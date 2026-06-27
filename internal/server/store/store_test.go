@@ -185,5 +185,56 @@ func TestIngestFlow(t *testing.T) {
 	}
 }
 
+// TestWriteProjectionStaleGuard confirms a projection parsed from a stale raw
+// length is rejected, so an older parse cannot clobber a newer one.
+func TestWriteProjectionStaleGuard(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	u, err := st.Register(ctx, "grace", "hash", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ann, err := st.Announce(ctx, AnnounceParams{
+		UserID: u.ID, Agent: "claude", SourceSessionID: "sess-stale", ProjectID: projectID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := []byte("line one\nline two\n")
+	if _, err := st.AppendChunk(ctx, ann.SessionID, 0, raw); err != nil {
+		t.Fatal(err)
+	}
+
+	p := Projection{MessageCount: 1, ParserVersion: 1, Messages: []ProjMessage{{Ordinal: 0, Role: "user", Content: "x"}}}
+
+	// A write whose rawBytes lags the stored length is stale and must be refused.
+	if err := st.WriteProjection(ctx, ann.SessionID, int64(len(raw))-1, p); !errors.Is(err, ErrStaleProjection) {
+		t.Fatalf("stale write: want ErrStaleProjection, got %v", err)
+	}
+	var count int
+	if err := st.Pool.QueryRow(ctx, "SELECT count(*) FROM messages WHERE session_id=$1", ann.SessionID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("stale write left %d message rows, want 0", count)
+	}
+
+	// A write matching the stored length succeeds.
+	if err := st.WriteProjection(ctx, ann.SessionID, int64(len(raw)), p); err != nil {
+		t.Fatalf("matching write: %v", err)
+	}
+	if err := st.Pool.QueryRow(ctx, "SELECT count(*) FROM messages WHERE session_id=$1", ann.SessionID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("matching write left %d message rows, want 1", count)
+	}
+}
+
 func hashHex(s string) string      { return hashHexBytes([]byte(s)) }
 func hashHexBytes(b []byte) string { sum := sha256.Sum256(b); return hex.EncodeToString(sum[:]) }

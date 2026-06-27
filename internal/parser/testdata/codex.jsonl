@@ -1,0 +1,10 @@
+{"type":"session_meta","timestamp":"2024-02-01T09:00:00Z","payload":{"id":"abc-123","cwd":"/home/grace/code/my-api","originator":"user","git":{"branch":"dev"}}}
+{"type":"response_item","timestamp":"2024-02-01T09:00:01Z","payload":{"role":"user","content":[{"type":"input_text","text":"Add rate limiting"}]}}
+{"type":"response_item","timestamp":"2024-02-01T09:00:03Z","payload":{"type":"reasoning","content":[{"type":"text","text":"Choose a token bucket."}]}}
+{"type":"response_item","timestamp":"2024-02-01T09:00:04Z","payload":{"type":"function_call","name":"shell_command","call_id":"call_1","arguments":"{\"cmd\":\"go test ./...\"}"}}
+{"type":"response_item","timestamp":"2024-02-01T09:00:06Z","payload":{"type":"function_call_output","call_id":"call_1","output":"ok"}}
+{"type":"response_item","timestamp":"2024-02-01T09:00:08Z","payload":{"role":"assistant","model":"gpt-5-codex","content":[{"type":"output_text","text":"I'll add rate limiting."}]}}
+{"type":"event_msg","timestamp":"2024-02-01T09:00:09Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1000,"cached_input_tokens":400,"output_tokens":200,"reasoning_output_tokens":50}}}}
+{"type":"response_item","timestamp":"2024-02-01T09:00:20Z","payload":{"role":"user","content":[{"type":"input_text","text":"Now add tests"}]}}
+{"type":"response_item","timestamp":"2024-02-01T09:00:25Z","payload":{"role":"assistant","model":"gpt-5-codex","content":[{"type":"output_text","text":"Added tests."}]}}
+{"type":"event_msg","timestamp":"2024-02-01T09:00:26Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":500,"cached_input_tokens":100,"output_tokens":100}}}}

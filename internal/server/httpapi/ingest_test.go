@@ -4,9 +4,9 @@ import "testing"
 
 func TestParseRemoteKey(t *testing.T) {
 	cases := []struct {
-		in                 string
-		host, owner, repo  string
-		ok                 bool
+		in                string
+		host, owner, repo string
+		ok                bool
 	}{
 		{"github.com/jssblck/akari", "github.com", "jssblck", "akari", true},
 		{"gitlab.com/group/subgroup/proj", "gitlab.com", "group/subgroup", "proj", true},

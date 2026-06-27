@@ -84,14 +84,13 @@ func (s *Store) Announce(ctx context.Context, p AnnounceParams) (AnnounceResult,
 	return r, err
 }
 
-// SessionOwner returns the owning user of a session, or ErrNotFound.
-func (s *Store) SessionOwner(ctx context.Context, sessionID int64) (int64, error) {
-	var userID int64
-	err := s.Pool.QueryRow(ctx, "SELECT user_id FROM sessions WHERE id = $1", sessionID).Scan(&userID)
+// SessionMeta returns the owning user and agent of a session, or ErrNotFound.
+func (s *Store) SessionMeta(ctx context.Context, sessionID int64) (userID int64, agent string, err error) {
+	err = s.Pool.QueryRow(ctx, "SELECT user_id, agent FROM sessions WHERE id = $1", sessionID).Scan(&userID, &agent)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, ErrNotFound
+		return 0, "", ErrNotFound
 	}
-	return userID, err
+	return userID, agent, err
 }
 
 // AppendChunk appends data at the given offset. If offset does not match the
