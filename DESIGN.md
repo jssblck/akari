@@ -229,8 +229,7 @@ explicit divergence check.
      "project_remote": "github.com/jssblck/akari",
      "git_branch": "main",
      "cwd": "/home/grace/projects/akari",
-     "machine": "grace-laptop",
-     "source_path": "/home/grace/.claude/projects/.../0e3b.jsonl"
+     "machine": "grace-laptop"
    }
    ```
    The server upserts the project and session rows (latest announce wins for
@@ -238,7 +237,7 @@ explicit divergence check.
    the number of raw bytes it holds, and the sha256 of those bytes:
    ```json
    {
-     "session_id": "uuid",
+     "session_id": 42,
      "stored_bytes": 40960,
      "prefix_sha256": "9f86d0...e7"
    }
