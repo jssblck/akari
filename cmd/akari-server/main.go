@@ -18,6 +18,12 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "reparse" {
+		if err := runReparse(os.Args[2:]); err != nil {
+			log.Fatalf("akari-server reparse: %v", err)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		log.Fatalf("akari-server: %v", err)
 	}

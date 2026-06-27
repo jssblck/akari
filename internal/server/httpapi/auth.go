@@ -14,10 +14,10 @@ import (
 )
 
 const (
-	cookieName    = "akari_session"
-	sessionTTL    = 30 * 24 * time.Hour
-	scopeIngest   = "ingest"
-	scopeFull     = "full"
+	cookieName  = "akari_session"
+	sessionTTL  = 30 * 24 * time.Hour
+	scopeIngest = "ingest"
+	scopeFull   = "full"
 )
 
 type principal struct {

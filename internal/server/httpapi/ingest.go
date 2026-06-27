@@ -3,10 +3,12 @@ package httpapi
 import (
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
 
+	"github.com/jssblck/akari/internal/server/parse"
 	"github.com/jssblck/akari/internal/server/store"
 )
 
@@ -73,7 +75,7 @@ func (s *Server) handleAnnounce(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleChunk(w http.ResponseWriter, r *http.Request) {
-	sessionID, ok := s.ownedSession(w, r)
+	sessionID, agent, ok := s.ownedSession(w, r)
 	if !ok {
 		return
 	}
@@ -103,12 +105,18 @@ func (s *Server) handleChunk(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "append chunk")
 		return
 	}
-	// message_count is 0 until the parser lands (milestone 2).
-	writeJSON(w, http.StatusOK, map[string]any{"stored_bytes": stored, "message_count": 0})
+	// Re-parse the session from its stored raw bytes. The bytes are already
+	// persisted, so a parse failure does not fail the upload; it is logged and
+	// the projection is left for the next chunk or a reparse to rebuild.
+	msgCount, perr := parse.SessionFromRaw(r.Context(), s.Store, sessionID, agent)
+	if perr != nil {
+		log.Printf("parse session %d (%s): %v", sessionID, agent, perr)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"stored_bytes": stored, "message_count": msgCount})
 }
 
 func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {
-	sessionID, ok := s.ownedSession(w, r)
+	sessionID, _, ok := s.ownedSession(w, r)
 	if !ok {
 		return
 	}
@@ -124,28 +132,29 @@ func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {
 }
 
 // ownedSession parses the {id} path value and confirms the authenticated
-// principal owns that session. It writes the error response itself on failure.
-func (s *Server) ownedSession(w http.ResponseWriter, r *http.Request) (int64, bool) {
+// principal owns that session, returning the session id and its agent. It writes
+// the error response itself on failure.
+func (s *Server) ownedSession(w http.ResponseWriter, r *http.Request) (int64, string, bool) {
 	p, _ := principalFrom(r.Context())
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid session id")
-		return 0, false
+		return 0, "", false
 	}
-	owner, err := s.Store.SessionOwner(r.Context(), id)
+	owner, agent, err := s.Store.SessionMeta(r.Context(), id)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "session not found")
-		return 0, false
+		return 0, "", false
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "look up session")
-		return 0, false
+		return 0, "", false
 	}
 	if owner != p.UserID {
 		writeError(w, http.StatusForbidden, "session belongs to another user")
-		return 0, false
+		return 0, "", false
 	}
-	return id, true
+	return id, agent, true
 }
 
 // parseRemoteKey splits a canonical "host/owner/.../repo" key into host, owner,
