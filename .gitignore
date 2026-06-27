@@ -1,0 +1,17 @@
+# Compiled binaries
+/akari
+/akari.exe
+*.exe
+*.test
+
+# Test and coverage output
+*.out
+coverage.*
+
+# Go workspace file
+go.work
+go.work.sum
+
+# Editor and OS cruft
+.DS_Store
+*.swp
