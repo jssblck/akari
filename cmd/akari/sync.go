@@ -11,6 +11,7 @@ import (
 
 	"github.com/jssblck/akari/internal/client/discover"
 	"github.com/jssblck/akari/internal/client/resolve"
+	"github.com/jssblck/akari/internal/client/syncer"
 	"github.com/jssblck/akari/internal/client/upload"
 	"github.com/jssblck/akari/internal/config"
 )
@@ -42,6 +43,7 @@ func runSync(ctx context.Context, args []string) error {
 
 	resolver := resolve.New()
 	client := upload.New(&http.Client{Timeout: 60 * time.Second}, cfg.ServerURL, cfg.Token)
+	sync := syncer.New(resolver, client, machine)
 
 	var (
 		uploaded, upToDate, reset, skipped, failed int
@@ -50,43 +52,36 @@ func runSync(ctx context.Context, args []string) error {
 	)
 
 	for _, f := range files {
-		res := resolver.Resolve(ctx, f)
-		if res.Skipped {
-			skipped++
-			skipReasons[res.Reason]++
-			fmt.Fprintf(os.Stderr, "skip %s: %s\n", f.Path, res.Reason)
-			continue
-		}
-
 		if *dryRun {
+			res := resolver.Resolve(ctx, f)
+			if res.Skipped {
+				skipped++
+				skipReasons[res.Reason]++
+				fmt.Fprintf(os.Stderr, "skip %s: %s\n", f.Path, res.Reason)
+				continue
+			}
 			fmt.Printf("would upload %s -> %s\n", f.Path, res.ProjectKey)
 			continue
 		}
 
-		out, err := client.SyncFile(ctx, upload.Target{
-			Agent:      f.Agent,
-			Path:       f.Path,
-			SourceID:   res.Header.SourceID,
-			ProjectKey: res.ProjectKey,
-			GitBranch:  res.Header.GitBranch,
-			Cwd:        res.Header.Cwd,
-			Machine:    machine,
-		})
-		if err != nil {
+		r := sync.SyncOne(ctx, f)
+		switch {
+		case r.Skipped:
+			skipped++
+			skipReasons[r.Reason]++
+			fmt.Fprintf(os.Stderr, "skip %s: %s\n", f.Path, r.Reason)
+		case r.Err != nil:
 			failed++
-			fmt.Fprintf(os.Stderr, "error %s: %v\n", f.Path, err)
-			continue
-		}
-		switch out.Action {
-		case upload.ActionUploaded:
+			fmt.Fprintf(os.Stderr, "error %s: %v\n", f.Path, r.Err)
+		case r.Action == upload.ActionUploaded:
 			uploaded++
-			uploadedBytes += out.UploadedBytes
-			fmt.Printf("uploaded %s -> %s (%d bytes, %d messages)\n", f.Path, res.ProjectKey, out.UploadedBytes, out.MessageCount)
-		case upload.ActionReset:
+			uploadedBytes += r.UploadedBytes
+			fmt.Printf("uploaded %s -> %s (%d bytes, %d messages)\n", f.Path, r.ProjectKey, r.UploadedBytes, r.MessageCount)
+		case r.Action == upload.ActionReset:
 			reset++
-			uploadedBytes += out.UploadedBytes
-			fmt.Printf("reset+uploaded %s -> %s (%d bytes)\n", f.Path, res.ProjectKey, out.UploadedBytes)
-		case upload.ActionUpToDate:
+			uploadedBytes += r.UploadedBytes
+			fmt.Printf("reset+uploaded %s -> %s (%d bytes)\n", f.Path, r.ProjectKey, r.UploadedBytes)
+		case r.Action == upload.ActionUpToDate:
 			upToDate++
 		}
 	}

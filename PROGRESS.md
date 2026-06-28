@@ -110,7 +110,45 @@ on failure), and drive the append-only ingest protocol statelessly. One-shot
 - LOW: SyncFile discarded the outcome of conflicted attempts, undercounting bytes
   and missing a reset in the summary. Work is now rolled up across retries.
 
-## Milestone 4: client watch + daemon (not started)
+## Milestone 4: client watch + daemon (DONE)
+
+Goal: continuous watch mode and background daemon management. fsnotify with a
+polling fallback and a slow full rescan, a single-instance lock, and per-OS
+detached process management.
+
+- [x] internal/client/syncer: shared resolve+upload used by both sync and watch
+- [x] internal/client/watch: fsnotify event loop with debounce, polling fallback
+      (mtime/size diff), periodic full rescan, recursive auto-add of new dirs,
+      and an unbounded deduped dirty set drained by a single worker
+- [x] internal/client/daemon: OS advisory lock (flock / LockFileEx) for single
+      instance, plus Start/Stop/Status of a detached `akari watch` process
+- [x] cmd/akari: `watch` (foreground, holds the lock) and `daemon {start|stop|status}`
+- [x] Tests: watch (initial pass, new-file detection, non-session filtering),
+      daemon lock (acquire/release, double-acquire rejection, IsRunning, alive)
+- [x] e2e: started the daemon against the live server with isolated discovery,
+      saw the initial pass and a live append uploaded, confirmed status,
+      double-start rejection, and clean stop with the lock released
+- [x] codex review (gpt-5.5 high) twice; all findings fixed and re-verified
+
+### Milestone 4 codex findings (all fixed)
+
+- HIGH: the watch worker queue was a bounded channel that dropped files when full
+  (>1024 files or a slow worker), and the poll baseline was updated as if the drop
+  had synced. Replaced with an unbounded, deduplicated dirty set drained by the
+  worker, so no change is ever lost.
+- HIGH: the pidfile lock had a stale-reclaim TOCTOU race and trusted a recorded
+  pid (vulnerable to pid reuse). Replaced with a real OS advisory lock held for
+  the process lifetime (auto-released on death); IsRunning probes the live lock.
+- HIGH: Release unlinked the pidfile after unlocking, a window in which a new
+  holder's file could be deleted. Release now only drops the OS lock and leaves
+  the (harmless, unlocked) file in place.
+- HIGH: daemon Start polled with IsRunning, competing with the child for the lock
+  and risking a false startup timeout. Start now watches for the child to write
+  its own pid (and bails if the child exits) without touching the lock.
+- MEDIUM: Acquire ignored pidfile write errors, which Stop depends on. A write
+  failure is now fatal (unlock, close, error).
+- Windows detail: the lock is taken on a high sentinel byte offset so the pid
+  bytes stay readable (an exclusive LockFileEx range is otherwise unreadable).
 
 ## Milestone 5: web UI (not started)
 
