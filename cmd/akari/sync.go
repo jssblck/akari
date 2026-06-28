@@ -16,14 +16,39 @@ import (
 	"github.com/jssblck/akari/internal/config"
 )
 
+// defaultTimeLimit caps how long a sync keeps starting new uploads when the
+// caller does not pass --time-limit. It bounds an unattended run without cutting
+// off a typical backlog; pass --time-limit 0 to remove the cap entirely.
+const defaultTimeLimit = 5 * time.Minute
+
+// syncDeadline wraps the shutdown context so a time limit acts as a self-inflicted
+// graceful stop: once limit elapses the returned context is cancelled, which the
+// sync loop reads the same way it reads a Ctrl-C, so the in-flight upload still
+// finishes. A non-positive limit means run until the work is done (or the operator
+// interrupts), so only cancellation propagates.
+func syncDeadline(ctx context.Context, limit time.Duration) (context.Context, context.CancelFunc) {
+	if limit <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, limit)
+}
+
 // runSync performs a single discovery pass and uploads everything new since the
 // server's cursor for each file, then prints a tally and exits.
 func runSync(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
 	configPath := fs.String("config", "", "config file path (default: platform config dir)")
 	dryRun := fs.Bool("dry-run", false, "resolve and report without uploading")
+	timeLimitStr := fs.String("time-limit", defaultTimeLimit.String(), "Go duration to keep starting new uploads, e.g. 30s or 5m (0 for no limit); the in-flight upload always finishes")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	timeLimit, err := time.ParseDuration(*timeLimitStr)
+	if err != nil {
+		return fmt.Errorf("invalid --time-limit: %w", err)
+	}
+	if timeLimit < 0 {
+		return fmt.Errorf("invalid --time-limit: must not be negative")
 	}
 
 	cfg, err := config.LoadClient(*configPath)
@@ -60,13 +85,20 @@ func runSync(ctx context.Context, args []string) error {
 		}
 	}
 
+	// A time limit is a self-inflicted graceful shutdown: deadline wraps the
+	// shutdown context so the loop below reads an elapsed limit exactly as it reads
+	// a first Ctrl-C, stopping new files while letting the in-flight one finish.
+	deadline, cancel := syncDeadline(ctx, timeLimit)
+	defer cancel()
+
 	// work is detached from ctx so the file currently being uploaded finishes to a
-	// clean stopping point after a first Ctrl-C; the loop below stops starting new
-	// files once ctx is cancelled, and a second Ctrl-C exits the process outright.
+	// clean stopping point after a first Ctrl-C or once the time limit elapses; the
+	// loop below stops starting new files once deadline is cancelled, and a second
+	// Ctrl-C exits the process outright.
 	work := context.WithoutCancel(ctx)
 	interrupted := false
 	for _, f := range files {
-		if ctx.Err() != nil {
+		if deadline.Err() != nil {
 			interrupted = true
 			break
 		}
@@ -110,7 +142,13 @@ func runSync(ctx context.Context, args []string) error {
 
 	printSummary(len(files), uploaded, reset, upToDate, skipped, failed, standalone, orphaned, uploadedBytes, skipReasons, *dryRun)
 	if interrupted {
-		fmt.Fprintf(os.Stderr, "interrupted: stopped before processing every file\n")
+		// ctx (the bare shutdown context) carries Ctrl-C; if it is still live the
+		// loop must have stopped because deadline's own timeout fired instead.
+		if ctx.Err() != nil {
+			fmt.Fprintf(os.Stderr, "interrupted: stopped before processing every file\n")
+		} else {
+			fmt.Fprintf(os.Stderr, "time limit reached: stopped before processing every file\n")
+		}
 	}
 	if failed > 0 {
 		return fmt.Errorf("%d file(s) failed to upload", failed)
