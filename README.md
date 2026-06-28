@@ -97,14 +97,23 @@ warning rather than uploaded under an ambiguous project.
 
 ## The web UI
 
-- **Projects index**: every project with session counts, token totals, and cost.
+- **Projects index**: every project with session counts, token totals, and cost,
+  plus an inline analytics panel (cost and token trends over time, a by-model and
+  by-agent breakdown) and a 30-day cost sparkline per project row.
 - **Project view**: that project's sessions across all users and machines, with
-  agent, user, and machine filters.
-- **Session view**: a stats header (tokens in/out/cache, cost, duration, message
-  counts) and the transcript: messages, thinking, and tool calls. Tool input and
-  result bodies show as size/type chips that expand inline on click, fetched from
-  the CAS. Subagent sessions are listed under the session that spawned them. In-
-  progress sessions update live over server-sent events.
+  agent, user, and machine filters, and the same analytics panel scoped to the
+  project.
+- **Session view**: a sticky stats header (tokens in/out/cache, cost, duration,
+  message counts) and the transcript: messages, thinking, and tool calls, with a
+  timeline rail that maps the turns and flags errored tools. Tool input and result
+  bodies show as size/type chips that expand inline on click, fetched from the
+  CAS; an editing tool's input expands as a rendered diff. A density toggle
+  switches between a comfortable and a compact reading mode. Subagent sessions are
+  listed under the session that spawned them. In-progress sessions update live
+  over server-sent events.
+- **Charts** are rendered by a small dependency-free SVG module bundled as a
+  static asset; the UI fonts (Geist and Geist Mono) are self-hosted, so the binary
+  stays self-contained with no Node toolchain.
 - **Search**: trigram substring search across message content.
 - **Account**: API tokens (ingest or full scope), and invites for admins.
 
@@ -157,4 +166,5 @@ Tests that need the database skip cleanly when `AKARI_TEST_DATABASE_URL` is unse
   and the watch/daemon machinery.
 - `migrations` holds the embedded SQL schema.
 
-See `DESIGN.md` for the full design and rationale.
+See `docs/DESIGN.md` for the full engineering design and rationale, and
+`DESIGN.md` for the visual design system.

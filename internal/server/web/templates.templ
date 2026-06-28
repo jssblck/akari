@@ -13,14 +13,17 @@ templ layout(p Page) {
 			<meta charset="utf-8"/>
 			<meta name="viewport" content="width=device-width, initial-scale=1"/>
 			<title>{ p.Title } - akari</title>
+			<link rel="preload" href="/static/fonts/Geist-Regular.woff2" as="font" type="font/woff2" crossorigin/>
+			<link rel="preload" href="/static/fonts/GeistMono-Regular.woff2" as="font" type="font/woff2" crossorigin/>
 			<link rel="stylesheet" href="/static/app.css"/>
 			<script src="/static/htmx.min.js" defer></script>
+			<script src="/static/charts.js" defer></script>
 			<script src="/static/app.js" defer></script>
 		</head>
 		<body>
 			if p.LoggedIn {
 				<header class="topbar">
-					<span class="brand"><a href="/">akari</a></span>
+					<a class="brand" href="/">@brandMark()</a>
 					<nav>
 						<a href="/">Projects</a>
 						<a href="/search">Search</a>
@@ -28,8 +31,8 @@ templ layout(p Page) {
 					</nav>
 					<span class="spacer"></span>
 					<span class="who">{ p.Username }</span>
-					<form method="post" action="/logout" style="margin:0">
-						<button class="secondary" type="submit">Log out</button>
+					<form method="post" action="/logout" class="inline">
+						<button class="ghost" type="submit">Log out</button>
 					</form>
 				</header>
 			}
@@ -38,6 +41,18 @@ templ layout(p Page) {
 			</main>
 		</body>
 	</html>
+}
+
+// brandMark is the wordmark: a small lilac aperture glyph beside the name, a nod
+// to akari (light) without leaning on a heavy logo.
+templ brandMark() {
+	<span class="brandmark">
+		<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" class="brandglyph">
+			<circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.4"></circle>
+			<circle cx="8" cy="8" r="2.2" fill="currentColor"></circle>
+		</svg>
+		<span>akari</span>
+	</span>
 }
 
 templ LoginPage(p Page, next, errMsg string) {
@@ -76,67 +91,157 @@ templ RegisterPage(p Page, errMsg string) {
 	}
 }
 
-templ ProjectsPage(p Page, projects []store.ProjectSummary) {
-	@layout(p) {
-		<h1>Projects</h1>
-		if len(projects) == 0 {
-			<div class="empty">No sessions have been pushed yet.</div>
+// ============================ Analytics ============================
+
+// analyticsPanel is the shared chart block used by the projects index (global)
+// and a single project page. scope is a short label ("Across all projects" or
+// the project key) shown as the panel subtitle.
+templ analyticsPanel(a store.Analytics, chartID, scope string) {
+	<section class="analytics">
+		<div class="panel-head">
+			<h2>Usage</h2>
+			<span class="muted small">{ scope }</span>
+		</div>
+		if !a.HasData() {
+			<div class="empty">No usage recorded yet.</div>
 		} else {
-			<table>
-				<thead>
-					<tr>
-						<th>Project</th>
-						<th class="num">Sessions</th>
-						<th class="num">Input</th>
-						<th class="num">Output</th>
-						<th class="num">Cost</th>
-						<th>Last activity</th>
-					</tr>
-				</thead>
-				<tbody>
-					for _, pr := range projects {
-						<tr>
-							<td><a href={ ProjectHref(pr.ID) }>{ pr.RemoteKey }</a></td>
-							<td class="num">{ fmt.Sprintf("%d", pr.SessionCount) }</td>
-							<td class="num">{ FmtTokens(pr.TotalInput) }</td>
-							<td class="num">{ FmtTokens(pr.TotalOutput) }</td>
-							<td class="num">{ FmtCost(pr.TotalCostUSD, false) }</td>
-							<td>{ FmtTime(pr.LastActivity) }</td>
-						</tr>
-					}
-				</tbody>
-			</table>
+			<div class="stats">
+				@stat("Cost", FmtCost(a.TotalCost, false), "")
+				@stat("Input", FmtTokens(a.TotalIn), "")
+				@stat("Output", FmtTokens(a.TotalOut), "")
+				@stat("Sessions", fmt.Sprintf("%d", a.Sessions), "")
+			</div>
+			@chartBlock(a, chartID)
+			<div class="breakdowns">
+				@breakdownList("By model", BuildBreakdown(a.Models))
+				@breakdownList("By agent", BuildBreakdown(a.Agents))
+			</div>
 		}
+	</section>
+}
+
+// chartBlock holds the time-series canvas and the inline JSON the SVG chart
+// module hydrates from. The metric toggle lets the reader switch the series the
+// chart draws (cost or token classes) without a round trip.
+templ chartBlock(a store.Analytics, chartID string) {
+	<div class="chart-wrap">
+		<div class="chart-toolbar" role="group" aria-label="Metric">
+			<button type="button" class="seg active" data-metric="cost" data-chart-target={ chartID }>Cost</button>
+			<button type="button" class="seg" data-metric="tokens" data-chart-target={ chartID }>Tokens</button>
+		</div>
+		<div class="chart" id={ chartID } data-chart data-series={ AnalyticsJSON(a) }></div>
+	</div>
+}
+
+templ breakdownList(title string, rows []BreakdownRow) {
+	<div class="breakdown">
+		<div class="breakdown-title label">{ title }</div>
+		if len(rows) == 0 {
+			<div class="muted small">No data.</div>
+		} else {
+			<ul class="bars">
+				for _, row := range rows {
+					<li class="bar-row">
+						<div class="bar-head">
+							<span class="bar-label" title={ row.Label }>{ row.Label }</span>
+							<span class="bar-val">{ row.Cost }</span>
+						</div>
+						<div class="bar-track">
+							<div
+								class="bar-fill"
+								data-pct={ fmt.Sprintf("%.2f", row.Pct) }
+								data-color={ row.Color }
+							></div>
+						</div>
+						<div class="bar-sub muted small">{ row.Tokens } tok &middot; { fmt.Sprintf("%d", row.Sessions) } sessions</div>
+					</li>
+				}
+			</ul>
+		}
+	</div>
+}
+
+// ============================ Projects ============================
+
+templ ProjectsPage(p Page, projects []store.ProjectSummary, a store.Analytics, spark map[int64][]float64) {
+	@layout(p) {
+		<div class="page-head">
+			<h1>Projects</h1>
+		</div>
+		@analyticsPanel(a, "chart-global", "Across all projects")
+		<section>
+			<div class="panel-head">
+				<h2>Projects</h2>
+			</div>
+			if len(projects) == 0 {
+				<div class="empty">No sessions have been pushed yet.</div>
+			} else {
+				<table class="grid">
+					<thead>
+						<tr>
+							<th>Project</th>
+							<th class="trend">30d</th>
+							<th class="num">Sessions</th>
+							<th class="num">Input</th>
+							<th class="num">Output</th>
+							<th class="num">Cost</th>
+							<th>Last activity</th>
+						</tr>
+					</thead>
+					<tbody>
+						for _, pr := range projects {
+							<tr>
+								<td><a href={ ProjectHref(pr.ID) }>{ pr.RemoteKey }</a></td>
+								<td class="trend">@templ.Raw(Sparkline(spark[pr.ID]))</td>
+								<td class="num">{ fmt.Sprintf("%d", pr.SessionCount) }</td>
+								<td class="num">{ FmtTokens(pr.TotalInput) }</td>
+								<td class="num">{ FmtTokens(pr.TotalOutput) }</td>
+								<td class="num">{ FmtCost(pr.TotalCostUSD, false) }</td>
+								<td class="muted">{ FmtTime(pr.LastActivity) }</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			}
+		</section>
 	}
 }
 
-templ ProjectPage(p Page, proj store.ProjectSummary, sessions []store.SessionSummary, facets Facets, sel store.SessionFilter) {
+templ ProjectPage(p Page, proj store.ProjectSummary, sessions []store.SessionSummary, facets Facets, sel store.SessionFilter, a store.Analytics) {
 	@layout(p) {
-		<h1>{ proj.RemoteKey }</h1>
-		<form class="filters" method="get" hx-get={ ProjectPath(proj.ID) } hx-target="#session-list" hx-push-url="true">
-			<select name="agent">
-				<option value="">all agents</option>
-				for _, a := range facets.Agents {
-					<option value={ a } selected?={ sel.Agent == a }>{ a }</option>
-				}
-			</select>
-			<select name="user">
-				<option value="">all users</option>
-				for _, u := range facets.Users {
-					<option value={ u } selected?={ sel.Username == u }>{ u }</option>
-				}
-			</select>
-			<select name="machine">
-				<option value="">all machines</option>
-				for _, m := range facets.Machines {
-					<option value={ m } selected?={ sel.Machine == m }>{ m }</option>
-				}
-			</select>
-			<button type="submit">Filter</button>
-		</form>
-		<div id="session-list">
-			@SessionList(sessions)
+		<div class="page-head">
+			<h1>{ proj.RemoteKey }</h1>
 		</div>
+		@analyticsPanel(a, "chart-project", proj.RemoteKey)
+		<section>
+			<div class="panel-head">
+				<h2>Sessions</h2>
+			</div>
+			<form class="filters" method="get" hx-get={ ProjectPath(proj.ID) } hx-target="#session-list" hx-push-url="true">
+				<select name="agent">
+					<option value="">all agents</option>
+					for _, ag := range facets.Agents {
+						<option value={ ag } selected?={ sel.Agent == ag }>{ ag }</option>
+					}
+				</select>
+				<select name="user">
+					<option value="">all users</option>
+					for _, u := range facets.Users {
+						<option value={ u } selected?={ sel.Username == u }>{ u }</option>
+					}
+				</select>
+				<select name="machine">
+					<option value="">all machines</option>
+					for _, m := range facets.Machines {
+						<option value={ m } selected?={ sel.Machine == m }>{ m }</option>
+					}
+				</select>
+				<button type="submit">Filter</button>
+			</form>
+			<div id="session-list">
+				@SessionList(sessions)
+			</div>
+		</section>
 	}
 }
 
@@ -144,7 +249,7 @@ templ SessionList(sessions []store.SessionSummary) {
 	if len(sessions) == 0 {
 		<div class="empty">No sessions match these filters.</div>
 	} else {
-		<table>
+		<table class="grid">
 			<thead>
 				<tr>
 					<th>Session</th>
@@ -163,16 +268,16 @@ templ SessionList(sessions []store.SessionSummary) {
 						<td>
 							<a href={ SessionHref(s.ID) }>#{ fmt.Sprintf("%d", s.ID) }</a>
 							if s.Visibility == "public" {
-								<span class="badge public">public</span>
+								<span class="tag public">public</span>
 							}
 						</td>
-						<td><span class="badge agent">{ s.Agent }</span></td>
+						<td><span class="tag agent">{ s.Agent }</span></td>
 						<td>{ s.Username }</td>
-						<td>{ s.Machine }</td>
-						<td>{ s.GitBranch }</td>
+						<td class="muted">{ s.Machine }</td>
+						<td class="muted">{ s.GitBranch }</td>
 						<td class="num">{ fmt.Sprintf("%d", s.MessageCount) }</td>
 						<td class="num">{ FmtCost(s.TotalCostUSD, s.CostIncomplete) }</td>
-						<td>{ FmtTime(s.UpdatedAt) }</td>
+						<td class="muted">{ FmtTime(s.UpdatedAt) }</td>
 					</tr>
 				}
 			</tbody>
@@ -180,40 +285,58 @@ templ SessionList(sessions []store.SessionSummary) {
 	}
 }
 
+// ============================ Session ============================
+
 templ SessionPage(p Page, d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, subagents []store.SessionSummary, live, owner bool) {
 	@layout(p) {
-		<h1>
-			<a href={ ProjectHref(d.ProjectID) }>{ d.ProjectKey }</a>
-			<span class="muted">/ session #{ fmt.Sprintf("%d", d.ID) }</span>
-			<span class="badge agent">{ d.Agent }</span>
-			if d.Visibility == "public" {
-				<span class="badge public">public</span>
-			}
-		</h1>
+		<div class="session-head">
+			<div class="session-title">
+				<h1>
+					<a href={ ProjectHref(d.ProjectID) }>{ d.ProjectKey }</a>
+					<span class="sep">/</span>
+					<span class="muted">session #{ fmt.Sprintf("%d", d.ID) }</span>
+				</h1>
+				<div class="session-meta">
+					<span class="tag agent">{ d.Agent }</span>
+					if d.Visibility == "public" {
+						<span class="tag public">public</span>
+					}
+					if live {
+						<span class="live-dot" title="Live: updating as new bytes are parsed">live</span>
+					}
+					if d.GitBranch != "" {
+						<span class="muted">{ d.GitBranch }</span>
+					}
+					<span class="muted">{ d.Username }</span>
+					<span class="muted">{ d.Machine }</span>
+				</div>
+			</div>
+			@densityToolbar()
+		</div>
 		if owner {
 			<div class="publish card">
 				if d.Visibility == "public" && d.PublicID != nil {
 					<span>Shared publicly at <a href={ PublicHref(*d.PublicID) }>{ PublicPath(*d.PublicID) }</a></span>
-					<form method="post" action={ templ.SafeURL(fmt.Sprintf("/sessions/%d/unpublish", d.ID)) } style="margin:0">
+					<form method="post" action={ templ.SafeURL(fmt.Sprintf("/sessions/%d/unpublish", d.ID)) } class="inline">
 						<button class="secondary" type="submit">Unpublish</button>
 					</form>
 				} else {
 					<span class="muted">This session is internal: visible to logged-in users only.</span>
-					<form method="post" action={ templ.SafeURL(fmt.Sprintf("/sessions/%d/publish", d.ID)) } style="margin:0">
+					<form method="post" action={ templ.SafeURL(fmt.Sprintf("/sessions/%d/publish", d.ID)) } class="inline">
 						<button type="submit">Publish</button>
 					</form>
 				}
 			</div>
 		}
 		if owner || p.IsAdmin {
-			<div class="publish">
-				<span class="muted">
+			<div class="publish subtle">
+				<span class="muted small">
 					if !owner {
 						Admin:
 					}
 					Deleting removes this session and its transcript permanently.
 				</span>
-				<form method="post" action={ templ.SafeURL(fmt.Sprintf("/sessions/%d/delete", d.ID)) } style="margin:0" onsubmit="return confirm('Delete this session and its transcript permanently?')">
+				<form method="post" action={ templ.SafeURL(fmt.Sprintf("/sessions/%d/delete", d.ID)) } class="inline" onsubmit="return confirm('Delete this session and its transcript permanently?')">
 					<button class="danger" type="submit">Delete session</button>
 				</form>
 			</div>
@@ -230,31 +353,72 @@ templ SessionPage(p Page, d store.SessionDetail, msgs []store.Message, tools map
 	}
 }
 
-templ SessionBody(d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, subagents []store.SessionSummary) {
-	<div class="stats">
-		@stat("Messages", fmt.Sprintf("%d", d.MessageCount))
-		@stat("User msgs", fmt.Sprintf("%d", d.UserMessageCount))
-		@stat("Input", FmtTokens(d.TotalInput))
-		@stat("Output", FmtTokens(d.TotalOutput))
-		@stat("Cache write", FmtTokens(d.TotalCacheWrite))
-		@stat("Cache read", FmtTokens(d.TotalCacheRead))
-		@stat("Cost", FmtCost(d.TotalCostUSD, d.CostIncomplete))
-		@stat("Duration", FmtDuration(d.StartedAt, d.EndedAt))
+templ densityToolbar() {
+	<div class="density seg-group" role="group" aria-label="Transcript density">
+		<button type="button" class="seg" data-density="comfortable">Comfortable</button>
+		<button type="button" class="seg" data-density="compact">Compact</button>
 	</div>
-	if len(subagents) > 0 {
-		<h2>Subagents</h2>
-		<div class="subagents">
-			@SessionList(subagents)
-		</div>
-	}
-	<h2>Transcript</h2>
-	@Transcript(msgs, tools, SessionBlobBase(d.ID))
 }
 
-templ stat(label, value string) {
+templ SessionBody(d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, subagents []store.SessionSummary) {
+	<div class="session-grid">
+		<aside class="rail" aria-label="Timeline">
+			@TimelineRail(BuildRail(msgs, tools))
+		</aside>
+		<div class="session-main">
+			@sessionStats(d)
+			if len(subagents) > 0 {
+				<h2>Subagents</h2>
+				<div class="subagents">
+					@SessionList(subagents)
+				</div>
+			}
+			<h2>Transcript</h2>
+			@Transcript(msgs, tools, SessionBlobBase(d.ID))
+		</div>
+	</div>
+}
+
+// sessionStats is the instrument header: stat tiles that stick to the top of the
+// transcript column and flash (needle-settle) when a live update changes a value.
+templ sessionStats(d store.SessionDetail) {
+	<div class="stats sticky" id="session-stats">
+		@stat("Messages", fmt.Sprintf("%d", d.MessageCount), "messages")
+		@stat("User msgs", fmt.Sprintf("%d", d.UserMessageCount), "user")
+		@stat("Input", FmtTokens(d.TotalInput), "input")
+		@stat("Output", FmtTokens(d.TotalOutput), "output")
+		@stat("Cache write", FmtTokens(d.TotalCacheWrite), "cw")
+		@stat("Cache read", FmtTokens(d.TotalCacheRead), "cr")
+		@stat("Cost", FmtCost(d.TotalCostUSD, d.CostIncomplete), "cost")
+		@stat("Duration", FmtDuration(d.StartedAt, d.EndedAt), "dur")
+	</div>
+}
+
+templ stat(label, value, key string) {
 	<div class="stat">
 		<div class="label">{ label }</div>
-		<div class="value">{ value }</div>
+		if key != "" {
+			<div class="value" data-stat-key={ key }>{ value }</div>
+		} else {
+			<div class="value">{ value }</div>
+		}
+	</div>
+}
+
+templ TimelineRail(markers []RailMarker) {
+	<div class="rail-inner">
+		for _, m := range markers {
+			<a
+				class={ RailClass(m) }
+				href={ templ.SafeURL(fmt.Sprintf("#msg-%d", m.Ordinal)) }
+				data-rail={ fmt.Sprintf("%d", m.Ordinal) }
+				title={ railTitle(m) }
+			>
+				if m.ToolCount > 0 {
+					<span class="rail-count">{ fmt.Sprintf("%d", m.ToolCount) }</span>
+				}
+			</a>
+		}
 	</div>
 }
 
@@ -264,16 +428,20 @@ templ Transcript(msgs []store.Message, tools map[int][]store.ToolCallView, blobB
 	} else {
 		<div class="transcript">
 			for _, m := range msgs {
-				<div class={ "msg " + RoleClass(m.Role) }>
+				<div class={ "msg " + RoleClass(m.Role) } id={ fmt.Sprintf("msg-%d", m.Ordinal) } data-ordinal={ fmt.Sprintf("%d", m.Ordinal) }>
 					<div class="meta">
-						<span>{ m.Role }</span>
+						<span class="role">{ m.Role }</span>
 						if m.Model != "" {
-							<span class="badge">{ m.Model }</span>
+							<span class="tag model">{ m.Model }</span>
 						}
-						<span>{ FmtTime(m.Timestamp) }</span>
+						<span class="spacer"></span>
+						<span class="muted small">{ FmtTime(m.Timestamp) }</span>
 					</div>
 					if m.HasThinking && m.ThinkingText != "" {
-						<div class="thinking">{ m.ThinkingText }</div>
+						<details class="thinking">
+							<summary>Thinking</summary>
+							<div class="thinking-body">{ m.ThinkingText }</div>
+						</details>
 					}
 					if m.Content != "" {
 						<div class="content">{ m.Content }</div>
@@ -292,49 +460,71 @@ templ Transcript(msgs []store.Message, tools map[int][]store.ToolCallView, blobB
 }
 
 // ToolChip renders one tool call's metadata. A body that lives in the CAS is a
-// clickable chip carrying its blob URL; app.js fetches and expands it inline.
+// clickable chip carrying its blob URL plus the tool name and slot, so app.js can
+// expand an editing tool's input as an inline diff rather than raw JSON.
 templ ToolChip(t store.ToolCallView, blobBase string) {
 	<div class="tool-chip">
 		<span class="tname">{ t.ToolName }</span>
 		if t.FilePath != "" {
-			<span class="muted">{ t.FilePath }</span>
+			<span class="tpath muted">{ t.FilePath }</span>
 		}
 		if t.InputSHA != "" {
-			<button type="button" class="badge body-toggle" data-blob-url={ BlobURL(blobBase, t.InputSHA) }>in: { ChipLabel(t.InputMediaType, t.InputBytes) }</button>
+			<button
+				type="button"
+				class="stamp body-toggle"
+				data-blob-url={ BlobURL(blobBase, t.InputSHA) }
+				data-tool={ t.ToolName }
+				data-slot="input"
+				if DiffTool(t.ToolName) {
+					data-diff="1"
+				}
+			>in: { ChipLabel(t.InputMediaType, t.InputBytes) }</button>
 		} else if t.InputBytes > 0 {
-			<span class="badge">in: { ChipLabel(t.InputMediaType, t.InputBytes) }</span>
+			<span class="stamp">in: { ChipLabel(t.InputMediaType, t.InputBytes) }</span>
 		}
 		if t.ResultStatus != "" {
-			<span class={ "tool-status " + StatusClass(t.ResultStatus) }>{ t.ResultStatus }</span>
+			<span class={ "tstatus " + StatusClass(t.ResultStatus) }>{ t.ResultStatus }</span>
 			if t.ResultSHA != "" {
-				<button type="button" class="badge body-toggle" data-blob-url={ BlobURL(blobBase, t.ResultSHA) }>out: { ChipLabel(t.ResultMediaType, t.ResultBytes) }</button>
+				<button
+					type="button"
+					class="stamp body-toggle"
+					data-blob-url={ BlobURL(blobBase, t.ResultSHA) }
+					data-tool={ t.ToolName }
+					data-slot="result"
+				>out: { ChipLabel(t.ResultMediaType, t.ResultBytes) }</button>
 			} else if t.ResultBytes > 0 {
-				<span class="badge">out: { ChipLabel(t.ResultMediaType, t.ResultBytes) }</span>
+				<span class="stamp">out: { ChipLabel(t.ResultMediaType, t.ResultBytes) }</span>
 			}
 		}
 	</div>
 }
 
+// ============================ Search / Account ============================
+
 templ SearchPage(p Page, query string, hits []store.SearchHit) {
 	@layout(p) {
-		<h1>Search</h1>
+		<div class="page-head">
+			<h1>Search</h1>
+		</div>
 		<form class="filters" method="get" action="/search">
-			<input name="q" value={ query } placeholder="search message content" autofocus style="min-width:320px"/>
+			<input name="q" value={ query } placeholder="search message content" autofocus class="grow"/>
 			<button type="submit">Search</button>
 		</form>
 		if query != "" {
 			if len(hits) == 0 {
 				<div class="empty">No messages match { query }.</div>
 			} else {
-				<div class="transcript">
+				<div class="hits">
 					for _, h := range hits {
-						<div class="card">
-							<div class="meta muted">
-								<a href={ SessionHref(h.SessionID) }>{ h.ProjectKey }</a>
-								{ " · " }{ h.Agent }{ " · " }{ h.Username }{ " · " }{ h.Role }
+						<a class="hit card" href={ SessionHref(h.SessionID) }>
+							<div class="meta muted small">
+								<span class="role">{ h.ProjectKey }</span>
+								<span class="tag agent">{ h.Agent }</span>
+								<span>{ h.Username }</span>
+								<span>{ h.Role }</span>
 							</div>
 							<div class="content">{ h.Snippet }</div>
-						</div>
+						</a>
 					}
 				</div>
 			}
@@ -344,65 +534,71 @@ templ SearchPage(p Page, query string, hits []store.SearchHit) {
 
 templ AccountPage(p Page, tokens []store.APIToken, newToken, newInvite string) {
 	@layout(p) {
-		<h1>Account</h1>
+		<div class="page-head">
+			<h1>Account</h1>
+		</div>
 		if newToken != "" {
-			<div class="card">
+			<div class="card reveal">
 				<strong>New token (shown once):</strong> <code>{ newToken }</code>
 			</div>
 		}
-		<h2>API tokens</h2>
-		<form method="post" action="/account/tokens" class="filters">
-			<input name="name" placeholder="token name"/>
-			<select name="scope">
-				<option value="ingest">ingest (push only)</option>
-				<option value="full">full (push and read)</option>
-			</select>
-			<button type="submit">Create token</button>
-		</form>
-		if len(tokens) == 0 {
-			<div class="empty">No tokens yet.</div>
-		} else {
-			<table>
-				<thead>
-					<tr><th>Name</th><th>Scope</th><th>Created</th><th>Last used</th><th></th></tr>
-				</thead>
-				<tbody>
-					for _, t := range tokens {
-						<tr>
-							<td>{ t.Name }</td>
-							<td>{ t.Scope }</td>
-							<td>{ FmtTimeAt(t.CreatedAt) }</td>
-							<td>{ FmtTime(t.LastUsedAt) }</td>
-							<td>
-								if t.RevokedAt != nil {
-									<span class="muted">revoked</span>
-								} else {
-									<form method="post" action={ templ.SafeURL(fmt.Sprintf("/account/tokens/%d/revoke", t.ID)) } style="margin:0">
-										<button class="secondary" type="submit">Revoke</button>
-									</form>
-								}
-							</td>
-						</tr>
-					}
-				</tbody>
-			</table>
-		}
-		if p.IsAdmin {
-			<h2>Invites</h2>
-			if newInvite != "" {
-				<div class="card">
-					<strong>New invite (shown once):</strong> <code>{ newInvite }</code>
-				</div>
-			}
-			<form method="post" action="/account/invites">
-				<button type="submit">Create invite</button>
+		<section>
+			<div class="panel-head"><h2>API tokens</h2></div>
+			<form method="post" action="/account/tokens" class="filters">
+				<input name="name" placeholder="token name"/>
+				<select name="scope">
+					<option value="ingest">ingest (push only)</option>
+					<option value="full">full (push and read)</option>
+				</select>
+				<button type="submit">Create token</button>
 			</form>
+			if len(tokens) == 0 {
+				<div class="empty">No tokens yet.</div>
+			} else {
+				<table class="grid">
+					<thead>
+						<tr><th>Name</th><th>Scope</th><th>Created</th><th>Last used</th><th></th></tr>
+					</thead>
+					<tbody>
+						for _, t := range tokens {
+							<tr>
+								<td>{ t.Name }</td>
+								<td><span class="tag">{ t.Scope }</span></td>
+								<td class="muted">{ FmtTimeAt(t.CreatedAt) }</td>
+								<td class="muted">{ FmtTime(t.LastUsedAt) }</td>
+								<td>
+									if t.RevokedAt != nil {
+										<span class="muted">revoked</span>
+									} else {
+										<form method="post" action={ templ.SafeURL(fmt.Sprintf("/account/tokens/%d/revoke", t.ID)) } class="inline">
+											<button class="secondary" type="submit">Revoke</button>
+										</form>
+									}
+								</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			}
+		</section>
+		if p.IsAdmin {
+			<section>
+				<div class="panel-head"><h2>Invites</h2></div>
+				if newInvite != "" {
+					<div class="card reveal">
+						<strong>New invite (shown once):</strong> <code>{ newInvite }</code>
+					</div>
+				}
+				<form method="post" action="/account/invites">
+					<button type="submit">Create invite</button>
+				</form>
+			</section>
 		}
 	}
 }
 
-// publicLayout is the chrome for logged-out public session pages: brand and a
-// log-in link, but none of the internal navigation.
+// ============================ Public ============================
+
 templ publicLayout(title string) {
 	<!DOCTYPE html>
 	<html lang="en">
@@ -410,12 +606,14 @@ templ publicLayout(title string) {
 			<meta charset="utf-8"/>
 			<meta name="viewport" content="width=device-width, initial-scale=1"/>
 			<title>{ title } - akari</title>
+			<link rel="preload" href="/static/fonts/Geist-Regular.woff2" as="font" type="font/woff2" crossorigin/>
+			<link rel="preload" href="/static/fonts/GeistMono-Regular.woff2" as="font" type="font/woff2" crossorigin/>
 			<link rel="stylesheet" href="/static/app.css"/>
 			<script src="/static/app.js" defer></script>
 		</head>
 		<body>
 			<header class="topbar">
-				<span class="brand"><a href="/">akari</a></span>
+				<a class="brand" href="/">@brandMark()</a>
 				<span class="spacer"></span>
 				<a href="/login">Log in</a>
 			</header>
@@ -426,54 +624,58 @@ templ publicLayout(title string) {
 	</html>
 }
 
-// PublicSessionPage renders a published session for logged-out viewers. It never
-// links to internal session ids; only public subagents are shown, linked by their
-// own public id.
 templ PublicSessionPage(d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, publicSubs []store.SessionSummary) {
 	@publicLayout(d.ProjectKey + " session") {
-		<h1>
-			<span>{ d.ProjectKey }</span>
-			<span class="muted">/ session</span>
-			<span class="badge agent">{ d.Agent }</span>
-			<span class="badge public">public</span>
-		</h1>
-		<p class="muted">Shared by { d.Username }.</p>
-		<div class="stats">
-			@stat("Messages", fmt.Sprintf("%d", d.MessageCount))
-			@stat("User msgs", fmt.Sprintf("%d", d.UserMessageCount))
-			@stat("Input", FmtTokens(d.TotalInput))
-			@stat("Output", FmtTokens(d.TotalOutput))
-			@stat("Cache write", FmtTokens(d.TotalCacheWrite))
-			@stat("Cache read", FmtTokens(d.TotalCacheRead))
-			@stat("Cost", FmtCost(d.TotalCostUSD, d.CostIncomplete))
-			@stat("Duration", FmtDuration(d.StartedAt, d.EndedAt))
-		</div>
-		if len(publicSubs) > 0 {
-			<h2>Subagents</h2>
-			<div class="subagents">
-				<table>
-					<tbody>
-						for _, sub := range publicSubs {
-							if sub.PublicID != nil {
-								<tr>
-									<td><a href={ PublicHref(*sub.PublicID) }>{ sub.Agent } subagent</a></td>
-									<td class="num">{ fmt.Sprintf("%d", sub.MessageCount) } messages</td>
-								</tr>
-							}
-						}
-					</tbody>
-				</table>
+		<div class="session-head">
+			<div class="session-title">
+				<h1>
+					<span>{ d.ProjectKey }</span>
+					<span class="sep">/</span>
+					<span class="muted">session</span>
+				</h1>
+				<div class="session-meta">
+					<span class="tag agent">{ d.Agent }</span>
+					<span class="tag public">public</span>
+					<span class="muted">Shared by { d.Username }</span>
+				</div>
 			</div>
-		}
-		<h2>Transcript</h2>
-		@Transcript(msgs, tools, PublicBlobBase(*d.PublicID))
+			@densityToolbar()
+		</div>
+		<div id="session-body">
+			<div class="session-grid">
+				<aside class="rail" aria-label="Timeline">
+					@TimelineRail(BuildRail(msgs, tools))
+				</aside>
+				<div class="session-main">
+					@sessionStats(d)
+					if len(publicSubs) > 0 {
+						<h2>Subagents</h2>
+						<div class="subagents">
+							<table class="grid">
+								<tbody>
+									for _, sub := range publicSubs {
+										if sub.PublicID != nil {
+											<tr>
+												<td><a href={ PublicHref(*sub.PublicID) }>{ sub.Agent } subagent</a></td>
+												<td class="num">{ fmt.Sprintf("%d", sub.MessageCount) } messages</td>
+											</tr>
+										}
+									}
+								</tbody>
+							</table>
+						</div>
+					}
+					<h2>Transcript</h2>
+					@Transcript(msgs, tools, PublicBlobBase(*d.PublicID))
+				</div>
+			</div>
+		</div>
 	}
 }
 
-// PublicErrorPage is the logged-out error page (an unpublished or unknown link).
 templ PublicErrorPage(code int, message string) {
 	@publicLayout(fmt.Sprintf("%d", code)) {
-		<div class="empty">
+		<div class="empty big">
 			<h1>{ fmt.Sprintf("%d", code) }</h1>
 			<p>{ message }</p>
 		</div>
@@ -482,7 +684,7 @@ templ PublicErrorPage(code int, message string) {
 
 templ ErrorPage(p Page, code int, message string) {
 	@layout(p) {
-		<div class="empty">
+		<div class="empty big">
 			<h1>{ fmt.Sprintf("%d", code) }</h1>
 			<p>{ message }</p>
 			<p><a href="/">Back to projects</a></p>

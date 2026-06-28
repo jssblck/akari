@@ -1,0 +1,170 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-06-27T00:00:00Z",
+  "title": "Design System: akari",
+  "extensions": {
+    "colorMeta": {
+      "lilac": {
+        "role": "primary",
+        "displayName": "Machined Lilac",
+        "canonical": "oklch(0.78 0.10 305)",
+        "tonalRamp": ["oklch(0.18 0.05 305)", "oklch(0.28 0.07 305)", "oklch(0.38 0.085 305)", "oklch(0.48 0.10 305)", "oklch(0.58 0.11 305)", "oklch(0.68 0.105 305)", "oklch(0.80 0.085 305)", "oklch(0.92 0.05 305)"]
+      },
+      "bg": {
+        "role": "neutral",
+        "displayName": "The Room",
+        "canonical": "oklch(0.18 0.012 300)",
+        "tonalRamp": ["oklch(0.15 0.012 300)", "oklch(0.22 0.014 300)", "oklch(0.30 0.016 300)", "oklch(0.40 0.016 300)", "oklch(0.55 0.014 300)", "oklch(0.70 0.012 300)", "oklch(0.85 0.010 300)", "oklch(0.95 0.008 300)"]
+      },
+      "ok": {
+        "role": "secondary",
+        "displayName": "Sage",
+        "canonical": "oklch(0.83 0.075 150)",
+        "tonalRamp": ["oklch(0.20 0.04 150)", "oklch(0.30 0.055 150)", "oklch(0.42 0.07 150)", "oklch(0.54 0.08 150)", "oklch(0.66 0.085 150)", "oklch(0.78 0.08 150)", "oklch(0.88 0.06 150)", "oklch(0.95 0.035 150)"]
+      },
+      "err": {
+        "role": "secondary",
+        "displayName": "Rose",
+        "canonical": "oklch(0.76 0.11 15)",
+        "tonalRamp": ["oklch(0.22 0.06 15)", "oklch(0.32 0.085 15)", "oklch(0.44 0.105 15)", "oklch(0.56 0.12 15)", "oklch(0.68 0.12 15)", "oklch(0.78 0.105 15)", "oklch(0.88 0.07 15)", "oklch(0.95 0.04 15)"]
+      },
+      "warn": {
+        "role": "secondary",
+        "displayName": "Peach",
+        "canonical": "oklch(0.84 0.09 70)",
+        "tonalRamp": ["oklch(0.22 0.05 70)", "oklch(0.32 0.07 70)", "oklch(0.44 0.085 70)", "oklch(0.56 0.095 70)", "oklch(0.68 0.10 70)", "oklch(0.80 0.09 70)", "oklch(0.89 0.065 70)", "oklch(0.95 0.04 70)"]
+      },
+      "info": {
+        "role": "secondary",
+        "displayName": "Teal",
+        "canonical": "oklch(0.80 0.07 195)",
+        "tonalRamp": ["oklch(0.20 0.04 195)", "oklch(0.30 0.05 195)", "oklch(0.42 0.06 195)", "oklch(0.54 0.07 195)", "oklch(0.66 0.075 195)", "oklch(0.78 0.07 195)", "oklch(0.88 0.05 195)", "oklch(0.95 0.03 195)"]
+      }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Display", "purpose": "Page titles only. Modest scale; the instrument is labeled, not shouting." },
+      "label": { "displayName": "Label (knurled cap)", "purpose": "11px uppercase tracked caps over table headers and stat tiles. The only sanctioned uppercase." },
+      "data": { "displayName": "Data (mono)", "purpose": "Every number, id, duration, and model name. Tabular figures, fixed grid." },
+      "code": { "displayName": "Code (mono)", "purpose": "Expanded tool input and result bodies." }
+    },
+    "shadows": [
+      { "name": "overlay", "value": "0 8px 24px -6px rgba(8, 6, 14, 0.6)", "purpose": "Dropdowns, native dialog/popover, menus that escape the layout. The only ambient shadow." },
+      { "name": "focus-ring", "value": "0 0 0 2px rgba(198, 168, 242, 0.5)", "purpose": "Keyboard focus and active inputs. Focus is a lilac glow, not a browser outline." }
+    ],
+    "motion": [
+      { "name": "dur-fast", "value": "120ms", "purpose": "Row hover tint, button background shift, small state changes." },
+      { "name": "dur-base", "value": "180ms", "purpose": "Tool-body expand (height and fade), panel transitions." },
+      { "name": "dur-slow", "value": "220ms", "purpose": "SSE message entrance (slide and fade), needle-settle glow." },
+      { "name": "ease-settle", "value": "cubic-bezier(0.165, 0.84, 0.44, 1)", "purpose": "Ease-out-quart for entrances and the live value settle. No bounce." },
+      { "name": "ease-state", "value": "cubic-bezier(0.4, 0, 0.2, 1)", "purpose": "Default easing for hover and focus state transitions." }
+    ],
+    "breakpoints": [
+      { "name": "sm", "value": "640px" },
+      { "name": "md", "value": "960px" },
+      { "name": "lg", "value": "1280px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The single filled-lilac action in a view. Reserve for the one primary action.",
+      "html": "<button class=\"ds-btn-primary\">Publish</button>",
+      "css": ".ds-btn-primary { background: #c6a8f2; color: #1a1320; font: 500 0.875rem/1 Geist, Inter, system-ui, sans-serif; border: none; border-radius: 4px; padding: 8px 14px; cursor: pointer; transition: background 120ms cubic-bezier(0.4,0,0.2,1), transform 120ms cubic-bezier(0.4,0,0.2,1); } .ds-btn-primary:hover { background: #b693ea; } .ds-btn-primary:active { transform: translateY(1px); } .ds-btn-primary:focus-visible { outline: none; box-shadow: 0 0 0 2px rgba(198,168,242,0.5); }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Low-emphasis action on a steel fill with a scribed hairline.",
+      "html": "<button class=\"ds-btn-secondary\">Filter</button>",
+      "css": ".ds-btn-secondary { background: #232230; color: #e6e3f0; font: 500 0.875rem/1 Geist, Inter, system-ui, sans-serif; border: 1px solid #383548; border-radius: 4px; padding: 8px 14px; cursor: pointer; transition: background 120ms cubic-bezier(0.4,0,0.2,1); } .ds-btn-secondary:hover { background: #2b2939; } .ds-btn-secondary:focus-visible { outline: none; box-shadow: 0 0 0 2px rgba(198,168,242,0.5); }"
+    },
+    {
+      "name": "Search Input",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Steel fill, scribed border, lilac focus ring and border shift.",
+      "html": "<input class=\"ds-input\" placeholder=\"search message content\" />",
+      "css": ".ds-input { background: #1b1a24; color: #e6e3f0; font: 400 0.875rem/1.4 Geist, Inter, system-ui, sans-serif; border: 1px solid #383548; border-radius: 4px; padding: 7px 10px; min-width: 280px; transition: border-color 120ms cubic-bezier(0.4,0,0.2,1), box-shadow 120ms cubic-bezier(0.4,0,0.2,1); } .ds-input::placeholder { color: #9a94ad; } .ds-input:focus { outline: none; border-color: #c6a8f2; box-shadow: 0 0 0 2px rgba(198,168,242,0.5); }"
+    },
+    {
+      "name": "Agent Tag",
+      "kind": "chip",
+      "refersTo": "tag-agent",
+      "description": "A machined rectangular tag (never a pill). Agent name in lilac, label caps.",
+      "html": "<span class=\"ds-tag-agent\">claude</span>",
+      "css": ".ds-tag-agent { display: inline-block; background: #232230; color: #c6a8f2; font: 500 0.6875rem/1.2 Geist, Inter, system-ui, sans-serif; letter-spacing: 0.04em; border: 1px solid #383548; border-radius: 4px; padding: 2px 7px; }"
+    },
+    {
+      "name": "Stat Tile",
+      "kind": "card",
+      "refersTo": "stat-tile",
+      "description": "An instrument readout: knurled cap label over a large mono value. Live updates underglow lilac and settle.",
+      "html": "<div class=\"ds-stat\"><div class=\"ds-stat-label\">Cost</div><div class=\"ds-stat-value\">$2.41</div></div>",
+      "css": ".ds-stat { background: #1b1a24; border: 1px solid #383548; border-radius: 6px; padding: 10px 14px; min-width: 120px; } .ds-stat-label { color: #9a94ad; font: 500 0.6875rem/1.2 Geist, Inter, system-ui, sans-serif; letter-spacing: 0.08em; text-transform: uppercase; } .ds-stat-value { margin-top: 4px; color: #e6e3f0; font: 450 1.125rem/1.2 Geist Mono, ui-monospace, monospace; font-variant-numeric: tabular-nums; transition: text-shadow 220ms cubic-bezier(0.165,0.84,0.44,1); } .ds-stat-value.ds-settling { text-shadow: 0 0 12px rgba(198,168,242,0.7); } @media (prefers-reduced-motion: reduce) { .ds-stat-value { transition: none; } .ds-stat-value.ds-settling { text-shadow: none; } }"
+    },
+    {
+      "name": "Tool Chip",
+      "kind": "custom",
+      "refersTo": "tool-chip",
+      "description": "Signature component. A tool call as a compact metadata chip; the body stamp is a button that expands inline.",
+      "html": "<div class=\"ds-tool-chip\"><span class=\"ds-tool-name\">Read</span><span class=\"ds-tool-path\">internal/server/web/web.go</span><button class=\"ds-tool-stamp\">in: 36 KB json</button><span class=\"ds-tool-ok\">ok</span></div>",
+      "css": ".ds-tool-chip { display: inline-flex; gap: 8px; align-items: center; background: #1b1a24; border: 1px solid #383548; border-radius: 4px; padding: 5px 10px; font: 450 0.8125rem/1.4 Geist Mono, ui-monospace, monospace; } .ds-tool-name { color: #c6a8f2; font-weight: 500; } .ds-tool-path { color: #9a94ad; } .ds-tool-stamp { background: #232230; color: #c5c1d6; font: inherit; border: 1px solid #383548; border-radius: 4px; padding: 1px 7px; cursor: pointer; transition: background 120ms cubic-bezier(0.4,0,0.2,1); } .ds-tool-stamp:hover { background: #c6a8f2; color: #1a1320; border-color: #c6a8f2; } .ds-tool-stamp:focus-visible { outline: none; box-shadow: 0 0 0 2px rgba(198,168,242,0.5); } .ds-tool-ok { color: #9fd6a6; }"
+    },
+    {
+      "name": "Data Table Row",
+      "kind": "custom",
+      "refersTo": "table",
+      "description": "The primary data grid. Hairline separators, mono tabular numerics right-aligned, full-row hover.",
+      "html": "<table class=\"ds-table\"><tbody><tr><td><a href=\"#\">github.com/jssblck/akari</a></td><td class=\"ds-num\">128</td><td class=\"ds-num\">$2.41</td></tr></tbody></table>",
+      "css": ".ds-table { width: 100%; border-collapse: collapse; font: 400 0.875rem/1.5 Geist, Inter, system-ui, sans-serif; } .ds-table td { padding: 8px 10px; border-bottom: 1px solid #383548; color: #e6e3f0; transition: background 120ms cubic-bezier(0.4,0,0.2,1); } .ds-table a { color: #c6a8f2; text-decoration: none; } .ds-table a:hover { text-decoration: underline; } .ds-table .ds-num { text-align: right; font-family: Geist Mono, ui-monospace, monospace; font-variant-numeric: tabular-nums; } .ds-table tr:hover td { background: #232230; }"
+    },
+    {
+      "name": "Top Navigation",
+      "kind": "nav",
+      "refersTo": "nav",
+      "description": "Sticky top bar on steel with a scribed underline. Active links in lilac, the rest subtext.",
+      "html": "<header class=\"ds-nav\"><span class=\"ds-brand\">akari</span><nav><a class=\"ds-active\" href=\"#\">Projects</a><a href=\"#\">Search</a><a href=\"#\">Account</a></nav></header>",
+      "css": ".ds-nav { display: flex; align-items: center; gap: 20px; padding: 12px 24px; background: #1b1a24; border-bottom: 1px solid #383548; font: 400 0.875rem/1 Geist, Inter, system-ui, sans-serif; } .ds-brand { font-weight: 600; font-size: 1rem; color: #e6e3f0; } .ds-nav nav { display: flex; gap: 16px; } .ds-nav a { color: #c5c1d6; text-decoration: none; transition: color 120ms cubic-bezier(0.4,0,0.2,1); } .ds-nav a:hover, .ds-nav a.ds-active { color: #c6a8f2; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Machinist's Bench",
+    "overview": "akari is an instrument, not a dashboard. The model is a machinist's bench under low shop light: steel surfaces with a faint violet cast, scribed hairlines instead of heavy frames, knurled-cap labels over precise readouts, and every number machined to tolerance in a monospace face. The palette is the surprise: muted lilac and pastel signal colors on a deep violet-graphite base, a Catppuccin-Mocha sensibility rather than the literal scheme. Desaturation is the discipline, so the surface reads as serious tooling rather than a toy. Color is a signal, never decoration.",
+    "keyCharacteristics": [
+      "Deep violet-graphite base; muted lilac signature carried on under 10% of a screen.",
+      "Scribed 1px hairlines and tonal layering do the structural work; shadows are rare.",
+      "Every figure is monospaced and tabular, so values never shift as data streams.",
+      "Tight radii (4 to 10px) and machined rectangular tags, never consumer pills.",
+      "Motion settles like an instrument needle: fast, purposeful, reversible."
+    ],
+    "rules": [
+      { "name": "The One Voice Rule", "body": "Machined Lilac covers at most 10% of any screen, reserved for the primary action, links, focus, and the live signal. If two things on screen are lilac, one of them is wrong.", "section": "colors" },
+      { "name": "The Blue Demotion Rule", "body": "Blue is forbidden as an interface accent (the generic-SaaS tell). It survives only as Sky, one series in the chart ramp.", "section": "colors" },
+      { "name": "The Muted Pastel Rule", "body": "Every signal color is desaturated against a genuinely dark ground. If a hue looks candy-bright, lower its chroma until it reads as an instrument light.", "section": "colors" },
+      { "name": "The Tabular Tolerance Rule", "body": "Every number renders in Geist Mono with tabular-nums. A value that jitters by a pixel as it updates is a defect, like a gauge with a loose needle.", "section": "typography" },
+      { "name": "The Caps-Once Rule", "body": "Uppercase tracking is permitted only on the 11px label role. Never set body text, buttons, or headings in tracked uppercase.", "section": "typography" },
+      { "name": "The Scribed Line Rule", "body": "Surfaces are bordered by a single 1px hairline, not a heavy frame. A component that needs a 2px-plus colored edge to separate is layered wrong; restate it with tone.", "section": "elevation" },
+      { "name": "The Float-Earns-Shadow Rule", "body": "A shadow is allowed only on something that actually overlaps other content (a menu, a dialog). Resting cards, tiles, and rows are flat.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do carry Machined Lilac (#c6a8f2) on at most 10% of a screen, reserved for the primary action, links, focus, and the live signal.",
+      "Do set every number in Geist Mono with tabular-nums, so values hold their position as data streams in.",
+      "Do build depth from the tonal surface ladder and 1px scribed hairlines; keep resting surfaces flat.",
+      "Do keep radii tight (4 to 10px) and render badges as machined rectangles.",
+      "Do desaturate every pastel against the dark ground, and back every status hue with a label or icon, never color alone.",
+      "Do give live updates a 120 to 220ms settle and a prefers-reduced-motion instant fallback."
+    ],
+    "donts": [
+      "Don't ship generic dark SaaS: no interchangeable one-blue-accent admin look. Blue is demoted to a single chart series.",
+      "Don't add enterprise bloat: no settings-soup, no modal-on-modal. The authorization model is flat, so the chrome stays light.",
+      "Don't drift playful or consumer: no candy-bright colors, no fully rounded pills, no soft mascot roundness.",
+      "Don't reproduce Datadog-style clutter: real charts and dense tables are welcome, the everything-at-once wall of panels is not.",
+      "Don't use a border-left or border-right thicker than 1px as a colored accent stripe.",
+      "Don't set body text, buttons, or headings in tracked uppercase; reserve caps for the 11px label role.",
+      "Don't put a drop shadow on a resting card, tile, or row. Shadow is for floating overlays alone."
+    ]
+  }
+}
