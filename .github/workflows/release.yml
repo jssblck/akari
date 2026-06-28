@@ -4,10 +4,12 @@ name: Release
 #
 # On a version tag (v*) this cross-compiles every target (the akari-server for
 # Linux, the akari client for Linux, macOS, and Windows), packages each into an
-# archive, computes a SHA256SUMS over them, then publishes a GitHub Release whose
-# notes are generated from the pull requests merged since the previous tag
-# (--generate-notes, the "releases as changelog" pattern). The release goes out
-# directly; edit the generated notes afterward if you want to expand them.
+# archive, computes a SHA256SUMS over them, then assembles a GitHub Release as a
+# draft (uploading the assets and generating notes from the pull requests merged
+# since the previous tag, the "releases as changelog" pattern) and flips it to
+# published as the final step. Assembling the draft first means the release only
+# becomes visible once it is complete, never half-populated. Edit the generated
+# notes afterward if you want to expand them.
 #
 # On every pull request and every push to main this runs as a DRY RUN: it
 # executes the exact same build and packaging matrix and computes SHA256SUMS but
@@ -213,7 +215,7 @@ jobs:
           echo "SHA256SUMS:"
           cat SHA256SUMS
 
-      - name: Create GitHub release
+      - name: Create draft GitHub release
         if: ${{ needs.prepare.outputs.dry_run == 'false' }}
         shell: bash
         run: |
@@ -227,9 +229,11 @@ jobs:
             channel=(--latest)
           fi
 
-          # Published directly (no --draft): the assets and version go live as
-          # soon as this step finishes.
+          # Assemble as a draft first: upload every asset and generate the notes
+          # while the release stays hidden. The "Publish release" step below
+          # flips it visible, so it never appears half-populated.
           gh release create "$tag" \
+            --draft \
             --generate-notes \
             "${channel[@]}" \
             --title "$tag" \
@@ -253,6 +257,18 @@ jobs:
             cat dist/SHA256SUMS
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish release
+        # The final step, run only for a real release: flip the fully assembled
+        # draft to published. This is the one step that makes the release
+        # visible, so it runs last; if any earlier step fails the release stays a
+        # hidden draft rather than going out half-built.
+        if: ${{ needs.prepare.outputs.dry_run == 'false' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ needs.prepare.outputs.tag }}"
+          gh release edit "$tag" --draft=false
 
       - name: Write dry run summary
         if: ${{ needs.prepare.outputs.dry_run == 'true' }}

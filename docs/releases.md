@@ -33,10 +33,13 @@ Do not edit a constant to mark a release, tag instead.
    ```
 
 3. The `Release` workflow cross-compiles every target, packages the archives,
-   computes `SHA256SUMS`, then publishes a GitHub Release with notes generated
-   from the pull requests merged since the previous tag. A bare `X.Y.Z` tag is
-   published as the latest stable release; any other tag shape (for example a
-   `-rc.1` pre-release suffix) is marked as a prerelease.
+   computes `SHA256SUMS`, and assembles a GitHub Release as a draft: it uploads
+   the assets and generates notes from the pull requests merged since the
+   previous tag. Its final step flips the draft to published, so the release only
+   becomes visible once it is fully assembled (and stays a hidden draft if an
+   earlier step fails). A bare `X.Y.Z` tag is published as the latest stable
+   release; any other tag shape (for example a `-rc.1` pre-release suffix) is
+   marked as a prerelease.
 4. The release is live as soon as the workflow finishes. Edit the generated notes
    afterward if you want to expand them.
 
