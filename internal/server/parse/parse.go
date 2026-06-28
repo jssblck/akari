@@ -76,6 +76,7 @@ func toProjection(s parser.Session) store.Projection {
 			InputBytes:     int64(len(t.InputJSON)),
 		}
 		if t.InputJSON != "" {
+			tc.InputBody = []byte(t.InputJSON)
 			tc.InputMediaType = "application/json"
 		}
 		if t.ResultStatus != "" {
@@ -86,6 +87,9 @@ func toProjection(s parser.Session) store.Projection {
 				tc.ResultMediaType = "text/plain"
 			}
 			tc.ResultStatus = t.ResultStatus
+			if len(t.ResultBody) > 0 {
+				tc.ResultBody = []byte(t.ResultBody)
+			}
 		}
 		p.ToolCalls = append(p.ToolCalls, tc)
 	}

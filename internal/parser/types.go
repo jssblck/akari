@@ -49,11 +49,11 @@ type Message struct {
 	HasToolUse   bool
 }
 
-// ToolCall is one tool invocation attached to a message. InputJSON and
-// ResultText carry the bulky bodies; the store keeps only their size and media
-// type until the CAS milestone lands. ResultBytes and ResultMediaType describe
-// the original result body, not the flattened display text, so the recorded size
-// is faithful to what the CAS will eventually hold.
+// ToolCall is one tool invocation attached to a message. InputJSON and ResultBody
+// carry the bulky bodies the CAS stores; ResultBytes and ResultMediaType describe
+// ResultBody exactly, so the recorded size and media type always match the stored
+// content. InputJSON is the raw tool-input JSON; ResultBody is the result body
+// (a tool result that is an array of text blocks is flattened to its text).
 type ToolCall struct {
 	MessageOrdinal  int
 	CallIndex       int
@@ -61,7 +61,7 @@ type ToolCall struct {
 	Category        string
 	FilePath        string
 	InputJSON       string
-	ResultText      string
+	ResultBody      string
 	ResultBytes     int
 	ResultMediaType string
 	ResultStatus    string // "ok" | "error" | "" (pending)

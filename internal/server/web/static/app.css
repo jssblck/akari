@@ -113,6 +113,16 @@ button.secondary, .btn.secondary { background: var(--panel-2); color: var(--text
 .tool-chip .tname { font-weight: 600; color: var(--accent); }
 .tool-chip .ok { color: var(--ok); }
 .tool-chip .err { color: var(--err); }
+button.body-toggle { font: inherit; font-size: 11px; cursor: pointer; }
+button.body-toggle.open { background: var(--accent); color: #0b0e13; border-color: var(--accent); }
+button.body-toggle.loading { opacity: 0.6; }
+pre.tool-body {
+  margin: 6px 0 2px; padding: 10px 12px; max-height: 420px; overflow: auto;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap; word-break: break-word; color: var(--text);
+}
+pre.tool-body.error { color: var(--err); }
 
 .auth-wrap { max-width: 360px; margin: 64px auto; }
 .auth-wrap form { display: flex; flex-direction: column; gap: 12px; }

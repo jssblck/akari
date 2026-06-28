@@ -235,7 +235,7 @@ templ SessionBody(d store.SessionDetail, msgs []store.Message, tools map[int][]s
 		</div>
 	}
 	<h2>Transcript</h2>
-	@Transcript(msgs, tools)
+	@Transcript(msgs, tools, SessionBlobBase(d.ID))
 }
 
 templ stat(label, value string) {
@@ -245,7 +245,7 @@ templ stat(label, value string) {
 	</div>
 }
 
-templ Transcript(msgs []store.Message, tools map[int][]store.ToolCallView) {
+templ Transcript(msgs []store.Message, tools map[int][]store.ToolCallView, blobBase string) {
 	if len(msgs) == 0 {
 		<div class="empty">No messages parsed yet.</div>
 	} else {
@@ -268,7 +268,7 @@ templ Transcript(msgs []store.Message, tools map[int][]store.ToolCallView) {
 					if tc := tools[m.Ordinal]; len(tc) > 0 {
 						<div class="tools">
 							for _, t := range tc {
-								@ToolChip(t)
+								@ToolChip(t, blobBase)
 							}
 						</div>
 					}
@@ -278,18 +278,24 @@ templ Transcript(msgs []store.Message, tools map[int][]store.ToolCallView) {
 	}
 }
 
-templ ToolChip(t store.ToolCallView) {
+// ToolChip renders one tool call's metadata. A body that lives in the CAS is a
+// clickable chip carrying its blob URL; app.js fetches and expands it inline.
+templ ToolChip(t store.ToolCallView, blobBase string) {
 	<div class="tool-chip">
 		<span class="tname">{ t.ToolName }</span>
 		if t.FilePath != "" {
 			<span class="muted">{ t.FilePath }</span>
 		}
-		if t.InputBytes > 0 {
+		if t.InputSHA != "" {
+			<button type="button" class="badge body-toggle" data-blob-url={ BlobURL(blobBase, t.InputSHA) }>in: { ChipLabel(t.InputMediaType, t.InputBytes) }</button>
+		} else if t.InputBytes > 0 {
 			<span class="badge">in: { ChipLabel(t.InputMediaType, t.InputBytes) }</span>
 		}
 		if t.ResultStatus != "" {
 			<span class={ "tool-status " + StatusClass(t.ResultStatus) }>{ t.ResultStatus }</span>
-			if t.ResultBytes > 0 {
+			if t.ResultSHA != "" {
+				<button type="button" class="badge body-toggle" data-blob-url={ BlobURL(blobBase, t.ResultSHA) }>out: { ChipLabel(t.ResultMediaType, t.ResultBytes) }</button>
+			} else if t.ResultBytes > 0 {
 				<span class="badge">out: { ChipLabel(t.ResultMediaType, t.ResultBytes) }</span>
 			}
 		}
@@ -392,6 +398,7 @@ templ publicLayout(title string) {
 			<meta name="viewport" content="width=device-width, initial-scale=1"/>
 			<title>{ title } - akari</title>
 			<link rel="stylesheet" href="/static/app.css"/>
+			<script src="/static/app.js" defer></script>
 		</head>
 		<body>
 			<header class="topbar">
@@ -446,7 +453,7 @@ templ PublicSessionPage(d store.SessionDetail, msgs []store.Message, tools map[i
 			</div>
 		}
 		<h2>Transcript</h2>
-		@Transcript(msgs, tools)
+		@Transcript(msgs, tools, PublicBlobBase(*d.PublicID))
 	}
 }
 

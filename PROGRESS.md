@@ -230,7 +230,50 @@ unguessable capability id minted on publish, and a logged-out session view at
   reveal it. PublicSessionPage now titles by project and renders "/ session" with
   no number; the HTTP test asserts neither "/sessions/{id}" nor "#{id}" appears.
 
-## Milestone 7: CAS (not started)
+## Milestone 7: CAS (DONE)
+
+Goal: move bulky tool bodies out of the hot tables into a content-addressed store
+backed by Postgres large objects, deduped across sessions, with session-scoped
+serving and on-demand expansion in the UI.
+
+- [x] internal/parser: ToolCall.ResultBody (was ResultText) holds the canonical
+      body bytes; bodyContent returns body + media type so size and media always
+      describe exactly what the CAS stores (text-block arrays flatten to readable
+      text/plain; genuine objects stay raw JSON)
+- [x] internal/server/store/blob.go: writeBlobTx (lo_create + lowrite + insert,
+      deduped, race-safe via FOR KEY SHARE), BlobMeta, WriteBlobTo (streams the
+      large object), SessionReferencesBlob, SweepBlobs (FOR UPDATE SKIP LOCKED)
+- [x] internal/server/store/projection.go: WriteProjection stores tool input and
+      result bodies in the CAS within its transaction and records the sha256
+      references; reparse reuses existing blobs and orphans nothing for identical
+      content
+- [x] internal/server/httpapi/blob.go: GET /api/v1/session/{id}/blob/{sha256}
+      (full scope) and GET /s/{public_id}/blob/{sha256} (logged out); both verify
+      the session references the hash, validate the 64-hex sha, send nosniff, and
+      serve only JSON/plain text inline (anything else as opaque bytes)
+- [x] internal/server/web: body chips are buttons carrying a blob URL; app.js
+      fetches and expands them inline with textContent (never innerHTML), on both
+      the authed and public views
+- [x] cmd/akari-server: sweep subcommand; reparse sweeps once projections rebuild
+- [x] Tests: CAS dedup/read/sweep, the sweep-skips-a-writer-locked-blob race, and
+      HTTP access control (authed and public serving, cross-session leak blocked,
+      internal body unreachable via a public session, malformed sha)
+- [x] e2e: reparsed live data to populate the CAS, then expanded both tool input
+      and result bodies inline in a real browser (fetched from the blob endpoint)
+- [x] codex review (gpt-5.5 high) twice; both findings fixed and re-verified
+
+### Milestone 7 codex findings (all fixed)
+
+- MEDIUM: a sweep could race a live writer: writeBlobTx returned on a plain
+  EXISTS check without locking, so a concurrent SweepBlobs could delete a blob
+  between the check and the referencing tool_calls insert, failing the FK.
+  writeBlobTx now locks the existing row FOR KEY SHARE and the sweep claims
+  orphans FOR UPDATE SKIP LOCKED, so the sweep skips a blob a writer is about to
+  reference (or the writer recreates it if the sweep won). Covered by a test.
+- LOW: ResetRaw drops tool_calls and attachments, orphaning blobs, without
+  sweeping. Documented that these are reclaimed by a later SweepBlobs (a
+  synchronous full sweep on every client reset would be a performance footgun),
+  matching the design's "sweep runs after deletions or re-parses".
 
 ## Milestone 8: polish (not started)
 

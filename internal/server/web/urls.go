@@ -21,6 +21,16 @@ func ProjectPath(id int64) string { return fmt.Sprintf("/projects/%d", id) }
 // link to copy.
 func PublicPath(publicID string) string { return "/s/" + publicID }
 
+// SessionBlobBase and PublicBlobBase are the per-session prefixes under which CAS
+// blobs are served, for the authenticated and logged-out views respectively. A
+// blob URL is the base plus "/blob/{sha256}"; serving is gated on the session
+// referencing the hash.
+func SessionBlobBase(id int64) string       { return fmt.Sprintf("/api/v1/session/%d", id) }
+func PublicBlobBase(publicID string) string { return "/s/" + publicID }
+
+// BlobURL builds a tool body's fetch URL from a session blob base and a hash.
+func BlobURL(base, sha string) string { return base + "/blob/" + sha }
+
 // SSEPath and BodyPath are the live-update endpoints for a session, carried on
 // data attributes for the static app.js to wire up.
 func SSEPath(id int64) string  { return fmt.Sprintf("/sessions/%d/events", id) }

@@ -71,15 +71,18 @@ type Message struct {
 	Timestamp    *time.Time
 }
 
-// ToolCallView is one tool call rendered as metadata (the body lives in the CAS).
+// ToolCallView is one tool call rendered as metadata (the body lives in the CAS,
+// fetched on demand by its sha256).
 type ToolCallView struct {
 	MessageOrdinal  int
 	CallIndex       int
 	ToolName        string
 	Category        string
 	FilePath        string
+	InputSHA        string
 	InputBytes      int64
 	InputMediaType  string
+	ResultSHA       string
 	ResultBytes     int64
 	ResultMediaType string
 	ResultStatus    string
@@ -285,8 +288,8 @@ func (s *Store) Messages(ctx context.Context, sessionID int64) ([]Message, error
 func (s *Store) ToolCalls(ctx context.Context, sessionID int64) ([]ToolCallView, error) {
 	rows, err := s.Pool.Query(ctx,
 		`SELECT message_ordinal, call_index, tool_name, coalesce(category,''), coalesce(file_path,''),
-		        coalesce(input_bytes,0), coalesce(input_media_type,''),
-		        coalesce(result_bytes,0), coalesce(result_media_type,''), coalesce(result_status,'')
+		        coalesce(input_sha256,''), coalesce(input_bytes,0), coalesce(input_media_type,''),
+		        coalesce(result_sha256,''), coalesce(result_bytes,0), coalesce(result_media_type,''), coalesce(result_status,'')
 		   FROM tool_calls WHERE session_id = $1 ORDER BY message_ordinal, call_index`, sessionID)
 	if err != nil {
 		return nil, err
@@ -296,7 +299,8 @@ func (s *Store) ToolCalls(ctx context.Context, sessionID int64) ([]ToolCallView,
 	for rows.Next() {
 		var t ToolCallView
 		if err := rows.Scan(&t.MessageOrdinal, &t.CallIndex, &t.ToolName, &t.Category, &t.FilePath,
-			&t.InputBytes, &t.InputMediaType, &t.ResultBytes, &t.ResultMediaType, &t.ResultStatus); err != nil {
+			&t.InputSHA, &t.InputBytes, &t.InputMediaType,
+			&t.ResultSHA, &t.ResultBytes, &t.ResultMediaType, &t.ResultStatus); err != nil {
 			return nil, err
 		}
 		out = append(out, t)

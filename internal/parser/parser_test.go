@@ -59,8 +59,8 @@ func TestParseClaude(t *testing.T) {
 	if tc.ToolName != "Read" || tc.Category != "read" || tc.FilePath != "src/auth.ts" {
 		t.Errorf("tool call = %+v", tc)
 	}
-	if tc.ResultText != "export function login() {}" || tc.ResultStatus != "ok" {
-		t.Errorf("tool result = %q (%s)", tc.ResultText, tc.ResultStatus)
+	if tc.ResultBody != "export function login() {}" || tc.ResultStatus != "ok" {
+		t.Errorf("tool result = %q (%s)", tc.ResultBody, tc.ResultStatus)
 	}
 	if tc.ResultBytes != len("export function login() {}") || tc.ResultMediaType != "text/plain" {
 		t.Errorf("tool result size = %d (%s)", tc.ResultBytes, tc.ResultMediaType)
@@ -136,8 +136,8 @@ func TestParseCodex(t *testing.T) {
 	if tc.ToolName != "shell_command" || tc.Category != "bash" {
 		t.Errorf("tool call = %+v", tc)
 	}
-	if tc.ResultText != "ok" || tc.ResultStatus != "ok" {
-		t.Errorf("tool result = %q (%s)", tc.ResultText, tc.ResultStatus)
+	if tc.ResultBody != "ok" || tc.ResultStatus != "ok" {
+		t.Errorf("tool result = %q (%s)", tc.ResultBody, tc.ResultStatus)
 	}
 	if tc.ResultBytes != 2 || tc.ResultMediaType != "text/plain" {
 		t.Errorf("tool result size = %d (%s), want 2 text/plain", tc.ResultBytes, tc.ResultMediaType)
@@ -205,13 +205,14 @@ func TestParsePi(t *testing.T) {
 	if tc.ToolName != "read" || tc.Category != "read" || tc.FilePath != "auth.go" {
 		t.Errorf("tool call = %+v", tc)
 	}
-	if tc.ResultText != "package auth" || tc.ResultStatus != "ok" {
-		t.Errorf("tool result = %q (%s)", tc.ResultText, tc.ResultStatus)
+	if tc.ResultBody != "package auth" || tc.ResultStatus != "ok" {
+		t.Errorf("tool result = %q (%s)", tc.ResultBody, tc.ResultStatus)
 	}
-	// pi delivers the result as an array of blocks, so the body is measured as
-	// JSON, not as the flattened text.
-	if tc.ResultMediaType != "application/json" || tc.ResultBytes <= len("package auth") {
-		t.Errorf("tool result size = %d (%s), want json larger than flattened text", tc.ResultBytes, tc.ResultMediaType)
+	// pi delivers the result as an array of text blocks; the body is flattened to
+	// readable text, and its size and media type describe that flattened content
+	// exactly (so the CAS blob matches the recorded metadata).
+	if tc.ResultMediaType != "text/plain" || tc.ResultBytes != len("package auth") {
+		t.Errorf("tool result size = %d (%s), want %d (text/plain)", tc.ResultBytes, tc.ResultMediaType, len("package auth"))
 	}
 
 	if len(s.UsageEvent) != 1 {

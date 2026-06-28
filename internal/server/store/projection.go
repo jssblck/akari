@@ -41,16 +41,19 @@ type ProjMessage struct {
 	ContentLength int
 }
 
-// ProjToolCall is one row for the tool_calls table. Blob references are left
-// nil until the CAS milestone; only sizes and metadata are recorded now.
+// ProjToolCall is one row for the tool_calls table. InputBody and ResultBody hold
+// the bulky bodies; WriteProjection stores them in the CAS and records the
+// resulting sha256 references along with the sizes and media types.
 type ProjToolCall struct {
 	MessageOrdinal  int
 	CallIndex       int
 	ToolName        string
 	Category        string
 	FilePath        string
+	InputBody       []byte
 	InputBytes      int64
 	InputMediaType  string
+	ResultBody      []byte
 	ResultBytes     int64
 	ResultMediaType string
 	ResultStatus    string
@@ -168,15 +171,32 @@ func (s *Store) WriteProjection(ctx context.Context, sessionID int64, rawBytes i
 		if len(p.ToolCalls) > 0 {
 			rows := make([][]any, len(p.ToolCalls))
 			for i, t := range p.ToolCalls {
-				var resultBytes, resultMedia, resultStatus any
+				// Store the bodies in the CAS first so the tool_calls rows can carry
+				// their sha256 references (the blobs FK is satisfied within this tx).
+				var inputSHA, inputMedia any
+				if len(t.InputBody) > 0 {
+					sha, err := writeBlobTx(ctx, tx, t.InputBody, t.InputMediaType)
+					if err != nil {
+						return err
+					}
+					inputSHA, inputMedia = sha, t.InputMediaType
+				}
+				var resultSHA, resultBytes, resultMedia, resultStatus any
 				if t.HasResult {
 					resultBytes, resultMedia, resultStatus = t.ResultBytes, t.ResultMediaType, t.ResultStatus
+					if len(t.ResultBody) > 0 {
+						sha, err := writeBlobTx(ctx, tx, t.ResultBody, t.ResultMediaType)
+						if err != nil {
+							return err
+						}
+						resultSHA = sha
+					}
 				}
 				rows[i] = []any{
 					sessionID, t.MessageOrdinal, t.CallIndex, t.ToolName, t.Category,
 					nullString(t.FilePath),
-					nil, t.InputBytes, t.InputMediaType, // input_sha256 (nil until CAS), bytes, media
-					nil, resultBytes, resultMedia, resultStatus, // result_sha256 (nil until CAS), ...
+					inputSHA, t.InputBytes, inputMedia,
+					resultSHA, resultBytes, resultMedia, resultStatus,
 				}
 			}
 			if _, err := tx.CopyFrom(ctx, pgx.Identifier{"tool_calls"},
