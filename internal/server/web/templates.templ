@@ -205,6 +205,19 @@ templ SessionPage(p Page, d store.SessionDetail, msgs []store.Message, tools map
 				}
 			</div>
 		}
+		if owner || p.IsAdmin {
+			<div class="publish">
+				<span class="muted">
+					if !owner {
+						Admin:
+					}
+					Deleting removes this session and its transcript permanently.
+				</span>
+				<form method="post" action={ templ.SafeURL(fmt.Sprintf("/sessions/%d/delete", d.ID)) } style="margin:0" onsubmit="return confirm('Delete this session and its transcript permanently?')">
+					<button class="danger" type="submit">Delete session</button>
+				</form>
+			</div>
+		}
 		if live {
 			<div id="session-body" data-sse={ SSEPath(d.ID) } data-body={ BodyPath(d.ID) }>
 				@SessionBody(d, msgs, tools, subagents)

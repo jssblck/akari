@@ -194,6 +194,34 @@ func (s *Server) handleUnpublishSession(w http.ResponseWriter, r *http.Request) 
 	http.Redirect(w, r, fmt.Sprintf("/sessions/%d", id), http.StatusSeeOther)
 }
 
+// handleDeleteSession removes a session. The owner may delete their own session;
+// an admin may delete any. Its CAS blobs are reclaimed by a later sweep.
+func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
+	p, _ := principalFrom(r.Context())
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	d, err := s.Store.SessionDetailByID(r.Context(), id)
+	if err != nil {
+		render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(r, "Not found"), http.StatusNotFound, "Session not found."))
+		return
+	}
+	if p.UserID != d.OwnerID {
+		// Only the owner or an admin may delete a session.
+		if u, err := s.Store.UserByID(r.Context(), p.UserID); err != nil || !u.IsAdmin {
+			render(w, r, http.StatusForbidden, web.ErrorPage(s.pageFor(r, "Forbidden"), http.StatusForbidden, "You cannot delete this session."))
+			return
+		}
+	}
+	if err := s.Store.DeleteSession(r.Context(), id); err != nil {
+		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not delete session."))
+		return
+	}
+	http.Redirect(w, r, fmt.Sprintf("/projects/%d", d.ProjectID), http.StatusSeeOther)
+}
+
 // handlePublicSession serves a published session to logged-out viewers, reached
 // only through the unguessable public id. It never exposes the numeric id and
 // shows only subagents that are themselves public.

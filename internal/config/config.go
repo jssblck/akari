@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 // Server holds the akari-server runtime configuration.
@@ -20,6 +21,10 @@ type Server struct {
 	// CookieSecure marks session cookies Secure. Defaults true; set
 	// AKARI_COOKIE_INSECURE=1 for plain-HTTP local development.
 	CookieSecure bool
+	// SweepInterval is how often the server reclaims orphaned CAS blobs
+	// (AKARI_SWEEP_INTERVAL, a Go duration like "1h"). Defaults to 1h; set "0" to
+	// disable the background sweep (for example to run it only via the subcommand).
+	SweepInterval time.Duration
 }
 
 // LoadServer reads server configuration from the environment, applying defaults
@@ -33,7 +38,29 @@ func LoadServer() (Server, error) {
 	if s.DatabaseURL == "" {
 		return Server{}, fmt.Errorf("AKARI_DATABASE_URL is required")
 	}
+	interval, err := parseDuration(os.Getenv("AKARI_SWEEP_INTERVAL"), time.Hour)
+	if err != nil {
+		return Server{}, fmt.Errorf("AKARI_SWEEP_INTERVAL: %w", err)
+	}
+	s.SweepInterval = interval
 	return s, nil
+}
+
+// parseDuration reads a Go duration string, returning fallback when unset and
+// allowing "0" to mean disabled.
+func parseDuration(v string, fallback time.Duration) (time.Duration, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return fallback, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, err
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("must not be negative")
+	}
+	return d, nil
 }
 
 func envOr(key, fallback string) string {

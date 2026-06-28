@@ -3,12 +3,37 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/jssblck/akari/internal/config"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/migrations"
 )
+
+// runBackgroundSweep reclaims orphaned CAS blobs on a fixed interval until the
+// context is cancelled. Each pass is bounded by its own timeout so a slow sweep
+// cannot stack up behind the ticker.
+func runBackgroundSweep(ctx context.Context, st *store.Store, interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			sweepCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+			n, err := st.SweepBlobs(sweepCtx)
+			cancel()
+			switch {
+			case err != nil:
+				log.Printf("background sweep: %v", err)
+			case n > 0:
+				log.Printf("background sweep reclaimed %d blob(s)", n)
+			}
+		}
+	}
+}
 
 // runSweep deletes CAS blobs no live row references and unlinks their large
 // objects. Liveness is computed, not refcounted, so the sweep is safe to run any
