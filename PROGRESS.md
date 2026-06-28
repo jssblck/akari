@@ -67,9 +67,48 @@ cost and an incomplete flag, and a `reparse` subcommand to rebuild from raw.
   wrong call. Empty IDs are no longer indexed or matched.
 - LOW: reparse used flag.ExitOnError; now ContinueOnError so it returns errors.
 
-## Milestone 3: client core (not started)
+## Milestone 3: client core (DONE)
 
-Discovery, git remote resolution + skip-and-warn, one-shot sync.
+Goal: the thin client end of the pipeline. Discover agent session files, peek
+each header for cwd, resolve cwd to a canonical git origin remote (skip-and-warn
+on failure), and drive the append-only ingest protocol statelessly. One-shot
+`akari sync`.
+
+- [x] internal/gitremote: origin URL canonicalization (scp-like, scheme URLs,
+      ports, userinfo, case rules, nested subgroups) + best-effort ssh alias
+      resolution
+- [x] internal/config: client TOML config at os.UserConfigDir, atomic save,
+      raw vs validated load
+- [x] internal/client/discover: per-agent roots (env overrides honored), file walk
+- [x] internal/client/resolve: header peek per agent, git resolution via injectable
+      runner, skip-and-warn with specific reasons, per-directory cache
+- [x] internal/client/upload: stateless ingest driver (announce, prefix-hash
+      verify, reset on divergence, newline-trimmed chunking with long-line growth,
+      409 re-announce-and-reverify)
+- [x] cmd/akari: `sync` (one-shot, dry-run, summary with skip reasons) and `login`
+- [x] Tests: gitremote table tests, discover, resolve (peek + skip cases + cache),
+      upload (resume/reset/uptodate/conflict/long-line), config round-trip
+- [x] e2e: built the client, ran `akari sync` against the live server with a real
+      git repo as cwd; verified resolution to host/owner/repo, incremental append,
+      idempotent re-sync, and skip-and-warn for a non-git cwd
+- [x] codex review (gpt-5.5 high) twice; all findings fixed and re-verified
+
+### Milestone 3 codex findings (all fixed)
+
+- HIGH: a mid-stream 409 conflict trusted the server's reported cursor without
+  re-checking the prefix hash, so the client could append onto a divergent server
+  prefix, and could in principle loop forever. SyncFile now re-announces and
+  re-verifies the prefix from scratch on conflict, bounded by a retry cap.
+- HIGH: SaveClient truncated the config before encoding, so a failure could
+  destroy the only stored token. It now writes a temp file and atomically renames.
+- HIGH: `akari login` swallowed all config-load errors, silently overwriting a
+  corrupt config and losing extra_roots. It now uses ReadClient, which separates
+  missing (start blank) from corrupt (refuse to overwrite).
+- HIGH: ssh alias resolution rewrote any matching host, so a Host github.com /
+  HostName ssh.github.com entry split a repo across two projects. Only short,
+  dotless aliases are resolved now; canonical hosts are left alone.
+- LOW: SyncFile discarded the outcome of conflicted attempts, undercounting bytes
+  and missing a reset in the summary. Work is now rolled up across retries.
 
 ## Milestone 4: client watch + daemon (not started)
 
