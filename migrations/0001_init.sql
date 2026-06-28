@@ -1,4 +1,4 @@
--- akari initial schema. See DESIGN.md for rationale.
+-- akari initial schema. See docs/DESIGN.md for rationale.
 -- Forward-only; applied once and recorded in schema_migrations.
 
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
@@ -130,7 +130,7 @@ CREATE TABLE blobs (
   media_type TEXT NOT NULL DEFAULT 'application/octet-stream',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
--- No refcount column: liveness is computed at sweep time (see DESIGN.md CAS).
+-- No refcount column: liveness is computed at sweep time (see docs/DESIGN.md CAS).
 
 CREATE TABLE tool_calls (
   session_id        BIGINT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,

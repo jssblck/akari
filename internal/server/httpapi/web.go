@@ -68,7 +68,17 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load projects."))
 		return
 	}
-	render(w, r, http.StatusOK, web.ProjectsPage(s.pageFor(r, "Projects"), projects))
+	analytics, err := s.Store.Analytics(r.Context(), 0)
+	if err != nil {
+		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load analytics."))
+		return
+	}
+	spark, err := s.Store.ProjectSparklines(r.Context(), 30)
+	if err != nil {
+		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load analytics."))
+		return
+	}
+	render(w, r, http.StatusOK, web.ProjectsPage(s.pageFor(r, "Projects"), projects, analytics, spark))
 }
 
 func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
@@ -110,8 +120,13 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load filters."))
 		return
 	}
+	analytics, err := s.Store.Analytics(r.Context(), id)
+	if err != nil {
+		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load analytics."))
+		return
+	}
 	wf := web.Facets{Agents: facets.Agents, Machines: facets.Machines, Users: facets.Users}
-	render(w, r, http.StatusOK, web.ProjectPage(s.pageFor(r, proj.RemoteKey), proj, sessions, wf, filter))
+	render(w, r, http.StatusOK, web.ProjectPage(s.pageFor(r, proj.RemoteKey), proj, sessions, wf, filter, analytics))
 }
 
 // sessionView loads everything the session page (and its live body fragment)

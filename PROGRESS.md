@@ -1,6 +1,6 @@
 # akari implementation progress
 
-Working tracker across milestones. See DESIGN.md for the full design.
+Working tracker across milestones. See docs/DESIGN.md for the full design.
 
 ## Conventions
 
@@ -17,7 +17,7 @@ to end.
 
 - [x] Project restructure: remove greet scaffold, add cmd/akari-server, cmd/akari stub
 - [x] Dependencies: pgx/v5, x/crypto (argon2)
-- [x] migrations/0001_init.sql (full schema from DESIGN.md)
+- [x] migrations/0001_init.sql (full schema from docs/DESIGN.md)
 - [x] internal/config: server config from env
 - [x] internal/server/store: pgx pool + migration runner + queries
 - [x] internal/server/auth: argon2 passwords, token + invite hashing
@@ -306,6 +306,41 @@ configurable background blob sweep, a real README, and broader parser coverage.
   sweep now runs on a cancelable root context; shutdown cancels it and waits on a
   sweepDone channel before the pool closes, covering the SIGTERM, early
   ListenAndServe error, and migrate-error paths (go vet lostcancel clean).
+
+## Milestone 9: analytics + session redesign (DONE)
+
+Goal: a dark industrial visual system (the Machinist's Bench, see DESIGN.md and
+PRODUCT.md), inline fleet analytics, and a reworked session read experience.
+
+- [x] Design system captured in PRODUCT.md (strategic) and DESIGN.md (visual,
+      Stitch format) plus the .impeccable/design.json sidecar; the engineering
+      design moved to docs/DESIGN.md
+- [x] internal/server/store/analytics.go: time-bucketed usage rollups (daily
+      series, by-model, by-agent) scoped to a project or the whole instance, and
+      ProjectSparklines (per-project 30-day cost, bucketed in Go from one query)
+- [x] internal/server/web: chart view-models (inline series JSON on a data
+      attribute, breakdown bars, server-rendered sparklines, the timeline rail,
+      diff-tool detection); full token system in app.css (Geist + Geist Mono
+      self-hosted as woff2, lilac-on-violet-graphite, motion with reduced-motion
+      fallbacks)
+- [x] static/charts.js: a dependency-free SVG time-series renderer (hairline
+      grid, mono ticks, lilac crosshair with a mono readout, cost/token metric
+      toggle, resize redraw)
+- [x] static/app.js: inline diff rendering for editing tools across the three
+      agents, transcript density modes (persisted), the rail scroll spy, and the
+      instrument needle-settle on live stat changes
+- [x] templates + handlers: inline analytics on the index (global) and project
+      pages; the session view reworked into a timeline rail plus a sticky
+      instrument header and a diff-ready transcript
+- [x] Tests: store analytics rollups + sparkline windowing (DB-gated); web chart
+      helpers (breakdown widths, sparkline shape, rail markers, diff detection,
+      series JSON round-trip); full suite green with `-p 1`
+- [x] Verified in a real browser against seeded data: global and per-project
+      charts with a working crosshair (cost and token modes), breakdown bars and
+      sparklines, the session timeline rail and error marker, an Edit tool
+      expanding as a rendered diff, the density toggle, and the logged-out public
+      session view (no numeric id leaked)
+- [ ] codex review (gpt-5.5 high) before merge, per the milestone convention
 
 ## Deferred (from codex review, to address in later milestones)
 
