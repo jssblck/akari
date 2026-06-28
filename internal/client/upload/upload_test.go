@@ -254,7 +254,7 @@ func TestNextChunkTrimsToNewline(t *testing.T) {
 	defer f.Close()
 	info, _ := f.Stat()
 
-	chunk, err := nextChunk(f, 0, info.Size(), "claude", false)
+	chunk, _, err := nextChunk(f, 0, 0, info.Size(), "claude", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +263,7 @@ func TestNextChunkTrimsToNewline(t *testing.T) {
 	}
 
 	// From the trailing "c" with no newline, there is nothing complete to send.
-	tail, err := nextChunk(f, int64(len("a\nb\n")), info.Size(), "claude", false)
+	tail, _, err := nextChunk(f, int64(len("a\nb\n")), int64(len("a\nb\n")), info.Size(), "claude", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +285,7 @@ func TestNextChunkGrowsForLongLine(t *testing.T) {
 	defer f.Close()
 	info, _ := f.Stat()
 
-	chunk, err := nextChunk(f, 0, info.Size(), "claude", false)
+	chunk, _, err := nextChunk(f, 0, 0, info.Size(), "claude", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +323,7 @@ func TestNextChunkCodexCutsAtTurnBoundary(t *testing.T) {
 	// The cut falls right after the second user line; the trailing assistant turn
 	// (lines[5]) is withheld because its closing user line has not arrived.
 	wantCut := len(strings.Join(lines[:5], "\n") + "\n")
-	chunk, err := nextChunk(f, 0, info.Size(), "codex", false)
+	chunk, _, err := nextChunk(f, 0, 0, info.Size(), "codex", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -332,7 +332,7 @@ func TestNextChunkCodexCutsAtTurnBoundary(t *testing.T) {
 	}
 
 	// The trailing turn stays withheld while the file is still considered live.
-	tail, err := nextChunk(f, int64(wantCut), info.Size(), "codex", false)
+	tail, _, err := nextChunk(f, int64(wantCut), int64(wantCut), info.Size(), "codex", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -341,11 +341,70 @@ func TestNextChunkCodexCutsAtTurnBoundary(t *testing.T) {
 	}
 
 	// Once the file has settled, the final turn is flushed whole.
-	flushed, err := nextChunk(f, int64(wantCut), info.Size(), "codex", true)
+	flushed, _, err := nextChunk(f, int64(wantCut), int64(wantCut), info.Size(), "codex", true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(flushed) != lines[5]+"\n" {
 		t.Errorf("settled flush = %q, want %q", flushed, lines[5]+"\n")
+	}
+}
+
+// TestCodexChunkIncrementalScan checks that boundary detection resumes from
+// scanFrom instead of rescanning from offset: a turn whose earlier bytes were
+// already examined (and found to hold no boundary) is completed by scanning only
+// the newly appended tail, yet the returned chunk still covers from offset.
+func TestCodexChunkIncrementalScan(t *testing.T) {
+	user := `{"type":"response_item","payload":{"role":"user","content":[{"type":"input_text","text":"a"}]}}`
+	reasoning := `{"type":"response_item","payload":{"type":"reasoning","content":[{"type":"text","text":"r"}]}}`
+	assistant := `{"type":"response_item","payload":{"role":"assistant","content":[{"type":"output_text","text":"x"}]}}`
+	closing := `{"type":"response_item","payload":{"role":"user","content":[{"type":"input_text","text":"b"}]}}`
+
+	// [reasoning, assistant] is an in-progress turn with no boundary; the closing
+	// user line lands in the tail. scanFrom sits at the end of the in-progress turn,
+	// modelling a prior tick that scanned that far and withheld.
+	head := reasoning + "\n" + assistant + "\n"
+	content := head + closing + "\n"
+	path := tempFile(t, content)
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	info, _ := f.Stat()
+	size := info.Size()
+
+	chunk, scannedTo, err := nextChunk(f, 0, int64(len(head)), size, "codex", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Even though the scan started past [reasoning, assistant], the chunk covers the
+	// whole turn from offset 0 through the closing user line.
+	if string(chunk) != content {
+		t.Errorf("chunk = %q, want the whole turn %q", chunk, content)
+	}
+	if scannedTo != size {
+		t.Errorf("scannedTo = %d, want %d", scannedTo, size)
+	}
+
+	// A user line sitting before scanFrom is trusted-already-scanned and so is not
+	// treated as a fresh boundary: with the cursor past the first user line, the cut
+	// is the later one, not the earlier.
+	twoUsers := user + "\n" + reasoning + "\n" + closing + "\n"
+	path2 := tempFile(t, twoUsers)
+	f2, err := os.Open(path2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f2.Close()
+	size2 := int64(len(twoUsers))
+	// scanFrom just past the first user line: detection should find only the closing
+	// user line and return the whole range from offset 0.
+	chunk2, _, err := nextChunk(f2, 0, int64(len(user)+1), size2, "codex", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(chunk2) != twoUsers {
+		t.Errorf("chunk2 = %q, want %q", chunk2, twoUsers)
 	}
 }

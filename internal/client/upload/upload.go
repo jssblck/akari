@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -74,6 +75,16 @@ type Client struct {
 	http    *http.Client
 	baseURL string
 	token   string
+
+	// scanCursors caches, per file path, how far we have already scanned for a turn
+	// boundary. Finding a Codex turn boundary means parsing forward looking for the
+	// line that closes the turn; without this, a sync that finds the trailing turn
+	// still open would re-scan the whole accumulated turn every tick. The cursor
+	// advances past the bytes already examined so each sync only scans the newly
+	// appended tail. It is a performance cache only: losing it costs a re-scan, not
+	// correctness, so it lives in memory and resets when the file's prefix diverges.
+	mu          sync.Mutex
+	scanCursors map[string]int64
 }
 
 // New builds a Client. baseURL is the server root (trailing slash optional).
@@ -81,7 +92,26 @@ func New(httpClient *http.Client, baseURL, token string) *Client {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
-	return &Client{http: httpClient, baseURL: strings.TrimRight(baseURL, "/"), token: token}
+	return &Client{
+		http:        httpClient,
+		baseURL:     strings.TrimRight(baseURL, "/"),
+		token:       token,
+		scanCursors: map[string]int64{},
+	}
+}
+
+// scanCursor returns the cached scan position for a path, or 0 if none.
+func (c *Client) scanCursor(path string) int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.scanCursors[path]
+}
+
+// setScanCursor records how far a path has been scanned for a turn boundary.
+func (c *Client) setScanCursor(path string, v int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.scanCursors[path] = v
 }
 
 // maxConflictRetries bounds how many times a single SyncFile re-announces after
@@ -163,17 +193,32 @@ func (c *Client) syncOnce(ctx context.Context, t Target, f *os.File) (Outcome, b
 			}
 			offset = 0
 			action = ActionReset
+			// The prefix diverged, so any cached scan position now points into bytes
+			// that no longer exist or no longer mean the same thing. Drop it.
+			c.setScanCursor(t.Path, 0)
 		}
+	}
+
+	// scanFrom starts where the last sync left off scanning for a turn boundary, but
+	// never before the bytes still unsent: the region [offset, scanFrom) was already
+	// confirmed to hold no boundary, and the file only appends, so it still holds
+	// none. A stale cursor outside [offset, size] is ignored and we re-scan.
+	scanFrom := c.scanCursor(t.Path)
+	if scanFrom < offset || scanFrom > size {
+		scanFrom = offset
 	}
 
 	out := Outcome{StoredBytes: ann.StoredBytes}
 	for offset < size {
-		chunk, err := nextChunk(f, offset, size, t.Agent, settled)
+		chunk, scannedTo, err := nextChunk(f, offset, scanFrom, size, t.Agent, settled)
 		if err != nil {
 			return out, false, err
 		}
 		if len(chunk) == 0 {
-			break // only an incomplete or in-progress trailing message remains; wait
+			// Only an incomplete or in-progress trailing message remains. Remember how
+			// far we scanned so the next tick resumes from there instead of rescanning.
+			c.setScanCursor(t.Path, scannedTo)
+			break
 		}
 		res, err := c.chunk(ctx, ann.SessionID, offset, chunk)
 		if err != nil {
@@ -186,6 +231,11 @@ func (c *Client) syncOnce(ctx context.Context, t Target, f *os.File) (Outcome, b
 		out.StoredBytes = res.storedBytes
 		out.MessageCount = res.messageCount
 		offset = res.storedBytes
+		scanFrom = offset
+	}
+	if offset >= size {
+		// Everything completable has been sent; the cursor catches up to the end.
+		c.setScanCursor(t.Path, size)
 	}
 
 	if out.UploadedBytes == 0 && action != ActionReset {
@@ -195,19 +245,32 @@ func (c *Client) syncOnce(ctx context.Context, t Target, f *os.File) (Outcome, b
 	return out, false, nil
 }
 
-// nextChunk returns the bytes to send next: from offset up to a message boundary
-// within a bounded window, so a chunk never splits a message. For Claude and pi a
-// message is one JSONL line, so the boundary is the last newline. For Codex a
-// message is a folded turn (reasoning, tool calls, and the assistant reply), so
-// the boundary is the last turn end, which keeps a turn from spanning a chunk
-// (and so from spanning a parse region). The window grows up to hardCap to fit a
-// single oversized message, which is then served alone.
+// nextChunk returns the bytes to send next, from offset up to a message boundary,
+// so a chunk never splits a message. For Claude and pi a message is one JSONL
+// line, so the boundary is the last newline. For Codex a message is a folded turn
+// (reasoning, tool calls, and the assistant reply), so the boundary is the last
+// turn end, which keeps a turn from spanning a chunk (and so a parse region).
 //
-// It returns an empty slice when nothing is completable yet: an unfinished
-// trailing line, or, for Codex, a trailing in-progress turn whose closing user
-// line has not arrived and whose file has not settled. settled lets the final
-// turn of an idle session be flushed even without that closing line.
-func nextChunk(f *os.File, offset, size int64, agent string, settled bool) ([]byte, error) {
+// scanFrom is where boundary detection resumes: bytes in [offset, scanFrom) were
+// scanned on an earlier tick and hold no boundary, so only [scanFrom, size) needs
+// examining. nextChunk returns the chunk and scannedTo, how far it got, which the
+// caller caches as the next scanFrom. A nil chunk means nothing is completable
+// yet: an unfinished trailing line, or, for Codex, a trailing in-progress turn
+// whose closing user line has not arrived and whose file has not settled. settled
+// lets the final turn of an idle session be flushed even without that closing line.
+func nextChunk(f *os.File, offset, scanFrom, size int64, agent string, settled bool) (chunk []byte, scannedTo int64, err error) {
+	if agent != agentCodex {
+		c, err := lineChunk(f, offset, size)
+		return c, size, err
+	}
+	return codexChunk(f, offset, scanFrom, size, settled)
+}
+
+// lineChunk returns the bytes from offset through the last complete line within a
+// growing window, or nil when only an unfinished trailing line remains. Each JSONL
+// line is a whole message, so a newline is a safe cut. The window grows up to
+// hardCap to fit a single oversized line, which is then served alone.
+func lineChunk(f *os.File, offset, size int64) ([]byte, error) {
 	window := int64(chunkTarget)
 	for {
 		end := offset + window
@@ -218,15 +281,14 @@ func nextChunk(f *os.File, offset, size int64, agent string, settled bool) ([]by
 		if _, err := f.ReadAt(buf, offset); err != nil && err != io.EOF {
 			return nil, err
 		}
-		atEOF := end >= size
-		if cut := messageBoundary(buf, agent, atEOF, settled); cut > 0 {
-			return buf[:cut], nil
+		if nl := bytes.LastIndexByte(buf, '\n'); nl >= 0 {
+			return buf[:nl+1], nil
 		}
-		if atEOF {
-			return nil, nil // nothing completable yet; wait for more bytes or a settle
+		if end >= size {
+			return nil, nil // unfinished trailing line; wait for more bytes
 		}
 		if window >= hardCap {
-			return nil, fmt.Errorf("session %s message exceeds %d bytes without a boundary", agent, hardCap)
+			return nil, fmt.Errorf("session line exceeds %d bytes without a newline", hardCap)
 		}
 		window *= 2
 		if window > hardCap {
@@ -235,30 +297,76 @@ func nextChunk(f *os.File, offset, size int64, agent string, settled bool) ([]by
 	}
 }
 
-// messageBoundary returns the offset within buf up to which whole messages can be
-// uploaded, or 0 when none can be yet (signalling the caller to grow the window
-// or wait). atEOF reports that buf reaches the file's end; settled reports the
-// file has gone idle.
-func messageBoundary(buf []byte, agent string, atEOF, settled bool) int {
-	nl := bytes.LastIndexByte(buf, '\n')
-	if nl < 0 {
-		return 0 // no complete line yet
+// codexChunk finds the next whole Codex turn(s) to upload. It scans for a turn
+// boundary only in [scanFrom, size), the bytes not yet examined, so a sync that
+// finds the trailing turn still open does work proportional to the newly appended
+// bytes, not to the whole accumulated turn. When a boundary is found it returns
+// the bytes from offset through it (batching any whole turns that fit). With no
+// boundary, the trailing in-progress turn is withheld until the file settles, and
+// scannedTo reports how far the scan reached so the next tick can resume there.
+func codexChunk(f *os.File, offset, scanFrom, size int64, settled bool) ([]byte, int64, error) {
+	if scanFrom < offset {
+		scanFrom = offset
 	}
-	complete := nl + 1
-	if agent != string(agentCodex) {
-		return complete // each line is a whole message
+	window := int64(chunkTarget)
+	for {
+		end := scanFrom + window
+		if end > size {
+			end = size
+		}
+		buf := make([]byte, end-scanFrom)
+		if _, err := f.ReadAt(buf, scanFrom); err != nil && err != io.EOF {
+			return nil, scanFrom, err
+		}
+		atEOF := end >= size
+		nl := bytes.LastIndexByte(buf, '\n')
+		if nl < 0 {
+			// No complete line in the newly scanned bytes yet.
+			if atEOF {
+				return nil, scanFrom, nil
+			}
+			if window >= hardCap {
+				return nil, scanFrom, fmt.Errorf("session codex line exceeds %d bytes without a newline", hardCap)
+			}
+			window *= 2
+			if window > hardCap {
+				window = hardCap
+			}
+			continue
+		}
+		completeEnd := scanFrom + int64(nl) + 1
+		if rel := lastCodexTurnEnd(buf[:nl+1]); rel > 0 {
+			boundary := scanFrom + int64(rel)
+			upload, err := readRange(f, offset, boundary)
+			return upload, boundary, err
+		}
+		// Complete lines, but no turn closed in them: the tail is one in-progress
+		// turn. Flush it only once the file has settled (its closing user line will
+		// never come); otherwise withhold it and resume scanning past these lines.
+		if atEOF {
+			if settled {
+				upload, err := readRange(f, offset, completeEnd)
+				return upload, completeEnd, err
+			}
+			return nil, completeEnd, nil
+		}
+		if window >= hardCap {
+			return nil, scanFrom, fmt.Errorf("session codex turn exceeds %d bytes without a boundary", hardCap)
+		}
+		window *= 2
+		if window > hardCap {
+			window = hardCap
+		}
 	}
-	// Codex: cut after the last turn boundary so a folded turn stays whole.
-	if tb := lastCodexTurnEnd(buf[:complete]); tb > 0 {
-		return tb
+}
+
+// readRange reads [from, to) from f into a fresh buffer.
+func readRange(f *os.File, from, to int64) ([]byte, error) {
+	b := make([]byte, to-from)
+	if _, err := f.ReadAt(b, from); err != nil && err != io.EOF {
+		return nil, err
 	}
-	// No closed turn in the buffer: the tail is one in-progress turn. Flush it only
-	// once the file has settled (its closing user line will never come); otherwise
-	// wait for the turn to close or for more bytes.
-	if atEOF && settled {
-		return complete
-	}
-	return 0
+	return b, nil
 }
 
 // agentCodex is the agent string whose sessions fold a turn across lines. Kept
