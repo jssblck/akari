@@ -197,7 +197,38 @@ search, account/token/invite management, and live session updates over SSE.
   scope is the read credential and M5 ships no JSON read API, so HTML is the only
   read surface; ingest-only tokens remain blocked. Comments updated to say it.
 
-## Milestone 6: public publishing (not started)
+## Milestone 6: public publishing (DONE)
+
+Goal: per-session public publishing. An owner-only publish/unpublish control, an
+unguessable capability id minted on publish, and a logged-out session view at
+`/s/{public_id}` that never exposes the numeric id or any internal data.
+
+- [x] internal/server/auth: NewPublicID (144-bit URL-safe capability id, stored
+      in the clear because the link itself is the grant)
+- [x] internal/server/store/visibility.go: PublishSession (owner-scoped, mints id
+      via COALESCE so re-publish keeps a stable link), UnpublishSession (clears
+      visibility and public_id so the old link 404s)
+- [x] internal/server/store/read.go: SessionDetail carries OwnerID; public lookup
+      stays filtered to visibility='public'
+- [x] internal/server/httpapi/web.go: publish/unpublish handlers (requireFull,
+      owner check folded into SQL), handlePublicSession (no auth, filters
+      subagents to public-only, never renders the numeric id)
+- [x] internal/server/web: owner publish/unpublish control with the shareable
+      link on the session page; publicLayout, PublicSessionPage, PublicErrorPage
+- [x] Tests: store publish/unpublish (owner scoping, id stability, link
+      invalidation), HTTP public flow (anon 303 on numeric id, 200 on public link
+      with content, 404 after unpublish, no numeric-id leak in the body)
+- [x] e2e: real browser publish -> public badge + shareable link -> logged-out
+      public view (brand + Log in chrome only); cookie-less fetch returns 200,
+      numeric id redirects to login, unknown/unpublished id 404s
+- [x] codex review (gpt-5.5 high) twice; finding fixed and re-verified
+
+### Milestone 6 codex findings (all fixed)
+
+- MEDIUM: the public page exposed the numeric session id in the page title and
+  H1 ("session #<id>"), violating the requirement that the public path never
+  reveal it. PublicSessionPage now titles by project and renders "/ session" with
+  no number; the HTTP test asserts neither "/sessions/{id}" nor "#{id}" appears.
 
 ## Milestone 7: CAS (not started)
 

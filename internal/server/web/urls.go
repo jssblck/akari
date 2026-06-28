@@ -17,6 +17,10 @@ func PublicHref(publicID string) templ.SafeURL {
 // not URL-sanitized like href).
 func ProjectPath(id int64) string { return fmt.Sprintf("/projects/%d", id) }
 
+// PublicPath is the plain-string public URL, shown to the owner as the shareable
+// link to copy.
+func PublicPath(publicID string) string { return "/s/" + publicID }
+
 // SSEPath and BodyPath are the live-update endpoints for a session, carried on
 // data attributes for the static app.js to wire up.
 func SSEPath(id int64) string  { return fmt.Sprintf("/sessions/%d/events", id) }

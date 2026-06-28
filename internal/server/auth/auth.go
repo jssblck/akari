@@ -85,6 +85,17 @@ func NewToken() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
+// NewPublicID returns an unguessable, URL-safe id for a published session (144
+// bits of entropy). Unlike a token it is stored in the clear: it is a capability
+// URL, so possession of the link is what grants logged-out read access.
+func NewPublicID() (string, error) {
+	b := make([]byte, 18)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
 // HashToken returns the hex sha256 of a presented secret. Only hashes are
 // stored, so a database read never exposes a usable token.
 func HashToken(token string) string {

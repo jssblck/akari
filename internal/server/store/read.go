@@ -50,11 +50,12 @@ type SessionSummary struct {
 // SessionDetail adds the owning project to a session summary.
 type SessionDetail struct {
 	SessionSummary
-	ProjectID    int64
-	ProjectKey   string
-	ProjectName  string
-	Cwd          string
-	ParentID     *int64
+	OwnerID       int64
+	ProjectID     int64
+	ProjectKey    string
+	ProjectName   string
+	Cwd           string
+	ParentID      *int64
 	ParserVersion int
 }
 
@@ -231,7 +232,7 @@ func (s *Store) scanDetail(ctx context.Context, where string, arg any) (SessionD
 		        s.total_cache_write_tokens, s.total_cache_read_tokens,
 		        s.total_cost_usd, s.cost_incomplete, s.visibility, s.public_id,
 		        s.started_at, s.ended_at, s.updated_at,
-		        s.project_id, p.remote_key, p.display_name, s.cwd, s.parent_session_id, s.parser_version
+		        s.user_id, s.project_id, p.remote_key, p.display_name, s.cwd, s.parent_session_id, s.parser_version
 		   FROM sessions s
 		   JOIN users u ON u.id = s.user_id
 		   JOIN projects p ON p.id = s.project_id
@@ -242,7 +243,7 @@ func (s *Store) scanDetail(ctx context.Context, where string, arg any) (SessionD
 		&d.TotalInput, &d.TotalOutput, &d.TotalCacheWrite, &d.TotalCacheRead,
 		&d.TotalCostUSD, &d.CostIncomplete, &d.Visibility, &d.PublicID,
 		&d.StartedAt, &d.EndedAt, &d.UpdatedAt,
-		&d.ProjectID, &d.ProjectKey, &d.ProjectName, &d.Cwd, &d.ParentID, &d.ParserVersion)
+		&d.OwnerID, &d.ProjectID, &d.ProjectKey, &d.ProjectName, &d.Cwd, &d.ParentID, &d.ParserVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return SessionDetail{}, ErrNotFound
 	}

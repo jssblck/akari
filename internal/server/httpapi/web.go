@@ -152,7 +152,82 @@ func (s *Server) handleSessionPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	title := fmt.Sprintf("Session #%d", d.ID)
-	render(w, r, http.StatusOK, web.SessionPage(s.pageFor(r, title), d, msgs, tools, subs, true))
+	p, _ := principalFrom(r.Context())
+	owner := p.UserID == d.OwnerID
+	render(w, r, http.StatusOK, web.SessionPage(s.pageFor(r, title), d, msgs, tools, subs, true, owner))
+}
+
+// handlePublishSession marks the owner's session public and redirects back to it.
+func (s *Server) handlePublishSession(w http.ResponseWriter, r *http.Request) {
+	p, _ := principalFrom(r.Context())
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	candidate, err := auth.NewPublicID()
+	if err != nil {
+		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not publish session."))
+		return
+	}
+	if _, err := s.Store.PublishSession(r.Context(), id, p.UserID, candidate); err != nil {
+		// A session the caller does not own (or one that does not exist) is a 404,
+		// not a hint that it belongs to someone else.
+		render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(r, "Not found"), http.StatusNotFound, "Session not found."))
+		return
+	}
+	http.Redirect(w, r, fmt.Sprintf("/sessions/%d", id), http.StatusSeeOther)
+}
+
+// handleUnpublishSession returns the owner's session to internal visibility.
+func (s *Server) handleUnpublishSession(w http.ResponseWriter, r *http.Request) {
+	p, _ := principalFrom(r.Context())
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if err := s.Store.UnpublishSession(r.Context(), id, p.UserID); err != nil {
+		render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(r, "Not found"), http.StatusNotFound, "Session not found."))
+		return
+	}
+	http.Redirect(w, r, fmt.Sprintf("/sessions/%d", id), http.StatusSeeOther)
+}
+
+// handlePublicSession serves a published session to logged-out viewers, reached
+// only through the unguessable public id. It never exposes the numeric id and
+// shows only subagents that are themselves public.
+func (s *Server) handlePublicSession(w http.ResponseWriter, r *http.Request) {
+	pid := r.PathValue("public_id")
+	d, err := s.Store.SessionDetailByPublicID(r.Context(), pid)
+	if err != nil {
+		render(w, r, http.StatusNotFound, web.PublicErrorPage(http.StatusNotFound, "This session is not published, or the link has expired."))
+		return
+	}
+	msgs, err := s.Store.Messages(r.Context(), d.ID)
+	if err != nil {
+		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load session."))
+		return
+	}
+	tools, err := s.Store.ToolCalls(r.Context(), d.ID)
+	if err != nil {
+		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load session."))
+		return
+	}
+	subs, err := s.Store.Subagents(r.Context(), d.ID)
+	if err != nil {
+		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load session."))
+		return
+	}
+	// Only public subagents may appear on a public page; a public parent does not
+	// make its children public.
+	var publicSubs []store.SessionSummary
+	for _, sub := range subs {
+		if sub.Visibility == "public" && sub.PublicID != nil {
+			publicSubs = append(publicSubs, sub)
+		}
+	}
+	render(w, r, http.StatusOK, web.PublicSessionPage(d, msgs, web.ToolsByOrdinal(tools), publicSubs))
 }
 
 // handleSessionBody serves just the live-updating body fragment, re-fetched by
