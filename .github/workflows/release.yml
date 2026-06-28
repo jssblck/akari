@@ -1,0 +1,281 @@
+name: Release
+
+# Build and publish akari releases to GitHub Releases.
+#
+# On a version tag (v*) this cross-compiles every target (the akari-server for
+# Linux, the akari client for Linux, macOS, and Windows), packages each into an
+# archive, computes a SHA256SUMS over them, then creates a DRAFT GitHub Release
+# whose notes are generated from the pull requests merged since the previous tag
+# (--generate-notes, the "releases as changelog" pattern). The draft is reviewed
+# and published by hand.
+#
+# On every pull request and every push to main this runs as a DRY RUN: it
+# executes the exact same build and packaging matrix and computes SHA256SUMS but
+# stops short of creating a GitHub Release. That makes the release pipeline a
+# PR-time gate, so a change that breaks the release build fails on the PR instead
+# of when a tag is cut. The only difference between a dry run and a real release
+# is whether the ref is a version tag. workflow_dispatch triggers a manual dry
+# run on any ref.
+#
+# Go style: every target cross-compiles from a single Linux runner with
+# CGO_ENABLED=0 (akari is pure Go), so there is no per-OS build matrix of
+# runners. The reported --version is stamped into the binary with -ldflags -X,
+# the Go equivalent of a build-time version constant.
+
+on:
+  push:
+    # No paths filter: a tag push must always run (path filtering on tags is
+    # unreliable, and a release must never be silently skipped), and main pushes
+    # are cheap enough to always run.
+    tags:
+      - "v*"
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # Coalesce per ref. cancel-in-progress is safe: a superseded dry run has
+  # nothing worth finishing, and tag refs are unique per release.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+      dry_run: ${{ steps.version.outputs.dry_run }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history so git describe can find the previous tag on dry runs.
+          fetch-depth: 0
+
+      - name: Extract version from tag
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            # A version tag is the one and only path that publishes a release.
+            TAG="${{ github.ref_name }}"
+            # Strip the leading v for the version stamped into filenames: v0.1.0
+            # becomes 0.1.0. The binary still reports the full tag (with the v).
+            VERSION="${TAG#v}"
+            DRY_RUN=false
+          else
+            # Pull requests, main pushes, and manual dispatch all build and
+            # package the full release but never publish it. git describe gives a
+            # sensible version stamp without a tag.
+            TAG="$(git describe --always --tags --dirty)"
+            VERSION="${TAG#v}"
+            DRY_RUN=true
+            echo "::notice::Dry run (${{ github.event_name }} on ${{ github.ref }}); using git describe version: $TAG"
+          fi
+
+          # Anything that is not a bare X.Y.Z (a pre-release suffix, or a
+          # non-semver describe string) is treated as a prerelease.
+          if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            PRERELEASE=false
+          else
+            PRERELEASE=true
+          fi
+
+          {
+            echo "tag=${TAG}"
+            echo "version=${VERSION}"
+            echo "prerelease=${PRERELEASE}"
+            echo "dry_run=${DRY_RUN}"
+          } >> "$GITHUB_OUTPUT"
+          if [[ "$DRY_RUN" == "true" ]]; then
+            echo "Dry run for ${TAG} (version ${VERSION}, prerelease ${PRERELEASE}); no release will be created."
+          else
+            echo "Releasing ${TAG} (version ${VERSION}, prerelease ${PRERELEASE})"
+          fi
+
+  build:
+    name: Build ${{ matrix.bin }} ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      # One target's failure should not cancel the others: a release wants every
+      # asset, and seeing all the failures at once is more useful on a dry run.
+      fail-fast: false
+      matrix:
+        include:
+          # Server: Linux only (it is deployed as a container or a Linux host
+          # daemon), amd64 and arm64 for the common cloud architectures.
+          - { bin: akari-server, cmd: ./cmd/akari-server, goos: linux, goarch: amd64 }
+          - { bin: akari-server, cmd: ./cmd/akari-server, goos: linux, goarch: arm64 }
+          # Client: Linux, macOS, and Windows, each amd64 and arm64 (Apple
+          # Silicon and arm64 Windows included).
+          - { bin: akari, cmd: ./cmd/akari, goos: linux, goarch: amd64 }
+          - { bin: akari, cmd: ./cmd/akari, goos: linux, goarch: arm64 }
+          - { bin: akari, cmd: ./cmd/akari, goos: darwin, goarch: amd64 }
+          - { bin: akari, cmd: ./cmd/akari, goos: darwin, goarch: arm64 }
+          - { bin: akari, cmd: ./cmd/akari, goos: windows, goarch: amd64 }
+          - { bin: akari, cmd: ./cmd/akari, goos: windows, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build and package
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          # Pure-Go build: cross-compiles to every target without a C toolchain
+          # and produces a static binary (the same flags the Dockerfile uses).
+          CGO_ENABLED: "0"
+          BIN: ${{ matrix.bin }}
+          CMD: ${{ matrix.cmd }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          ext=""
+          if [[ "$GOOS" == "windows" ]]; then ext=".exe"; fi
+
+          mkdir -p build dist
+          out="build/${BIN}${ext}"
+
+          # -trimpath strips local path prefixes for reproducible builds; -s -w
+          # drops the symbol and DWARF tables for a smaller binary; the -X
+          # override stamps the release tag so `akari version` reports it exactly,
+          # independent of clone depth.
+          go build \
+            -trimpath \
+            -ldflags "-s -w -X github.com/jssblck/akari/internal/version.Version=${TAG}" \
+            -o "$out" \
+            "$CMD"
+
+          # Package: tar.gz for Unix, zip for Windows, named like a goreleaser
+          # build (<bin>_<version>_<os>_<arch>). README rides along for context.
+          stem="${BIN}_${VERSION}_${GOOS}_${GOARCH}"
+          cp README.md build/README.md
+          if [[ "$GOOS" == "windows" ]]; then
+            (cd build && zip -q "../dist/${stem}.zip" "${BIN}${ext}" README.md)
+          else
+            tar -czf "dist/${stem}.tar.gz" -C build "${BIN}${ext}" README.md
+          fi
+
+          echo "Packaged:"
+          ls -l dist
+
+      - name: Upload archive artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: akari-archive-${{ matrix.bin }}-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Release
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download all archives
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+          pattern: akari-archive-*
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          # sha256 plus filename for every published archive, for manual
+          # verification. Sorted for a stable, reviewable file.
+          sha256sum $(ls | sort) > SHA256SUMS
+          echo "Staged assets:"
+          ls -l
+          echo
+          echo "SHA256SUMS:"
+          cat SHA256SUMS
+
+      - name: Create draft GitHub release
+        if: ${{ needs.prepare.outputs.dry_run == 'false' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ needs.prepare.outputs.tag }}"
+          # Stable releases (bare X.Y.Z) are marked latest; everything else is a
+          # prerelease.
+          if [[ "${{ needs.prepare.outputs.prerelease }}" == "true" ]]; then
+            channel=(--prerelease)
+          else
+            channel=(--latest)
+          fi
+
+          gh release create "$tag" \
+            --draft \
+            --generate-notes \
+            "${channel[@]}" \
+            --title "$tag" \
+            dist/*
+
+      - name: Write release summary
+        if: ${{ needs.prepare.outputs.dry_run == 'false' }}
+        shell: bash
+        run: |
+          tag="${{ needs.prepare.outputs.tag }}"
+          {
+            echo "## Draft release created: $tag"
+            echo
+            echo "A draft release was created with auto-generated notes (the merged PRs since the previous tag)."
+            echo
+            echo "### Next steps"
+            echo
+            echo "1. Review the draft release at https://github.com/${{ github.repository }}/releases"
+            echo "2. Edit the generated notes if needed"
+            echo "3. Publish when ready"
+            echo
+            echo "### SHA256SUMS"
+            echo
+            echo '```'
+            cat dist/SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Write dry run summary
+        if: ${{ needs.prepare.outputs.dry_run == 'true' }}
+        shell: bash
+        run: |
+          tag="${{ needs.prepare.outputs.tag }}"
+          {
+            echo "## Dry run: $tag"
+            echo
+            echo "No release was created. This was a dry run."
+            echo
+            echo "### Staged assets"
+            echo
+            echo '```'
+            (cd dist && ls)
+            echo '```'
+            echo
+            echo "### SHA256SUMS"
+            echo
+            echo '```'
+            cat dist/SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -14,10 +15,18 @@ import (
 	"github.com/jssblck/akari/internal/config"
 	"github.com/jssblck/akari/internal/server/httpapi"
 	"github.com/jssblck/akari/internal/server/store"
+	"github.com/jssblck/akari/internal/version"
 	"github.com/jssblck/akari/migrations"
 )
 
 func main() {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "version", "--version", "-v":
+			fmt.Println(version.String())
+			return
+		}
+	}
 	if len(os.Args) > 1 && os.Args[1] == "reparse" {
 		if err := runReparse(os.Args[2:]); err != nil {
 			log.Fatalf("akari-server reparse: %v", err)
@@ -36,6 +45,8 @@ func main() {
 }
 
 func run() error {
+	log.Printf("akari-server %s starting", version.String())
+
 	cfg, err := config.LoadServer()
 	if err != nil {
 		return err

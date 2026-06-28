@@ -62,6 +62,7 @@ akari-server            # run the HTTP server (default)
 akari-server reparse    # rebuild every projection from stored raw bytes
 akari-server reparse --agent claude   # limit a reparse to one agent
 akari-server sweep      # reclaim orphaned CAS blobs now
+akari-server version    # print the build version and exit
 ```
 
 `reparse` is how a parser change reaches already-ingested data; it sweeps
@@ -89,6 +90,7 @@ akari watch                # stay running, upload sessions as they change
 akari daemon start         # run watch in the background (per-OS)
 akari daemon status
 akari daemon stop
+akari version              # print the build version and exit
 ```
 
 The client discovers Claude, Codex, and pi sessions in their standard locations.
@@ -168,3 +170,13 @@ Tests that need the database skip cleanly when `AKARI_TEST_DATABASE_URL` is unse
 
 See `docs/DESIGN.md` for the full engineering design and rationale, and
 `DESIGN.md` for the visual design system.
+
+## Releases
+
+Releases are cut by pushing a `vX.Y.Z` tag. CI cross-compiles the server (Linux)
+and the client (Linux, macOS, Windows), packages each target into an archive with
+a `SHA256SUMS`, and opens a draft GitHub Release with notes generated from the
+merged pull requests. The same build runs as a dry run on every pull request and
+`main` push, so a break in the release pipeline surfaces on the PR. The binaries
+report the tag through `akari version` / `akari-server version`. See
+[docs/releases.md](docs/releases.md) for the full process and asset list.
