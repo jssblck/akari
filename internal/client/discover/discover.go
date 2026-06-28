@@ -59,10 +59,10 @@ func Roots(cfg config.Client, env func(string) string, home string) []Root {
 	return roots
 }
 
-// matches reports whether a filename is a session file for the given agent.
+// Matches reports whether a filename is a session file for the given agent.
 // Codex files are named rollout-*.jsonl; Claude and pi use any *.jsonl (pi files
 // are further validated by their session header at resolve time).
-func matches(agent, name string) bool {
+func Matches(agent, name string) bool {
 	if !strings.HasSuffix(name, ".jsonl") {
 		return false
 	}
@@ -89,7 +89,7 @@ func Discover(roots []Root) ([]File, error) {
 			if err != nil {
 				return nil // skip unreadable entries rather than aborting the walk
 			}
-			if d.IsDir() || !matches(root.Agent, d.Name()) {
+			if d.IsDir() || !Matches(root.Agent, d.Name()) {
 				return nil
 			}
 			if seen[path] {
