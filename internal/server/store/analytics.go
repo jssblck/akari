@@ -202,7 +202,7 @@ func (s *Store) ProjectSparklines(ctx context.Context, days int) (map[int64][]fl
 
 	// Day 0 is the oldest bucket; align to UTC midnight so date_trunc days map
 	// cleanly onto array offsets.
-	start := time.Now().UTC().Truncate(24 * time.Hour).AddDate(0, 0, -(days - 1))
+	start := time.Now().UTC().Truncate(24*time.Hour).AddDate(0, 0, -(days - 1))
 	out := map[int64][]float64{}
 	for rows.Next() {
 		var pid int64
