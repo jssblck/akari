@@ -56,10 +56,7 @@ func (r *reducer) reduceCodex(region []byte, base int64) error {
 
 			case p.Get("type").String() == "reasoning":
 				r.ensureAssistant(ts)
-				if t := blockText(p.Get("content")); t != "" {
-					r.open.AppendThinking = joinNonEmpty(r.open.AppendThinking, t)
-					r.open.HasThinking = true
-				}
+				r.addOpenThinking(blockText(p.Get("content")))
 
 			case p.Get("role").String() == "user":
 				r.closeTurn() // a user turn ends the current assistant turn
@@ -67,9 +64,7 @@ func (r *reducer) reduceCodex(region []byte, base int64) error {
 
 			case p.Get("role").String() == "assistant":
 				r.ensureAssistant(ts)
-				if c := blockText(p.Get("content")); c != "" {
-					r.open.AppendContent = joinNonEmpty(r.open.AppendContent, c)
-				}
+				r.addOpenContent(blockText(p.Get("content")))
 				if r.st.Model != "" {
 					r.open.Model = r.st.Model
 				}

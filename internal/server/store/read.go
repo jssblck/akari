@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -274,7 +275,10 @@ func (s *Store) MessageCount(ctx context.Context, sessionID int64) (int, error) 
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, ErrNotFound
 	}
-	return n, err
+	if err != nil {
+		return 0, fmt.Errorf("read message count for session %d: %w", sessionID, err)
+	}
+	return n, nil
 }
 
 // Messages returns a session's transcript in order.

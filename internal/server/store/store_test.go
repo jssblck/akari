@@ -275,6 +275,93 @@ func TestAdvanceProjectionCursorAndVersionGate(t *testing.T) {
 	}
 }
 
+// TestAdvanceProjectionBatching forces a backlog larger than one parse batch and
+// confirms catch-up advances in bounded steps, parsing each chunk's bytes exactly
+// once and contiguously (the readRawRegion SQL bound, not a client-side rescan of
+// the whole tail).
+func TestAdvanceProjectionBatching(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	old := parseBatchBytes
+	parseBatchBytes = 2 // smaller than the gap between chunk starts, so each batches alone
+	defer func() { parseBatchBytes = old }()
+
+	u, err := st.Register(ctx, "grace", "hash", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ann, err := st.Announce(ctx, AnnounceParams{
+		UserID: u.ID, Agent: "claude", SourceSessionID: "sess-batch", ProjectID: projectID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Three chunks, each a short line, appended before any parse runs: the parse
+	// cursor must catch up across several bounded batches.
+	chunks := []string{"a\n", "bb\n", "ccc\n"}
+	var offset int64
+	for _, c := range chunks {
+		stored, err := st.AppendChunk(ctx, ann.SessionID, offset, []byte(c))
+		if err != nil {
+			t.Fatalf("append %q: %v", c, err)
+		}
+		offset = stored
+	}
+
+	var bases []int64
+	reduce := func(state, region []byte, base int64) ([]byte, ProjectionDelta, error) {
+		bases = append(bases, base)
+		return []byte("{}"), ProjectionDelta{
+			MessagesAdded: 1,
+			Messages:      []MessageDelta{{Ordinal: int(base), Role: "assistant", AppendContent: string(region)}},
+		}, nil
+	}
+
+	iterations := 0
+	for {
+		_, caughtUp, err := st.AdvanceProjection(ctx, ann.SessionID, 1, reduce)
+		if err != nil {
+			t.Fatalf("advance: %v", err)
+		}
+		iterations++
+		if caughtUp {
+			break
+		}
+		if iterations > 10 {
+			t.Fatal("catch-up did not converge")
+		}
+	}
+
+	// One batch per chunk, each starting exactly where the previous ended.
+	if len(bases) != 3 {
+		t.Fatalf("parsed in %d batches, want 3 (one per chunk): bases=%v", len(bases), bases)
+	}
+	want := []int64{0, 2, 5}
+	for i, b := range bases {
+		if b != want[i] {
+			t.Fatalf("batch %d started at %d, want %d (bases=%v)", i, b, want[i], bases)
+		}
+	}
+
+	var mc int
+	var parsed, byteLen int64
+	if err := st.Pool.QueryRow(ctx, "SELECT message_count FROM sessions WHERE id=$1", ann.SessionID).Scan(&mc); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool.QueryRow(ctx, "SELECT parsed_byte_len, byte_len FROM session_raw WHERE session_id=$1", ann.SessionID).Scan(&parsed, &byteLen); err != nil {
+		t.Fatal(err)
+	}
+	if mc != 3 || parsed != byteLen {
+		t.Fatalf("after catch-up: message_count=%d parsed=%d byte_len=%d", mc, parsed, byteLen)
+	}
+}
+
 // TestUpsertProjectKindTransition confirms a standalone folder that is later
 // deleted transitions to orphaned in place: same key, same row, updated kind.
 func TestUpsertProjectKindTransition(t *testing.T) {

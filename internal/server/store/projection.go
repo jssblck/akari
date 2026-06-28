@@ -12,8 +12,9 @@ import (
 // parseBatchBytes bounds how much raw content one AdvanceProjection call parses
 // under the session_raw lock, so catching up a large backlog (after a parser
 // upgrade and reparse, or a run of failed parses) does not hold the lock for the
-// whole session at once. At least one whole chunk is always processed.
-const parseBatchBytes = 16 << 20
+// whole session at once. At least one whole chunk is always processed. It is a
+// var so tests can shrink it to force multi-batch catch-up.
+var parseBatchBytes int64 = 16 << 20
 
 // ErrParserVersionStale reports that a session was partially parsed by a
 // different parser version than the caller's, so incremental parsing cannot
@@ -179,7 +180,7 @@ func (s *Store) AdvanceProjection(ctx context.Context, sessionID int64, parserVe
 
 		newState, d, err := reduce(stateJSON, region, parsedLen)
 		if err != nil {
-			return err
+			return fmt.Errorf("parse session %d region [%d,%d): %w", sessionID, parsedLen, regionEnd, err)
 		}
 		if err := applyDelta(ctx, tx, sessionID, d); err != nil {
 			return err
@@ -190,7 +191,7 @@ func (s *Store) AdvanceProjection(ctx context.Context, sessionID int64, parserVe
 			    SET parsed_byte_len = $2, parse_state = $3, parse_state_version = $4, parse_error = ''
 			  WHERE session_id = $1`,
 			sessionID, regionEnd, newState, parserVersion); err != nil {
-			return err
+			return fmt.Errorf("advance parse cursor for session %d to %d: %w", sessionID, regionEnd, err)
 		}
 		if err := applyAggregates(ctx, tx, sessionID, parserVersion, d); err != nil {
 			return err
@@ -214,18 +215,21 @@ func (s *Store) ApplyProjectionDelta(ctx context.Context, sessionID int64, d Pro
 	})
 }
 
-// readRawRegion concatenates the raw chunks at or past `from`, stopping once at
-// least `cap` bytes are gathered (always taking at least one chunk). It returns
-// the bytes and the offset just past them. Chunks are contiguous and line
-// aligned, so the returned region always ends on a JSONL line boundary.
-func readRawRegion(ctx context.Context, tx pgx.Tx, sessionID, from int64, cap int) ([]byte, int64, error) {
+// readRawRegion concatenates the raw chunks for one parse batch: the chunks whose
+// start falls in [from, from+cap). The bound is in SQL, so a backlog catch-up of
+// many AdvanceProjection calls fetches only each batch's chunks rather than
+// rescanning the whole tail every time. Chunks are contiguous and line aligned,
+// so the returned region always ends on a JSONL line boundary, and the chunk at
+// `from` always qualifies (so a batch is never empty when bytes remain). It
+// returns the bytes and the offset just past them.
+func readRawRegion(ctx context.Context, tx pgx.Tx, sessionID, from int64, cap int64) ([]byte, int64, error) {
 	rows, err := tx.Query(ctx,
 		`SELECT byte_offset, byte_len, content
 		   FROM session_raw_chunks
-		  WHERE session_id = $1 AND byte_offset >= $2
-		  ORDER BY byte_offset`, sessionID, from)
+		  WHERE session_id = $1 AND byte_offset >= $2 AND byte_offset < $2 + $3
+		  ORDER BY byte_offset`, sessionID, from, cap)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, fmt.Errorf("read raw chunks for session %d from offset %d: %w", sessionID, from, err)
 	}
 	defer rows.Close()
 
@@ -235,19 +239,16 @@ func readRawRegion(ctx context.Context, tx pgx.Tx, sessionID, from int64, cap in
 		var off, length int64
 		var content []byte
 		if err := rows.Scan(&off, &length, &content); err != nil {
-			return nil, 0, err
+			return nil, 0, fmt.Errorf("scan raw chunk for session %d: %w", sessionID, err)
 		}
 		if off != end {
 			return nil, 0, fmt.Errorf("raw chunk gap for session %d: expected offset %d, got %d", sessionID, end, off)
 		}
 		region = append(region, content...)
 		end = off + length
-		if len(region) >= cap {
-			break
-		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, 0, err
+		return nil, 0, fmt.Errorf("iterate raw chunks for session %d: %w", sessionID, err)
 	}
 	return region, end, nil
 }
@@ -274,7 +275,7 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 			   is_open = EXCLUDED.is_open`,
 			sessionID, m.Ordinal, m.Role, m.AppendContent, m.AppendThinking, m.Model,
 			nullTime(m.Timestamp), m.HasThinking, m.HasToolUse, m.Open); err != nil {
-			return err
+			return fmt.Errorf("write message %d for session %d: %w", m.Ordinal, sessionID, err)
 		}
 	}
 
@@ -283,7 +284,7 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 		if len(t.InputBody) > 0 {
 			sha, err := writeBlobTx(ctx, tx, t.InputBody, t.InputMediaType)
 			if err != nil {
-				return err
+				return fmt.Errorf("write tool input blob for session %d call %d/%d: %w", sessionID, t.MessageOrdinal, t.CallIndex, err)
 			}
 			inputSHA, inputMedia = sha, t.InputMediaType
 		}
@@ -295,7 +296,7 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 			 ON CONFLICT (session_id, message_ordinal, call_index) DO NOTHING`,
 			sessionID, t.MessageOrdinal, t.CallIndex, t.ToolName, t.Category, nullString(t.FilePath),
 			inputSHA, t.InputBytes, inputMedia, nullString(t.CallUID), t.SourceOffset); err != nil {
-			return err
+			return fmt.Errorf("insert tool call %d/%d for session %d: %w", t.MessageOrdinal, t.CallIndex, sessionID, err)
 		}
 	}
 
@@ -307,7 +308,7 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 		if len(tr.Body) > 0 {
 			sha, err := writeBlobTx(ctx, tx, tr.Body, tr.MediaType)
 			if err != nil {
-				return err
+				return fmt.Errorf("write tool result blob for session %d call %q: %w", sessionID, tr.CallUID, err)
 			}
 			resultSHA = sha
 		}
@@ -320,7 +321,7 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 			    SET result_sha256 = $3, result_bytes = $4, result_media_type = $5, result_status = $6
 			  WHERE session_id = $1 AND call_uid = $2`,
 			sessionID, tr.CallUID, resultSHA, tr.Bytes, media, tr.Status); err != nil {
-			return err
+			return fmt.Errorf("back-patch tool result for session %d call %q: %w", sessionID, tr.CallUID, err)
 		}
 	}
 
@@ -341,7 +342,7 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 			 ON CONFLICT DO NOTHING`,
 			sessionID, ord, u.Model, u.Input, u.Output, u.CacheWrite, u.CacheRead,
 			u.Reasoning, cost, nullTime(u.OccurredAt), u.DedupKey, u.SourceOffset, u.SourceIndex); err != nil {
-			return err
+			return fmt.Errorf("insert usage event for session %d at offset %d: %w", sessionID, u.SourceOffset, err)
 		}
 	}
 	return nil
@@ -371,7 +372,10 @@ func applyAggregates(ctx context.Context, tx pgx.Tx, sessionID int64, parserVers
 		d.AddInput, d.AddOutput, d.AddCacheWrite, d.AddCacheRead,
 		d.AddCostUSD, d.CostIncomplete,
 		nullTime(d.Started), nullTime(d.Ended), parserVersion)
-	return err
+	if err != nil {
+		return fmt.Errorf("update aggregates for session %d: %w", sessionID, err)
+	}
+	return nil
 }
 
 // ResetProjectionForReparse clears a session's parser-owned projection rows and
@@ -387,7 +391,7 @@ func (s *Store) ResetProjectionForReparse(ctx context.Context, sessionID int64, 
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrNotFound
 			}
-			return err
+			return fmt.Errorf("lock session_raw for reparse of session %d: %w", sessionID, err)
 		}
 		for _, q := range []string{
 			"DELETE FROM messages WHERE session_id = $1",
@@ -395,7 +399,7 @@ func (s *Store) ResetProjectionForReparse(ctx context.Context, sessionID int64, 
 			"DELETE FROM usage_events WHERE session_id = $1",
 		} {
 			if _, err := tx.Exec(ctx, q, sessionID); err != nil {
-				return err
+				return fmt.Errorf("clear projection for reparse of session %d (%s): %w", sessionID, q, err)
 			}
 		}
 		if _, err := tx.Exec(ctx,
@@ -403,7 +407,7 @@ func (s *Store) ResetProjectionForReparse(ctx context.Context, sessionID int64, 
 			    SET parsed_byte_len = 0, parse_state = '{}'::jsonb,
 			        parse_state_version = $2, parse_error = ''
 			  WHERE session_id = $1`, sessionID, parserVersion); err != nil {
-			return err
+			return fmt.Errorf("rewind parse cursor for session %d: %w", sessionID, err)
 		}
 		return resetSessionAggregates(ctx, tx, sessionID)
 	})
@@ -421,7 +425,10 @@ func resetSessionAggregates(ctx context.Context, tx pgx.Tx, sessionID int64) err
 		   started_at = NULL, ended_at = NULL,
 		   updated_at = now()
 		 WHERE id = $1`, sessionID)
-	return err
+	if err != nil {
+		return fmt.Errorf("reset aggregates for session %d: %w", sessionID, err)
+	}
+	return nil
 }
 
 func nullTime(t time.Time) any {

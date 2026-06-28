@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -122,10 +123,15 @@ func Reduce(agent Agent, st State, region []byte, baseOffset int64) (State, Delt
 
 // reducer accumulates a Delta for one Reduce call. open is the assistant turn
 // being folded across lines in this region (Codex); claude and pi never use it.
+// openContent and openThink collect that turn's fragments so they are joined once
+// when the op is emitted, rather than rebuilt with a growing string concatenation
+// on every line (which would make one chunk O(chunk_text^2)).
 type reducer struct {
-	st   State
-	d    Delta
-	open *MessageOp
+	st          State
+	d           Delta
+	open        *MessageOp
+	openContent []string
+	openThink   []string
 
 	lastUsageOffset int64
 	lastUsageIndex  int
@@ -188,6 +194,29 @@ func (r *reducer) ensureAssistant(ts time.Time) int {
 	return ord
 }
 
+// addOpenContent and addOpenThinking collect a fragment of the open turn; they
+// are joined once when the op is emitted.
+func (r *reducer) addOpenContent(s string) {
+	if s != "" {
+		r.openContent = append(r.openContent, s)
+	}
+}
+
+func (r *reducer) addOpenThinking(s string) {
+	if s != "" {
+		r.openThink = append(r.openThink, s)
+		r.open.HasThinking = true
+	}
+}
+
+// buildOpen joins the open turn's collected fragments into its op and resets the
+// fragment buffers for the next turn.
+func (r *reducer) buildOpen() {
+	r.open.AppendContent = strings.Join(r.openContent, "\n")
+	r.open.AppendThinking = strings.Join(r.openThink, "\n")
+	r.openContent, r.openThink = nil, nil
+}
+
 // closeTurn finalizes the open assistant turn (a user line ends it), flipping its
 // row to not-open even if nothing was appended this region.
 func (r *reducer) closeTurn() {
@@ -197,6 +226,7 @@ func (r *reducer) closeTurn() {
 	if r.open == nil {
 		r.open = &MessageOp{Ordinal: r.st.OpenAssistant, Role: RoleAssistant}
 	}
+	r.buildOpen()
 	r.open.Open = false
 	r.d.Messages = append(r.d.Messages, *r.open)
 	r.open = nil
@@ -208,6 +238,7 @@ func (r *reducer) closeTurn() {
 // so the next region continues appending to the same row.
 func (r *reducer) flushRegion() {
 	if r.open != nil {
+		r.buildOpen()
 		r.d.Messages = append(r.d.Messages, *r.open)
 		r.open = nil
 	}
