@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>akari — Overview (mockup)</title>
+<link rel="stylesheet" href="mockup.css"/>
+<style>
+  .live-strip { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 22px; }
+  .live-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); padding: 13px 14px; }
+  .live-card .top { display: flex; align-items: center; gap: 9px; margin-bottom: 9px; }
+  .live-card .proj { color: var(--text); font-weight: 500; font-size: 0.8125rem; }
+  .live-card .last { color: var(--muted); font-size: 0.8125rem; line-height: 1.45; height: 2.9em; overflow: hidden; }
+  .live-card .foot { display: flex; align-items: center; gap: 10px; margin-top: 10px; color: var(--muted); font-size: 0.75rem; font-family: var(--mono); }
+  .ctxbar { height: 4px; border-radius: 999px; background: var(--surface-2); overflow: hidden; flex: 1; }
+  .ctxbar > span { display: block; height: 100%; background: var(--lilac); border-radius: 999px; }
+  .feed-meta { color: var(--muted); }
+  .feed-meta a { color: var(--subtext); }
+  .path { font-family: var(--mono); font-size: 0.8125rem; color: var(--subtext); }
+  .chip { font-family: var(--mono); font-size: 0.75rem; color: var(--muted); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 1px 6px; }
+  .addrm .a { color: var(--ok); } .addrm .r { color: var(--err); }
+  .section { margin-top: 26px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- ===== Sidebar ===== -->
+  <aside class="sidebar">
+    <div class="brand">
+      <svg viewBox="0 0 16 16" width="18" height="18"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="8" cy="8" r="2.2" fill="currentColor"/></svg>
+      akari
+    </div>
+    <div class="navgroup">
+      <div class="nav active"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="1.5" y="1.5" width="5" height="5" rx="1"/><rect x="9.5" y="1.5" width="5" height="5" rx="1"/><rect x="1.5" y="9.5" width="5" height="5" rx="1"/><rect x="9.5" y="9.5" width="5" height="5" rx="1"/></svg>Overview</div>
+      <div class="nav"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 4h12M2 8h12M2 12h8"/></svg>Sessions<span class="count">1.2k</span></div>
+      <div class="nav"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 12V6l3-2 3 2 3-2 3 2v6"/><path d="M2 12h12"/></svg>Projects<span class="count">37</span></div>
+      <div class="nav"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="7" cy="7" r="4.5"/><path d="M14 14l-3.5-3.5"/></svg>Search</div>
+      <div class="nav"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 13l3-5 3 3 3-6 3 4"/></svg>Insights</div>
+    </div>
+    <div class="navgroup">
+      <div class="navlabel label">Pinned projects</div>
+      <div class="nav"><span class="dot" style="background:var(--v1)"></span>akari<span class="count">214</span></div>
+      <div class="nav"><span class="dot" style="background:var(--v2)"></span>web-gateway<span class="count">98</span></div>
+      <div class="nav"><span class="dot" style="background:var(--v3)"></span>infra-pulumi<span class="count">61</span></div>
+    </div>
+    <div class="spacer"></div>
+    <div class="navgroup">
+      <div class="nav"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="6.2"/><path d="M8 5v3l2 1"/></svg>Account</div>
+    </div>
+    <div class="sb-foot"><span class="avatar"></span><span>jess</span><span class="dot" style="background:var(--ok); margin-left:auto" title="syncing"></span></div>
+  </aside>
+
+  <!-- ===== Content ===== -->
+  <main class="content">
+    <div class="cmdbar">
+      <div class="search"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="7" cy="7" r="4.5"/><path d="M14 14l-3.5-3.5"/></svg>Search sessions, projects, files…<span class="kbd">⌘K</span></div>
+      <div class="seg-group"><span class="seg">24h</span><span class="seg active">7d</span><span class="seg">30d</span><span class="seg">All</span></div>
+    </div>
+
+    <div class="pagehead">
+      <h1>Overview</h1>
+      <span class="sub">12 machines · 4 agents · last sync 40s ago</span>
+      <span class="spacer"></span>
+      <span class="live">3 live</span>
+    </div>
+
+    <!-- KPIs -->
+    <div class="kpis">
+      <div class="kpi"><div class="label">Spend · 7d</div><div class="v">$418.62</div><div class="d up">▲ 12% vs prev</div></div>
+      <div class="kpi"><div class="label">Tokens · 7d</div><div class="v">214.8M</div><div class="d up">▲ 8%</div></div>
+      <div class="kpi"><div class="label">Sessions · 7d</div><div class="v">186</div><div class="d down">▼ 4%</div></div>
+      <div class="kpi"><div class="label">Active now</div><div class="v">3</div><div class="d flat">2 working · 1 blocked</div></div>
+    </div>
+
+    <!-- Live sessions -->
+    <div class="panel-head"><h2>Live</h2><span class="sub muted">Sessions streaming in now</span></div>
+    <div class="live-strip">
+      <div class="live-card">
+        <div class="top"><span class="live">working</span><span class="tag agent">claude</span><span class="proj" style="margin-left:auto">akari</span></div>
+        <div class="last">Editing <span class="mono">internal/server/web/templates.templ</span> to add the inspector pane and wire the SSE live region…</div>
+        <div class="foot"><span class="ctxbar"><span style="width:62%"></span></span><span>62% ctx</span><span>·</span><span>$2.14</span></div>
+      </div>
+      <div class="live-card">
+        <div class="top"><span class="live" style="color:var(--err)"><span style="background:var(--err);box-shadow:0 0 8px var(--err)"></span></span><span class="tag err">blocked</span><span class="tag agent">codex</span><span class="proj" style="margin-left:auto">web-gateway</span></div>
+        <div class="last">Awaiting input: <span class="subtext">“Run the destructive migration on staging?”</span></div>
+        <div class="foot"><span class="ctxbar"><span style="width:38%;background:var(--err)"></span></span><span>38% ctx</span><span>·</span><span>$0.91</span></div>
+      </div>
+      <div class="live-card">
+        <div class="top"><span class="live">working</span><span class="tag agent">claude</span><span class="proj" style="margin-left:auto">infra-pulumi</span></div>
+        <div class="last">Running <span class="mono">go test ./...</span> — 41 packages, building fixtures for the parser change…</div>
+        <div class="foot"><span class="ctxbar"><span style="width:81%;background:var(--warn)"></span></span><span>81% ctx</span><span>·</span><span>$5.03</span></div>
+      </div>
+    </div>
+
+    <!-- Chart + breakdown -->
+    <div class="grid2 section">
+      <div class="card">
+        <div class="panel-head"><h2>Spend over time</h2><span class="spacer"></span><div class="seg-group"><span class="seg active">Cost</span><span class="seg">Tokens</span></div></div>
+        <svg viewBox="0 0 640 230" width="100%" height="230" preserveAspectRatio="none" font-family="Geist Mono" font-size="10">
+          <line x1="40" y1="20" x2="40" y2="190" stroke="#383548"/>
+          <line x1="40" y1="190" x2="630" y2="190" stroke="#383548"/>
+          <g stroke="#383548" stroke-dasharray="2 4" opacity="0.6">
+            <line x1="40" y1="60" x2="630" y2="60"/><line x1="40" y1="100" x2="630" y2="100"/><line x1="40" y1="145" x2="630" y2="145"/>
+          </g>
+          <g fill="#9a94ad"><text x="6" y="63">$90</text><text x="6" y="103">$60</text><text x="6" y="148">$30</text></g>
+          <g fill="#9a94ad"><text x="44" y="205">Mon</text><text x="140" y="205">Tue</text><text x="236" y="205">Wed</text><text x="332" y="205">Thu</text><text x="428" y="205">Fri</text><text x="524" y="205">Sat</text><text x="600" y="205">Sun</text></g>
+          <path d="M48,150 L144,120 L240,135 L336,80 L432,95 L528,55 L600,70 L600,190 L48,190 Z" fill="#c6a8f2" opacity="0.16"/>
+          <path d="M48,150 L144,120 L240,135 L336,80 L432,95 L528,55 L600,70" fill="none" stroke="#c6a8f2" stroke-width="1.75" stroke-linejoin="round"/>
+          <circle cx="528" cy="55" r="3" fill="#c6a8f2"/>
+          <line x1="528" y1="20" x2="528" y2="190" stroke="#c6a8f2" stroke-dasharray="3 3" opacity="0.5"/>
+        </svg>
+        <div class="flex" style="margin-top:6px; color:var(--muted); font-size:0.75rem; font-family:var(--mono)"><span style="color:var(--lilac)">●</span> total &nbsp; Sat $84.10 · 41.2M tok</div>
+      </div>
+      <div class="card">
+        <div class="panel-head"><h2>By model</h2></div>
+        <ul class="bars">
+          <li><div class="bar-head"><span class="bar-label">claude-opus-4-8</span><span class="bar-val">$248.10</span></div><div class="bar-track"><div class="bar-fill" style="width:79%;background:var(--v1)"></div></div><div class="bar-sub">128M tok · 94 sessions</div></li>
+          <li><div class="bar-head"><span class="bar-label">claude-sonnet-4-6</span><span class="bar-val">$96.40</span></div><div class="bar-track"><div class="bar-fill" style="width:38%;background:var(--v2)"></div></div><div class="bar-sub">61M tok · 142 sessions</div></li>
+          <li><div class="bar-head"><span class="bar-label">gpt-5-codex</span><span class="bar-val">$74.12</span></div><div class="bar-track"><div class="bar-fill" style="width:29%;background:var(--v3)"></div></div><div class="bar-sub">25M tok · 38 sessions</div></li>
+        </ul>
+        <hr class="divider" style="margin:16px 0"/>
+        <div class="panel-head"><h3>By agent</h3></div>
+        <ul class="bars">
+          <li><div class="bar-head"><span class="bar-label">claude</span><span class="bar-val">$344.50</span></div><div class="bar-track"><div class="bar-fill" style="width:82%;background:var(--v1)"></div></div></li>
+          <li><div class="bar-head"><span class="bar-label">codex</span><span class="bar-val">$74.12</span></div><div class="bar-track"><div class="bar-fill" style="width:18%;background:var(--v3)"></div></div></li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- Recent activity + recent edits -->
+    <div class="grid2 section">
+      <div>
+        <div class="panel-head"><h2>Recent activity</h2><span class="spacer"></span><a class="small" href="#">All sessions →</a></div>
+        <table class="grid">
+          <thead><tr><th>Session</th><th>Project</th><th>Agent</th><th class="num">Cost</th><th>When</th></tr></thead>
+          <tbody>
+            <tr><td><a href="#">#2041</a> <span class="tag">public</span></td><td>akari</td><td><span class="tag agent">claude</span></td><td class="num">$8.12</td><td class="muted">2m ago</td></tr>
+            <tr><td><a href="#">#2040</a></td><td>web-gateway</td><td><span class="tag agent">codex</span></td><td class="num">$1.94</td><td class="muted">14m ago</td></tr>
+            <tr><td><a href="#">#2039</a></td><td>infra-pulumi</td><td><span class="tag agent">claude</span></td><td class="num">$5.03</td><td class="muted">31m ago</td></tr>
+            <tr><td><a href="#">#2038</a></td><td>akari</td><td><span class="tag agent">claude</span></td><td class="num">$0.42</td><td class="muted">1h ago</td></tr>
+            <tr><td><a href="#">#2037</a></td><td>data-pipeline</td><td><span class="tag agent">pi</span></td><td class="num">$2.77</td><td class="muted">2h ago</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div>
+        <div class="panel-head"><h2>Recently edited files</h2><span class="sub muted">across all sessions</span></div>
+        <table class="grid">
+          <thead><tr><th>File</th><th class="num">Δ</th><th>Session</th></tr></thead>
+          <tbody>
+            <tr><td><span class="path">templates.templ</span><div class="muted small mono">internal/server/web</div></td><td class="num addrm"><span class="a">+64</span> <span class="r">−12</span></td><td><a href="#">#2041</a></td></tr>
+            <tr><td><span class="path">app.css</span><div class="muted small mono">internal/server/web/static</div></td><td class="num addrm"><span class="a">+128</span> <span class="r">−4</span></td><td><a href="#">#2041</a></td></tr>
+            <tr><td><span class="path">handler.go</span><div class="muted small mono">internal/server</div></td><td class="num addrm"><span class="a">+22</span> <span class="r">−8</span></td><td><a href="#">#2040</a></td></tr>
+            <tr><td><span class="path">stack.ts</span><div class="muted small mono">infra-pulumi/src</div></td><td class="num addrm"><span class="a">+9</span> <span class="r">−3</span></td><td><a href="#">#2039</a></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+</div>
+</body>
+</html>

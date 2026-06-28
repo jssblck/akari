@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>akari — Sessions (mockup)</title>
+<link rel="stylesheet" href="mockup.css"/>
+<style>
+  .content { display: grid; grid-template-columns: 196px minmax(0,1fr); gap: 22px; max-width: 1320px; }
+  .facets { display: flex; flex-direction: column; gap: 20px; }
+  .facet .label { margin-bottom: 9px; display: block; }
+  .opt { display: flex; align-items: center; gap: 9px; padding: 4px 2px; color: var(--subtext); font-size: 0.8125rem; }
+  .opt .box { width: 13px; height: 13px; border: 1px solid var(--border-strong); border-radius: 3px; flex: none; }
+  .opt .box.on { background: var(--lilac); border-color: var(--lilac); position: relative; }
+  .opt .box.on::after { content:"✓"; position:absolute; inset:0; color: var(--ink); font-size: 10px; line-height: 13px; text-align: center; }
+  .opt .c { margin-left: auto; font-family: var(--mono); font-size: 0.75rem; color: var(--faint); }
+  .opt .swatch { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+  .main { min-width: 0; }
+  .toolrow { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+  .active-filters { display: flex; gap: 6px; flex-wrap: wrap; }
+  .fchip { display: inline-flex; align-items: center; gap: 6px; background: var(--surface-2); border: 1px solid var(--border-strong); border-radius: var(--r-sm); padding: 3px 8px; font-size: 0.75rem; color: var(--subtext); }
+  .fchip .x { color: var(--faint); }
+  .sessrow td { vertical-align: middle; }
+  .branch { font-family: var(--mono); font-size: 0.75rem; color: var(--muted); }
+  .titlecell { color: var(--text); font-size: 0.8125rem; }
+  .titlecell .sid { color: var(--lilac); font-family: var(--mono); }
+  /* command palette overlay */
+  .scrim { position: fixed; inset: 0; background: rgba(8,6,14,0.55); }
+  .palette { position: fixed; top: 90px; left: 50%; transform: translateX(-50%); width: 560px; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--r-lg); box-shadow: 0 8px 24px -6px rgba(8,6,14,0.6); overflow: hidden; }
+  .palette .pin { display: flex; align-items: center; gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--border); }
+  .palette .pin input { all: unset; flex: 1; color: var(--text); font-size: 0.9375rem; }
+  .palette .pin .ico { width: 16px; height: 16px; color: var(--muted); }
+  .psec { padding: 8px 8px; }
+  .psec .label { padding: 5px 10px; }
+  .pitem { display: flex; align-items: center; gap: 11px; padding: 8px 10px; border-radius: var(--r-sm); color: var(--subtext); font-size: 0.875rem; }
+  .pitem .ico { width: 15px; height: 15px; color: var(--muted); }
+  .pitem.sel { background: var(--surface-3); color: var(--text); }
+  .pitem.sel .ico { color: var(--lilac); }
+  .pitem .meta { margin-left: auto; font-family: var(--mono); font-size: 0.75rem; color: var(--faint); }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand"><svg viewBox="0 0 16 16" width="18" height="18"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="8" cy="8" r="2.2" fill="currentColor"/></svg>akari</div>
+    <div class="navgroup">
+      <div class="nav"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="1.5" y="1.5" width="5" height="5" rx="1"/><rect x="9.5" y="1.5" width="5" height="5" rx="1"/><rect x="1.5" y="9.5" width="5" height="5" rx="1"/><rect x="9.5" y="9.5" width="5" height="5" rx="1"/></svg>Overview</div>
+      <div class="nav active"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 4h12M2 8h12M2 12h8"/></svg>Sessions<span class="count">1.2k</span></div>
+      <div class="nav"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 12V6l3-2 3 2 3-2 3 2v6"/><path d="M2 12h12"/></svg>Projects<span class="count">37</span></div>
+      <div class="nav"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="7" cy="7" r="4.5"/><path d="M14 14l-3.5-3.5"/></svg>Search</div>
+      <div class="nav"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 13l3-5 3 3 3-6 3 4"/></svg>Insights</div>
+    </div>
+    <div class="navgroup">
+      <div class="navlabel label">Saved views</div>
+      <div class="nav"><span class="dot" style="background:var(--warn)"></span>Needs input</div>
+      <div class="nav"><span class="dot" style="background:var(--err)"></span>Errored runs</div>
+      <div class="nav"><span class="dot" style="background:var(--v3)"></span>My expensive runs</div>
+    </div>
+    <div class="spacer"></div>
+    <div class="sb-foot"><span class="avatar"></span><span>jess</span><span class="dot" style="background:var(--ok); margin-left:auto"></span></div>
+  </aside>
+
+  <main class="content">
+    <!-- facet rail -->
+    <div class="facets">
+      <div class="pagehead" style="margin:0 0 4px"><h1 style="font-size:1.25rem">Filters</h1></div>
+      <div class="facet">
+        <span class="label">Status</span>
+        <div class="opt"><span class="box on"></span>Live<span class="c">3</span></div>
+        <div class="opt"><span class="box on"></span>Needs input<span class="c">2</span></div>
+        <div class="opt"><span class="box"></span>Completed<span class="c">1.1k</span></div>
+        <div class="opt"><span class="box"></span>Errored<span class="c">48</span></div>
+      </div>
+      <div class="facet">
+        <span class="label">Agent</span>
+        <div class="opt"><span class="box on"></span>claude<span class="c">812</span></div>
+        <div class="opt"><span class="box on"></span>codex<span class="c">301</span></div>
+        <div class="opt"><span class="box"></span>pi<span class="c">94</span></div>
+      </div>
+      <div class="facet">
+        <span class="label">Project</span>
+        <div class="opt"><span class="swatch" style="background:var(--v1)"></span>akari<span class="c">214</span></div>
+        <div class="opt"><span class="swatch" style="background:var(--v2)"></span>web-gateway<span class="c">98</span></div>
+        <div class="opt"><span class="swatch" style="background:var(--v3)"></span>infra-pulumi<span class="c">61</span></div>
+        <div class="opt muted" style="color:var(--faint)">+ 34 more</div>
+      </div>
+      <div class="facet">
+        <span class="label">Machine</span>
+        <div class="opt"><span class="box"></span>mbp-jess<span class="c">540</span></div>
+        <div class="opt"><span class="box"></span>linux-rig<span class="c">410</span></div>
+        <div class="opt"><span class="box"></span>ci-runner<span class="c">257</span></div>
+      </div>
+    </div>
+
+    <!-- main column -->
+    <div class="main">
+      <div class="pagehead"><h1>Sessions</h1><span class="sub">1,207 sessions · 37 projects</span><span class="spacer"></span><span class="live">3 live</span></div>
+
+      <div class="toolrow">
+        <div class="search" style="flex:1; display:flex; align-items:center; gap:8px; background:var(--surface); border:1px solid var(--border); border-radius:var(--r-sm); padding:8px 11px; color:var(--muted); font-size:0.8125rem">
+          <svg class="ico" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="7" cy="7" r="4.5"/><path d="M14 14l-3.5-3.5"/></svg>
+          Filter by content, branch, tool…<span class="kbd" style="margin-left:auto">⌘K</span>
+        </div>
+        <div class="seg-group"><span class="seg active">Group: Project</span><span class="seg">Day</span><span class="seg">Flat</span></div>
+        <div class="seg-group"><span class="seg active">Recent</span><span class="seg">Cost</span></div>
+      </div>
+      <div class="active-filters" style="margin-bottom:14px">
+        <span class="fchip">status: live, needs input <span class="x">✕</span></span>
+        <span class="fchip">agent: claude, codex <span class="x">✕</span></span>
+        <span class="fchip">last 7 days <span class="x">✕</span></span>
+        <a class="small" href="#" style="align-self:center">Clear all</a>
+      </div>
+
+      <table class="grid">
+        <thead><tr><th>Session</th><th>Agent</th><th>Branch</th><th>User</th><th class="num">Msgs</th><th class="num">Tokens</th><th class="num">Cost</th><th>Status</th><th>Updated</th></tr></thead>
+        <tbody>
+          <tr class="grouprow"><td colspan="9"><span class="swatch" style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--v1);vertical-align:middle"></span> &nbsp;akari <span class="gcount">· 214 sessions · $1,204.10</span></td></tr>
+          <tr class="sessrow"><td class="titlecell"><span class="sid">#2041</span> &nbsp;Add inspector pane to session view</td><td><span class="tag agent">claude</span></td><td class="branch">claude/ui-org</td><td class="muted">jess</td><td class="num">142</td><td class="num">8.1M</td><td class="num">$8.12</td><td><span class="live">working</span></td><td class="muted">2m</td></tr>
+          <tr class="sessrow"><td class="titlecell"><span class="sid">#2038</span> &nbsp;Fix colliding source_session_id</td><td><span class="tag agent">claude</span></td><td class="branch">main</td><td class="muted">jess</td><td class="num">61</td><td class="num">2.2M</td><td class="num">$0.42</td><td><span class="tag ok">done</span></td><td class="muted">1h</td></tr>
+          <tr class="sessrow"><td class="titlecell"><span class="sid">#2030</span> &nbsp;Incremental parse per chunk</td><td><span class="tag agent">codex</span></td><td class="branch">perf/chunks</td><td class="muted">sam</td><td class="num">88</td><td class="num">4.0M</td><td class="num">$3.18</td><td><span class="tag err">2 errors</span></td><td class="muted">5h</td></tr>
+          <tr class="grouprow"><td colspan="9"><span class="swatch" style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--v2);vertical-align:middle"></span> &nbsp;web-gateway <span class="gcount">· 98 sessions · $612.40</span></td></tr>
+          <tr class="sessrow"><td class="titlecell"><span class="sid">#2040</span> &nbsp;Staging migration for rate limits</td><td><span class="tag agent">codex</span></td><td class="branch">db/ratelimit</td><td class="muted">sam</td><td class="num">37</td><td class="num">1.9M</td><td class="num">$1.94</td><td><span class="tag warn">needs input</span></td><td class="muted">14m</td></tr>
+          <tr class="sessrow"><td class="titlecell"><span class="sid">#2021</span> &nbsp;Add OTEL spans to handler</td><td><span class="tag agent">claude</span></td><td class="branch">obs/otel</td><td class="muted">jess</td><td class="num">54</td><td class="num">2.6M</td><td class="num">$2.10</td><td><span class="tag ok">done</span></td><td class="muted">yest</td></tr>
+          <tr class="grouprow"><td colspan="9"><span class="swatch" style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--v3);vertical-align:middle"></span> &nbsp;infra-pulumi <span class="gcount">· 61 sessions · $388.90</span></td></tr>
+          <tr class="sessrow"><td class="titlecell"><span class="sid">#2039</span> &nbsp;Parser fixtures + test sweep</td><td><span class="tag agent">claude</span></td><td class="branch">test/fixtures</td><td class="muted">jess</td><td class="num">120</td><td class="num">6.4M</td><td class="num">$5.03</td><td><span class="live">working</span></td><td class="muted">31m</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </main>
+</div>
+
+<!-- ===== Command palette (⌘K) ===== -->
+<div class="scrim"></div>
+<div class="palette">
+  <div class="pin">
+    <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="7" cy="7" r="4.5"/><path d="M14 14l-3.5-3.5"/></svg>
+    <input value="migration" />
+    <span class="kbd">esc</span>
+  </div>
+  <div class="psec">
+    <span class="label">Jump to</span>
+    <div class="pitem sel"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 4h12M2 8h12M2 12h8"/></svg>Session #2040 — “Staging migration for rate limits”<span class="meta">web-gateway</span></div>
+    <div class="pitem"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 12V6l3-2 3 2 3-2 3 2v6"/></svg>Project — web-gateway<span class="meta">98 sessions</span></div>
+  </div>
+  <div class="psec">
+    <span class="label">Search message content</span>
+    <div class="pitem"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="7" cy="7" r="4.5"/><path d="M14 14l-3.5-3.5"/></svg>“migration” in transcripts<span class="meta">312 hits</span></div>
+  </div>
+  <div class="psec">
+    <span class="label">Filter</span>
+    <div class="pitem"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 3h12l-5 6v4l-2 1V9z"/></svg>Add filter · tool = Bash<span class="meta">⏎</span></div>
+  </div>
+</div>
+</body>
+</html>
