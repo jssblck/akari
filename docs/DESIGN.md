@@ -269,6 +269,18 @@ explicit divergence check.
    fragile signals like inode and device numbers, which are unreliable across
    platforms and rewrites.
 
+   The client keeps the hash incremental so a long session does not re-hash its
+   whole prefix on every sync. It caches, per file, the verified offset and a
+   resumable sha256 digest of `[0, verified)`. An append-only file whose prefix is
+   already cached is confirmed by comparing the cached digest (no I/O); a file the
+   server has grown past the cache is confirmed by hashing only the new span; and
+   after a successful append the digest advances over the bytes just sent, which
+   the client already holds. Only a cold cache, a server rewind, or a truncation
+   (a file shorter than the cache describes) falls back to a full re-hash. The
+   cache is an in-memory accelerator: losing it costs one re-hash, never
+   correctness, since the server's `prefix_sha256` remains the sole authority on
+   divergence.
+
 2. **Append bytes.**
    `POST /api/v1/ingest/session/{id}/chunk?offset=40960`
    with the raw bytes from that offset as the body. A chunk ends on a message
@@ -280,9 +292,14 @@ explicit divergence check.
    region, which is what lets the projection write each message exactly once. The
    client prefers ~1 MiB chunks but grows a chunk to hold one oversized message,
    up to a 128 MiB cap, so a giant single turn is served alone rather than split.
-   The final turn of a session has no closing user line, so the client withholds
-   it until the file goes idle (it has not changed for a settle window), then
-   flushes it whole. The server:
+   That cap is enforced against the open region before any buffer is allocated: a
+   message that grows past it without closing is refused, so the client never
+   buffers more than the cap. Boundary detection is incremental too. The client
+   caches how far it has scanned a file for the next boundary, so a trailing turn
+   that is still open is not re-scanned from its start each tick; only the newly
+   appended bytes are examined. The final turn of a session has no closing user
+   line, so the client withholds it until the file goes idle (it has not changed
+   for a settle window), then flushes it whole. The server:
    - Rejects with the current length if `offset` does not equal `stored_bytes`
      (idempotent: a re-sent chunk whose offset is behind is a no-op that returns
      the truth, so the client simply advances).
@@ -745,16 +762,20 @@ Drive the ingest protocol above, statelessly, once per file each time it is
 visited:
 
 - Announce the session, learn `stored_bytes` and the server's `prefix_sha256`.
-- Verify: hash the local file's first `stored_bytes` bytes and compare. On
-  mismatch (or a local file shorter than `stored_bytes`), call reset and
-  re-upload from zero; otherwise resume at `stored_bytes`.
-- Stream the gap in bounded chunks (a few MB), each truncated to the last newline
-  so only complete JSONL lines are sent, advancing on each ack.
+- Verify: confirm the local file's first `stored_bytes` bytes hash to
+  `prefix_sha256`, advancing the cached digest over only the newly stored bytes
+  rather than re-hashing the whole prefix. On mismatch (or a local file shorter
+  than `stored_bytes`), call reset and re-upload from zero; otherwise resume at
+  `stored_bytes`.
+- Stream the gap in boundary-aligned chunks (~1 MiB, growing to fit one oversized
+  message up to the cap), scanning only newly appended bytes for the next
+  boundary, advancing on each ack.
 
-There is nothing to persist on the client. If the local file already matches the
-server (size equals `stored_bytes`, hashes agree), the announce is the only call
-and no bytes move. Restarts, crashes, and a fresh machine all recover by simply
-re-announcing; divergence is always decided by the server's `prefix_sha256`.
+The client persists nothing to disk; its per-file cursor and digest live only in
+memory. If the local file already matches the server (size equals `stored_bytes`,
+hashes agree), the announce is the only call and no bytes move. Restarts, crashes,
+and a fresh machine all recover by simply re-announcing, paying one re-hash to
+rebuild the cache; divergence is always decided by the server's `prefix_sha256`.
 
 ### Watch mode (default)
 

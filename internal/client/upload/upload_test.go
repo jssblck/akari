@@ -408,3 +408,96 @@ func TestCodexChunkIncrementalScan(t *testing.T) {
 		t.Errorf("chunk2 = %q, want %q", chunk2, twoUsers)
 	}
 }
+
+func hexSHA(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+// TestVerifyPrefixUsesCachedDigest proves the fast path compares the cached digest
+// instead of re-reading the prefix: the on-disk bytes differ from what the cache
+// claims, yet verification follows the cache, so no rehash happened.
+func TestVerifyPrefixUsesCachedDigest(t *testing.T) {
+	c, _ := newTestClient(t)
+	f, err := os.Open(tempFile(t, "AAA\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	fs := &fileSync{base: 3, prefixSize: 4, prefixHasher: sha256.New()}
+	fs.prefixHasher.Write([]byte("BBB")) // cache claims the first 3 bytes were "BBB"
+
+	ok, err := c.verifyPrefix(f, fs, 3, 4, hexSHA("BBB"))
+	if err != nil || !ok {
+		t.Fatalf("fast path against cached digest: ok=%v err=%v", ok, err)
+	}
+	// The same call must reject a hash that matches the on-disk "AAA", because the
+	// fast path never looks at the file.
+	ok, err = c.verifyPrefix(f, fs, 3, 4, hexSHA("AAA"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatal("fast path should compare the cached digest, not re-read the file")
+	}
+}
+
+// TestVerifyPrefixExtendsOverNewBytes proves the extend path hashes only the bytes
+// the server gained, trusting the cache for the rest: after the historical bytes
+// on disk are scribbled over, extending still matches because only the new span is
+// read.
+func TestVerifyPrefixExtendsOverNewBytes(t *testing.T) {
+	c, _ := newTestClient(t)
+	path := tempFile(t, "l1\nl2\n")
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	// Cold cache: a full hash of the first line populates the cache.
+	fs := &fileSync{}
+	if ok, err := c.verifyPrefix(f, fs, 3, 6, hexSHA("l1\n")); err != nil || !ok {
+		t.Fatalf("cold verify: ok=%v err=%v", ok, err)
+	}
+	if fs.base != 3 {
+		t.Fatalf("base after cold verify = %d, want 3", fs.base)
+	}
+
+	// Scribble over the already-cached bytes on disk. The extend path must not read
+	// them: it hashes only [3,6) and appends to the cached digest of "l1\n".
+	if err := os.WriteFile(path, []byte("XX\nl2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := c.verifyPrefix(f, fs, 6, 6, hexSHA("l1\nl2\n"))
+	if err != nil || !ok {
+		t.Fatalf("extend verify: ok=%v err=%v (must trust cache for [0,3))", ok, err)
+	}
+	if fs.base != 6 {
+		t.Fatalf("base after extend = %d, want 6", fs.base)
+	}
+}
+
+// TestNextChunkRejectsOversizedOpenMessage checks the open region is capped before
+// it is ever allocated: a Codex turn that never closes and grows past hardCap is
+// refused rather than buffered whole.
+func TestNextChunkRejectsOversizedOpenMessage(t *testing.T) {
+	orig := hardCap
+	hardCap = 16
+	defer func() { hardCap = orig }()
+
+	// Two complete lines, neither a user line, so the turn never closes; together
+	// they exceed the shrunken cap.
+	line := `{"type":"response_item","payload":{"role":"assistant"}}`
+	content := line + "\n" + line + "\n"
+	f, err := os.Open(tempFile(t, content))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	if _, _, err := nextChunk(f, 0, 0, int64(len(content)), "codex", true); err == nil {
+		t.Fatal("expected an oversized-message error for an open turn past hardCap")
+	}
+}

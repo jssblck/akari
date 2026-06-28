@@ -122,18 +122,21 @@ func (s *Store) SessionsForReparse(ctx context.Context, agent string) ([]Reparse
 	q += " ORDER BY id"
 	rows, err := s.Pool.Query(ctx, q, args...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list sessions for reparse (agent=%q): %w", agent, err)
 	}
 	defer rows.Close()
 	var out []ReparseTarget
 	for rows.Next() {
 		var t ReparseTarget
 		if err := rows.Scan(&t.ID, &t.Agent); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scan reparse target: %w", err)
 		}
 		out = append(out, t)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate reparse targets: %w", err)
+	}
+	return out, nil
 }
 
 // AdvanceProjection parses the next unparsed region of a session and applies it
