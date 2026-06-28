@@ -247,7 +247,7 @@ func (w *Watcher) fileFor(path string) (discover.File, bool) {
 	base := filepath.Base(path)
 	for _, r := range w.roots {
 		if within(r.Dir, path) && discover.Matches(r.Agent, base) {
-			return discover.File{Agent: r.Agent, Path: path}, true
+			return discover.File{Agent: r.Agent, Root: r.Dir, Path: path}, true
 		}
 	}
 	return discover.File{}, false

@@ -42,9 +42,11 @@ func TestDiscover(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := map[string]string{} // path base -> agent
+	got := map[string]string{}      // path base -> agent
+	fileRoot := map[string]string{} // path base -> discovery root
 	for _, f := range files {
 		got[filepath.Base(f.Path)] = f.Agent
+		fileRoot[filepath.Base(f.Path)] = f.Root
 	}
 	want := map[string]string{
 		"sess1.jsonl":                  "claude",
@@ -58,6 +60,20 @@ func TestDiscover(t *testing.T) {
 	for name, agent := range want {
 		if got[name] != agent {
 			t.Errorf("%s: agent %q, want %q", name, got[name], agent)
+		}
+	}
+
+	// Each file records the discovery root it was found under, so resolution can
+	// derive an id from its location. The two claude files share the claude root.
+	wantRoot := map[string]string{
+		"sess1.jsonl":                  claudeDir,
+		"sess2.jsonl":                  claudeDir,
+		"rollout-2024-01-01-abc.jsonl": codexDir,
+		"sessX.jsonl":                  piDir,
+	}
+	for name, dir := range wantRoot {
+		if fileRoot[name] != dir {
+			t.Errorf("%s: root %q, want %q", name, fileRoot[name], dir)
 		}
 	}
 }
