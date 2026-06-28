@@ -1,0 +1,378 @@
+package web
+
+import (
+	"fmt"
+
+	"github.com/jssblck/akari/internal/server/store"
+)
+
+templ layout(p Page) {
+	<!DOCTYPE html>
+	<html lang="en">
+		<head>
+			<meta charset="utf-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1"/>
+			<title>{ p.Title } - akari</title>
+			<link rel="stylesheet" href="/static/app.css"/>
+			<script src="/static/htmx.min.js" defer></script>
+			<script src="/static/app.js" defer></script>
+		</head>
+		<body>
+			if p.LoggedIn {
+				<header class="topbar">
+					<span class="brand"><a href="/">akari</a></span>
+					<nav>
+						<a href="/">Projects</a>
+						<a href="/search">Search</a>
+						<a href="/account">Account</a>
+					</nav>
+					<span class="spacer"></span>
+					<span class="who">{ p.Username }</span>
+					<form method="post" action="/logout" style="margin:0">
+						<button class="secondary" type="submit">Log out</button>
+					</form>
+				</header>
+			}
+			<main>
+				{ children... }
+			</main>
+		</body>
+	</html>
+}
+
+templ LoginPage(p Page, next, errMsg string) {
+	@layout(p) {
+		<div class="auth-wrap card">
+			<h1>Log in</h1>
+			if errMsg != "" {
+				<div class="error">{ errMsg }</div>
+			}
+			<form method="post" action="/login">
+				<input type="hidden" name="next" value={ next }/>
+				<input name="username" placeholder="username" autofocus/>
+				<input name="password" type="password" placeholder="password"/>
+				<button type="submit">Log in</button>
+			</form>
+			<p class="muted">Have an invite? <a href="/register">Register</a>.</p>
+		</div>
+	}
+}
+
+templ RegisterPage(p Page, errMsg string) {
+	@layout(p) {
+		<div class="auth-wrap card">
+			<h1>Register</h1>
+			if errMsg != "" {
+				<div class="error">{ errMsg }</div>
+			}
+			<form method="post" action="/register">
+				<input name="username" placeholder="username" autofocus/>
+				<input name="password" type="password" placeholder="password"/>
+				<input name="invite_token" placeholder="invite token"/>
+				<button type="submit">Register</button>
+			</form>
+			<p class="muted">The first account needs no invite and becomes admin. <a href="/login">Log in</a>.</p>
+		</div>
+	}
+}
+
+templ ProjectsPage(p Page, projects []store.ProjectSummary) {
+	@layout(p) {
+		<h1>Projects</h1>
+		if len(projects) == 0 {
+			<div class="empty">No sessions have been pushed yet.</div>
+		} else {
+			<table>
+				<thead>
+					<tr>
+						<th>Project</th>
+						<th class="num">Sessions</th>
+						<th class="num">Input</th>
+						<th class="num">Output</th>
+						<th class="num">Cost</th>
+						<th>Last activity</th>
+					</tr>
+				</thead>
+				<tbody>
+					for _, pr := range projects {
+						<tr>
+							<td><a href={ ProjectHref(pr.ID) }>{ pr.RemoteKey }</a></td>
+							<td class="num">{ fmt.Sprintf("%d", pr.SessionCount) }</td>
+							<td class="num">{ FmtTokens(pr.TotalInput) }</td>
+							<td class="num">{ FmtTokens(pr.TotalOutput) }</td>
+							<td class="num">{ FmtCost(pr.TotalCostUSD, false) }</td>
+							<td>{ FmtTime(pr.LastActivity) }</td>
+						</tr>
+					}
+				</tbody>
+			</table>
+		}
+	}
+}
+
+templ ProjectPage(p Page, proj store.ProjectSummary, sessions []store.SessionSummary, facets Facets, sel store.SessionFilter) {
+	@layout(p) {
+		<h1>{ proj.RemoteKey }</h1>
+		<form class="filters" method="get" hx-get={ ProjectPath(proj.ID) } hx-target="#session-list" hx-push-url="true">
+			<select name="agent">
+				<option value="">all agents</option>
+				for _, a := range facets.Agents {
+					<option value={ a } selected?={ sel.Agent == a }>{ a }</option>
+				}
+			</select>
+			<select name="user">
+				<option value="">all users</option>
+				for _, u := range facets.Users {
+					<option value={ u } selected?={ sel.Username == u }>{ u }</option>
+				}
+			</select>
+			<select name="machine">
+				<option value="">all machines</option>
+				for _, m := range facets.Machines {
+					<option value={ m } selected?={ sel.Machine == m }>{ m }</option>
+				}
+			</select>
+			<button type="submit">Filter</button>
+		</form>
+		<div id="session-list">
+			@SessionList(sessions)
+		</div>
+	}
+}
+
+templ SessionList(sessions []store.SessionSummary) {
+	if len(sessions) == 0 {
+		<div class="empty">No sessions match these filters.</div>
+	} else {
+		<table>
+			<thead>
+				<tr>
+					<th>Session</th>
+					<th>Agent</th>
+					<th>User</th>
+					<th>Machine</th>
+					<th>Branch</th>
+					<th class="num">Messages</th>
+					<th class="num">Cost</th>
+					<th>Updated</th>
+				</tr>
+			</thead>
+			<tbody>
+				for _, s := range sessions {
+					<tr>
+						<td>
+							<a href={ SessionHref(s.ID) }>#{ fmt.Sprintf("%d", s.ID) }</a>
+							if s.Visibility == "public" {
+								<span class="badge public">public</span>
+							}
+						</td>
+						<td><span class="badge agent">{ s.Agent }</span></td>
+						<td>{ s.Username }</td>
+						<td>{ s.Machine }</td>
+						<td>{ s.GitBranch }</td>
+						<td class="num">{ fmt.Sprintf("%d", s.MessageCount) }</td>
+						<td class="num">{ FmtCost(s.TotalCostUSD, s.CostIncomplete) }</td>
+						<td>{ FmtTime(s.UpdatedAt) }</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+	}
+}
+
+templ SessionPage(p Page, d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, subagents []store.SessionSummary, live bool) {
+	@layout(p) {
+		<h1>
+			<a href={ ProjectHref(d.ProjectID) }>{ d.ProjectKey }</a>
+			<span class="muted">/ session #{ fmt.Sprintf("%d", d.ID) }</span>
+			<span class="badge agent">{ d.Agent }</span>
+			if d.Visibility == "public" {
+				<span class="badge public">public</span>
+			}
+		</h1>
+		if live {
+			<div id="session-body" data-sse={ SSEPath(d.ID) } data-body={ BodyPath(d.ID) }>
+				@SessionBody(d, msgs, tools, subagents)
+			</div>
+		} else {
+			<div id="session-body">
+				@SessionBody(d, msgs, tools, subagents)
+			</div>
+		}
+	}
+}
+
+templ SessionBody(d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, subagents []store.SessionSummary) {
+	<div class="stats">
+		@stat("Messages", fmt.Sprintf("%d", d.MessageCount))
+		@stat("User msgs", fmt.Sprintf("%d", d.UserMessageCount))
+		@stat("Input", FmtTokens(d.TotalInput))
+		@stat("Output", FmtTokens(d.TotalOutput))
+		@stat("Cache write", FmtTokens(d.TotalCacheWrite))
+		@stat("Cache read", FmtTokens(d.TotalCacheRead))
+		@stat("Cost", FmtCost(d.TotalCostUSD, d.CostIncomplete))
+		@stat("Duration", FmtDuration(d.StartedAt, d.EndedAt))
+	</div>
+	if len(subagents) > 0 {
+		<h2>Subagents</h2>
+		<div class="subagents">
+			@SessionList(subagents)
+		</div>
+	}
+	<h2>Transcript</h2>
+	@Transcript(msgs, tools)
+}
+
+templ stat(label, value string) {
+	<div class="stat">
+		<div class="label">{ label }</div>
+		<div class="value">{ value }</div>
+	</div>
+}
+
+templ Transcript(msgs []store.Message, tools map[int][]store.ToolCallView) {
+	if len(msgs) == 0 {
+		<div class="empty">No messages parsed yet.</div>
+	} else {
+		<div class="transcript">
+			for _, m := range msgs {
+				<div class={ "msg " + RoleClass(m.Role) }>
+					<div class="meta">
+						<span>{ m.Role }</span>
+						if m.Model != "" {
+							<span class="badge">{ m.Model }</span>
+						}
+						<span>{ FmtTime(m.Timestamp) }</span>
+					</div>
+					if m.HasThinking && m.ThinkingText != "" {
+						<div class="thinking">{ m.ThinkingText }</div>
+					}
+					if m.Content != "" {
+						<div class="content">{ m.Content }</div>
+					}
+					if tc := tools[m.Ordinal]; len(tc) > 0 {
+						<div class="tools">
+							for _, t := range tc {
+								@ToolChip(t)
+							}
+						</div>
+					}
+				</div>
+			}
+		</div>
+	}
+}
+
+templ ToolChip(t store.ToolCallView) {
+	<div class="tool-chip">
+		<span class="tname">{ t.ToolName }</span>
+		if t.FilePath != "" {
+			<span class="muted">{ t.FilePath }</span>
+		}
+		if t.InputBytes > 0 {
+			<span class="badge">in: { ChipLabel(t.InputMediaType, t.InputBytes) }</span>
+		}
+		if t.ResultStatus != "" {
+			<span class={ "tool-status " + StatusClass(t.ResultStatus) }>{ t.ResultStatus }</span>
+			if t.ResultBytes > 0 {
+				<span class="badge">out: { ChipLabel(t.ResultMediaType, t.ResultBytes) }</span>
+			}
+		}
+	</div>
+}
+
+templ SearchPage(p Page, query string, hits []store.SearchHit) {
+	@layout(p) {
+		<h1>Search</h1>
+		<form class="filters" method="get" action="/search">
+			<input name="q" value={ query } placeholder="search message content" autofocus style="min-width:320px"/>
+			<button type="submit">Search</button>
+		</form>
+		if query != "" {
+			if len(hits) == 0 {
+				<div class="empty">No messages match { query }.</div>
+			} else {
+				<div class="transcript">
+					for _, h := range hits {
+						<div class="card">
+							<div class="meta muted">
+								<a href={ SessionHref(h.SessionID) }>{ h.ProjectKey }</a>
+								{ " · " }{ h.Agent }{ " · " }{ h.Username }{ " · " }{ h.Role }
+							</div>
+							<div class="content">{ h.Snippet }</div>
+						</div>
+					}
+				</div>
+			}
+		}
+	}
+}
+
+templ AccountPage(p Page, tokens []store.APIToken, newToken, newInvite string) {
+	@layout(p) {
+		<h1>Account</h1>
+		if newToken != "" {
+			<div class="card">
+				<strong>New token (shown once):</strong> <code>{ newToken }</code>
+			</div>
+		}
+		<h2>API tokens</h2>
+		<form method="post" action="/account/tokens" class="filters">
+			<input name="name" placeholder="token name"/>
+			<select name="scope">
+				<option value="ingest">ingest (push only)</option>
+				<option value="full">full (push and read)</option>
+			</select>
+			<button type="submit">Create token</button>
+		</form>
+		if len(tokens) == 0 {
+			<div class="empty">No tokens yet.</div>
+		} else {
+			<table>
+				<thead>
+					<tr><th>Name</th><th>Scope</th><th>Created</th><th>Last used</th><th></th></tr>
+				</thead>
+				<tbody>
+					for _, t := range tokens {
+						<tr>
+							<td>{ t.Name }</td>
+							<td>{ t.Scope }</td>
+							<td>{ FmtTimeAt(t.CreatedAt) }</td>
+							<td>{ FmtTime(t.LastUsedAt) }</td>
+							<td>
+								if t.RevokedAt != nil {
+									<span class="muted">revoked</span>
+								} else {
+									<form method="post" action={ templ.SafeURL(fmt.Sprintf("/account/tokens/%d/revoke", t.ID)) } style="margin:0">
+										<button class="secondary" type="submit">Revoke</button>
+									</form>
+								}
+							</td>
+						</tr>
+					}
+				</tbody>
+			</table>
+		}
+		if p.IsAdmin {
+			<h2>Invites</h2>
+			if newInvite != "" {
+				<div class="card">
+					<strong>New invite (shown once):</strong> <code>{ newInvite }</code>
+				</div>
+			}
+			<form method="post" action="/account/invites">
+				<button type="submit">Create invite</button>
+			</form>
+		}
+	}
+}
+
+templ ErrorPage(p Page, code int, message string) {
+	@layout(p) {
+		<div class="empty">
+			<h1>{ fmt.Sprintf("%d", code) }</h1>
+			<p>{ message }</p>
+			<p><a href="/">Back to projects</a></p>
+		</div>
+	}
+}
