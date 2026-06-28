@@ -86,6 +86,35 @@ resolve "latest" through the GitHub releases API; since the workflow publishes
 releases directly, a freshly tagged release is reachable as soon as the workflow
 finishes (GitHub's asset CDN can lag the publish by a few seconds).
 
+## Updating in place
+
+Both binaries can update themselves to the latest release: `akari update` and
+`akari-server update` (each with `--check` to report availability without
+installing, and `--force` to reinstall the latest even when current). The shared
+[`internal/selfupdate`](../internal/selfupdate) package resolves the latest
+release, downloads the matching archive, and verifies it against `SHA256SUMS`,
+the same assets the install scripts use.
+
+The client is a fully native updater (no shell or `curl`):
+
+- On Unix it writes the new binary alongside the running one and renames it over
+  the target. Replacing a running executable's file is allowed: the live process
+  keeps its open inode, and the next launch runs the new binary.
+- On Windows a running `.exe` cannot be overwritten, but it can be renamed, so
+  the updater moves the live binary to a `.old` sibling and drops the new one in
+  its place. The update therefore succeeds while akari is running; the `.old`
+  file (still the running image) is removed on the next update.
+
+Version comparison is semver-aware (`golang.org/x/mod/semver`), so a build
+already on or ahead of the latest release is left alone, and a development build
+(stamped with a commit SHA rather than a tag) is always treated as updatable.
+
+The server is Linux-only, so rather than reimplement the download it shells out
+to `install-server.sh` pinned to the resolved tag, then nudges a
+`systemctl restart akari-server` when the service is installed. It warns when run
+inside a container, where the right move is to rebuild the image and redeploy
+rather than update the binary in place.
+
 ## Container image
 
 The `Dockerfile` builds `akari-server`. To stamp the version into the container,

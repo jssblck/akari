@@ -25,6 +25,11 @@ func main() {
 		case "version", "--version", "-v":
 			fmt.Println(version.String())
 			return
+		case "update":
+			if err := runUpdate(os.Args[2:]); err != nil {
+				log.Fatalf("akari-server update: %v", err)
+			}
+			return
 		}
 	}
 	if len(os.Args) > 1 && os.Args[1] == "reparse" {

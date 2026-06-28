@@ -61,6 +61,26 @@ service, a dedicated `akari` user, and an environment file at
 `/etc/akari/server.env`. See [docs/releases.md](docs/releases.md) for the asset
 list and the install options.
 
+### Updating
+
+Both binaries update themselves to the latest release:
+
+```sh
+akari update            # update the client in place
+akari update --check    # report whether an update is available, install nothing
+akari-server update     # update the server in place
+```
+
+`akari update` is a native updater: it downloads the latest release archive for
+your platform, verifies it against the release `SHA256SUMS`, and swaps the
+binary in place with no shell or `curl` needed. On Windows it replaces the
+running executable by moving it aside, so the update succeeds while akari is
+running; restart any `akari watch`/`daemon` to pick up the new version.
+`akari-server update` reuses the install script, then reminds you to restart the
+service (`systemctl restart akari-server`) when one is installed. Inside a
+container, rebuild the image and redeploy instead of updating the binary in
+place; the server warns when it detects it is running in one.
+
 ## Running the server
 
 The server is a container workload configured from the environment. The included
@@ -92,6 +112,7 @@ akari-server            # run the HTTP server (default)
 akari-server reparse    # rebuild every projection from stored raw bytes
 akari-server reparse --agent claude   # limit a reparse to one agent
 akari-server sweep      # reclaim orphaned CAS blobs now
+akari-server update     # update to the latest release (see Updating below)
 akari-server version    # print the build version and exit
 ```
 
@@ -121,6 +142,7 @@ akari watch                # stay running, upload sessions as they change
 akari daemon start         # run watch in the background (per-OS)
 akari daemon status
 akari daemon stop
+akari update               # update to the latest release (see Updating below)
 akari version              # print the build version and exit
 ```
 

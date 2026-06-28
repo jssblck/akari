@@ -31,6 +31,8 @@ func main() {
 		err = runDaemon(os.Args[2:])
 	case "login":
 		err = runLogin(os.Args[2:])
+	case "update":
+		err = runUpdate(ctx, os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Println(version.String())
 		return
@@ -56,6 +58,7 @@ Usage:
   akari watch [--config PATH]                             watch continuously and upload changes (foreground)
   akari daemon {start|stop|status} [--config PATH]        manage the watch loop as a background process
   akari login --server URL --token TOKEN [--config PATH]  write the client config
+  akari update [--check]                                  update to the latest release in place
   akari version                                           print the build version and exit
 `)
 }
