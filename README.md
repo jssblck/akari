@@ -1,34 +1,160 @@
 # akari
 
-A Go application.
+akari collects the local session logs of coding agents (Claude Code, Codex, and
+pi), parses them on the server, and shows them in one place: a searchable history
+of every session across your machines, grouped by the git project they ran in,
+with token usage and cost. Sessions can be published for logged-out viewing.
 
-## Requirements
+It is an explicit client/server split. Many thin clients push raw session bytes
+to one server; the server does all the parsing, storage, and rendering. The
+client keeps no derived state, so a parser improvement reaches old sessions by
+re-parsing on the server, with nothing re-uploaded.
 
-- Go 1.26 or newer
+## How it fits together
 
-## Usage
+- **Clients** discover agent session files on disk, resolve each session's
+  working directory to a canonical git remote, and stream the raw bytes to the
+  server with a resumable, append-only protocol. A client runs anywhere; only the
+  server is Linux-only.
+- **The server** stores the raw bytes, parses them into a normalized projection
+  (messages, tool calls, token usage), prices usage from a compiled-in rate
+  table, and serves a web UI. Bulky tool bodies go into a content-addressed store
+  (Postgres large objects), deduped across sessions.
+- **Projects** are keyed by canonical git remote, so the same repo cloned into
+  several worktrees or machines collapses into one project.
 
-```sh
-go run . [name]
+```
+  agent logs            akari client                 akari server
+ (claude/codex/pi)  ──►  discover + resolve   ──►   ingest ─► parse ─► Postgres
+                         (git remote)               raw bytes   projection + CAS
+                                                                      │
+                                                              web UI (templ+htmx)
 ```
 
-Without an argument it greets the world; pass a name to greet someone specific:
+## Running the server
+
+The server is a container workload configured from the environment. The included
+`docker-compose.yml` brings up Postgres and the server together:
 
 ```sh
-$ go run . Ada
-Hello, Ada!
+docker compose up -d --build
 ```
+
+It listens on `:8080` by default. The first account you register becomes the
+admin and needs no invite; every later account needs an invite token an admin
+mints from the account page. Registration is otherwise closed.
+
+### Server configuration
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `AKARI_DATABASE_URL` | (required) | Postgres connection string. |
+| `AKARI_LISTEN` | `:8080` | Address the HTTP server binds. |
+| `AKARI_COOKIE_INSECURE` | unset | Set truthy to drop the `Secure` flag on session cookies for plain-HTTP local development. |
+| `AKARI_SWEEP_INTERVAL` | `1h` | How often the server reclaims orphaned CAS blobs. A Go duration (`30m`, `2h`); `0` disables the background sweep. |
+
+Migrations are embedded and applied on startup, so the server is safe to restart.
+
+### Maintenance subcommands
+
+```sh
+akari-server            # run the HTTP server (default)
+akari-server reparse    # rebuild every projection from stored raw bytes
+akari-server reparse --agent claude   # limit a reparse to one agent
+akari-server sweep      # reclaim orphaned CAS blobs now
+```
+
+`reparse` is how a parser change reaches already-ingested data; it sweeps
+afterward. `sweep` is the manual form of the periodic background sweep.
+
+## Running a client
+
+Build the client and point it at your server:
+
+```sh
+go build -o akari ./cmd/akari
+
+akari login --server https://akari.example.com --token <ingest-token>
+```
+
+Create the ingest token from the server's account page (the `ingest` scope is
+push-only). The client writes its config to the OS config directory.
+
+Then push your sessions:
+
+```sh
+akari sync                 # one-shot: scan and upload everything new
+akari sync --dry-run       # show what would upload, with skip reasons
+akari watch                # stay running, upload sessions as they change
+akari daemon start         # run watch in the background (per-OS)
+akari daemon status
+akari daemon stop
+```
+
+The client discovers Claude, Codex, and pi sessions in their standard locations.
+A session whose working directory is not a git repository is skipped with a
+warning rather than uploaded under an ambiguous project.
+
+## The web UI
+
+- **Projects index**: every project with session counts, token totals, and cost.
+- **Project view**: that project's sessions across all users and machines, with
+  agent, user, and machine filters.
+- **Session view**: a stats header (tokens in/out/cache, cost, duration, message
+  counts) and the transcript: messages, thinking, and tool calls. Tool input and
+  result bodies show as size/type chips that expand inline on click, fetched from
+  the CAS. Subagent sessions are listed under the session that spawned them. In-
+  progress sessions update live over server-sent events.
+- **Search**: trigram substring search across message content.
+- **Account**: API tokens (ingest or full scope), and invites for admins.
+
+### Visibility and publishing
+
+Sessions are `internal` (visible to any logged-in user) by default. There is no
+private-to-one-user state, by design: logged-in means you see everything. The
+owner of a session can publish it, which mints an unguessable link at
+`/s/{public_id}` for logged-out viewing; unpublishing clears the link so it stops
+resolving. A public page never exposes the numeric session id, and a published
+session only links to subagents that are themselves public.
+
+CAS blobs are served per session, not by bare hash: a viewer can fetch a tool
+body only through a session that references it and that they may see. This keeps
+the cross-session dedup from leaking an internal body through a public link.
+
+### Retention
+
+The owner of a session (or an admin) can delete it from the session page.
+Deleting cascades its transcript and raw bytes; any CAS blobs it referenced are
+reclaimed by the next sweep.
 
 ## Development
 
 ```sh
-go build ./...   # compile everything
-go test ./...    # run the tests
-go vet ./...     # static checks
+go build ./...    # compile everything
+go vet ./...
+go test ./...     # unit tests
+templ generate    # regenerate templates after editing internal/server/web/*.templ
 ```
 
-## Layout
+Integration tests share one Postgres database and each resets the `public`
+schema, so run them serialized and point them at a throwaway database:
 
-- `main.go` is the command entry point.
-- `internal/greet` holds the greeting logic, kept in an `internal` package so it
-  is importable only from within this module.
+```sh
+AKARI_TEST_DATABASE_URL=postgres://akari:akari@localhost:5432/akari_test \
+  go test -p 1 ./...
+```
+
+Tests that need the database skip cleanly when `AKARI_TEST_DATABASE_URL` is unset.
+
+### Layout
+
+- `cmd/akari-server` is the server entry point (plus `reparse` and `sweep`).
+- `cmd/akari` is the client CLI (`login`, `sync`, `watch`, `daemon`).
+- `internal/parser` holds the per-agent parsers and their fixtures.
+- `internal/pricing` is the compiled-in model rate table.
+- `internal/server` is the data layer, HTTP surface, parse pipeline, and web UI.
+- `internal/client` is discovery, git remote resolution, the upload protocol,
+  and the watch/daemon machinery.
+- `migrations` holds the embedded SQL schema.
+
+See `DESIGN.md` for the full design and rationale.

@@ -83,6 +83,8 @@ button, .btn {
   cursor: pointer;
 }
 button.secondary, .btn.secondary { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); }
+button.danger { background: var(--panel-2); color: var(--err); border: 1px solid var(--err); }
+button.danger:hover { background: var(--err); color: #0b0e13; }
 
 .badge {
   display: inline-block;

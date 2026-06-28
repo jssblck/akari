@@ -41,19 +41,46 @@ func run() error {
 		return err
 	}
 
-	ctx := context.Background()
-	st, err := store.Open(ctx, cfg.DatabaseURL)
+	// rootCtx is cancelled on shutdown so background work (the blob sweep) stops
+	// before the connection pool is closed. The deferred stop guarantees the
+	// context is always released; a second stop below also waits for the sweep.
+	rootCtx, stop := context.WithCancel(context.Background())
+	defer stop()
+
+	st, err := store.Open(rootCtx, cfg.DatabaseURL)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
 
-	migrateCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	migrateCtx, cancel := context.WithTimeout(rootCtx, 60*time.Second)
 	defer cancel()
 	if err := st.Migrate(migrateCtx, migrations.FS); err != nil {
 		return err
 	}
 	log.Printf("migrations applied")
+
+	// Reclaim orphaned CAS blobs in the background. Deleting a session or
+	// re-parsing can leave blobs unreferenced; a periodic sweep keeps the store
+	// from accumulating them without any per-write bookkeeping. sweepDone lets
+	// shutdown wait for an in-flight sweep before the pool closes.
+	sweepDone := make(chan struct{})
+	if cfg.SweepInterval > 0 {
+		go func() {
+			defer close(sweepDone)
+			runBackgroundSweep(rootCtx, st, cfg.SweepInterval)
+		}()
+	} else {
+		close(sweepDone)
+	}
+	// Registered after st.Close so LIFO runs it first: cancel the sweep and wait
+	// for it to finish before the pool closes, on every return path (including an
+	// early ListenAndServe error). Receiving from an already-closed sweepDone is
+	// safe, so this composes with the signal handler's own wait.
+	defer func() {
+		stop()
+		<-sweepDone
+	}()
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
@@ -77,9 +104,16 @@ func run() error {
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			log.Printf("shutdown: %v", err)
 		}
+		// Stop the background sweep and let it finish its current pass before the
+		// pool is closed by the deferred st.Close.
+		stop()
+		<-sweepDone
 		close(idleClosed)
 	}()
 
+	if cfg.SweepInterval > 0 {
+		log.Printf("background blob sweep every %s", cfg.SweepInterval)
+	}
 	log.Printf("akari-server listening on %s", cfg.Listen)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err

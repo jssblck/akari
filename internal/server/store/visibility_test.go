@@ -79,6 +79,62 @@ func TestPublishUnpublish(t *testing.T) {
 	}
 }
 
+func TestDeleteSessionCascadesAndOrphansBlob(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	u, err := st.Register(ctx, "grace", "hash", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("deleted tool body")
+	sid := seedSession(t, st, u.ID, projectID, "sess-del")
+	proj := Projection{
+		ParserVersion: 1, MessageCount: 1,
+		Messages: []ProjMessage{{Ordinal: 0, Role: "assistant", Content: "x", HasToolUse: true}},
+		ToolCalls: []ProjToolCall{{
+			MessageOrdinal: 0, CallIndex: 0, ToolName: "Read",
+			ResultBody: body, ResultBytes: int64(len(body)), ResultMediaType: "text/plain",
+			ResultStatus: "ok", HasResult: true,
+		}},
+	}
+	if err := st.WriteProjection(ctx, sid, 0, proj); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := st.DeleteSession(ctx, sid); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	// The session and everything keyed to it are gone.
+	if _, err := st.SessionDetailByID(ctx, sid); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("session lookup after delete = %v, want ErrNotFound", err)
+	}
+	for _, tbl := range []string{"messages", "tool_calls", "usage_events", "session_raw"} {
+		var n int
+		if err := st.Pool.QueryRow(ctx, "SELECT count(*) FROM "+tbl+" WHERE session_id = $1", sid).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Fatalf("%s still has %d rows for deleted session", tbl, n)
+		}
+	}
+
+	// The blob it referenced is now an orphan a sweep reclaims.
+	if removed, err := st.SweepBlobs(ctx); err != nil || removed != 1 {
+		t.Fatalf("sweep after delete removed=%d err=%v, want 1", removed, err)
+	}
+
+	// Deleting a missing session is ErrNotFound.
+	if err := st.DeleteSession(ctx, sid); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("delete missing = %v, want ErrNotFound", err)
+	}
+}
+
 // mintInvite creates a redeemable invite and returns the secret's hash, so a
 // second user can register in tests.
 func mintInvite(t *testing.T, st *Store, adminID int64) string {

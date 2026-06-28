@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"testing"
 
+	"github.com/jssblck/akari/internal/server/auth"
 	"github.com/jssblck/akari/internal/server/store"
 )
 
@@ -36,6 +37,86 @@ func seedToolSession(t *testing.T, st *store.Store, userID, projectID int64, sou
 		t.Fatalf("write projection %s: %v", source, err)
 	}
 	return ann.SessionID, store.HashBytes(body)
+}
+
+func TestDeleteSessionAuthz(t *testing.T) {
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+
+	admin, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), "")
+	if err != nil {
+		t.Fatalf("register admin: %v", err)
+	}
+	if _, err := st.CreateInvite(ctx, auth.HashToken("inv1"), admin.ID, "", nil); err != nil {
+		t.Fatalf("invite: %v", err)
+	}
+	user, err := st.Register(ctx, "ada", mustHash(t, "lovelace-1843"), auth.HashToken("inv1"))
+	if err != nil {
+		t.Fatalf("register user: %v", err)
+	}
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+
+	login := func(username, password string) *http.Client {
+		c := newClient(t)
+		c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		resp, err := c.PostForm(srv.URL+"/login", url.Values{"username": {username}, "password": {password}})
+		if err != nil {
+			t.Fatalf("login %s: %v", username, err)
+		}
+		resp.Body.Close()
+		return c
+	}
+	del := func(c *http.Client, id int64) int {
+		resp, err := c.PostForm(srv.URL+fmt.Sprintf("/sessions/%d/delete", id), url.Values{})
+		if err != nil {
+			t.Fatalf("delete %d: %v", id, err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	seed := func(owner int64, src string) int64 {
+		ann, err := st.Announce(ctx, store.AnnounceParams{
+			UserID: owner, Agent: "claude", SourceSessionID: src,
+			ProjectID: projectID, GitBranch: "main", Cwd: "/x", Machine: "m",
+		})
+		if err != nil {
+			t.Fatalf("announce %s: %v", src, err)
+		}
+		return ann.SessionID
+	}
+
+	adaClient := login("ada", "lovelace-1843")
+	graceClient := login("grace", "hopper-1906")
+
+	// A non-owner, non-admin cannot delete someone else's session.
+	graceSession := seed(admin.ID, "grace-1")
+	if code := del(adaClient, graceSession); code != http.StatusForbidden {
+		t.Fatalf("non-owner delete status = %d, want 403", code)
+	}
+	if _, err := st.SessionDetailByID(ctx, graceSession); err != nil {
+		t.Fatalf("session should survive a forbidden delete: %v", err)
+	}
+
+	// The owner can delete their own session.
+	adaSession := seed(user.ID, "ada-1")
+	if code := del(adaClient, adaSession); code != http.StatusSeeOther {
+		t.Fatalf("owner delete status = %d, want 303", code)
+	}
+	if _, err := st.SessionDetailByID(ctx, adaSession); err == nil {
+		t.Fatal("owner-deleted session still present")
+	}
+
+	// An admin can delete another user's session.
+	adaSession2 := seed(user.ID, "ada-2")
+	if code := del(graceClient, adaSession2); code != http.StatusSeeOther {
+		t.Fatalf("admin delete status = %d, want 303", code)
+	}
+	if _, err := st.SessionDetailByID(ctx, adaSession2); err == nil {
+		t.Fatal("admin-deleted session still present")
+	}
 }
 
 func TestBlobServingAccessControl(t *testing.T) {

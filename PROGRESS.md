@@ -275,7 +275,37 @@ serving and on-demand expansion in the UI.
   synchronous full sweep on every client reset would be a performance footgun),
   matching the design's "sweep runs after deletions or re-parses".
 
-## Milestone 8: polish (not started)
+## Milestone 8: polish (DONE)
+
+Goal: round out the lifecycle and the docs. Session deletion (retention), a
+configurable background blob sweep, a real README, and broader parser coverage.
+
+- [x] internal/server/store: DeleteSession cascades a session's derived rows and
+      raw bytes; referenced blobs are reclaimed by a later sweep
+- [x] internal/server/httpapi: POST /sessions/{id}/delete (owner or admin), with
+      a delete control on the session page guarded by owner || admin
+- [x] internal/config + cmd/akari-server: AKARI_SWEEP_INTERVAL (default 1h, 0
+      disables); a background goroutine sweeps on the interval, cancelled cleanly
+      on shutdown before the pool closes
+- [x] README rewritten: what akari is, the client/server split, server and client
+      setup, configuration table, maintenance subcommands, the UI, publishing,
+      retention, and development
+- [x] Broader parser coverage: a Claude error tool result delivered as text
+      blocks (error status, flattened body, faithful size/media)
+- [x] Tests: DeleteSession cascade + orphan, delete authz (non-owner 403, owner
+      and admin allowed), config duration parsing
+- [x] e2e: deleted a session in the browser (redirect to the now-empty project),
+      confirmed the background sweep logs on startup and the sweep subcommand runs
+- [x] codex review (gpt-5.5 high) twice; the shutdown race it found was fixed and
+      re-verified
+
+### Milestone 8 codex findings (all fixed)
+
+- MEDIUM: the background sweep ran on context.Background(), so on SIGTERM the
+  connection pool could close while a sweep was in flight (use-after-close). The
+  sweep now runs on a cancelable root context; shutdown cancels it and waits on a
+  sweepDone channel before the pool closes, covering the SIGTERM, early
+  ListenAndServe error, and migrate-error paths (go vet lostcancel clean).
 
 ## Deferred (from codex review, to address in later milestones)
 

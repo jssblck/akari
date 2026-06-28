@@ -26,6 +26,23 @@ func (s *Store) PublishSession(ctx context.Context, sessionID, userID int64, can
 	return publicID, err
 }
 
+// DeleteSession removes a session and everything derived from it. The foreign
+// keys cascade messages, tool calls, usage events, attachments, and the raw
+// bytes; child sessions have their parent pointer nulled. Any CAS blobs the
+// session referenced are left for a later SweepBlobs to reclaim. Authorization
+// (owner or admin) is enforced by the caller, so this deletes unconditionally by
+// id and returns ErrNotFound when nothing matched.
+func (s *Store) DeleteSession(ctx context.Context, sessionID int64) error {
+	tag, err := s.Pool.Exec(ctx, "DELETE FROM sessions WHERE id = $1", sessionID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // UnpublishSession returns a session to internal visibility and clears its public
 // id, so the old link stops resolving rather than merely flipping a flag. It is
 // owner-scoped; a session the user does not own yields ErrNotFound.

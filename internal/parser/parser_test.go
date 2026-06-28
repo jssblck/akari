@@ -84,6 +84,40 @@ func TestParseClaude(t *testing.T) {
 	}
 }
 
+// TestParseClaudeToolError covers an error tool result delivered as an array of
+// text blocks: the status is "error", the body flattens to readable text, and the
+// size and media type describe the flattened body.
+func TestParseClaudeToolError(t *testing.T) {
+	raw := []byte(`{"type":"user","timestamp":"2024-01-01T10:00:00Z","message":{"content":"run it"}}
+{"type":"assistant","timestamp":"2024-01-01T10:00:01Z","message":{"id":"m1","model":"claude-sonnet-4-20250514","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"false"}}]}}
+{"type":"user","timestamp":"2024-01-01T10:00:02Z","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":[{"type":"text","text":"command failed: exit 1"}]}]}}
+`)
+	s, err := Parse(AgentClaude, raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(s.ToolCalls) != 1 {
+		t.Fatalf("tool calls = %d, want 1", len(s.ToolCalls))
+	}
+	tc := s.ToolCalls[0]
+	if tc.ToolName != "Bash" {
+		t.Errorf("tool name = %q", tc.ToolName)
+	}
+	if tc.ResultStatus != "error" {
+		t.Errorf("result status = %q, want error", tc.ResultStatus)
+	}
+	if tc.ResultBody != "command failed: exit 1" {
+		t.Errorf("result body = %q", tc.ResultBody)
+	}
+	if tc.ResultMediaType != "text/plain" || tc.ResultBytes != len("command failed: exit 1") {
+		t.Errorf("result size = %d (%s)", tc.ResultBytes, tc.ResultMediaType)
+	}
+	// The input is captured as raw JSON for the CAS.
+	if tc.InputJSON == "" || tc.FilePath != "" {
+		t.Errorf("input = %q file=%q", tc.InputJSON, tc.FilePath)
+	}
+}
+
 func TestParseCodex(t *testing.T) {
 	s, err := Parse(AgentCodex, loadFixture(t, "codex.jsonl"))
 	if err != nil {
