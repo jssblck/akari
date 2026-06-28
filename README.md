@@ -31,6 +31,36 @@ re-parsing on the server, with nothing re-uploaded.
                                                               web UI (templ+htmx)
 ```
 
+## Install
+
+Prebuilt, checksum-verified binaries are published for each release. Each script
+downloads the archive for your OS and architecture, verifies it against the
+release `SHA256SUMS`, and installs the binary. Set `AKARI_VERSION` (for example
+`v0.1.0`) to pin a version instead of taking the latest.
+
+Client, Linux and macOS:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jssblck/akari/main/scripts/install.sh | sh
+```
+
+Client, Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/jssblck/akari/main/scripts/install.ps1 | iex
+```
+
+Server, Linux:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jssblck/akari/main/scripts/install-server.sh | sh
+```
+
+Add `-s -- --systemd` to the server command to also install a managed systemd
+service, a dedicated `akari` user, and an environment file at
+`/etc/akari/server.env`. See [docs/releases.md](docs/releases.md) for the asset
+list and the install options.
+
 ## Running the server
 
 The server is a container workload configured from the environment. The included
@@ -70,7 +100,8 @@ afterward. `sweep` is the manual form of the periodic background sweep.
 
 ## Running a client
 
-Build the client and point it at your server:
+Install the client (see [Install](#install) above) or build it from source, then
+point it at your server:
 
 ```sh
 go build -o akari ./cmd/akari

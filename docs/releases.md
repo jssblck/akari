@@ -66,6 +66,22 @@ is pure Go, so there is no per-OS runner matrix. The binaries are built with
 `-trimpath -ldflags "-s -w -X .../version.Version=<tag>"`, so they are stripped,
 reproducible, and report the tag through `--version`.
 
+## Install scripts
+
+The `scripts/` directory holds the installers the README points users at:
+
+- `install.sh`: client for Linux and macOS.
+- `install.ps1`: client for Windows.
+- `install-server.sh`: server for Linux, with an optional `--systemd` flag that
+  installs a managed service, a dedicated `akari` user, and an environment file.
+
+Each resolves the release to install (the latest published release, or the tag
+in `AKARI_VERSION`), downloads the matching archive and `SHA256SUMS`, verifies
+the checksum before extracting, and installs the binary. They depend only on the
+asset names above, so they keep working across releases without changes. Because
+they resolve "latest" through the GitHub releases API, a release must be
+published (not left as a draft) before the no-version install path can find it.
+
 ## Container image
 
 The `Dockerfile` builds `akari-server`. To stamp the version into the container,
