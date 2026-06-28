@@ -28,10 +28,11 @@ type Header struct {
 	GitBranch string
 	SourceID  string
 
-	// sessionID holds the raw in-file session id (Claude's sessionId, Codex's
-	// payload.id, pi's id) before it is turned into a unique SourceID. For Claude
-	// it is the parent session id even on a subagent file, since subagents record
-	// their parent's sessionId. PeekHeader uses it to derive the final SourceID.
+	// sessionID holds the raw in-file session id for the agents that key on it
+	// (Codex's payload.id, pi's id). Claude does not use it: its sessionId is
+	// repeated across a session's subagent and workflow files and is even reused by
+	// a resumed or forked session in a new file, so Claude keys on the file's path
+	// instead. PeekHeader turns this into the final SourceID.
 	sessionID string
 }
 
@@ -231,9 +232,8 @@ func applyHeaderLine(agent string, e gjson.Result, h *Header) {
 		if v := e.Get("gitBranch").String(); v != "" {
 			h.GitBranch = v
 		}
-		if v := e.Get("sessionId").String(); v != "" {
-			h.sessionID = v
-		}
+		// Claude's in-file sessionId is deliberately ignored: it is not unique per
+		// file (see sourceID). The path-derived fallback is the id.
 	case "codex":
 		p := e.Get("payload")
 		if v := p.Get("cwd").String(); v != "" {
@@ -255,47 +255,30 @@ func applyHeaderLine(agent string, e gjson.Result, h *Header) {
 	}
 }
 
-// subagentsSegment is the path segment Claude uses for runs spawned by a session
-// (subagents and the workflows nested under them). Its presence in a file's path
-// is what marks the file as a child of a main session rather than the main file.
-const subagentsSegment = "subagents"
-
-// sourceID turns the raw in-file session id into a stable id that is unique per
-// file. Codex and pi already carry one id per file, so their in-file id stands.
+// sourceID turns a peeked header into a stable id that is unique per file. The
+// server keys sessions on (user, agent, source_session_id), so two files sharing
+// an id fold onto one row and clobber each other.
 //
-// Claude is the exception: a main session file (<sessionId>.jsonl directly under
-// a project dir) and every subagent and workflow file beneath it record the same
-// sessionId, so adopting that id verbatim collapses a whole session tree onto one
-// row. Only the main file keeps the bare sessionId, which preserves identity when
-// a session resumes into the same file. A subagent or workflow file instead gets
-// <parentSessionId>/<path-from-the-session-dir>, which is unique per file and
-// keeps every child grouped under its parent. For example a subagent resolves to
-// "<sid>/subagents/agent-ac2d35a2" and a workflow journal to
-// "<sid>/subagents/workflows/wf_1c721b08/journal".
+// Codex and pi write one id per file, so their in-file id stands. Claude is the
+// exception twice over: every subagent and workflow file repeats its parent's
+// sessionId, and a resumed or forked session writes a new file (named by a fresh
+// id) that still records the original sessionId inside. Both make the in-file
+// sessionId ambiguous, so Claude keys on the file's location, which it does keep
+// unique: each session file has its own name and children nest under a per-session
+// directory. Dropping the leading project directory (an encoded cwd) yields
+// "<id>" for a main file and "<id>/subagents/..." for a child, which stays unique
+// and keeps children grouped under their parent. An ordinary session, whose file
+// is named by its sessionId, still resolves to exactly that id, so the scheme is
+// unchanged except for the forked and child files it now keeps distinct.
 func sourceID(f discover.File, sessionID string) string {
 	if f.Agent != "claude" {
 		return sessionID
 	}
 	rel := relPath(f.Root, f.Path)
-	suffix, ok := fromSegment(rel, subagentsSegment)
-	if !ok {
-		return sessionID // main session file: keep its real sessionId
+	if i := strings.IndexByte(rel, '/'); i >= 0 {
+		return rel[i+1:]
 	}
-	return sessionID + "/" + suffix
-}
-
-// fromSegment returns the portion of rel (a slash-separated, extension-stripped
-// path) starting at the first occurrence of seg, reporting whether seg is
-// present. It is how a subagent file's id is anchored at the "subagents" segment
-// rather than the project dir, whose name is a long encoded cwd.
-func fromSegment(rel, seg string) (string, bool) {
-	parts := strings.Split(rel, "/")
-	for i, p := range parts {
-		if p == seg {
-			return strings.Join(parts[i:], "/"), true
-		}
-	}
-	return "", false
+	return rel
 }
 
 // sourceIDFromName derives a stable source id from the file's location relative
