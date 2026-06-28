@@ -269,24 +269,61 @@ explicit divergence check.
    fragile signals like inode and device numbers, which are unreliable across
    platforms and rewrites.
 
+   The client keeps the hash incremental so a long session does not re-hash its
+   whole prefix on every sync. It caches, per file, the verified offset and a
+   resumable sha256 digest of `[0, verified)`. An append-only file whose prefix is
+   already cached is confirmed by comparing the cached digest (no I/O); a file the
+   server has grown past the cache is confirmed by hashing only the new span; and
+   after a successful append the digest advances over the bytes just sent, which
+   the client already holds. Only a cold cache, a server rewind, or a truncation
+   (a file shorter than the cache describes) falls back to a full re-hash. The
+   cache is an in-memory accelerator: losing it costs one re-hash, never
+   correctness, since the server's `prefix_sha256` remains the sole authority on
+   divergence.
+
 2. **Append bytes.**
    `POST /api/v1/ingest/session/{id}/chunk?offset=40960`
-   with the raw bytes from that offset as the body. Chunks are always terminated
-   on a newline: the client uploads only through the last `\n` it sees, so a
-   chunk never includes a partially written final line, and `stored_bytes` always
-   rests on a JSONL line boundary. The server:
+   with the raw bytes from that offset as the body. A chunk ends on a message
+   boundary, never inside a message. For Claude and pi a message is one JSONL
+   line, so a chunk ends on the last `\n`. For Codex a message is a folded turn
+   (reasoning, tool calls, and the assistant reply), so a chunk ends on a turn
+   boundary: the client cuts right after a user line, which is where a turn
+   closes. This keeps a turn inside one chunk, and therefore inside one parse
+   region, which is what lets the projection write each message exactly once. The
+   client prefers ~1 MiB chunks but grows a chunk to hold one oversized message,
+   up to a 128 MiB cap, so a giant single turn is served alone rather than split.
+   That cap is enforced against the open region before any buffer is allocated: a
+   message that grows past it without closing is refused, so the client never
+   buffers more than the cap. Boundary detection is incremental too. The client
+   caches how far it has scanned a file for the next boundary, so a trailing turn
+   that is still open is not re-scanned from its start each tick; only the newly
+   appended bytes are examined. The final turn of a session has no closing user
+   line, so the client withholds it until the file goes idle (it has not changed
+   for a settle window), then flushes it whole. The server:
    - Rejects with the current length if `offset` does not equal `stored_bytes`
      (idempotent: a re-sent chunk whose offset is behind is a no-op that returns
      the truth, so the client simply advances).
-   - Appends to the raw store and folds the chunk into the stored content hash.
-   - Parses only the appended region (offset-based, assigning message ordinals
-     after the last stored ordinal). Because every stored byte ends on a line
-     boundary, the parser only ever sees complete lines.
+   - Rejects a chunk that is empty or does not end on a newline, so the line
+     boundary the parser relies on is a server-enforced invariant, not just a
+     client convention. (Turn alignment is a client guarantee the server does not
+     re-check: a misaligned chunk would at worst render one turn as two messages,
+     never corrupt the store.)
+   - Appends the chunk as a new raw row and advances the content hash by resuming
+     its stored digest state over only the new bytes. Both are one transaction:
+     once it commits, the upload has succeeded regardless of what parsing does.
+   - In a second transaction, parses only the bytes past the parse cursor
+     (assigning ordinals after the last stored ordinal) and applies them to the
+     projection incrementally. Because every stored byte ends on a line boundary,
+     the parser only ever sees complete lines. Parsing is best effort: a parse
+     failure leaves the durable bytes in place and the cursor where it was, for
+     the next chunk or a reparse to advance, so client ingest health never
+     depends on parser correctness.
    - Returns the new `stored_bytes` and the new message count.
 
 3. **Reset.** `POST /api/v1/ingest/session/{id}/reset` truncates the raw store
-   and its hash, drops the derived rows, and re-parses from zero on the next
-   chunk. The client calls this when the announce divergence check fails.
+   (its chunks, length, and hash), drops the derived rows, rewinds the parse
+   cursor, and re-parses from zero on the next chunk. The client calls this when
+   the announce divergence check fails.
 
 Because the server stores raw bytes and `stored_bytes` is the cursor, there is
 no separate client-visible sync watermark to keep coherent: the server is always
@@ -295,10 +332,29 @@ match mine."
 
 ### Server-side parsing pipeline
 
-The parser package is shared design across the three agents and produces the
-projection structs. It runs in two situations: incrementally on each appended
-chunk, and in bulk when re-parsing stored raw bytes after a parser upgrade
-(`akari-server reparse [--agent claude]`).
+The parser is a per-agent line reducer: given a small carry-over state (the next
+ordinal, and for Codex the sticky model) and a region of complete lines, it
+returns the next state and a projection delta (rows to add, results to
+back-patch, and the increments to fold into the session rollups). The carry-over
+is bounded to counters: no per-message accumulation and no open turn live in it.
+A Codex turn folds a run of items into one assistant message, but that fold never
+crosses a region, because the ingest protocol keeps a whole turn inside one chunk
+(and a chunk inside one region). So each `messages` row is written exactly once,
+with its complete text, never appended to in place. The one cross-region
+dependency that remains is a tool result: Claude delivers a `tool_result` in the
+following user entry, which can land in a later region, so a result is
+back-patched to its call by the call id (a per-session unique index makes that a
+constant-time, single-row update). The state and the parse cursor are stored on
+the `session_raw` row, so a chunk parses only its own bytes.
+
+The batch parser used by tests and the bulk reparse is a thin wrapper over the
+same reducer fed the whole file at once, so incremental and full parsing cannot
+diverge. Reparse (`akari-server reparse [--agent claude]`) reaches already-ingested
+data after a parser upgrade: it clears the derived rows, rewinds the cursor, and
+replays the stored raw through the reducer from scratch. A session partially
+parsed by an older parser version refuses to advance incrementally (the stored
+`parse_state_version` no longer matches) until that reparse rewinds it, so a
+version change can never blend two parsers' output.
 
 Per-agent specifics the parser must handle:
 
@@ -426,12 +482,31 @@ CREATE INDEX idx_sessions_public  ON sessions(id) WHERE visibility = 'public';
 CREATE INDEX idx_sessions_parent  ON sessions(parent_session_id)
   WHERE parent_session_id IS NOT NULL;
 
--- Raw bytes: lossless backup and re-parse source (text, inline; TOAST handles size)
+-- Raw bytes: lossless backup and re-parse source. Append-only. The parent row
+-- holds the cursor, the prefix hash and its resumable digest state, and the parse
+-- cursor + serialized parser state; the bytes themselves are appended as chunk
+-- rows so growth is O(append), never a detoast-and-rewrite of the whole value.
 CREATE TABLE session_raw (
-  session_id     BIGINT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
-  content        TEXT NOT NULL DEFAULT '',
-  byte_len       BIGINT NOT NULL DEFAULT 0,  -- == sessions cursor, line-aligned
-  content_sha256 CHAR(64) NOT NULL DEFAULT '' -- sha256 of content; the prefix hash
+  session_id          BIGINT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+  byte_len            BIGINT NOT NULL DEFAULT 0,    -- == sessions cursor, line-aligned
+  content_sha256      CHAR(64) NOT NULL DEFAULT '...', -- sha256 of all bytes; the prefix hash
+  sha256_state        BYTEA,                        -- resumable digest, so hashing is O(append)
+  parsed_byte_len     BIGINT NOT NULL DEFAULT 0,    -- how far parsing has consumed
+  parse_state_version INT NOT NULL DEFAULT 0,       -- parser version that wrote parse_state
+  parse_state         JSONB NOT NULL DEFAULT '{}',  -- bounded per-agent resume cursor
+  parse_error         TEXT NOT NULL DEFAULT '',
+  CHECK (parsed_byte_len <= byte_len)
+);
+
+-- One row per uploaded chunk. The client already trims each chunk to a newline,
+-- so every row boundary is a JSONL line boundary and a parse can resume at any of
+-- them. byte_offset is the sequence.
+CREATE TABLE session_raw_chunks (
+  session_id  BIGINT NOT NULL REFERENCES session_raw(session_id) ON DELETE CASCADE,
+  byte_offset BIGINT NOT NULL,
+  byte_len    BIGINT NOT NULL,
+  content     BYTEA NOT NULL,
+  PRIMARY KEY (session_id, byte_offset)
 );
 
 -- Parsed projection
@@ -445,7 +520,9 @@ CREATE TABLE messages (
   timestamp      TIMESTAMPTZ,
   has_thinking   BOOLEAN NOT NULL DEFAULT FALSE,
   has_tool_use   BOOLEAN NOT NULL DEFAULT FALSE,
-  content_length INT NOT NULL DEFAULT 0,
+  content_length INT GENERATED ALWAYS AS (octet_length(content)) STORED,
+  -- A row is written once: a whole turn lands in one chunk, so content is never
+  -- appended in place and there is no "still accumulating" state to track.
   PRIMARY KEY (session_id, ordinal)
 );
 -- Trigram index for full-text search over message content
@@ -466,8 +543,15 @@ CREATE TABLE tool_calls (
   result_bytes      BIGINT,
   result_media_type TEXT,
   result_status     TEXT,                  -- ok | error | (empty if pending)
+  call_uid          TEXT,                  -- agent's call id; back-patches the result by UPDATE
   PRIMARY KEY (session_id, message_ordinal, call_index)
 );
+-- Unique per session: a call id is unique within a session, so back-patching a
+-- result touches exactly one row in constant time. Safe because storage and
+-- parsing are separate transactions, so a malformed duplicate id can only stall
+-- that session's parse (recoverable by reparse), never fail an append.
+CREATE UNIQUE INDEX idx_tool_calls_call_uid ON tool_calls(session_id, call_uid)
+  WHERE call_uid IS NOT NULL;
 
 CREATE TABLE usage_events (
   id                    BIGSERIAL PRIMARY KEY,
@@ -481,10 +565,16 @@ CREATE TABLE usage_events (
   reasoning_tokens      INT NOT NULL DEFAULT 0,
   cost_usd              DOUBLE PRECISION,
   occurred_at           TIMESTAMPTZ,
-  dedup_key             TEXT NOT NULL DEFAULT ''
+  dedup_key             TEXT NOT NULL DEFAULT '',
+  source_offset         BIGINT,           -- raw byte offset of the originating line
+  source_index          INT NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX idx_usage_dedup ON usage_events(session_id, dedup_key)
   WHERE dedup_key <> '';
+-- Source identity makes incremental inserts idempotent even for Codex, whose
+-- usage carries no native dedup key; a replayed line is absorbed by ON CONFLICT.
+CREATE UNIQUE INDEX idx_usage_source ON usage_events(session_id, source_offset, source_index)
+  WHERE source_offset IS NOT NULL;
 
 -- Content-addressed store (Postgres large objects): anything too large to inline
 -- (binary attachments, bulky tool input/result bodies), deduped by content hash.
@@ -541,9 +631,10 @@ self-healing (a drifted count can never strand or prematurely free a blob). The
 sweep only needs to run after deletions or re-parses, since nothing else can
 orphan a blob.
 
-Conversational text (message content and thinking) and the raw session bytes
-stay inline in `messages` and `session_raw`, so they remain searchable and render
-straight from the tables. The CAS takes the large objects: binary attachments
+Conversational text (message content and thinking) stays inline in `messages`, so
+it remains searchable and renders straight from the table, and the raw session
+bytes live in their own append-only `session_raw_chunks` table as the lossless
+backup and reparse source. The CAS takes the large objects: binary attachments
 and bulky tool bodies today, and anything else that would bloat a row later,
 shown in the UI as metadata until expanded.
 
@@ -671,16 +762,20 @@ Drive the ingest protocol above, statelessly, once per file each time it is
 visited:
 
 - Announce the session, learn `stored_bytes` and the server's `prefix_sha256`.
-- Verify: hash the local file's first `stored_bytes` bytes and compare. On
-  mismatch (or a local file shorter than `stored_bytes`), call reset and
-  re-upload from zero; otherwise resume at `stored_bytes`.
-- Stream the gap in bounded chunks (a few MB), each truncated to the last newline
-  so only complete JSONL lines are sent, advancing on each ack.
+- Verify: confirm the local file's first `stored_bytes` bytes hash to
+  `prefix_sha256`, advancing the cached digest over only the newly stored bytes
+  rather than re-hashing the whole prefix. On mismatch (or a local file shorter
+  than `stored_bytes`), call reset and re-upload from zero; otherwise resume at
+  `stored_bytes`.
+- Stream the gap in boundary-aligned chunks (~1 MiB, growing to fit one oversized
+  message up to the cap), scanning only newly appended bytes for the next
+  boundary, advancing on each ack.
 
-There is nothing to persist on the client. If the local file already matches the
-server (size equals `stored_bytes`, hashes agree), the announce is the only call
-and no bytes move. Restarts, crashes, and a fresh machine all recover by simply
-re-announcing; divergence is always decided by the server's `prefix_sha256`.
+The client persists nothing to disk; its per-file cursor and digest live only in
+memory. If the local file already matches the server (size equals `stored_bytes`,
+hashes agree), the announce is the only call and no bytes move. Restarts, crashes,
+and a fresh machine all recover by simply re-announcing, paying one re-hash to
+rebuild the cache; divergence is always decided by the server's `prefix_sha256`.
 
 ### Watch mode (default)
 

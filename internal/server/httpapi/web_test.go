@@ -299,14 +299,14 @@ func TestPublicSessionFlow(t *testing.T) {
 		t.Fatalf("announce: %v", err)
 	}
 	sid := ann.SessionID
-	if err := st.WriteProjection(ctx, sid, 0, store.Projection{
-		ParserVersion: 1,
-		MessageCount:  1,
-		Messages: []store.ProjMessage{
+	if err := st.ApplyProjectionDelta(ctx, sid, store.ProjectionDelta{
+		MessagesAdded:     1,
+		UserMessagesAdded: 1,
+		Messages: []store.MessageDelta{
 			{Ordinal: 0, Role: "user", Content: "Fix the secret login bug"},
 		},
 	}); err != nil {
-		t.Fatalf("write projection: %v", err)
+		t.Fatalf("apply projection: %v", err)
 	}
 
 	// Log in as the owner.

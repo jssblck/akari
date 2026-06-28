@@ -54,6 +54,12 @@ type Message struct {
 // ResultBody exactly, so the recorded size and media type always match the stored
 // content. InputJSON is the raw tool-input JSON; ResultBody is the result body
 // (a tool result that is an array of text blocks is flattened to its text).
+//
+// CallUID is the agent's own call id; the incremental pipeline records it on the
+// row so a tool result arriving in a later line (Claude delivers tool_result in
+// the following user entry, which may land in a later region) is back-patched by
+// an UPDATE keyed on it rather than by a parser-held id->row map. It is carried
+// on inserts only; a Session assembled for tests ignores it.
 type ToolCall struct {
 	MessageOrdinal  int
 	CallIndex       int
@@ -65,10 +71,13 @@ type ToolCall struct {
 	ResultBytes     int
 	ResultMediaType string
 	ResultStatus    string // "ok" | "error" | "" (pending)
+	CallUID         string
 }
 
 // Usage is one token-accounting record. MessageOrdinal is nil for session-level
-// totals not tied to a single message.
+// totals not tied to a single message. SourceOffset and SourceIndex identify the
+// originating line (and its position within it) so incremental inserts are
+// idempotent even for agents whose usage carries no native dedup key.
 type Usage struct {
 	MessageOrdinal *int
 	Model          string
@@ -79,4 +88,6 @@ type Usage struct {
 	Reasoning      int
 	OccurredAt     time.Time
 	DedupKey       string
+	SourceOffset   int64
+	SourceIndex    int
 }

@@ -24,17 +24,19 @@ func seedToolSession(t *testing.T, st *store.Store, userID, projectID int64, sou
 	if err != nil {
 		t.Fatalf("announce %s: %v", source, err)
 	}
-	proj := store.Projection{
-		ParserVersion: 1, MessageCount: 1,
-		Messages: []store.ProjMessage{{Ordinal: 0, Role: "assistant", Content: "x", HasToolUse: true}},
+	delta := store.ProjectionDelta{
+		MessagesAdded: 1,
+		Messages:      []store.MessageDelta{{Ordinal: 0, Role: "assistant", Content: "x", HasToolUse: true}},
 		ToolCalls: []store.ProjToolCall{{
-			MessageOrdinal: 0, CallIndex: 0, ToolName: "Read", Category: "read",
-			HasResult: true, ResultBody: body, ResultBytes: int64(len(body)),
-			ResultMediaType: "text/plain", ResultStatus: "ok",
+			MessageOrdinal: 0, CallIndex: 0, ToolName: "Read", Category: "read", CallUID: "call-" + source,
+		}},
+		ToolResults: []store.ToolResultDelta{{
+			CallUID: "call-" + source, Body: string(body), Bytes: int64(len(body)),
+			MediaType: "text/plain", Status: "ok",
 		}},
 	}
-	if err := st.WriteProjection(ctx, ann.SessionID, 0, proj); err != nil {
-		t.Fatalf("write projection %s: %v", source, err)
+	if err := st.ApplyProjectionDelta(ctx, ann.SessionID, delta); err != nil {
+		t.Fatalf("apply projection %s: %v", source, err)
 	}
 	return ann.SessionID, store.HashBytes(body)
 }

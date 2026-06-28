@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -265,6 +266,19 @@ func (s *Store) SessionDetailByID(ctx context.Context, id int64) (SessionDetail,
 // SessionDetailByPublicID loads a published session by its public id.
 func (s *Store) SessionDetailByPublicID(ctx context.Context, publicID string) (SessionDetail, error) {
 	return s.scanDetail(ctx, "s.public_id = $1 AND s.visibility = 'public'", publicID)
+}
+
+// MessageCount returns a session's current message count from its rollup.
+func (s *Store) MessageCount(ctx context.Context, sessionID int64) (int, error) {
+	var n int
+	err := s.Pool.QueryRow(ctx, "SELECT message_count FROM sessions WHERE id = $1", sessionID).Scan(&n)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read message count for session %d: %w", sessionID, err)
+	}
+	return n, nil
 }
 
 // Messages returns a session's transcript in order.

@@ -176,6 +176,15 @@ func TestIngestFlow(t *testing.T) {
 		t.Fatalf("combined prefix hash mismatch")
 	}
 
+	// A chunk that does not end on a newline is rejected and stores nothing: the
+	// server only ever holds complete lines.
+	if _, err := st.AppendChunk(ctx, first.SessionID, int64(len(line1)+len(line2)), []byte("no newline here")); !errors.Is(err, ErrChunkNotLineAligned) {
+		t.Fatalf("unterminated chunk: want ErrChunkNotLineAligned, got %v", err)
+	}
+	if r := announce(); r.StoredBytes != int64(len(line1)+len(line2)) {
+		t.Fatalf("rejected chunk changed the cursor to %d", r.StoredBytes)
+	}
+
 	// Reset clears the raw store.
 	if err := st.ResetRaw(ctx, first.SessionID); err != nil {
 		t.Fatalf("reset: %v", err)
@@ -185,9 +194,11 @@ func TestIngestFlow(t *testing.T) {
 	}
 }
 
-// TestWriteProjectionStaleGuard confirms a projection parsed from a stale raw
-// length is rejected, so an older parse cannot clobber a newer one.
-func TestWriteProjectionStaleGuard(t *testing.T) {
+// TestAdvanceProjectionCursorAndVersionGate exercises the incremental applier
+// directly with a stub reducer: the parse cursor advances to the stored length
+// and folds the delta into the aggregates, a caught-up session is a no-op, and a
+// session partially parsed by one version refuses to continue under another.
+func TestAdvanceProjectionCursorAndVersionGate(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 
@@ -200,39 +211,154 @@ func TestWriteProjectionStaleGuard(t *testing.T) {
 		t.Fatal(err)
 	}
 	ann, err := st.Announce(ctx, AnnounceParams{
-		UserID: u.ID, Agent: "claude", SourceSessionID: "sess-stale", ProjectID: projectID,
+		UserID: u.ID, Agent: "claude", SourceSessionID: "sess-adv", ProjectID: projectID,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw := []byte("line one\nline two\n")
-	if _, err := st.AppendChunk(ctx, ann.SessionID, 0, raw); err != nil {
+	if _, err := st.AppendChunk(ctx, ann.SessionID, 0, []byte("line one\nline two\n")); err != nil {
 		t.Fatal(err)
 	}
 
-	p := Projection{MessageCount: 1, ParserVersion: 1, Messages: []ProjMessage{{Ordinal: 0, Role: "user", Content: "x"}}}
-
-	// A write whose rawBytes lags the stored length is stale and must be refused.
-	if err := st.WriteProjection(ctx, ann.SessionID, int64(len(raw))-1, p); !errors.Is(err, ErrStaleProjection) {
-		t.Fatalf("stale write: want ErrStaleProjection, got %v", err)
-	}
-	var count int
-	if err := st.Pool.QueryRow(ctx, "SELECT count(*) FROM messages WHERE session_id=$1", ann.SessionID).Scan(&count); err != nil {
-		t.Fatal(err)
-	}
-	if count != 0 {
-		t.Fatalf("stale write left %d message rows, want 0", count)
+	// A stub reducer that emits one message per call, keyed by the region's base
+	// offset so repeated calls never collide on the messages primary key.
+	var calls int
+	reduce := func(state, region []byte, base int64) ([]byte, ProjectionDelta, error) {
+		calls++
+		return []byte("{}"), ProjectionDelta{
+			MessagesAdded: 1, UserMessagesAdded: 1, AddInput: 5,
+			Messages: []MessageDelta{{Ordinal: int(base), Role: "user", Content: "x"}},
+		}, nil
 	}
 
-	// A write matching the stored length succeeds.
-	if err := st.WriteProjection(ctx, ann.SessionID, int64(len(raw)), p); err != nil {
-		t.Fatalf("matching write: %v", err)
+	parsedTo, caughtUp, err := st.AdvanceProjection(ctx, ann.SessionID, 1, reduce)
+	if err != nil {
+		t.Fatalf("advance: %v", err)
 	}
-	if err := st.Pool.QueryRow(ctx, "SELECT count(*) FROM messages WHERE session_id=$1", ann.SessionID).Scan(&count); err != nil {
+	if !caughtUp || parsedTo != int64(len("line one\nline two\n")) {
+		t.Fatalf("advance: caughtUp=%v parsedTo=%d", caughtUp, parsedTo)
+	}
+
+	var mc int
+	var in int64
+	var parsed int64
+	if err := st.Pool.QueryRow(ctx, "SELECT message_count, total_input_tokens FROM sessions WHERE id=$1", ann.SessionID).Scan(&mc, &in); err != nil {
 		t.Fatal(err)
 	}
-	if count != 1 {
-		t.Fatalf("matching write left %d message rows, want 1", count)
+	if mc != 1 || in != 5 {
+		t.Fatalf("aggregates: message_count=%d input=%d, want 1 and 5", mc, in)
+	}
+
+	// A second advance with nothing new is a no-op: the reducer is not called and
+	// the aggregates do not move.
+	before := calls
+	if _, caughtUp, err = st.AdvanceProjection(ctx, ann.SessionID, 1, reduce); err != nil || !caughtUp {
+		t.Fatalf("advance no-op: caughtUp=%v err=%v", caughtUp, err)
+	}
+	if calls != before {
+		t.Fatalf("reducer ran on a caught-up session: %d calls", calls-before)
+	}
+
+	// More bytes arrive, but under a different parser version the partially parsed
+	// session refuses to continue until a reparse rewinds it.
+	if _, err := st.AppendChunk(ctx, ann.SessionID, int64(len("line one\nline two\n")), []byte("line three\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st.AdvanceProjection(ctx, ann.SessionID, 2, reduce); !errors.Is(err, ErrParserVersionStale) {
+		t.Fatalf("version gate: want ErrParserVersionStale, got %v", err)
+	}
+	if err := st.Pool.QueryRow(ctx, "SELECT parsed_byte_len FROM session_raw WHERE session_id=$1", ann.SessionID).Scan(&parsed); err != nil {
+		t.Fatal(err)
+	}
+	if parsed != int64(len("line one\nline two\n")) {
+		t.Fatalf("version gate advanced the cursor to %d", parsed)
+	}
+}
+
+// TestAdvanceProjectionBatching forces a backlog larger than one parse batch and
+// confirms catch-up advances in bounded steps, parsing each chunk's bytes exactly
+// once and contiguously (the readRawRegion SQL bound, not a client-side rescan of
+// the whole tail).
+func TestAdvanceProjectionBatching(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	old := parseBatchBytes
+	parseBatchBytes = 2 // smaller than the gap between chunk starts, so each batches alone
+	defer func() { parseBatchBytes = old }()
+
+	u, err := st.Register(ctx, "grace", "hash", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ann, err := st.Announce(ctx, AnnounceParams{
+		UserID: u.ID, Agent: "claude", SourceSessionID: "sess-batch", ProjectID: projectID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Three chunks, each a short line, appended before any parse runs: the parse
+	// cursor must catch up across several bounded batches.
+	chunks := []string{"a\n", "bb\n", "ccc\n"}
+	var offset int64
+	for _, c := range chunks {
+		stored, err := st.AppendChunk(ctx, ann.SessionID, offset, []byte(c))
+		if err != nil {
+			t.Fatalf("append %q: %v", c, err)
+		}
+		offset = stored
+	}
+
+	var bases []int64
+	reduce := func(state, region []byte, base int64) ([]byte, ProjectionDelta, error) {
+		bases = append(bases, base)
+		return []byte("{}"), ProjectionDelta{
+			MessagesAdded: 1,
+			Messages:      []MessageDelta{{Ordinal: int(base), Role: "assistant", Content: string(region)}},
+		}, nil
+	}
+
+	iterations := 0
+	for {
+		_, caughtUp, err := st.AdvanceProjection(ctx, ann.SessionID, 1, reduce)
+		if err != nil {
+			t.Fatalf("advance: %v", err)
+		}
+		iterations++
+		if caughtUp {
+			break
+		}
+		if iterations > 10 {
+			t.Fatal("catch-up did not converge")
+		}
+	}
+
+	// One batch per chunk, each starting exactly where the previous ended.
+	if len(bases) != 3 {
+		t.Fatalf("parsed in %d batches, want 3 (one per chunk): bases=%v", len(bases), bases)
+	}
+	want := []int64{0, 2, 5}
+	for i, b := range bases {
+		if b != want[i] {
+			t.Fatalf("batch %d started at %d, want %d (bases=%v)", i, b, want[i], bases)
+		}
+	}
+
+	var mc int
+	var parsed, byteLen int64
+	if err := st.Pool.QueryRow(ctx, "SELECT message_count FROM sessions WHERE id=$1", ann.SessionID).Scan(&mc); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool.QueryRow(ctx, "SELECT parsed_byte_len, byte_len FROM session_raw WHERE session_id=$1", ann.SessionID).Scan(&parsed, &byteLen); err != nil {
+		t.Fatal(err)
+	}
+	if mc != 3 || parsed != byteLen {
+		t.Fatalf("after catch-up: message_count=%d parsed=%d byte_len=%d", mc, parsed, byteLen)
 	}
 }
 

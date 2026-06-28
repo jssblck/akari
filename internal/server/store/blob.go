@@ -24,6 +24,21 @@ func HashBytes(content []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// HashString returns the lowercase hex sha256 of content. It hashes in place
+// (the digest consumes the string in 64-byte blocks), so a large body is never
+// copied into a byte slice just to be hashed.
+func HashString(content string) string {
+	h := sha256.New()
+	_, _ = io.WriteString(h, content)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// blobWriteChunk bounds how much of a body is turned into bytes at once when
+// streaming it into a large object. A tool body can be large (a big file read,
+// or one oversized turn), so writing it in slices keeps at most one chunk
+// resident beyond the source string rather than a full second copy.
+const blobWriteChunk = 4 << 20
+
 // writeBlobTx stores content in the CAS within an existing transaction, deduped
 // by sha256, and returns its hash. If the hash already exists the content is not
 // rewritten. Large objects can only be created inside a transaction, so this is
@@ -39,8 +54,8 @@ func HashBytes(content []byte) string {
 // A concurrent transaction can still insert the same hash between our check and
 // our insert; ON CONFLICT DO NOTHING absorbs that, and we unlink the large object
 // we created so the loser does not strand one.
-func writeBlobTx(ctx context.Context, tx pgx.Tx, content []byte, mediaType string) (string, error) {
-	sum := HashBytes(content)
+func writeBlobTx(ctx context.Context, tx pgx.Tx, content string, mediaType string) (string, error) {
+	sum := HashString(content)
 
 	var dummy int
 	err := tx.QueryRow(ctx, "SELECT 1 FROM blobs WHERE sha256 = $1 FOR KEY SHARE", sum).Scan(&dummy)
@@ -60,9 +75,17 @@ func writeBlobTx(ctx context.Context, tx pgx.Tx, content []byte, mediaType strin
 	if err != nil {
 		return "", err
 	}
-	if _, err := lo.Write(content); err != nil {
-		_ = lo.Close()
-		return "", err
+	// Write in bounded slices so the body is not duplicated whole: each iteration
+	// materializes at most blobWriteChunk bytes, never the full body a second time.
+	for i := 0; i < len(content); i += blobWriteChunk {
+		j := i + blobWriteChunk
+		if j > len(content) {
+			j = len(content)
+		}
+		if _, err := lo.Write([]byte(content[i:j])); err != nil {
+			_ = lo.Close()
+			return "", err
+		}
 	}
 	if err := lo.Close(); err != nil {
 		return "", err

@@ -1,12 +1,12 @@
 // Package parse is the server-side pipeline that turns a session's stored raw
-// bytes into the queryable projection: it runs the per-agent parser, computes
-// cost from the compiled-in pricing table, and writes the result, replacing any
-// prior projection for that session.
+// bytes into the queryable projection. It runs the per-agent reducer over the
+// unparsed tail of a session, prices each usage event from the compiled-in
+// pricing table, and applies the result incrementally: each chunk does work
+// proportional to its own bytes, not to the whole session.
 package parse
 
 import (
 	"context"
-	"errors"
 
 	"github.com/jssblck/akari/internal/parser"
 	"github.com/jssblck/akari/internal/pricing"
@@ -14,59 +14,85 @@ import (
 )
 
 // Version is the parser projection version. Bump it when parsing changes so a
-// reparse can be told which sessions are stale.
+// reparse can be told which sessions are stale. A session parsed past byte 0 by a
+// different version cannot be resumed incrementally; reparse rewinds and replays
+// it from scratch.
 const Version = 1
 
-// SessionFromRaw loads a session's raw bytes, parses them for the given agent,
-// computes cost, writes the projection, and returns the message count.
-func SessionFromRaw(ctx context.Context, st *store.Store, sessionID int64, agent string) (int, error) {
-	raw, err := st.LoadRaw(ctx, sessionID)
-	if err != nil {
-		return 0, err
-	}
-	parsed, err := parser.Parse(parser.Agent(agent), raw)
-	if err != nil {
-		return 0, err
-	}
-	proj := toProjection(parsed)
-	if err := st.WriteProjection(ctx, sessionID, int64(len(raw)), proj); err != nil {
-		// A concurrent parse of newer bytes is authoritative; this one is a no-op.
-		if errors.Is(err, store.ErrStaleProjection) {
-			return proj.MessageCount, nil
+// Advance parses any not-yet-parsed bytes of a session and applies them to the
+// projection, looping until the parse cursor catches up to the stored length. It
+// returns the session's message count. The raw bytes are never modified; a parser
+// error leaves the cursor where it was for the next chunk or a reparse to retry.
+func Advance(ctx context.Context, st *store.Store, sessionID int64, agent string) (int, error) {
+	reduce := reduceFunc(agent)
+	for {
+		_, caughtUp, err := st.AdvanceProjection(ctx, sessionID, Version, reduce)
+		if err != nil {
+			return 0, err
 		}
-		return 0, err
+		if caughtUp {
+			break
+		}
 	}
-	return proj.MessageCount, nil
+	return st.MessageCount(ctx, sessionID)
 }
 
-// toProjection converts a parsed session into the store projection, applying
-// pricing to each usage event.
-func toProjection(s parser.Session) store.Projection {
-	p := store.Projection{
-		StartedAt:     s.StartedAt,
-		EndedAt:       s.EndedAt,
-		ParserVersion: Version,
+// Reparse rebuilds a session's projection from its stored raw bytes: it clears
+// the derived rows and rewinds the parse cursor, then replays the whole session
+// through the same reducer the live path uses. This is how a parser improvement
+// reaches already-ingested data without re-uploading anything.
+func Reparse(ctx context.Context, st *store.Store, sessionID int64, agent string) (int, error) {
+	if err := st.ResetProjectionForReparse(ctx, sessionID, Version); err != nil {
+		return 0, err
 	}
+	return Advance(ctx, st, sessionID, agent)
+}
 
-	for _, m := range s.Messages {
-		p.Messages = append(p.Messages, store.ProjMessage{
-			Ordinal:       m.Ordinal,
-			Role:          string(m.Role),
-			Content:       m.Content,
-			ThinkingText:  m.ThinkingText,
-			Model:         m.Model,
-			Timestamp:     m.Timestamp,
-			HasThinking:   m.HasThinking,
-			HasToolUse:    m.HasToolUse,
-			ContentLength: len(m.Content),
-		})
-		p.MessageCount++
-		if m.Role == parser.RoleUser {
-			p.UserMessageCount++
+// reduceFunc adapts the per-agent reducer to the store's ReduceFunc: it decodes
+// the carry-over state, runs the reducer over the region, prices the usage, and
+// returns the re-encoded state plus the store-shaped delta.
+func reduceFunc(agent string) store.ReduceFunc {
+	return func(stateBytes, region []byte, baseOffset int64) ([]byte, store.ProjectionDelta, error) {
+		st, err := parser.DecodeState(stateBytes)
+		if err != nil {
+			return nil, store.ProjectionDelta{}, err
 		}
+		next, d, err := parser.Reduce(parser.Agent(agent), st, region, baseOffset)
+		if err != nil {
+			return nil, store.ProjectionDelta{}, err
+		}
+		encoded, err := next.Encode()
+		if err != nil {
+			return nil, store.ProjectionDelta{}, err
+		}
+		return encoded, toProjectionDelta(d), nil
+	}
+}
+
+// toProjectionDelta maps a parser delta to the store delta, applying pricing to
+// each usage event and accumulating the session-level token and cost increments.
+func toProjectionDelta(p parser.Delta) store.ProjectionDelta {
+	d := store.ProjectionDelta{
+		MessagesAdded:     p.MessagesAdded,
+		UserMessagesAdded: p.UserMessagesAdded,
+		Started:           p.Started,
+		Ended:             p.Ended,
 	}
 
-	for _, t := range s.ToolCalls {
+	for _, m := range p.Messages {
+		d.Messages = append(d.Messages, store.MessageDelta{
+			Ordinal:      m.Ordinal,
+			Role:         string(m.Role),
+			Content:      m.Content,
+			ThinkingText: m.ThinkingText,
+			Model:        m.Model,
+			HasThinking:  m.HasThinking,
+			HasToolUse:   m.HasToolUse,
+			Timestamp:    m.Timestamp,
+		})
+	}
+
+	for _, t := range p.ToolCalls {
 		tc := store.ProjToolCall{
 			MessageOrdinal: t.MessageOrdinal,
 			CallIndex:      t.CallIndex,
@@ -74,27 +100,29 @@ func toProjection(s parser.Session) store.Projection {
 			Category:       t.Category,
 			FilePath:       t.FilePath,
 			InputBytes:     int64(len(t.InputJSON)),
+			CallUID:        t.CallUID,
 		}
 		if t.InputJSON != "" {
-			tc.InputBody = []byte(t.InputJSON)
+			// Carry the parsed input string straight through. gjson aliases the
+			// region, and the blob writer streams it in slices, so the body is never
+			// copied whole into a second buffer on the way to the CAS.
+			tc.InputBody = t.InputJSON
 			tc.InputMediaType = "application/json"
 		}
-		if t.ResultStatus != "" {
-			tc.HasResult = true
-			tc.ResultBytes = int64(t.ResultBytes)
-			tc.ResultMediaType = t.ResultMediaType
-			if tc.ResultMediaType == "" {
-				tc.ResultMediaType = "text/plain"
-			}
-			tc.ResultStatus = t.ResultStatus
-			if len(t.ResultBody) > 0 {
-				tc.ResultBody = []byte(t.ResultBody)
-			}
-		}
-		p.ToolCalls = append(p.ToolCalls, tc)
+		d.ToolCalls = append(d.ToolCalls, tc)
 	}
 
-	for _, u := range s.UsageEvent {
+	for _, tr := range p.ToolResults {
+		d.ToolResults = append(d.ToolResults, store.ToolResultDelta{
+			CallUID:   tr.CallUID,
+			Body:      tr.Body,
+			Bytes:     int64(tr.Bytes),
+			MediaType: tr.MediaType,
+			Status:    tr.Status,
+		})
+	}
+
+	for _, u := range p.Usage {
 		pu := store.ProjUsage{
 			MessageOrdinal: u.MessageOrdinal,
 			Model:          u.Model,
@@ -105,21 +133,23 @@ func toProjection(s parser.Session) store.Projection {
 			Reasoning:      u.Reasoning,
 			OccurredAt:     u.OccurredAt,
 			DedupKey:       u.DedupKey,
+			SourceOffset:   u.SourceOffset,
+			SourceIndex:    u.SourceIndex,
 		}
 		if cost, known := pricing.Cost(u.Model, u.Input, u.Output, u.CacheWrite, u.CacheRead); known {
 			pu.CostUSD = &cost
-			p.TotalCostUSD += cost
+			d.AddCostUSD += cost
 		} else if u.Input+u.Output+u.CacheWrite+u.CacheRead+u.Reasoning > 0 {
-			// Tokens were spent on a model we cannot price: the session total is
-			// a partial sum.
-			p.CostIncomplete = true
+			// Tokens spent on a model we cannot price: the session total is a partial
+			// sum and the flag says so.
+			d.CostIncomplete = true
 		}
-		p.TotalInput += int64(u.Input)
-		p.TotalOutput += int64(u.Output)
-		p.TotalCacheWrite += int64(u.CacheWrite)
-		p.TotalCacheRead += int64(u.CacheRead)
-		p.Usage = append(p.Usage, pu)
+		d.AddInput += int64(u.Input)
+		d.AddOutput += int64(u.Output)
+		d.AddCacheWrite += int64(u.CacheWrite)
+		d.AddCacheRead += int64(u.CacheRead)
+		d.Usage = append(d.Usage, pu)
 	}
 
-	return p
+	return d
 }

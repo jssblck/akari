@@ -1,113 +1,72 @@
 package parser
 
-import (
-	"time"
+import "github.com/tidwall/gjson"
 
-	"github.com/tidwall/gjson"
-)
-
-// parseCodex parses Codex JSONL. Lines wrap a payload: session_meta carries cwd
-// and branch; response_item carries user/assistant turns, function_call (tool
-// invocations), function_call_output (tool results), and reasoning; event_msg of
-// type token_count carries token usage whose combined input must be split into
-// uncached input and cache-read.
-func parseCodex(raw []byte) (Session, error) {
-	var s Session
-	var sp span
-	ordinal := 0
-	lastAssistant := -1
-	callCount := map[int]int{}   // assistant ordinal -> next call index
-	toolByID := map[string]int{} // call_id -> index in s.ToolCalls
-	currentModel := ""
-
-	// ensureAssistant returns the ordinal of the current assistant turn, hosting a
-	// tool call, usage, reasoning, or final text. Codex emits a turn as a run of
-	// reasoning and function_call items followed by the assistant message, so all
-	// of these fold into one message; a fresh turn begins only after a user item
-	// resets lastAssistant.
-	ensureAssistant := func(ts time.Time) int {
-		if lastAssistant >= 0 {
-			return lastAssistant
+// reduceCodex advances a Codex session over one raw region. Lines wrap a payload:
+// session_meta carries cwd and branch; response_item carries user/assistant
+// turns, function_call (tool invocations), function_call_output (tool results),
+// and reasoning; event_msg of type token_count carries usage whose combined input
+// must be split into uncached input and cache-read. A turn is a run of reasoning
+// and function_call items followed by the assistant message, all folded into one
+// assistant message; that fold can span a chunk boundary, which is why the open
+// turn lives in the carry-over state.
+func (r *reducer) reduceCodex(region []byte, base int64) error {
+	err := eachLine(region, base, func(line []byte, offset int64) error {
+		if !gjson.ValidBytes(line) {
+			return nil
 		}
-		s.Messages = append(s.Messages, Message{Ordinal: ordinal, Role: RoleAssistant, Model: currentModel, Timestamp: ts})
-		lastAssistant = ordinal
-		ordinal++
-		return lastAssistant
-	}
-
-	lines, err := scanLines(raw)
-	if err != nil {
-		return Session{}, err
-	}
-	for _, line := range lines {
-		if !gjson.Valid(line) {
-			continue
-		}
-		e := gjson.Parse(line)
+		e := gjson.ParseBytes(line)
 		typ := e.Get("type").String()
 		p := e.Get("payload")
 		ts := parseTime(e.Get("timestamp").String())
-		sp.observe(ts)
+		r.observe(ts)
 		if m := p.Get("model").String(); m != "" {
-			currentModel = m
+			r.st.Model = m
 		}
 
 		switch typ {
 		case "session_meta":
 			if cwd := p.Get("cwd").String(); cwd != "" {
-				s.Cwd = cwd
+				r.d.Cwd = cwd
 			}
 			if br := p.Get("git.branch").String(); br != "" {
-				s.GitBranch = br
+				r.d.GitBranch = br
 			}
 
 		case "response_item":
 			switch {
 			case p.Get("type").String() == "function_call":
-				ord := ensureAssistant(ts)
-				s.Messages[ord].HasToolUse = true
+				ord := r.ensureAssistant(ts)
+				r.open.HasToolUse = true
 				name := p.Get("name").String()
 				args := p.Get("arguments").String()
 				tc := ToolCall{
-					MessageOrdinal: ord, CallIndex: callCount[ord],
+					MessageOrdinal: ord, CallIndex: r.openCalls,
 					ToolName: name, Category: toolCategory(name),
-					InputJSON: args,
+					InputJSON: args, CallUID: p.Get("call_id").String(),
 				}
 				if gjson.Valid(args) {
 					tc.FilePath = gjson.Get(args, "file_path").String()
 				}
-				if cid := p.Get("call_id").String(); cid != "" {
-					toolByID[cid] = len(s.ToolCalls)
-				}
-				s.ToolCalls = append(s.ToolCalls, tc)
-				callCount[ord]++
+				r.d.ToolCalls = append(r.d.ToolCalls, tc)
+				r.openCalls++
 
 			case p.Get("type").String() == "function_call_output":
-				applyToolResult(&s, toolByID, p.Get("call_id").String(), p.Get("output"), false)
+				r.applyResult(p.Get("call_id").String(), p.Get("output"), false)
 
 			case p.Get("type").String() == "reasoning":
-				ord := ensureAssistant(ts)
-				if t := blockText(p.Get("content")); t != "" {
-					s.Messages[ord].ThinkingText = joinNonEmpty(s.Messages[ord].ThinkingText, t)
-					s.Messages[ord].HasThinking = true
-				}
+				r.ensureAssistant(ts)
+				r.addOpenThinking(blockText(p.Get("content")))
 
 			case p.Get("role").String() == "user":
-				s.Messages = append(s.Messages, Message{
-					Ordinal: ordinal, Role: RoleUser, Content: blockText(p.Get("content")), Timestamp: ts,
-				})
-				ordinal++
-				lastAssistant = -1 // a user turn ends the current assistant turn
+				r.closeTurn() // a user turn ends the current assistant turn
+				r.addUser(blockText(p.Get("content")), ts)
 
 			case p.Get("role").String() == "assistant":
-				// Fold the final text into the current turn's message, which any
-				// preceding reasoning or function_call items already created.
-				ord := ensureAssistant(ts)
-				if c := blockText(p.Get("content")); c != "" {
-					s.Messages[ord].Content = joinNonEmpty(s.Messages[ord].Content, c)
-				}
-				if currentModel != "" {
-					s.Messages[ord].Model = currentModel
+				r.ensureAssistant(ts)
+				r.addOpenContent(blockText(p.Get("content")))
+				if r.st.Model != "" {
+					r.open.Model = r.st.Model
 				}
 			}
 
@@ -115,7 +74,7 @@ func parseCodex(raw []byte) (Session, error) {
 			if p.Get("type").String() == "token_count" {
 				u := p.Get("info.last_token_usage")
 				if !u.Exists() {
-					continue
+					return nil
 				}
 				total := int(u.Get("input_tokens").Int())
 				cached := int(u.Get("cached_input_tokens").Int())
@@ -124,26 +83,33 @@ func parseCodex(raw []byte) (Session, error) {
 					input = 0
 				}
 				usage := Usage{
-					Model: currentModel, Input: input, Output: int(u.Get("output_tokens").Int()),
+					Model: r.st.Model, Input: input, Output: int(u.Get("output_tokens").Int()),
 					CacheRead: cached, Reasoning: int(u.Get("reasoning_output_tokens").Int()),
 					OccurredAt: ts,
 				}
-				if lastAssistant >= 0 {
-					ord := lastAssistant
+				if r.open != nil {
+					ord := r.open.Ordinal
 					usage.MessageOrdinal = &ord
 				}
-				s.UsageEvent = append(s.UsageEvent, usage)
+				r.addUsage(usage, offset)
 			}
 		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
-
-	s.StartedAt, s.EndedAt = sp.started, sp.ended
-	return s, nil
+	// Keep any still-open turn open so the next region continues its row.
+	r.flushRegion()
+	return nil
 }
 
 func joinNonEmpty(a, b string) string {
 	if a == "" {
 		return b
+	}
+	if b == "" {
+		return a
 	}
 	return a + "\n" + b
 }
