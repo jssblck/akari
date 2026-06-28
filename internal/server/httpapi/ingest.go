@@ -18,9 +18,12 @@ const maxChunk = 64 << 20
 
 var validAgents = map[string]bool{"claude": true, "codex": true, "pi": true}
 
+var validKinds = map[string]bool{"remote": true, "standalone": true, "orphaned": true}
+
 type announceRequest struct {
 	Agent           string `json:"agent"`
 	SourceSessionID string `json:"source_session_id"`
+	Kind            string `json:"kind"`
 	ProjectRemote   string `json:"project_remote"`
 	GitBranch       string `json:"git_branch"`
 	Cwd             string `json:"cwd"`
@@ -36,6 +39,10 @@ func (s *Server) handleAnnounce(w http.ResponseWriter, r *http.Request) {
 	req.Agent = strings.TrimSpace(req.Agent)
 	req.SourceSessionID = strings.TrimSpace(req.SourceSessionID)
 	req.ProjectRemote = strings.TrimSpace(req.ProjectRemote)
+	req.Kind = strings.TrimSpace(req.Kind)
+	if req.Kind == "" {
+		req.Kind = "remote" // back-compat: older clients announce only remotes
+	}
 	if !validAgents[req.Agent] {
 		writeError(w, http.StatusBadRequest, "agent must be claude, codex, or pi")
 		return
@@ -44,12 +51,33 @@ func (s *Server) handleAnnounce(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "source_session_id is required")
 		return
 	}
-	host, owner, repo, ok := parseRemoteKey(req.ProjectRemote)
-	if !ok {
-		writeError(w, http.StatusBadRequest, "project_remote must look like host/owner/repo")
+	if !validKinds[req.Kind] {
+		writeError(w, http.StatusBadRequest, "kind must be remote, standalone, or orphaned")
 		return
 	}
-	projectID, err := s.Store.UpsertProject(r.Context(), req.ProjectRemote, host, owner, repo, repo)
+
+	// A remote session carries a canonical remote key; a standalone or orphaned
+	// session has none, so the server derives a stable per-machine, per-path key.
+	var remoteKey, host, owner, repo, displayName string
+	if req.Kind == "remote" {
+		var ok bool
+		host, owner, repo, ok = parseRemoteKey(req.ProjectRemote)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "project_remote must look like host/owner/repo")
+			return
+		}
+		remoteKey, displayName = req.ProjectRemote, repo
+	} else {
+		remoteKey = localProjectKey(req.Machine, req.Cwd)
+		host = req.Machine
+		displayName = lastPathSegment(req.Cwd)
+		if displayName == "" {
+			displayName = "(unknown location)"
+		}
+		repo = displayName
+	}
+
+	projectID, err := s.Store.UpsertProject(r.Context(), remoteKey, host, owner, repo, displayName, req.Kind)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "upsert project")
 		return
@@ -59,6 +87,7 @@ func (s *Server) handleAnnounce(w http.ResponseWriter, r *http.Request) {
 		Agent:           req.Agent,
 		SourceSessionID: req.SourceSessionID,
 		ProjectID:       projectID,
+		Kind:            req.Kind,
 		GitBranch:       req.GitBranch,
 		Cwd:             req.Cwd,
 		Machine:         req.Machine,
@@ -157,6 +186,29 @@ func (s *Server) ownedSession(w http.ResponseWriter, r *http.Request) (int64, st
 		return 0, "", false
 	}
 	return id, agent, true
+}
+
+// localProjectKey derives the project key for a session with no git remote. It
+// groups by machine and working directory, so every standalone or orphaned
+// session from the same folder on the same machine lands in one project. The
+// "local:" prefix and the colon separators keep it out of the "host/owner/repo"
+// remote namespace: a canonicalized remote key has no empty path segments and is
+// never shaped like this, so a synthetic key can never collide with a real one.
+// Standalone and orphaned share the namespace (the key omits the kind) so a
+// folder that is deleted transitions kind in place rather than forking.
+func localProjectKey(machine, cwd string) string {
+	return "local:" + machine + ":" + cwd
+}
+
+// lastPathSegment returns the final element of a filesystem path, accepting both
+// forward and back slashes so a Windows client's path renders sensibly on the
+// Linux server. It returns "" for an empty path.
+func lastPathSegment(p string) string {
+	p = strings.TrimRight(p, `/\`)
+	if i := strings.LastIndexAny(p, `/\`); i >= 0 {
+		return p[i+1:]
+	}
+	return p
 }
 
 // parseRemoteKey splits a canonical "host/owner/.../repo" key into host, owner,

@@ -35,11 +35,15 @@ const (
 	ActionReset    Action = "reset"    // diverged, re-uploaded from zero
 )
 
-// Target is everything needed to upload one resolved session file.
+// Target is everything needed to upload one resolved session file. Kind is the
+// session's classification ("remote", "standalone", or "orphaned"). ProjectKey
+// is set only for a remote session; for standalone and orphaned sessions the
+// server derives the project key from Machine and Cwd.
 type Target struct {
 	Agent      string
 	Path       string
 	SourceID   string
+	Kind       string
 	ProjectKey string
 	GitBranch  string
 	Cwd        string
@@ -230,6 +234,7 @@ func (c *Client) announce(ctx context.Context, t Target) (announceResp, error) {
 	body := map[string]string{
 		"agent":             t.Agent,
 		"source_session_id": t.SourceID,
+		"kind":              t.Kind,
 		"project_remote":    t.ProjectKey,
 		"git_branch":        t.GitBranch,
 		"cwd":               t.Cwd,

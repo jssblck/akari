@@ -40,7 +40,7 @@ func TestAnalyticsRollups(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	proj, err := st.UpsertProject(ctx, "github.com/ada/engine", "github.com", "ada", "engine", "engine")
+	proj, err := st.UpsertProject(ctx, "github.com/ada/engine", "github.com", "ada", "engine", "engine", "remote")
 	if err != nil {
 		t.Fatalf("project: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestProjectSparklines(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 	admin, _ := st.Register(ctx, "grace", "h", "")
-	proj, _ := st.UpsertProject(ctx, "github.com/ada/engine", "github.com", "ada", "engine", "engine")
+	proj, _ := st.UpsertProject(ctx, "github.com/ada/engine", "github.com", "ada", "engine", "engine", "remote")
 	s1 := seedSessionWithStats(t, st, admin.ID, proj, "claude", "s1", 2.0, 100, 20)
 	seedUsage(t, st, s1, "claude-opus-4-8", 1.0, 100, 20, 0, "a")
 	seedUsage(t, st, s1, "claude-opus-4-8", 1.0, 100, 20, 5, "b")

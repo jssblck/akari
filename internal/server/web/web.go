@@ -6,6 +6,7 @@ package web
 import (
 	"embed"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jssblck/akari/internal/server/store"
@@ -23,6 +24,52 @@ type Page struct {
 	Username string
 	IsAdmin  bool
 	LoggedIn bool
+}
+
+// IsLocalKind reports whether a project kind is one of the non-remote kinds
+// (standalone or orphaned), which are grouped and labeled apart from git-remote
+// projects in the UI.
+func IsLocalKind(kind string) bool {
+	return kind == "standalone" || kind == "orphaned"
+}
+
+// ProjectTitle is the heading shown for a project. A remote project shows its
+// canonical remote key; a standalone or orphaned project shows its folder name,
+// since its synthetic key ("local:machine:path") is an internal detail.
+func ProjectTitle(p store.ProjectSummary) string {
+	if IsLocalKind(p.Kind) {
+		return p.DisplayName
+	}
+	return p.RemoteKey
+}
+
+// SessionProjectLabel is the project name shown in a session header: the folder
+// name for a local session, the remote key otherwise. It keeps the synthetic
+// "local:machine:path" key out of the heading.
+func SessionProjectLabel(d store.SessionDetail) string {
+	if IsLocalKind(d.ProjectKind) {
+		return d.ProjectName
+	}
+	return d.ProjectKey
+}
+
+// SearchHitLabel is the project name shown on a search result, friendly for a
+// local project and the remote key otherwise.
+func SearchHitLabel(h store.SearchHit) string {
+	if IsLocalKind(h.ProjectKind) {
+		return h.ProjectName
+	}
+	return h.ProjectKey
+}
+
+// LocalPath recovers the working-directory path from a local project's synthetic
+// key ("local:machine:path"), for display beside the folder name. It returns ""
+// for a remote project.
+func LocalPath(p store.ProjectSummary) string {
+	if !IsLocalKind(p.Kind) {
+		return ""
+	}
+	return strings.TrimPrefix(p.RemoteKey, "local:"+p.Host+":")
 }
 
 // ToolsByOrdinal groups tool calls by the message ordinal they belong to, so the

@@ -54,7 +54,7 @@ func TestDeleteSessionAuthz(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register user: %v", err)
 	}
-	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari")
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
 	if err != nil {
 		t.Fatalf("project: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestBlobServingAccessControl(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari")
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
 	if err != nil {
 		t.Fatalf("project: %v", err)
 	}

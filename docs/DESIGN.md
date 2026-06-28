@@ -108,9 +108,15 @@ Resolution is two hops, performed on the client:
 2. **Folder to git remote.** The client reads the `origin` remote URL of the git
    repository containing that folder, then canonicalizes it.
 
-If either hop fails, the session is skipped and a warning is logged (see
-"Skip-and-warn" below). Sessions are never stored under a guessed or
-path-derived identity.
+Either hop can fail, and a failure classifies the session rather than dropping
+it (see "Project resolution and classification" below). A session with a usable
+remote is a normal remote project. A session whose folder exists but has no
+usable remote is standalone; a session whose folder is unknown or gone is
+orphaned. Standalone and orphaned sessions are still backed up, keyed by their
+local location (machine plus path) rather than a remote, and tagged in the UI so
+their state is explicit. A remote session is never stored under a guessed or
+path-derived identity. Only sessions with no remote to find fall back to a local
+key.
 
 **Why this collapses worktrees for free.** Git worktrees share the main
 repository's config (their `.git` file points at a `commondir`, and remotes live
@@ -121,9 +127,11 @@ special worktree handling. The same property makes branch names irrelevant: the
 remote does not change per branch.
 
 **Remote selection.** Only the remote named `origin` is used. If a repository
-has no `origin`, or `origin` has more than one URL configured, the session is
-skipped and warned rather than guessed. This keeps a project's identity
-unambiguous and identical on every machine.
+has no `origin`, or `origin` has more than one URL configured (or its URL is
+unrecognized), the session is classified standalone rather than guessed: it is
+backed up under its local location instead of a remote. This keeps a remote
+project's identity unambiguous and identical on every machine, while still
+preserving the work that has no clean remote.
 
 **Canonicalization.** Given the `origin` URL, produce a key of the form
 `host/path`:
@@ -145,7 +153,14 @@ unambiguous and identical on every machine.
 - Result example: all of the above collapse to `github.com/owner/repo`.
 
 A project row stores the canonical key (unique), plus parsed host, owner, repo,
-and a display name (the repo segment), and first/last seen timestamps.
+and a display name (the repo segment), and first/last seen timestamps. It also
+records a **kind**: `remote` for a git-remote project, or `standalone` /
+`orphaned` for a local folder with no usable remote. A local project's key is
+synthetic (`local:<machine>:<cwd>`), so every standalone or orphaned session
+from the same folder on the same machine groups into one project. Standalone and
+orphaned share that key namespace, so a folder that is later deleted transitions
+from standalone to orphaned in place (its kind flips) rather than forking a
+second project.
 
 ### Sessions
 
@@ -153,7 +168,11 @@ A session is one agent run, identified on the client by its source id (the
 session file's UUID or filename stem) and its agent. On the server the natural
 key is `(user_id, agent, source_session_id)`; a surrogate id is the primary key.
 A session always belongs to exactly one user (the one who pushed it) and exactly
-one project (resolution succeeded, or it was skipped). A given session file lives
+one project: a remote project when resolution succeeds, or a local (standalone or
+orphaned) project keyed by machine and path when there is no remote to resolve.
+Remote attribution is sticky: once a session resolves to a remote, a later
+announce that can no longer find one (its folder was deleted) keeps it under that
+remote rather than sliding it into an orphaned bucket. A given session file lives
 on one machine and is pushed by one client, so there is never write contention
 on a single session from multiple clients.
 
@@ -355,14 +374,17 @@ CREATE TABLE invite_tokens (             -- admin-issued, single-use registratio
   redeemed_at TIMESTAMPTZ
 );
 
--- Projects, keyed by canonical git remote
+-- Projects, keyed by canonical git remote (or a synthetic local key when there
+-- is no remote). kind distinguishes the two; see "Projects, normalized by git
+-- remote".
 CREATE TABLE projects (
   id           BIGSERIAL PRIMARY KEY,
-  remote_key   TEXT NOT NULL UNIQUE,      -- e.g. github.com/jssblck/akari
-  host         TEXT NOT NULL,
+  remote_key   TEXT NOT NULL UNIQUE,      -- remote: github.com/jssblck/akari; local: local:<machine>:<cwd>
+  host         TEXT NOT NULL,             -- remote: hostname; local: machine
   owner        TEXT NOT NULL,
   repo         TEXT NOT NULL,
   display_name TEXT NOT NULL,
+  kind         TEXT NOT NULL DEFAULT 'remote',  -- remote | standalone | orphaned
   first_seen   TIMESTAMPTZ NOT NULL DEFAULT now(),
   last_seen    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -546,8 +568,11 @@ binary is self-contained.
 Pages:
 
 - **Login**, and **registration** (requires a valid invite token).
-- **Projects index**: every project with session counts, token totals, last
-  activity.
+- **Projects index**: two sections. **Projects** lists every git-remote project
+  with session counts, token totals, and last activity. **Sessions** lists local
+  folders with no git remote (standalone and orphaned), each tagged with its
+  state and labeled by folder name and path rather than the synthetic key. A
+  folder with no local sessions shows no Sessions section.
 - **Project view**: sessions in that project across all users and machines, with
   filters (user, agent, machine, date, model).
 - **Session view**: the transcript (messages, thinking, tool calls,
@@ -610,28 +635,33 @@ variables of its own (see Config):
 Extra or non-standard roots are added through the config file, not through new
 environment variables.
 
-### Project resolution and skip-and-warn
+### Project resolution and classification
 
 For each discovered file, the client peeks the header: it reads from the top only
 as far as it needs to extract `cwd`, the source session id, and the agent. That is
 cheap and usually the first few lines, though for Codex the `cwd` arrives in an
 early `session_meta` event, so the peek reads until it finds it. The full parse
-is the server's job. With the header in hand:
+is the server's job. With the header in hand the client classifies the session
+into one of three kinds, and backs up all three:
 
-1. **Match to folder.** If `cwd` is empty or no longer exists on disk, skip and
-   warn: `skip <file>: no working directory recorded` or `... cwd no longer
-   exists`.
-2. **Match to remote.** Run `git -C <cwd> rev-parse --is-inside-work-tree`, then
-   `git -C <cwd> remote get-url --all origin`. Skip and warn on each failure
-   mode: `skip <file>: <cwd> is not a git repository`, `... has no origin
-   remote`, or `... origin has multiple URLs`. (A repository with remotes but no
-   `origin` is intentionally treated the same as one with no remote: skipped and
-   warned.)
-3. Canonicalize the remote (see Projects). The result is the project key sent on
-   ingest.
+1. **Orphaned.** If `cwd` is empty or no longer exists on disk, the session is
+   orphaned: its location can never be resolved to a remote. The reason is
+   recorded (`no working directory recorded` or `cwd no longer exists`).
+2. **Standalone.** Otherwise run `git -C <cwd> rev-parse --is-inside-work-tree`,
+   then `git -C <cwd> remote get-url --all origin`. Any failure (`<cwd> is not a
+   git repository`, `... has no origin remote`, `... origin has multiple URLs`,
+   or an unrecognized origin URL) makes the session standalone: a real local
+   folder with no clean remote. A repository with remotes but no `origin` is
+   treated the same as one with no remote.
+3. **Remote.** A single usable `origin` is canonicalized (see Projects); the
+   result is the project key sent on ingest.
 
-Skips are counted and surfaced (a periodic summary in watch mode, a final tally
-in one-shot mode) so a user can see what is not being backed up and why. Git is
+A remote session uploads with its canonical key. A standalone or orphaned session
+uploads with its kind and its working directory; the server derives the synthetic
+local key from machine plus path. The per-kind counts are surfaced (a periodic
+summary in watch mode, a final tally in one-shot mode) so a user can see what is
+backed up as standalone or orphaned. Only a file whose header cannot be read at
+all is truly skipped, since there is then nothing to identify or send. Git is
 invoked by shelling out to the system `git` with a short timeout; results are
 cached per directory for the process lifetime.
 

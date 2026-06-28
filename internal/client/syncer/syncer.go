@@ -12,16 +12,32 @@ import (
 )
 
 // Result is the outcome of syncing one file: a skip with a reason, an error, or a
-// successful upload action.
+// successful upload action. Kind classifies how the session resolved; Reason
+// carries the detail behind a standalone or orphaned classification (or a skip).
 type Result struct {
 	File          discover.File
+	Kind          resolve.Kind
 	ProjectKey    string
+	Cwd           string
 	Skipped       bool
 	Reason        string
 	Err           error
 	Action        upload.Action
 	UploadedBytes int64
 	MessageCount  int
+}
+
+// Destination is a short label for where the file was backed up, for logs and
+// summaries. A remote session shows its project key; a standalone or orphaned
+// session shows its kind and working directory, since it has no remote.
+func (r Result) Destination() string {
+	if r.ProjectKey != "" {
+		return r.ProjectKey
+	}
+	if r.Cwd != "" {
+		return string(r.Kind) + ":" + r.Cwd
+	}
+	return string(r.Kind)
 }
 
 // Syncer resolves files and uploads them to one server as one machine.
@@ -49,17 +65,21 @@ func (s *Syncer) SyncOne(ctx context.Context, f discover.File) Result {
 		Agent:      f.Agent,
 		Path:       f.Path,
 		SourceID:   res.Header.SourceID,
+		Kind:       string(res.Kind),
 		ProjectKey: res.ProjectKey,
 		GitBranch:  res.Header.GitBranch,
 		Cwd:        res.Header.Cwd,
 		Machine:    s.machine,
 	})
 	if err != nil {
-		return Result{File: f, ProjectKey: res.ProjectKey, Err: err}
+		return Result{File: f, Kind: res.Kind, ProjectKey: res.ProjectKey, Cwd: res.Header.Cwd, Reason: res.Reason, Err: err}
 	}
 	return Result{
 		File:          f,
+		Kind:          res.Kind,
 		ProjectKey:    res.ProjectKey,
+		Cwd:           res.Header.Cwd,
+		Reason:        res.Reason,
 		Action:        out.Action,
 		UploadedBytes: out.UploadedBytes,
 		MessageCount:  out.MessageCount,

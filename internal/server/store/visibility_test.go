@@ -18,7 +18,7 @@ func TestPublishUnpublish(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari")
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestDeleteSessionCascadesAndOrphansBlob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari")
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -91,6 +91,9 @@ func TestResolveSuccess(t *testing.T) {
 	if res.Skipped {
 		t.Fatalf("unexpected skip: %s", res.Reason)
 	}
+	if res.Kind != KindRemote {
+		t.Errorf("kind = %q, want remote", res.Kind)
+	}
 	if res.ProjectKey != "github.com/owner/repo" {
 		t.Errorf("project key = %q", res.ProjectKey)
 	}
@@ -99,47 +102,67 @@ func TestResolveSuccess(t *testing.T) {
 	}
 }
 
-func TestResolveSkips(t *testing.T) {
+// TestResolveClassifies confirms that the formerly-skipped cases are now backed
+// up with a kind: a missing or unknown working directory is orphaned, and a
+// directory with no usable git remote is standalone. None are skipped, and only
+// remote results carry a project key.
+func TestResolveClassifies(t *testing.T) {
 	existing := t.TempDir()
 
 	cases := []struct {
 		name       string
 		cwd        string
 		git        GitRunner
+		wantKind   Kind
 		wantReason string // substring
 	}{
 		{
-			name:       "no cwd",
+			name:       "no cwd is orphaned",
 			cwd:        "",
 			git:        fakeGit(nil, nil),
+			wantKind:   KindOrphaned,
 			wantReason: "no working directory recorded",
 		},
 		{
-			name:       "cwd missing",
+			name:       "missing cwd is orphaned",
 			cwd:        filepath.Join(existing, "gone"),
 			git:        fakeGit(nil, nil),
+			wantKind:   KindOrphaned,
 			wantReason: "cwd no longer exists",
 		},
 		{
-			name:       "not a git repo",
+			name:       "not a git repo is standalone",
 			cwd:        existing,
 			git:        fakeGit(nil, map[string]error{"rev-parse": fmt.Errorf("fatal: not a git repo")}),
+			wantKind:   KindStandalone,
 			wantReason: "is not a git repository",
 		},
 		{
-			name:       "no origin",
+			name:       "no origin is standalone",
 			cwd:        existing,
 			git:        fakeGit(map[string]string{"rev-parse": "true"}, map[string]error{"remote get-url": fmt.Errorf("no such remote")}),
+			wantKind:   KindStandalone,
 			wantReason: "has no origin remote",
 		},
 		{
-			name: "multiple origin urls",
+			name: "multiple origin urls is standalone",
 			cwd:  existing,
 			git: fakeGit(map[string]string{
 				"rev-parse":      "true",
 				"remote get-url": "git@github.com:owner/repo.git\nhttps://github.com/owner/repo.git",
 			}, nil),
+			wantKind:   KindStandalone,
 			wantReason: "origin has multiple URLs",
+		},
+		{
+			name: "unrecognized origin url is standalone",
+			cwd:  existing,
+			git: fakeGit(map[string]string{
+				"rev-parse":      "true",
+				"remote get-url": "not-a-url",
+			}, nil),
+			wantKind:   KindStandalone,
+			wantReason: "origin URL is unrecognized",
 		},
 	}
 
@@ -150,8 +173,14 @@ func TestResolveSkips(t *testing.T) {
 				fmt.Sprintf(`{"type":"user","cwd":%q}`+"\n", c.cwd))
 			r := NewWith(c.git, nil)
 			res := r.Resolve(context.Background(), discover.File{Agent: "claude", Path: file})
-			if !res.Skipped {
-				t.Fatalf("expected skip, got project %q", res.ProjectKey)
+			if res.Skipped {
+				t.Fatalf("unexpected skip: %s", res.Reason)
+			}
+			if res.Kind != c.wantKind {
+				t.Errorf("kind = %q, want %q", res.Kind, c.wantKind)
+			}
+			if res.ProjectKey != "" {
+				t.Errorf("non-remote result carried project key %q", res.ProjectKey)
 			}
 			if !strings.Contains(res.Reason, c.wantReason) {
 				t.Errorf("reason = %q, want substring %q", res.Reason, c.wantReason)

@@ -110,7 +110,7 @@ func TestIngestFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari")
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +195,7 @@ func TestWriteProjectionStaleGuard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari")
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,6 +233,110 @@ func TestWriteProjectionStaleGuard(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("matching write left %d message rows, want 1", count)
+	}
+}
+
+// TestUpsertProjectKindTransition confirms a standalone folder that is later
+// deleted transitions to orphaned in place: same key, same row, updated kind.
+func TestUpsertProjectKindTransition(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	key := "local:laptop:/home/grace/scratch"
+	id1, err := st.UpsertProject(ctx, key, "laptop", "", "scratch", "scratch", "standalone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id2, err := st.UpsertProject(ctx, key, "laptop", "", "scratch", "scratch", "orphaned")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id1 != id2 {
+		t.Fatalf("transition forked the project row: %d vs %d", id1, id2)
+	}
+	var kind string
+	if err := st.Pool.QueryRow(ctx, "SELECT kind FROM projects WHERE id = $1", id1).Scan(&kind); err != nil {
+		t.Fatal(err)
+	}
+	if kind != "orphaned" {
+		t.Fatalf("kind = %q, want orphaned", kind)
+	}
+}
+
+// TestAnnounceKeepsRemoteAttribution confirms remote attribution is sticky: a
+// session resolved to a git remote stays there even when a later announce can no
+// longer find one (its folder was deleted), and an upgrade in the other
+// direction (gaining a remote) does re-home the session.
+func TestAnnounceKeepsRemoteAttribution(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	u, err := st.Register(ctx, "grace", "hash", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	remoteID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	localID, err := st.UpsertProject(ctx, "local:laptop:/home/grace/akari", "laptop", "", "akari", "akari", "orphaned")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := st.Announce(ctx, AnnounceParams{
+		UserID: u.ID, Agent: "claude", SourceSessionID: "sess-1",
+		ProjectID: remoteID, Kind: "remote", Cwd: "/home/grace/akari", Machine: "laptop",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The folder is deleted; the client now announces it as orphaned under a local
+	// project. The session must keep its remote attribution and identity.
+	second, err := st.Announce(ctx, AnnounceParams{
+		UserID: u.ID, Agent: "claude", SourceSessionID: "sess-1",
+		ProjectID: localID, Kind: "orphaned", Cwd: "/home/grace/akari", Machine: "laptop",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.SessionID != first.SessionID {
+		t.Fatalf("session id changed: %d vs %d", second.SessionID, first.SessionID)
+	}
+	var projectID int64
+	if err := st.Pool.QueryRow(ctx, "SELECT project_id FROM sessions WHERE id = $1", first.SessionID).Scan(&projectID); err != nil {
+		t.Fatal(err)
+	}
+	if projectID != remoteID {
+		t.Fatalf("session moved to project %d, want remote %d (attribution not sticky)", projectID, remoteID)
+	}
+
+	// The reverse is allowed: regaining a remote re-homes the session.
+	third, err := st.Announce(ctx, AnnounceParams{
+		UserID: u.ID, Agent: "claude", SourceSessionID: "sess-1",
+		ProjectID: remoteID, Kind: "remote", Cwd: "/home/grace/akari", Machine: "laptop",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.SessionID != first.SessionID {
+		t.Fatalf("session id changed on re-home: %d vs %d", third.SessionID, first.SessionID)
+	}
+
+	// A standalone session that never had a remote lands in its local project.
+	localOnly, err := st.Announce(ctx, AnnounceParams{
+		UserID: u.ID, Agent: "claude", SourceSessionID: "sess-2",
+		ProjectID: localID, Kind: "standalone", Cwd: "/home/grace/scratch", Machine: "laptop",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool.QueryRow(ctx, "SELECT project_id FROM sessions WHERE id = $1", localOnly.SessionID).Scan(&projectID); err != nil {
+		t.Fatal(err)
+	}
+	if projectID != localID {
+		t.Fatalf("standalone session landed in project %d, want local %d", projectID, localID)
 	}
 }
 

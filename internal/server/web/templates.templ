@@ -163,7 +163,17 @@ templ breakdownList(title string, rows []BreakdownRow) {
 
 // ============================ Projects ============================
 
-templ ProjectsPage(p Page, projects []store.ProjectSummary, a store.Analytics, spark map[int64][]float64) {
+// kindTag renders a state chip for a non-remote project. A remote project gets
+// no chip: it is the default and needs no label.
+templ kindTag(kind string) {
+	if kind == "standalone" {
+		<span class="tag standalone" title="No .git, or no git origin remote">standalone</span>
+	} else if kind == "orphaned" {
+		<span class="tag orphaned" title="The working directory no longer exists on disk">orphaned</span>
+	}
+}
+
+templ ProjectsPage(p Page, projects, locals []store.ProjectSummary, a store.Analytics, spark map[int64][]float64) {
 	@layout(p) {
 		<div class="page-head">
 			<h1>Projects</h1>
@@ -174,7 +184,7 @@ templ ProjectsPage(p Page, projects []store.ProjectSummary, a store.Analytics, s
 				<h2>Projects</h2>
 			</div>
 			if len(projects) == 0 {
-				<div class="empty">No sessions have been pushed yet.</div>
+				<div class="empty">No git-remote projects yet.</div>
 			} else {
 				<table class="grid">
 					<thead>
@@ -204,15 +214,58 @@ templ ProjectsPage(p Page, projects []store.ProjectSummary, a store.Analytics, s
 				</table>
 			}
 		</section>
+		if len(locals) > 0 {
+			<section>
+				<div class="panel-head">
+					<h2>Sessions</h2>
+					<span class="muted small">Folders without a git remote</span>
+				</div>
+				<table class="grid">
+					<thead>
+						<tr>
+							<th>Folder</th>
+							<th>State</th>
+							<th>Machine</th>
+							<th class="num">Sessions</th>
+							<th class="num">Input</th>
+							<th class="num">Output</th>
+							<th class="num">Cost</th>
+							<th>Last activity</th>
+						</tr>
+					</thead>
+					<tbody>
+						for _, pr := range locals {
+							<tr>
+								<td>
+									<a href={ ProjectHref(pr.ID) }>{ pr.DisplayName }</a>
+									<div class="muted small mono">{ LocalPath(pr) }</div>
+								</td>
+								<td>@kindTag(pr.Kind)</td>
+								<td class="muted">{ pr.Host }</td>
+								<td class="num">{ fmt.Sprintf("%d", pr.SessionCount) }</td>
+								<td class="num">{ FmtTokens(pr.TotalInput) }</td>
+								<td class="num">{ FmtTokens(pr.TotalOutput) }</td>
+								<td class="num">{ FmtCost(pr.TotalCostUSD, false) }</td>
+								<td class="muted">{ FmtTime(pr.LastActivity) }</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			</section>
+		}
 	}
 }
 
 templ ProjectPage(p Page, proj store.ProjectSummary, sessions []store.SessionSummary, facets Facets, sel store.SessionFilter, a store.Analytics) {
 	@layout(p) {
 		<div class="page-head">
-			<h1>{ proj.RemoteKey }</h1>
+			<h1>{ ProjectTitle(proj) }</h1>
+			@kindTag(proj.Kind)
+			if IsLocalKind(proj.Kind) {
+				<span class="muted small mono">{ LocalPath(proj) }</span>
+			}
 		</div>
-		@analyticsPanel(a, "chart-project", proj.RemoteKey)
+		@analyticsPanel(a, "chart-project", ProjectTitle(proj))
 		<section>
 			<div class="panel-head">
 				<h2>Sessions</h2>
@@ -292,12 +345,13 @@ templ SessionPage(p Page, d store.SessionDetail, msgs []store.Message, tools map
 		<div class="session-head">
 			<div class="session-title">
 				<h1>
-					<a href={ ProjectHref(d.ProjectID) }>{ d.ProjectKey }</a>
+					<a href={ ProjectHref(d.ProjectID) }>{ SessionProjectLabel(d) }</a>
 					<span class="sep">/</span>
 					<span class="muted">session #{ fmt.Sprintf("%d", d.ID) }</span>
 				</h1>
 				<div class="session-meta">
 					<span class="tag agent">{ d.Agent }</span>
+					@kindTag(d.ProjectKind)
 					if d.Visibility == "public" {
 						<span class="tag public">public</span>
 					}
@@ -518,7 +572,8 @@ templ SearchPage(p Page, query string, hits []store.SearchHit) {
 					for _, h := range hits {
 						<a class="hit card" href={ SessionHref(h.SessionID) }>
 							<div class="meta muted small">
-								<span class="role">{ h.ProjectKey }</span>
+								<span class="role">{ SearchHitLabel(h) }</span>
+								@kindTag(h.ProjectKind)
 								<span class="tag agent">{ h.Agent }</span>
 								<span>{ h.Username }</span>
 								<span>{ h.Role }</span>
@@ -625,16 +680,17 @@ templ publicLayout(title string) {
 }
 
 templ PublicSessionPage(d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, publicSubs []store.SessionSummary) {
-	@publicLayout(d.ProjectKey + " session") {
+	@publicLayout(SessionProjectLabel(d) + " session") {
 		<div class="session-head">
 			<div class="session-title">
 				<h1>
-					<span>{ d.ProjectKey }</span>
+					<span>{ SessionProjectLabel(d) }</span>
 					<span class="sep">/</span>
 					<span class="muted">session</span>
 				</h1>
 				<div class="session-meta">
 					<span class="tag agent">{ d.Agent }</span>
+					@kindTag(d.ProjectKind)
 					<span class="tag public">public</span>
 					<span class="muted">Shared by { d.Username }</span>
 				</div>

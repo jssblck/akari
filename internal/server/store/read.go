@@ -18,6 +18,7 @@ type ProjectSummary struct {
 	Owner        string
 	Repo         string
 	DisplayName  string
+	Kind         string
 	SessionCount int
 	TotalCostUSD float64
 	TotalInput   int64
@@ -54,6 +55,7 @@ type SessionDetail struct {
 	ProjectID     int64
 	ProjectKey    string
 	ProjectName   string
+	ProjectKind   string
 	Cwd           string
 	ParentID      *int64
 	ParserVersion int
@@ -90,13 +92,15 @@ type ToolCallView struct {
 
 // SearchHit is one message matching a search, with its session context.
 type SearchHit struct {
-	SessionID  int64
-	ProjectKey string
-	Agent      string
-	Username   string
-	Ordinal    int
-	Role       string
-	Snippet    string
+	SessionID   int64
+	ProjectKey  string
+	ProjectName string
+	ProjectKind string
+	Agent       string
+	Username    string
+	Ordinal     int
+	Role        string
+	Snippet     string
 }
 
 // SessionFilter narrows a session list. Empty fields are ignored.
@@ -113,7 +117,7 @@ type SessionFilter struct {
 // first.
 func (s *Store) ListProjects(ctx context.Context) ([]ProjectSummary, error) {
 	rows, err := s.Pool.Query(ctx,
-		`SELECT p.id, p.remote_key, p.host, p.owner, p.repo, p.display_name,
+		`SELECT p.id, p.remote_key, p.host, p.owner, p.repo, p.display_name, p.kind,
 		        count(s.id),
 		        coalesce(sum(s.total_cost_usd), 0),
 		        coalesce(sum(s.total_input_tokens), 0),
@@ -130,7 +134,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]ProjectSummary, error) {
 	var out []ProjectSummary
 	for rows.Next() {
 		var p ProjectSummary
-		if err := rows.Scan(&p.ID, &p.RemoteKey, &p.Host, &p.Owner, &p.Repo, &p.DisplayName,
+		if err := rows.Scan(&p.ID, &p.RemoteKey, &p.Host, &p.Owner, &p.Repo, &p.DisplayName, &p.Kind,
 			&p.SessionCount, &p.TotalCostUSD, &p.TotalInput, &p.TotalOutput, &p.LastActivity); err != nil {
 			return nil, err
 		}
@@ -143,8 +147,8 @@ func (s *Store) ListProjects(ctx context.Context) ([]ProjectSummary, error) {
 func (s *Store) Project(ctx context.Context, id int64) (ProjectSummary, error) {
 	var p ProjectSummary
 	err := s.Pool.QueryRow(ctx,
-		`SELECT id, remote_key, host, owner, repo, display_name FROM projects WHERE id = $1`, id).
-		Scan(&p.ID, &p.RemoteKey, &p.Host, &p.Owner, &p.Repo, &p.DisplayName)
+		`SELECT id, remote_key, host, owner, repo, display_name, kind FROM projects WHERE id = $1`, id).
+		Scan(&p.ID, &p.RemoteKey, &p.Host, &p.Owner, &p.Repo, &p.DisplayName, &p.Kind)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ProjectSummary{}, ErrNotFound
 	}
@@ -235,7 +239,7 @@ func (s *Store) scanDetail(ctx context.Context, where string, arg any) (SessionD
 		        s.total_cache_write_tokens, s.total_cache_read_tokens,
 		        s.total_cost_usd, s.cost_incomplete, s.visibility, s.public_id,
 		        s.started_at, s.ended_at, s.updated_at,
-		        s.user_id, s.project_id, p.remote_key, p.display_name, s.cwd, s.parent_session_id, s.parser_version
+		        s.user_id, s.project_id, p.remote_key, p.display_name, p.kind, s.cwd, s.parent_session_id, s.parser_version
 		   FROM sessions s
 		   JOIN users u ON u.id = s.user_id
 		   JOIN projects p ON p.id = s.project_id
@@ -246,7 +250,7 @@ func (s *Store) scanDetail(ctx context.Context, where string, arg any) (SessionD
 		&d.TotalInput, &d.TotalOutput, &d.TotalCacheWrite, &d.TotalCacheRead,
 		&d.TotalCostUSD, &d.CostIncomplete, &d.Visibility, &d.PublicID,
 		&d.StartedAt, &d.EndedAt, &d.UpdatedAt,
-		&d.OwnerID, &d.ProjectID, &d.ProjectKey, &d.ProjectName, &d.Cwd, &d.ParentID, &d.ParserVersion)
+		&d.OwnerID, &d.ProjectID, &d.ProjectKey, &d.ProjectName, &d.ProjectKind, &d.Cwd, &d.ParentID, &d.ParserVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return SessionDetail{}, ErrNotFound
 	}
@@ -380,7 +384,7 @@ func (s *Store) Search(ctx context.Context, query string, projectID int64, limit
 	}
 	args = append(args, limit)
 	rows, err := s.Pool.Query(ctx,
-		`SELECT m.session_id, p.remote_key, s.agent, u.username, m.ordinal, m.role,
+		`SELECT m.session_id, p.remote_key, p.display_name, p.kind, s.agent, u.username, m.ordinal, m.role,
 		        left(m.content, 240)
 		   FROM messages m
 		   JOIN sessions s ON s.id = m.session_id
@@ -396,7 +400,7 @@ func (s *Store) Search(ctx context.Context, query string, projectID int64, limit
 	var out []SearchHit
 	for rows.Next() {
 		var h SearchHit
-		if err := rows.Scan(&h.SessionID, &h.ProjectKey, &h.Agent, &h.Username, &h.Ordinal, &h.Role, &h.Snippet); err != nil {
+		if err := rows.Scan(&h.SessionID, &h.ProjectKey, &h.ProjectName, &h.ProjectKind, &h.Agent, &h.Username, &h.Ordinal, &h.Role, &h.Snippet); err != nil {
 			return nil, err
 		}
 		out = append(out, h)

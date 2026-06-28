@@ -103,6 +103,7 @@ h2 { font-size: 1.25rem; margin: 0; }
 
 .muted { color: var(--muted); }
 .small { font-size: 0.75rem; }
+.mono { font-family: var(--mono); }
 .label {
   font-weight: 500; font-size: 0.6875rem; line-height: 1.2;
   letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted);
@@ -189,6 +190,10 @@ th.trend, td.trend { width: 108px; }
 .tag.agent { color: var(--lilac); }
 .tag.public { color: var(--ok); border-color: rgba(159, 214, 166, 0.4); }
 .tag.model { color: var(--subtext); font-family: var(--mono); letter-spacing: 0; }
+/* Project state: standalone (no remote) reads as a caution; orphaned (folder
+   gone) reads as an error. */
+.tag.standalone { color: var(--warn); border-color: rgba(240, 197, 146, 0.4); }
+.tag.orphaned { color: var(--err); border-color: rgba(239, 154, 169, 0.4); }
 
 /* ---- Buttons ---- */
 button, .btn {

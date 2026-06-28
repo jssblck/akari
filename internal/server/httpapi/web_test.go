@@ -1,7 +1,9 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/cookiejar"
@@ -101,7 +103,7 @@ func TestWebFlow(t *testing.T) {
 		t.Fatalf("get / authed: %v", err)
 	}
 	body = readBody(t, resp)
-	if !strings.Contains(body, "grace") || !strings.Contains(body, "No sessions have been pushed yet") {
+	if !strings.Contains(body, "grace") || !strings.Contains(body, "No git-remote projects yet") {
 		t.Fatalf("projects page missing expected content, got:\n%s", body)
 	}
 
@@ -154,6 +156,88 @@ func TestWebFlow(t *testing.T) {
 	}
 }
 
+// TestStandaloneOrphanedIndex drives the real ingest endpoint with a non-remote
+// kind and confirms the index renders standalone and orphaned folders in their
+// own "Sessions" section, tagged and labeled by folder, and that drilling into
+// one shows its state and path.
+func TestStandaloneOrphanedIndex(t *testing.T) {
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+	c := newClient(t)
+
+	// Register the first admin (browser cookie) and mint an ingest token whose
+	// raw secret we control, so we can call the ingest API directly.
+	if _, err := c.PostForm(srv.URL+"/register", url.Values{
+		"username": {"grace"}, "password": {"hopper-1906"},
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	u, err := st.UserByUsername(ctx, "grace")
+	if err != nil {
+		t.Fatalf("lookup user: %v", err)
+	}
+	const token = "ingest-secret-token"
+	if _, err := st.CreateAPIToken(ctx, u.ID, "laptop", "ingest", auth.HashToken(token)); err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+
+	announce := func(kind, source, cwd string) {
+		t.Helper()
+		body, _ := json.Marshal(map[string]string{
+			"agent": "claude", "source_session_id": source, "kind": kind,
+			"cwd": cwd, "machine": "grace-laptop",
+		})
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/ingest/session", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("announce %s: %v", source, err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("announce %s: status %d", source, resp.StatusCode)
+		}
+	}
+
+	announce("standalone", "sess-standalone", "/home/grace/scratch")
+	announce("orphaned", "sess-orphaned", "/home/grace/deleted")
+
+	// The index shows a Sessions section with both states tagged and the folder
+	// name and path rendered (not the synthetic local: key).
+	resp, err := c.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("get /: %v", err)
+	}
+	body := readBody(t, resp)
+	for _, want := range []string{
+		">Sessions<", "standalone", "orphaned", "scratch", "/home/grace/scratch", "deleted",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("index missing %q, got:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "local:grace-laptop:") {
+		t.Fatalf("index leaked the synthetic local key, got:\n%s", body)
+	}
+
+	// Drilling into the standalone folder shows its state tag and path.
+	var projID int64
+	if err := st.Pool.QueryRow(ctx, "SELECT id FROM projects WHERE kind = 'standalone'").Scan(&projID); err != nil {
+		t.Fatalf("find standalone project: %v", err)
+	}
+	resp, err = c.Get(fmt.Sprintf("%s/projects/%d", srv.URL, projID))
+	if err != nil {
+		t.Fatalf("get project: %v", err)
+	}
+	body = readBody(t, resp)
+	for _, want := range []string{"standalone", "/home/grace/scratch"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("project page missing %q, got:\n%s", want, body)
+		}
+	}
+}
+
 func TestLoginPreservesNext(t *testing.T) {
 	srv, _ := newTestServer(t)
 	c := newClient(t)
@@ -203,7 +287,7 @@ func TestPublicSessionFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari")
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
 	if err != nil {
 		t.Fatalf("project: %v", err)
 	}

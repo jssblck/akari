@@ -8,12 +8,15 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// AnnounceParams carries what a client reports when announcing a session.
+// AnnounceParams carries what a client reports when announcing a session. Kind
+// is the session's classification ("remote", "standalone", or "orphaned"); it
+// gates the downgrade guard in Announce.
 type AnnounceParams struct {
 	UserID          int64
 	Agent           string
 	SourceSessionID string
 	ProjectID       int64
+	Kind            string
 	GitBranch       string
 	Cwd             string
 	Machine         string
@@ -39,24 +42,57 @@ func (e OffsetMismatchError) Error() string {
 	return fmt.Sprintf("offset mismatch: server holds %d bytes", e.StoredBytes)
 }
 
-// UpsertProject inserts the project keyed by its canonical remote, or refreshes
-// last_seen on an existing one, returning the project id.
-func (s *Store) UpsertProject(ctx context.Context, remoteKey, host, owner, repo, displayName string) (int64, error) {
+// UpsertProject inserts the project keyed by its remote/synthetic key, or
+// refreshes last_seen on an existing one, returning the project id. The kind is
+// updated on conflict so a standalone folder that is later deleted transitions to
+// orphaned in place (its key, machine + path, is unchanged), and one that gains a
+// remote is never re-resolved here: a remote session carries its own remote key.
+func (s *Store) UpsertProject(ctx context.Context, remoteKey, host, owner, repo, displayName, kind string) (int64, error) {
 	var id int64
 	err := s.Pool.QueryRow(ctx,
-		`INSERT INTO projects (remote_key, host, owner, repo, display_name)
-		 VALUES ($1, $2, $3, $4, $5)
-		 ON CONFLICT (remote_key) DO UPDATE SET last_seen = now()
+		`INSERT INTO projects (remote_key, host, owner, repo, display_name, kind)
+		 VALUES ($1, $2, $3, $4, $5, $6)
+		 ON CONFLICT (remote_key) DO UPDATE SET last_seen = now(), kind = EXCLUDED.kind
 		 RETURNING id`,
-		remoteKey, host, owner, repo, displayName).Scan(&id)
+		remoteKey, host, owner, repo, displayName, kind).Scan(&id)
 	return id, err
 }
 
 // Announce upserts the session row (latest announce wins for mutable metadata),
 // ensures its raw-store row exists, and returns the current cursor and hash.
+//
+// Remote attribution is sticky: once a session resolves to a git-remote project,
+// a later announce that can no longer find a remote (standalone or orphaned,
+// because the folder lost its origin or was deleted) does not move it to a local
+// project. Backed-up work keeps its repo grouping rather than sliding into an
+// orphaned bucket the moment its checkout is removed. An upgrade in the other
+// direction (a local session that gains a remote) is allowed and re-homes it.
 func (s *Store) Announce(ctx context.Context, p AnnounceParams) (AnnounceResult, error) {
 	var r AnnounceResult
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		if p.Kind != "" && p.Kind != "remote" {
+			var existingID int64
+			var existingKind string
+			err := tx.QueryRow(ctx,
+				`SELECT s.id, pr.kind
+				   FROM sessions s JOIN projects pr ON pr.id = s.project_id
+				  WHERE s.user_id = $1 AND s.agent = $2 AND s.source_session_id = $3`,
+				p.UserID, p.Agent, p.SourceSessionID).Scan(&existingID, &existingKind)
+			switch {
+			case err == nil && existingKind == "remote":
+				// Keep the remote attribution untouched; report the current cursor.
+				r.SessionID = existingID
+				if _, err := tx.Exec(ctx,
+					`INSERT INTO session_raw (session_id) VALUES ($1) ON CONFLICT DO NOTHING`, existingID); err != nil {
+					return err
+				}
+				return tx.QueryRow(ctx,
+					`SELECT byte_len, content_sha256 FROM session_raw WHERE session_id = $1`, existingID).
+					Scan(&r.StoredBytes, &r.PrefixSHA256)
+			case err != nil && !errors.Is(err, pgx.ErrNoRows):
+				return err
+			}
+		}
 		if err := tx.QueryRow(ctx,
 			`INSERT INTO sessions (user_id, project_id, agent, source_session_id, machine, cwd, git_branch)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7)

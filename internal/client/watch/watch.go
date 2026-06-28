@@ -214,7 +214,7 @@ func (r *runState) worker(ctx context.Context) {
 			case res.Err != nil:
 				r.w.opt.Logf("error %s: %v", f.Path, res.Err)
 			case res.UploadedBytes > 0:
-				r.w.opt.Logf("uploaded %s -> %s (%d bytes)", f.Path, res.ProjectKey, res.UploadedBytes)
+				r.w.opt.Logf("uploaded %s -> %s (%d bytes)", f.Path, res.Destination(), res.UploadedBytes)
 			}
 		}
 	}

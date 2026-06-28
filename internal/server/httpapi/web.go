@@ -68,6 +68,16 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load projects."))
 		return
 	}
+	// Git-remote projects and local (standalone/orphaned) folders render in
+	// separate sections; split here so the template stays declarative.
+	var remotes, locals []store.ProjectSummary
+	for _, pr := range projects {
+		if web.IsLocalKind(pr.Kind) {
+			locals = append(locals, pr)
+		} else {
+			remotes = append(remotes, pr)
+		}
+	}
 	analytics, err := s.Store.Analytics(r.Context(), 0)
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load analytics."))
@@ -78,7 +88,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load analytics."))
 		return
 	}
-	render(w, r, http.StatusOK, web.ProjectsPage(s.pageFor(r, "Projects"), projects, analytics, spark))
+	render(w, r, http.StatusOK, web.ProjectsPage(s.pageFor(r, "Projects"), remotes, locals, analytics, spark))
 }
 
 func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {

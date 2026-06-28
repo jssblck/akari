@@ -1,8 +1,9 @@
 // Package resolve turns a discovered session file into the project it belongs to.
 // It peeks the file header for the working directory, then resolves that
 // directory's git origin remote to a canonical project key. Either hop can fail;
-// when it does the session is skipped with a specific, user-facing reason rather
-// than stored under a guessed identity.
+// rather than dropping the session, a failure classifies it: a folder with no
+// usable git remote is standalone, a folder that no longer exists on disk is
+// orphaned. Only a file we cannot even read a header from is skipped.
 package resolve
 
 import (
@@ -28,12 +29,31 @@ type Header struct {
 	SourceID  string
 }
 
-// Result is the outcome of resolving one file. When Skipped is true, Reason
-// explains why and ProjectKey is empty; otherwise ProjectKey is the canonical
-// remote and the session is ready to upload.
+// Kind classifies how a session resolves to a project.
+type Kind string
+
+const (
+	// KindRemote is a session whose working directory resolves to a canonical git
+	// remote. ProjectKey holds that remote.
+	KindRemote Kind = "remote"
+	// KindStandalone is a session whose working directory exists but yields no
+	// usable git remote: not a repository, no origin, multiple origin URLs, or an
+	// unrecognized origin URL. It is backed up and keyed by its local location.
+	KindStandalone Kind = "standalone"
+	// KindOrphaned is a session whose working directory is unknown or no longer
+	// exists on disk, so its remote can never be resolved. It is still backed up.
+	KindOrphaned Kind = "orphaned"
+)
+
+// Result is the outcome of resolving one file. Kind classifies the session;
+// ProjectKey is the canonical remote only when Kind is KindRemote. Reason carries
+// the human-readable detail behind a standalone or orphaned classification (and
+// the failure detail when Skipped). Skipped is true only when the file's header
+// could not be read at all, leaving nothing to upload.
 type Result struct {
 	File       discover.File
 	Header     Header
+	Kind       Kind
 	ProjectKey string
 	Skipped    bool
 	Reason     string
@@ -79,8 +99,11 @@ func NewWith(git GitRunner, aliases map[string]string) *Resolver {
 	}
 }
 
-// Resolve peeks the file header and resolves it to a project, or returns a
-// skip-with-reason.
+// Resolve peeks the file header and classifies the session. A session with a
+// resolvable git remote is KindRemote; one whose folder exists but has no usable
+// remote is KindStandalone; one whose folder is unknown or gone is KindOrphaned.
+// All three are returned ready to upload. Only a file whose header cannot be read
+// is Skipped, since without a header there is nothing to identify or send.
 func (r *Resolver) Resolve(ctx context.Context, f discover.File) Result {
 	h, err := PeekHeader(f.Agent, f.Path)
 	if err != nil {
@@ -89,20 +112,20 @@ func (r *Resolver) Resolve(ctx context.Context, f discover.File) Result {
 	res := Result{File: f, Header: h}
 
 	if h.Cwd == "" {
-		res.Skipped, res.Reason = true, "no working directory recorded"
+		res.Kind, res.Reason = KindOrphaned, "no working directory recorded"
 		return res
 	}
 	if info, err := os.Stat(h.Cwd); err != nil || !info.IsDir() {
-		res.Skipped, res.Reason = true, "cwd no longer exists: "+h.Cwd
+		res.Kind, res.Reason = KindOrphaned, "cwd no longer exists: "+h.Cwd
 		return res
 	}
 
 	key, reason := r.project(ctx, h.Cwd)
 	if reason != "" {
-		res.Skipped, res.Reason = true, reason
+		res.Kind, res.Reason = KindStandalone, reason
 		return res
 	}
-	res.ProjectKey = key
+	res.Kind, res.ProjectKey = KindRemote, key
 	return res
 }
 
