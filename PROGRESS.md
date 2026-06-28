@@ -150,7 +150,52 @@ detached process management.
 - Windows detail: the lock is taken on a high sentinel byte offset so the pid
   bytes stay readable (an exclusive LockFileEx range is otherwise unreadable).
 
-## Milestone 5: web UI (not started)
+## Milestone 5: web UI (DONE)
+
+Goal: the server-rendered read UI. Login/register, a projects index with rolled-up
+stats, a project view with agent/user/machine filters, a session view (stats
+header, transcript with thinking and tool-metadata chips, subagents), full-text
+search, account/token/invite management, and live session updates over SSE.
+
+- [x] internal/server/web: templ templates (layout, login/register, projects,
+      project + filterable session list, session + body fragment, transcript,
+      tool chip, search, account, error), view-model helpers (token/byte/cost/
+      time/duration formatting, role and status classes), embedded static assets
+- [x] internal/server/web/static: dark theme stylesheet, htmx 2.0.3, and an
+      app.js that wires the SSE stream to an htmx body swap via data attributes
+- [x] internal/server/store/read.go: ListProjects, Project, ListSessions (dynamic
+      filter), SessionDetail by id/public id, Messages, ToolCalls, Subagents,
+      Search (trigram ILIKE), SessionFacets (filter dropdown values)
+- [x] internal/server/httpapi/web.go: HTML handlers, requireReadHTML middleware,
+      flash cookies for once-shown secrets, login/register/logout forms, account
+      token/invite forms, SSE + body-fragment endpoints, static serving
+- [x] internal/server/httpapi/sse.go: in-process hub (subscribe/unsubscribe/
+      publish keyed by session id); handleChunk publishes after each parse
+- [x] Tests: full web flow (unauth redirect, register, projects, token flash,
+      search, logout), login next-preservation, safeNext open-redirect guard
+- [x] e2e: real browser (Claude in Chrome) through login, projects, project view,
+      session view, search, account; live SSE verified by streaming a session in
+      two chunks and watching the page update message count, stats, tool result,
+      and the new message with no reload
+- [x] codex review (gpt-5.5 high) twice; all findings fixed and re-verified
+
+### Milestone 5 codex findings (all fixed)
+
+- MEDIUM: the SSE handler cleared the write deadline for the whole stream, so a
+  client that stopped reading could block a write forever and the deferred
+  unsubscribe never ran (subscription/goroutine leak). Each SSE write now takes a
+  bounded 10s deadline and the loop returns on any write failure, so unsubscribe
+  always runs.
+- MEDIUM: flash cookies carrying freshly minted token/invite secrets omitted the
+  Secure flag, so on an HTTPS deployment with CookieSecure set a secret could
+  still ride a plain-HTTP request. setFlash now honors Cfg.CookieSecure like the
+  session cookie.
+- LOW: the post-login `next` target was dropped (the form posted to /login with no
+  query), so a deep link always bounced to /. LoginPage now carries next as a
+  hidden field, validated through safeNext on POST.
+- By design (not a finding): a full-scope API token can read the HTML UI. Full
+  scope is the read credential and M5 ships no JSON read API, so HTML is the only
+  read surface; ingest-only tokens remain blocked. Comments updated to say it.
 
 ## Milestone 6: public publishing (not started)
 

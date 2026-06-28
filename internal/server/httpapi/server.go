@@ -13,11 +13,12 @@ import (
 type Server struct {
 	Store *store.Store
 	Cfg   config.Server
+	hub   *sseHub
 }
 
 // New builds a Server.
 func New(st *store.Store, cfg config.Server) *Server {
-	return &Server{Store: st, Cfg: cfg}
+	return &Server{Store: st, Cfg: cfg, hub: newSSEHub()}
 }
 
 // Routes returns the HTTP handler for the whole API.
@@ -41,6 +42,28 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/ingest/session", s.requireIngest(s.handleAnnounce))
 	mux.HandleFunc("POST /api/v1/ingest/session/{id}/chunk", s.requireIngest(s.handleChunk))
 	mux.HandleFunc("POST /api/v1/ingest/session/{id}/reset", s.requireIngest(s.handleReset))
+
+	// Static assets.
+	mux.Handle("GET /static/", staticHandler())
+
+	// Server-rendered UI: public auth pages.
+	mux.HandleFunc("GET /login", s.handleLoginPage)
+	mux.HandleFunc("POST /login", s.handleLoginForm)
+	mux.HandleFunc("GET /register", s.handleRegisterPage)
+	mux.HandleFunc("POST /register", s.handleRegisterForm)
+	mux.HandleFunc("POST /logout", s.handleLogoutForm)
+
+	// Server-rendered UI: read pages (require a full-scope credential).
+	mux.HandleFunc("GET /{$}", s.requireReadHTML(s.handleIndex))
+	mux.HandleFunc("GET /projects/{id}", s.requireReadHTML(s.handleProjectPage))
+	mux.HandleFunc("GET /sessions/{id}", s.requireReadHTML(s.handleSessionPage))
+	mux.HandleFunc("GET /sessions/{id}/body", s.requireReadHTML(s.handleSessionBody))
+	mux.HandleFunc("GET /sessions/{id}/events", s.requireReadHTML(s.handleSessionEvents))
+	mux.HandleFunc("GET /search", s.requireReadHTML(s.handleSearchPage))
+	mux.HandleFunc("GET /account", s.requireReadHTML(s.handleAccountPage))
+	mux.HandleFunc("POST /account/tokens", s.requireFull(s.handleCreateTokenForm))
+	mux.HandleFunc("POST /account/tokens/{id}/revoke", s.requireFull(s.handleRevokeTokenForm))
+	mux.HandleFunc("POST /account/invites", s.requireAdmin(s.handleCreateInviteForm))
 
 	return mux
 }

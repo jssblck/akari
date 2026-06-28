@@ -112,6 +112,8 @@ func (s *Server) handleChunk(w http.ResponseWriter, r *http.Request) {
 	if perr != nil {
 		log.Printf("parse session %d (%s): %v", sessionID, agent, perr)
 	}
+	// Wake any browsers watching this session so they re-fetch the body.
+	s.hub.publish(sessionID)
 	writeJSON(w, http.StatusOK, map[string]any{"stored_bytes": stored, "message_count": msgCount})
 }
 
