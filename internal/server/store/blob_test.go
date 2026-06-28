@@ -44,7 +44,7 @@ func TestCASWriteDedupReadSweep(t *testing.T) {
 		Messages:      []MessageDelta{{Ordinal: 0, Role: "assistant", Content: "x", HasToolUse: true}},
 		ToolCalls: []ProjToolCall{{
 			MessageOrdinal: 0, CallIndex: 0, ToolName: "Read", Category: "read",
-			InputBody: body, InputBytes: int64(len(body)), InputMediaType: "application/json", CallUID: "c1",
+			InputBody: string(body), InputBytes: int64(len(body)), InputMediaType: "application/json", CallUID: "c1",
 		}},
 	}
 	if err := st.ApplyProjectionDelta(ctx, s1, withInput); err != nil {
@@ -136,7 +136,7 @@ func TestSweepSkipsBlobLockedByWriter(t *testing.T) {
 		Messages:      []MessageDelta{{Ordinal: 0, Role: "assistant", Content: "x", HasToolUse: true}},
 		ToolCalls:     []ProjToolCall{{MessageOrdinal: 0, CallIndex: 0, ToolName: "Read", CallUID: "c1"}},
 		ToolResults: []ToolResultDelta{{
-			CallUID: "c1", Body: body, Bytes: int64(len(body)), MediaType: "text/plain", Status: "ok",
+			CallUID: "c1", Body: string(body), Bytes: int64(len(body)), MediaType: "text/plain", Status: "ok",
 		}},
 	}
 	if err := st.ApplyProjectionDelta(ctx, sid, withBlob); err != nil {
@@ -154,7 +154,7 @@ func TestSweepSkipsBlobLockedByWriter(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback(ctx)
-	if _, err := writeBlobTx(ctx, tx, body, "text/plain"); err != nil {
+	if _, err := writeBlobTx(ctx, tx, string(body), "text/plain"); err != nil {
 		t.Fatalf("writeBlobTx: %v", err)
 	}
 

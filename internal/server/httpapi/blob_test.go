@@ -31,7 +31,7 @@ func seedToolSession(t *testing.T, st *store.Store, userID, projectID int64, sou
 			MessageOrdinal: 0, CallIndex: 0, ToolName: "Read", Category: "read", CallUID: "call-" + source,
 		}},
 		ToolResults: []store.ToolResultDelta{{
-			CallUID: "call-" + source, Body: body, Bytes: int64(len(body)),
+			CallUID: "call-" + source, Body: string(body), Bytes: int64(len(body)),
 			MediaType: "text/plain", Status: "ok",
 		}},
 	}

@@ -98,7 +98,7 @@ func TestDeleteSessionCascadesAndOrphansBlob(t *testing.T) {
 		Messages:      []MessageDelta{{Ordinal: 0, Role: "assistant", Content: "x", HasToolUse: true}},
 		ToolCalls:     []ProjToolCall{{MessageOrdinal: 0, CallIndex: 0, ToolName: "Read", CallUID: "c1"}},
 		ToolResults: []ToolResultDelta{{
-			CallUID: "c1", Body: body, Bytes: int64(len(body)), MediaType: "text/plain", Status: "ok",
+			CallUID: "c1", Body: string(body), Bytes: int64(len(body)), MediaType: "text/plain", Status: "ok",
 		}},
 	}
 	if err := st.ApplyProjectionDelta(ctx, sid, proj); err != nil {

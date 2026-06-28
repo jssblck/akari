@@ -103,23 +103,23 @@ func toProjectionDelta(p parser.Delta) store.ProjectionDelta {
 			CallUID:        t.CallUID,
 		}
 		if t.InputJSON != "" {
-			tc.InputBody = []byte(t.InputJSON)
+			// Carry the parsed input string straight through. gjson aliases the
+			// region, and the blob writer streams it in slices, so the body is never
+			// copied whole into a second buffer on the way to the CAS.
+			tc.InputBody = t.InputJSON
 			tc.InputMediaType = "application/json"
 		}
 		d.ToolCalls = append(d.ToolCalls, tc)
 	}
 
 	for _, tr := range p.ToolResults {
-		trd := store.ToolResultDelta{
+		d.ToolResults = append(d.ToolResults, store.ToolResultDelta{
 			CallUID:   tr.CallUID,
+			Body:      tr.Body,
 			Bytes:     int64(tr.Bytes),
 			MediaType: tr.MediaType,
 			Status:    tr.Status,
-		}
-		if len(tr.Body) > 0 {
-			trd.Body = []byte(tr.Body)
-		}
-		d.ToolResults = append(d.ToolResults, trd)
+		})
 	}
 
 	for _, u := range p.Usage {

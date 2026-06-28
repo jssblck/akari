@@ -46,7 +46,7 @@ type ProjToolCall struct {
 	ToolName       string
 	Category       string
 	FilePath       string
-	InputBody      []byte
+	InputBody      string
 	InputBytes     int64
 	InputMediaType string
 	CallUID        string
@@ -56,7 +56,7 @@ type ProjToolCall struct {
 // the bulky result the CAS stores (empty when the result carries no body).
 type ToolResultDelta struct {
 	CallUID   string
-	Body      []byte
+	Body      string
 	Bytes     int64
 	MediaType string
 	Status    string
