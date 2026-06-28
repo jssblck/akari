@@ -256,6 +256,29 @@ func readRawRegion(ctx context.Context, tx pgx.Tx, sessionID, from int64, cap in
 // applyDelta writes one region's rows: message upserts, tool-call inserts (with
 // their input bodies in the CAS), tool-result back-patches, and usage inserts.
 func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDelta) error {
+	// The DO UPDATE branch rewrites the row's content/thinking_text, so it is the
+	// one place a streamed turn could in principle do O(text^2) work over a
+	// session. It is not on the session's hot path. The branch fires only when the
+	// same ordinal is touched in more than one region, which happens for exactly
+	// one shape of input: a single Codex assistant turn whose own text and
+	// reasoning span a chunk boundary. Ordinary messages (every user turn, every
+	// Claude and pi turn, and any Codex turn that fits in one chunk) take the
+	// INSERT path once and are never rewritten.
+	//
+	// For the append to be costly that one assistant message would have to be
+	// multiple megabytes of natural-language text and reasoning, since a chunk is
+	// several MB and the message would have to outgrow it. That does not happen:
+	// the bulky part of a tool-heavy turn is the tool output, which is a
+	// function_call_output stored as a result blob in the CAS, never in
+	// messages.content. So the rewrite is bounded by one turn's prose, not by the
+	// session, and in practice fires zero times.
+	//
+	// The alternatives are worse. Append-only fragment rows concatenated on read
+	// would fragment content out of the messages row, breaking both the inline
+	// trigram index (idx_messages_content_trgm) and direct rendering. Buffering the
+	// open turn's text in parse_state is itself O(text^2), because that JSONB is
+	// rewritten on every chunk. Keeping the partial turn in its own row, appended
+	// in place, is the cheapest correct option for the case that actually occurs.
 	for _, m := range d.Messages {
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO messages
