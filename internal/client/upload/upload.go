@@ -91,11 +91,14 @@ type Client struct {
 // fresh Client) costs a one-time full re-hash and re-scan, never correctness, and
 // any sign the file diverged from what it describes forces that full path.
 type fileSync struct {
-	// mu serializes the whole sync of one path. The fields below and the hasher are
-	// not safe for concurrent use, so SyncFile holds this for its entire run; two
+	// lock serializes the whole sync of one path. The fields below and the hasher
+	// are not safe for concurrent use, so SyncFile holds it for its entire run; two
 	// goroutines syncing the same path proceed one at a time, while different paths
-	// (different fileSync) run in parallel.
-	mu sync.Mutex
+	// (different fileSync) run in parallel. It is a one-slot semaphore rather than a
+	// sync.Mutex so the wait can be abandoned when the caller's context is canceled:
+	// the holder may be parked on a slow HTTP call, and a mutex wait would ignore a
+	// shutdown. A nil channel (a fileSync built directly in a test) means no locking.
+	lock chan struct{}
 
 	// Verified prefix. Local bytes [0, base) are confirmed to match what the server
 	// stored, and prefixHasher has consumed exactly those bytes, so the next
@@ -133,7 +136,7 @@ func (c *Client) fileState(path string) *fileSync {
 	defer c.mu.Unlock()
 	fs := c.files[path]
 	if fs == nil {
-		fs = &fileSync{}
+		fs = &fileSync{lock: make(chan struct{}, 1)}
 		c.files[path] = fs
 	}
 	return fs
@@ -176,10 +179,16 @@ func (c *Client) SyncFile(ctx context.Context, t Target) (Outcome, error) {
 	defer f.Close()
 
 	// Hold the per-file lock for the whole sync so concurrent SyncFile calls for the
-	// same path serialize instead of racing on the shared cursor and hasher.
+	// same path serialize instead of racing on the shared cursor and hasher. The
+	// acquire is cancellable: a caller whose context is canceled (a shutdown) stops
+	// waiting instead of blocking behind an in-flight sync that may be stuck on I/O.
 	fs := c.fileState(t.Path)
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
+	select {
+	case fs.lock <- struct{}{}:
+		defer func() { <-fs.lock }()
+	case <-ctx.Done():
+		return Outcome{}, ctx.Err()
+	}
 
 	var totalUploaded int64
 	sawReset := false

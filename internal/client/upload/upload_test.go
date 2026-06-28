@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -553,5 +554,24 @@ func TestConcurrentSyncSamePathSerializes(t *testing.T) {
 
 	if string(fs.buf) != content {
 		t.Fatalf("server buf = %q, want the file content once", fs.buf)
+	}
+}
+
+// TestSyncFileLockWaitIsCancellable proves the per-file single-flight wait honors
+// the context: while one holder has the lock, a caller whose context is already
+// canceled returns promptly instead of blocking behind the in-flight sync.
+func TestSyncFileLockWaitIsCancellable(t *testing.T) {
+	c, _ := newTestClient(t)
+	path := tempFile(t, "l1\n")
+
+	// Take the per-file lock and keep it, so the SyncFile below must wait for it.
+	state := c.fileState(path)
+	state.lock <- struct{}{}
+	defer func() { <-state.lock }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := c.SyncFile(ctx, target(path)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 }
