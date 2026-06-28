@@ -3,12 +3,10 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
-	"os/signal"
-	"syscall"
 
+	"github.com/jssblck/akari/internal/shutdown"
 	"github.com/jssblck/akari/internal/version"
 )
 
@@ -18,7 +16,12 @@ func main() {
 		os.Exit(2)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	// The first Ctrl-C acks immediately and cancels ctx so the running command
+	// stops taking on new work and winds down the unit it is on; a second Ctrl-C
+	// exits at once.
+	ctx, stop := shutdown.Notify(func() {
+		fmt.Fprintln(os.Stderr, "akari: interrupt received, finishing in-flight work (Ctrl-C again to exit now)")
+	})
 	defer stop()
 
 	var err error

@@ -8,13 +8,12 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
 	"github.com/jssblck/akari/internal/config"
 	"github.com/jssblck/akari/internal/server/httpapi"
 	"github.com/jssblck/akari/internal/server/store"
+	"github.com/jssblck/akari/internal/shutdown"
 	"github.com/jssblck/akari/internal/version"
 	"github.com/jssblck/akari/migrations"
 )
@@ -57,10 +56,15 @@ func run() error {
 		return err
 	}
 
-	// rootCtx is cancelled on shutdown so background work (the blob sweep) stops
-	// before the connection pool is closed. The deferred stop guarantees the
-	// context is always released; a second stop below also waits for the sweep.
-	rootCtx, stop := context.WithCancel(context.Background())
+	// rootCtx is cancelled on the first interrupt so background work (the blob
+	// sweep) and the HTTP server wind down before the connection pool is closed.
+	// shutdown.Notify acks the signal immediately, gives that clean wind-down a
+	// chance to complete, and forces an exit on a second interrupt. The deferred
+	// stop guarantees the context is always released; a second stop below also
+	// waits for the sweep.
+	rootCtx, stop := shutdown.Notify(func() {
+		log.Printf("interrupt received, shutting down gracefully (Ctrl-C again to force exit)")
+	})
 	defer stop()
 
 	st, err := store.Open(rootCtx, cfg.DatabaseURL)
@@ -109,20 +113,17 @@ func run() error {
 		IdleTimeout:  120 * time.Second,
 	}
 
-	// Graceful shutdown on interrupt.
+	// On the first interrupt (rootCtx cancelled), stop accepting connections and
+	// drain in-flight requests, then wait for the sweep to finish its current
+	// pass, before the deferred st.Close shuts the pool.
 	idleClosed := make(chan struct{})
 	go func() {
-		sig := make(chan os.Signal, 1)
-		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-		<-sig
+		<-rootCtx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			log.Printf("shutdown: %v", err)
 		}
-		// Stop the background sweep and let it finish its current pass before the
-		// pool is closed by the deferred st.Close.
-		stop()
 		<-sweepDone
 		close(idleClosed)
 	}()

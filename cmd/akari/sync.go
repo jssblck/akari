@@ -60,9 +60,18 @@ func runSync(ctx context.Context, args []string) error {
 		}
 	}
 
+	// work is detached from ctx so the file currently being uploaded finishes to a
+	// clean stopping point after a first Ctrl-C; the loop below stops starting new
+	// files once ctx is cancelled, and a second Ctrl-C exits the process outright.
+	work := context.WithoutCancel(ctx)
+	interrupted := false
 	for _, f := range files {
+		if ctx.Err() != nil {
+			interrupted = true
+			break
+		}
 		if *dryRun {
-			res := resolver.Resolve(ctx, f)
+			res := resolver.Resolve(work, f)
 			if res.Skipped {
 				skipped++
 				skipReasons[res.Reason]++
@@ -74,7 +83,7 @@ func runSync(ctx context.Context, args []string) error {
 			continue
 		}
 
-		r := sync.SyncOne(ctx, f)
+		r := sync.SyncOne(work, f)
 		switch {
 		case r.Skipped:
 			skipped++
@@ -100,6 +109,9 @@ func runSync(ctx context.Context, args []string) error {
 	}
 
 	printSummary(len(files), uploaded, reset, upToDate, skipped, failed, standalone, orphaned, uploadedBytes, skipReasons, *dryRun)
+	if interrupted {
+		fmt.Fprintf(os.Stderr, "interrupted: stopped before processing every file\n")
+	}
 	if failed > 0 {
 		return fmt.Errorf("%d file(s) failed to upload", failed)
 	}

@@ -192,7 +192,13 @@ func (r *runState) pop() (discover.File, bool) {
 
 // worker drains the dirty set one file at a time. Uploads are idempotent, so a
 // file re-marked while in flight simply syncs again on the next drain.
+//
+// Syncs run on a context detached from ctx so the file the worker is on finishes
+// uploading after a Ctrl-C; once that file is done the worker stops instead of
+// draining the rest of the backlog. A second Ctrl-C exits the process outright
+// (handled by the signal layer), so a slow upload never blocks shutdown forever.
 func (r *runState) worker(ctx context.Context) {
+	work := context.WithoutCancel(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -200,14 +206,11 @@ func (r *runState) worker(ctx context.Context) {
 		case <-r.wake:
 		}
 		for {
-			if ctx.Err() != nil {
-				return
-			}
 			f, ok := r.pop()
 			if !ok {
 				break
 			}
-			res := r.w.sync(ctx, f)
+			res := r.w.sync(work, f)
 			switch {
 			case res.Skipped:
 				r.w.opt.Logf("skip %s: %s", f.Path, res.Reason)
@@ -215,6 +218,9 @@ func (r *runState) worker(ctx context.Context) {
 				r.w.opt.Logf("error %s: %v", f.Path, res.Err)
 			case res.UploadedBytes > 0:
 				r.w.opt.Logf("uploaded %s -> %s (%d bytes)", f.Path, res.Destination(), res.UploadedBytes)
+			}
+			if ctx.Err() != nil {
+				return // finished the current file; stop without draining the backlog
 			}
 		}
 	}
