@@ -91,6 +91,12 @@ type Client struct {
 // fresh Client) costs a one-time full re-hash and re-scan, never correctness, and
 // any sign the file diverged from what it describes forces that full path.
 type fileSync struct {
+	// mu serializes the whole sync of one path. The fields below and the hasher are
+	// not safe for concurrent use, so SyncFile holds this for its entire run; two
+	// goroutines syncing the same path proceed one at a time, while different paths
+	// (different fileSync) run in parallel.
+	mu sync.Mutex
+
 	// Verified prefix. Local bytes [0, base) are confirmed to match what the server
 	// stored, and prefixHasher has consumed exactly those bytes, so the next
 	// verification extends the digest over only the newly stored bytes instead of
@@ -133,14 +139,20 @@ func (c *Client) fileState(path string) *fileSync {
 	return fs
 }
 
-// reset rewinds a file's cached state to the start: an empty verified prefix and a
-// fresh hasher. Called when the server holds nothing, or when the prefix diverged
-// and the server copy was dropped, so the whole file re-uploads from zero.
-func (fs *fileSync) reset(size int64) {
+// rewind sets the verified prefix back to empty: the server holds nothing, so the
+// whole file will re-upload from zero. It keeps the scan cursor only when the bytes
+// it covers are both unsent and unchanged: base was already 0 (nothing had been
+// accepted, so [0, scanned) is still a boundary-free unsent prefix) and the file
+// only grew. Otherwise (we had uploaded bytes whose boundaries must be re-found, or
+// the file shrank under us) it rescans from zero.
+func (fs *fileSync) rewind(size int64) {
+	keepScan := fs.base == 0 && size >= fs.prefixSize
 	fs.base = 0
 	fs.prefixHasher = sha256.New()
 	fs.prefixSize = size
-	fs.scanned = 0
+	if !keepScan {
+		fs.scanned = 0
+	}
 }
 
 // maxConflictRetries bounds how many times a single SyncFile re-announces after
@@ -163,10 +175,16 @@ func (c *Client) SyncFile(ctx context.Context, t Target) (Outcome, error) {
 	}
 	defer f.Close()
 
+	// Hold the per-file lock for the whole sync so concurrent SyncFile calls for the
+	// same path serialize instead of racing on the shared cursor and hasher.
+	fs := c.fileState(t.Path)
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
 	var totalUploaded int64
 	sawReset := false
 	for attempt := 0; attempt < maxConflictRetries; attempt++ {
-		out, conflicted, err := c.syncOnce(ctx, t, f)
+		out, conflicted, err := c.syncOnce(ctx, t, fs, f)
 		if err != nil {
 			return Outcome{}, err
 		}
@@ -192,7 +210,7 @@ func (c *Client) SyncFile(ctx context.Context, t Target) (Outcome, error) {
 // syncOnce performs one announce, reconcile, and upload pass. It returns
 // conflicted=true if an offset conflict interrupted the upload, signalling the
 // caller to re-announce and try again.
-func (c *Client) syncOnce(ctx context.Context, t Target, f *os.File) (Outcome, bool, error) {
+func (c *Client) syncOnce(ctx context.Context, t Target, fs *fileSync, f *os.File) (Outcome, bool, error) {
 	ann, err := c.announce(ctx, t)
 	if err != nil {
 		return Outcome{}, false, err
@@ -207,12 +225,12 @@ func (c *Client) syncOnce(ctx context.Context, t Target, f *os.File) (Outcome, b
 	// also keeps a turn that merely paused mid-write from being flushed early.
 	settled := time.Since(info.ModTime()) > settleWindow
 
-	fs := c.fileState(t.Path)
 	action := ActionUploaded
 	if ann.StoredBytes == 0 {
-		// The server holds nothing: there is no prefix to verify, and any cached
-		// state is for an upload that is being redone from zero.
-		fs.reset(size)
+		// The server holds nothing: there is no prefix to verify. rewind keeps the
+		// scan cursor when the file is just append-growing before its first chunk is
+		// uploadable, so a withheld opening turn is not rescanned from zero each tick.
+		fs.rewind(size)
 	} else {
 		ok, err := c.verifyPrefix(f, fs, ann.StoredBytes, size, ann.PrefixSHA256)
 		if err != nil {
@@ -224,7 +242,7 @@ func (c *Client) syncOnce(ctx context.Context, t Target, f *os.File) (Outcome, b
 			if err := c.reset(ctx, ann.SessionID); err != nil {
 				return Outcome{}, false, err
 			}
-			fs.reset(size)
+			fs.rewind(size)
 			action = ActionReset
 		}
 	}
@@ -370,13 +388,21 @@ func readRange(f *os.File, from, to int64) ([]byte, error) {
 	return b, nil
 }
 
-// readAt fills buf from offset off, treating EOF as a clean short read, and wraps
-// any real I/O error with the range it was reading so a failure is diagnosable.
+// readAt fills buf entirely from offset off. A short read means the file was
+// truncated or rotated between Stat and now, so the missing bytes would otherwise
+// be read as zero-filled session content; readAt treats any short read as an error
+// (including the io.EOF ReadAt returns for one) and wraps it with the range. A full
+// read returns nil even at the exact end of file, where ReadAt may report io.EOF.
 func readAt(f *os.File, buf []byte, off int64) error {
-	if _, err := f.ReadAt(buf, off); err != nil && err != io.EOF {
-		return fmt.Errorf("read session file [%d,%d): %w", off, off+int64(len(buf)), err)
+	n, err := f.ReadAt(buf, off)
+	if n == len(buf) {
+		return nil
 	}
-	return nil
+	if err == nil {
+		err = io.ErrUnexpectedEOF
+	}
+	return fmt.Errorf("read session file [%d,%d): short read (%d of %d bytes): %w",
+		off, off+int64(len(buf)), n, len(buf), err)
 }
 
 // agentCodex is the agent string whose sessions fold a turn across lines. Kept
@@ -466,13 +492,18 @@ func (c *Client) verifyPrefix(f *os.File, fs *fileSync, serverBytes, size int64,
 	}
 }
 
-// hashRange feeds [from, to) of f into h.
+// hashRange feeds [from, to) of f into h. A short read (the file was truncated
+// since Stat) is an error, not a silently shorter prefix that would hash wrong.
 func hashRange(f *os.File, h hash.Hash, from, to int64) error {
 	if to <= from {
 		return nil
 	}
-	if _, err := io.Copy(h, io.NewSectionReader(f, from, to-from)); err != nil {
+	n, err := io.Copy(h, io.NewSectionReader(f, from, to-from))
+	if err != nil {
 		return fmt.Errorf("hash session file [%d,%d): %w", from, to, err)
+	}
+	if n != to-from {
+		return fmt.Errorf("hash session file [%d,%d): short read (%d of %d bytes)", from, to, n, to-from)
 	}
 	return nil
 }

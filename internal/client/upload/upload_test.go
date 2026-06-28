@@ -501,3 +501,57 @@ func TestNextChunkRejectsOversizedOpenMessage(t *testing.T) {
 		t.Fatal("expected an oversized-message error for an open turn past hardCap")
 	}
 }
+
+// TestRewindKeepsScanCursorBeforeFirstUpload covers the zero-byte-server case: a
+// file that is only append-growing keeps its scan cursor (so a withheld opening
+// message is not rescanned from zero every tick), while a file that diverged or
+// shrank rescans from the start.
+func TestRewindKeepsScanCursorBeforeFirstUpload(t *testing.T) {
+	// Append-only growth, nothing uploaded yet: keep the cursor.
+	fs := &fileSync{scanned: 100, prefixSize: 100}
+	fs.rewind(150)
+	if fs.scanned != 100 {
+		t.Errorf("append-growing cursor = %d, want 100 (kept)", fs.scanned)
+	}
+
+	// Bytes had been uploaded (base > 0) and the server dropped to zero: the dropped
+	// prefix holds boundaries, so rescan from the start.
+	fs = &fileSync{base: 50, scanned: 80, prefixSize: 100}
+	fs.rewind(150)
+	if fs.scanned != 0 {
+		t.Errorf("post-upload cursor = %d, want 0 (rescan)", fs.scanned)
+	}
+
+	// The file shrank: the scanned bytes are no longer what we saw, so rescan.
+	fs = &fileSync{scanned: 80, prefixSize: 100}
+	fs.rewind(50)
+	if fs.scanned != 0 {
+		t.Errorf("truncated cursor = %d, want 0 (rescan)", fs.scanned)
+	}
+}
+
+// TestConcurrentSyncSamePathSerializes runs many syncs of one path at once. The
+// per-file lock must serialize them so they cannot corrupt the shared cursor and
+// hasher; the server ends up with exactly the file content. Run under -race to
+// catch a regression in the locking.
+func TestConcurrentSyncSamePathSerializes(t *testing.T) {
+	c, fs := newTestClient(t)
+	content := strings.Repeat("line\n", 64)
+	path := tempFile(t, content)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := c.SyncFile(context.Background(), target(path)); err != nil {
+				t.Errorf("sync: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if string(fs.buf) != content {
+		t.Fatalf("server buf = %q, want the file content once", fs.buf)
+	}
+}
