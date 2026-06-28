@@ -39,21 +39,19 @@ func TestCASWriteDedupReadSweep(t *testing.T) {
 	// blob (content-addressed across sessions).
 	s1 := seedSession(t, st, u.ID, projectID, "sess-1")
 	s2 := seedSession(t, st, u.ID, projectID, "sess-2")
-	proj := func(ord int) Projection {
-		return Projection{
-			ParserVersion: 1, MessageCount: 1,
-			Messages: []ProjMessage{{Ordinal: 0, Role: "assistant", Content: "x", HasToolUse: true}},
-			ToolCalls: []ProjToolCall{{
-				MessageOrdinal: 0, CallIndex: 0, ToolName: "Read", Category: "read",
-				InputBody: body, InputBytes: int64(len(body)), InputMediaType: "application/json",
-			}},
-		}
+	withInput := ProjectionDelta{
+		MessagesAdded: 1,
+		Messages:      []MessageDelta{{Ordinal: 0, Role: "assistant", AppendContent: "x", HasToolUse: true}},
+		ToolCalls: []ProjToolCall{{
+			MessageOrdinal: 0, CallIndex: 0, ToolName: "Read", Category: "read",
+			InputBody: body, InputBytes: int64(len(body)), InputMediaType: "application/json", CallUID: "c1",
+		}},
 	}
-	if err := st.WriteProjection(ctx, s1, 0, proj(0)); err != nil {
-		t.Fatalf("write projection s1: %v", err)
+	if err := st.ApplyProjectionDelta(ctx, s1, withInput); err != nil {
+		t.Fatalf("apply projection s1: %v", err)
 	}
-	if err := st.WriteProjection(ctx, s2, 0, proj(0)); err != nil {
-		t.Fatalf("write projection s2: %v", err)
+	if err := st.ApplyProjectionDelta(ctx, s2, withInput); err != nil {
+		t.Fatalf("apply projection s2: %v", err)
 	}
 
 	var blobCount int
@@ -93,14 +91,12 @@ func TestCASWriteDedupReadSweep(t *testing.T) {
 		t.Fatalf("sweep with live refs removed=%d err=%v, want 0", removed, err)
 	}
 
-	// Re-projecting s1 and s2 with no tool calls orphans the blob; the sweep then
-	// reclaims it.
-	empty := Projection{ParserVersion: 1, MessageCount: 1,
-		Messages: []ProjMessage{{Ordinal: 0, Role: "user", Content: "hi"}}}
-	if err := st.WriteProjection(ctx, s1, 0, empty); err != nil {
+	// Resetting both sessions drops their tool calls, orphaning the blob; the
+	// sweep then reclaims it.
+	if err := st.ResetRaw(ctx, s1); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.WriteProjection(ctx, s2, 0, empty); err != nil {
+	if err := st.ResetRaw(ctx, s2); err != nil {
 		t.Fatal(err)
 	}
 	removed, err := st.SweepBlobs(ctx)
@@ -135,23 +131,20 @@ func TestSweepSkipsBlobLockedByWriter(t *testing.T) {
 	body := []byte("shared tool body")
 	sha := HashBytes(body)
 	sid := seedSession(t, st, u.ID, projectID, "sess-1")
-	withBlob := Projection{
-		ParserVersion: 1, MessageCount: 1,
-		Messages: []ProjMessage{{Ordinal: 0, Role: "assistant", Content: "x", HasToolUse: true}},
-		ToolCalls: []ProjToolCall{{
-			MessageOrdinal: 0, CallIndex: 0, ToolName: "Read",
-			ResultBody: body, ResultBytes: int64(len(body)), ResultMediaType: "text/plain",
-			ResultStatus: "ok", HasResult: true,
+	withBlob := ProjectionDelta{
+		MessagesAdded: 1,
+		Messages:      []MessageDelta{{Ordinal: 0, Role: "assistant", AppendContent: "x", HasToolUse: true}},
+		ToolCalls:     []ProjToolCall{{MessageOrdinal: 0, CallIndex: 0, ToolName: "Read", CallUID: "c1"}},
+		ToolResults: []ToolResultDelta{{
+			CallUID: "c1", Body: body, Bytes: int64(len(body)), MediaType: "text/plain", Status: "ok",
 		}},
 	}
-	if err := st.WriteProjection(ctx, sid, 0, withBlob); err != nil {
+	if err := st.ApplyProjectionDelta(ctx, sid, withBlob); err != nil {
 		t.Fatal(err)
 	}
 	// Drop the reference in committed state: the blob is now an orphan a naive
 	// sweep would remove.
-	empty := Projection{ParserVersion: 1, MessageCount: 1,
-		Messages: []ProjMessage{{Ordinal: 0, Role: "user", Content: "hi"}}}
-	if err := st.WriteProjection(ctx, sid, 0, empty); err != nil {
+	if err := st.ResetRaw(ctx, sid); err != nil {
 		t.Fatal(err)
 	}
 

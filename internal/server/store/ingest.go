@@ -2,6 +2,9 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding"
+	"encoding/hex"
 	"errors"
 	"fmt"
 
@@ -129,14 +132,27 @@ func (s *Store) SessionMeta(ctx context.Context, sessionID int64) (userID int64,
 	return userID, agent, err
 }
 
-// AppendChunk appends data at the given offset. If offset does not match the
-// server's current byte_len it returns OffsetMismatchError with the truth and
-// makes no change. The stored content hash is advanced to cover the new bytes.
+// ErrChunkNotLineAligned reports a chunk that is empty or does not end on a
+// newline. The ingest protocol requires every stored byte to rest on a JSONL line
+// boundary so the server only ever parses complete lines; the server enforces it
+// rather than trusting the client.
+var ErrChunkNotLineAligned = errors.New("chunk must be non-empty and end on a newline")
+
+// AppendChunk appends data at the given offset as a new raw chunk row. If offset
+// does not match the server's current byte_len it returns OffsetMismatchError
+// with the truth and makes no change. The prefix hash is advanced by resuming the
+// stored sha256 state and folding in only the new bytes, so appending is work
+// proportional to the chunk, not to the whole session.
 func (s *Store) AppendChunk(ctx context.Context, sessionID, offset int64, data []byte) (newStoredBytes int64, err error) {
+	if len(data) == 0 || data[len(data)-1] != '\n' {
+		return 0, ErrChunkNotLineAligned
+	}
 	err = pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		var current int64
+		var hashState []byte
 		if err := tx.QueryRow(ctx,
-			`SELECT byte_len FROM session_raw WHERE session_id = $1 FOR UPDATE`, sessionID).Scan(&current); err != nil {
+			`SELECT byte_len, sha256_state FROM session_raw WHERE session_id = $1 FOR UPDATE`, sessionID).
+			Scan(&current, &hashState); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrNotFound
 			}
@@ -145,18 +161,32 @@ func (s *Store) AppendChunk(ctx context.Context, sessionID, offset int64, data [
 		if current != offset {
 			return OffsetMismatchError{StoredBytes: current}
 		}
-		// The SET expressions read the pre-update content, so byte_len and the
-		// hash both fold in exactly the appended bytes once. Hashing in-database
-		// keeps the large content off the wire. content is BYTEA, so the bytes
-		// (and their hash) round-trip exactly.
-		return tx.QueryRow(ctx,
+
+		h := sha256.New()
+		if len(hashState) > 0 {
+			if err := h.(encoding.BinaryUnmarshaler).UnmarshalBinary(hashState); err != nil {
+				return fmt.Errorf("restore hash state for session %d: %w", sessionID, err)
+			}
+		}
+		h.Write(data)
+		newState, err := h.(encoding.BinaryMarshaler).MarshalBinary()
+		if err != nil {
+			return err
+		}
+		newStoredBytes = current + int64(len(data))
+
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO session_raw_chunks (session_id, byte_offset, byte_len, content)
+			 VALUES ($1, $2, $3, $4)`,
+			sessionID, offset, int64(len(data)), data); err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx,
 			`UPDATE session_raw
-			   SET content        = content || $2,
-			       byte_len       = byte_len + $3,
-			       content_sha256 = encode(sha256(content || $2), 'hex')
-			 WHERE session_id = $1
-			 RETURNING byte_len`,
-			sessionID, data, int64(len(data))).Scan(&newStoredBytes)
+			    SET byte_len = $2, content_sha256 = $3, sha256_state = $4
+			  WHERE session_id = $1`,
+			sessionID, newStoredBytes, hex.EncodeToString(h.Sum(nil)), newState)
+		return err
 	})
 	return newStoredBytes, err
 }
@@ -172,20 +202,24 @@ func (s *Store) ResetRaw(ctx context.Context, sessionID int64) error {
 			"DELETE FROM tool_calls WHERE session_id = $1",
 			"DELETE FROM usage_events WHERE session_id = $1",
 			"DELETE FROM attachments WHERE session_id = $1",
+			"DELETE FROM session_raw_chunks WHERE session_id = $1",
 		} {
 			if _, err := tx.Exec(ctx, q, sessionID); err != nil {
 				return err
 			}
 		}
 		ct, err := tx.Exec(ctx,
-			`UPDATE session_raw SET content = '\x', byte_len = 0, content_sha256 = '' WHERE session_id = $1`,
-			sessionID)
+			`UPDATE session_raw
+			    SET byte_len = 0, content_sha256 = $2, sha256_state = NULL,
+			        parsed_byte_len = 0, parse_state = '{}'::jsonb,
+			        parse_state_version = 0, parse_error = ''
+			  WHERE session_id = $1`, sessionID, emptySHA256)
 		if err != nil {
 			return err
 		}
 		if ct.RowsAffected() == 0 {
 			return ErrNotFound
 		}
-		return nil
+		return resetSessionAggregates(ctx, tx, sessionID)
 	})
 }

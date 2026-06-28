@@ -47,7 +47,7 @@ func runReparse(args []string) error {
 
 	var ok, failed int
 	for _, t := range targets {
-		if _, err := parse.SessionFromRaw(ctx, st, t.ID, t.Agent); err != nil {
+		if _, err := parse.Reparse(ctx, st, t.ID, t.Agent); err != nil {
 			failed++
 			log.Printf("reparse session %d (%s): %v", t.ID, t.Agent, err)
 			continue

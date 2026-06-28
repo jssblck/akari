@@ -127,6 +127,9 @@ func (s *Server) handleChunk(w http.ResponseWriter, r *http.Request) {
 			"error": "offset mismatch", "stored_bytes": mismatch.StoredBytes,
 		})
 		return
+	case errors.Is(err, store.ErrChunkNotLineAligned):
+		writeError(w, http.StatusBadRequest, "chunk must end on a newline")
+		return
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusNotFound, "session not found")
 		return
@@ -134,10 +137,11 @@ func (s *Server) handleChunk(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "append chunk")
 		return
 	}
-	// Re-parse the session from its stored raw bytes. The bytes are already
-	// persisted, so a parse failure does not fail the upload; it is logged and
-	// the projection is left for the next chunk or a reparse to rebuild.
-	msgCount, perr := parse.SessionFromRaw(r.Context(), s.Store, sessionID, agent)
+	// Parse the newly appended bytes into the projection. The raw bytes are
+	// already committed, so a parse failure (including a parser-version change
+	// awaiting a reparse) does not fail the upload: it is logged and the cursor is
+	// left for the next chunk or a reparse to advance.
+	msgCount, perr := parse.Advance(r.Context(), s.Store, sessionID, agent)
 	if perr != nil {
 		log.Printf("parse session %d (%s): %v", sessionID, agent, perr)
 	}

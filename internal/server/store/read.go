@@ -267,6 +267,16 @@ func (s *Store) SessionDetailByPublicID(ctx context.Context, publicID string) (S
 	return s.scanDetail(ctx, "s.public_id = $1 AND s.visibility = 'public'", publicID)
 }
 
+// MessageCount returns a session's current message count from its rollup.
+func (s *Store) MessageCount(ctx context.Context, sessionID int64) (int, error) {
+	var n int
+	err := s.Pool.QueryRow(ctx, "SELECT message_count FROM sessions WHERE id = $1", sessionID).Scan(&n)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	return n, err
+}
+
 // Messages returns a session's transcript in order.
 func (s *Store) Messages(ctx context.Context, sessionID int64) ([]Message, error) {
 	rows, err := s.Pool.Query(ctx,

@@ -6,61 +6,50 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// parseClaude parses Claude Code JSONL. Each line is a typed entry; user and
-// assistant entries carry message content as either a string or an array of
-// typed blocks (text, thinking, tool_use, tool_result). Token usage rides on the
-// assistant entry. Tool results arrive as blocks in the following user entry and
-// are matched back to their tool_use by id.
-func parseClaude(raw []byte) (Session, error) {
-	var s Session
-	var sp span
-	ordinal := 0
-	toolByID := map[string]int{} // tool_use id -> index in s.ToolCalls
-
-	lines, err := scanLines(raw)
-	if err != nil {
-		return Session{}, err
-	}
-	for _, line := range lines {
-		if !gjson.Valid(line) {
-			continue
+// reduceClaude advances a Claude Code session over one raw region. Each line is a
+// typed entry; user and assistant entries carry content as a string or an array
+// of typed blocks (text, thinking, tool_use, tool_result). Token usage rides on
+// the assistant entry. Tool results arrive as blocks in a following user entry
+// and are back-patched to their tool_use by id.
+func (r *reducer) reduceClaude(region []byte, base int64) error {
+	return eachLine(region, base, func(line []byte, offset int64) error {
+		if !gjson.ValidBytes(line) {
+			return nil
 		}
-		e := gjson.Parse(line)
+		e := gjson.ParseBytes(line)
 		typ := e.Get("type").String()
 		ts := parseTime(e.Get("timestamp").String())
-		sp.observe(ts)
+		r.observe(ts)
 
 		if cwd := e.Get("cwd").String(); cwd != "" {
-			s.Cwd = cwd
+			r.d.Cwd = cwd
 		}
 		if br := e.Get("gitBranch").String(); br != "" {
-			s.GitBranch = br
+			r.d.GitBranch = br
 		}
 
 		switch typ {
 		case "user":
 			content := e.Get("message.content")
 			text := blockText(content)
-			// Apply any tool_result blocks to their originating tool calls.
 			if content.IsArray() {
 				for _, b := range content.Array() {
 					if b.Get("type").String() == "tool_result" {
-						applyToolResult(&s, toolByID,
-							b.Get("tool_use_id").String(), b.Get("content"), b.Get("is_error").Bool())
+						r.applyResult(b.Get("tool_use_id").String(), b.Get("content"), b.Get("is_error").Bool())
 					}
 				}
 			}
 			if strings.TrimSpace(text) == "" {
-				continue // a turn that only delivers tool results is not a message
+				return nil // a turn that only delivers tool results is not a message
 			}
-			s.Messages = append(s.Messages, Message{
-				Ordinal: ordinal, Role: RoleUser, Content: text, Timestamp: ts,
-			})
-			ordinal++
+			r.addUser(text, ts)
 
 		case "assistant":
 			msg := e.Get("message")
-			m := Message{Ordinal: ordinal, Role: RoleAssistant, Model: msg.Get("model").String(), Timestamp: ts}
+			ord := r.st.NextOrdinal
+			r.st.NextOrdinal++
+			r.d.MessagesAdded++
+			op := MessageOp{Ordinal: ord, Role: RoleAssistant, Model: msg.Get("model").String(), Timestamp: ts}
 			var textParts, thinkParts []string
 			callIndex := 0
 			for _, b := range msg.Get("content").Array() {
@@ -70,67 +59,58 @@ func parseClaude(raw []byte) (Session, error) {
 				case "thinking":
 					thinkParts = append(thinkParts, b.Get("thinking").String())
 				case "tool_use":
-					m.HasToolUse = true
+					op.HasToolUse = true
 					name := b.Get("name").String()
-					tc := ToolCall{
-						MessageOrdinal: ordinal, CallIndex: callIndex,
+					r.d.ToolCalls = append(r.d.ToolCalls, ToolCall{
+						MessageOrdinal: ord, CallIndex: callIndex,
 						ToolName: name, Category: toolCategory(name),
-						FilePath:  b.Get("input.file_path").String(),
-						InputJSON: b.Get("input").Raw,
-					}
-					if id := b.Get("id").String(); id != "" {
-						toolByID[id] = len(s.ToolCalls)
-					}
-					s.ToolCalls = append(s.ToolCalls, tc)
+						FilePath:     b.Get("input.file_path").String(),
+						InputJSON:    b.Get("input").Raw,
+						CallUID:      b.Get("id").String(),
+						SourceOffset: offset,
+					})
 					callIndex++
 				}
 			}
-			m.Content = strings.Join(textParts, "\n")
-			m.ThinkingText = strings.Join(thinkParts, "\n")
-			m.HasThinking = m.ThinkingText != ""
-			s.Messages = append(s.Messages, m)
+			op.AppendContent = strings.Join(textParts, "\n")
+			op.AppendThinking = strings.Join(thinkParts, "\n")
+			op.HasThinking = op.AppendThinking != ""
+			r.d.Messages = append(r.d.Messages, op)
 
 			if u := msg.Get("usage"); u.Exists() {
-				ord := ordinal
-				s.UsageEvent = append(s.UsageEvent, Usage{
-					MessageOrdinal: &ord,
-					Model:          m.Model,
+				o := ord
+				r.addUsage(Usage{
+					MessageOrdinal: &o,
+					Model:          op.Model,
 					Input:          int(u.Get("input_tokens").Int()),
 					Output:         int(u.Get("output_tokens").Int()),
 					CacheWrite:     int(u.Get("cache_creation_input_tokens").Int()),
 					CacheRead:      int(u.Get("cache_read_input_tokens").Int()),
 					OccurredAt:     ts,
 					DedupKey:       msg.Get("id").String(),
-				})
+				}, offset)
 			}
-			ordinal++
 		}
-	}
-
-	s.StartedAt, s.EndedAt = sp.started, sp.ended
-	return s, nil
+		return nil
+	})
 }
 
-// applyToolResult records a tool result against the matching tool call. body is
-// the raw result value (a string or an array of blocks). The stored body, its
-// size, and its media type all come from bodyContent, so the chip metadata always
+// applyResult records a tool result against the call its id names. body is the
+// raw result value (a string or an array of blocks). The stored body, its size,
+// and its media type all come from bodyContent, so the recorded metadata always
 // describes exactly the bytes the CAS holds.
-func applyToolResult(s *Session, toolByID map[string]int, id string, body gjson.Result, isErr bool) {
+func (r *reducer) applyResult(id string, body gjson.Result, isErr bool) {
 	if id == "" {
 		return // an unkeyed result cannot be matched to a call
 	}
-	idx, ok := toolByID[id]
-	if !ok {
-		return
-	}
-	tc := &s.ToolCalls[idx]
-	tc.ResultBody, tc.ResultMediaType = bodyContent(body)
-	tc.ResultBytes = len(tc.ResultBody)
+	content, media := bodyContent(body)
+	status := "ok"
 	if isErr {
-		tc.ResultStatus = "error"
-	} else {
-		tc.ResultStatus = "ok"
+		status = "error"
 	}
+	r.d.ToolResults = append(r.d.ToolResults, ToolResultOp{
+		CallUID: id, Body: content, Bytes: len(content), MediaType: media, Status: status,
+	})
 }
 
 // bodyContent returns the canonical body bytes and media type for a raw tool
