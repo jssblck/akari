@@ -180,7 +180,7 @@ templ SessionList(sessions []store.SessionSummary) {
 	}
 }
 
-templ SessionPage(p Page, d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, subagents []store.SessionSummary, live bool) {
+templ SessionPage(p Page, d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, subagents []store.SessionSummary, live, owner bool) {
 	@layout(p) {
 		<h1>
 			<a href={ ProjectHref(d.ProjectID) }>{ d.ProjectKey }</a>
@@ -190,6 +190,21 @@ templ SessionPage(p Page, d store.SessionDetail, msgs []store.Message, tools map
 				<span class="badge public">public</span>
 			}
 		</h1>
+		if owner {
+			<div class="publish card">
+				if d.Visibility == "public" && d.PublicID != nil {
+					<span>Shared publicly at <a href={ PublicHref(*d.PublicID) }>{ PublicPath(*d.PublicID) }</a></span>
+					<form method="post" action={ templ.SafeURL(fmt.Sprintf("/sessions/%d/unpublish", d.ID)) } style="margin:0">
+						<button class="secondary" type="submit">Unpublish</button>
+					</form>
+				} else {
+					<span class="muted">This session is internal: visible to logged-in users only.</span>
+					<form method="post" action={ templ.SafeURL(fmt.Sprintf("/sessions/%d/publish", d.ID)) } style="margin:0">
+						<button type="submit">Publish</button>
+					</form>
+				}
+			</div>
+		}
 		if live {
 			<div id="session-body" data-sse={ SSEPath(d.ID) } data-body={ BodyPath(d.ID) }>
 				@SessionBody(d, msgs, tools, subagents)
@@ -364,6 +379,84 @@ templ AccountPage(p Page, tokens []store.APIToken, newToken, newInvite string) {
 				<button type="submit">Create invite</button>
 			</form>
 		}
+	}
+}
+
+// publicLayout is the chrome for logged-out public session pages: brand and a
+// log-in link, but none of the internal navigation.
+templ publicLayout(title string) {
+	<!DOCTYPE html>
+	<html lang="en">
+		<head>
+			<meta charset="utf-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1"/>
+			<title>{ title } - akari</title>
+			<link rel="stylesheet" href="/static/app.css"/>
+		</head>
+		<body>
+			<header class="topbar">
+				<span class="brand"><a href="/">akari</a></span>
+				<span class="spacer"></span>
+				<a href="/login">Log in</a>
+			</header>
+			<main>
+				{ children... }
+			</main>
+		</body>
+	</html>
+}
+
+// PublicSessionPage renders a published session for logged-out viewers. It never
+// links to internal session ids; only public subagents are shown, linked by their
+// own public id.
+templ PublicSessionPage(d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, publicSubs []store.SessionSummary) {
+	@publicLayout(d.ProjectKey + " session") {
+		<h1>
+			<span>{ d.ProjectKey }</span>
+			<span class="muted">/ session</span>
+			<span class="badge agent">{ d.Agent }</span>
+			<span class="badge public">public</span>
+		</h1>
+		<p class="muted">Shared by { d.Username }.</p>
+		<div class="stats">
+			@stat("Messages", fmt.Sprintf("%d", d.MessageCount))
+			@stat("User msgs", fmt.Sprintf("%d", d.UserMessageCount))
+			@stat("Input", FmtTokens(d.TotalInput))
+			@stat("Output", FmtTokens(d.TotalOutput))
+			@stat("Cache write", FmtTokens(d.TotalCacheWrite))
+			@stat("Cache read", FmtTokens(d.TotalCacheRead))
+			@stat("Cost", FmtCost(d.TotalCostUSD, d.CostIncomplete))
+			@stat("Duration", FmtDuration(d.StartedAt, d.EndedAt))
+		</div>
+		if len(publicSubs) > 0 {
+			<h2>Subagents</h2>
+			<div class="subagents">
+				<table>
+					<tbody>
+						for _, sub := range publicSubs {
+							if sub.PublicID != nil {
+								<tr>
+									<td><a href={ PublicHref(*sub.PublicID) }>{ sub.Agent } subagent</a></td>
+									<td class="num">{ fmt.Sprintf("%d", sub.MessageCount) } messages</td>
+								</tr>
+							}
+						}
+					</tbody>
+				</table>
+			</div>
+		}
+		<h2>Transcript</h2>
+		@Transcript(msgs, tools)
+	}
+}
+
+// PublicErrorPage is the logged-out error page (an unpublished or unknown link).
+templ PublicErrorPage(code int, message string) {
+	@publicLayout(fmt.Sprintf("%d", code)) {
+		<div class="empty">
+			<h1>{ fmt.Sprintf("%d", code) }</h1>
+			<p>{ message }</p>
+		</div>
 	}
 }
 

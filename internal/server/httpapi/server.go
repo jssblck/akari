@@ -46,7 +46,8 @@ func (s *Server) Routes() http.Handler {
 	// Static assets.
 	mux.Handle("GET /static/", staticHandler())
 
-	// Server-rendered UI: public auth pages.
+	// Server-rendered UI: public, logged-out pages.
+	mux.HandleFunc("GET /s/{public_id}", s.handlePublicSession)
 	mux.HandleFunc("GET /login", s.handleLoginPage)
 	mux.HandleFunc("POST /login", s.handleLoginForm)
 	mux.HandleFunc("GET /register", s.handleRegisterPage)
@@ -59,6 +60,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /sessions/{id}", s.requireReadHTML(s.handleSessionPage))
 	mux.HandleFunc("GET /sessions/{id}/body", s.requireReadHTML(s.handleSessionBody))
 	mux.HandleFunc("GET /sessions/{id}/events", s.requireReadHTML(s.handleSessionEvents))
+	mux.HandleFunc("POST /sessions/{id}/publish", s.requireFull(s.handlePublishSession))
+	mux.HandleFunc("POST /sessions/{id}/unpublish", s.requireFull(s.handleUnpublishSession))
 	mux.HandleFunc("GET /search", s.requireReadHTML(s.handleSearchPage))
 	mux.HandleFunc("GET /account", s.requireReadHTML(s.handleAccountPage))
 	mux.HandleFunc("POST /account/tokens", s.requireFull(s.handleCreateTokenForm))

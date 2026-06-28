@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -11,13 +12,25 @@ import (
 	"testing"
 
 	"github.com/jssblck/akari/internal/config"
+	"github.com/jssblck/akari/internal/server/auth"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/migrations"
 )
 
+// mustHash hashes a password for seeding a test account directly via the store.
+func mustHash(t *testing.T, password string) string {
+	t.Helper()
+	h, err := auth.HashPassword(password)
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	return h
+}
+
 // newTestServer brings up a full Routes() handler backed by a freshly migrated
-// test database. It is skipped unless AKARI_TEST_DATABASE_URL is set.
-func newTestServer(t *testing.T) *httptest.Server {
+// test database, returning the server and its store. It is skipped unless
+// AKARI_TEST_DATABASE_URL is set.
+func newTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 	t.Helper()
 	dburl := os.Getenv("AKARI_TEST_DATABASE_URL")
 	if dburl == "" {
@@ -41,7 +54,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 		srv.Close()
 		st.Close()
 	})
-	return srv
+	return srv, st
 }
 
 // newClient returns an http.Client that follows redirects and keeps cookies, so
@@ -56,7 +69,7 @@ func newClient(t *testing.T) *http.Client {
 }
 
 func TestWebFlow(t *testing.T) {
-	srv := newTestServer(t)
+	srv, _ := newTestServer(t)
 	c := newClient(t)
 
 	// An unauthenticated read page redirects to login.
@@ -142,7 +155,7 @@ func TestWebFlow(t *testing.T) {
 }
 
 func TestLoginPreservesNext(t *testing.T) {
-	srv := newTestServer(t)
+	srv, _ := newTestServer(t)
 	c := newClient(t)
 
 	// Seed an account (first user, admin).
@@ -176,6 +189,114 @@ func TestLoginPreservesNext(t *testing.T) {
 	}
 	if loc := resp.Header.Get("Location"); loc != "/search" {
 		t.Fatalf("post-login redirect = %q, want /search", loc)
+	}
+	resp.Body.Close()
+}
+
+func TestPublicSessionFlow(t *testing.T) {
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+	c := newClient(t)
+
+	// Seed an owner with one session carrying a searchable message.
+	owner, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	ann, err := st.Announce(ctx, store.AnnounceParams{
+		UserID: owner.ID, Agent: "claude", SourceSessionID: "sess-1",
+		ProjectID: projectID, GitBranch: "main", Cwd: "/home/grace/akari", Machine: "laptop",
+	})
+	if err != nil {
+		t.Fatalf("announce: %v", err)
+	}
+	sid := ann.SessionID
+	if err := st.WriteProjection(ctx, sid, 0, store.Projection{
+		ParserVersion: 1,
+		MessageCount:  1,
+		Messages: []store.ProjMessage{
+			{Ordinal: 0, Role: "user", Content: "Fix the secret login bug"},
+		},
+	}); err != nil {
+		t.Fatalf("write projection: %v", err)
+	}
+
+	// Log in as the owner.
+	if _, err := c.PostForm(srv.URL+"/login", url.Values{
+		"username": {"grace"}, "password": {"hopper-1906"},
+	}); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+
+	// Before publishing, an anonymous client cannot reach the session by id (it is
+	// redirected to login) and there is no public link yet.
+	anon := newClient(t)
+	anon.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := anon.Get(srv.URL + fmt.Sprintf("/sessions/%d", sid))
+	if err != nil {
+		t.Fatalf("anon session by id: %v", err)
+	}
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("anon /sessions/%d status = %d, want 303 redirect", sid, resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Owner publishes the session.
+	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err = c.PostForm(srv.URL+fmt.Sprintf("/sessions/%d/publish", sid), url.Values{})
+	if err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("publish status = %d, want 303", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	d, err := st.SessionDetailByID(ctx, sid)
+	if err != nil || d.PublicID == nil {
+		t.Fatalf("session not public after publish: err=%v publicID=%v", err, d.PublicID)
+	}
+	pid := *d.PublicID
+
+	// An anonymous client can now read the public page and its content.
+	anon.CheckRedirect = nil
+	resp, err = anon.Get(srv.URL + "/s/" + pid)
+	if err != nil {
+		t.Fatalf("anon public view: %v", err)
+	}
+	body := readBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("public view status = %d, want 200", resp.StatusCode)
+	}
+	if !strings.Contains(body, "Fix the secret login bug") || !strings.Contains(body, "Shared by grace") {
+		t.Fatalf("public page missing content, got:\n%s", body)
+	}
+	// The public page must not expose the numeric session id, neither as a
+	// /sessions/{id} path nor as a "#<id>" label.
+	if strings.Contains(body, fmt.Sprintf("/sessions/%d", sid)) {
+		t.Fatalf("public page leaked numeric session path, got:\n%s", body)
+	}
+	if strings.Contains(body, fmt.Sprintf("#%d", sid)) {
+		t.Fatalf("public page leaked numeric session id label, got:\n%s", body)
+	}
+
+	// Owner unpublishes; the public link stops resolving.
+	resp, err = c.PostForm(srv.URL+fmt.Sprintf("/sessions/%d/unpublish", sid), url.Values{})
+	if err != nil {
+		t.Fatalf("unpublish: %v", err)
+	}
+	resp.Body.Close()
+	anon.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err = anon.Get(srv.URL + "/s/" + pid)
+	if err != nil {
+		t.Fatalf("anon public view after unpublish: %v", err)
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("public view after unpublish status = %d, want 404", resp.StatusCode)
 	}
 	resp.Body.Close()
 }
