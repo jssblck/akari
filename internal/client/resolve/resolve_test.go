@@ -39,7 +39,7 @@ func TestPeekHeader(t *testing.T) {
 		{"pi", pi, "/home/grace/proj", "", "p-7"},
 	}
 	for _, c := range cases {
-		h, err := PeekHeader(c.agent, c.path)
+		h, err := PeekHeader(discover.File{Agent: c.agent, Root: dir, Path: c.path})
 		if err != nil {
 			t.Fatalf("%s: %v", c.agent, err)
 		}
@@ -53,12 +53,132 @@ func TestPeekHeaderFallsBackToFilename(t *testing.T) {
 	dir := t.TempDir()
 	// A pi file whose header omits an id: the source id falls back to the stem.
 	path := writeFile(t, dir, "fallback-id.jsonl", `{"type":"session","cwd":"/x"}`+"\n")
-	h, err := PeekHeader("pi", path)
+	h, err := PeekHeader(discover.File{Agent: "pi", Root: dir, Path: path})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if h.SourceID != "fallback-id" {
 		t.Errorf("source id = %q, want fallback-id", h.SourceID)
+	}
+}
+
+// TestClaudeSourceIDUnique is the regression guard for the source-id collision:
+// a Claude main session file and every subagent and workflow file beneath it all
+// record the same in-file sessionId, so before the fix they folded onto one
+// server row and clobbered each other. Each file must now resolve to a distinct
+// source id, with subagents kept grouped under their parent sessionId and the
+// main file keeping the bare sessionId.
+func TestClaudeSourceIDUnique(t *testing.T) {
+	root := t.TempDir()
+	const sid = "4a7929e8-5b80-48e6-8ccc-a8919c89cd6d"
+
+	// All four files carry the parent sessionId in their first line, exactly as
+	// Claude writes subagent and workflow files.
+	line := fmt.Sprintf(`{"type":"user","cwd":"/home/ada/app","gitBranch":"main","sessionId":%q}`+"\n", sid)
+
+	mustWrite := func(rel string) string {
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(line), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	proj := "-home-ada-app"
+	main := mustWrite(proj + "/" + sid + ".jsonl")
+	subA := mustWrite(proj + "/" + sid + "/subagents/agent-ac2d35a2e8e2aff8e.jsonl")
+	subB := mustWrite(proj + "/" + sid + "/subagents/agent-bb11ff00deadbeef0.jsonl")
+	wfJournal1 := mustWrite(proj + "/" + sid + "/subagents/workflows/wf_1c721b08-534/journal.jsonl")
+	wfJournal2 := mustWrite(proj + "/" + sid + "/subagents/workflows/wf_99aa00bb-001/journal.jsonl")
+
+	id := func(path string) string {
+		h, err := PeekHeader(discover.File{Agent: "claude", Root: root, Path: path})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h.SourceID
+	}
+
+	// The main file keeps its bare sessionId so a resume into the same file keeps
+	// identity.
+	if got := id(main); got != sid {
+		t.Errorf("main source id = %q, want %q", got, sid)
+	}
+
+	// Subagents are grouped under the parent but distinct from it and each other.
+	wantSubA := sid + "/subagents/agent-ac2d35a2e8e2aff8e"
+	wantSubB := sid + "/subagents/agent-bb11ff00deadbeef0"
+	if got := id(subA); got != wantSubA {
+		t.Errorf("subagent A source id = %q, want %q", got, wantSubA)
+	}
+	if got := id(subB); got != wantSubB {
+		t.Errorf("subagent B source id = %q, want %q", got, wantSubB)
+	}
+
+	// Two journal.jsonl files in different workflow dirs must not collide on the
+	// bare "journal" basename.
+	wantWf1 := sid + "/subagents/workflows/wf_1c721b08-534/journal"
+	wantWf2 := sid + "/subagents/workflows/wf_99aa00bb-001/journal"
+	if got := id(wfJournal1); got != wantWf1 {
+		t.Errorf("workflow journal 1 source id = %q, want %q", got, wantWf1)
+	}
+	if got := id(wfJournal2); got != wantWf2 {
+		t.Errorf("workflow journal 2 source id = %q, want %q", got, wantWf2)
+	}
+
+	all := []string{id(main), id(subA), id(subB), id(wfJournal1), id(wfJournal2)}
+	seen := map[string]bool{}
+	for _, v := range all {
+		if seen[v] {
+			t.Errorf("duplicate source id %q across distinct files", v)
+		}
+		seen[v] = true
+		if v == sid && (v != id(main)) {
+			t.Errorf("non-main file reused the parent sessionId %q", sid)
+		}
+	}
+}
+
+// TestSourceIDUnchangedForCodexAndPi pins that the fix is Claude-only: Codex and
+// pi already carry one id per file, so their in-file id stands regardless of how
+// deeply nested the file is.
+func TestSourceIDUnchangedForCodexAndPi(t *testing.T) {
+	root := t.TempDir()
+
+	codexPath := filepath.Join(root, "2026", "06", "rollout-2026-06-27-x9.jsonl")
+	if err := os.MkdirAll(filepath.Dir(codexPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(codexPath,
+		[]byte(`{"type":"session_meta","payload":{"id":"codex-id-9","cwd":"/home/ada/api","git":{"branch":"dev"}}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	piPath := filepath.Join(root, "encoded-cwd", "sessX.jsonl")
+	if err := os.MkdirAll(filepath.Dir(piPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(piPath, []byte(`{"type":"session","id":"pi-id-7","cwd":"/home/ada/proj"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	hc, err := PeekHeader(discover.File{Agent: "codex", Root: root, Path: codexPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hc.SourceID != "codex-id-9" {
+		t.Errorf("codex source id = %q, want codex-id-9", hc.SourceID)
+	}
+
+	hp, err := PeekHeader(discover.File{Agent: "pi", Root: root, Path: piPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hp.SourceID != "pi-id-7" {
+		t.Errorf("pi source id = %q, want pi-id-7", hp.SourceID)
 	}
 }
 
@@ -87,7 +207,7 @@ func TestResolveSuccess(t *testing.T) {
 		"remote get-url": "git@github.com:owner/repo.git",
 	}, nil), nil)
 
-	res := r.Resolve(context.Background(), discover.File{Agent: "claude", Path: file})
+	res := r.Resolve(context.Background(), discover.File{Agent: "claude", Root: cwd, Path: file})
 	if res.Skipped {
 		t.Fatalf("unexpected skip: %s", res.Reason)
 	}

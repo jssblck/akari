@@ -13,9 +13,14 @@ import (
 	"github.com/jssblck/akari/internal/config"
 )
 
-// File is one discovered session file.
+// File is one discovered session file. Root is the discovery directory the file
+// was found under: it is what lets resolution compute a stable, unique id from
+// the file's location relative to the root, which is how Claude's subagent and
+// workflow files (which all carry their parent's sessionId inside) avoid
+// colliding on a single source id.
 type File struct {
 	Agent string // claude | codex | pi
+	Root  string
 	Path  string
 }
 
@@ -96,7 +101,7 @@ func Discover(roots []Root) ([]File, error) {
 				return nil
 			}
 			seen[path] = true
-			out = append(out, File{Agent: root.Agent, Path: path})
+			out = append(out, File{Agent: root.Agent, Root: root.Dir, Path: path})
 			return nil
 		})
 		if err != nil {
