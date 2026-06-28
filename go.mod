@@ -3,6 +3,7 @@ module github.com/jssblck/akari
 go 1.26.4
 
 require (
+	github.com/BurntSushi/toml v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/tidwall/gjson v1.19.0
 	golang.org/x/crypto v0.53.0
