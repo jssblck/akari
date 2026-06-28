@@ -46,26 +46,26 @@ CREATE TABLE session_raw_chunks (
   CHECK (octet_length(content) = byte_len)
 );
 
--- messages: content_length becomes a generated column so the append-on-update
--- path (a Codex assistant turn that spans a chunk boundary) keeps it accurate
--- for free. is_open marks a message still accumulating, so a live SSE reader can
--- tell an in-progress turn from a finished one.
+-- messages: content_length becomes a generated column so it stays accurate for
+-- free. A message is written once (the ingest protocol keeps a whole turn inside
+-- one chunk, so a turn is never folded across regions), so there is no in-place
+-- content rewrite and no need for an is_open flag.
 ALTER TABLE messages DROP COLUMN content_length;
 ALTER TABLE messages
-  ADD COLUMN content_length INT GENERATED ALWAYS AS (octet_length(content)) STORED,
-  ADD COLUMN is_open BOOLEAN NOT NULL DEFAULT FALSE;
+  ADD COLUMN content_length INT GENERATED ALWAYS AS (octet_length(content)) STORED;
 
 -- tool_calls: call_uid is the agent's own call id, so a tool result that arrives
--- in a later line is back-patched with an UPDATE keyed on it rather than by
--- carrying a growing id->row map in the parser state. source_offset records the
--- raw byte offset of the originating line for idempotence and debugging. The
--- index is non-unique on purpose: a duplicate id (which agents do not emit in
--- practice) must never fail an append, since raw bytes are authoritative and the
--- projection is recoverable by reparse.
+-- on a later line is back-patched with an UPDATE keyed on it rather than by
+-- carrying a growing id->row map in the parser state. Claude delivers a
+-- tool_result in the following user entry, which can land in a later region, so
+-- the back-patch must work across regions. The index is unique per session: a
+-- call id is unique within a session, so the UPDATE touches exactly one row in
+-- constant time. Uniqueness is safe because raw storage (one transaction) and
+-- parsing (a separate one) are split, so a malformed duplicate id can only stall
+-- that session's parse (recoverable by reparse), never fail an append.
 ALTER TABLE tool_calls
-  ADD COLUMN call_uid      TEXT,
-  ADD COLUMN source_offset BIGINT;
-CREATE INDEX idx_tool_calls_call_uid ON tool_calls(session_id, call_uid)
+  ADD COLUMN call_uid TEXT;
+CREATE UNIQUE INDEX idx_tool_calls_call_uid ON tool_calls(session_id, call_uid)
   WHERE call_uid IS NOT NULL;
 
 -- usage_events: a source-offset identity makes incremental inserts idempotent

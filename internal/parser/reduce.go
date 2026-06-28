@@ -11,27 +11,23 @@ import (
 
 // State is the carry-over a parser needs to resume from a byte cursor. It is
 // serialized to the session_raw row between chunks and is bounded in size: it
-// holds counters and the currently-open turn, never any per-message or
-// per-tool-call accumulation (those live in the projection rows themselves).
+// holds only counters, never any per-message accumulation or an open turn. A
+// Codex turn folds a run of reasoning/function_call items and the final text
+// into one assistant message, but that fold never crosses a region: the ingest
+// protocol cuts chunks on turn boundaries, so a whole turn always lands in one
+// region. That is what lets the open turn live in the reducer for the span of a
+// single Reduce call and never be serialized here.
 type State struct {
 	// NextOrdinal is the ordinal the next message will take.
 	NextOrdinal int `json:"next_ordinal"`
-	// Model is the sticky current model (Codex carries it across lines).
+	// Model is the sticky current model (Codex carries it across lines, and a
+	// later region's usage line may need the model named in an earlier region).
 	Model string `json:"model"`
-	// OpenAssistant is the ordinal of the assistant turn still accumulating, or
-	// -1 when none is open. Codex folds a run of reasoning/function_call items and
-	// the final text into one assistant message; that turn can span a chunk
-	// boundary, so the open ordinal survives in the state and the partial row
-	// survives in the messages table.
-	OpenAssistant int `json:"open_assistant"`
-	// OpenAssistantCalls is the next call index within the open assistant turn.
-	OpenAssistantCalls int `json:"open_assistant_calls"`
 }
 
-// initialState is the state a fresh (or freshly reset) session starts from. A
-// stored "{}" unmarshals onto this, so OpenAssistant defaults to -1, not 0.
+// initialState is the state a fresh (or freshly reset) session starts from.
 func initialState() State {
-	return State{OpenAssistant: -1}
+	return State{}
 }
 
 // DecodeState parses serialized parser state, defaulting unset fields to the
@@ -50,20 +46,19 @@ func DecodeState(b []byte) (State, error) {
 // Encode serializes the state for storage.
 func (s State) Encode() ([]byte, error) { return json.Marshal(s) }
 
-// MessageOp is one message write in a Delta. AppendContent and AppendThinking
-// are appended to any existing row for the same ordinal (newline-joined when both
-// sides are non-empty), so an open Codex turn that grows across chunks lands as a
-// single message. Open marks the turn as still accumulating.
+// MessageOp is one message write in a Delta. Each ordinal is written exactly
+// once: a turn is folded whole within the region that contains it (the ingest
+// protocol keeps a turn inside one chunk), so Content and ThinkingText are the
+// complete text, not a fragment to append.
 type MessageOp struct {
-	Ordinal        int
-	Role           Role
-	AppendContent  string
-	AppendThinking string
-	Model          string
-	HasThinking    bool
-	HasToolUse     bool
-	Timestamp      time.Time
-	Open           bool
+	Ordinal      int
+	Role         Role
+	Content      string
+	ThinkingText string
+	Model        string
+	HasThinking  bool
+	HasToolUse   bool
+	Timestamp    time.Time
 }
 
 // ToolResultOp back-patches a tool call's result, matched by the agent's call id.
@@ -122,14 +117,18 @@ func Reduce(agent Agent, st State, region []byte, baseOffset int64) (State, Delt
 }
 
 // reducer accumulates a Delta for one Reduce call. open is the assistant turn
-// being folded across lines in this region (Codex); claude and pi never use it.
-// openContent and openThink collect that turn's fragments so they are joined once
-// when the op is emitted, rather than rebuilt with a growing string concatenation
-// on every line (which would make one chunk O(chunk_text^2)).
+// being folded across the lines of this region (Codex); claude and pi never use
+// it. It lives only for the span of one Reduce call: a turn never crosses a
+// region, so there is nothing to carry into the next one. openContent and
+// openThink collect that turn's fragments so they are joined once when the op is
+// emitted, rather than rebuilt with a growing concatenation on every line (which
+// would make one region O(region_text^2)). openCalls is the next call index
+// within the open turn.
 type reducer struct {
 	st          State
 	d           Delta
 	open        *MessageOp
+	openCalls   int
 	openContent []string
 	openThink   []string
 
@@ -157,7 +156,7 @@ func (r *reducer) addUser(content string, ts time.Time) {
 	r.d.MessagesAdded++
 	r.d.UserMessagesAdded++
 	r.d.Messages = append(r.d.Messages, MessageOp{
-		Ordinal: ord, Role: RoleUser, AppendContent: content, Timestamp: ts,
+		Ordinal: ord, Role: RoleUser, Content: content, Timestamp: ts,
 	})
 }
 
@@ -175,22 +174,17 @@ func (r *reducer) addUsage(u Usage, offset int64) {
 }
 
 // ensureAssistant returns the ordinal of the open assistant turn, opening one if
-// none is. A turn opened in a prior region (OpenAssistant already set, its row
-// already in the table) reattaches without allocating a new ordinal, so its
-// continuation appends to the existing row.
+// none is. The open turn lives only within this region; the protocol guarantees
+// the whole turn is here, so it is folded and emitted before the region ends.
 func (r *reducer) ensureAssistant(ts time.Time) int {
-	if r.st.OpenAssistant >= 0 {
-		if r.open == nil {
-			r.open = &MessageOp{Ordinal: r.st.OpenAssistant, Role: RoleAssistant, Open: true, Timestamp: ts}
-		}
-		return r.st.OpenAssistant
+	if r.open != nil {
+		return r.open.Ordinal
 	}
 	ord := r.st.NextOrdinal
 	r.st.NextOrdinal++
-	r.st.OpenAssistant = ord
-	r.st.OpenAssistantCalls = 0
+	r.openCalls = 0
 	r.d.MessagesAdded++
-	r.open = &MessageOp{Ordinal: ord, Role: RoleAssistant, Open: true, Model: r.st.Model, Timestamp: ts}
+	r.open = &MessageOp{Ordinal: ord, Role: RoleAssistant, Model: r.st.Model, Timestamp: ts}
 	return ord
 }
 
@@ -205,43 +199,35 @@ func (r *reducer) addOpenContent(s string) {
 func (r *reducer) addOpenThinking(s string) {
 	if s != "" {
 		r.openThink = append(r.openThink, s)
-		r.open.HasThinking = true
+		if r.open != nil {
+			r.open.HasThinking = true
+		}
 	}
 }
 
 // buildOpen joins the open turn's collected fragments into its op and resets the
 // fragment buffers for the next turn.
 func (r *reducer) buildOpen() {
-	r.open.AppendContent = strings.Join(r.openContent, "\n")
-	r.open.AppendThinking = strings.Join(r.openThink, "\n")
+	r.open.Content = strings.Join(r.openContent, "\n")
+	r.open.ThinkingText = strings.Join(r.openThink, "\n")
 	r.openContent, r.openThink = nil, nil
 }
 
-// closeTurn finalizes the open assistant turn (a user line ends it), flipping its
-// row to not-open even if nothing was appended this region.
+// closeTurn finalizes and emits the open assistant turn (a user line ends it).
 func (r *reducer) closeTurn() {
-	if r.st.OpenAssistant < 0 {
+	if r.open == nil {
 		return
 	}
-	if r.open == nil {
-		r.open = &MessageOp{Ordinal: r.st.OpenAssistant, Role: RoleAssistant}
-	}
 	r.buildOpen()
-	r.open.Open = false
 	r.d.Messages = append(r.d.Messages, *r.open)
 	r.open = nil
-	r.st.OpenAssistant = -1
-	r.st.OpenAssistantCalls = 0
 }
 
-// flushRegion emits the still-open turn at the end of a region, keeping it open
-// so the next region continues appending to the same row.
+// flushRegion emits a still-open turn at the end of a region. Under the protocol
+// this only fires for the final, in-progress turn of a settled session (its
+// closing user line never arrives); it is emitted as a complete message.
 func (r *reducer) flushRegion() {
-	if r.open != nil {
-		r.buildOpen()
-		r.d.Messages = append(r.d.Messages, *r.open)
-		r.open = nil
-	}
+	r.closeTurn()
 }
 
 // eachLine walks the complete JSONL lines in region, calling fn with the trimmed
@@ -298,8 +284,8 @@ func assemble(d Delta) Session {
 			byOrd[op.Ordinal] = m
 			order = append(order, op.Ordinal)
 		}
-		m.Content = joinNonEmpty(m.Content, op.AppendContent)
-		m.ThinkingText = joinNonEmpty(m.ThinkingText, op.AppendThinking)
+		m.Content = joinNonEmpty(m.Content, op.Content)
+		m.ThinkingText = joinNonEmpty(m.ThinkingText, op.ThinkingText)
 		if op.Model != "" {
 			m.Model = op.Model
 		}

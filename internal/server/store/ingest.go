@@ -156,7 +156,7 @@ func (s *Store) AppendChunk(ctx context.Context, sessionID, offset int64, data [
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrNotFound
 			}
-			return err
+			return fmt.Errorf("lock session_raw to append to session %d at offset %d: %w", sessionID, offset, err)
 		}
 		if current != offset {
 			return OffsetMismatchError{StoredBytes: current}
@@ -198,12 +198,16 @@ func (s *Store) AppendChunk(ctx context.Context, sessionID, offset int64, data [
 // blobs; like any deletion or re-parse, those are reclaimed by a later
 // SweepBlobs rather than synchronously here, so a client reset stays cheap.
 //
-// It takes the session_raw row lock before touching anything else, the same lock
+// It takes the parent session row lock and then the session_raw lock, the locks
 // AppendChunk and AdvanceProjection serialize on, so a reset cannot interleave
 // with an in-flight append or parse and leave behind a chunk row or projection
-// rows for a session it just zeroed.
+// rows for a session it just zeroed. Taking the session row before session_raw
+// matches DeleteSession's order, so the two cannot deadlock.
 func (s *Store) ResetRaw(ctx context.Context, sessionID int64) error {
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		if err := lockSession(ctx, tx, sessionID); err != nil {
+			return err
+		}
 		var dummy int64
 		if err := tx.QueryRow(ctx,
 			`SELECT session_id FROM session_raw WHERE session_id = $1 FOR UPDATE`, sessionID).Scan(&dummy); err != nil {

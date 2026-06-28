@@ -271,16 +271,26 @@ explicit divergence check.
 
 2. **Append bytes.**
    `POST /api/v1/ingest/session/{id}/chunk?offset=40960`
-   with the raw bytes from that offset as the body. Chunks are always terminated
-   on a newline: the client uploads only through the last `\n` it sees, so a
-   chunk never includes a partially written final line, and `stored_bytes` always
-   rests on a JSONL line boundary. The server:
+   with the raw bytes from that offset as the body. A chunk ends on a message
+   boundary, never inside a message. For Claude and pi a message is one JSONL
+   line, so a chunk ends on the last `\n`. For Codex a message is a folded turn
+   (reasoning, tool calls, and the assistant reply), so a chunk ends on a turn
+   boundary: the client cuts right after a user line, which is where a turn
+   closes. This keeps a turn inside one chunk, and therefore inside one parse
+   region, which is what lets the projection write each message exactly once. The
+   client prefers ~1 MiB chunks but grows a chunk to hold one oversized message,
+   up to a 128 MiB cap, so a giant single turn is served alone rather than split.
+   The final turn of a session has no closing user line, so the client withholds
+   it until the file goes idle (it has not changed for a settle window), then
+   flushes it whole. The server:
    - Rejects with the current length if `offset` does not equal `stored_bytes`
      (idempotent: a re-sent chunk whose offset is behind is a no-op that returns
      the truth, so the client simply advances).
    - Rejects a chunk that is empty or does not end on a newline, so the line
      boundary the parser relies on is a server-enforced invariant, not just a
-     client convention.
+     client convention. (Turn alignment is a client guarantee the server does not
+     re-check: a misaligned chunk would at worst render one turn as two messages,
+     never corrupt the store.)
    - Appends the chunk as a new raw row and advances the content hash by resuming
      its stored digest state over only the new bytes. Both are one transaction:
      once it commits, the upload has succeeded regardless of what parsing does.
@@ -306,14 +316,19 @@ match mine."
 ### Server-side parsing pipeline
 
 The parser is a per-agent line reducer: given a small carry-over state (the next
-ordinal, and for Codex the sticky model and the open assistant turn) and a region
-of complete lines, it returns the next state and a projection delta (rows to add,
-results to back-patch, and the increments to fold into the session rollups). The
-carry-over is bounded: no per-message or per-tool-call accumulation lives in it,
-because the projection rows are themselves the accumulator (a tool result is
-back-patched to its call by id, and a Codex turn that spans a chunk boundary keeps
-growing the same `messages` row). The state and the parse cursor are stored on the
-`session_raw` row, so a chunk parses only its own bytes.
+ordinal, and for Codex the sticky model) and a region of complete lines, it
+returns the next state and a projection delta (rows to add, results to
+back-patch, and the increments to fold into the session rollups). The carry-over
+is bounded to counters: no per-message accumulation and no open turn live in it.
+A Codex turn folds a run of items into one assistant message, but that fold never
+crosses a region, because the ingest protocol keeps a whole turn inside one chunk
+(and a chunk inside one region). So each `messages` row is written exactly once,
+with its complete text, never appended to in place. The one cross-region
+dependency that remains is a tool result: Claude delivers a `tool_result` in the
+following user entry, which can land in a later region, so a result is
+back-patched to its call by the call id (a per-session unique index makes that a
+constant-time, single-row update). The state and the parse cursor are stored on
+the `session_raw` row, so a chunk parses only its own bytes.
 
 The batch parser used by tests and the bulk reparse is a thin wrapper over the
 same reducer fed the whole file at once, so incremental and full parsing cannot
@@ -488,8 +503,9 @@ CREATE TABLE messages (
   timestamp      TIMESTAMPTZ,
   has_thinking   BOOLEAN NOT NULL DEFAULT FALSE,
   has_tool_use   BOOLEAN NOT NULL DEFAULT FALSE,
-  is_open        BOOLEAN NOT NULL DEFAULT FALSE,  -- turn still accumulating (Codex fold across chunks)
   content_length INT GENERATED ALWAYS AS (octet_length(content)) STORED,
+  -- A row is written once: a whole turn lands in one chunk, so content is never
+  -- appended in place and there is no "still accumulating" state to track.
   PRIMARY KEY (session_id, ordinal)
 );
 -- Trigram index for full-text search over message content
@@ -511,12 +527,13 @@ CREATE TABLE tool_calls (
   result_media_type TEXT,
   result_status     TEXT,                  -- ok | error | (empty if pending)
   call_uid          TEXT,                  -- agent's call id; back-patches the result by UPDATE
-  source_offset     BIGINT,                -- raw byte offset of the originating line
   PRIMARY KEY (session_id, message_ordinal, call_index)
 );
--- Non-unique: a duplicate id (which agents do not emit) must never fail an
--- append, since raw bytes are authoritative and the projection is reparse-able.
-CREATE INDEX idx_tool_calls_call_uid ON tool_calls(session_id, call_uid)
+-- Unique per session: a call id is unique within a session, so back-patching a
+-- result touches exactly one row in constant time. Safe because storage and
+-- parsing are separate transactions, so a malformed duplicate id can only stall
+-- that session's parse (recoverable by reparse), never fail an append.
+CREATE UNIQUE INDEX idx_tool_calls_call_uid ON tool_calls(session_id, call_uid)
   WHERE call_uid IS NOT NULL;
 
 CREATE TABLE usage_events (

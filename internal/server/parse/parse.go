@@ -81,15 +81,14 @@ func toProjectionDelta(p parser.Delta) store.ProjectionDelta {
 
 	for _, m := range p.Messages {
 		d.Messages = append(d.Messages, store.MessageDelta{
-			Ordinal:        m.Ordinal,
-			Role:           string(m.Role),
-			AppendContent:  m.AppendContent,
-			AppendThinking: m.AppendThinking,
-			Model:          m.Model,
-			HasThinking:    m.HasThinking,
-			HasToolUse:     m.HasToolUse,
-			Timestamp:      m.Timestamp,
-			Open:           m.Open,
+			Ordinal:      m.Ordinal,
+			Role:         string(m.Role),
+			Content:      m.Content,
+			ThinkingText: m.ThinkingText,
+			Model:        m.Model,
+			HasThinking:  m.HasThinking,
+			HasToolUse:   m.HasToolUse,
+			Timestamp:    m.Timestamp,
 		})
 	}
 
@@ -102,7 +101,6 @@ func toProjectionDelta(p parser.Delta) store.ProjectionDelta {
 			FilePath:       t.FilePath,
 			InputBytes:     int64(len(t.InputJSON)),
 			CallUID:        t.CallUID,
-			SourceOffset:   t.SourceOffset,
 		}
 		if t.InputJSON != "" {
 			tc.InputBody = []byte(t.InputJSON)

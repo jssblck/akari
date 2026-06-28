@@ -22,26 +22,24 @@ var parseBatchBytes int64 = 16 << 20
 // projection and cursor and replays from zero. The raw bytes are untouched.
 var ErrParserVersionStale = errors.New("parser version changed since last parse: reparse required")
 
-// MessageDelta is one message write. AppendContent and AppendThinking are
-// appended to any existing row for the same ordinal (newline-joined when both
-// sides are non-empty), so an assistant turn that grows across chunks lands as a
-// single row. Open marks the turn as still accumulating.
+// MessageDelta is one message write. Each ordinal is written exactly once: the
+// ingest protocol keeps a whole turn inside one chunk, so Content and
+// ThinkingText are the complete text of the message, never a fragment to append.
 type MessageDelta struct {
-	Ordinal        int
-	Role           string
-	AppendContent  string
-	AppendThinking string
-	Model          string
-	HasThinking    bool
-	HasToolUse     bool
-	Timestamp      time.Time
-	Open           bool
+	Ordinal      int
+	Role         string
+	Content      string
+	ThinkingText string
+	Model        string
+	HasThinking  bool
+	HasToolUse   bool
+	Timestamp    time.Time
 }
 
 // ProjToolCall is one tool_calls insert. InputBody holds the bulky input the CAS
 // stores; AdvanceProjection writes it and records the sha256 reference. CallUID
-// is the agent's call id (used to back-patch the result); SourceOffset is the raw
-// byte offset of the originating line.
+// is the agent's call id, used to back-patch the result that arrives on a later
+// line (and possibly in a later region, for Claude).
 type ProjToolCall struct {
 	MessageOrdinal int
 	CallIndex      int
@@ -52,7 +50,6 @@ type ProjToolCall struct {
 	InputBytes     int64
 	InputMediaType string
 	CallUID        string
-	SourceOffset   int64
 }
 
 // ToolResultDelta back-patches a tool call's result, matched by call id. Body is
@@ -151,6 +148,12 @@ func (s *Store) SessionsForReparse(ctx context.Context, agent string) ([]Reparse
 // rebuild. The raw bytes are never modified here.
 func (s *Store) AdvanceProjection(ctx context.Context, sessionID int64, parserVersion int, reduce ReduceFunc) (parsedTo int64, caughtUp bool, err error) {
 	err = pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		// Lock the parent session row before session_raw. DeleteSession locks
+		// sessions first and cascades into session_raw, so taking the two rows in
+		// that same order here keeps a concurrent delete and parse from deadlocking.
+		if err := lockSession(ctx, tx, sessionID); err != nil {
+			return err
+		}
 		var byteLen, parsedLen int64
 		var stateJSON []byte
 		var stateVer int
@@ -161,7 +164,7 @@ func (s *Store) AdvanceProjection(ctx context.Context, sessionID int64, parserVe
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrNotFound
 			}
-			return err
+			return fmt.Errorf("load parse cursor for session %d: %w", sessionID, err)
 		}
 		if parsedLen >= byteLen {
 			parsedTo, caughtUp = parsedLen, true
@@ -256,48 +259,19 @@ func readRawRegion(ctx context.Context, tx pgx.Tx, sessionID, from int64, cap in
 // applyDelta writes one region's rows: message upserts, tool-call inserts (with
 // their input bodies in the CAS), tool-result back-patches, and usage inserts.
 func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDelta) error {
-	// The DO UPDATE branch rewrites the row's content/thinking_text, so it is the
-	// one place a streamed turn could in principle do O(text^2) work over a
-	// session. It is not on the session's hot path. The branch fires only when the
-	// same ordinal is touched in more than one region, which happens for exactly
-	// one shape of input: a single Codex assistant turn whose own text and
-	// reasoning span a chunk boundary. Ordinary messages (every user turn, every
-	// Claude and pi turn, and any Codex turn that fits in one chunk) take the
-	// INSERT path once and are never rewritten.
-	//
-	// For the append to be costly that one assistant message would have to be
-	// multiple megabytes of natural-language text and reasoning, since a chunk is
-	// several MB and the message would have to outgrow it. That does not happen:
-	// the bulky part of a tool-heavy turn is the tool output, which is a
-	// function_call_output stored as a result blob in the CAS, never in
-	// messages.content. So the rewrite is bounded by one turn's prose, not by the
-	// session, and in practice fires zero times.
-	//
-	// The alternatives are worse. Append-only fragment rows concatenated on read
-	// would fragment content out of the messages row, breaking both the inline
-	// trigram index (idx_messages_content_trgm) and direct rendering. Buffering the
-	// open turn's text in parse_state is itself O(text^2), because that JSONB is
-	// rewritten on every chunk. Keeping the partial turn in its own row, appended
-	// in place, is the cheapest correct option for the case that actually occurs.
+	// Each ordinal is inserted once: a turn is folded whole within the region that
+	// carries it, so there is no in-place content rewrite and no quadratic append.
+	// The ON CONFLICT DO NOTHING is a replay guard only (a region is parsed once,
+	// since the cursor advances in the same transaction, and a reparse deletes
+	// these rows first), so a retried region never duplicates or rewrites a row.
 	for _, m := range d.Messages {
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO messages
-			   (session_id, ordinal, role, content, thinking_text, model, timestamp, has_thinking, has_tool_use, is_open)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-			 ON CONFLICT (session_id, ordinal) DO UPDATE SET
-			   content = CASE WHEN messages.content = '' OR EXCLUDED.content = ''
-			                  THEN messages.content || EXCLUDED.content
-			                  ELSE messages.content || E'\n' || EXCLUDED.content END,
-			   thinking_text = CASE WHEN messages.thinking_text = '' OR EXCLUDED.thinking_text = ''
-			                        THEN messages.thinking_text || EXCLUDED.thinking_text
-			                        ELSE messages.thinking_text || E'\n' || EXCLUDED.thinking_text END,
-			   model = CASE WHEN EXCLUDED.model <> '' THEN EXCLUDED.model ELSE messages.model END,
-			   timestamp = COALESCE(messages.timestamp, EXCLUDED.timestamp),
-			   has_thinking = messages.has_thinking OR EXCLUDED.has_thinking,
-			   has_tool_use = messages.has_tool_use OR EXCLUDED.has_tool_use,
-			   is_open = EXCLUDED.is_open`,
-			sessionID, m.Ordinal, m.Role, m.AppendContent, m.AppendThinking, m.Model,
-			nullTime(m.Timestamp), m.HasThinking, m.HasToolUse, m.Open); err != nil {
+			   (session_id, ordinal, role, content, thinking_text, model, timestamp, has_thinking, has_tool_use)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+			 ON CONFLICT (session_id, ordinal) DO NOTHING`,
+			sessionID, m.Ordinal, m.Role, m.Content, m.ThinkingText, m.Model,
+			nullTime(m.Timestamp), m.HasThinking, m.HasToolUse); err != nil {
 			return fmt.Errorf("write message %d for session %d: %w", m.Ordinal, sessionID, err)
 		}
 	}
@@ -314,11 +288,11 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO tool_calls
 			   (session_id, message_ordinal, call_index, tool_name, category, file_path,
-			    input_sha256, input_bytes, input_media_type, call_uid, source_offset)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+			    input_sha256, input_bytes, input_media_type, call_uid)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
 			 ON CONFLICT (session_id, message_ordinal, call_index) DO NOTHING`,
 			sessionID, t.MessageOrdinal, t.CallIndex, t.ToolName, t.Category, nullString(t.FilePath),
-			inputSHA, t.InputBytes, inputMedia, nullString(t.CallUID), t.SourceOffset); err != nil {
+			inputSHA, t.InputBytes, inputMedia, nullString(t.CallUID)); err != nil {
 			return fmt.Errorf("insert tool call %d/%d for session %d: %w", t.MessageOrdinal, t.CallIndex, sessionID, err)
 		}
 	}
@@ -408,6 +382,11 @@ func applyAggregates(ctx context.Context, tx pgx.Tx, sessionID int64, parserVers
 // left intact.
 func (s *Store) ResetProjectionForReparse(ctx context.Context, sessionID int64, parserVersion int) error {
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		// Parent session first, then session_raw: the same order DeleteSession takes,
+		// so a concurrent delete cannot deadlock with a reparse.
+		if err := lockSession(ctx, tx, sessionID); err != nil {
+			return err
+		}
 		var dummy int64
 		if err := tx.QueryRow(ctx,
 			`SELECT session_id FROM session_raw WHERE session_id = $1 FOR UPDATE`, sessionID).Scan(&dummy); err != nil {
@@ -450,6 +429,25 @@ func resetSessionAggregates(ctx context.Context, tx pgx.Tx, sessionID int64) err
 		 WHERE id = $1`, sessionID)
 	if err != nil {
 		return fmt.Errorf("reset aggregates for session %d: %w", sessionID, err)
+	}
+	return nil
+}
+
+// lockSession takes the row lock on the parent session before the parse and reset
+// paths lock session_raw and update the session aggregates. DeleteSession locks
+// the session row (its DELETE) and then cascades into session_raw and the child
+// projection tables, so acquiring the session row first here gives one global lock
+// order (session, then session_raw) and rules out the parent/child deadlock where
+// one transaction holds session_raw while waiting on sessions and another holds
+// sessions while waiting on session_raw. AppendChunk stays out of this: it locks
+// session_raw but never the session row, so it cannot close such a cycle.
+func lockSession(ctx context.Context, tx pgx.Tx, sessionID int64) error {
+	var id int64
+	if err := tx.QueryRow(ctx, `SELECT id FROM sessions WHERE id = $1 FOR UPDATE`, sessionID).Scan(&id); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("lock session %d: %w", sessionID, err)
 	}
 	return nil
 }

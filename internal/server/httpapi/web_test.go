@@ -303,7 +303,7 @@ func TestPublicSessionFlow(t *testing.T) {
 		MessagesAdded:     1,
 		UserMessagesAdded: 1,
 		Messages: []store.MessageDelta{
-			{Ordinal: 0, Role: "user", AppendContent: "Fix the secret login bug"},
+			{Ordinal: 0, Role: "user", Content: "Fix the secret login bug"},
 		},
 	}); err != nil {
 		t.Fatalf("apply projection: %v", err)

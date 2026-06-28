@@ -204,12 +204,11 @@ func assertClaudeProjection(t *testing.T, st *store.Store, sid int64) {
 	}
 }
 
-// TestCodexTurnSplitAcrossChunks puts a chunk boundary in the middle of one
-// Codex assistant turn: the reasoning and tool call land in the first chunk
-// (leaving the message open), and the assistant text plus the closing user turn
-// land in the second. The folded message must end with both halves joined and no
-// longer open.
-func TestCodexTurnSplitAcrossChunks(t *testing.T) {
+// TestCodexTurnFoldedInOneChunk delivers a whole Codex turn (reasoning, tool
+// call, and the assistant reply) in one chunk, the way the turn-aligned ingest
+// protocol guarantees. The run of items folds into a single assistant message,
+// closed by the following user turn, with its tool use recorded.
+func TestCodexTurnFoldedInOneChunk(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 
@@ -219,57 +218,36 @@ func TestCodexTurnSplitAcrossChunks(t *testing.T) {
 		t.Fatal(err)
 	}
 	ann, err := st.Announce(ctx, store.AnnounceParams{
-		UserID: uid, Agent: "codex", SourceSessionID: "codex-split", ProjectID: projectID,
+		UserID: uid, Agent: "codex", SourceSessionID: "codex-fold", ProjectID: projectID,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	sid := ann.SessionID
 
-	chunk1 := `{"type":"session_meta","timestamp":"2024-01-01T10:00:00Z","payload":{"cwd":"/x","git":{"branch":"main"},"model":"gpt-5-codex"}}` + "\n" +
+	// One whole turn, then the user line that closes it, in a single chunk.
+	chunk := `{"type":"session_meta","timestamp":"2024-01-01T10:00:00Z","payload":{"cwd":"/x","git":{"branch":"main"},"model":"gpt-5-codex"}}` + "\n" +
 		`{"type":"response_item","timestamp":"2024-01-01T10:00:01Z","payload":{"type":"reasoning","content":[{"type":"text","text":"think A"}]}}` + "\n" +
-		`{"type":"response_item","timestamp":"2024-01-01T10:00:02Z","payload":{"type":"function_call","name":"shell_command","arguments":"{}","call_id":"c1"}}` + "\n"
-	chunk2 := `{"type":"response_item","timestamp":"2024-01-01T10:00:03Z","payload":{"role":"assistant","content":[{"type":"output_text","text":"done"}]}}` + "\n" +
+		`{"type":"response_item","timestamp":"2024-01-01T10:00:02Z","payload":{"type":"function_call","name":"shell_command","arguments":"{}","call_id":"c1"}}` + "\n" +
+		`{"type":"response_item","timestamp":"2024-01-01T10:00:03Z","payload":{"role":"assistant","content":[{"type":"output_text","text":"done"}]}}` + "\n" +
 		`{"type":"response_item","timestamp":"2024-01-01T10:00:04Z","payload":{"role":"user","content":[{"type":"input_text","text":"next"}]}}` + "\n"
 
-	stored, err := st.AppendChunk(ctx, sid, 0, []byte(chunk1))
-	if err != nil {
+	if _, err := st.AppendChunk(ctx, sid, 0, []byte(chunk)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Advance(ctx, st, sid, "codex"); err != nil {
-		t.Fatalf("advance 1: %v", err)
+		t.Fatalf("advance: %v", err)
 	}
 
-	// After the first chunk the assistant turn is open: its row exists, carries the
-	// reasoning, and is flagged open.
-	var open bool
 	var content, thinking string
-	if err := st.Pool.QueryRow(ctx,
-		"SELECT is_open, content, thinking_text FROM messages WHERE session_id=$1 AND ordinal=0", sid).
-		Scan(&open, &content, &thinking); err != nil {
-		t.Fatal(err)
-	}
-	if !open || content != "" || thinking != "think A" {
-		t.Fatalf("mid-turn row: open=%v content=%q thinking=%q", open, content, thinking)
-	}
-
-	if _, err := st.AppendChunk(ctx, sid, stored, []byte(chunk2)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Advance(ctx, st, sid, "codex"); err != nil {
-		t.Fatalf("advance 2: %v", err)
-	}
-
-	// The turn is now closed, the text appended to the same row, and the tool use
-	// recorded. A separate user message follows.
 	var hasTool bool
 	if err := st.Pool.QueryRow(ctx,
-		"SELECT is_open, content, thinking_text, has_tool_use FROM messages WHERE session_id=$1 AND ordinal=0", sid).
-		Scan(&open, &content, &thinking, &hasTool); err != nil {
+		"SELECT content, thinking_text, has_tool_use FROM messages WHERE session_id=$1 AND ordinal=0", sid).
+		Scan(&content, &thinking, &hasTool); err != nil {
 		t.Fatal(err)
 	}
-	if open || content != "done" || thinking != "think A" || !hasTool {
-		t.Fatalf("closed turn: open=%v content=%q thinking=%q tool=%v", open, content, thinking, hasTool)
+	if content != "done" || thinking != "think A" || !hasTool {
+		t.Fatalf("folded turn: content=%q thinking=%q tool=%v", content, thinking, hasTool)
 	}
 
 	var mc int
@@ -284,7 +262,51 @@ func TestCodexTurnSplitAcrossChunks(t *testing.T) {
 		t.Fatal(err)
 	}
 	if calls != 1 {
-		t.Fatalf("tool calls on the open turn = %d, want 1", calls)
+		t.Fatalf("tool calls on the folded turn = %d, want 1", calls)
+	}
+}
+
+// TestCodexTrailingTurnFlushedWhole confirms the final turn of a session, which
+// has no closing user line, still parses as one complete message: the protocol
+// flushes it whole in the last chunk, and the reducer emits the open turn at the
+// region's end rather than carrying it.
+func TestCodexTrailingTurnFlushedWhole(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	uid := firstUser(t, st)
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ann, err := st.Announce(ctx, store.AnnounceParams{
+		UserID: uid, Agent: "codex", SourceSessionID: "codex-trailing", ProjectID: projectID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid := ann.SessionID
+
+	// A user line, then the assistant's reply, with no following user line: the
+	// session ended here.
+	chunk := `{"type":"session_meta","timestamp":"2024-01-01T10:00:00Z","payload":{"cwd":"/x","model":"gpt-5-codex"}}` + "\n" +
+		`{"type":"response_item","timestamp":"2024-01-01T10:00:01Z","payload":{"role":"user","content":[{"type":"input_text","text":"hi"}]}}` + "\n" +
+		`{"type":"response_item","timestamp":"2024-01-01T10:00:02Z","payload":{"role":"assistant","content":[{"type":"output_text","text":"hello"}]}}` + "\n"
+
+	if _, err := st.AppendChunk(ctx, sid, 0, []byte(chunk)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Advance(ctx, st, sid, "codex"); err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+
+	var content string
+	if err := st.Pool.QueryRow(ctx,
+		"SELECT content FROM messages WHERE session_id=$1 AND ordinal=1", sid).Scan(&content); err != nil {
+		t.Fatal(err)
+	}
+	if content != "hello" {
+		t.Fatalf("trailing assistant content = %q, want %q", content, "hello")
 	}
 }
 

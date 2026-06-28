@@ -15,16 +15,27 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 )
 
-// chunkTarget is the preferred chunk size. A chunk is trimmed back to its last
-// newline so it carries only complete JSONL lines.
-const chunkTarget = 4 << 20
+// chunkTarget is the preferred chunk size. A chunk is trimmed back to a message
+// boundary (a newline for Claude and pi, a turn boundary for Codex) so it carries
+// only whole messages. Well-behaved small sessions move in sub-megabyte chunks.
+const chunkTarget = 1 << 20
 
-// hardCap bounds how far the client will grow a chunk to reach a newline when a
-// single JSONL line is larger than chunkTarget. It stays under the server's
-// 64 MiB chunk limit.
-const hardCap = 60 << 20
+// hardCap bounds how far the client will grow a chunk to reach a boundary when a
+// single message (a JSONL line, or a folded Codex turn) is larger than
+// chunkTarget. A message that big is served alone, as one oversized chunk; only a
+// truly pathological size is refused. It matches the server's maxChunk, and since
+// the server parses one oversized chunk in one region, it also bounds the
+// server's worst-case parse memory.
+const hardCap = 128 << 20
+
+// settleWindow is how long a session file must be idle before the client uploads
+// its trailing in-progress turn. A Codex turn closes only at the next user line,
+// so a session's final turn has no closer; once the file stops growing, the turn
+// is done and is flushed. It is a var so tests can force an immediate flush.
+var settleWindow = 60 * time.Second
 
 // Action describes what SyncFile did for a file.
 type Action string
@@ -132,6 +143,10 @@ func (c *Client) syncOnce(ctx context.Context, t Target, f *os.File) (Outcome, b
 		return Outcome{}, false, err
 	}
 	size := info.Size()
+	// A session's final turn has no closing user line, so it is withheld until the
+	// file goes idle. Treat a file untouched for settleWindow as settled, which
+	// also keeps a turn that merely paused mid-write from being flushed early.
+	settled := time.Since(info.ModTime()) > settleWindow
 
 	action := ActionUploaded
 	offset := ann.StoredBytes
@@ -153,12 +168,12 @@ func (c *Client) syncOnce(ctx context.Context, t Target, f *os.File) (Outcome, b
 
 	out := Outcome{StoredBytes: ann.StoredBytes}
 	for offset < size {
-		chunk, err := nextChunk(f, offset, size)
+		chunk, err := nextChunk(f, offset, size, t.Agent, settled)
 		if err != nil {
 			return out, false, err
 		}
 		if len(chunk) == 0 {
-			break // only an incomplete trailing line remains; wait for it to finish
+			break // only an incomplete or in-progress trailing message remains; wait
 		}
 		res, err := c.chunk(ctx, ann.SessionID, offset, chunk)
 		if err != nil {
@@ -180,11 +195,19 @@ func (c *Client) syncOnce(ctx context.Context, t Target, f *os.File) (Outcome, b
 	return out, false, nil
 }
 
-// nextChunk returns the bytes to send next: from offset through the last newline
-// within a bounded window, so only complete lines are uploaded. It returns an
-// empty slice when only an unfinished trailing line remains, and an error when a
-// single line exceeds hardCap.
-func nextChunk(f *os.File, offset, size int64) ([]byte, error) {
+// nextChunk returns the bytes to send next: from offset up to a message boundary
+// within a bounded window, so a chunk never splits a message. For Claude and pi a
+// message is one JSONL line, so the boundary is the last newline. For Codex a
+// message is a folded turn (reasoning, tool calls, and the assistant reply), so
+// the boundary is the last turn end, which keeps a turn from spanning a chunk
+// (and so from spanning a parse region). The window grows up to hardCap to fit a
+// single oversized message, which is then served alone.
+//
+// It returns an empty slice when nothing is completable yet: an unfinished
+// trailing line, or, for Codex, a trailing in-progress turn whose closing user
+// line has not arrived and whose file has not settled. settled lets the final
+// turn of an idle session be flushed even without that closing line.
+func nextChunk(f *os.File, offset, size int64, agent string, settled bool) ([]byte, error) {
 	window := int64(chunkTarget)
 	for {
 		end := offset + window
@@ -195,20 +218,82 @@ func nextChunk(f *os.File, offset, size int64) ([]byte, error) {
 		if _, err := f.ReadAt(buf, offset); err != nil && err != io.EOF {
 			return nil, err
 		}
-		if nl := bytes.LastIndexByte(buf, '\n'); nl >= 0 {
-			return buf[:nl+1], nil
+		atEOF := end >= size
+		if cut := messageBoundary(buf, agent, atEOF, settled); cut > 0 {
+			return buf[:cut], nil
 		}
-		if end >= size {
-			return nil, nil // no newline in the tail: an incomplete final line
+		if atEOF {
+			return nil, nil // nothing completable yet; wait for more bytes or a settle
 		}
 		if window >= hardCap {
-			return nil, fmt.Errorf("session line exceeds %d bytes without a newline", hardCap)
+			return nil, fmt.Errorf("session %s message exceeds %d bytes without a boundary", agent, hardCap)
 		}
 		window *= 2
 		if window > hardCap {
 			window = hardCap
 		}
 	}
+}
+
+// messageBoundary returns the offset within buf up to which whole messages can be
+// uploaded, or 0 when none can be yet (signalling the caller to grow the window
+// or wait). atEOF reports that buf reaches the file's end; settled reports the
+// file has gone idle.
+func messageBoundary(buf []byte, agent string, atEOF, settled bool) int {
+	nl := bytes.LastIndexByte(buf, '\n')
+	if nl < 0 {
+		return 0 // no complete line yet
+	}
+	complete := nl + 1
+	if agent != string(agentCodex) {
+		return complete // each line is a whole message
+	}
+	// Codex: cut after the last turn boundary so a folded turn stays whole.
+	if tb := lastCodexTurnEnd(buf[:complete]); tb > 0 {
+		return tb
+	}
+	// No closed turn in the buffer: the tail is one in-progress turn. Flush it only
+	// once the file has settled (its closing user line will never come); otherwise
+	// wait for the turn to close or for more bytes.
+	if atEOF && settled {
+		return complete
+	}
+	return 0
+}
+
+// agentCodex is the agent string whose sessions fold a turn across lines. Kept
+// local so the upload package does not depend on the parser.
+const agentCodex = "codex"
+
+// codexLine is the minimal shape needed to spot a turn boundary: a Codex turn
+// closes at the next user entry, so a response_item carrying role "user" ends the
+// preceding turn.
+type codexLine struct {
+	Type    string `json:"type"`
+	Payload struct {
+		Role string `json:"role"`
+	} `json:"payload"`
+}
+
+// lastCodexTurnEnd returns the offset just past the last line that closes a turn
+// (a response_item with role "user"), or 0 when the buffer holds no such line.
+// Cutting there keeps every folded turn whole within one chunk: the user entry
+// that closes a turn travels with it, and the next turn begins in the next chunk.
+func lastCodexTurnEnd(buf []byte) int {
+	last := 0
+	start := 0
+	for i := 0; i < len(buf); i++ {
+		if buf[i] != '\n' {
+			continue
+		}
+		var cl codexLine
+		if json.Unmarshal(bytes.TrimSpace(buf[start:i]), &cl) == nil &&
+			cl.Type == "response_item" && cl.Payload.Role == "user" {
+			last = i + 1
+		}
+		start = i + 1
+	}
+	return last
 }
 
 // prefixMatches reports whether the local file's first storedBytes bytes hash to

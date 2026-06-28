@@ -56,10 +56,10 @@ type Message struct {
 // (a tool result that is an array of text blocks is flattened to its text).
 //
 // CallUID is the agent's own call id; the incremental pipeline records it on the
-// row so a tool result arriving in a later line is back-patched by an UPDATE
-// keyed on it rather than by a parser-held id->row map. SourceOffset is the raw
-// byte offset of the line that introduced the call. Both are carried on inserts
-// only; a Session assembled for tests ignores them.
+// row so a tool result arriving in a later line (Claude delivers tool_result in
+// the following user entry, which may land in a later region) is back-patched by
+// an UPDATE keyed on it rather than by a parser-held id->row map. It is carried
+// on inserts only; a Session assembled for tests ignores it.
 type ToolCall struct {
 	MessageOrdinal  int
 	CallIndex       int
@@ -72,7 +72,6 @@ type ToolCall struct {
 	ResultMediaType string
 	ResultStatus    string // "ok" | "error" | "" (pending)
 	CallUID         string
-	SourceOffset    int64
 }
 
 // Usage is one token-accounting record. MessageOrdinal is nil for session-level

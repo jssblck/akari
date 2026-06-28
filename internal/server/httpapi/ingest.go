@@ -12,9 +12,11 @@ import (
 	"github.com/jssblck/akari/internal/server/store"
 )
 
-// maxChunk bounds a single uploaded chunk. The client streams larger files as
-// several newline-terminated chunks.
-const maxChunk = 64 << 20
+// maxChunk bounds a single uploaded chunk. The client streams a file as several
+// message-aligned chunks, but one oversized message (a JSONL line, or a folded
+// Codex turn) is served alone, so this matches the client's hard cap. The server
+// parses one chunk in one region, so this also bounds worst-case parse memory.
+const maxChunk = 128 << 20
 
 var validAgents = map[string]bool{"claude": true, "codex": true, "pi": true}
 

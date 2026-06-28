@@ -254,7 +254,7 @@ func TestNextChunkTrimsToNewline(t *testing.T) {
 	defer f.Close()
 	info, _ := f.Stat()
 
-	chunk, err := nextChunk(f, 0, info.Size())
+	chunk, err := nextChunk(f, 0, info.Size(), "claude", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +263,7 @@ func TestNextChunkTrimsToNewline(t *testing.T) {
 	}
 
 	// From the trailing "c" with no newline, there is nothing complete to send.
-	tail, err := nextChunk(f, int64(len("a\nb\n")), info.Size())
+	tail, err := nextChunk(f, int64(len("a\nb\n")), info.Size(), "claude", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +285,7 @@ func TestNextChunkGrowsForLongLine(t *testing.T) {
 	defer f.Close()
 	info, _ := f.Stat()
 
-	chunk, err := nextChunk(f, 0, info.Size())
+	chunk, err := nextChunk(f, 0, info.Size(), "claude", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,5 +296,56 @@ func TestNextChunkGrowsForLongLine(t *testing.T) {
 	}
 	if string(chunk) != content {
 		t.Errorf("grown chunk should cover the whole file: got %d bytes, want %d", len(chunk), len(content))
+	}
+}
+
+// TestNextChunkCodexCutsAtTurnBoundary checks that a Codex chunk ends right after
+// a user line (a turn boundary), keeping each folded turn whole and withholding
+// the trailing in-progress turn until the file settles.
+func TestNextChunkCodexCutsAtTurnBoundary(t *testing.T) {
+	lines := []string{
+		`{"type":"session_meta","payload":{"cwd":"/x"}}`,
+		`{"type":"response_item","payload":{"role":"user","content":[{"type":"input_text","text":"a"}]}}`,
+		`{"type":"response_item","payload":{"type":"reasoning","content":[{"type":"text","text":"r"}]}}`,
+		`{"type":"response_item","payload":{"role":"assistant","content":[{"type":"output_text","text":"x"}]}}`,
+		`{"type":"response_item","payload":{"role":"user","content":[{"type":"input_text","text":"b"}]}}`,
+		`{"type":"response_item","payload":{"role":"assistant","content":[{"type":"output_text","text":"y"}]}}`,
+	}
+	content := strings.Join(lines, "\n") + "\n"
+	path := tempFile(t, content)
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	info, _ := f.Stat()
+
+	// The cut falls right after the second user line; the trailing assistant turn
+	// (lines[5]) is withheld because its closing user line has not arrived.
+	wantCut := len(strings.Join(lines[:5], "\n") + "\n")
+	chunk, err := nextChunk(f, 0, info.Size(), "codex", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunk) != wantCut {
+		t.Fatalf("chunk len = %d, want %d (through the second user line)", len(chunk), wantCut)
+	}
+
+	// The trailing turn stays withheld while the file is still considered live.
+	tail, err := nextChunk(f, int64(wantCut), info.Size(), "codex", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tail != nil {
+		t.Errorf("unsettled trailing turn = %q, want nil", tail)
+	}
+
+	// Once the file has settled, the final turn is flushed whole.
+	flushed, err := nextChunk(f, int64(wantCut), info.Size(), "codex", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(flushed) != lines[5]+"\n" {
+		t.Errorf("settled flush = %q, want %q", flushed, lines[5]+"\n")
 	}
 }

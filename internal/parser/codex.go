@@ -41,15 +41,15 @@ func (r *reducer) reduceCodex(region []byte, base int64) error {
 				name := p.Get("name").String()
 				args := p.Get("arguments").String()
 				tc := ToolCall{
-					MessageOrdinal: ord, CallIndex: r.st.OpenAssistantCalls,
+					MessageOrdinal: ord, CallIndex: r.openCalls,
 					ToolName: name, Category: toolCategory(name),
-					InputJSON: args, CallUID: p.Get("call_id").String(), SourceOffset: offset,
+					InputJSON: args, CallUID: p.Get("call_id").String(),
 				}
 				if gjson.Valid(args) {
 					tc.FilePath = gjson.Get(args, "file_path").String()
 				}
 				r.d.ToolCalls = append(r.d.ToolCalls, tc)
-				r.st.OpenAssistantCalls++
+				r.openCalls++
 
 			case p.Get("type").String() == "function_call_output":
 				r.applyResult(p.Get("call_id").String(), p.Get("output"), false)
@@ -87,8 +87,8 @@ func (r *reducer) reduceCodex(region []byte, base int64) error {
 					CacheRead: cached, Reasoning: int(u.Get("reasoning_output_tokens").Int()),
 					OccurredAt: ts,
 				}
-				if r.st.OpenAssistant >= 0 {
-					ord := r.st.OpenAssistant
+				if r.open != nil {
+					ord := r.open.Ordinal
 					usage.MessageOrdinal = &ord
 				}
 				r.addUsage(usage, offset)

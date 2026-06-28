@@ -64,17 +64,16 @@ func (r *reducer) reduceClaude(region []byte, base int64) error {
 					r.d.ToolCalls = append(r.d.ToolCalls, ToolCall{
 						MessageOrdinal: ord, CallIndex: callIndex,
 						ToolName: name, Category: toolCategory(name),
-						FilePath:     b.Get("input.file_path").String(),
-						InputJSON:    b.Get("input").Raw,
-						CallUID:      b.Get("id").String(),
-						SourceOffset: offset,
+						FilePath:  b.Get("input.file_path").String(),
+						InputJSON: b.Get("input").Raw,
+						CallUID:   b.Get("id").String(),
 					})
 					callIndex++
 				}
 			}
-			op.AppendContent = strings.Join(textParts, "\n")
-			op.AppendThinking = strings.Join(thinkParts, "\n")
-			op.HasThinking = op.AppendThinking != ""
+			op.Content = strings.Join(textParts, "\n")
+			op.ThinkingText = strings.Join(thinkParts, "\n")
+			op.HasThinking = op.ThinkingText != ""
 			r.d.Messages = append(r.d.Messages, op)
 
 			if u := msg.Get("usage"); u.Exists() {

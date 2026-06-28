@@ -227,7 +227,7 @@ func TestAdvanceProjectionCursorAndVersionGate(t *testing.T) {
 		calls++
 		return []byte("{}"), ProjectionDelta{
 			MessagesAdded: 1, UserMessagesAdded: 1, AddInput: 5,
-			Messages: []MessageDelta{{Ordinal: int(base), Role: "user", AppendContent: "x"}},
+			Messages: []MessageDelta{{Ordinal: int(base), Role: "user", Content: "x"}},
 		}, nil
 	}
 
@@ -319,7 +319,7 @@ func TestAdvanceProjectionBatching(t *testing.T) {
 		bases = append(bases, base)
 		return []byte("{}"), ProjectionDelta{
 			MessagesAdded: 1,
-			Messages:      []MessageDelta{{Ordinal: int(base), Role: "assistant", AppendContent: string(region)}},
+			Messages:      []MessageDelta{{Ordinal: int(base), Role: "assistant", Content: string(region)}},
 		}, nil
 	}
 
