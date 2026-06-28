@@ -138,6 +138,7 @@ Then push your sessions:
 ```sh
 akari sync                 # one-shot: scan and upload everything new
 akari sync --dry-run       # show what would upload, with skip reasons
+akari sync --time-limit 30s  # upload for up to 30s, finish the in-flight file, then exit
 akari watch                # stay running, upload sessions as they change
 akari daemon start         # run watch in the background (per-OS)
 akari daemon status
@@ -145,6 +146,14 @@ akari daemon stop
 akari update               # update to the latest release (see Updating below)
 akari version              # print the build version and exit
 ```
+
+`akari sync` stops starting new uploads after `--time-limit`, a Go duration such
+as `30s` or `5m` (default 5 minutes; `0` removes the cap). The limit gates only when new work begins. The
+file being uploaded when the limit elapses runs to a clean stopping point, so a run
+can finish a little past the limit but never abandons an upload mid-stream. Because
+uploads resume from the server's cursor, repeated short runs ingest a backlog in
+chunks. That is handy for trickling in data, or for grabbing a few seconds of
+sample sessions while a dev server is up.
 
 The client discovers Claude, Codex, and pi sessions in their standard locations.
 A session whose working directory is not a git repository is skipped with a

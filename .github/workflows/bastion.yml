@@ -1,0 +1,102 @@
+name: bastion
+
+# Agentic code review on every pull request. Reviewers live in .bastion.yaml
+# and run through the Codex CLI, billing against the PR
+# author's Codex subscription (restored from a per-author secret below). This is
+# the same set of reviewers contributors run locally with `bastion review`.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+
+jobs:
+  review:
+    name: review
+    runs-on: ubuntu-latest
+
+    # Fork PRs do not receive repository secrets, so the Codex credential cannot
+    # be restored there and the review could only fail. Skip them; the aggregate
+    # `bastion` check still has to pass for same-repo PRs.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+
+    env:
+      # Keep run storage inside the workspace so the report step finds the run
+      # the review step just produced.
+      BASTION_DATA_DIR: ${{ github.workspace }}/.bastion
+      # An optional GitHub App gives the PR comment a bot identity instead of the
+      # default Actions token. Leave the secrets unset to fall back to GITHUB_TOKEN.
+      HAS_BASTION_APP: ${{ secrets.BASTION_APP_ID != '' && secrets.BASTION_APP_PRIVATE_KEY != '' }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Reviewers diff against the base branch, so the full history must be
+          # present for `origin/<base>` to resolve.
+          fetch-depth: 0
+
+      - name: Install the Bastion CLI
+        run: |
+          set -euo pipefail
+          curl -sSfL https://raw.githubusercontent.com/jssblck/bastion/main/scripts/install.sh \
+            | bash -s -- --bin-dir "$HOME/.local/bin"
+          # The installer does not modify PATH; expose its bin dir to later steps.
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install the Codex CLI
+        # Bastion shells out to `codex`, so the runner needs it on PATH. Pinned
+        # for reproducible reviews; bump deliberately.
+        run: npm install -g @openai/codex@0.142.3
+
+      - name: Authenticate Codex as the PR author
+        # Each contributor stores their own Codex subscription credential as a
+        # CODEX_AUTH_<LOGIN> secret (uppercased GitHub login). Restore the one
+        # matching this PR's author so the review bills to them. To onboard a new
+        # author, add a case arm here and the matching secret.
+        env:
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          CODEX_AUTH_JSSBLCK: ${{ secrets.CODEX_AUTH_JSSBLCK }}
+        run: |
+          set -euo pipefail
+          author="$(printf '%s' "$AUTHOR" | tr '[:upper:]' '[:lower:]')"
+          case "$author" in
+            jssblck) cred="$CODEX_AUTH_JSSBLCK" ;;
+            *)
+              echo "::error::No Codex credential mapped for PR author '$AUTHOR'. Add a CODEX_AUTH_<LOGIN> secret and a case arm in .github/workflows/bastion.yml." >&2
+              exit 1 ;;
+          esac
+          if [ -z "$cred" ]; then
+            echo "::error::Codex credential for '$AUTHOR' is mapped but its secret is empty." >&2
+            exit 1
+          fi
+          mkdir -p "$HOME/.codex"
+          printf '%s' "$cred" > "$HOME/.codex/auth.json"
+          chmod 600 "$HOME/.codex/auth.json"
+
+      - name: Review
+        run: bastion review --base "origin/${{ github.base_ref }}"
+
+      - id: app-token
+        name: Mint a GitHub App token (optional)
+        if: ${{ always() && env.HAS_BASTION_APP == 'true' }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.BASTION_APP_ID }}
+          private-key: ${{ secrets.BASTION_APP_PRIVATE_KEY }}
+
+      - name: Report to the PR
+        # Always report, even when a gate blocked, so the PR shows the verdict and
+        # per-reviewer check runs (including the aggregate `bastion` check).
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+        run: |
+          set -euo pipefail
+          bastion github report \
+            --repo "${{ github.repository }}" \
+            --pr "${{ github.event.pull_request.number }}" \
+            --sha "${{ github.event.pull_request.head.sha }}"

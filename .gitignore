@@ -15,3 +15,6 @@ go.work.sum
 # Editor and OS cruft
 .DS_Store
 *.swp
+
+# Bastion run storage (the CI workflow points BASTION_DATA_DIR here)
+/.bastion/

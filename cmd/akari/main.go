@@ -57,7 +57,7 @@ func usage() {
 	fmt.Fprint(os.Stderr, `akari - back up agent sessions to an akari server
 
 Usage:
-  akari sync [--config PATH] [--dry-run]                  discover and upload new session bytes, then exit
+  akari sync [--config PATH] [--dry-run] [--time-limit DUR] discover and upload new session bytes, then exit
   akari watch [--config PATH]                             watch continuously and upload changes (foreground)
   akari daemon {start|stop|status} [--config PATH]        manage the watch loop as a background process
   akari login --server URL --token TOKEN [--config PATH]  write the client config
