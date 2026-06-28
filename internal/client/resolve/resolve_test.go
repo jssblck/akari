@@ -23,7 +23,9 @@ func writeFile(t *testing.T, dir, name, content string) string {
 func TestPeekHeader(t *testing.T) {
 	dir := t.TempDir()
 
-	claude := writeFile(t, dir, "claude.jsonl",
+	// A Claude main file is named by its session id, so its path-derived source id
+	// equals that id.
+	claude := writeFile(t, dir, "c-123.jsonl",
 		`{"type":"user","cwd":"/home/grace/app","gitBranch":"main","sessionId":"c-123","message":{"content":"hi"}}`+"\n")
 	codex := writeFile(t, dir, "rollout-codex.jsonl",
 		`{"type":"session_meta","payload":{"id":"x-9","cwd":"/home/grace/api","git":{"branch":"dev"}}}`+"\n")
@@ -66,8 +68,8 @@ func TestPeekHeaderFallsBackToFilename(t *testing.T) {
 // a Claude main session file and every subagent and workflow file beneath it all
 // record the same in-file sessionId, so before the fix they folded onto one
 // server row and clobbered each other. Each file must now resolve to a distinct
-// source id, with subagents kept grouped under their parent sessionId and the
-// main file keeping the bare sessionId.
+// path-derived source id, with subagents kept grouped under their parent. An
+// ordinary main file is named by its session id, so it still resolves to that id.
 func TestClaudeSourceIDUnique(t *testing.T) {
 	root := t.TempDir()
 	const sid = "4a7929e8-5b80-48e6-8ccc-a8919c89cd6d"
@@ -102,8 +104,8 @@ func TestClaudeSourceIDUnique(t *testing.T) {
 		return h.SourceID
 	}
 
-	// The main file keeps its bare sessionId so a resume into the same file keeps
-	// identity.
+	// The main file is named by its session id, so its path-derived id is that id;
+	// a resume that appends to the same file keeps identity.
 	if got := id(main); got != sid {
 		t.Errorf("main source id = %q, want %q", got, sid)
 	}
@@ -139,6 +141,51 @@ func TestClaudeSourceIDUnique(t *testing.T) {
 		if v == sid && (v != id(main)) {
 			t.Errorf("non-main file reused the parent sessionId %q", sid)
 		}
+	}
+}
+
+// TestClaudeForkedSessionDistinct guards the second half of the collision: a
+// resumed or forked Claude session writes a new file (named by a fresh id) that
+// still records the ORIGINAL session's sessionId inside. Keyed on the in-file
+// sessionId the two main files would fold onto one row; keyed on the file name
+// they stay distinct, so both are backed up losslessly.
+func TestClaudeForkedSessionDistinct(t *testing.T) {
+	root := t.TempDir()
+	const parent = "10c63fb7-6a1f-48d8-95f4-51bfd15c57c2"
+	const fork = "c0ce02b7-4f3e-49ff-9a3d-6784654cdfaa"
+	proj := "-home-ada-app"
+
+	// Both files carry the parent's sessionId in their first line; only their file
+	// names differ.
+	line := fmt.Sprintf(`{"type":"user","cwd":"/home/ada/app","sessionId":%q}`+"\n", parent)
+	mustWrite := func(name string) string {
+		path := filepath.Join(root, proj, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(line), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	id := func(path string) string {
+		h, err := PeekHeader(discover.File{Agent: "claude", Root: root, Path: path})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h.SourceID
+	}
+
+	parentID := id(mustWrite(parent + ".jsonl"))
+	forkID := id(mustWrite(fork + ".jsonl"))
+	if parentID != parent {
+		t.Errorf("parent source id = %q, want %q", parentID, parent)
+	}
+	if forkID != fork {
+		t.Errorf("fork source id = %q, want %q (must not reuse the in-file sessionId)", forkID, fork)
+	}
+	if parentID == forkID {
+		t.Errorf("forked session collided with its parent on id %q", parentID)
 	}
 }
 
@@ -199,7 +246,7 @@ func fakeGit(responses map[string]string, errs map[string]error) GitRunner {
 
 func TestResolveSuccess(t *testing.T) {
 	cwd := t.TempDir() // a directory that exists on disk
-	file := writeFile(t, cwd, "sess.jsonl",
+	file := writeFile(t, cwd, "s1.jsonl",
 		fmt.Sprintf(`{"type":"user","cwd":%q,"gitBranch":"main","sessionId":"s1"}`+"\n", cwd))
 
 	r := NewWith(fakeGit(map[string]string{
