@@ -206,7 +206,7 @@ See `docs/DESIGN.md` for the full engineering design and rationale, and
 
 Releases are cut by pushing a `vX.Y.Z` tag. CI cross-compiles the server (Linux)
 and the client (Linux, macOS, Windows), packages each target into an archive with
-a `SHA256SUMS`, and opens a draft GitHub Release with notes generated from the
+a `SHA256SUMS`, and publishes a GitHub Release with notes generated from the
 merged pull requests. The same build runs as a dry run on every pull request and
 `main` push, so a break in the release pipeline surfaces on the PR. The binaries
 report the tag through `akari version` / `akari-server version`. See

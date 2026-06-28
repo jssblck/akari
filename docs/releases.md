@@ -33,12 +33,12 @@ Do not edit a constant to mark a release, tag instead.
    ```
 
 3. The `Release` workflow cross-compiles every target, packages the archives,
-   computes `SHA256SUMS`, then creates a DRAFT GitHub Release with notes
-   generated from the pull requests merged since the previous tag.
-4. Review the draft release, edit the generated notes if needed, then publish it
-   by hand. A bare `X.Y.Z` tag is published as the latest stable release; any
-   other tag shape (for example a `-rc.1` pre-release suffix) is marked as a
-   prerelease.
+   computes `SHA256SUMS`, then publishes a GitHub Release with notes generated
+   from the pull requests merged since the previous tag. A bare `X.Y.Z` tag is
+   published as the latest stable release; any other tag shape (for example a
+   `-rc.1` pre-release suffix) is marked as a prerelease.
+4. The release is live as soon as the workflow finishes. Edit the generated notes
+   afterward if you want to expand them.
 
 ## Published assets
 
@@ -78,9 +78,10 @@ The `scripts/` directory holds the installers the README points users at:
 Each resolves the release to install (the latest published release, or the tag
 in `AKARI_VERSION`), downloads the matching archive and `SHA256SUMS`, verifies
 the checksum before extracting, and installs the binary. They depend only on the
-asset names above, so they keep working across releases without changes. Because
-they resolve "latest" through the GitHub releases API, a release must be
-published (not left as a draft) before the no-version install path can find it.
+asset names above, so they keep working across releases without changes. They
+resolve "latest" through the GitHub releases API; since the workflow publishes
+releases directly, a freshly tagged release is reachable as soon as the workflow
+finishes (GitHub's asset CDN can lag the publish by a few seconds).
 
 ## Container image
 

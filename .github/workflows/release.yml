@@ -4,10 +4,10 @@ name: Release
 #
 # On a version tag (v*) this cross-compiles every target (the akari-server for
 # Linux, the akari client for Linux, macOS, and Windows), packages each into an
-# archive, computes a SHA256SUMS over them, then creates a DRAFT GitHub Release
-# whose notes are generated from the pull requests merged since the previous tag
-# (--generate-notes, the "releases as changelog" pattern). The draft is reviewed
-# and published by hand.
+# archive, computes a SHA256SUMS over them, then publishes a GitHub Release whose
+# notes are generated from the pull requests merged since the previous tag
+# (--generate-notes, the "releases as changelog" pattern). The release goes out
+# directly; edit the generated notes afterward if you want to expand them.
 #
 # On every pull request and every push to main this runs as a DRY RUN: it
 # executes the exact same build and packaging matrix and computes SHA256SUMS but
@@ -213,7 +213,7 @@ jobs:
           echo "SHA256SUMS:"
           cat SHA256SUMS
 
-      - name: Create draft GitHub release
+      - name: Create GitHub release
         if: ${{ needs.prepare.outputs.dry_run == 'false' }}
         shell: bash
         run: |
@@ -227,8 +227,9 @@ jobs:
             channel=(--latest)
           fi
 
+          # Published directly (no --draft): the assets and version go live as
+          # soon as this step finishes.
           gh release create "$tag" \
-            --draft \
             --generate-notes \
             "${channel[@]}" \
             --title "$tag" \
@@ -240,15 +241,11 @@ jobs:
         run: |
           tag="${{ needs.prepare.outputs.tag }}"
           {
-            echo "## Draft release created: $tag"
+            echo "## Released: $tag"
             echo
-            echo "A draft release was created with auto-generated notes (the merged PRs since the previous tag)."
+            echo "Published a GitHub Release with auto-generated notes (the merged PRs since the previous tag)."
             echo
-            echo "### Next steps"
-            echo
-            echo "1. Review the draft release at https://github.com/${{ github.repository }}/releases"
-            echo "2. Edit the generated notes if needed"
-            echo "3. Publish when ready"
+            echo "View it at https://github.com/${{ github.repository }}/releases/tag/$tag"
             echo
             echo "### SHA256SUMS"
             echo
