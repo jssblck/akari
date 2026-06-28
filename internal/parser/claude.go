@@ -112,9 +112,9 @@ func parseClaude(raw []byte) (Session, error) {
 }
 
 // applyToolResult records a tool result against the matching tool call. body is
-// the raw result value (a string or an array of blocks); its size and media type
-// are taken from the original body so the recorded metadata is faithful, while
-// ResultText holds a flattened form for display and search.
+// the raw result value (a string or an array of blocks). The stored body, its
+// size, and its media type all come from bodyContent, so the chip metadata always
+// describes exactly the bytes the CAS holds.
 func applyToolResult(s *Session, toolByID map[string]int, id string, body gjson.Result, isErr bool) {
 	if id == "" {
 		return // an unkeyed result cannot be matched to a call
@@ -124,8 +124,8 @@ func applyToolResult(s *Session, toolByID map[string]int, id string, body gjson.
 		return
 	}
 	tc := &s.ToolCalls[idx]
-	tc.ResultText = blockText(body)
-	tc.ResultBytes, tc.ResultMediaType = bodySize(body)
+	tc.ResultBody, tc.ResultMediaType = bodyContent(body)
+	tc.ResultBytes = len(tc.ResultBody)
 	if isErr {
 		tc.ResultStatus = "error"
 	} else {
@@ -133,19 +133,23 @@ func applyToolResult(s *Session, toolByID map[string]int, id string, body gjson.
 	}
 }
 
-// bodySize reports the byte length and media type of a raw tool body. Strings are
-// measured by their unquoted contents (text/plain); arrays and objects by their
-// JSON encoding (application/json). This is the size the CAS will later store.
-func bodySize(body gjson.Result) (int, string) {
+// bodyContent returns the canonical body bytes and media type for a raw tool
+// body. A string is its unquoted contents; an array of typed blocks is flattened
+// to its text (so a result that arrives as text blocks renders as readable text,
+// not a JSON wrapper); a genuine object stays raw JSON. The returned string is
+// exactly what the CAS stores, so its length is the recorded size.
+func bodyContent(body gjson.Result) (string, string) {
 	switch {
 	case body.Type == gjson.String:
-		return len(body.String()), "text/plain"
-	case body.IsArray() || body.IsObject():
-		return len(body.Raw), "application/json"
+		return body.String(), "text/plain"
+	case body.IsArray():
+		return blockText(body), "text/plain"
+	case body.IsObject():
+		return body.Raw, "application/json"
 	case body.Exists():
-		return len(body.Raw), "text/plain"
+		return body.Raw, "text/plain"
 	default:
-		return 0, ""
+		return "", ""
 	}
 }
 

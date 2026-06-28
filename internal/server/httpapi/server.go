@@ -46,6 +46,10 @@ func (s *Server) Routes() http.Handler {
 	// Static assets.
 	mux.Handle("GET /static/", staticHandler())
 
+	// CAS blob serving, gated by the referencing session.
+	mux.HandleFunc("GET /api/v1/session/{id}/blob/{sha256}", s.requireFull(s.handleSessionBlob))
+	mux.HandleFunc("GET /s/{public_id}/blob/{sha256}", s.handlePublicBlob)
+
 	// Server-rendered UI: public, logged-out pages.
 	mux.HandleFunc("GET /s/{public_id}", s.handlePublicSession)
 	mux.HandleFunc("GET /login", s.handleLoginPage)

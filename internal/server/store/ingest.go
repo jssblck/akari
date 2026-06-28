@@ -126,7 +126,9 @@ func (s *Store) AppendChunk(ctx context.Context, sessionID, offset int64, data [
 }
 
 // ResetRaw clears a session's raw store and its derived rows so the next chunk
-// re-parses from zero.
+// re-parses from zero. Dropping the tool_calls and attachments can orphan CAS
+// blobs; like any deletion or re-parse, those are reclaimed by a later
+// SweepBlobs rather than synchronously here, so a client reset stays cheap.
 func (s *Store) ResetRaw(ctx context.Context, sessionID int64) error {
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		for _, q := range []string{

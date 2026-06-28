@@ -54,6 +54,12 @@ func runReparse(args []string) error {
 		}
 		ok++
 	}
-	fmt.Printf("reparsed %d session(s), %d failed\n", ok, failed)
+	// A parser change can rewrite tool bodies, orphaning the old blobs, so sweep
+	// once the projections are rebuilt.
+	removed, err := st.SweepBlobs(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("reparsed %d session(s), %d failed; swept %d orphaned blob(s)\n", ok, failed, removed)
 	return nil
 }

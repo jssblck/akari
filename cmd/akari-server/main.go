@@ -24,6 +24,12 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "sweep" {
+		if err := runSweep(os.Args[2:]); err != nil {
+			log.Fatalf("akari-server sweep: %v", err)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		log.Fatalf("akari-server: %v", err)
 	}
