@@ -223,14 +223,16 @@ func TestAdvanceProjectionCursorAndVersionGate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A stub reducer that emits one message per call, keyed by the region's base
-	// offset so repeated calls never collide on the messages primary key.
+	// A stub reducer that emits one user message and one usage row per call, keyed
+	// by the region's base offset so repeated calls never collide on the messages
+	// primary key or the usage source identity. The rollups are derived from the
+	// rows that actually insert, so the delta carries rows, not precomputed counts.
 	var calls int
 	reduce := func(state, region []byte, base int64) ([]byte, ProjectionDelta, error) {
 		calls++
 		return []byte("{}"), ProjectionDelta{
-			MessagesAdded: 1, UserMessagesAdded: 1, AddInput: 5,
 			Messages: []MessageDelta{{Ordinal: int(base), Role: "user", Content: "x"}},
+			Usage:    []ProjUsage{{Model: "m", Input: 5, SourceOffset: base, SourceIndex: 0}},
 		}, nil
 	}
 
@@ -321,8 +323,7 @@ func TestAdvanceProjectionBatching(t *testing.T) {
 	reduce := func(state, region []byte, base int64) ([]byte, ProjectionDelta, error) {
 		bases = append(bases, base)
 		return []byte("{}"), ProjectionDelta{
-			MessagesAdded: 1,
-			Messages:      []MessageDelta{{Ordinal: int(base), Role: "assistant", Content: string(region)}},
+			Messages: []MessageDelta{{Ordinal: int(base), Role: "assistant", Content: string(region)}},
 		}, nil
 	}
 

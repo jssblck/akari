@@ -25,8 +25,7 @@ func seedToolSession(t *testing.T, st *store.Store, userID, projectID int64, sou
 		t.Fatalf("announce %s: %v", source, err)
 	}
 	delta := store.ProjectionDelta{
-		MessagesAdded: 1,
-		Messages:      []store.MessageDelta{{Ordinal: 0, Role: "assistant", Content: "x", HasToolUse: true}},
+		Messages: []store.MessageDelta{{Ordinal: 0, Role: "assistant", Content: "x", HasToolUse: true}},
 		ToolCalls: []store.ProjToolCall{{
 			MessageOrdinal: 0, CallIndex: 0, ToolName: "Read", Category: "read", CallUID: "call-" + source,
 		}},

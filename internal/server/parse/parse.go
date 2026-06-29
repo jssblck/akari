@@ -17,7 +17,16 @@ import (
 // reparse can be told which sessions are stale. A session parsed past byte 0 by a
 // different version cannot be resumed incrementally; reparse rewinds and replays
 // it from scratch.
-const Version = 1
+//
+// Version 2 changed how the session rollups are folded: they now count only the
+// usage and message rows that survive their ON CONFLICT dedup, where version 1
+// added every per-region occurrence and so inflated Claude sessions (which repeat
+// a usage block across sidechain and summary lines). A version-1 session keeps its
+// inflated rollup until a reparse rewinds it, which is why the fix ships with a
+// version bump: an incremental advance over a still version-1 session would fold a
+// correct delta onto a wrong base. Run `akari-server reparse` to correct the live
+// data.
+const Version = 2
 
 // Advance parses any not-yet-parsed bytes of a session and applies them to the
 // projection, looping until the parse cursor catches up to the stored length. It
@@ -69,14 +78,14 @@ func reduceFunc(agent string) store.ReduceFunc {
 	}
 }
 
-// toProjectionDelta maps a parser delta to the store delta, applying pricing to
-// each usage event and accumulating the session-level token and cost increments.
+// toProjectionDelta maps a parser delta to the store delta, pricing each usage
+// event from the compiled-in table. It does not accumulate session-level token or
+// cost increments: those are derived from the rows that actually persist (the store
+// dedups usage on insert), so the rollups count exactly the surviving ledger set.
 func toProjectionDelta(p parser.Delta) store.ProjectionDelta {
 	d := store.ProjectionDelta{
-		MessagesAdded:     p.MessagesAdded,
-		UserMessagesAdded: p.UserMessagesAdded,
-		Started:           p.Started,
-		Ended:             p.Ended,
+		Started: p.Started,
+		Ended:   p.Ended,
 	}
 
 	for _, m := range p.Messages {
@@ -144,18 +153,12 @@ func toProjectionDelta(p parser.Delta) store.ProjectionDelta {
 			SourceOffset:   u.SourceOffset,
 			SourceIndex:    u.SourceIndex,
 		}
+		// Price the event here; whether it counts toward the session total is decided
+		// at insert time, where a duplicate usage line is dropped and only the
+		// surviving row folds into the rollup (cost_incomplete included).
 		if cost, known := pricing.Cost(u.Model, u.Input, u.Output, u.CacheWrite, u.CacheRead); known {
 			pu.CostUSD = &cost
-			d.AddCostUSD += cost
-		} else if u.Input+u.Output+u.CacheWrite+u.CacheRead+u.Reasoning > 0 {
-			// Tokens spent on a model we cannot price: the session total is a partial
-			// sum and the flag says so.
-			d.CostIncomplete = true
 		}
-		d.AddInput += int64(u.Input)
-		d.AddOutput += int64(u.Output)
-		d.AddCacheWrite += int64(u.CacheWrite)
-		d.AddCacheRead += int64(u.CacheRead)
 		d.Usage = append(d.Usage, pu)
 	}
 

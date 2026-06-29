@@ -94,9 +94,8 @@ func TestDeleteSessionCascadesAndOrphansBlob(t *testing.T) {
 	body := []byte("deleted tool body")
 	sid := seedSession(t, st, u.ID, projectID, "sess-del")
 	proj := ProjectionDelta{
-		MessagesAdded: 1,
-		Messages:      []MessageDelta{{Ordinal: 0, Role: "assistant", Content: "x", HasToolUse: true}},
-		ToolCalls:     []ProjToolCall{{MessageOrdinal: 0, CallIndex: 0, ToolName: "Read", CallUID: "c1"}},
+		Messages:  []MessageDelta{{Ordinal: 0, Role: "assistant", Content: "x", HasToolUse: true}},
+		ToolCalls: []ProjToolCall{{MessageOrdinal: 0, CallIndex: 0, ToolName: "Read", CallUID: "c1"}},
 		ToolResults: []ToolResultDelta{{
 			CallUID: "c1", Body: string(body), Bytes: int64(len(body)), MediaType: "text/plain", Status: "ok",
 		}},

@@ -48,7 +48,6 @@ func (r *reducer) reduceClaude(region []byte, base int64) error {
 			msg := e.Get("message")
 			ord := r.st.NextOrdinal
 			r.st.NextOrdinal++
-			r.d.MessagesAdded++
 			op := MessageOp{Ordinal: ord, Role: RoleAssistant, Model: msg.Get("model").String(), Timestamp: ts}
 			var textParts, thinkParts []string
 			callIndex := 0

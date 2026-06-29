@@ -448,7 +448,7 @@ match mine."
 The parser is a per-agent line reducer: given a small carry-over state (the next
 ordinal, and for Codex the sticky model) and a region of complete lines, it
 returns the next state and a projection delta (rows to add, results to
-back-patch, and the increments to fold into the session rollups). The carry-over
+back-patch, and the region's timestamp span). The carry-over
 is bounded to counters: no per-message accumulation and no open turn live in it.
 A Codex turn folds a run of items into one assistant message, but that fold never
 crosses a region, because the ingest protocol keeps a whole turn inside one chunk
@@ -459,6 +459,21 @@ following user entry, which can land in a later region, so a result is
 back-patched to its call by the call id (a per-session unique index makes that a
 constant-time, single-row update). The state and the parse cursor are stored on
 the `session_raw` row, so a chunk parses only its own bytes.
+
+The session rollups (`message_count`, `user_message_count`, the token totals, and
+`total_cost_usd`) are folded from the rows that actually persist, not from a count
+the reducer carries. The projection inserts messages and usage under their unique
+indexes with `ON CONFLICT DO NOTHING`, so a duplicate is dropped from the ledger,
+and only an insert that survives that guard contributes to the rollup. This
+matters because a Claude transcript repeats the same usage block across sidechain
+and summary lines (the same `dedup_key`), so the ledger keeps one row while the
+raw region carries several. Folding the persisted set keeps the invariant that,
+for every agent, `sessions.total_*` equals the matching `sum` over `usage_events`
+and `message_count` equals the count of `messages` rows. `cost_incomplete` is
+derived the same way: a surviving usage row that carries tokens but no priced cost
+is what flags the session total as partial. The timestamp span is the one
+aggregate folded from the region directly, because widening `started_at` /
+`ended_at` by `LEAST` / `GREATEST` is idempotent under a replay.
 
 The batch parser used by tests and the bulk reparse is a thin wrapper over the
 same reducer fed the whole file at once, so incremental and full parsing cannot
