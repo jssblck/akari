@@ -8,7 +8,9 @@ with token usage and cost. Sessions can be published for logged-out viewing.
 It is an explicit client/server split. Many thin clients push raw session bytes
 to one server; the server does all the parsing, storage, and rendering. The
 client keeps no derived state, so a parser improvement reaches old sessions by
-re-parsing on the server, with nothing re-uploaded.
+re-parsing on the server, with nothing re-uploaded. That reparse is automatic: a
+new server binary notices its parser changed and rebuilds the stored projection in
+the background, so there is no manual step after a parser upgrade.
 
 ## How it fits together
 
@@ -128,15 +130,19 @@ Migrations are embedded and applied on startup, so the server is safe to restart
 
 ```sh
 akari-server            # run the HTTP server (default)
-akari-server reparse    # rebuild every projection from stored raw bytes
+akari-server reparse    # force a rebuild of every projection from stored raw bytes
 akari-server reparse --agent claude   # limit a reparse to one agent
 akari-server sweep      # reclaim orphaned CAS blobs now
 akari-server update     # update to the latest release (see Updating below)
 akari-server version    # print the build version and exit
 ```
 
-`reparse` is how a parser change reaches already-ingested data; it sweeps
-afterward. `sweep` is the manual form of the periodic background sweep.
+The server reparses on its own when its parser changes: it compares a compiled-in
+parser epoch against the epoch the stored data was last rebuilt under and, when they
+differ, reparses in the background on startup. An admin can also force one from the
+account page. `akari-server reparse` is the manual escape hatch and forces a run
+regardless of the epoch; it sweeps orphaned blobs afterward, as the automatic run
+does. `sweep` is the manual form of the periodic background sweep.
 
 ## Running a client
 
@@ -188,7 +194,7 @@ Projects, Search, Account); the signed-in user and log-out sit at its foot.
   recent sessions across every project, so the deep read and the spend view are
   both one click from the door.
 - **Sessions**: every session across all projects in one place, with a faceted
-  filter rail (agent, project, user, machine — each with counts) and a project
+  filter rail (agent, project, user, machine, each with counts) and a project
   column, so a run is findable without first choosing its project.
 - **Projects index**: every project with session counts, token totals, and cost,
   plus an inline analytics panel (cost and token trends over time, a by-model and

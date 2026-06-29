@@ -4,18 +4,19 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/jssblck/akari/internal/config"
-	"github.com/jssblck/akari/internal/server/parse"
+	"github.com/jssblck/akari/internal/server/reparse"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/migrations"
 )
 
 // runReparse rebuilds the parsed projection for stored sessions from their raw
 // bytes. This is how a parser improvement reaches already-ingested data without
-// re-uploading anything.
+// re-uploading anything. It is now a thin wrapper over the shared reparse service
+// (the server runs the same path automatically when the parser epoch changes); the
+// CLI stays as a manual escape hatch and forces a run regardless of the epoch.
 func runReparse(args []string) error {
 	fs := flag.NewFlagSet("reparse", flag.ContinueOnError)
 	agent := fs.String("agent", "", "limit to one agent (claude|codex|pi); empty means all")
@@ -40,26 +41,11 @@ func runReparse(args []string) error {
 		return err
 	}
 
-	targets, err := st.SessionsForReparse(ctx, *agent)
+	res, err := reparse.New(ctx, st).Run(ctx, reparse.Options{Agent: *agent, Force: true})
 	if err != nil {
 		return err
 	}
-
-	var ok, failed int
-	for _, t := range targets {
-		if _, err := parse.Reparse(ctx, st, t.ID, t.Agent); err != nil {
-			failed++
-			log.Printf("reparse session %d (%s): %v", t.ID, t.Agent, err)
-			continue
-		}
-		ok++
-	}
-	// A parser change can rewrite tool bodies, orphaning the old blobs, so sweep
-	// once the projections are rebuilt.
-	removed, err := st.SweepBlobs(ctx)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("reparsed %d session(s), %d failed; swept %d orphaned blob(s)\n", ok, failed, removed)
+	fmt.Printf("reparsed %d session(s), %d failed; swept %d orphaned blob(s)\n",
+		res.Done-res.Failed, res.Failed, res.SweptBlobs)
 	return nil
 }

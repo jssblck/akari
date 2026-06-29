@@ -15,6 +15,7 @@ import (
 
 	"github.com/jssblck/akari/internal/config"
 	"github.com/jssblck/akari/internal/server/auth"
+	"github.com/jssblck/akari/internal/server/reparse"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/migrations"
 )
@@ -33,6 +34,14 @@ func mustHash(t *testing.T, password string) string {
 // test database, returning the server and its store. It is skipped unless
 // AKARI_TEST_DATABASE_URL is set.
 func newTestServer(t *testing.T) (*httptest.Server, *store.Store) {
+	t.Helper()
+	srv, st, _ := newTestServerWithReparse(t)
+	return srv, st
+}
+
+// newTestServerWithReparse is newTestServer that also returns the reparse service
+// wired into the server, so a test can force its status to exercise the UI gating.
+func newTestServerWithReparse(t *testing.T) (*httptest.Server, *store.Store, *reparse.Service) {
 	t.Helper()
 	dburl := os.Getenv("AKARI_TEST_DATABASE_URL")
 	if dburl == "" {
@@ -54,12 +63,13 @@ func newTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 	if err := st.Migrate(ctx, migrations.FS); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	srv := httptest.NewServer(New(st, config.Server{}).Routes())
+	rp := reparse.New(ctx, st)
+	srv := httptest.NewServer(New(st, config.Server{}, rp).Routes())
 	t.Cleanup(func() {
 		srv.Close()
 		st.Close()
 	})
-	return srv, st
+	return srv, st, rp
 }
 
 // newClient returns an http.Client that follows redirects and keeps cookies, so

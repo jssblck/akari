@@ -933,11 +933,12 @@ templ SearchPage(p Page, query string, hits []store.SearchHit) {
 	}
 }
 
-templ AccountPage(p Page, tokens []store.APIToken, newToken, newInvite string) {
+templ AccountPage(p Page, tokens []store.APIToken, newToken, newInvite string, rp ReparseView) {
 	@layout(p) {
 		<div class="page-head">
 			<h1>Account</h1>
 		</div>
+		@accountReparse(p, rp)
 		if newToken != "" {
 			<div class="card reveal">
 				<strong>New token (shown once):</strong> <code>{ newToken }</code>
@@ -995,6 +996,110 @@ templ AccountPage(p Page, tokens []store.APIToken, newToken, newInvite string) {
 				</form>
 			</section>
 		}
+	}
+}
+
+// ============================ Reparse ============================
+
+// accountReparse is the Reparse section of the account page: a short explanation,
+// the live status, and (for admins) the force button. Its watch container reloads
+// the page when the in-progress state flips, so starting a reparse here swaps the
+// idle line for the progress bar and finishing swaps it back, with the button
+// re-enabled.
+templ accountReparse(p Page, rp ReparseView) {
+	<section>
+		<div class="panel-head"><h2>Reparse</h2></div>
+		<p class="muted small">
+			Reparse rebuilds the parsed view of every stored session from its raw bytes. The
+			server runs it automatically after a parser change; force one here if you need to.
+		</p>
+		if rp.InProgress {
+			@reparseProgress(rp.Done, rp.Total, rp.Failed)
+		} else {
+			<div
+				class="reparse-idle muted small"
+				data-reparse-watch
+				data-reparse-initial="0"
+				data-sse="/api/v1/reparse/events"
+				data-status="/api/v1/reparse/status"
+			>
+				No reparse running.
+			</div>
+		}
+		if p.IsAdmin {
+			<form method="post" action="/account/reparse" class="reparse-form">
+				<button type="submit" disabled?={ rp.InProgress }>Reparse now</button>
+			</form>
+		}
+	</section>
+}
+
+// reparseProgress is the shared progress card shown wherever a reparse is in flight
+// (the gated parsed pages and the account page). Its data attributes drive the
+// frontend watch in app.js: the SSE stream and status endpoint to read, and the
+// initial in-progress state (1) so the page reloads once the reparse finishes. The
+// done/total/failed spans are updated live; the fill width is set from the same
+// status frames.
+templ reparseProgress(done, total, failed int) {
+	<div
+		class="reparse card"
+		data-reparse-watch
+		data-reparse-initial="1"
+		data-sse="/api/v1/reparse/events"
+		data-status="/api/v1/reparse/status"
+	>
+		<div class="reparse-head">
+			<span class="reparse-title">Reparse in progress</span>
+			<span class="reparse-count muted small">
+				<span data-reparse-done>{ fmt.Sprintf("%d", done) }</span>
+				/ <span data-reparse-total>{ fmt.Sprintf("%d", total) }</span> sessions
+			</span>
+		</div>
+		<div class="bar-track reparse-track">
+			<div class="bar-fill" data-reparse-fill data-pct={ fmt.Sprintf("%d", ReparsePercent(done, total)) }></div>
+		</div>
+		<div class="reparse-foot muted small">
+			Parsed views are paused while sessions rebuild; this page updates automatically.
+			<span class="reparse-sep">&middot;</span>
+			<span data-reparse-failed>{ fmt.Sprintf("%d", failed) }</span> failed
+		</div>
+	</div>
+}
+
+// ReparseProgressPage is the full-page stand-in for a parsed view while a reparse
+// runs. The parsed UI is gated rather than shown stale, because a reparse rebuilds
+// each session's projection in place.
+templ ReparseProgressPage(p Page, done, total, failed int) {
+	@layout(p) {
+		<div class="page-head">
+			<h1>Reparsing</h1>
+			<span class="muted small">rebuilding parsed sessions</span>
+		</div>
+		@reparseProgress(done, total, failed)
+	}
+}
+
+// ReparseBanner is the htmx-partial form of the progress card, returned when a
+// parsed list fragment is requested mid-reparse so an in-page swap shows the same
+// state rather than half-rebuilt rows.
+templ ReparseBanner(done, total, failed int) {
+	@reparseProgress(done, total, failed)
+}
+
+// PublicReparsePage is the logged-out stand-in for a public session view during a
+// reparse. A logged-out viewer has no credential to watch the status stream, so the
+// page reloads on a timer (data-reparse-public) and returns to the real view once
+// the reparse finishes.
+templ PublicReparsePage(done, total, failed int) {
+	@publicLayout("Reparsing") {
+		<div class="empty big" data-reparse-public>
+			<h1>Reparsing</h1>
+			<p>This session is being rebuilt after a parser update. It will return shortly.</p>
+			<div class="bar-track reparse-public-track">
+				<div class="bar-fill" data-pct={ fmt.Sprintf("%d", ReparsePercent(done, total)) }></div>
+			</div>
+			<p class="muted small">{ fmt.Sprintf("%d of %d sessions", done, total) }</p>
+		</div>
 	}
 }
 

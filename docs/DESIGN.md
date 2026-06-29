@@ -477,12 +477,42 @@ aggregate folded from the region directly, because widening `started_at` /
 
 The batch parser used by tests and the bulk reparse is a thin wrapper over the
 same reducer fed the whole file at once, so incremental and full parsing cannot
-diverge. Reparse (`akari-server reparse [--agent claude]`) reaches already-ingested
-data after a parser upgrade: it clears the derived rows, rewinds the cursor, and
-replays the stored raw through the reducer from scratch. A session partially
-parsed by an older parser version refuses to advance incrementally (the stored
-`parse_state_version` no longer matches) until that reparse rewinds it, so a
-version change can never blend two parsers' output.
+diverge. Reparse reaches already-ingested data after a parser upgrade: it clears
+the derived rows, rewinds the cursor, and replays the stored raw through the
+reducer from scratch. A session partially parsed by an older parser version refuses
+to advance incrementally (the stored `parse_state_version` no longer matches) until
+that reparse rewinds it, so a version change can never blend two parsers' output.
+
+The reparse runs on its own after a parser upgrade. The trigger is `parse.Epoch`, a
+binary constant bumped whenever parser or reducer output changes (new rows, changed
+fields, a different fold, or a pricing change that re-prices stored usage). On
+startup the server compares `parse.Epoch` against `parse_meta.reparsed_epoch`; when
+they differ it reparses every session in the background and, on success, writes the
+new epoch back, so deploying a new binary is all it takes. The trigger is a binary
+constant and not a migration on purpose: parser behavior lives in the binary, and a
+parser change often ships with no schema migration at all (PR #18 added Codex image
+payloads to the projection without one), so a migration-versioned signal would miss
+exactly those changes. A golden-fixtures test (`internal/server/parse/epoch_test.go`)
+snapshots the projection for representative sessions and fails, naming `parse.Epoch`,
+if output drifts without a bump, so the bump cannot be forgotten.
+
+One `reparse` service backs three entry points so they cannot diverge: the startup
+auto-run, the admin Reparse button on the account page (`POST /account/reparse`,
+admin-only), and the `akari-server reparse [--agent claude]` CLI (the manual escape
+hatch, which forces a run regardless of the epoch). A Postgres advisory lock keeps
+multiple server instances from reparsing at once, and an in-process guard makes a
+second trigger a no-op that returns the running status. Shutdown cancels an in-flight
+reparse the same way it winds down the blob sweep, before the pool closes; a partial
+or agent-filtered run never advances the epoch, so the next startup finishes the job.
+
+Because a reparse rebuilds each session's projection in place (delete then replay),
+a session genuinely has old-or-absent parsed data mid-reparse, so the server gates
+the parsed UI while one runs: pages that serve projected data return a "reparse in
+progress" view with a live progress bar (pushed over SSE, with `GET
+/api/v1/reparse/status` as a poll fallback) instead of stale or half-rebuilt rows,
+while raw-data, auth, and account endpoints stay available. A future improvement
+could build a shadow projection and swap it in atomically per session, removing the
+need to gate; the current design takes the simpler in-place rebuild.
 
 Per-agent specifics the parser must handle:
 

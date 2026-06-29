@@ -220,6 +220,33 @@ func BaseName(p string) string {
 	return p
 }
 
+// ReparseView is the reparse status the account page renders: whether one is
+// running and how far along. The httpapi layer fills it from the reparse service,
+// so the web package stays free of a dependency on that service.
+type ReparseView struct {
+	InProgress bool
+	Done       int
+	Total      int
+	Failed     int
+}
+
+// ReparsePercent is the completed fraction of a reparse as an integer percent,
+// for the progress bar's fill width. It is 0 before the total is known and is
+// clamped to 100, so a late count revision can never overflow the track.
+func ReparsePercent(done, total int) int {
+	if total <= 0 {
+		return 0
+	}
+	pct := done * 100 / total
+	if pct > 100 {
+		return 100
+	}
+	if pct < 0 {
+		return 0
+	}
+	return pct
+}
+
 // navClass returns the sidebar link's class, adding "active" when its key is the
 // page's current section.
 func navClass(key, active string) string {

@@ -41,7 +41,7 @@
   // Highlights the outline turn whose message is at the reading line. On scroll
   // it samples the one message under a fixed point (O(1), rAF-throttled) and
   // resolves its outline entry by id, so there are no per-message observers or
-  // indexes — nothing whose cost or memory grows with the session. Set up once;
+  // indexes, nothing whose cost or memory grows with the session. Set up once;
   // it reads the live DOM, so it keeps working across live transcript swaps.
   var outlineScrollHandler = null;
   function initOutlineSpy() {
@@ -112,6 +112,63 @@
       var after = function () { rehydrate(); flashChangedStats(before); };
       if (p && typeof p.then === "function") { p.then(after); } else { setTimeout(after, 60); }
     });
+  }
+
+  // ---------------- Reparse progress ----------------
+  // While the server rebuilds the parsed projection, parsed views are gated and
+  // show a progress card. The watch reads live status off the SSE stream (with a
+  // poll fallback) and reloads the page when the in-progress state flips from what
+  // the page rendered: a gated page returns to its real view when the reparse
+  // finishes, and the account page swaps idle for progress when one starts.
+  function initReparseWatch() {
+    var root = document.querySelector("[data-reparse-watch]");
+    if (!root) return;
+    var initial = root.getAttribute("data-reparse-initial") === "1";
+    var reloaded = false;
+    function num(sel, v) {
+      var el = root.querySelector(sel);
+      if (el) el.textContent = String(v);
+    }
+    function apply(status) {
+      if (reloaded || !status) return;
+      var fill = root.querySelector("[data-reparse-fill]");
+      if (fill && status.total > 0) {
+        fill._done = true; // claim it from animateBars so the two never fight
+        fill.style.width = Math.min(100, Math.round((status.done * 100) / status.total)) + "%";
+      }
+      num("[data-reparse-done]", status.done || 0);
+      num("[data-reparse-total]", status.total || 0);
+      num("[data-reparse-failed]", status.failed || 0);
+      if (!!status.in_progress !== initial) {
+        reloaded = true;
+        window.location.reload();
+      }
+    }
+    var sseUrl = root.getAttribute("data-sse");
+    if (sseUrl && window.EventSource) {
+      var es = new EventSource(sseUrl);
+      es.addEventListener("status", function (ev) {
+        try { apply(JSON.parse(ev.data)); } catch (e) {}
+      });
+    }
+    var statusUrl = root.getAttribute("data-status");
+    if (statusUrl) {
+      var timer = setInterval(function () {
+        if (reloaded) { clearInterval(timer); return; }
+        fetch(statusUrl, { credentials: "same-origin" })
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .then(apply)
+          .catch(function () {});
+      }, 3000);
+    }
+  }
+
+  // The logged-out public session view has no credential to watch the status
+  // stream, so its reparse stand-in just reloads on a timer until the real view
+  // returns.
+  function initReparsePublic() {
+    if (!document.querySelector("[data-reparse-public]")) return;
+    setTimeout(function () { window.location.reload(); }, 5000);
   }
 
   // ---------------- Inline diff rendering ----------------
@@ -455,6 +512,8 @@
     initOutlineSpy();   // once; the spy reads the live DOM and survives swaps
     resetInspector();   // once; the inspector persists across live updates
     initLive();
+    initReparseWatch();
+    initReparsePublic();
   }
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", init);
