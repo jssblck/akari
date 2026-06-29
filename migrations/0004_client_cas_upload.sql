@@ -5,16 +5,14 @@
 -- output never travels inline and the transcript stays small at any size.
 --
 -- This changes the on-wire and on-disk transcript format (bodies become
--- sentinels), so prior sessions must be re-ingested to be readable. Pre-release,
--- the clean guarantee is to clear session-scoped data here rather than leave it
--- half-converted. Identity (users, tokens, invites) is untouched.
-
--- Reclaim large objects before dropping the rows that point at them, then clear
--- every session-scoped table. Projects go too, since they only group sessions.
-SELECT lo_unlink(lo_oid) FROM blobs;
-TRUNCATE messages, tool_calls, usage_events, attachments,
-         session_raw_chunks, session_raw, sessions, projects, blobs
-  RESTART IDENTITY CASCADE;
+-- sentinels), so prior sessions must be re-ingested to be readable. Clearing the
+-- old session data is an operational step run before re-sync, not part of this
+-- migration: the runner wraps each migration file in one transaction, and
+-- unlinking every blob's large object in a single transaction exceeds the lock
+-- table on a server with real data (it fails with "out of shared memory"). A
+-- bulk reclaim has to batch across transactions, which an admin step can do and a
+-- migration cannot. This migration therefore only adds schema; identity, and any
+-- existing rows, are left untouched for the operator to clear.
 
 -- Sweep-protection pins. A body the client has uploaded but not yet referenced
 -- from a transcript would otherwise look orphaned to the background sweep. A pin
