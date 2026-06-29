@@ -1,8 +1,11 @@
-package store
+package store_test
 
 import (
 	"context"
 	"testing"
+
+	"github.com/jssblck/akari/internal/server/store"
+	"github.com/jssblck/akari/internal/server/storetest"
 )
 
 // TestApplyDeltaDuplicateCallUIDBackPatchesEveryCopy exercises a call_uid collision
@@ -14,7 +17,8 @@ import (
 // visible copy of a replayed turn carries its result. A third call carries no id at
 // all, which stays NULL and unpatched.
 func TestApplyDeltaDuplicateCallUIDBackPatchesEveryCopy(t *testing.T) {
-	st := newTestStore(t)
+	t.Parallel()
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 
 	u, err := st.Register(ctx, "ada", "hash", "")
@@ -28,20 +32,20 @@ func TestApplyDeltaDuplicateCallUIDBackPatchesEveryCopy(t *testing.T) {
 	sid := seedSession(t, st, u.ID, projectID, "sess-calluid-batch")
 
 	body := []byte("package auth")
-	delta := ProjectionDelta{
-		Messages: []MessageDelta{
+	delta := store.ProjectionDelta{
+		Messages: []store.MessageDelta{
 			{Ordinal: 0, Role: "assistant", Content: "first", HasToolUse: true},
 			{Ordinal: 1, Role: "assistant", Content: "replay", HasToolUse: true},
 			{Ordinal: 2, Role: "assistant", Content: "unkeyed", HasToolUse: true},
 		},
-		ToolCalls: []ProjToolCall{
+		ToolCalls: []store.ProjToolCall{
 			// Two calls share id "dup": the second is the replayed turn. A third call
 			// carries no id at all, exercising the NULL call_uid path.
 			{MessageOrdinal: 0, CallIndex: 0, ToolName: "Read", CallUID: "dup"},
 			{MessageOrdinal: 1, CallIndex: 0, ToolName: "Read", CallUID: "dup"},
 			{MessageOrdinal: 2, CallIndex: 0, ToolName: "Bash", CallUID: ""},
 		},
-		ToolResults: []ToolResultDelta{
+		ToolResults: []store.ToolResultDelta{
 			{CallUID: "dup", Body: string(body), Bytes: int64(len(body)), MediaType: "text/plain", Status: "ok"},
 		},
 	}
@@ -108,7 +112,8 @@ func TestApplyDeltaDuplicateCallUIDBackPatchesEveryCopy(t *testing.T) {
 // TestDuplicateCallUIDCountGroups confirms the chip scalar counts colliding ids, not
 // rows: zero when every id is distinct, and one per duplicated id otherwise.
 func TestDuplicateCallUIDCountGroups(t *testing.T) {
-	st := newTestStore(t)
+	t.Parallel()
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 
 	u, err := st.Register(ctx, "anna", "hash", "")
@@ -121,9 +126,9 @@ func TestDuplicateCallUIDCountGroups(t *testing.T) {
 	}
 
 	unique := seedSession(t, st, u.ID, projectID, "sess-calluid-unique")
-	if err := st.ApplyProjectionDelta(ctx, unique, ProjectionDelta{
-		Messages: []MessageDelta{{Ordinal: 0, Role: "assistant", HasToolUse: true}},
-		ToolCalls: []ProjToolCall{
+	if err := st.ApplyProjectionDelta(ctx, unique, store.ProjectionDelta{
+		Messages: []store.MessageDelta{{Ordinal: 0, Role: "assistant", HasToolUse: true}},
+		ToolCalls: []store.ProjToolCall{
 			{MessageOrdinal: 0, CallIndex: 0, ToolName: "Read", CallUID: "a"},
 			{MessageOrdinal: 0, CallIndex: 1, ToolName: "Bash", CallUID: "b"},
 		},
@@ -137,12 +142,12 @@ func TestDuplicateCallUIDCountGroups(t *testing.T) {
 	// Two ids each repeated, one distinct, plus an unkeyed call: the count is the two
 	// colliding ids, not the row total and not the distinct call.
 	multi := seedSession(t, st, u.ID, projectID, "sess-calluid-multi")
-	if err := st.ApplyProjectionDelta(ctx, multi, ProjectionDelta{
-		Messages: []MessageDelta{
+	if err := st.ApplyProjectionDelta(ctx, multi, store.ProjectionDelta{
+		Messages: []store.MessageDelta{
 			{Ordinal: 0, Role: "assistant", HasToolUse: true},
 			{Ordinal: 1, Role: "assistant", HasToolUse: true},
 		},
-		ToolCalls: []ProjToolCall{
+		ToolCalls: []store.ProjToolCall{
 			{MessageOrdinal: 0, CallIndex: 0, ToolName: "Read", CallUID: "x"},
 			{MessageOrdinal: 0, CallIndex: 1, ToolName: "Read", CallUID: "y"},
 			{MessageOrdinal: 0, CallIndex: 2, ToolName: "Grep", CallUID: "z"},
@@ -163,7 +168,8 @@ func TestDuplicateCallUIDCountGroups(t *testing.T) {
 // id (a replay re-delivering it) does not overwrite them. A copy that is still
 // pending when the replay arrives is the only thing the second result resolves.
 func TestBackPatchSkipsAlreadyResolvedCopies(t *testing.T) {
-	st := newTestStore(t)
+	t.Parallel()
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 
 	u, err := st.Register(ctx, "grace", "hash", "")
@@ -178,16 +184,16 @@ func TestBackPatchSkipsAlreadyResolvedCopies(t *testing.T) {
 
 	first := []byte("first result")
 	// Region 1: two copies of call "dup" and its result. Both resolve to "first".
-	if err := st.ApplyProjectionDelta(ctx, sid, ProjectionDelta{
-		Messages: []MessageDelta{
+	if err := st.ApplyProjectionDelta(ctx, sid, store.ProjectionDelta{
+		Messages: []store.MessageDelta{
 			{Ordinal: 0, Role: "assistant", HasToolUse: true},
 			{Ordinal: 1, Role: "assistant", HasToolUse: true},
 		},
-		ToolCalls: []ProjToolCall{
+		ToolCalls: []store.ProjToolCall{
 			{MessageOrdinal: 0, CallIndex: 0, ToolName: "Read", CallUID: "dup"},
 			{MessageOrdinal: 1, CallIndex: 0, ToolName: "Read", CallUID: "dup"},
 		},
-		ToolResults: []ToolResultDelta{
+		ToolResults: []store.ToolResultDelta{
 			{CallUID: "dup", Body: string(first), Bytes: int64(len(first)), MediaType: "text/plain", Status: "ok"},
 		},
 	}); err != nil {
@@ -198,12 +204,12 @@ func TestBackPatchSkipsAlreadyResolvedCopies(t *testing.T) {
 	// still-pending copy. The guard must skip the two resolved rows (keeping "first")
 	// and resolve only the new pending copy.
 	second := []byte("second result, longer")
-	if err := st.ApplyProjectionDelta(ctx, sid, ProjectionDelta{
-		Messages: []MessageDelta{{Ordinal: 2, Role: "assistant", HasToolUse: true}},
-		ToolCalls: []ProjToolCall{
+	if err := st.ApplyProjectionDelta(ctx, sid, store.ProjectionDelta{
+		Messages: []store.MessageDelta{{Ordinal: 2, Role: "assistant", HasToolUse: true}},
+		ToolCalls: []store.ProjToolCall{
 			{MessageOrdinal: 2, CallIndex: 0, ToolName: "Read", CallUID: "dup"},
 		},
-		ToolResults: []ToolResultDelta{
+		ToolResults: []store.ToolResultDelta{
 			{CallUID: "dup", Body: string(second), Bytes: int64(len(second)), MediaType: "text/plain", Status: "ok"},
 		},
 	}); err != nil {

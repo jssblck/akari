@@ -1,13 +1,16 @@
-package store
+package store_test
 
 import (
 	"context"
 	"testing"
+
+	"github.com/jssblck/akari/internal/server/store"
+	"github.com/jssblck/akari/internal/server/storetest"
 )
 
 // seedUsage inserts a session and a usage event directly, bypassing the ingest
 // pipeline, so the analytics rollups can be asserted against known inputs.
-func seedSessionWithStats(t *testing.T, st *Store, userID, projectID int64, agent, src string, cost float64, in, out int64) int64 {
+func seedSessionWithStats(t *testing.T, st *store.Store, userID, projectID int64, agent, src string, cost float64, in, out int64) int64 {
 	t.Helper()
 	var id int64
 	err := st.Pool.QueryRow(context.Background(),
@@ -21,7 +24,7 @@ func seedSessionWithStats(t *testing.T, st *Store, userID, projectID int64, agen
 	return id
 }
 
-func seedUsage(t *testing.T, st *Store, sessionID int64, model string, cost float64, in, out int64, daysAgo int, dedup string) {
+func seedUsage(t *testing.T, st *store.Store, sessionID int64, model string, cost float64, in, out int64, daysAgo int, dedup string) {
 	t.Helper()
 	_, err := st.Pool.Exec(context.Background(),
 		`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cost_usd, occurred_at, dedup_key)
@@ -33,7 +36,8 @@ func seedUsage(t *testing.T, st *Store, sessionID int64, model string, cost floa
 }
 
 func TestAnalyticsRollups(t *testing.T) {
-	st := newTestStore(t)
+	t.Parallel()
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 
 	admin, err := st.Register(ctx, "grace", "h", "")
@@ -95,7 +99,8 @@ func TestAnalyticsRollups(t *testing.T) {
 }
 
 func TestProjectSparklines(t *testing.T) {
-	st := newTestStore(t)
+	t.Parallel()
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 	admin, _ := st.Register(ctx, "grace", "h", "")
 	proj, _ := st.UpsertProject(ctx, "github.com/ada/engine", "github.com", "ada", "engine", "engine", "remote")

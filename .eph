@@ -10,7 +10,7 @@
 # Quick start, run from a worktree root:
 #   eph up                       start Postgres + server, wait until healthy
 #   eph status                   show the assigned host ports
-#   eph run go test -p 1 ./...   run a command with the AKARI_* vars injected
+#   eph run go test ./...        run a command with the AKARI_* vars injected
 #   eval "$(eph env)"            load the same vars into your shell
 #   eph down                     stop the stack (keeps data); eph clean drops it
 #

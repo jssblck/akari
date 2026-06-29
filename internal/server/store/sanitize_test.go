@@ -1,8 +1,11 @@
-package store
+package store_test
 
 import (
 	"context"
 	"testing"
+
+	"github.com/jssblck/akari/internal/server/store"
+	"github.com/jssblck/akari/internal/server/storetest"
 )
 
 // TestSanitizeText pins the contract the projection write boundary relies on:
@@ -27,7 +30,7 @@ func TestSanitizeText(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := sanitizeText(c.in); got != c.want {
+			if got := store.SanitizeText(c.in); got != c.want {
 				t.Fatalf("sanitizeText(%q) = %q, want %q", c.in, got, c.want)
 			}
 		})
@@ -41,7 +44,8 @@ func TestSanitizeText(t *testing.T) {
 // with the offending bytes shown as U+FFFD, proving the seam covers every text
 // column rather than only the one that first tripped.
 func TestApplyDeltaSanitizesText(t *testing.T) {
-	st := newTestStore(t)
+	t.Parallel()
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 
 	u, err := st.Register(ctx, "grace", "hash", "")
@@ -55,8 +59,8 @@ func TestApplyDeltaSanitizesText(t *testing.T) {
 	sid := seedSession(t, st, u.ID, projectID, "sess-nul")
 
 	const repl = "�"
-	delta := ProjectionDelta{
-		Messages: []MessageDelta{{
+	delta := store.ProjectionDelta{
+		Messages: []store.MessageDelta{{
 			Ordinal:      0,
 			Role:         "assistant",
 			Content:      "Grace Hopper\x00 traced the moth",
@@ -65,7 +69,7 @@ func TestApplyDeltaSanitizesText(t *testing.T) {
 			HasThinking:  true,
 			HasToolUse:   true,
 		}},
-		ToolCalls: []ProjToolCall{{
+		ToolCalls: []store.ProjToolCall{{
 			MessageOrdinal: 0,
 			CallIndex:      0,
 			ToolName:       "Re\x00ad",

@@ -15,6 +15,7 @@ import (
 // chunk that does not end on a newline and stores nothing, so the line boundary
 // the incremental parser relies on is a server-enforced invariant.
 func TestChunkRejectsUnterminated(t *testing.T) {
+	t.Parallel()
 	srv, st := newTestServer(t)
 	ctx := context.Background()
 
@@ -105,6 +106,7 @@ func TestLocalProjectIdentity(t *testing.T) {
 // and displayed as the repo folder. This is the server half of the worktree
 // collapse the resolver feeds.
 func TestAnnounceGroupsWorktreesByLocalRoot(t *testing.T) {
+	t.Parallel()
 	srv, st := newTestServer(t)
 	ctx := context.Background()
 

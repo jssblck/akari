@@ -1,46 +1,19 @@
-package store
+package store_test
 
 import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"os"
 	"testing"
 
-	"github.com/jssblck/akari/migrations"
+	"github.com/jssblck/akari/internal/server/store"
+	"github.com/jssblck/akari/internal/server/storetest"
 )
 
-// newTestStore connects to AKARI_TEST_DATABASE_URL, resets the schema, and
-// applies migrations. Tests are skipped when the env var is unset.
-func newTestStore(t *testing.T) *Store {
-	t.Helper()
-	url := os.Getenv("AKARI_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("set AKARI_TEST_DATABASE_URL to run store integration tests")
-	}
-	ctx := context.Background()
-	if err := EnsureDatabase(ctx, url); err != nil {
-		t.Fatalf("ensure database: %v", err)
-	}
-	st, err := Open(ctx, url)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	for _, q := range []string{"DROP SCHEMA public CASCADE", "CREATE SCHEMA public"} {
-		if _, err := st.Pool.Exec(ctx, q); err != nil {
-			t.Fatalf("reset schema (%s): %v", q, err)
-		}
-	}
-	if err := st.Migrate(ctx, migrations.FS); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	t.Cleanup(st.Close)
-	return st
-}
-
 func TestRegisterFirstAdminThenInvite(t *testing.T) {
-	st := newTestStore(t)
+	t.Parallel()
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 
 	admin, err := st.Register(ctx, "grace", "hash1", "")
@@ -52,7 +25,7 @@ func TestRegisterFirstAdminThenInvite(t *testing.T) {
 	}
 
 	// Second registration without an invite must fail.
-	if _, err := st.Register(ctx, "ada", "hash2", ""); !errors.Is(err, ErrInvalidInvite) {
+	if _, err := st.Register(ctx, "ada", "hash2", ""); !errors.Is(err, store.ErrInvalidInvite) {
 		t.Fatalf("want ErrInvalidInvite, got %v", err)
 	}
 
@@ -70,13 +43,14 @@ func TestRegisterFirstAdminThenInvite(t *testing.T) {
 	}
 
 	// The invite is single use.
-	if _, err := st.Register(ctx, "anna", "hash3", inviteHash); !errors.Is(err, ErrInvalidInvite) {
+	if _, err := st.Register(ctx, "anna", "hash3", inviteHash); !errors.Is(err, store.ErrInvalidInvite) {
 		t.Fatalf("reused invite: want ErrInvalidInvite, got %v", err)
 	}
 }
 
 func TestTokenAuth(t *testing.T) {
-	st := newTestStore(t)
+	t.Parallel()
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 
 	u, err := st.Register(ctx, "grace", "hash", "")
@@ -100,13 +74,14 @@ func TestTokenAuth(t *testing.T) {
 	if err := st.RevokeAPIToken(ctx, u.ID, id); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := st.TokenAuth(ctx, tokenHash); !errors.Is(err, ErrNotFound) {
+	if _, _, err := st.TokenAuth(ctx, tokenHash); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("revoked token: want ErrNotFound, got %v", err)
 	}
 }
 
 func TestIngestFlow(t *testing.T) {
-	st := newTestStore(t)
+	t.Parallel()
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 
 	u, err := st.Register(ctx, "grace", "hash", "")
@@ -118,8 +93,8 @@ func TestIngestFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	announce := func() AnnounceResult {
-		r, err := st.Announce(ctx, AnnounceParams{
+	announce := func() store.AnnounceResult {
+		r, err := st.Announce(ctx, store.AnnounceParams{
 			UserID: u.ID, Agent: "claude", SourceSessionID: "sess-1",
 			ProjectID: projectID, GitBranch: "main", Cwd: "/home/grace/akari", Machine: "laptop",
 		})
@@ -158,7 +133,7 @@ func TestIngestFlow(t *testing.T) {
 
 	// An append at the wrong offset is rejected with the true cursor.
 	_, err = st.AppendChunk(ctx, first.SessionID, 0, []byte("x\n"))
-	var mismatch OffsetMismatchError
+	var mismatch store.OffsetMismatchError
 	if !errors.As(err, &mismatch) {
 		t.Fatalf("want OffsetMismatchError, got %v", err)
 	}
@@ -181,7 +156,7 @@ func TestIngestFlow(t *testing.T) {
 
 	// A chunk that does not end on a newline is rejected and stores nothing: the
 	// server only ever holds complete lines.
-	if _, err := st.AppendChunk(ctx, first.SessionID, int64(len(line1)+len(line2)), []byte("no newline here")); !errors.Is(err, ErrChunkNotLineAligned) {
+	if _, err := st.AppendChunk(ctx, first.SessionID, int64(len(line1)+len(line2)), []byte("no newline here")); !errors.Is(err, store.ErrChunkNotLineAligned) {
 		t.Fatalf("unterminated chunk: want ErrChunkNotLineAligned, got %v", err)
 	}
 	if r := announce(); r.StoredBytes != int64(len(line1)+len(line2)) {
@@ -202,7 +177,8 @@ func TestIngestFlow(t *testing.T) {
 // and folds the delta into the aggregates, a caught-up session is a no-op, and a
 // session partially parsed by one version refuses to continue under another.
 func TestAdvanceProjectionCursorAndVersionGate(t *testing.T) {
-	st := newTestStore(t)
+	t.Parallel()
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 
 	u, err := st.Register(ctx, "grace", "hash", "")
@@ -213,7 +189,7 @@ func TestAdvanceProjectionCursorAndVersionGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ann, err := st.Announce(ctx, AnnounceParams{
+	ann, err := st.Announce(ctx, store.AnnounceParams{
 		UserID: u.ID, Agent: "claude", SourceSessionID: "sess-adv", ProjectID: projectID,
 	})
 	if err != nil {
@@ -228,11 +204,11 @@ func TestAdvanceProjectionCursorAndVersionGate(t *testing.T) {
 	// primary key or the usage source identity. The rollups are derived from the
 	// rows that actually insert, so the delta carries rows, not precomputed counts.
 	var calls int
-	reduce := func(state, region []byte, base int64) ([]byte, ProjectionDelta, error) {
+	reduce := func(state, region []byte, base int64) ([]byte, store.ProjectionDelta, error) {
 		calls++
-		return []byte("{}"), ProjectionDelta{
-			Messages: []MessageDelta{{Ordinal: int(base), Role: "user", Content: "x"}},
-			Usage:    []ProjUsage{{Model: "m", Input: 5, SourceOffset: base, SourceIndex: 0}},
+		return []byte("{}"), store.ProjectionDelta{
+			Messages: []store.MessageDelta{{Ordinal: int(base), Role: "user", Content: "x"}},
+			Usage:    []store.ProjUsage{{Model: "m", Input: 5, SourceOffset: base, SourceIndex: 0}},
 		}, nil
 	}
 
@@ -269,7 +245,7 @@ func TestAdvanceProjectionCursorAndVersionGate(t *testing.T) {
 	if _, err := st.AppendChunk(ctx, ann.SessionID, int64(len("line one\nline two\n")), []byte("line three\n")); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := st.AdvanceProjection(ctx, ann.SessionID, 2, reduce); !errors.Is(err, ErrParserVersionStale) {
+	if _, _, err := st.AdvanceProjection(ctx, ann.SessionID, 2, reduce); !errors.Is(err, store.ErrParserVersionStale) {
 		t.Fatalf("version gate: want ErrParserVersionStale, got %v", err)
 	}
 	if err := st.Pool.QueryRow(ctx, "SELECT parsed_byte_len FROM session_raw WHERE session_id=$1", ann.SessionID).Scan(&parsed); err != nil {
@@ -284,13 +260,17 @@ func TestAdvanceProjectionCursorAndVersionGate(t *testing.T) {
 // confirms catch-up advances in bounded steps, parsing each chunk's bytes exactly
 // once and contiguously (the readRawRegion SQL bound, not a client-side rescan of
 // the whole tail).
+//
+// This test is deliberately not parallel: through the SetParseBatchBytes seam it
+// overrides a package-global in store. A non-parallel test runs to completion
+// (restoring the global) before any t.Parallel test resumes, so the override
+// never races a reader.
 func TestAdvanceProjectionBatching(t *testing.T) {
-	st := newTestStore(t)
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 
-	old := parseBatchBytes
-	parseBatchBytes = 2 // smaller than the gap between chunk starts, so each batches alone
-	defer func() { parseBatchBytes = old }()
+	// A batch smaller than the gap between chunk starts, so each chunk batches alone.
+	defer store.SetParseBatchBytes(2)()
 
 	u, err := st.Register(ctx, "grace", "hash", "")
 	if err != nil {
@@ -300,7 +280,7 @@ func TestAdvanceProjectionBatching(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ann, err := st.Announce(ctx, AnnounceParams{
+	ann, err := st.Announce(ctx, store.AnnounceParams{
 		UserID: u.ID, Agent: "claude", SourceSessionID: "sess-batch", ProjectID: projectID,
 	})
 	if err != nil {
@@ -320,10 +300,10 @@ func TestAdvanceProjectionBatching(t *testing.T) {
 	}
 
 	var bases []int64
-	reduce := func(state, region []byte, base int64) ([]byte, ProjectionDelta, error) {
+	reduce := func(state, region []byte, base int64) ([]byte, store.ProjectionDelta, error) {
 		bases = append(bases, base)
-		return []byte("{}"), ProjectionDelta{
-			Messages: []MessageDelta{{Ordinal: int(base), Role: "assistant", Content: string(region)}},
+		return []byte("{}"), store.ProjectionDelta{
+			Messages: []store.MessageDelta{{Ordinal: int(base), Role: "assistant", Content: string(region)}},
 		}, nil
 	}
 
@@ -369,7 +349,8 @@ func TestAdvanceProjectionBatching(t *testing.T) {
 // TestUpsertProjectKindTransition confirms a standalone folder that is later
 // deleted transitions to orphaned in place: same key, same row, updated kind.
 func TestUpsertProjectKindTransition(t *testing.T) {
-	st := newTestStore(t)
+	t.Parallel()
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 
 	key := "local:laptop:/home/grace/scratch"
@@ -398,7 +379,8 @@ func TestUpsertProjectKindTransition(t *testing.T) {
 // longer find one (its folder was deleted), and an upgrade in the other
 // direction (gaining a remote) does re-home the session.
 func TestAnnounceKeepsRemoteAttribution(t *testing.T) {
-	st := newTestStore(t)
+	t.Parallel()
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 
 	u, err := st.Register(ctx, "grace", "hash", "")
@@ -414,7 +396,7 @@ func TestAnnounceKeepsRemoteAttribution(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	first, err := st.Announce(ctx, AnnounceParams{
+	first, err := st.Announce(ctx, store.AnnounceParams{
 		UserID: u.ID, Agent: "claude", SourceSessionID: "sess-1",
 		ProjectID: remoteID, Kind: "remote", Cwd: "/home/grace/akari", Machine: "laptop",
 	})
@@ -424,7 +406,7 @@ func TestAnnounceKeepsRemoteAttribution(t *testing.T) {
 
 	// The folder is deleted; the client now announces it as orphaned under a local
 	// project. The session must keep its remote attribution and identity.
-	second, err := st.Announce(ctx, AnnounceParams{
+	second, err := st.Announce(ctx, store.AnnounceParams{
 		UserID: u.ID, Agent: "claude", SourceSessionID: "sess-1",
 		ProjectID: localID, Kind: "orphaned", Cwd: "/home/grace/akari", Machine: "laptop",
 	})
@@ -443,7 +425,7 @@ func TestAnnounceKeepsRemoteAttribution(t *testing.T) {
 	}
 
 	// The reverse is allowed: regaining a remote re-homes the session.
-	third, err := st.Announce(ctx, AnnounceParams{
+	third, err := st.Announce(ctx, store.AnnounceParams{
 		UserID: u.ID, Agent: "claude", SourceSessionID: "sess-1",
 		ProjectID: remoteID, Kind: "remote", Cwd: "/home/grace/akari", Machine: "laptop",
 	})
@@ -455,7 +437,7 @@ func TestAnnounceKeepsRemoteAttribution(t *testing.T) {
 	}
 
 	// A standalone session that never had a remote lands in its local project.
-	localOnly, err := st.Announce(ctx, AnnounceParams{
+	localOnly, err := st.Announce(ctx, store.AnnounceParams{
 		UserID: u.ID, Agent: "claude", SourceSessionID: "sess-2",
 		ProjectID: localID, Kind: "standalone", Cwd: "/home/grace/scratch", Machine: "laptop",
 	})
