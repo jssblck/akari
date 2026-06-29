@@ -45,7 +45,7 @@ func analyticsWithData() store.Analytics {
 // would otherwise repeat the scope already named in the page head.
 func TestOverviewPageRendersHeatmap(t *testing.T) {
 	p := Page{Title: "Overview", LoggedIn: true, Active: "overview", Username: "Grace Hopper"}
-	html := renderComponent(t, OverviewPage(p, analyticsWithData(), DefaultRange))
+	html := renderComponent(t, OverviewPage(p, analyticsWithData(), DefaultRange, nil, nil))
 
 	for _, want := range []string{`data-heatmap`, `data-heatmap-target="chart-global"`, `>Tokens</button>`, `>Dollars</button>`} {
 		if !strings.Contains(html, want) {
@@ -65,7 +65,7 @@ func TestOverviewPageRendersHeatmap(t *testing.T) {
 // active one, and refetch into that same target.
 func TestOverviewPageRangeSelector(t *testing.T) {
 	p := Page{Title: "Overview", LoggedIn: true, Active: "overview", Username: "Grace Hopper"}
-	html := renderComponent(t, OverviewPage(p, analyticsWithData(), "90d"))
+	html := renderComponent(t, OverviewPage(p, analyticsWithData(), "90d", nil, nil))
 
 	for _, want := range []string{`id="usage"`, `aria-label="Date range"`, `hx-get="/?range=7d"`, `hx-get="/?range=all"`, `hx-target="#usage"`, `hx-select="#usage"`} {
 		if !strings.Contains(html, want) {
@@ -83,6 +83,59 @@ func TestOverviewPageRangeSelector(t *testing.T) {
 	}
 }
 
+// The per-user filter sits beside the range selector: a disclosure offering an
+// "All Users" reset and a checkbox per account, the active selection marked both
+// as checked boxes and as collapsed pills. The range buttons must carry the active
+// users so switching the window holds the selection, and the menu must serialize
+// its hidden range plus the checked boxes back to the overview.
+func TestOverviewPageUserFilter(t *testing.T) {
+	p := Page{Title: "Overview", LoggedIn: true, Active: "overview", Username: "Grace Hopper"}
+	users := []store.User{{ID: 2, Username: "ada"}, {ID: 5, Username: "grace"}}
+	html := renderComponent(t, OverviewPage(p, analyticsWithData(), "7d", users, []int64{5}))
+
+	for _, want := range []string{
+		`class="userfilter"`,
+		`class="userfilter-opt userfilter-reset"`,
+		`hx-get="/?range=7d"`, // the reset clears users while holding the window
+		`name="user" value="2"`,
+		`name="user" value="5"`,
+		`hx-include="closest .userfilter-menu"`,
+		`<input type="hidden" name="range" value="7d">`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("user filter missing %q", want)
+		}
+	}
+	// The selected account renders a collapsed pill and a checked box.
+	if !strings.Contains(html, `class="userfilter-pill">grace</span>`) {
+		t.Error("the selected user should show as a collapsed pill")
+	}
+	if !strings.Contains(html, `value="5" checked`) {
+		t.Error("the selected user's checkbox should be checked")
+	}
+	// The range buttons preserve the selection, so switching the window keeps it.
+	// templ HTML-escapes the & in the attribute value (htmx decodes it back).
+	if !strings.Contains(html, `hx-get="/?range=30d&amp;user=5"`) {
+		t.Error("range buttons should carry the active user selection")
+	}
+}
+
+// With nothing selected the collapsed control reads "All Users" and the reset is
+// the active option, so the unscoped state is legible without opening the menu.
+func TestOverviewPageUserFilterUnscoped(t *testing.T) {
+	p := Page{Title: "Overview", LoggedIn: true, Active: "overview", Username: "Grace Hopper"}
+	users := []store.User{{ID: 2, Username: "ada"}}
+	html := renderComponent(t, OverviewPage(p, analyticsWithData(), DefaultRange, users, nil))
+
+	if !strings.Contains(html, `class="userfilter-all">All Users</span>`) {
+		t.Error("unscoped collapsed control should read All Users")
+	}
+	// The All Users reset's decorative box renders checked when nothing is selected.
+	if !strings.Contains(html, `aria-hidden="true" checked>`) {
+		t.Error("unscoped state should mark the All Users reset box checked")
+	}
+}
+
 // The overview's headline strip reads Cost / Tokens / Sessions, with the combined
 // token figure and its per-class split (the same in/out/cache breakdown a heatmap
 // cell shows) behind the Tokens tooltip. It shares the session header's Tokens tile
@@ -90,7 +143,7 @@ func TestOverviewPageRangeSelector(t *testing.T) {
 // Output into their own tiles.
 func TestOverviewPageTokensStat(t *testing.T) {
 	p := Page{Title: "Overview", LoggedIn: true, Active: "overview", Username: "Grace Hopper"}
-	html := renderComponent(t, OverviewPage(p, analyticsWithData(), DefaultRange))
+	html := renderComponent(t, OverviewPage(p, analyticsWithData(), DefaultRange, nil, nil))
 
 	for _, want := range []string{`>Tokens</div>`, `tokens-stat`, `tokens-value`, `class="stat-tip"`, `<dt>In</dt>`, `<dt>Out</dt>`, `<dt>Cache read</dt>`, `<dt>Cache write</dt>`} {
 		if !strings.Contains(html, want) {
@@ -110,7 +163,7 @@ func TestOverviewPageTokensStat(t *testing.T) {
 // subtitle: the panel is the page.
 func TestOverviewPageDropsRecentActivity(t *testing.T) {
 	p := Page{Title: "Overview", LoggedIn: true, Active: "overview", Username: "Grace Hopper"}
-	html := renderComponent(t, OverviewPage(p, analyticsWithData(), DefaultRange))
+	html := renderComponent(t, OverviewPage(p, analyticsWithData(), DefaultRange, nil, nil))
 
 	if strings.Contains(html, "Recent activity") {
 		t.Error("overview should no longer render the recent-activity feed")

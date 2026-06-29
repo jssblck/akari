@@ -53,6 +53,70 @@
    as a divider inset a few px top and bottom. Fixed (not stretched) so it never
    inflates the flex line. */
 .heatmap-controls .ctrl-sep { width: 1px; height: 18px; align-self: center; background: var(--border); flex: none; }
+
+/* ---- Per-user activity filter (overview) ---- */
+/* A skinned disclosure in the controls row, parted from the range selector and the
+   metric toggle by the same hairline. Collapsed, it reads as one control sized to
+   match the segmented buttons; open, it drops an absolutely-positioned checkbox
+   menu so it never reflows the row or the grid below. */
+/* Stretch to the controls row's height (set by the taller segmented controls) so
+   the summary can fill it and read as the same height as its neighbours. */
+.userfilter { position: relative; display: inline-flex; align-self: stretch; }
+.userfilter-summary {
+  display: inline-flex; align-items: center; gap: var(--sp-sm);
+  max-width: 240px; height: 100%; padding: 0 10px;
+  border: 1px solid var(--border); border-radius: var(--r-sm);
+  background: var(--surface); color: var(--subtext);
+  font-size: 0.8125rem; line-height: 1; cursor: pointer; list-style: none; user-select: none;
+  transition: background var(--dur-fast) var(--ease-state), border-color var(--dur-fast) var(--ease-state);
+}
+.userfilter-summary::-webkit-details-marker { display: none; }
+.userfilter-summary:hover { background: var(--surface-2); }
+.userfilter[open] .userfilter-summary { border-color: var(--border-strong); }
+/* Pills lay out in a single non-wrapping row, clipped at the control's edge with a
+   soft right-edge fade so an overflowing selection trails off rather than spilling
+   past the control or growing the row to a second line. */
+.userfilter-pills {
+  display: flex; flex-wrap: nowrap; gap: 4px; min-width: 0; overflow: hidden;
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 16px), transparent);
+          mask-image: linear-gradient(to right, #000 calc(100% - 16px), transparent);
+}
+.userfilter-all { color: var(--muted); white-space: nowrap; }
+.userfilter-pill {
+  flex: none; white-space: nowrap;
+  background: var(--surface-3); color: var(--lilac);
+  border-radius: 999px; padding: 1px 8px; font-size: 0.75rem;
+}
+.userfilter-caret { flex: none; color: var(--muted); transition: transform var(--dur-fast) var(--ease-state); }
+.userfilter[open] .userfilter-caret { transform: rotate(180deg); }
+
+/* The dropdown menu floats over the grid; capping its height keeps a long roster
+   scrollable rather than letting the menu run off the viewport. */
+.userfilter-menu {
+  position: absolute; z-index: var(--z-overlay); top: calc(100% + 4px); right: 0;
+  min-width: 200px; max-height: 280px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 1px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--r-md); padding: var(--sp-sm); box-shadow: var(--shadow-overlay);
+}
+.userfilter[open] .userfilter-menu { animation: userfilter-pop var(--dur-fast) var(--ease-state); }
+@keyframes userfilter-pop { from { opacity: 0; transform: translateY(-2px); } to { opacity: 1; transform: none; } }
+.userfilter-opt, .userfilter-reset {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; padding: 5px 8px; border: none; border-radius: var(--r-sm);
+  background: none; color: var(--subtext); font-size: 0.8125rem; text-align: left; cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-state);
+}
+.userfilter-opt:hover, .userfilter-reset:hover { background: var(--surface-3); }
+/* The "All Users" reset reads as the head of the list, parted from the accounts by
+   the same hairline the menu uses elsewhere. */
+.userfilter-reset { border-bottom: 1px solid var(--border); border-radius: 0; padding-bottom: 7px; margin-bottom: 2px; }
+/* Real native checkboxes, themed to the signal lilac: standard look and behaviour,
+   no hand-drawn box. The reset's box is decorative (the button is the control), so
+   clicks fall through to the button rather than toggling it. */
+.userfilter-box { flex: none; width: 14px; height: 14px; margin: 0; accent-color: var(--lilac); cursor: pointer; }
+.userfilter-reset .userfilter-box { pointer-events: none; }
+.userfilter-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .heatmap {
   position: relative;
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md);

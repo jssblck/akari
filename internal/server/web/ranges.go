@@ -20,9 +20,10 @@ var DateRanges = []DateRange{
 	{Key: "all", Label: "All", Days: 0},
 }
 
-// DefaultRange is the window the overview opens on: a month of trailing activity,
-// recent enough to read trend without dragging in the long tail of all history.
-const DefaultRange = "30d"
+// DefaultRange is the window the overview opens on: a trailing year, wide enough
+// to read seasonality and longer trends on the activity grid without jumping to
+// all of history.
+const DefaultRange = "year"
 
 // ParseRange normalizes a range query value to a known key, falling back to the
 // default for anything empty or unrecognized.
