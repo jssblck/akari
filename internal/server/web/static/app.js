@@ -45,13 +45,21 @@
     if (outlineObserver) { outlineObserver.disconnect(); outlineObserver = null; }
     var msgs = document.querySelectorAll(".transcript .msg[data-ordinal]");
     if (!msgs.length || !("IntersectionObserver" in window)) return;
+    // Index the outline entries by ordinal once, then each intersection toggles
+    // only the previous and current entries instead of scanning the whole outline.
+    var byOrd = {};
+    Array.prototype.slice.call(document.querySelectorAll(".outline [data-ord]")).forEach(function (elt) {
+      byOrd[elt.getAttribute("data-ord")] = elt;
+    });
+    var current = null;
     outlineObserver = new IntersectionObserver(function (entries) {
       entries.forEach(function (e) {
         if (!e.isIntersecting) return;
-        var ord = e.target.getAttribute("data-ordinal");
-        Array.prototype.slice.call(document.querySelectorAll(".outline [data-ord]")).forEach(function (t) {
-          t.classList.toggle("current", t.getAttribute("data-ord") === ord);
-        });
+        var elt = byOrd[e.target.getAttribute("data-ordinal")];
+        if (!elt || elt === current) return;
+        if (current) current.classList.remove("current");
+        elt.classList.add("current");
+        current = elt;
       });
     }, { rootMargin: "-45% 0px -50% 0px", threshold: 0 });
     Array.prototype.slice.call(msgs).forEach(function (m) { outlineObserver.observe(m); });
@@ -194,7 +202,7 @@
     var insp = inspectorEl();
     if (!insp) return;
     if (!inspectorEmptyHTML) inspectorEmptyHTML = insp.innerHTML; // capture the server-rendered empty state once
-    lastBody = { url: "", text: "" }; // drop any retained body on (re)load
+    lastBody = { url: "", res: null }; // drop any retained body on (re)load
     emptyInspector(insp);
   }
   function clearInspectSelection() {
@@ -241,39 +249,74 @@
     return views;
   }
 
-  // One-entry cache: re-toggling the same view does not refetch, but clicking
-  // through many bodies never accumulates more than the current one in memory.
-  var lastBody = { url: "", text: "" };
-  // Cap the text rendered into the DOM so a huge tool body cannot blow up the
-  // page; the rest stays one click away as the raw blob.
+  // One-entry cache holding only the bounded prefix: re-toggling the same view
+  // does not refetch, and clicking through many bodies never retains more than
+  // one capped body.
+  var lastBody = { url: "", res: null };
+  // Cap the text pulled into the page so a huge tool body cannot blow up memory;
+  // the rest stays one click away as the raw blob.
   var BODY_DISPLAY_CAP = 200000;
+
+  // fetchBounded streams the blob and stops once it has the display cap, so peak
+  // memory tracks the cap rather than the full body size. Falls back to text()
+  // where the Streams API is unavailable.
+  function fetchBounded(url, cap) {
+    return fetch(url, { credentials: "same-origin" }).then(function (r) {
+      if (!r.ok) throw new Error("status " + r.status);
+      var total = parseInt(r.headers.get("Content-Length") || "", 10);
+      if (!r.body || !r.body.getReader || typeof TextDecoder === "undefined") {
+        return r.text().then(function (t) {
+          var truncated = t.length > cap;
+          return { text: truncated ? t.slice(0, cap) : t, truncated: truncated, total: t.length };
+        });
+      }
+      var reader = r.body.getReader();
+      var decoder = new TextDecoder();
+      var acc = "";
+      var truncated = false;
+      function pump() {
+        return reader.read().then(function (res) {
+          if (res.done) return;
+          acc += decoder.decode(res.value, { stream: true });
+          if (acc.length >= cap) {
+            truncated = true;
+            acc = acc.slice(0, cap);
+            return reader.cancel(); // abort the rest; nothing more is buffered
+          }
+          return pump();
+        });
+      }
+      return pump().then(function () {
+        return { text: acc, truncated: truncated, total: isNaN(total) ? -1 : total };
+      });
+    });
+  }
+
   function loadView(bodyEl, view, toolName) {
-    function paint(text) {
+    function paint(res) {
       bodyEl.innerHTML = "";
-      var truncated = text.length > BODY_DISPLAY_CAP;
-      var shown = truncated ? text.slice(0, BODY_DISPLAY_CAP) : text;
       var node = null;
-      if (view.render === "diff" && !truncated) node = diffElement(toolName, shown);
-      if (!node) { node = document.createElement("pre"); node.className = "tool-body"; node.textContent = shown; }
+      if (view.render === "diff" && !res.truncated) node = diffElement(toolName, res.text);
+      if (!node) { node = document.createElement("pre"); node.className = "tool-body"; node.textContent = res.text; }
       bodyEl.appendChild(node);
-      if (truncated) {
+      if (res.truncated) {
         var note = document.createElement("div");
         note.className = "insp-trunc muted";
-        note.textContent = "Showing the first " + Math.round(BODY_DISPLAY_CAP / 1000) + " KB of " + Math.round(text.length / 1000) + " KB. ";
+        var of = res.total > 0 ? " of " + Math.round(res.total / 1000) + " KB" : "";
+        note.textContent = "Showing the first " + Math.round(BODY_DISPLAY_CAP / 1000) + " KB" + of + ". ";
         var a = document.createElement("a");
         a.href = view.url; a.target = "_blank"; a.rel = "noopener"; a.textContent = "Open raw";
         note.appendChild(a);
         bodyEl.appendChild(note);
       }
     }
-    if (lastBody.url === view.url) { paint(lastBody.text); return; }
+    if (lastBody.url === view.url && lastBody.res) { paint(lastBody.res); return; }
     bodyEl.innerHTML = "";
     var loading = document.createElement("div");
     loading.className = "insp-loading muted"; loading.textContent = "Loading…";
     bodyEl.appendChild(loading);
-    fetch(view.url, { credentials: "same-origin" })
-      .then(function (r) { if (!r.ok) throw new Error("status " + r.status); return r.text(); })
-      .then(function (text) { lastBody = { url: view.url, text: text }; paint(text); })
+    fetchBounded(view.url, BODY_DISPLAY_CAP)
+      .then(function (res) { lastBody = { url: view.url, res: res }; paint(res); })
       .catch(function () {
         bodyEl.innerHTML = "";
         var pre = document.createElement("pre"); pre.className = "tool-body error";
