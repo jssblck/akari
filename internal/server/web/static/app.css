@@ -187,7 +187,12 @@ main { max-width: var(--maxw); margin: 0 auto; padding: var(--sp-xl); }
 .viz-6 { background: #ddc885; } .viz-7 { background: #a98ad4; }
 
 /* ---- Sessions: faceted layout ---- */
-.sessions-layout { display: grid; grid-template-columns: 196px minmax(0, 1fr); gap: var(--sp-xl); align-items: start; }
+/* The global Sessions view runs edge to edge: a faceted rail plus a wide table
+   put the whole viewport to use, unlike the reading-width pages. The rail column
+   sizes to its widest label (no more clipped project names) rather than a fixed
+   width, and the table takes the rest. */
+main:has(.sessions-layout) { max-width: none; }
+.sessions-layout { display: grid; grid-template-columns: minmax(196px, max-content) minmax(0, 1fr); gap: var(--sp-xl); align-items: start; }
 .facets { display: flex; flex-direction: column; gap: var(--sp-lg); position: sticky; top: var(--sp-md); }
 .facet-title { margin-bottom: var(--sp-sm); }
 .facets .opts { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
@@ -199,7 +204,9 @@ main { max-width: var(--maxw); margin: 0 auto; padding: var(--sp-xl); }
 }
 .facets .opt:hover { background: var(--surface-2); text-decoration: none; }
 .facets .opt.active { background: var(--surface-3); color: var(--text); }
-.facets .opt-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The rail column sizes to the widest label, so labels stay on one line and show
+   in full rather than truncating with an ellipsis. */
+.facets .opt-label { white-space: nowrap; }
 .facets .opt-count { margin-left: auto; font-family: var(--mono); font-size: 0.75rem; color: var(--faint); font-variant-numeric: tabular-nums; }
 .facets .opt.active .opt-count { color: var(--lilac); }
 .sessions-main { min-width: 0; }
@@ -215,6 +222,31 @@ main { max-width: var(--maxw); margin: 0 auto; padding: var(--sp-xl); }
 .active-filters .clear { margin-left: 4px; }
 .proj-link { color: var(--subtext); }
 .proj-link:hover { color: var(--lilac); }
+
+/* The Sessions table fills the wide page: every column sizes to its content and
+   never wraps, with the Project column (col-grow) absorbing the slack so the row
+   stays flush rather than leaving a ragged right edge. */
+table.sessions th, table.sessions td { white-space: nowrap; }
+table.sessions .col-grow { width: 100%; }
+table.sessions td.tags .tag + .tag { margin-left: 4px; }
+
+/* Tokens column: the figure carries a hover/focus card that breaks it down by
+   class and cost, reusing the heatmap tooltip's inner styles. The cell lifts its
+   stacking context on hover so the card paints over the rows below. */
+table.sessions td.tokens { overflow: visible; }
+.tok-cell { position: relative; display: inline-block; }
+.tok-cell:hover, .tok-cell:focus-within { z-index: var(--z-overlay); }
+.tok-total { border-bottom: 1px dotted var(--border-strong); }
+.tok-tip {
+  display: none; position: absolute; right: 0; top: calc(100% + 6px);
+  min-width: 170px; text-align: left; z-index: var(--z-overlay);
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-sm);
+  padding: var(--sp-sm); box-shadow: var(--shadow-overlay);
+}
+.tok-cell:hover .tok-tip, .tok-cell:focus-within .tok-tip { display: block; }
+/* The card's rows are spans here (the heatmap builds them as divs), so make them
+   stack. */
+.tok-tip .tt-total, .tok-tip .tt-cost { display: block; }
 
 /* ---- KPI tiles (Overview) ---- */
 .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--sp-md); margin-bottom: var(--sp-lg); }
@@ -241,6 +273,21 @@ table.grid tbody tr:hover td { background: var(--surface-2); }
 td.num, th.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
 th.trend, td.trend { width: 108px; }
 .sparkline { width: 96px; height: 24px; display: block; }
+.nowrap { white-space: nowrap; }
+
+/* ---- Projects index: a full-bleed table whose columns grow to their content ---- */
+/* The projects index is the page's only surface, so it drops the centered
+   max-width and runs the table the full content width. */
+main.page-projects { max-width: none; }
+/* Every figure column sizes to its content (no wrapping); the project-name
+   column takes width:100% so it absorbs the slack, letting names show in full
+   instead of clipping while the table still fills the available width. */
+table.grid.projects th, table.grid.projects td { white-space: nowrap; }
+table.grid.projects th.proj-name, table.grid.projects td.proj-name { width: 100%; }
+/* The tokens cell reuses the global session list's .tok-cell hover card, so its
+   styling (and the shared heatmap-tooltip rules) already apply here. The cell
+   only needs to let the card overflow the row, the same as the sessions table. */
+table.grid.projects td.num { overflow: visible; }
 
 /* ---- Cards ---- */
 .card {
@@ -260,16 +307,46 @@ th.trend, td.trend { width: 108px; }
 .stat .value { font-family: var(--mono); font-size: 1.125rem; font-variant-numeric: tabular-nums; color: var(--text); }
 /* The analytics panels (overview, projects, project) fuse their readouts into a
    single instrument strip: one bordered row split by hairlines, instead of four
-   detached tiles floating above the chart. The session page keeps loose tiles. */
+   detached tiles floating above the chart. */
 .analytics .stats { gap: 0; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); overflow: hidden; }
 .analytics .stat { flex: 1; min-width: 0; border: none; border-radius: 0; }
 .analytics .stat + .stat { border-left: 1px solid var(--border); }
+/* The session header fuses its readouts into the same instrument strip, sticky to
+   the top of the transcript. One bordered row split by hairlines reads as a single
+   gauge cluster and reclaims the vertical space the loose tiles used to wrap into.
+   It scrolls horizontally rather than wrapping when the viewport gets narrow. */
 .stats.sticky {
   position: sticky; top: 0; z-index: var(--z-sticky);
-  padding: var(--sp-md) 0; margin: 0 0 var(--sp-lg);
-  background: linear-gradient(var(--bg) 78%, rgba(20, 19, 27, 0));
-  backdrop-filter: blur(2px);
+  display: flex; gap: 0; margin: 0 0 var(--sp-lg); padding: 0;
+  border: 1px solid var(--border); border-radius: var(--r-md);
+  background: var(--surface);
 }
+.stats.sticky .stat {
+  flex: 1 0 auto; min-width: 118px; padding: 8px var(--sp-lg);
+  border: none; border-radius: 0; border-left: 1px solid var(--border);
+}
+.stats.sticky .stat:first-child { border-left: 0; }
+/* The Tokens tile folds input, output, cache read, cache write, and cost into one
+   gauge. The per-class breakdown and cost reveal on hover or keyboard focus, the
+   same detail the overview heatmap surfaces for a day. */
+.tokens-stat { position: relative; outline: none; }
+.tokens-value { text-decoration: underline dotted var(--faint); text-underline-offset: 3px; }
+.tokens-stat:hover, .tokens-stat:focus-visible { background: var(--surface-2); }
+.stat-tip {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 20;
+  min-width: 190px; padding: var(--sp-sm) var(--sp-md);
+  background: var(--surface-2); border: 1px solid var(--border-strong);
+  border-radius: var(--r-md); box-shadow: var(--shadow-overlay);
+  opacity: 0; visibility: hidden; transform: translateY(-3px); pointer-events: none;
+  transition: opacity var(--dur-fast) var(--ease-state), transform var(--dur-fast) var(--ease-state), visibility 0s linear var(--dur-fast);
+}
+.tokens-stat:hover .stat-tip, .tokens-stat:focus-within .stat-tip {
+  opacity: 1; visibility: visible; transform: none; transition-delay: 0s;
+}
+.stat-tip .tt-grid { display: grid; grid-template-columns: auto auto; gap: 1px var(--sp-md); margin: 0; font: 450 0.75rem/1.6 var(--mono); }
+.stat-tip .tt-grid dt { color: var(--muted); }
+.stat-tip .tt-grid dd { margin: 0; color: var(--subtext); text-align: right; font-variant-numeric: tabular-nums; }
+.stat-tip .tt-cost { margin-top: 5px; padding-top: 5px; border-top: 1px solid var(--border); color: var(--text); font: 450 0.75rem var(--mono); font-variant-numeric: tabular-nums; text-align: right; }
 .value.settling { animation: settle var(--dur-slow) var(--ease-settle); }
 @keyframes settle {
   0% { color: var(--lilac); text-shadow: 0 0 14px rgba(198, 168, 242, 0.75); }
@@ -290,6 +367,8 @@ th.trend, td.trend { width: 108px; }
    gone) reads as an error. */
 .tag.standalone { color: var(--warn); border-color: rgba(240, 197, 146, 0.4); }
 .tag.orphaned { color: var(--err); border-color: rgba(239, 154, 169, 0.4); }
+/* Data-quality caution: the session repeats a tool-call id across rows. */
+.tag.warn { color: var(--warn); border-color: rgba(240, 197, 146, 0.4); cursor: help; }
 
 /* ---- Buttons ---- */
 button, .btn {
@@ -383,16 +462,19 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--l
   transition: opacity var(--dur-fast) var(--ease-state), transform var(--dur-fast) var(--ease-state);
 }
 .heatmap-tooltip.on { opacity: 1; transform: none; }
+/* The breakdown card's inner styles are shared by the heatmap tooltip and the
+   Sessions table's token card (.tok-tip), so a token total reads the same in
+   both places. */
 .heatmap-tooltip .tt-day { color: var(--lilac); font: 500 0.75rem var(--mono); margin-bottom: 4px; }
-.heatmap-tooltip .tt-total { color: var(--text); font: 450 0.8125rem var(--mono); font-variant-numeric: tabular-nums; }
+.heatmap-tooltip .tt-total, .tok-tip .tt-total { color: var(--text); font: 450 0.8125rem var(--mono); font-variant-numeric: tabular-nums; }
 .heatmap-tooltip .tt-empty { color: var(--muted); font-size: 0.75rem; }
-.heatmap-tooltip .tt-grid {
+.heatmap-tooltip .tt-grid, .tok-tip .tt-grid {
   display: grid; grid-template-columns: auto auto; gap: 1px var(--sp-sm);
   margin: 5px 0 0; font: 450 0.75rem/1.5 var(--mono);
 }
-.heatmap-tooltip .tt-grid dt { color: var(--muted); }
-.heatmap-tooltip .tt-grid dd { margin: 0; color: var(--subtext); text-align: right; font-variant-numeric: tabular-nums; }
-.heatmap-tooltip .tt-cost {
+.heatmap-tooltip .tt-grid dt, .tok-tip .tt-grid dt { color: var(--muted); }
+.heatmap-tooltip .tt-grid dd, .tok-tip .tt-grid dd { margin: 0; color: var(--subtext); text-align: right; font-variant-numeric: tabular-nums; }
+.heatmap-tooltip .tt-cost, .tok-tip .tt-cost {
   margin-top: 5px; padding-top: 5px; border-top: 1px solid var(--border);
   color: var(--subtext); font: 450 0.75rem var(--mono); font-variant-numeric: tabular-nums;
 }
@@ -417,6 +499,12 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--l
 .reparse-form { margin-top: var(--sp-md); }
 .reparse-public-track { max-width: 360px; margin: var(--sp-lg) auto; }
 
+/* The session view is the one page that takes the full content width: its outline,
+   stat strip, tool chips, and diffs all earn the room, while prose inside a message
+   stays capped at a readable measure (see .msg .content). Every other page keeps
+   the centered --maxw column. */
+main:has(> .session-page) { max-width: none; }
+
 /* ---- Session head ---- */
 .session-head {
   display: flex; align-items: flex-start; justify-content: space-between;
@@ -425,18 +513,17 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--l
 .session-title h1 { display: flex; align-items: baseline; gap: var(--sp-sm); flex-wrap: wrap; }
 .session-title h1 .sep { color: var(--faint); }
 .session-meta { display: flex; align-items: center; gap: var(--sp-md); flex-wrap: wrap; margin-top: var(--sp-sm); font-size: 0.8125rem; }
-.live-dot { color: var(--warn); font-size: 0.6875rem; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; display: inline-flex; align-items: center; gap: 5px; }
-.live-dot::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--warn); box-shadow: 0 0 8px var(--warn); animation: pulse 1.6s var(--ease-state) infinite; }
-@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 
-.publish { display: flex; align-items: center; gap: var(--sp-lg); margin-bottom: var(--sp-md); flex-wrap: wrap; }
-.publish.subtle { margin-bottom: var(--sp-lg); }
-.publish code, .publish a { font-family: var(--mono); }
+/* The owner/admin controls ride on the header's top line opposite the title, so
+   publishing and deleting cost no vertical band of their own. */
+.session-actions { display: flex; align-items: center; gap: var(--sp-sm); flex: none; flex-wrap: wrap; justify-content: flex-end; }
+.session-actions .share-link { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 26ch; }
+button.small, .btn.small { padding: 5px 10px; font-size: 0.8125rem; }
 .reveal { animation: fadein var(--dur-slow) var(--ease-settle); }
 @keyframes fadein { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
 
-/* ---- Session grid: outline + main + inspector ---- */
-.session-grid { display: grid; grid-template-columns: 212px minmax(0, 1fr) 360px; gap: var(--sp-lg); align-items: start; }
+/* ---- Session grid: outline + transcript (the body opens in a modal, not a third column) ---- */
+.session-grid { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: var(--sp-lg); align-items: start; }
 .session-main { min-width: 0; }
 
 /* ---- Outline (left pane) ---- */
@@ -475,26 +562,34 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--l
 .ol-step.ol-step-error .ol-tn { color: var(--err); }
 .ol-step .ol-file { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
 
-/* ---- Inspector (right pane) ---- */
-.inspector {
-  position: sticky; top: var(--sp-md); align-self: start;
-  max-height: calc(100vh - var(--sp-lg)); overflow: hidden;
-  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md);
-  display: flex; flex-direction: column;
+/* ---- Inspector (tool-body modal) ----
+   A selected tool call's bodies open in a large centered dialog instead of a
+   docked column, so reading a body has the room a 360px rail never did and the
+   transcript keeps the full width when nothing is open. One overlay layer only,
+   dismissed by the backdrop, Esc, or the close control. */
+.modal-overlay {
+  position: fixed; inset: 0; z-index: var(--z-overlay);
+  display: flex; align-items: center; justify-content: center; padding: var(--sp-2xl);
+  background: rgba(8, 6, 14, 0.62);
+  animation: fadein var(--dur-base) var(--ease-settle);
 }
-.insp-empty {
-  padding: var(--sp-xl) var(--sp-lg); text-align: center; color: var(--muted);
-  display: flex; flex-direction: column; align-items: center; gap: var(--sp-sm); font-size: 0.8125rem;
+.modal-overlay[hidden] { display: none; }
+.modal-dialog {
+  width: min(1100px, 92vw); height: min(880px, 88vh);
+  display: flex; flex-direction: column; overflow: hidden;
+  background: var(--surface); border: 1px solid var(--border-strong);
+  border-radius: var(--r-lg); box-shadow: var(--shadow-overlay);
 }
-.insp-empty-glyph { font-family: var(--mono); font-size: 1.5rem; color: var(--faint); }
+body.modal-open { overflow: hidden; }
 .insp-head { display: flex; align-items: center; gap: var(--sp-sm); padding: var(--sp-md) var(--sp-md); border-bottom: 1px solid var(--border); }
 .insp-tn { color: var(--lilac); font-family: var(--mono); font-weight: 500; font-size: 0.8125rem; flex: none; }
 .insp-file { color: var(--muted); font-size: 0.75rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.insp-close { margin-left: auto; background: transparent; color: var(--faint); border: none; padding: 2px 6px; font-size: 0.875rem; flex: none; }
+.insp-spacer { flex: 1 1 auto; }
+.insp-status { flex: none; font-size: 0.75rem; font-weight: 500; }
+.insp-close { background: transparent; color: var(--faint); border: none; padding: 2px 6px; font-size: 0.875rem; flex: none; }
 .insp-close:hover { background: var(--surface-2); color: var(--subtext); }
-.insp-meta { padding: var(--sp-sm) var(--sp-md) 0; }
 .insp-views { margin: var(--sp-sm) var(--sp-md); }
-.insp-body { padding: 0 var(--sp-md) var(--sp-md); overflow: auto; min-height: 0; }
+.insp-body { flex: 1; padding: 0 var(--sp-md) var(--sp-md); overflow: auto; min-height: 0; }
 .insp-body .tool-body, .insp-body .diff { margin-top: 0; max-height: none; }
 .insp-loading { padding: var(--sp-md); font-size: 0.8125rem; }
 .insp-trunc { padding: var(--sp-sm) 0 2px; font-size: 0.75rem; }
@@ -580,14 +675,6 @@ a.attachment.file { width: fit-content; text-decoration: none; }
 .empty.big { padding: 64px var(--sp-xl); }
 .empty.big h1 { font-family: var(--mono); color: var(--lilac); }
 
-/* ---- Density: compact ---- */
-body.density-compact .transcript { gap: var(--sp-sm); }
-body.density-compact .msg { padding: var(--sp-sm) var(--sp-md); }
-body.density-compact .msg .content { max-width: none; }
-body.density-compact .thinking { display: none; }
-body.density-compact .stats.sticky { padding: var(--sp-sm) 0; }
-body.density-compact .stat { padding: 6px var(--sp-md); min-width: 100px; }
-
 /* ---- Responsive ---- */
 @media (max-width: 980px) {
   /* Collapse the sidebar into a horizontal top strip so the content gets the
@@ -612,17 +699,15 @@ body.density-compact .stat { padding: 6px var(--sp-md); min-width: 100px; }
   .sessions-layout { grid-template-columns: 1fr; gap: var(--sp-lg); }
 }
 @media (max-width: 1100px) {
-  /* Drop the inspector to a full-width row below the transcript rather than
-     hiding it, so opening a body still works on a narrower screen. */
   .session-grid { grid-template-columns: 200px minmax(0, 1fr); }
-  .inspector { position: static; grid-column: 1 / -1; max-height: 520px; }
 }
 @media (max-width: 720px) {
   .session-grid { grid-template-columns: 1fr; }
   .outline-rail { display: none; }
-  .inspector { grid-column: auto; }
   header.topbar { gap: var(--sp-md); flex-wrap: wrap; padding: var(--sp-sm) var(--sp-md); }
   .session-head { flex-direction: column; }
+  .modal-overlay { padding: var(--sp-md); }
+  .modal-dialog { width: 96vw; height: 92vh; }
 }
 
 /* ---- Reduced motion ---- */
@@ -630,5 +715,4 @@ body.density-compact .stat { padding: 6px var(--sp-md); min-width: 100px; }
   html { scroll-behavior: auto; }
   *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
   .bar-fill { transition: none; }
-  .live-dot::before { animation: none; }
 }

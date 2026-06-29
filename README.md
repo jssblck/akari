@@ -196,9 +196,11 @@ Projects, Search, Account); the signed-in user and log-out sit at its foot.
 - **Sessions**: every session across all projects in one place, with a faceted
   filter rail (agent, project, user, and machine, each with counts) and a project
   column, so a run is findable without first choosing its project.
-- **Projects index**: every project with session counts, token totals, and cost,
-  plus an inline analytics panel (cost and token trends over time, a by-model and
-  by-agent breakdown) and a 30-day cost sparkline per project row.
+- **Projects index**: one full-width table of git-remote projects, each row with
+  its session count, a single token total (hover it for the in/out/cache-read/
+  cache-write breakdown), cost, a 30-day cost sparkline, and a relative "updated"
+  time. Fleet usage lives on the Overview; local folders reach you through the
+  Sessions filter rail, so neither crowds this surface.
 - **Project view**: that project's sessions across all users and machines, with
   agent, user, and machine filters, and the same analytics panel scoped to the
   project.

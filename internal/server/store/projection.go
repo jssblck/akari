@@ -336,6 +336,18 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 			}
 			inputSHA, inputMedia = sha, sanitizeText(t.InputMediaType)
 		}
+		// call_uid is the agent's own tool_use id, and the tool-result back-patch keys
+		// on it. The (session_id, call_uid) index is deliberately non-unique (migration
+		// 0010): a resumed or compacted Claude transcript replays prior assistant turns
+		// verbatim, so the same id legitimately rides more than one row, and under a
+		// unique index the second insert tripped the constraint and rolled back the whole
+		// parse (the reparse failure on four sessions). Storing the id on every row lets
+		// the back-patch UPDATE ... WHERE call_uid = $1 stamp the same result onto each
+		// replayed copy, which is what a reader expects to see. The ON CONFLICT still
+		// guards the (message_ordinal, call_index) key against a region replay. A session
+		// that carries a duplicate id is surfaced in the UI (DuplicateCallUIDCount), so a
+		// genuinely malformed id reuse, the only case where stamping both rows is wrong,
+		// is visible rather than silent.
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO tool_calls
 			   (session_id, message_ordinal, call_index, tool_name, category, file_path,
@@ -371,10 +383,19 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 		if media == "" {
 			media = "text/plain"
 		}
+		// Patches one row in the common case and every still-pending copy when a
+		// transcript repeated the call's id (the index is non-unique by design), so each
+		// visible copy of a duplicated turn carries the same result rather than one
+		// looking pending. The result_status IS NULL predicate both makes the write
+		// once-per-row and lets the pending-only partial index (idx_tool_calls_pending_result,
+		// migration 0011) serve the lookup: a row leaves that index when its result lands,
+		// so a replayed turn that delivers its tool_result K times probes only the copies
+		// still pending rather than re-scanning all K accumulated rows each time. That
+		// keeps the back-patch linear in the number of rows instead of O(K^2).
 		if _, err := tx.Exec(ctx,
 			`UPDATE tool_calls
 			    SET result_sha256 = $3, result_bytes = $4, result_media_type = $5, result_status = $6
-			  WHERE session_id = $1 AND call_uid = $2`,
+			  WHERE session_id = $1 AND call_uid = $2 AND result_status IS NULL`,
 			sessionID, sanitizeText(tr.CallUID), resultSHA, tr.Bytes, media, sanitizeText(tr.Status)); err != nil {
 			return appliedDelta{}, fmt.Errorf("back-patch tool result for session %d call %q: %w", sessionID, tr.CallUID, err)
 		}

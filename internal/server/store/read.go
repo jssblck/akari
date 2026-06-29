@@ -25,7 +25,19 @@ type ProjectSummary struct {
 	TotalCostUSD float64
 	TotalInput   int64
 	TotalOutput  int64
-	LastActivity *time.Time
+	// Cache token rollups back the projects-index tokens column, whose hover
+	// detail breaks the total into in, out, cache read, and cache write (the same
+	// four classes the overview heatmap surfaces per day).
+	TotalCacheRead  int64
+	TotalCacheWrite int64
+	LastActivity    *time.Time
+}
+
+// TotalTokens is the sum of every token class for a project: input, output, and
+// both cache directions. It is the headline figure for the projects-index tokens
+// column, matching how the overview heatmap totals a day.
+func (p ProjectSummary) TotalTokens() int64 {
+	return p.TotalInput + p.TotalOutput + p.TotalCacheRead + p.TotalCacheWrite
 }
 
 // SessionSummary is one row of a session list (project view, search results).
@@ -135,6 +147,8 @@ func (s *Store) ListProjects(ctx context.Context) ([]ProjectSummary, error) {
 		        coalesce(sum(s.total_cost_usd), 0),
 		        coalesce(sum(s.total_input_tokens), 0),
 		        coalesce(sum(s.total_output_tokens), 0),
+		        coalesce(sum(s.total_cache_read_tokens), 0),
+		        coalesce(sum(s.total_cache_write_tokens), 0),
 		        max(s.updated_at)
 		   FROM projects p
 		   LEFT JOIN sessions s ON s.project_id = p.id
@@ -148,7 +162,8 @@ func (s *Store) ListProjects(ctx context.Context) ([]ProjectSummary, error) {
 	for rows.Next() {
 		var p ProjectSummary
 		if err := rows.Scan(&p.ID, &p.RemoteKey, &p.Host, &p.Owner, &p.Repo, &p.DisplayName, &p.Kind,
-			&p.SessionCount, &p.TotalCostUSD, &p.TotalInput, &p.TotalOutput, &p.LastActivity); err != nil {
+			&p.SessionCount, &p.TotalCostUSD, &p.TotalInput, &p.TotalOutput,
+			&p.TotalCacheRead, &p.TotalCacheWrite, &p.LastActivity); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -454,8 +469,20 @@ func (s *Store) GlobalFacets(ctx context.Context) (GlobalFacetValues, error) {
 	if err := prows.Err(); err != nil {
 		return f, fmt.Errorf("iterate project facets: %w", err)
 	}
+	// Surface git-remote projects above the standalone/orphaned folders: a real
+	// project is what a reader scans for first, the looser local ones sit below.
+	// A stable sort preserves the busiest-first order from the query within each
+	// group.
+	sort.SliceStable(f.Projects, func(i, j int) bool {
+		return !isLocalKind(f.Projects[i].Kind) && isLocalKind(f.Projects[j].Kind)
+	})
 	return f, nil
 }
+
+// isLocalKind reports whether a project kind is one of the non-remote kinds
+// (standalone or orphaned), which sort below git-remote projects in the facet
+// rail.
+func isLocalKind(kind string) bool { return kind == "standalone" || kind == "orphaned" }
 
 // scanDetail loads one session with its project, by an arbitrary WHERE clause.
 func (s *Store) scanDetail(ctx context.Context, where string, arg any) (SessionDetail, error) {
@@ -551,6 +578,27 @@ func (s *Store) ToolCalls(ctx context.Context, sessionID int64) ([]ToolCallView,
 		out = append(out, t)
 	}
 	return out, rows.Err()
+}
+
+// DuplicateCallUIDCount returns how many of a session's tool-call ids appear on more
+// than one row. The GROUP BY runs in the database against the (session_id, call_uid)
+// index, so the result is a bounded scalar and the session view can flag a repeated
+// id without loading or grouping the calls in process memory. It is normally zero; a
+// non-zero count means the transcript replayed a turn (a resumed or compacted Claude
+// session repeats a tool_use id), which the view surfaces as a chip so a genuinely
+// malformed id reuse is visible rather than silent.
+func (s *Store) DuplicateCallUIDCount(ctx context.Context, sessionID int64) (int, error) {
+	var n int
+	err := s.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM (
+		   SELECT 1 FROM tool_calls
+		    WHERE session_id = $1 AND call_uid IS NOT NULL
+		    GROUP BY call_uid HAVING count(*) > 1
+		 ) dups`, sessionID).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count duplicate call ids for session %d: %w", sessionID, err)
+	}
+	return n, nil
 }
 
 // AttachmentView is one attachment (today a lifted image) rendered under its

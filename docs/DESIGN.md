@@ -704,12 +704,22 @@ CREATE TABLE tool_calls (
   call_uid          TEXT,                  -- agent's call id; back-patches the result by UPDATE
   PRIMARY KEY (session_id, message_ordinal, call_index)
 );
--- Unique per session: a call id is unique within a session, so back-patching a
--- result touches exactly one row in constant time. Safe because storage and
--- parsing are separate transactions, so a malformed duplicate id can only stall
--- that session's parse (recoverable by reparse), never fail an append.
-CREATE UNIQUE INDEX idx_tool_calls_call_uid ON tool_calls(session_id, call_uid)
+-- Indexed per session for the result back-patch (UPDATE ... WHERE call_uid = $1),
+-- not unique. A call id is usually unique within a session, but a resumed or
+-- compacted Claude transcript replays prior assistant turns verbatim, so the same
+-- tool_use id can ride more than one row. A unique index turned that into a parse
+-- abort (the second insert rolled back the whole transaction); see migration 0010.
+-- With it non-unique, every replayed copy keeps its id and the back-patch stamps the
+-- same result onto each, and the session view flags any session that carries a
+-- duplicate id so a genuinely malformed reuse is visible rather than silent.
+CREATE INDEX idx_tool_calls_call_uid ON tool_calls(session_id, call_uid)
   WHERE call_uid IS NOT NULL;
+-- Pending-only companion for the back-patch (UPDATE ... WHERE call_uid = $1 AND
+-- result_status IS NULL). A row leaves this index once its result lands, so a
+-- repeated id is back-patched by probing only the copies still pending, keeping the
+-- work linear instead of re-scanning every accumulated copy on each replayed result.
+CREATE INDEX idx_tool_calls_pending_result ON tool_calls(session_id, call_uid)
+  WHERE call_uid IS NOT NULL AND result_status IS NULL;
 
 CREATE TABLE usage_events (
   id                    BIGSERIAL PRIMARY KEY,

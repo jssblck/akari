@@ -287,6 +287,74 @@ func TestCodexTrailingTurnFlushedWhole(t *testing.T) {
 	}
 }
 
+// TestClaudeDuplicateCallUIDDoesNotAbort reproduces the reparse failure that kept
+// four production sessions stale: a resumed or compacted Claude transcript replays
+// a prior assistant turn verbatim, so two distinct tool_use rows carry the same
+// agent call id. Under the old unique index the second insert tripped it and rolled
+// the whole parse back. With the index non-unique (migration 0010) both rows keep
+// the id, and the back-patch stamps the same result onto each, so every replayed
+// copy of the turn renders with its result rather than one looking pending. The two
+// turns are delivered as separate chunks so they parse in separate regions (and so
+// separate transactions), the cross-region path the back-patch must cover.
+func TestClaudeDuplicateCallUIDDoesNotAbort(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	sid := seedSession(t, st, "claude-dup-calluid")
+
+	// Two assistant turns whose tool_use blocks share id "toolu_dup" (the replay), and
+	// a user turn whose tool_result names that id. The message ids differ so this
+	// isolates the call_uid collision from the usage dedup path.
+	first := `{"type":"assistant","timestamp":"2024-01-01T10:00:01Z","message":{"id":"msg_a","model":"claude-sonnet-4-20250514","content":[{"type":"tool_use","id":"toolu_dup","name":"Read","input":{"file_path":"auth.go"}}]}}` + "\n"
+	second := `{"type":"assistant","timestamp":"2024-01-01T10:00:02Z","message":{"id":"msg_b","model":"claude-sonnet-4-20250514","content":[{"type":"tool_use","id":"toolu_dup","name":"Read","input":{"file_path":"auth.go"}}]}}` + "\n"
+	result := `{"type":"user","timestamp":"2024-01-01T10:00:03Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_dup","content":"package auth","is_error":false}]}}` + "\n"
+
+	// Separate chunks: the first region commits before the second parses, so the
+	// duplicate insert meets an already-committed row carrying the same id.
+	uploadAndParse(t, st, sid, first, second, result)
+
+	assertDuplicateCallUID := func(t *testing.T, when string) {
+		t.Helper()
+		var total, withUID, patched int
+		if err := st.Pool.QueryRow(ctx,
+			`SELECT count(*),
+			        count(*) FILTER (WHERE call_uid = 'toolu_dup'),
+			        count(*) FILTER (WHERE result_status = 'ok')
+			   FROM tool_calls WHERE session_id=$1`, sid).
+			Scan(&total, &withUID, &patched); err != nil {
+			t.Fatal(err)
+		}
+		if total != 2 {
+			t.Fatalf("%s: tool_calls rows = %d, want 2 (both turns kept)", when, total)
+		}
+		if withUID != 2 {
+			t.Fatalf("%s: rows carrying the shared id = %d, want 2 (both keep it)", when, withUID)
+		}
+		// The back-patch keys on the id, so both copies of the replayed call carry the
+		// same result rather than one of them looking pending.
+		if patched != 2 {
+			t.Fatalf("%s: rows with a back-patched result = %d, want 2", when, patched)
+		}
+		var bytes int64
+		if err := st.Pool.QueryRow(ctx,
+			`SELECT min(result_bytes) FROM tool_calls WHERE session_id=$1`, sid).Scan(&bytes); err != nil {
+			t.Fatal(err)
+		}
+		if bytes != int64(len("package auth")) {
+			t.Fatalf("%s: result_bytes = %d, want %d on every copy", when, bytes, len("package auth"))
+		}
+	}
+
+	assertDuplicateCallUID(t, "after advance")
+
+	// Reparse is the production remediation for the four stalled sessions: it must run
+	// to completion and land the same shape rather than rolling back as it did before.
+	if _, err := Reparse(ctx, st, sid, "claude"); err != nil {
+		t.Fatalf("reparse: %v", err)
+	}
+	assertDuplicateCallUID(t, "after reparse")
+}
+
 // TestCostIncompleteForUnknownModel confirms an unpriced model flips the
 // session's cost_incomplete flag while still recording token totals.
 func TestCostIncompleteForUnknownModel(t *testing.T) {
