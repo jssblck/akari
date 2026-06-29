@@ -25,7 +25,19 @@ type ProjectSummary struct {
 	TotalCostUSD float64
 	TotalInput   int64
 	TotalOutput  int64
-	LastActivity *time.Time
+	// Cache token rollups back the projects-index tokens column, whose hover
+	// detail breaks the total into in, out, cache read, and cache write (the same
+	// four classes the overview heatmap surfaces per day).
+	TotalCacheRead  int64
+	TotalCacheWrite int64
+	LastActivity    *time.Time
+}
+
+// TotalTokens is the sum of every token class for a project: input, output, and
+// both cache directions. It is the headline figure for the projects-index tokens
+// column, matching how the overview heatmap totals a day.
+func (p ProjectSummary) TotalTokens() int64 {
+	return p.TotalInput + p.TotalOutput + p.TotalCacheRead + p.TotalCacheWrite
 }
 
 // SessionSummary is one row of a session list (project view, search results).
@@ -135,6 +147,8 @@ func (s *Store) ListProjects(ctx context.Context) ([]ProjectSummary, error) {
 		        coalesce(sum(s.total_cost_usd), 0),
 		        coalesce(sum(s.total_input_tokens), 0),
 		        coalesce(sum(s.total_output_tokens), 0),
+		        coalesce(sum(s.total_cache_read_tokens), 0),
+		        coalesce(sum(s.total_cache_write_tokens), 0),
 		        max(s.updated_at)
 		   FROM projects p
 		   LEFT JOIN sessions s ON s.project_id = p.id
@@ -148,7 +162,8 @@ func (s *Store) ListProjects(ctx context.Context) ([]ProjectSummary, error) {
 	for rows.Next() {
 		var p ProjectSummary
 		if err := rows.Scan(&p.ID, &p.RemoteKey, &p.Host, &p.Owner, &p.Repo, &p.DisplayName, &p.Kind,
-			&p.SessionCount, &p.TotalCostUSD, &p.TotalInput, &p.TotalOutput, &p.LastActivity); err != nil {
+			&p.SessionCount, &p.TotalCostUSD, &p.TotalInput, &p.TotalOutput,
+			&p.TotalCacheRead, &p.TotalCacheWrite, &p.LastActivity); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
