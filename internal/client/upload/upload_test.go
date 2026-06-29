@@ -18,11 +18,16 @@ import (
 )
 
 // fakeServer is an in-memory stand-in for the akari ingest endpoints. It holds
-// one session's raw bytes and enforces the same append-only, offset-checked,
-// hash-reported protocol the real server implements.
+// one session's transformed raw bytes and a content-addressed blob set, and
+// enforces the same append-only, offset-checked, hash-reported protocol plus the
+// client-CAS upload endpoints the real server implements. Under the new protocol
+// the stored bytes are the TRANSFORMED transcript, so prefix_sha256 is the hash of
+// buf and the client verifies its transformed prefix against it.
 type fakeServer struct {
-	mu  sync.Mutex
-	buf []byte
+	mu    sync.Mutex
+	buf   []byte
+	blobs map[string][]byte // sha256 -> body bytes
+	puts  int               // count of accepted blob uploads, for dedup assertions
 
 	// conflictOnce, when set, makes the next chunk POST return 409 after first
 	// appending injectBytes, simulating another writer advancing the cursor.
@@ -34,6 +39,9 @@ type fakeServer struct {
 }
 
 func (s *fakeServer) handler() http.Handler {
+	if s.blobs == nil {
+		s.blobs = map[string][]byte{}
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/ingest/session", func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
@@ -75,6 +83,36 @@ func (s *fakeServer) handler() http.Handler {
 		defer s.mu.Unlock()
 		s.buf = nil
 		writeJSON(w, map[string]any{"stored_bytes": 0})
+	})
+	mux.HandleFunc("POST /api/v1/ingest/blobs/check", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			SHA256 []string `json:"sha256"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		missing := []string{}
+		for _, sha := range req.SHA256 {
+			if _, ok := s.blobs[sha]; !ok {
+				missing = append(missing, sha)
+			}
+		}
+		writeJSON(w, map[string]any{"missing": missing})
+	})
+	mux.HandleFunc("PUT /api/v1/ingest/blob/{sha256}", func(w http.ResponseWriter, r *http.Request) {
+		sha := r.PathValue("sha256")
+		body := readAll(r)
+		sum := sha256.Sum256(body)
+		if hex.EncodeToString(sum[:]) != sha {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]any{"error": "hash mismatch"})
+			return
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.blobs[sha] = body
+		s.puts++
+		writeJSON(w, map[string]any{"sha256": sha})
 	})
 	return mux
 }
@@ -246,178 +284,14 @@ func TestSyncGivesUpAfterRepeatedConflicts(t *testing.T) {
 	}
 }
 
-func TestNextChunkTrimsToNewline(t *testing.T) {
-	path := tempFile(t, "a\nb\nc")
-	f, err := os.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	info, _ := f.Stat()
-
-	chunk, _, err := nextChunk(f, 0, 0, info.Size(), "claude", false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(chunk) != "a\nb\n" {
-		t.Errorf("chunk = %q, want a\\nb\\n", chunk)
-	}
-
-	// From the trailing "c" with no newline, there is nothing complete to send.
-	tail, _, err := nextChunk(f, int64(len("a\nb\n")), int64(len("a\nb\n")), info.Size(), "claude", false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if tail != nil {
-		t.Errorf("tail = %q, want nil (incomplete line)", tail)
-	}
-}
-
-func TestNextChunkGrowsForLongLine(t *testing.T) {
-	// A single line larger than chunkTarget forces the window to grow until it
-	// reaches the newline.
-	long := strings.Repeat("x", chunkTarget+1<<20) + "\n"
-	content := long + "short\n"
-	path := tempFile(t, content)
-	f, err := os.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	info, _ := f.Stat()
-
-	chunk, _, err := nextChunk(f, 0, 0, info.Size(), "claude", false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The window had to grow past chunkTarget to find any newline; once grown it
-	// returns through the last newline that fits, which is the whole file here.
-	if len(chunk) <= chunkTarget {
-		t.Errorf("chunk length = %d, expected growth past chunkTarget %d", len(chunk), chunkTarget)
-	}
-	if string(chunk) != content {
-		t.Errorf("grown chunk should cover the whole file: got %d bytes, want %d", len(chunk), len(content))
-	}
-}
-
-// TestNextChunkCodexCutsAtTurnBoundary checks that a Codex chunk ends right after
-// a user line (a turn boundary), keeping each folded turn whole and withholding
-// the trailing in-progress turn until the file settles.
-func TestNextChunkCodexCutsAtTurnBoundary(t *testing.T) {
-	lines := []string{
-		`{"type":"session_meta","payload":{"cwd":"/x"}}`,
-		`{"type":"response_item","payload":{"role":"user","content":[{"type":"input_text","text":"a"}]}}`,
-		`{"type":"response_item","payload":{"type":"reasoning","content":[{"type":"text","text":"r"}]}}`,
-		`{"type":"response_item","payload":{"role":"assistant","content":[{"type":"output_text","text":"x"}]}}`,
-		`{"type":"response_item","payload":{"role":"user","content":[{"type":"input_text","text":"b"}]}}`,
-		`{"type":"response_item","payload":{"role":"assistant","content":[{"type":"output_text","text":"y"}]}}`,
-	}
-	content := strings.Join(lines, "\n") + "\n"
-	path := tempFile(t, content)
-	f, err := os.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	info, _ := f.Stat()
-
-	// The cut falls right after the second user line; the trailing assistant turn
-	// (lines[5]) is withheld because its closing user line has not arrived.
-	wantCut := len(strings.Join(lines[:5], "\n") + "\n")
-	chunk, _, err := nextChunk(f, 0, 0, info.Size(), "codex", false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(chunk) != wantCut {
-		t.Fatalf("chunk len = %d, want %d (through the second user line)", len(chunk), wantCut)
-	}
-
-	// The trailing turn stays withheld while the file is still considered live.
-	tail, _, err := nextChunk(f, int64(wantCut), int64(wantCut), info.Size(), "codex", false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if tail != nil {
-		t.Errorf("unsettled trailing turn = %q, want nil", tail)
-	}
-
-	// Once the file has settled, the final turn is flushed whole.
-	flushed, _, err := nextChunk(f, int64(wantCut), int64(wantCut), info.Size(), "codex", true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(flushed) != lines[5]+"\n" {
-		t.Errorf("settled flush = %q, want %q", flushed, lines[5]+"\n")
-	}
-}
-
-// TestCodexChunkIncrementalScan checks that boundary detection resumes from
-// scanFrom instead of rescanning from offset: a turn whose earlier bytes were
-// already examined (and found to hold no boundary) is completed by scanning only
-// the newly appended tail, yet the returned chunk still covers from offset.
-func TestCodexChunkIncrementalScan(t *testing.T) {
-	user := `{"type":"response_item","payload":{"role":"user","content":[{"type":"input_text","text":"a"}]}}`
-	reasoning := `{"type":"response_item","payload":{"type":"reasoning","content":[{"type":"text","text":"r"}]}}`
-	assistant := `{"type":"response_item","payload":{"role":"assistant","content":[{"type":"output_text","text":"x"}]}}`
-	closing := `{"type":"response_item","payload":{"role":"user","content":[{"type":"input_text","text":"b"}]}}`
-
-	// [reasoning, assistant] is an in-progress turn with no boundary; the closing
-	// user line lands in the tail. scanFrom sits at the end of the in-progress turn,
-	// modelling a prior tick that scanned that far and withheld.
-	head := reasoning + "\n" + assistant + "\n"
-	content := head + closing + "\n"
-	path := tempFile(t, content)
-	f, err := os.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	info, _ := f.Stat()
-	size := info.Size()
-
-	chunk, scannedTo, err := nextChunk(f, 0, int64(len(head)), size, "codex", false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Even though the scan started past [reasoning, assistant], the chunk covers the
-	// whole turn from offset 0 through the closing user line.
-	if string(chunk) != content {
-		t.Errorf("chunk = %q, want the whole turn %q", chunk, content)
-	}
-	if scannedTo != size {
-		t.Errorf("scannedTo = %d, want %d", scannedTo, size)
-	}
-
-	// A user line sitting before scanFrom is trusted-already-scanned and so is not
-	// treated as a fresh boundary: with the cursor past the first user line, the cut
-	// is the later one, not the earlier.
-	twoUsers := user + "\n" + reasoning + "\n" + closing + "\n"
-	path2 := tempFile(t, twoUsers)
-	f2, err := os.Open(path2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f2.Close()
-	size2 := int64(len(twoUsers))
-	// scanFrom just past the first user line: detection should find only the closing
-	// user line and return the whole range from offset 0.
-	chunk2, _, err := nextChunk(f2, 0, int64(len(user)+1), size2, "codex", false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(chunk2) != twoUsers {
-		t.Errorf("chunk2 = %q, want %q", chunk2, twoUsers)
-	}
-}
-
 func hexSHA(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
 }
 
 // TestVerifyPrefixUsesCachedDigest proves the fast path compares the cached digest
-// instead of re-reading the prefix: the on-disk bytes differ from what the cache
-// claims, yet verification follows the cache, so no rehash happened.
+// instead of re-transforming the prefix: the on-disk bytes differ from what the
+// cache claims, yet verification follows the cache.
 func TestVerifyPrefixUsesCachedDigest(t *testing.T) {
 	c, _ := newTestClient(t)
 	f, err := os.Open(tempFile(t, "AAA\n"))
@@ -427,15 +301,15 @@ func TestVerifyPrefixUsesCachedDigest(t *testing.T) {
 	defer f.Close()
 
 	fs := &fileSync{base: 3, prefixSize: 4, prefixHasher: sha256.New()}
-	fs.prefixHasher.Write([]byte("BBB")) // cache claims the first 3 bytes were "BBB"
+	fs.prefixHasher.Write([]byte("BBB")) // cache claims the first 3 transformed bytes were "BBB"
 
-	ok, err := c.verifyPrefix(f, fs, 3, 4, hexSHA("BBB"))
+	ok, err := c.verifyPrefix(f, fs, "claude", 3, 4, hexSHA("BBB"))
 	if err != nil || !ok {
 		t.Fatalf("fast path against cached digest: ok=%v err=%v", ok, err)
 	}
 	// The same call must reject a hash that matches the on-disk "AAA", because the
 	// fast path never looks at the file.
-	ok, err = c.verifyPrefix(f, fs, 3, 4, hexSHA("AAA"))
+	ok, err = c.verifyPrefix(f, fs, "claude", 3, 4, hexSHA("AAA"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -444,91 +318,46 @@ func TestVerifyPrefixUsesCachedDigest(t *testing.T) {
 	}
 }
 
-// TestVerifyPrefixExtendsOverNewBytes proves the extend path hashes only the bytes
-// the server gained, trusting the cache for the rest: after the historical bytes
-// on disk are scribbled over, extending still matches because only the new span is
-// read.
-func TestVerifyPrefixExtendsOverNewBytes(t *testing.T) {
+// TestVerifyPrefixColdReTransforms proves the cold path re-transforms the original
+// file from zero to verify the transformed prefix and recover the original cursor.
+// The transcript here carries no tool body, so the transform is identity and the
+// transformed prefix equals the raw prefix.
+func TestVerifyPrefixColdReTransforms(t *testing.T) {
 	c, _ := newTestClient(t)
-	path := tempFile(t, "l1\nl2\n")
+	content := claudeLine("hi") + claudeLine("bye")
+	path := tempFile(t, content)
 	f, err := os.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer f.Close()
 
-	// Cold cache: a full hash of the first line populates the cache.
+	first := claudeLine("hi")
 	fs := &fileSync{}
-	if ok, err := c.verifyPrefix(f, fs, 3, 6, hexSHA("l1\n")); err != nil || !ok {
+	ok, err := c.verifyPrefix(f, fs, "claude", int64(len(first)), int64(len(content)), hexSHA(first))
+	if err != nil || !ok {
 		t.Fatalf("cold verify: ok=%v err=%v", ok, err)
 	}
-	if fs.base != 3 {
-		t.Fatalf("base after cold verify = %d, want 3", fs.base)
+	if fs.base != int64(len(first)) || fs.origBase != int64(len(first)) {
+		t.Fatalf("after cold verify base=%d origBase=%d, want %d/%d", fs.base, fs.origBase, len(first), len(first))
 	}
 
-	// Scribble over the already-cached bytes on disk. The extend path must not read
-	// them: it hashes only [3,6) and appends to the cached digest of "l1\n".
-	if err := os.WriteFile(path, []byte("XX\nl2\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	ok, err := c.verifyPrefix(f, fs, 6, 6, hexSHA("l1\nl2\n"))
-	if err != nil || !ok {
-		t.Fatalf("extend verify: ok=%v err=%v (must trust cache for [0,3))", ok, err)
-	}
-	if fs.base != 6 {
-		t.Fatalf("base after extend = %d, want 6", fs.base)
+	// A wrong hash is rejected.
+	if ok, err := c.verifyPrefix(f, &fileSync{}, "claude", int64(len(first)), int64(len(content)), hexSHA("nope")); err != nil || ok {
+		t.Fatalf("cold verify of wrong hash: ok=%v err=%v, want false", ok, err)
 	}
 }
 
-// TestNextChunkRejectsOversizedOpenMessage checks the open region is capped before
-// it is ever allocated: a Codex turn that never closes and grows past hardCap is
-// refused rather than buffered whole.
-func TestNextChunkRejectsOversizedOpenMessage(t *testing.T) {
-	orig := hardCap
-	hardCap = 16
-	defer func() { hardCap = orig }()
-
-	// Two complete lines, neither a user line, so the turn never closes; together
-	// they exceed the shrunken cap.
-	line := `{"type":"response_item","payload":{"role":"assistant"}}`
-	content := line + "\n" + line + "\n"
-	f, err := os.Open(tempFile(t, content))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-
-	if _, _, err := nextChunk(f, 0, 0, int64(len(content)), "codex", true); err == nil {
-		t.Fatal("expected an oversized-message error for an open turn past hardCap")
-	}
+// claudeLine builds a one-line Claude user message with the given text, newline
+// terminated, for protocol tests that need realistic JSONL the transform passes
+// through unchanged (no tool body).
+func claudeLine(text string) string {
+	return `{"type":"user","message":{"content":` + jsonString(text) + `}}` + "\n"
 }
 
-// TestRewindKeepsScanCursorBeforeFirstUpload covers the zero-byte-server case: a
-// file that is only append-growing keeps its scan cursor (so a withheld opening
-// message is not rescanned from zero every tick), while a file that diverged or
-// shrank rescans from the start.
-func TestRewindKeepsScanCursorBeforeFirstUpload(t *testing.T) {
-	// Append-only growth, nothing uploaded yet: keep the cursor.
-	fs := &fileSync{scanned: 100, prefixSize: 100}
-	fs.rewind(150)
-	if fs.scanned != 100 {
-		t.Errorf("append-growing cursor = %d, want 100 (kept)", fs.scanned)
-	}
-
-	// Bytes had been uploaded (base > 0) and the server dropped to zero: the dropped
-	// prefix holds boundaries, so rescan from the start.
-	fs = &fileSync{base: 50, scanned: 80, prefixSize: 100}
-	fs.rewind(150)
-	if fs.scanned != 0 {
-		t.Errorf("post-upload cursor = %d, want 0 (rescan)", fs.scanned)
-	}
-
-	// The file shrank: the scanned bytes are no longer what we saw, so rescan.
-	fs = &fileSync{scanned: 80, prefixSize: 100}
-	fs.rewind(50)
-	if fs.scanned != 0 {
-		t.Errorf("truncated cursor = %d, want 0 (rescan)", fs.scanned)
-	}
+func jsonString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
 }
 
 // TestConcurrentSyncSamePathSerializes runs many syncs of one path at once. The

@@ -342,6 +342,38 @@ PRODUCT.md), inline fleet analytics, and a reworked session read experience.
       session view (no numeric id leaked)
 - [ ] codex review (gpt-5.5 high) before merge, per the milestone convention
 
+## Milestone 10: client-side CAS upload (DONE)
+
+Goal: move tool-call body storage off the inline transcript and onto the CAS at
+upload time, so a transcript stays small however big the tool outputs are and the
+508 MiB-turn case (98% base64-image tool results) uploads at all.
+
+- [x] internal/parser/extract.go: the single definition of which bytes are tool
+      bodies, shared by client and server. ExtractBodies/RewriteLine rewrite each
+      tool input/result body to a `{"__akari_cas__":1,...}` sentinel inline (span
+      located via gjson Index, body bytes identical to what the reducer CAS'd) and
+      surface the lifted bodies; the reducer reads the sentinel back into a CAS
+      reference (claude/codex/pi + applyResult)
+- [x] internal/client/upload: transform.go streams the original tail line by line,
+      lifts bodies, and assembles boundary-aligned, size-bounded transformed
+      chunks; upload.go uploads the bodies (check + chunked PUT) then the
+      transformed chunk, resuming against the original file while the server tracks
+      the transformed cursor (verify compares the transformed-prefix hash; cold
+      cache re-transforms from zero to recover the offset mapping)
+- [x] Server: blob check + PUT endpoints (httpapi/blob_upload.go), HaveBlobs/PutBlob
+      with hash verification and a blob_pins TTL so an uploaded-but-unreferenced
+      body survives the sweep; applyDelta records a reference (no blob write) for an
+      uploaded body and re-locks it FOR KEY SHARE; SweepBlobs excludes live pins and
+      clears expired ones; ErrBlobNotUploaded guards a dangling reference
+- [x] migrations/0004_client_cas_upload.sql: blob_pins table (pre-release wipe of
+      session-scoped data, identity preserved)
+- [x] Tests: extraction parity (claude/codex/pi + a base64-image result: sha,
+      bytes, media equal the inline set), parser round-trip (sentinels parse to the
+      same projection), store pin/sweep safety + reference recording, and end-to-end
+      client→server dedup-on-resync (zero bytes, zero bodies, cold cache too), big
+      body (160 MiB result, transcript stays tiny), and resume; full suite green
+      with `-race -p 1`
+
 ## Deferred (from codex review, to address in later milestones)
 
 - Raw storage is a single growing BYTEA column, so each append rewrites the row

@@ -43,6 +43,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/ingest/session/{id}/chunk", s.requireIngest(s.handleChunk))
 	mux.HandleFunc("POST /api/v1/ingest/session/{id}/reset", s.requireIngest(s.handleReset))
 
+	// Client-side CAS upload: the client lifts tool bodies out of the transcript
+	// and uploads them here before sending the transcript that references them.
+	mux.HandleFunc("POST /api/v1/ingest/blobs/check", s.requireIngest(s.handleBlobCheck))
+	mux.HandleFunc("PUT /api/v1/ingest/blob/{sha256}", s.requireIngest(s.handleBlobUpload))
+
 	// Static assets.
 	mux.Handle("GET /static/", staticHandler())
 

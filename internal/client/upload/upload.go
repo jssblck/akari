@@ -14,24 +14,20 @@ import (
 	"hash"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/jssblck/akari/internal/parser"
 )
 
-// chunkTarget is the preferred chunk size. A chunk is trimmed back to a message
-// boundary (a newline for Claude and pi, a turn boundary for Codex) so it carries
-// only whole messages. Well-behaved small sessions move in sub-megabyte chunks.
-const chunkTarget = 1 << 20
-
-// hardCap bounds how far the client will grow a chunk to reach a boundary when a
-// single message (a JSONL line, or a folded Codex turn) is larger than
-// chunkTarget. A message that big is served alone, as one oversized chunk; only a
-// truly pathological size is refused. It matches the server's maxChunk, and since
-// the server parses one oversized chunk in one region, it also bounds the server's
-// worst-case parse memory and the largest buffer the client allocates per chunk.
-// It is a var so tests can shrink it to exercise the refusal path.
+// hardCap bounds the largest single transformed message (one rewritten JSONL
+// line) the client will buffer. After the transform lifts tool bodies to the CAS
+// a line is small, so this only refuses a truly pathological line; it matches the
+// server's maxChunk, bounding the server's worst-case parse memory too. It is a
+// var so tests can shrink it to exercise the refusal path.
 var hardCap int64 = 128 << 20
 
 // settleWindow is how long a session file must be idle before the client uploads
@@ -88,8 +84,18 @@ type Client struct {
 
 // fileSync is the per-file state that keeps repeated syncs of an append-only
 // session O(newly appended bytes). It is a cache only: dropping it (a restart, a
-// fresh Client) costs a one-time full re-hash and re-scan, never correctness, and
-// any sign the file diverged from what it describes forces that full path.
+// fresh Client) costs a one-time full re-hash and re-transform, never
+// correctness, and any sign the file diverged from what it describes forces that
+// full path.
+//
+// Under the client-CAS protocol the bytes the server stores are the TRANSFORMED
+// transcript (tool bodies lifted to the CAS, replaced by sentinels), so the
+// verified-prefix cache is kept over the transformed stream: base is the count of
+// transformed bytes the server holds, prefixHasher is the sha256 of those
+// transformed bytes, and origBase is the count of original on-disk bytes that
+// transform to them. The client still resumes by the original file (it is what it
+// can recompute statelessly), so origBase is where the next transform pass reads
+// from.
 type fileSync struct {
 	// lock serializes the whole sync of one path. The fields below and the hasher
 	// are not safe for concurrent use, so SyncFile holds it for its entire run; two
@@ -100,20 +106,18 @@ type fileSync struct {
 	// shutdown. A nil channel (a fileSync built directly in a test) means no locking.
 	lock chan struct{}
 
-	// Verified prefix. Local bytes [0, base) are confirmed to match what the server
-	// stored, and prefixHasher has consumed exactly those bytes, so the next
-	// verification extends the digest over only the newly stored bytes instead of
-	// rehashing from zero. prefixSize is the file size observed at the last
-	// verification; a file shorter than that has been truncated, so the cheap path
-	// is abandoned for a full re-hash.
+	// Verified prefix, over the transformed stream. The server holds transformed
+	// bytes [0, base); prefixHasher has consumed exactly those bytes, so the next
+	// verification compares the cached digest (an append) instead of re-transforming
+	// from zero. origBase is the original-file offset that produced base transformed
+	// bytes, so the next transform pass reads original [origBase, size). prefixSize
+	// is the original file size observed at the last verification; a file shorter
+	// than that has been truncated, so the cheap path is abandoned for a full
+	// re-transform.
 	base         int64
+	origBase     int64
 	prefixHasher hash.Hash
 	prefixSize   int64
-
-	// Scan cursor. Bytes [base, scanned) were already examined for a message
-	// boundary and hold none, so boundary detection resumes at scanned and reads
-	// only the newly appended tail. It is always >= base.
-	scanned int64
 }
 
 // New builds a Client. baseURL is the server root (trailing slash optional).
@@ -143,19 +147,14 @@ func (c *Client) fileState(path string) *fileSync {
 }
 
 // rewind sets the verified prefix back to empty: the server holds nothing, so the
-// whole file will re-upload from zero. It keeps the scan cursor only when the bytes
-// it covers are both unsent and unchanged: base was already 0 (nothing had been
-// accepted, so [0, scanned) is still a boundary-free unsent prefix) and the file
-// only grew. Otherwise (we had uploaded bytes whose boundaries must be re-found, or
-// the file shrank under us) it rescans from zero.
+// whole file will re-transform and re-upload from zero. Both the transformed
+// cursor and the original cursor reset, since with nothing accepted there is no
+// verified original prefix to resume from.
 func (fs *fileSync) rewind(size int64) {
-	keepScan := fs.base == 0 && size >= fs.prefixSize
 	fs.base = 0
+	fs.origBase = 0
 	fs.prefixHasher = sha256.New()
 	fs.prefixSize = size
-	if !keepScan {
-		fs.scanned = 0
-	}
 }
 
 // maxConflictRetries bounds how many times a single SyncFile re-announces after
@@ -236,12 +235,10 @@ func (c *Client) syncOnce(ctx context.Context, t Target, fs *fileSync, f *os.Fil
 
 	action := ActionUploaded
 	if ann.StoredBytes == 0 {
-		// The server holds nothing: there is no prefix to verify. rewind keeps the
-		// scan cursor when the file is just append-growing before its first chunk is
-		// uploadable, so a withheld opening turn is not rescanned from zero each tick.
+		// The server holds nothing: there is no prefix to verify.
 		fs.rewind(size)
 	} else {
-		ok, err := c.verifyPrefix(f, fs, ann.StoredBytes, size, ann.PrefixSHA256)
+		ok, err := c.verifyPrefix(f, fs, t.Agent, ann.StoredBytes, size, ann.PrefixSHA256)
 		if err != nil {
 			return Outcome{}, false, err
 		}
@@ -256,38 +253,41 @@ func (c *Client) syncOnce(ctx context.Context, t Target, fs *fileSync, f *os.Fil
 		}
 	}
 
-	if fs.scanned < fs.base {
-		fs.scanned = fs.base
-	}
 	out := Outcome{StoredBytes: ann.StoredBytes}
-	for fs.base < size {
-		chunk, scannedTo, err := nextChunk(f, fs.base, fs.scanned, size, t.Agent, settled)
+
+	// Transform the unsent original tail into boundary-aligned transformed chunks,
+	// lifting every tool body to the CAS. Each pass reads original [origBase, size);
+	// origBase advances only past bytes the server accepts, so steady-state work is
+	// proportional to the newly appended bytes. A withheld trailing turn leaves
+	// origBase where it is and is re-examined next tick (the only repeated work, and
+	// only for an open final turn).
+	res, err := transformTail(f, fs.origBase, size, t.Agent, settled)
+	if err != nil {
+		return out, false, err
+	}
+	for _, ch := range res.chunks {
+		// Upload the bodies this chunk references before the chunk itself, so the
+		// transcript never lands referencing a body the CAS does not yet hold.
+		if err := c.uploadBodies(ctx, ch.Bodies); err != nil {
+			return out, false, err
+		}
+		r, err := c.chunk(ctx, ann.SessionID, fs.base, ch.Data)
 		if err != nil {
 			return out, false, err
 		}
-		if len(chunk) == 0 {
-			// Only an incomplete or in-progress trailing message remains. Remember how
-			// far we scanned so the next tick resumes from there instead of rescanning.
-			fs.scanned = scannedTo
-			break
-		}
-		res, err := c.chunk(ctx, ann.SessionID, fs.base, chunk)
-		if err != nil {
-			return out, false, err
-		}
-		if res.conflict {
+		if r.conflict {
 			return out, true, nil // re-announce and re-verify the prefix
 		}
-		// The server accepted these bytes, so extend the verified prefix over them
-		// (hashing the chunk we already hold, not re-reading the file) and resume
-		// scanning from the new send position.
-		fs.prefixHasher.Write(chunk)
-		fs.base = res.storedBytes
+		// The server accepted these transformed bytes, so extend the verified
+		// transformed-prefix digest over them (hashing the chunk we already hold) and
+		// advance the original cursor past the bytes they came from.
+		fs.prefixHasher.Write(ch.Data)
+		fs.base = r.storedBytes
+		fs.origBase += ch.OrigLen
 		fs.prefixSize = size
-		fs.scanned = fs.base
-		out.UploadedBytes += int64(len(chunk))
-		out.StoredBytes = res.storedBytes
-		out.MessageCount = res.messageCount
+		out.UploadedBytes += int64(len(ch.Data))
+		out.StoredBytes = r.storedBytes
+		out.MessageCount = r.messageCount
 	}
 
 	if out.UploadedBytes == 0 && action != ActionReset {
@@ -295,79 +295,6 @@ func (c *Client) syncOnce(ctx context.Context, t Target, fs *fileSync, f *os.Fil
 	}
 	out.Action = action
 	return out, false, nil
-}
-
-// nextChunk returns the bytes to send next, [base, boundary), so a chunk never
-// splits a message. For Claude and pi a message is one JSONL line, so the boundary
-// is the last newline. For Codex a message is a folded turn (reasoning, tool
-// calls, and the assistant reply), so the boundary is the last turn end, which
-// keeps a turn from spanning a chunk (and so a parse region).
-//
-// scanFrom is where boundary detection resumes: bytes in [base, scanFrom) were
-// examined on an earlier tick and hold no boundary, and the file only appends, so
-// only [scanFrom, size) needs scanning. nextChunk returns the chunk and scannedTo,
-// how far it got, which the caller caches as the next scanFrom. A nil chunk means
-// nothing is completable yet: an unfinished trailing line, or, for Codex, a
-// trailing in-progress turn whose closing user line has not arrived and whose file
-// has not settled. settled lets the final turn of an idle session be flushed even
-// without that closing line.
-//
-// The open region [base, size) is held to hardCap: a single message that grows
-// past it across ticks can never be one chunk, so nextChunk fails before ever
-// allocating it, keeping the largest buffer it returns bounded by hardCap.
-func nextChunk(f *os.File, base, scanFrom, size int64, agent string, settled bool) (chunk []byte, scannedTo int64, err error) {
-	if scanFrom < base {
-		scanFrom = base
-	}
-	window := int64(chunkTarget)
-	for {
-		end := scanFrom + window
-		if end > size {
-			end = size
-		}
-		buf := make([]byte, end-scanFrom)
-		if err := readAt(f, buf, scanFrom); err != nil {
-			return nil, scanFrom, err
-		}
-		atEOF := end >= size
-
-		if nl := bytes.LastIndexByte(buf, '\n'); nl >= 0 {
-			completeEnd := scanFrom + int64(nl) + 1
-			if boundary := boundaryWithin(buf[:nl+1], scanFrom, agent); boundary > 0 {
-				if boundary-base > hardCap {
-					return nil, scanFrom, errMessageTooBig(agent)
-				}
-				up, err := readRange(f, base, boundary)
-				return up, boundary, err
-			}
-			// Complete lines, but none closes a message: a Codex turn still open. Once
-			// settled, flush it whole; otherwise withhold and resume past these lines.
-			if atEOF {
-				if completeEnd-base > hardCap {
-					return nil, scanFrom, errMessageTooBig(agent)
-				}
-				if settled {
-					up, err := readRange(f, base, completeEnd)
-					return up, completeEnd, err
-				}
-				return nil, completeEnd, nil
-			}
-		} else if atEOF {
-			// No complete line in the scanned tail: an unfinished trailing line.
-			if size-base > hardCap {
-				return nil, scanFrom, errMessageTooBig(agent)
-			}
-			return nil, end, nil
-		}
-
-		if window >= hardCap {
-			return nil, scanFrom, errMessageTooBig(agent)
-		}
-		window *= 2
-		if window > hardCap {
-			window = hardCap
-		}
-	}
 }
 
 // boundaryWithin returns the absolute file position just past the last message
@@ -388,15 +315,6 @@ func errMessageTooBig(agent string) error {
 	return fmt.Errorf("session %s message exceeds %d bytes without a boundary", agent, hardCap)
 }
 
-// readRange reads [from, to) from f into a fresh buffer.
-func readRange(f *os.File, from, to int64) ([]byte, error) {
-	b := make([]byte, to-from)
-	if err := readAt(f, b, from); err != nil {
-		return nil, err
-	}
-	return b, nil
-}
-
 // readAt fills buf entirely from offset off. A short read means the file was
 // truncated or rotated between Stat and now, so the missing bytes would otherwise
 // be read as zero-filled session content; readAt treats any short read as an error
@@ -414,8 +332,8 @@ func readAt(f *os.File, buf []byte, off int64) error {
 		off, off+int64(len(buf)), n, len(buf), err)
 }
 
-// agentCodex is the agent string whose sessions fold a turn across lines. Kept
-// local so the upload package does not depend on the parser.
+// agentCodex is the agent string whose sessions fold a turn across lines, so a
+// chunk boundary is a turn close (a user line) rather than any newline.
 const agentCodex = "codex"
 
 // codexLine is the minimal shape needed to spot a turn boundary: a Codex turn
@@ -449,72 +367,48 @@ func lastCodexTurnEnd(buf []byte) int {
 	return last
 }
 
-// verifyPrefix reports whether the local file's first serverBytes bytes hash to
-// the server's prefix hash, and advances fs to record that verification. It avoids
-// rehashing the whole prefix on every sync: an append-only file whose prefix was
-// already hashed is confirmed by comparing the cached digest (no I/O), and a file
-// the server has grown past our cache is confirmed by hashing only the new bytes.
-// Only a cold cache, a server rewind, or a truncation forces a full re-hash.
+// verifyPrefix reports whether the TRANSFORMED prefix of the local file matches
+// the server's stored transformed bytes, and advances fs to record that
+// verification. The server holds transformed bytes (tool bodies lifted to the
+// CAS), so the comparison is against the transformed prefix, not the raw file.
 //
-// The cheap paths trust that bytes the cache already covered have not changed
-// underneath us. That holds for append-only session logs; a same-length in-place
-// rewrite of historical bytes would be missed, which is why a shorter file (the
-// real-world divergence signal, from rotation or truncation) drops to the full
-// re-hash, and the server's per-chunk offset checks backstop the rest.
-func (c *Client) verifyPrefix(f *os.File, fs *fileSync, serverBytes, size int64, want string) (bool, error) {
-	if size < serverBytes {
-		return false, nil // local file is shorter than the server: cannot match
-	}
-	switch {
-	case fs.prefixHasher != nil && fs.base == serverBytes && size >= fs.prefixSize:
-		// Append-only growth with the prefix already hashed: compare the cached digest.
+// The fast path is the common one: an append-only file whose transformed prefix
+// the cache already covers exactly (fs.base == serverBytes) is confirmed by
+// comparing the cached digest with no I/O. Otherwise (a cold cache after a
+// restart, a server rewind, a concurrent writer that advanced the cursor, or a
+// truncation) the client re-transforms the original file from zero until the
+// transformed output reaches serverBytes, hashing as it goes and recovering the
+// origBase mapping. That cold pass re-reads and re-hashes the bodies in the prefix
+// once, the documented cost of a dropped cache, but never re-uploads them.
+func (c *Client) verifyPrefix(f *os.File, fs *fileSync, agent string, serverBytes, size int64, want string) (bool, error) {
+	// serverBytes counts TRANSFORMED bytes and size counts ORIGINAL file bytes, so
+	// they are not directly comparable: a sentinel can be larger or smaller than the
+	// body it replaces. The fast path's guard is on the original coordinate: the
+	// file must still hold at least the original bytes the cache already consumed
+	// (origBase). A file shorter than that was truncated and drops to the cold path.
+	if fs.prefixHasher != nil && fs.base == serverBytes && size >= fs.origBase && size >= fs.prefixSize {
+		// Append-only growth with the transformed prefix already hashed: compare the
+		// cached digest.
 		fs.prefixSize = size
 		return hex.EncodeToString(fs.prefixHasher.Sum(nil)) == want, nil
-
-	case fs.prefixHasher != nil && fs.base < serverBytes && size >= fs.prefixSize:
-		// The server gained bytes since we last verified: extend the digest over only
-		// the new span. On a mismatch the caller resets and rebuilds from zero.
-		if err := hashRange(f, fs.prefixHasher, fs.base, serverBytes); err != nil {
-			return false, err
-		}
-		if hex.EncodeToString(fs.prefixHasher.Sum(nil)) != want {
-			return false, nil
-		}
-		fs.base = serverBytes
-		fs.prefixSize = size
-		return true, nil
-
-	default:
-		// Cold cache, server rewind, or truncation: re-hash the prefix from zero.
-		h := sha256.New()
-		if err := hashRange(f, h, 0, serverBytes); err != nil {
-			return false, err
-		}
-		if hex.EncodeToString(h.Sum(nil)) != want {
-			return false, nil
-		}
-		fs.prefixHasher = h
-		fs.base = serverBytes
-		fs.prefixSize = size
-		fs.scanned = serverBytes
-		return true, nil
 	}
-}
 
-// hashRange feeds [from, to) of f into h. A short read (the file was truncated
-// since Stat) is an error, not a silently shorter prefix that would hash wrong.
-func hashRange(f *os.File, h hash.Hash, from, to int64) error {
-	if to <= from {
-		return nil
-	}
-	n, err := io.Copy(h, io.NewSectionReader(f, from, to-from))
+	// Cold path: re-transform the original file from zero until the transformed
+	// output reaches serverBytes, computing both the digest and the original offset
+	// that maps to it. The transform is deterministic, so the recomputed prefix is
+	// byte identical to what was uploaded.
+	h, origBase, ok, err := transformPrefixDigest(f, agent, size, serverBytes)
 	if err != nil {
-		return fmt.Errorf("hash session file [%d,%d): %w", from, to, err)
+		return false, err
 	}
-	if n != to-from {
-		return fmt.Errorf("hash session file [%d,%d): short read (%d of %d bytes)", from, to, n, to-from)
+	if !ok || hex.EncodeToString(h.Sum(nil)) != want {
+		return false, nil
 	}
-	return nil
+	fs.prefixHasher = h
+	fs.base = serverBytes
+	fs.origBase = origBase
+	fs.prefixSize = size
+	return true, nil
 }
 
 type announceResp struct {
@@ -589,6 +483,83 @@ func (c *Client) chunk(ctx context.Context, sessionID, offset int64, data []byte
 		return chunkResult{}, fmt.Errorf("chunk: server returned %d: %s", resp.StatusCode, strings.TrimSpace(string(payload)))
 	}
 }
+
+// uploadBodies uploads the tool bodies a transformed chunk references, sending
+// only the ones the server lacks. It asks the server which hashes are missing
+// (the CAS dedupes globally, so a body any session already stored is skipped),
+// then streams each missing body to the CAS under its hash. A body is uploaded
+// before the transcript that references it, and the server pins it against the
+// sweep, so the reference can never land on a body the CAS does not hold.
+func (c *Client) uploadBodies(ctx context.Context, bodies []parser.Body) error {
+	if len(bodies) == 0 {
+		return nil
+	}
+	shas := make([]string, len(bodies))
+	for i, b := range bodies {
+		shas[i] = b.SHA256
+	}
+	missing, err := c.checkBlobs(ctx, shas)
+	if err != nil {
+		return err
+	}
+	uploaded := map[string]bool{}
+	for _, b := range bodies {
+		if !missing[b.SHA256] || uploaded[b.SHA256] {
+			continue // already present on the server, or already sent this pass
+		}
+		if err := c.putBlob(ctx, b); err != nil {
+			return err
+		}
+		uploaded[b.SHA256] = true
+	}
+	return nil
+}
+
+// checkBlobs returns the set of hashes the server does not yet hold.
+func (c *Client) checkBlobs(ctx context.Context, shas []string) (map[string]bool, error) {
+	var resp struct {
+		Missing []string `json:"missing"`
+	}
+	if err := c.doJSON(ctx, http.MethodPost, "/api/v1/ingest/blobs/check",
+		map[string]any{"sha256": shas}, &resp); err != nil {
+		return nil, err
+	}
+	missing := make(map[string]bool, len(resp.Missing))
+	for _, sha := range resp.Missing {
+		missing[sha] = true
+	}
+	return missing, nil
+}
+
+// putBlob streams one tool body to the CAS. The body is held in memory as a
+// string (one line's worth, the size of a single tool input or result), so the
+// request streams from it without a second copy; a body larger than one line never
+// arises, since the transform lifts each body from its own line.
+func (c *Client) putBlob(ctx context.Context, b parser.Body) error {
+	url := fmt.Sprintf("%s/api/v1/ingest/blob/%s?media_type=%s",
+		c.baseURL, b.SHA256, urlQueryEscape(b.MediaType))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, strings.NewReader(b.Content))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.ContentLength = int64(len(b.Content))
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	payload, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("upload blob %s: server returned %d: %s", b.SHA256, resp.StatusCode, strings.TrimSpace(string(payload)))
+	}
+	return nil
+}
+
+// urlQueryEscape escapes a value for use in a query string.
+func urlQueryEscape(s string) string { return url.QueryEscape(s) }
 
 // doJSON performs a JSON request, optionally decoding a JSON response into out.
 func (c *Client) doJSON(ctx context.Context, method, path string, body, out any) error {

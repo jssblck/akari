@@ -60,6 +60,11 @@ type Message struct {
 // the following user entry, which may land in a later region) is back-patched by
 // an UPDATE keyed on it rather than by a parser-held id->row map. It is carried
 // on inserts only; a Session assembled for tests ignores it.
+// InputSHA256, InputBytes, and InputMediaType carry a CAS reference when the
+// client lifted the input body to the CAS and left a sentinel in the transcript:
+// the server records the reference instead of re-storing the body. InputJSON is
+// empty in that case. When the body travels inline, InputJSON holds it and the
+// SHA/bytes/media fields are unset (the server hashes and sizes the inline body).
 type ToolCall struct {
 	MessageOrdinal  int
 	CallIndex       int
@@ -67,7 +72,11 @@ type ToolCall struct {
 	Category        string
 	FilePath        string
 	InputJSON       string
+	InputSHA256     string
+	InputBytes      int
+	InputMediaType  string
 	ResultBody      string
+	ResultSHA256    string
 	ResultBytes     int
 	ResultMediaType string
 	ResultStatus    string // "ok" | "error" | "" (pending)

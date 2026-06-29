@@ -62,12 +62,19 @@ type MessageOp struct {
 }
 
 // ToolResultOp back-patches a tool call's result, matched by the agent's call id.
+//
+// A result body normally travels inline (Body holds it) and the server writes it
+// to the CAS. When the client has already lifted the body to the CAS and left a
+// sentinel in the transcript, BodySHA256 is set instead: the server records the
+// reference and writes no blob, but Bytes and MediaType still describe the body
+// exactly so the row's metadata is unchanged.
 type ToolResultOp struct {
-	CallUID   string
-	Body      string
-	Bytes     int
-	MediaType string
-	Status    string
+	CallUID    string
+	Body       string
+	BodySHA256 string
+	Bytes      int
+	MediaType  string
+	Status     string
 }
 
 // Delta is everything one Reduce call produces for one raw region: rows to write
@@ -313,7 +320,8 @@ func assemble(d Delta) Session {
 			continue
 		}
 		tc := &s.ToolCalls[i]
-		tc.ResultBody, tc.ResultBytes, tc.ResultMediaType, tc.ResultStatus = tr.Body, tr.Bytes, tr.MediaType, tr.Status
+		tc.ResultBody, tc.ResultSHA256 = tr.Body, tr.BodySHA256
+		tc.ResultBytes, tc.ResultMediaType, tc.ResultStatus = tr.Bytes, tr.MediaType, tr.Status
 	}
 
 	s.UsageEvent = d.Usage

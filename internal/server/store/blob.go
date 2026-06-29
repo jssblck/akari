@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -111,6 +113,160 @@ func writeBlobTx(ctx context.Context, tx pgx.Tx, content string, mediaType strin
 	return sum, nil
 }
 
+// ErrBlobNotUploaded reports that a tool body the transcript references by sha256
+// is not in the CAS. Under the client-CAS protocol the client uploads every body
+// before the transcript that references it, so this means an out-of-order or
+// dropped upload; the parse leaves the cursor for a retry rather than inventing a
+// dangling reference.
+var ErrBlobNotUploaded = errors.New("referenced tool body is not present in the CAS")
+
+// pinBlobRefTx locks an already-present blob FOR KEY SHARE so a concurrent sweep
+// cannot reclaim it between this check and the referencing tool_calls insert in
+// the same transaction. It is the read-side analogue of the lock writeBlobTx
+// takes when it finds the hash already present: the sweep's FOR UPDATE conflicts
+// with this lock, so the blob survives until the reference commits. A missing
+// blob is ErrBlobNotUploaded: the client uploads bodies before the transcript, so
+// the row must exist by the time the reference is recorded.
+func pinBlobRefTx(ctx context.Context, tx pgx.Tx, sha string) error {
+	var dummy int
+	err := tx.QueryRow(ctx, "SELECT 1 FROM blobs WHERE sha256 = $1 FOR KEY SHARE", sha).Scan(&dummy)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrBlobNotUploaded
+	}
+	return err
+}
+
+// HaveBlobs returns, for a set of candidate hashes, the subset the CAS already
+// holds. The client calls this before uploading tool bodies so a body the server
+// already has (from this session's earlier sync, or any other session's, since
+// the CAS dedupes globally) is never re-sent.
+func (s *Store) HaveBlobs(ctx context.Context, shas []string) (map[string]bool, error) {
+	have := map[string]bool{}
+	if len(shas) == 0 {
+		return have, nil
+	}
+	rows, err := s.Pool.Query(ctx, "SELECT sha256 FROM blobs WHERE sha256 = ANY($1)", shas)
+	if err != nil {
+		return nil, fmt.Errorf("query present blobs: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sha string
+		if err := rows.Scan(&sha); err != nil {
+			return nil, err
+		}
+		have[sha] = true
+	}
+	return have, rows.Err()
+}
+
+// blobPinTTL is how long a freshly uploaded, not-yet-referenced blob is protected
+// from the sweep. The client uploads a body then sends the transcript that
+// references it within one sync, far inside this window; the pin only has to
+// outlive that gap (and a crash between the two), after which the tool_calls
+// reference keeps the blob alive and the pin lapses harmlessly. It is generous so
+// a slow or retried sync cannot lose a body out from under its transcript.
+const blobPinTTL = time.Hour
+
+// PutBlob stores a content-addressed body uploaded directly by the client and
+// pins it against the sweep for blobPinTTL. The body is streamed in from r in
+// bounded slices so neither the client nor the server holds the whole body in
+// memory: a 500 MiB tool result lands as a large object without a 500 MiB buffer.
+// The stored bytes are verified against the claimed sha256, so a corrupt upload
+// cannot poison the CAS (a later transcript referencing that hash would serve
+// wrong bytes). An already-present body is not rewritten; its pin is refreshed so
+// a re-sync still protects it.
+func (s *Store) PutBlob(ctx context.Context, sha, mediaType string, r io.Reader) error {
+	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		// Refresh the pin first, and on an already-present blob take FOR KEY SHARE so
+		// a racing sweep cannot delete it before the pin lands.
+		var dummy int
+		err := tx.QueryRow(ctx, "SELECT 1 FROM blobs WHERE sha256 = $1 FOR KEY SHARE", sha).Scan(&dummy)
+		if err == nil {
+			// Drain the request body so the upload completes cleanly even though we
+			// already have the content (the client need not special-case a 200 here).
+			_, _ = io.Copy(io.Discard, r)
+			return upsertBlobPin(ctx, tx, sha)
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+
+		los := tx.LargeObjects()
+		oid, err := los.Create(ctx, 0)
+		if err != nil {
+			return err
+		}
+		lo, err := los.Open(ctx, oid, pgx.LargeObjectModeWrite)
+		if err != nil {
+			return err
+		}
+		h := sha256.New()
+		buf := make([]byte, blobWriteChunk)
+		var total int64
+		for {
+			n, rerr := r.Read(buf)
+			if n > 0 {
+				if _, werr := lo.Write(buf[:n]); werr != nil {
+					_ = lo.Close()
+					return werr
+				}
+				h.Write(buf[:n])
+				total += int64(n)
+			}
+			if rerr == io.EOF {
+				break
+			}
+			if rerr != nil {
+				_ = lo.Close()
+				return rerr
+			}
+		}
+		if err := lo.Close(); err != nil {
+			return err
+		}
+
+		got := hex.EncodeToString(h.Sum(nil))
+		if got != sha {
+			// The bytes do not hash to the claimed key; drop the large object and
+			// reject so a mismatched body never enters the CAS under a wrong name.
+			_ = los.Unlink(ctx, oid)
+			return fmt.Errorf("uploaded blob hash %s does not match declared %s", got, sha)
+		}
+		if mediaType == "" {
+			mediaType = "application/octet-stream"
+		}
+		tag, err := tx.Exec(ctx,
+			`INSERT INTO blobs (sha256, lo_oid, byte_len, media_type)
+			 VALUES ($1, $2, $3, $4) ON CONFLICT (sha256) DO NOTHING`,
+			sha, oid, total, mediaType)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			// Another upload won the race for this hash; drop our duplicate large
+			// object rather than strand it.
+			if err := los.Unlink(ctx, oid); err != nil {
+				return err
+			}
+		}
+		return upsertBlobPin(ctx, tx, sha)
+	})
+}
+
+// upsertBlobPin records or refreshes a sweep-protection pin for a blob, extending
+// its expiry to now + blobPinTTL.
+func upsertBlobPin(ctx context.Context, tx pgx.Tx, sha string) error {
+	_, err := tx.Exec(ctx,
+		`INSERT INTO blob_pins (sha256, expires_at) VALUES ($1, now() + $2)
+		 ON CONFLICT (sha256) DO UPDATE SET expires_at = EXCLUDED.expires_at`,
+		sha, blobPinTTL)
+	if err != nil {
+		return fmt.Errorf("pin blob %s: %w", sha, err)
+	}
+	return nil
+}
+
 // BlobMeta returns a blob's size and media type without reading its body.
 func (s *Store) BlobMeta(ctx context.Context, sha256hex string) (Blob, error) {
 	var b Blob
@@ -169,9 +325,19 @@ func (s *Store) SessionReferencesBlob(ctx context.Context, sessionID int64, sha2
 // object. Liveness is computed, not refcounted, so the sweep is self-healing: it
 // is only needed after a delete or re-parse, the only events that can orphan a
 // blob. It returns the number of blobs removed.
+//
+// A freshly uploaded body the client has not yet referenced from a transcript is
+// protected by an unexpired pin (see PutBlob): the orphan predicate excludes any
+// blob with a live blob_pins row, so the gap between uploading a body and
+// uploading the transcript that references it cannot lose the body. Expired pins
+// are cleared first so a body whose transcript never arrived is eventually
+// reclaimable.
 func (s *Store) SweepBlobs(ctx context.Context) (int, error) {
 	var removed int
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, "DELETE FROM blob_pins WHERE expires_at <= now()"); err != nil {
+			return fmt.Errorf("clear expired blob pins: %w", err)
+		}
 		// FOR UPDATE conflicts with the FOR KEY SHARE a live writer holds on a blob
 		// it is about to reference; SKIP LOCKED makes the sweep pass over those
 		// rather than block on (or delete) a blob mid-write. The orphan predicate is
@@ -183,6 +349,9 @@ func (s *Store) SweepBlobs(ctx context.Context) (int, error) {
 			           WHERE t.input_sha256 = b.sha256 OR t.result_sha256 = b.sha256)
 			    AND NOT EXISTS (
 			          SELECT 1 FROM attachments a WHERE a.sha256 = b.sha256)
+			    AND NOT EXISTS (
+			          SELECT 1 FROM blob_pins p
+			           WHERE p.sha256 = b.sha256 AND p.expires_at > now())
 			  FOR UPDATE SKIP LOCKED`)
 		if err != nil {
 			return err
