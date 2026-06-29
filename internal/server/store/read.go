@@ -469,8 +469,20 @@ func (s *Store) GlobalFacets(ctx context.Context) (GlobalFacetValues, error) {
 	if err := prows.Err(); err != nil {
 		return f, fmt.Errorf("iterate project facets: %w", err)
 	}
+	// Surface git-remote projects above the standalone/orphaned folders: a real
+	// project is what a reader scans for first, the looser local ones sit below.
+	// A stable sort preserves the busiest-first order from the query within each
+	// group.
+	sort.SliceStable(f.Projects, func(i, j int) bool {
+		return !isLocalKind(f.Projects[i].Kind) && isLocalKind(f.Projects[j].Kind)
+	})
 	return f, nil
 }
+
+// isLocalKind reports whether a project kind is one of the non-remote kinds
+// (standalone or orphaned), which sort below git-remote projects in the facet
+// rail.
+func isLocalKind(kind string) bool { return kind == "standalone" || kind == "orphaned" }
 
 // scanDetail loads one session with its project, by an arbitrary WHERE clause.
 func (s *Store) scanDetail(ctx context.Context, where string, arg any) (SessionDetail, error) {
