@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/tidwall/gjson"
 )
 
 // State is the carry-over a parser needs to resume from a byte cursor. It is
@@ -77,6 +79,22 @@ type ToolResultOp struct {
 	Status     string
 }
 
+// AttachmentOp records one binary attachment (today a lifted image) against a
+// message. Like a tool body it reaches the CAS by one of two paths: when the client
+// lifted the image and left a sentinel, SHA256 is set and the server records the
+// reference with no blob write; otherwise Content holds the decoded bytes inline for
+// the server to store. Bytes and MediaType describe the decoded image either way, so
+// the row's metadata is the same whichever path delivered the bytes.
+type AttachmentOp struct {
+	MessageOrdinal int
+	SHA256         string
+	Content        string
+	ContentType    string
+	Bytes          int
+	MediaType      string
+	Filename       string
+}
+
 // Delta is everything one Reduce call produces for one raw region: the rows to
 // write and the region's timestamp span. It carries operations, not a whole
 // session, so applying it is append-only work proportional to the region, never to
@@ -89,6 +107,7 @@ type Delta struct {
 	ToolCalls   []ToolCall
 	ToolResults []ToolResultOp
 	Usage       []Usage
+	Attachments []AttachmentOp
 
 	Started time.Time
 	Ended   time.Time
@@ -141,6 +160,13 @@ type reducer struct {
 
 	lastUsageOffset int64
 	lastUsageIndex  int
+
+	// seenAttach dedups attachments by their content key within this region so the
+	// same image carried by more than one event (a Codex image_generation_call and
+	// the image_generation_end that mirrors it, or a user_message event echoing a
+	// message's pasted image) is recorded once. A whole turn lands in one region, so
+	// the duplicates always fall in the same Reduce call and this catches them.
+	seenAttach map[string]bool
 }
 
 // observe widens the region's timestamp span.
@@ -156,13 +182,97 @@ func (r *reducer) observe(t time.Time) {
 	}
 }
 
-// addUser appends a user message and advances the ordinal.
-func (r *reducer) addUser(content string, ts time.Time) {
+// addUser appends a user message and advances the ordinal, returning the ordinal it
+// took so a caller can attach images carried by the same line to it.
+func (r *reducer) addUser(content string, ts time.Time) int {
 	ord := r.st.NextOrdinal
 	r.st.NextOrdinal++
 	r.d.Messages = append(r.d.Messages, MessageOp{
 		Ordinal: ord, Role: RoleUser, Content: content, Timestamp: ts,
 	})
+	return ord
+}
+
+// addAttachment records one binary attachment against a message. The common path is a
+// CAS sentinel: the client lifts every image to the CAS (both the small-line rewrite
+// and the streaming big-line path lift images), so the server records a reference and
+// never holds the bytes. The fallback decodes an inline base64 image to its binary form
+// for the server to store. It dedups by content key within the region, so the same
+// image echoed by a second event is recorded once. A value that is neither a sentinel
+// nor a decodable base64 image is ignored, mirroring the extractor's gate.
+//
+// The inline decode is memory-bounded by a fixed window, not by session size. A large
+// image is always lifted to a sentinel by the client (a large line is the big-line
+// streaming path's job, and an image there is located and lifted, not inlined), so the
+// decode branch only runs for an image that arrived inline: one small enough to have
+// ridden under the client's 1 MiB big-line threshold, a legacy transcript from a client
+// that predates image lifting, or a small test fixture. Once a session is reparsed under
+// this version its images are sentinels, so the inline buffer never tracks input size.
+// This mirrors how the inline tool-body path carries InputJSON and ResultBody in the
+// delta, and the parser is CAS-free by design (it cannot stream into the store from
+// here), so the bounded buffer is the right shape rather than a streamed write.
+func (r *reducer) addAttachment(ord int, v gjson.Result, filename string) {
+	op := AttachmentOp{MessageOrdinal: ord, Filename: filename}
+	var key string
+	if ref, ok := asCASRef(v); ok {
+		op.SHA256, op.Bytes, op.MediaType = ref.SHA256, ref.Bytes, ref.MediaType
+		key = ref.SHA256
+	} else {
+		if v.Type != gjson.String {
+			return
+		}
+		s := v.String()
+		if !looksLikeBase64Image(imageHead(s)) {
+			return
+		}
+		decoded, ok := decodeBase64Body(s)
+		if !ok {
+			return
+		}
+		op.Content = string(decoded)
+		op.ContentType = ContentRaw
+		op.Bytes = len(decoded)
+		op.MediaType = imageMediaType(imageHead(s))
+		// The inline key is the hash of the raw decoded bytes, which equals the
+		// sentinel key whenever the encoder stores the body verbatim (the small-image
+		// path the batch/test parser takes), so dedup matches across the two paths.
+		key = HashString(op.Content)
+	}
+	if key != "" {
+		if r.seenAttach == nil {
+			r.seenAttach = map[string]bool{}
+		}
+		if r.seenAttach[key] {
+			return
+		}
+		r.seenAttach[key] = true
+	}
+	r.d.Attachments = append(r.d.Attachments, op)
+}
+
+// attachOrdinal returns the message ordinal an attachment lifted from a non-message
+// event should hang on: the open assistant turn while one is folding (an image
+// generated mid-turn), else the most recent message (a user_message event mirroring
+// the user line just recorded). With nothing recorded yet it opens an assistant turn
+// so the image still has a home.
+func (r *reducer) attachOrdinal(ts time.Time) int {
+	if r.open != nil {
+		return r.open.Ordinal
+	}
+	if r.st.NextOrdinal > 0 {
+		return r.st.NextOrdinal - 1
+	}
+	return r.ensureAssistant(ts)
+}
+
+// lastPathSegment returns the final path component of a file path, splitting on either
+// separator so a Windows saved_path yields a clean filename on the Linux server. An
+// empty path yields an empty name.
+func lastPathSegment(p string) string {
+	if i := strings.LastIndexAny(p, `/\`); i >= 0 {
+		return p[i+1:]
+	}
+	return p
 }
 
 // addUsage records a usage event tagged with a stable per-line source identity.
@@ -319,6 +429,17 @@ func assemble(d Delta) Session {
 		tc := &s.ToolCalls[i]
 		tc.ResultBody, tc.ResultSHA256 = tr.Body, tr.BodySHA256
 		tc.ResultBytes, tc.ResultMediaType, tc.ResultStatus = tr.Bytes, tr.MediaType, tr.Status
+	}
+
+	for _, a := range d.Attachments {
+		s.Attachments = append(s.Attachments, Attachment{
+			MessageOrdinal: a.MessageOrdinal,
+			SHA256:         a.SHA256,
+			Bytes:          a.Bytes,
+			MediaType:      a.MediaType,
+			Filename:       a.Filename,
+			Content:        a.Content,
+		})
 	}
 
 	s.UsageEvent = d.Usage

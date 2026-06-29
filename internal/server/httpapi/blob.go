@@ -86,15 +86,23 @@ func (s *Server) serveBlobForSession(w http.ResponseWriter, r *http.Request, ses
 	}
 }
 
-// safeBlobContentType maps a stored media type to one safe to serve inline. The
-// CAS only ever stores JSON, plain text, or opaque bytes; anything unexpected is
-// served as opaque bytes so it can never be interpreted as active content.
+// safeBlobContentType maps a stored media type to one safe to serve inline. The CAS
+// stores JSON and plain text (tool bodies) and raster images (lifted attachments); a
+// raster image is served under its real type so the transcript's <img> renders it,
+// while anything else (notably image/svg+xml, which can carry script) is served as
+// opaque bytes so it can never be interpreted as active content. With nosniff set, the
+// browser honors exactly the type named here and never up-sniffs octet-stream.
 func safeBlobContentType(mediaType string) string {
 	switch mediaType {
 	case "application/json":
 		return "application/json; charset=utf-8"
 	case "text/plain", "":
 		return "text/plain; charset=utf-8"
+	case "image/png", "image/jpeg", "image/gif", "image/webp":
+		// The inert raster types the image sniffer emits: safe to render inline, and the
+		// only image media a lifted attachment can carry (SVG is never sniffed, so a
+		// data-URI claiming it falls through to octet-stream below).
+		return mediaType
 	default:
 		return "application/octet-stream"
 	}

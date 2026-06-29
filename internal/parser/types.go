@@ -17,13 +17,29 @@ const (
 
 // Session is the parsed projection of one session file.
 type Session struct {
-	Cwd        string
-	GitBranch  string
-	StartedAt  time.Time
-	EndedAt    time.Time
-	Messages   []Message
-	ToolCalls  []ToolCall
-	UsageEvent []Usage
+	Cwd         string
+	GitBranch   string
+	StartedAt   time.Time
+	EndedAt     time.Time
+	Messages    []Message
+	ToolCalls   []ToolCall
+	UsageEvent  []Usage
+	Attachments []Attachment
+}
+
+// Attachment is one binary blob attached to a message: today a lifted image (a Codex
+// image-generation result or a pasted image). The bytes live in the CAS keyed by
+// SHA256; Bytes is the raw (decoded) size and MediaType its semantic type, so the UI
+// can render it without fetching. Content carries the decoded bytes only on the inline
+// path (a small image with no sentinel, used by the batch/test parser); when the
+// client lifted the image it is empty and SHA256 names the already-uploaded blob.
+type Attachment struct {
+	MessageOrdinal int
+	SHA256         string
+	Bytes          int
+	MediaType      string
+	Filename       string
+	Content        string
 }
 
 // Role is a normalized message role.

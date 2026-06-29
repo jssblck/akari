@@ -1,9 +1,12 @@
 package parser
 
 import (
+	"bufio"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
+	"strings"
 )
 
 // BodyKind selects how the raw located value is canonicalized into the bytes the
@@ -25,6 +28,15 @@ const (
 	// blockText flattening: the decoded text of each contributing element joined
 	// by a single newline.
 	BodyArrayText
+	// BodyBase64 treats the value as a JSON string carrying a base64-encoded binary
+	// blob (optionally wrapped in a `data:<media>;base64,` URI) and emits the decoded
+	// binary bytes. This is the canonical form for the image payloads Codex inlines
+	// (image_generation results, data-URI image_url blocks, pasted images): the CAS
+	// stores the real PNG/JPEG bytes, not the base64 text, so a reader serves the blob
+	// directly under its image media type. The decode ignores \r and \n exactly as
+	// encoding/base64 does, so the streamed result is byte-identical to the buffered
+	// base64.StdEncoding.DecodeString the extractor uses.
+	BodyBase64
 )
 
 // CanonicalBodyReader returns an io.Reader that streams the canonical body bytes
@@ -48,6 +60,8 @@ func CanonicalBodyReader(ctx context.Context, f io.ReaderAt, lineOffset int64, s
 	switch kind {
 	case BodyJSONString:
 		return newJSONStringReader(f, lineOffset+span.Start, lineOffset+span.End)
+	case BodyBase64:
+		return newBase64BodyReader(f, lineOffset+span.Start, lineOffset+span.End)
 	case BodyArrayText:
 		return newArrayTextReader(ctx, f, lineOffset, span)
 	default: // BodyRaw
@@ -313,7 +327,149 @@ func appendRune4(out []byte, r rune) []byte {
 	}
 }
 
-// newArrayTextReader builds a reader that streams blockText over the array whose
+// dataURIBase64Marker is the literal that separates a data URI's media/parameters
+// from its base64 payload. A value that contains it (within a short head) is a data
+// URI; the bytes after it are the base64 to decode, and the media is the token
+// between "data:" and the first ";" or this marker.
+const dataURIBase64Marker = ";base64,"
+
+// dataURIScan bounds how far into a value the data-URI prefix detector looks. A real
+// data URI header (media type plus parameters) is short; capping the scan keeps the
+// detector from buffering a body's worth of bytes while still covering any plausible
+// header, and makes the streaming and buffered paths agree on a fixed window.
+const dataURIScan = 256
+
+// stripDataURIPrefix removes a leading `data:<media>;base64,` wrapper from a base64
+// body, returning the bare base64. A value with no such prefix (raw base64) is
+// returned unchanged. The streaming reader strips the identical prefix over a peek of
+// the same bounded window, so both paths decode the same bytes.
+func stripDataURIPrefix(s string) string {
+	if !strings.HasPrefix(s, "data:") {
+		return s
+	}
+	head := s
+	if len(head) > dataURIScan {
+		head = head[:dataURIScan]
+	}
+	if i := strings.Index(head, dataURIBase64Marker); i >= 0 {
+		return s[i+len(dataURIBase64Marker):]
+	}
+	return s
+}
+
+// imageMediaType returns the semantic media type for a base64/data-URI image body,
+// read from the data-URI media token when present and otherwise sniffed from the
+// base64 magic prefix. head is the first bytes of the string value (before decoding);
+// base64/data-URI content is pure ASCII with no JSON escapes, so the raw head bytes
+// are the literal content. An unrecognized blob falls back to application/octet-stream
+// so a non-image is still stored faithfully rather than mislabeled.
+func imageMediaType(head string) string {
+	if strings.HasPrefix(head, "data:") {
+		if i := strings.Index(head, dataURIBase64Marker); i >= 0 {
+			media := head[len("data:"):i]
+			if j := strings.IndexByte(media, ';'); j >= 0 {
+				media = media[:j] // drop any ;charset= or other parameters
+			}
+			if media != "" {
+				return media
+			}
+		}
+		// A data: URI we could not fully parse: sniff the payload after the marker.
+		head = stripDataURIPrefix(head)
+	}
+	return sniffBase64ImageMedia(head)
+}
+
+// sniffBase64ImageMedia maps the leading characters of a raw base64 blob to an image
+// media type by their decoded magic bytes. The prefixes are the base64 encodings of
+// each format's signature: "iVBOR" is \x89PNG, "/9j/" is the JPEG SOI, "R0lGOD" is
+// GIF8, "UklGR" is the RIFF header WebP rides on. Anything else is treated as opaque.
+func sniffBase64ImageMedia(b64 string) string {
+	switch {
+	case strings.HasPrefix(b64, "iVBOR"):
+		return "image/png"
+	case strings.HasPrefix(b64, "/9j/"):
+		return "image/jpeg"
+	case strings.HasPrefix(b64, "R0lGOD"):
+		return "image/gif"
+	case strings.HasPrefix(b64, "UklGR"):
+		return "image/webp"
+	default:
+		return "application/octet-stream"
+	}
+}
+
+// looksLikeBase64Image reports whether a string value's head is a base64 image worth
+// lifting: a data-URI base64 wrapper, or raw base64 whose magic matches a known image
+// signature. It gates image extraction so a field that is not actually an encoded
+// image is left inline (and, if large, rides inline via the client's big-line
+// fallback) rather than lifted and then failing to base64-decode mid-upload.
+func looksLikeBase64Image(head string) bool {
+	if strings.HasPrefix(head, "data:") && strings.Contains(head[:min(len(head), dataURIScan)], dataURIBase64Marker) {
+		return true
+	}
+	return sniffBase64ImageMedia(head) != "application/octet-stream"
+}
+
+// imageHeadLen bounds how many leading characters of a string value the buffered
+// extractor inspects to classify it (data-URI prefix or base64 magic). It matches the
+// window the streaming peek uses so both paths classify a value identically.
+const imageHeadLen = dataURIScan
+
+// imageHead returns the leading bytes of a string value used to classify it as an
+// image and pick its media type, bounded so a huge base64 blob is not sliced whole.
+func imageHead(s string) string {
+	if len(s) > imageHeadLen {
+		return s[:imageHeadLen]
+	}
+	return s
+}
+
+// decodeBase64Body decodes a base64/data-URI string value into its raw binary bytes,
+// the buffered counterpart of newBase64BodyReader. It strips any data-URI wrapper and
+// base64-decodes the rest with the same StdEncoding the streaming decoder uses, so a
+// body buffered in memory and one streamed from disk produce identical bytes (and so
+// an identical CAS key). It declines (ok=false) when the value is not valid base64, so
+// a misclassified field is left inline rather than lifted to a body that cannot decode.
+func decodeBase64Body(s string) ([]byte, bool) {
+	decoded, err := base64.StdEncoding.DecodeString(stripDataURIPrefix(s))
+	if err != nil {
+		return nil, false
+	}
+	return decoded, true
+}
+
+// newBase64BodyReader streams the decoded binary bytes of a base64/data-URI string
+// value whose raw span is [rawStart,rawEnd) in f (rawStart points at the opening
+// quote). It layers a base64 decoder over the JSON-string reader, first discarding any
+// `data:<media>;base64,` prefix, so a hundreds-of-MiB image decodes in O(window)
+// memory and the bytes it yields match the buffered base64.StdEncoding.DecodeString of
+// the same value exactly (both ignore \r and \n).
+func newBase64BodyReader(f io.ReaderAt, rawStart, rawEnd int64) io.Reader {
+	src := newJSONStringReader(f, rawStart, rawEnd)
+	br := bufio.NewReaderSize(src, dataURIScan*2)
+	skipDataURIPrefix(br)
+	return base64.NewDecoder(base64.StdEncoding, br)
+}
+
+// skipDataURIPrefix consumes a leading `data:<media>;base64,` wrapper from br when
+// present, so the base64 decoder downstream sees only the payload. It peeks a bounded
+// head (never more than the source holds) and discards exactly through the marker; a
+// value with no such prefix is left untouched. A peek error is non-fatal: there is
+// then no prefix to strip and the decoder reports any real read failure itself.
+func skipDataURIPrefix(br *bufio.Reader) {
+	head, err := br.Peek(dataURIScan)
+	if len(head) == 0 && err != nil {
+		return
+	}
+	if !strings.HasPrefix(string(head), "data:") {
+		return
+	}
+	if i := strings.Index(string(head), dataURIBase64Marker); i >= 0 {
+		_, _ = br.Discard(i + len(dataURIBase64Marker))
+	}
+}
+
 // raw span is span within the line beginning at lineOffset in f. It is fully lazy:
 // rather than enumerating every contributing piece up front, it drives one
 // WalkArrayElements pass that is paced by reads, pulling the next contributing

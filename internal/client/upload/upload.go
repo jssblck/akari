@@ -499,8 +499,15 @@ func boundaryWithin(buf []byte, bufStart int64, agent string) int64 {
 	return 0
 }
 
+// errMessageTooBig reports that one transformed message (a single rewritten JSONL
+// line, after its tool bodies were lifted to the CAS) is larger than hardCap and so
+// cannot be sent as one chunk. It fires only for a genuinely pathological line:
+// after lifting, an ordinary line is small, and a large bodyless line rides inline
+// up to this cap rather than being refused. The old wording ("without a boundary")
+// described the symptom the assembler once saw, not the cause, and misled debugging
+// of image-heavy Codex sessions, so it names the hard cap directly.
 func errMessageTooBig(agent string) error {
-	return fmt.Errorf("session %s message exceeds %d bytes without a boundary", agent, hardCap)
+	return fmt.Errorf("session %s: a single transformed message exceeds the %d-byte hard cap even after lifting tool bodies", agent, hardCap)
 }
 
 // readAt fills buf entirely from offset off. A short read means the file was

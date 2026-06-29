@@ -59,8 +59,39 @@ func (r *reducer) reduceCodex(region []byte, base int64) error {
 				r.d.ToolCalls = append(r.d.ToolCalls, tc)
 				r.openCalls++
 
-			case p.Get("type").String() == "function_call_output":
+			case p.Get("type").String() == "custom_tool_call":
+				// A custom tool call (for example apply_patch) carries its input as a
+				// plain string, which can be a large patch; record it like any tool call
+				// so its body lands in the CAS rather than inline in the transcript.
+				ord := r.ensureAssistant(ts)
+				r.open.HasToolUse = true
+				name := p.Get("name").String()
+				tc := ToolCall{
+					MessageOrdinal: ord, CallIndex: r.openCalls,
+					ToolName: name, Category: toolCategory(name),
+					CallUID: p.Get("call_id").String(),
+				}
+				inVal := p.Get("input")
+				if ref, ok := asCASRef(inVal); ok {
+					tc.InputSHA256, tc.InputBytes, tc.InputMediaType = ref.SHA256, ref.Bytes, ref.MediaType
+				} else {
+					tc.InputJSON = inVal.String()
+					tc.InputMediaType = "text/plain"
+				}
+				r.d.ToolCalls = append(r.d.ToolCalls, tc)
+				r.openCalls++
+
+			case p.Get("type").String() == "function_call_output",
+				p.Get("type").String() == "custom_tool_call_output":
 				r.applyResult(p.Get("call_id").String(), p.Get("output"), false)
+
+			case p.Get("type").String() == "image_generation_call":
+				// The generated image rides inline as a base64 result; record it as an
+				// attachment on the assistant turn (and the client lifts its bytes to the
+				// CAS), so the transcript stays small and the image is stored decoded.
+				ord := r.ensureAssistant(ts)
+				r.open.HasToolUse = true
+				r.addAttachment(ord, p.Get("result"), lastPathSegment(p.Get("saved_path").String()))
 
 			case p.Get("type").String() == "reasoning":
 				r.ensureAssistant(ts)
@@ -68,7 +99,12 @@ func (r *reducer) reduceCodex(region []byte, base int64) error {
 
 			case p.Get("role").String() == "user":
 				r.closeTurn() // a user turn ends the current assistant turn
-				r.addUser(blockText(p.Get("content")), ts)
+				ord := r.addUser(blockText(p.Get("content")), ts)
+				// A user message can paste images as input_image blocks; lift each as an
+				// attachment on this message. Non-image blocks are ignored by addAttachment.
+				for _, b := range p.Get("content").Array() {
+					r.addAttachment(ord, b.Get("image_url"), "")
+				}
 
 			case p.Get("role").String() == "assistant":
 				r.ensureAssistant(ts)
@@ -79,7 +115,8 @@ func (r *reducer) reduceCodex(region []byte, base int64) error {
 			}
 
 		case "event_msg":
-			if p.Get("type").String() == "token_count" {
+			switch p.Get("type").String() {
+			case "token_count":
 				u := p.Get("info.last_token_usage")
 				if !u.Exists() {
 					return nil
@@ -100,6 +137,20 @@ func (r *reducer) reduceCodex(region []byte, base int64) error {
 					usage.MessageOrdinal = &ord
 				}
 				r.addUsage(usage, offset)
+
+			case "image_generation_end":
+				// The streaming completion event mirrors image_generation_call's result;
+				// record it as an attachment (deduped against the call by content key) so
+				// an image that arrives only as an end event is still stored and referenced.
+				r.addAttachment(r.attachOrdinal(ts), p.Get("result"), lastPathSegment(p.Get("saved_path").String()))
+
+			case "user_message":
+				// A user_message event carries pasted images as a flat array of data URIs,
+				// mirroring the response_item message; record each (deduped by content key).
+				ord := r.attachOrdinal(ts)
+				for _, img := range p.Get("images").Array() {
+					r.addAttachment(ord, img, "")
+				}
 			}
 		}
 		return nil

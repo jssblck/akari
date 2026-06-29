@@ -425,8 +425,8 @@ templ SessionList(sessions []store.SessionSummary) {
 
 // OverviewPage is the landing surface: the fleet-wide usage panel (totals,
 // spend-over-time, model and agent breakdowns) over a feed of the most recent
-// sessions across every project. It puts both front doors — the deep read and
-// the spend view — one click from the door, instead of behind the projects table.
+// sessions across every project. It puts both front doors (the deep read and the
+// spend view) one click away, instead of behind the projects table.
 templ OverviewPage(p Page, a store.Analytics, recent []store.SessionRow) {
 	@layout(p) {
 		<div class="page-head">
@@ -590,7 +590,7 @@ templ GlobalSessionList(rows []store.SessionRow) {
 
 // ============================ Session ============================
 
-templ SessionPage(p Page, d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, subagents []store.SessionSummary, live, owner bool) {
+templ SessionPage(p Page, d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, subagents []store.SessionSummary, live, owner bool) {
 	@layout(p) {
 		<div class="session-head">
 			<div class="session-title">
@@ -651,11 +651,11 @@ templ SessionPage(p Page, d store.SessionDetail, msgs []store.Message, tools map
 			</aside>
 			if live {
 				<div id="session-body" class="session-main" data-sse={ SSEPath(d.ID) } data-body={ BodyPath(d.ID) }>
-					@SessionMain(d, msgs, tools, subagents)
+					@SessionMain(d, msgs, tools, attachments, subagents)
 				</div>
 			} else {
 				<div id="session-body" class="session-main">
-					@SessionMain(d, msgs, tools, subagents)
+					@SessionMain(d, msgs, tools, attachments, subagents)
 				</div>
 			}
 			@inspectorPane()
@@ -674,7 +674,7 @@ templ densityToolbar() {
 // subagents, and the transcript. Only this fragment is re-fetched and swapped on
 // a live SSE update, so the outline and inspector (its siblings in the grid)
 // persist across updates and are not re-rendered per refresh.
-templ SessionMain(d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, subagents []store.SessionSummary) {
+templ SessionMain(d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, subagents []store.SessionSummary) {
 	@sessionStats(d)
 	if len(subagents) > 0 {
 		<h2>Subagents</h2>
@@ -683,7 +683,7 @@ templ SessionMain(d store.SessionDetail, msgs []store.Message, tools map[int][]s
 		</div>
 	}
 	<h2>Transcript</h2>
-	@Transcript(msgs, tools, SessionBlobBase(d.ID))
+	@Transcript(msgs, tools, attachments, SessionBlobBase(d.ID))
 }
 
 // Outline is the left pane of the session view: one entry per turn, with its
@@ -789,7 +789,7 @@ templ stat(label, value, key string) {
 	</div>
 }
 
-templ Transcript(msgs []store.Message, tools map[int][]store.ToolCallView, blobBase string) {
+templ Transcript(msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, blobBase string) {
 	if len(msgs) == 0 {
 		<div class="empty">No messages parsed yet.</div>
 	} else {
@@ -813,6 +813,13 @@ templ Transcript(msgs []store.Message, tools map[int][]store.ToolCallView, blobB
 					if m.Content != "" {
 						<div class="content">{ m.Content }</div>
 					}
+					if as := attachments[m.Ordinal]; len(as) > 0 {
+						<div class="attachments">
+							for _, a := range as {
+								@AttachmentTile(a, blobBase)
+							}
+						</div>
+					}
 					if tc := tools[m.Ordinal]; len(tc) > 0 {
 						<div class="tools">
 							for _, t := range tc {
@@ -823,6 +830,32 @@ templ Transcript(msgs []store.Message, tools map[int][]store.ToolCallView, blobB
 				</div>
 			}
 		</div>
+	}
+}
+
+// AttachmentTile renders one binary attachment. An image is shown inline from its
+// CAS blob (the same URL the inspector would fetch), captioned with its filename
+// and size; a non-image is a labelled link so it can still be opened.
+templ AttachmentTile(a store.AttachmentView, blobBase string) {
+	if IsImageMedia(a.MediaType) {
+		<figure class="attachment image">
+			<a href={ BlobURL(blobBase, a.SHA256) } target="_blank" rel="noopener">
+				<img src={ BlobURL(blobBase, a.SHA256) } alt={ AttachmentAlt(a) } loading="lazy"/>
+			</a>
+			<figcaption class="muted small">
+				if a.Filename != "" {
+					{ a.Filename + " · " }
+				}
+				{ ChipLabel(a.MediaType, a.ByteLen) }
+			</figcaption>
+		</figure>
+	} else {
+		<a class="attachment file stamp" href={ BlobURL(blobBase, a.SHA256) } target="_blank" rel="noopener">
+			if a.Filename != "" {
+				{ a.Filename + " · " }
+			}
+			{ ChipLabel(a.MediaType, a.ByteLen) }
+		</a>
 	}
 }
 
@@ -992,7 +1025,7 @@ templ publicLayout(title string) {
 	</html>
 }
 
-templ PublicSessionPage(d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, publicSubs []store.SessionSummary) {
+templ PublicSessionPage(d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, publicSubs []store.SessionSummary) {
 	@publicLayout(SessionProjectLabel(d) + " session") {
 		<div class="session-head">
 			<div class="session-title">
@@ -1035,7 +1068,7 @@ templ PublicSessionPage(d store.SessionDetail, msgs []store.Message, tools map[i
 						</div>
 					}
 					<h2>Transcript</h2>
-					@Transcript(msgs, tools, PublicBlobBase(*d.PublicID))
+					@Transcript(msgs, tools, attachments, PublicBlobBase(*d.PublicID))
 				</div>
 				@inspectorPane()
 			</div>

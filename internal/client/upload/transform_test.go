@@ -616,20 +616,43 @@ func TestTransformConflictUnwindsWithoutAdvancing(t *testing.T) {
 	}
 }
 
-// TestTransformBigLineNoBodyRejected confirms a line past the big-line threshold
-// that carries no liftable tool body is refused rather than buffered: there is
-// nothing to lift, so the line cannot be made small and must not be read whole.
-func TestTransformBigLineNoBodyRejected(t *testing.T) {
+// TestTransformBigLineNoBodyRidesInline confirms a line past the big-line threshold
+// that carries no liftable tool body, yet stays under hardCap, is buffered and sent
+// inline rather than refused. This is the fix for image-progress and compacted Codex
+// events: a large bodyless line is legitimate transcript content, so it must back up
+// like any other message instead of failing the whole sync.
+func TestTransformBigLineNoBodyRidesInline(t *testing.T) {
 	setBigLineThreshold(t, 256)
 	// A plain user line with a big inline content string and no tool_result block:
-	// nothing to lift to the CAS.
+	// nothing to lift, and well under hardCap, so it should ride inline unchanged.
 	content := claudeLine(strings.Repeat("x", 4096))
+	f, size := openTemp(t, content)
+
+	sink := runTransform(t, f, 0, size, "claude", true)
+	if got := string(sink.data); got != content {
+		t.Fatalf("big bodyless line did not ride inline: got %d bytes, want identity %d", len(got), len(content))
+	}
+	if sink.origEnd != size {
+		t.Fatalf("origEnd = %d, want %d", sink.origEnd, size)
+	}
+}
+
+// TestTransformBigLineNoBodyOverHardCapRejected confirms the cap still bites: a big
+// bodyless line larger than hardCap cannot be sent as one chunk and is refused, so the
+// memory bound on a single message holds even with the ride-inline fallback.
+func TestTransformBigLineNoBodyOverHardCapRejected(t *testing.T) {
+	setBigLineThreshold(t, 256)
+	orig := hardCap
+	hardCap = 1024
+	defer func() { hardCap = orig }()
+
+	content := claudeLine(strings.Repeat("x", 4096)) // big, bodyless, and over the cap
 	f, size := openTemp(t, content)
 
 	sink := &collectSink{}
 	tr := newTransformer(f, 0, size, "claude", sink, casenc.New(), nil, 0)
 	if _, _, err := tr.run(context.Background(), true); err == nil {
-		t.Fatal("expected a big-line-with-no-body refusal")
+		t.Fatal("expected an over-hardCap refusal for a bodyless line past the cap")
 	}
 }
 

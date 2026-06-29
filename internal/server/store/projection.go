@@ -87,6 +87,21 @@ type ProjUsage struct {
 	SourceIndex    int
 }
 
+// AttachmentDelta is one attachments insert (today a lifted image). Like a tool
+// body it reaches the CAS by one of two paths: when the client lifted the image,
+// SHA256 names the already-uploaded blob and applyDelta records the reference with no
+// blob write; otherwise Body holds the decoded bytes inline for the server to store.
+// Bytes and MediaType describe the decoded image so the row carries its size and type
+// without fetching the blob.
+type AttachmentDelta struct {
+	MessageOrdinal int
+	SHA256         string
+	Body           string
+	Bytes          int64
+	MediaType      string
+	Filename       string
+}
+
 // ProjectionDelta is the incremental projection write for one parsed region: the
 // rows to add and the region's timestamp span. The session rollups are not folded
 // from precomputed counters carried here. They are derived from the rows that
@@ -100,6 +115,7 @@ type ProjectionDelta struct {
 	ToolCalls   []ProjToolCall
 	ToolResults []ToolResultDelta
 	Usage       []ProjUsage
+	Attachments []AttachmentDelta
 
 	Started time.Time
 	Ended   time.Time
@@ -430,6 +446,42 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 			applied.CostIncomplete = true
 		}
 	}
+	// Attachments carry no rollup column, so they do not fold into appliedDelta; they
+	// are inserted here for their blob references and metadata. Like a tool body each
+	// reaches the CAS by one of two paths: a client-lifted image names an already
+	// uploaded blob (record the reference, re-locking it FOR KEY SHARE so a racing sweep
+	// cannot reclaim it before the FK is checked), and an inline image is written here.
+	for _, a := range d.Attachments {
+		var sha any
+		switch {
+		case a.SHA256 != "":
+			if err := pinBlobRefTx(ctx, tx, a.SHA256); err != nil {
+				return appliedDelta{}, fmt.Errorf("reference attachment blob %s for session %d ordinal %d: %w", a.SHA256, sessionID, a.MessageOrdinal, err)
+			}
+			sha = a.SHA256
+		case len(a.Body) > 0:
+			s, err := writeBlobTx(ctx, tx, a.Body, a.MediaType)
+			if err != nil {
+				return appliedDelta{}, fmt.Errorf("write attachment blob for session %d ordinal %d: %w", sessionID, a.MessageOrdinal, err)
+			}
+			sha = s
+		default:
+			continue // an attachment with no body is nothing to store
+		}
+		media := a.MediaType
+		if media == "" {
+			media = "application/octet-stream"
+		}
+		// The unique index (session_id, message_ordinal, sha256) makes a replayed region
+		// a no-op, so a retried chunk never double-inserts an attachment.
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO attachments (session_id, message_ordinal, sha256, filename, media_type, byte_len)
+			 VALUES ($1,$2,$3,$4,$5,$6)
+			 ON CONFLICT (session_id, message_ordinal, sha256) DO NOTHING`,
+			sessionID, a.MessageOrdinal, sha, nullString(a.Filename), media, a.Bytes); err != nil {
+			return appliedDelta{}, fmt.Errorf("insert attachment for session %d ordinal %d: %w", sessionID, a.MessageOrdinal, err)
+		}
+	}
 	return applied, nil
 }
 
@@ -469,8 +521,9 @@ func applyAggregates(ctx context.Context, tx pgx.Tx, sessionID int64, parserVers
 // ResetProjectionForReparse clears a session's parser-owned projection rows and
 // its aggregates, and rewinds the parse cursor to zero at the given version,
 // keeping the raw bytes and their hash. The reparse loop then replays the stored
-// raw through the parser from scratch. Attachments are not parser-owned and are
-// left intact.
+// raw through the parser from scratch. Attachments are now parser-owned (the reducer
+// emits them from the transcript's image events), so they are cleared here too; a
+// reparse rewrites them, and the orphan sweep reclaims any blob left unreferenced.
 func (s *Store) ResetProjectionForReparse(ctx context.Context, sessionID int64, parserVersion int) error {
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		// Parent session first, then session_raw: the same order DeleteSession takes,
@@ -486,10 +539,23 @@ func (s *Store) ResetProjectionForReparse(ctx context.Context, sessionID int64, 
 			}
 			return fmt.Errorf("lock session_raw for reparse of session %d: %w", sessionID, err)
 		}
+		// Pin every blob this session references (lifted tool inputs and results, and
+		// image attachments) before clearing the rows that reference them. Reparse
+		// deletes these rows in this transaction and rebuilds the references in the
+		// Advance that follows, after this commits; the original upload pins have long
+		// since lapsed, so without a fresh pin a sweep running in that gap would see the
+		// blob as unreferenced and reclaim it, and the rebuild's pinBlobRefTx would then
+		// fail with ErrBlobNotUploaded. The pin (taken FOR KEY SHARE via the FK on insert)
+		// conflicts with the sweep's FOR UPDATE, so the blob survives until Advance
+		// re-records the reference well inside the pin TTL.
+		if err := pinSessionBlobsTx(ctx, tx, sessionID); err != nil {
+			return err
+		}
 		for _, q := range []string{
 			"DELETE FROM messages WHERE session_id = $1",
 			"DELETE FROM tool_calls WHERE session_id = $1",
 			"DELETE FROM usage_events WHERE session_id = $1",
+			"DELETE FROM attachments WHERE session_id = $1",
 		} {
 			if _, err := tx.Exec(ctx, q, sessionID); err != nil {
 				return fmt.Errorf("clear projection for reparse of session %d (%s): %w", sessionID, q, err)

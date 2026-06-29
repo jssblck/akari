@@ -104,6 +104,31 @@ func ToolsByOrdinal(tools []store.ToolCallView) map[int][]store.ToolCallView {
 	return m
 }
 
+// AttachmentsByOrdinal groups attachments by the message ordinal they belong to,
+// so the session view can render a message's images beneath it.
+func AttachmentsByOrdinal(atts []store.AttachmentView) map[int][]store.AttachmentView {
+	m := map[int][]store.AttachmentView{}
+	for _, a := range atts {
+		m[a.MessageOrdinal] = append(m[a.MessageOrdinal], a)
+	}
+	return m
+}
+
+// IsImageMedia reports whether a media type is an image the transcript can show
+// inline, so a non-image attachment falls back to a download link instead.
+func IsImageMedia(mediaType string) bool {
+	return strings.HasPrefix(mediaType, "image/")
+}
+
+// AttachmentAlt is the alt text for a rendered image: its filename when one was
+// recovered, else a generic label so the element is never unlabelled.
+func AttachmentAlt(a store.AttachmentView) string {
+	if a.Filename != "" {
+		return a.Filename
+	}
+	return "attachment"
+}
+
 // FmtBytes renders a byte count compactly (the tool-body metadata chips).
 func FmtBytes(n int64) string {
 	switch {

@@ -553,6 +553,40 @@ func (s *Store) ToolCalls(ctx context.Context, sessionID int64) ([]ToolCallView,
 	return out, rows.Err()
 }
 
+// AttachmentView is one attachment (today a lifted image) rendered under its
+// message: the blob key plus enough metadata to show or link the image without
+// fetching it. The bytes are served on demand through the session-scoped blob route.
+type AttachmentView struct {
+	MessageOrdinal int
+	SHA256         string
+	MediaType      string
+	ByteLen        int64
+	Filename       string
+}
+
+// Attachments returns a session's attachments, ordered by the message they hang on.
+func (s *Store) Attachments(ctx context.Context, sessionID int64) ([]AttachmentView, error) {
+	rows, err := s.Pool.Query(ctx,
+		`SELECT coalesce(message_ordinal, 0), sha256, coalesce(media_type,''), coalesce(byte_len,0), coalesce(filename,'')
+		   FROM attachments WHERE session_id = $1 ORDER BY message_ordinal, id`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("query attachments for session %d: %w", sessionID, err)
+	}
+	defer rows.Close()
+	var out []AttachmentView
+	for rows.Next() {
+		var a AttachmentView
+		if err := rows.Scan(&a.MessageOrdinal, &a.SHA256, &a.MediaType, &a.ByteLen, &a.Filename); err != nil {
+			return nil, fmt.Errorf("scan attachment row for session %d: %w", sessionID, err)
+		}
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate attachments for session %d: %w", sessionID, err)
+	}
+	return out, nil
+}
+
 // Subagents returns sessions whose parent is the given session.
 func (s *Store) Subagents(ctx context.Context, parentID int64) ([]SessionSummary, error) {
 	rows, err := s.Pool.Query(ctx, sessionSelect+" WHERE s.parent_session_id = $1 ORDER BY s.id", parentID)

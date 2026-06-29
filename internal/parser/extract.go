@@ -64,6 +64,17 @@ type BodyEncoder interface {
 	EncodeBody(raw []byte) (sha string, stored []byte, contentType string)
 }
 
+// Body kinds label what a lifted body is, for diagnostics and the test oracle. The
+// server records a body by its position in the transcript, not by this label, so the
+// label never drives storage; it only distinguishes a tool input/result from a binary
+// attachment (a lifted image) when a test compares the client's lifted set against the
+// server's recorded set.
+const (
+	bodyKindInput      = "input"
+	bodyKindResult     = "result"
+	bodyKindAttachment = "attachment"
+)
+
 // Body is one tool body the client lifts out of the transcript. Stored holds the
 // exact bytes the CAS keeps, which are the raw canonical bytes for a small body and
 // the zstd-compressed form for a large one; ContentType says which. SHA256 is the
@@ -202,27 +213,120 @@ func claudeBodyFields(e gjson.Result) []bodyField {
 }
 
 func codexBodyFields(e gjson.Result) []bodyField {
-	if e.Get("type").String() != "response_item" {
-		return nil
-	}
 	p := e.Get("payload")
-	switch p.Get("type").String() {
-	case "function_call":
-		args := p.Get("arguments")
-		// Codex stores arguments as a JSON-encoded string; the body the reducer
-		// records is the unquoted string value, so the canonical content is
-		// args.String() while the rewritten span is the quoted raw value.
-		if f, ok := rawField(args, args.String(), "application/json", "input"); ok {
-			return []bodyField{f}
+	switch e.Get("type").String() {
+	case "response_item":
+		// The cases mirror reduceCodex's switch exactly, including its discriminators: a
+		// tool item is keyed by payload.type, a conversational turn by payload.role (a
+		// Codex message carries no payload.type, so keying it on role is what keeps the
+		// extractor and the reducer agreeing on which user-pasted images to lift).
+		switch {
+		case p.Get("type").String() == "function_call":
+			args := p.Get("arguments")
+			// Codex stores arguments as a JSON-encoded string; the body the reducer
+			// records is the unquoted string value, so the canonical content is
+			// args.String() while the rewritten span is the quoted raw value.
+			if f, ok := rawField(args, args.String(), "application/json", "input"); ok {
+				return []bodyField{f}
+			}
+		case p.Get("type").String() == "custom_tool_call":
+			// A custom tool call (for example apply_patch) carries its input as a plain
+			// string, which can be a large patch; lift it like any other tool input.
+			in := p.Get("input")
+			if f, ok := rawField(in, in.String(), "text/plain", "input"); ok {
+				return []bodyField{f}
+			}
+		case p.Get("type").String() == "function_call_output",
+			p.Get("type").String() == "custom_tool_call_output":
+			out := p.Get("output")
+			c, media := bodyContent(out)
+			if f, ok := rawField(out, c, media, "result"); ok {
+				return []bodyField{f}
+			}
+		case p.Get("type").String() == "image_generation_call":
+			// The generated image rides inline as a base64 result; lift it as a binary
+			// attachment so the transcript stays small and the image is stored decoded.
+			if f, ok := imageField(p.Get("result")); ok {
+				return []bodyField{f}
+			}
+		case p.Get("role").String() == "user":
+			// A user turn can paste images as input_image blocks; lift each, matching the
+			// reducer's role=="user" branch. Non-image blocks are left inline.
+			return codexImageBlocks(p.Get("content"))
 		}
-	case "function_call_output":
-		out := p.Get("output")
-		c, media := bodyContent(out)
-		if f, ok := rawField(out, c, media, "result"); ok {
-			return []bodyField{f}
+	case "event_msg":
+		switch p.Get("type").String() {
+		case "image_generation_end":
+			if f, ok := imageField(p.Get("result")); ok {
+				return []bodyField{f}
+			}
+		case "user_message":
+			return codexImageArray(p.Get("images"))
 		}
 	}
 	return nil
+}
+
+// codexImageBlocks lifts every base64 image carried by an input_image-style block in a
+// content array (a Codex user message can paste several images). It keys off the
+// presence of a base64 image_url rather than the block's declared type, so a new image
+// block kind is covered without a code change; non-image blocks are left inline.
+func codexImageBlocks(content gjson.Result) []bodyField {
+	if !content.IsArray() {
+		return nil
+	}
+	var fields []bodyField
+	for _, b := range content.Array() {
+		if f, ok := imageField(b.Get("image_url")); ok {
+			fields = append(fields, f)
+		}
+	}
+	return fields
+}
+
+// codexImageArray lifts every base64 image in a flat array of image strings (the
+// `images` field of a user_message event), each a data URI.
+func codexImageArray(images gjson.Result) []bodyField {
+	if !images.IsArray() {
+		return nil
+	}
+	var fields []bodyField
+	for _, img := range images.Array() {
+		if f, ok := imageField(img); ok {
+			fields = append(fields, f)
+		}
+	}
+	return fields
+}
+
+// imageField turns a base64/data-URI image string value into an attachment bodyField,
+// decoding it to the binary bytes the CAS stores. It declines when the value is absent,
+// already a sentinel, not a string, not a recognizable base64 image, or not decodable,
+// so non-image content (and an already-rewritten line) is left untouched. The kind is
+// "attachment", which the reducer records on the attachments table rather than a tool
+// call.
+func imageField(v gjson.Result) (bodyField, bool) {
+	if !v.Exists() || v.Index <= 0 || len(v.Raw) == 0 || v.Type != gjson.String {
+		return bodyField{}, false
+	}
+	if _, ok := asCASRef(v); ok {
+		return bodyField{}, false
+	}
+	s := v.String()
+	if !looksLikeBase64Image(imageHead(s)) {
+		return bodyField{}, false
+	}
+	decoded, ok := decodeBase64Body(s)
+	if !ok {
+		return bodyField{}, false
+	}
+	return bodyField{
+		start:   v.Index,
+		end:     v.Index + len(v.Raw),
+		content: string(decoded),
+		media:   imageMediaType(imageHead(s)),
+		kind:    bodyKindAttachment,
+	}, true
 }
 
 func piBodyFields(e gjson.Result) []bodyField {
