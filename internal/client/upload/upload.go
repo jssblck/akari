@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jssblck/akari/internal/casenc"
 	"github.com/jssblck/akari/internal/parser"
 )
 
@@ -73,6 +74,12 @@ type Client struct {
 	http    *http.Client
 	baseURL string
 	token   string
+
+	// enc encodes each tool body into the bytes the CAS stores (small bodies
+	// verbatim, large bodies zstd) and names its key. It is the single source of the
+	// stored-byte encoding for both the upload and the cold-cache prefix digest, so
+	// the sentinel a re-sync recomputes matches the one it first uploaded.
+	enc *casenc.Encoder
 
 	// files caches per-path incremental sync state so that re-syncing a growing
 	// session does work proportional to the newly appended bytes, not to the whole
@@ -144,6 +151,7 @@ func New(httpClient *http.Client, baseURL, token string) *Client {
 		http:    httpClient,
 		baseURL: strings.TrimRight(baseURL, "/"),
 		token:   token,
+		enc:     casenc.New(),
 		files:   map[string]*fileSync{},
 	}
 }
@@ -294,8 +302,8 @@ func (c *Client) syncOnce(ctx context.Context, t Target, fs *fileSync, f *os.Fil
 	// server accepts, so steady-state work is proportional to the newly appended
 	// bytes. A withheld trailing turn leaves origBase where it is and is re-examined
 	// next tick (the only repeated work, and only for an open final turn).
-	sink := &syncSink{c: c, fs: fs, sessionID: ann.SessionID, size: size, out: &out, seen: newSeenCache()}
-	tr := newTransformer(f, fs.origBase, size, t.Agent, sink, fs.pending, fs.partialSearch)
+	sink := &syncSink{c: c, fs: fs, sessionID: ann.SessionID, size: size, out: &out, seen: newSeenCache(), enc: c.enc}
+	tr := newTransformer(f, fs.origBase, size, t.Agent, sink, c.enc, fs.pending, fs.partialSearch)
 	_, conflicted, err := tr.run(ctx, settled)
 	if err != nil {
 		return out, false, err
@@ -333,32 +341,44 @@ type syncSink struct {
 	size      int64
 	out       *Outcome
 	seen      *seenCache // bounded recently-handled body hashes, to cut round-trips
+	enc       *casenc.Encoder
 }
 
-// emitBody hashes a located body (streaming it from the file, or using the bytes a
-// small line already holds), uploads it to the CAS when the server lacks it, and
-// returns the descriptor the sentinel is built from.
+// emitBody resolves a located body to its CAS key (the sha256 of the bytes the CAS
+// stores, which are the body's raw bytes or its zstd-compressed form), uploads those
+// stored bytes when the server lacks them, and returns the descriptor the sentinel is
+// built from. The sentinel records the RAW body length, not the stored length, so the
+// transcript's size metadata is independent of compression.
 //
-// Dedup is the server's job: MissingBlobs reports a body already in the CAS (from any
-// session) as not-missing and pins it, so a present body is never re-sent. The client
-// keeps only a small bounded cache of recently handled hashes to skip the redundant
-// round-trip for a body that recurs back to back, which is the common case (the same
-// tool result echoed across adjacent turns). The cache is capped, so its memory does
-// not grow with the number of distinct bodies in a session.
+// A small line already holds the encoded stored bytes (RewriteLine ran the encoder);
+// a big line is encoded by streaming it from the file. Encoding it here is the only
+// way to learn its key, since the key is the hash of the compressed bytes, so a body
+// that turns out to be missing is deliberately encoded a second time for the upload
+// (HashStream below to hash, then StreamAs in putBody to upload). That second
+// compression pass is an accepted tradeoff, not an inefficiency to remove: it keeps
+// the server from ever compressing, which is the whole point of the compressed-CAS
+// design. Dedup is the server's
+// job: MissingBlobs reports a body already in the CAS (from any session) as
+// not-missing and pins it, so a present body is never re-sent. The client keeps a
+// small bounded cache of recently handled hashes to skip the redundant round-trip for
+// a body that recurs back to back, which is the common case (the same tool result
+// echoed across adjacent turns). The cache is capped, so its memory does not grow with
+// the number of distinct bodies in a session.
 func (s *syncSink) emitBody(ctx context.Context, ref bodyRef) (parser.Body, error) {
-	var sha string
-	var n int
-	if ref.haveContent {
-		sha = parser.HashString(string(ref.content))
-		n = len(ref.content)
-	} else {
+	sha := ref.sha
+	contentType := ref.contentType
+	rawLen := ref.rawLen
+	if !ref.haveContent {
+		// Streamed big body: hash the stored (compressed) bytes by streaming the body
+		// through the encoder once, discarding the compressed output. A second pass
+		// re-streams it for the upload itself if the server turns out to lack it.
 		var err error
-		sha, n, err = hashBodySpan(ctx, ref.file, ref.lineOff, ref.span, ref.bodyKind)
+		sha, contentType, rawLen, err = s.enc.HashStream(ctx, ref.canonicalReader(ctx))
 		if err != nil {
 			return parser.Body{}, err
 		}
 	}
-	body := parser.Body{SHA256: sha, Bytes: n, MediaType: ref.media, Kind: ref.kind}
+	body := parser.Body{SHA256: sha, Bytes: rawLen, MediaType: ref.media, Kind: ref.kind}
 
 	if s.seen.has(sha) {
 		return body, nil // handled very recently this pass; the server already holds it
@@ -372,7 +392,7 @@ func (s *syncSink) emitBody(ctx context.Context, ref bodyRef) (parser.Body, erro
 		s.seen.add(sha) // present on the server (global dedup), record so a repeat skips the check
 		return body, nil
 	}
-	if err := s.c.putBlobStream(ctx, sha, ref); err != nil {
+	if err := s.c.putBody(ctx, s.enc, sha, contentType, ref); err != nil {
 		return parser.Body{}, fmt.Errorf("upload tool body %s to CAS: %w", sha, err)
 	}
 	s.seen.add(sha)
@@ -531,7 +551,7 @@ func (c *Client) verifyPrefix(ctx context.Context, f *os.File, fs *fileSync, age
 	// output reaches serverBytes, computing both the digest and the original offset
 	// that maps to it. The transform is deterministic, so the recomputed prefix is
 	// byte identical to what was uploaded.
-	h, origBase, ok, err := transformPrefixDigest(ctx, f, agent, size, serverBytes)
+	h, origBase, ok, err := transformPrefixDigest(ctx, f, agent, size, serverBytes, c.enc)
 	if err != nil {
 		return false, err
 	}
@@ -634,21 +654,23 @@ func (c *Client) checkBlobs(ctx context.Context, shas []string) (map[string]bool
 	return missing, nil
 }
 
-// putBlobStream streams one tool body to the CAS under its hash. For a small line
-// the body bytes are already in hand; for a big line the body is streamed straight
-// from the file through its canonical reader, so a hundreds-of-MiB body uploads in
-// O(window) memory and is never resident. The server verifies the streamed bytes
-// hash to sha and pins the body against the sweep, so a corrupt upload is rejected
-// and a present-but-unreferenced body survives until the transcript lands.
-func (c *Client) putBlobStream(ctx context.Context, sha string, ref bodyRef) error {
-	url := fmt.Sprintf("%s/api/v1/ingest/blob/%s?media_type=%s",
-		c.baseURL, sha, urlQueryEscape(ref.media))
+// putBody streams one tool body's STORED bytes to the CAS under its key, declaring
+// both the body's semantic media type and its storage content type (raw or zstd). For
+// a small line the stored bytes are already in hand; for a big line they are produced
+// by streaming the body's canonical bytes through the encoder, so a hundreds-of-MiB
+// body uploads in O(window) memory and is never resident. The server verifies the
+// uploaded bytes hash to sha and pins the body against the sweep, so a corrupt upload
+// is rejected and a present-but-unreferenced body survives until the transcript lands;
+// it stores the bytes opaquely and never decompresses them.
+func (c *Client) putBody(ctx context.Context, enc *casenc.Encoder, sha, contentType string, ref bodyRef) error {
+	url := fmt.Sprintf("%s/api/v1/ingest/blob/%s?media_type=%s&content_type=%s",
+		c.baseURL, sha, urlQueryEscape(ref.media), urlQueryEscape(contentType))
 
 	var bodyReader io.Reader
 	if ref.haveContent {
-		bodyReader = bytes.NewReader(ref.content)
+		bodyReader = bytes.NewReader(ref.stored)
 	} else {
-		bodyReader = parser.CanonicalBodyReader(ctx, ref.file, ref.lineOff, ref.span, ref.bodyKind)
+		bodyReader = enc.StreamAs(ctx, ref.canonicalReader(ctx), contentType)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bodyReader)
 	if err != nil {
@@ -657,7 +679,7 @@ func (c *Client) putBlobStream(ctx context.Context, sha string, ref bodyRef) err
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Content-Type", "application/octet-stream")
 	if ref.haveContent {
-		req.ContentLength = int64(len(ref.content))
+		req.ContentLength = int64(len(ref.stored))
 	}
 
 	resp, err := c.http.Do(req)

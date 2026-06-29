@@ -10,11 +10,12 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// HashString returns the lowercase hex sha256 of content, the key the CAS uses.
-// It hashes in place (the digest consumes the string in fixed blocks) so a large
-// body is never copied into a byte slice just to be hashed. The server computes
-// the identical hash over the identical body bytes, which is what lets a client
-// upload dedupe against blobs the server already holds.
+// HashString returns the lowercase hex sha256 of content. It hashes in place (the
+// digest consumes the string in fixed blocks) so a large body is never copied into a
+// byte slice just to be hashed. It hashes raw bytes; the CAS key is the hash of the
+// STORED bytes, which differ from the raw body when the encoder compresses it, so
+// this is the key only for an uncompressed (raw-stored) body. The server's inline
+// fallback write path computes the identical hash over the identical raw bytes.
 func HashString(content string) string {
 	h := sha256.New()
 	_, _ = io.WriteString(h, content)
@@ -35,17 +36,48 @@ func HashString(content string) string {
 // keeps the space ours by construction.
 const sentinelKey = "__akari_cas__"
 
-// Body is one tool body the client lifts out of the transcript. Content is the
-// exact bytes the CAS stores (and that the server would have stored inline
-// today), so SHA256 and Bytes describe Content precisely and the existing
-// hash-addressed blob serving keeps working byte for byte. Kind is "input" or
-// "result", for diagnostics and tests.
+// Storage content types name how the bytes the CAS holds are encoded, which is a
+// separate axis from a body's own MediaType (its semantic type, e.g.
+// application/json). A small body is stored verbatim; a body large enough to be
+// worth it is stored zstd-compressed. Compression is deliberately a client concern:
+// the server stores and serves these bytes opaquely and never (de)compresses, and
+// the browser decompresses transparently via Content-Encoding. These constants live
+// here, in the dependency-free parser, so the server can name them without linking
+// any compression code.
+const (
+	ContentRaw  = "application/octet-stream" // stored verbatim, key over the raw bytes
+	ContentZstd = "application/zstd"         // stored zstd-compressed, key over the compressed bytes
+)
+
+// BodyEncoder turns a tool body's canonical raw bytes into the bytes the CAS
+// actually stores, deciding per body whether compression is worth it. The CAS key
+// is the sha256 of the STORED bytes, so the same raw body must always encode to the
+// same stored bytes and key; the client supplies a deterministic implementation.
+// The parser depends only on this interface, never on a compression library, which
+// is what keeps the server (which links the parser but never compresses) free of
+// one. The streaming big-line path lives in the client and drives the same encoder
+// directly, so a body encodes identically whether buffered or streamed.
+type BodyEncoder interface {
+	// EncodeBody returns the CAS key (sha256 of the stored bytes), the stored bytes,
+	// and their storage content type (ContentRaw or ContentZstd) for a body's raw
+	// canonical bytes.
+	EncodeBody(raw []byte) (sha string, stored []byte, contentType string)
+}
+
+// Body is one tool body the client lifts out of the transcript. Stored holds the
+// exact bytes the CAS keeps, which are the raw canonical bytes for a small body and
+// the zstd-compressed form for a large one; ContentType says which. SHA256 is the
+// key, the sha256 of Stored. Bytes is the RAW (uncompressed) canonical length, the
+// size the transcript sentinel and the tool_calls row record (what a reader thinks
+// of as the body's size), independent of how the bytes are stored. Kind is "input"
+// or "result", for diagnostics and tests.
 type Body struct {
-	SHA256    string
-	Bytes     int
-	MediaType string
-	Content   string
-	Kind      string
+	SHA256      string
+	Bytes       int
+	MediaType   string
+	Stored      []byte
+	ContentType string
+	Kind        string
 }
 
 // casRef is the parsed sentinel: the reference the server records in place of a
@@ -63,13 +95,6 @@ type casRef struct {
 // to one lifted by the buffered path.
 func SentinelBytes(sha string, n int, media string) []byte {
 	return sentinelBytes(sha, n, media)
-}
-
-// HexDigest renders a raw digest as lowercase hex, the CAS key form. It lets the
-// client hash a streamed body and name it identically to HashString, which the
-// server uses over the same bytes.
-func HexDigest(sum []byte) string {
-	return hex.EncodeToString(sum)
 }
 
 // sentinelBytes renders the compact reference that replaces a body in the
@@ -261,14 +286,14 @@ func rawField(v gjson.Result, content, media, kind string) (bodyField, bool) {
 // unchanged. Re-running ExtractBodies over already-rewritten output is a no-op
 // (the sentinels are skipped), which is what makes a re-sync of an unchanged file
 // upload zero bodies and zero transcript bytes.
-func ExtractBodies(agent Agent, region []byte) ([]byte, []Body, error) {
+func ExtractBodies(agent Agent, region []byte, enc BodyEncoder) ([]byte, []Body, error) {
 	out := make([]byte, 0, len(region))
 	var bodies []Body
 	seen := map[string]bool{}
 
 	start := 0
 	emit := func(line []byte) {
-		rewritten, lineBodies := RewriteLine(agent, line)
+		rewritten, lineBodies := RewriteLine(agent, line, enc)
 		out = append(out, rewritten...)
 		for _, b := range lineBodies {
 			if seen[b.SHA256] {
@@ -299,8 +324,10 @@ func ExtractBodies(agent Agent, region []byte) ([]byte, []Body, error) {
 // the JSON value spans, so the line's length changes only by the body/sentinel
 // size delta and its boundary stays a boundary. The client uses it to transform
 // the transcript one line at a time so a giant tool body is never buffered as part
-// of a whole region.
-func RewriteLine(agent Agent, line []byte) ([]byte, []Body) {
+// of a whole region. enc encodes each lifted body into the bytes the CAS stores and
+// names the key; the sentinel carries that key (so the transcript references the
+// stored bytes) while still recording the raw body length.
+func RewriteLine(agent Agent, line []byte, enc BodyEncoder) ([]byte, []Body) {
 	trimmed := line
 	var nl []byte
 	if n := len(trimmed); n > 0 && trimmed[n-1] == '\n' {
@@ -325,16 +352,17 @@ func RewriteLine(agent Agent, line []byte) ([]byte, []Body) {
 		if f.start < cursor || f.end > len(trimmed) {
 			continue
 		}
-		sha := HashString(f.content)
+		sha, stored, contentType := enc.EncodeBody([]byte(f.content))
 		rewritten = append(rewritten, trimmed[cursor:f.start]...)
 		rewritten = append(rewritten, sentinelBytes(sha, len(f.content), f.media)...)
 		cursor = f.end
 		bodies = append(bodies, Body{
-			SHA256:    sha,
-			Bytes:     len(f.content),
-			MediaType: f.media,
-			Content:   f.content,
-			Kind:      f.kind,
+			SHA256:      sha,
+			Bytes:       len(f.content),
+			MediaType:   f.media,
+			Stored:      stored,
+			ContentType: contentType,
+			Kind:        f.kind,
 		})
 	}
 	rewritten = append(rewritten, trimmed[cursor:]...)
