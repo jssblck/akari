@@ -141,6 +141,7 @@ header.topbar {
 .brand:hover { text-decoration: none; }
 .brandmark { display: inline-flex; align-items: center; gap: var(--sp-sm); }
 .brandglyph { color: var(--lilac); display: block; }
+.brandver { color: var(--muted); font-family: var(--mono); font-size: 0.6875rem; font-weight: 400; align-self: flex-end; }
 header.topbar nav { display: flex; gap: var(--sp-lg); }
 header.topbar nav a { color: var(--subtext); }
 header.topbar nav a:hover { color: var(--lilac); text-decoration: none; }
