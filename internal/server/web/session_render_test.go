@@ -26,6 +26,7 @@ func sessionFixture() (store.SessionDetail, []store.Message, map[int][]store.Too
 			TotalInput:       180237,
 			TotalOutput:      12248,
 			TotalCacheRead:   807552,
+			TotalCacheWrite:  4096,
 			TotalCostUSD:     1.67,
 			Visibility:       "internal",
 			StartedAt:        &start,
@@ -94,11 +95,18 @@ func TestSessionStatsFoldTokensAndDropLive(t *testing.T) {
 	d, msgs, tools := sessionFixture()
 	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, true, true))
 
+	// The tile must show the aggregate of all four token classes, and the tooltip
+	// must carry each class value plus the cost, run through the same formatters
+	// the loose tiles used. A nonzero cache-write guards that field specifically.
+	total := FmtTokens(d.TotalInput + d.TotalOutput + d.TotalCacheRead + d.TotalCacheWrite)
 	for _, want := range []string{
-		`class="stat tokens-stat"`,              // the folded tile
-		`data-stat-key="tokens"`,                // the total, still flashed on live change
-		`class="stat-tip"`,                      // its hover breakdown
-		`>Cache read</dt>`, `>Cache write</dt>`, // the per-class detail
+		`class="stat tokens-stat"`,                   // the folded tile
+		`data-stat-key="tokens">` + total + `</div>`, // the aggregate, flashed on live change
+		`class="stat-tip"`,                           // its hover breakdown
+		`>Cache read</dt>`, `>Cache write</dt>`,      // the per-class labels
+		`<dd>` + FmtTokens(d.TotalInput) + `</dd>`,                                // input value
+		`<dd>` + FmtTokens(d.TotalCacheWrite) + `</dd>`,                           // cache-write value (nonzero)
+		`class="tt-cost">` + FmtCost(d.TotalCostUSD, d.CostIncomplete) + `</div>`, // cost text
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("session stats missing %q", want)
