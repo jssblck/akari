@@ -81,7 +81,7 @@ templ tokensCell(pr store.ProjectSummary) {
 	</span>
 }
 
-templ ProjectPage(p Page, proj store.ProjectSummary, sessions []store.SessionSummary, facets Facets, sel store.SessionFilter, a store.Analytics) {
+templ ProjectPage(p Page, proj store.ProjectSummary, sessions []store.SessionSummary, facets Facets, sel store.SessionFilter, a store.Analytics, rng string) {
 	@layout(p) {
 		<div class="page-head">
 			<h1>{ ProjectTitle(proj) }</h1>
@@ -90,12 +90,15 @@ templ ProjectPage(p Page, proj store.ProjectSummary, sessions []store.SessionSum
 				<span class="muted small mono">{ LocalPath(proj) }</span>
 			}
 		</div>
-		@analyticsPanel(a, "chart-project", ProjectTitle(proj), false, "")
+		@analyticsPanel(a, "chart-project", ProjectRangeOptions(proj.ID, sel, rng))
 		<section>
 			<div class="panel-head">
 				<h2>Sessions</h2>
 			</div>
 			<form class="filters" method="get" hx-get={ ProjectPath(proj.ID) } hx-target="#session-list" hx-push-url="true">
+				// The window rides with a filter submit so changing the session filter
+				// does not reset the usage panel's range on the next full load.
+				<input type="hidden" name="range" value={ rng }/>
 				<select name="agent">
 					<option value="">all agents</option>
 					for _, ag := range facets.Agents {
