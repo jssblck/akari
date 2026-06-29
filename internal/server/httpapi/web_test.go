@@ -39,6 +39,9 @@ func newTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 		t.Skip("set AKARI_TEST_DATABASE_URL to run web integration tests")
 	}
 	ctx := context.Background()
+	if err := store.EnsureDatabase(ctx, dburl); err != nil {
+		t.Fatalf("ensure database: %v", err)
+	}
 	st, err := store.Open(ctx, dburl)
 	if err != nil {
 		t.Fatalf("open store: %v", err)

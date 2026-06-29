@@ -94,6 +94,25 @@ It listens on `:8080` by default. The first account you register becomes the
 admin and needs no invite; every later account needs an invite token an admin
 mints from the account page. Registration is otherwise closed.
 
+### Worktree-based development with eph
+
+For day-to-day development across multiple git worktrees, use
+[eph](https://github.com/attunehq/doteph) instead of docker-compose. The bundled
+[`.eph`](.eph) file gives each worktree its own Postgres and its own
+natively-run server, each on a random free host port, so two worktrees never
+collide the way the fixed ports in `docker-compose.yml` would.
+
+```sh
+eph up                  # Postgres + server, each on its own host port
+eph status              # show the assigned ports and the server URL
+eval "$(eph env)"       # load AKARI_DATABASE_URL, AKARI_URL, etc. into the shell
+eph down                # stop the stack (keeps data); eph clean drops the volume
+```
+
+The server runs as `go run ./cmd/akari-server`, so a restart picks up source
+changes, and it applies its embedded migrations on boot. Point the client at the
+URL `eph status` reports (also exported as `AKARI_URL`).
+
 ### Server configuration
 
 | Variable | Default | Meaning |
@@ -210,7 +229,20 @@ templ generate    # regenerate templates after editing internal/server/web/*.tem
 ```
 
 Integration tests share one Postgres database and each resets the `public`
-schema, so run them serialized and point them at a throwaway database:
+schema, so run them serialized and point them at a throwaway database via
+`AKARI_TEST_DATABASE_URL`. The harness creates that database if it does not yet
+exist (connecting to the `postgres` maintenance database), so no manual setup
+step is needed.
+
+Under [eph](#worktree-based-development-with-eph) the variable is already set to
+a dedicated `akari_test` database on the workspace's Postgres, separate from the
+`akari` database the running server uses, so the tests never disturb it:
+
+```sh
+eph run go test -p 1 ./...
+```
+
+Without eph, point the variable at any Postgres you do not mind resetting:
 
 ```sh
 AKARI_TEST_DATABASE_URL=postgres://akari:akari@localhost:5432/akari_test \

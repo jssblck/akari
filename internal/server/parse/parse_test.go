@@ -19,6 +19,9 @@ func newTestStore(t *testing.T) *store.Store {
 		t.Skip("set AKARI_TEST_DATABASE_URL to run parse integration tests")
 	}
 	ctx := context.Background()
+	if err := store.EnsureDatabase(ctx, url); err != nil {
+		t.Fatalf("ensure database: %v", err)
+	}
 	st, err := store.Open(ctx, url)
 	if err != nil {
 		t.Fatalf("open: %v", err)

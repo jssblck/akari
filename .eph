@@ -1,0 +1,55 @@
+# Per-workspace ephemeral services for akari, powered by eph:
+#   https://github.com/attunehq/doteph
+#
+# Each git worktree (or checkout) gets its OWN Postgres and its OWN akari-server,
+# each on a random free host port. eph keys services off the workspace path, so
+# `eph up` from two different worktrees brings up two independent stacks with
+# separate data and no port collisions. (docker-compose.yml, by contrast, pins
+# host ports 55432 and 8080, so a second worktree using it would conflict.)
+#
+# Quick start, run from a worktree root:
+#   eph up                       start Postgres + server, wait until healthy
+#   eph status                   show the assigned host ports
+#   eph run go test -p 1 ./...   run a command with the AKARI_* vars injected
+#   eval "$(eph env)"            load the same vars into your shell
+#   eph down                     stop the stack (keeps data); eph clean drops it
+#
+# The akari client is unaffected: point it at the URL eph prints for the server.
+
+# =============================================================================
+# Environment variables (printed by `eph env`, injected into run= services).
+# Forward references to service ports below resolve once the services are up.
+# =============================================================================
+
+AKARI_DATABASE_URL=postgres://akari:akari@localhost:${postgres.port}/akari?sslmode=disable
+AKARI_TEST_DATABASE_URL=postgres://akari:akari@localhost:${postgres.port}/akari_test?sslmode=disable
+# Local dev is plain HTTP; do not mark session cookies Secure.
+AKARI_COOKIE_INSECURE=1
+# Convenience: the server's base URL on its assigned host port.
+AKARI_URL=http://localhost:${server.port}
+
+# =============================================================================
+# Services
+# =============================================================================
+
+[postgres]
+image=postgres:18
+port=5432
+env.POSTGRES_DB=akari
+env.POSTGRES_USER=akari
+env.POSTGRES_PASSWORD=akari
+# Postgres 18+ wants the mount at /var/lib/postgresql (data lives in a version
+# subdirectory under it), matching docker-compose.yml.
+volume=pgdata:/var/lib/postgresql
+healthcheck=pg_isready -U akari -d akari
+
+[server]
+# Run the server natively (not in a container) for fast worktree iteration. It
+# applies its embedded migrations on boot, so no migrate step is needed here.
+run=go run ./cmd/akari-server
+port=auto
+env.AKARI_LISTEN=:${server.port}
+# `go run` may spend tens of seconds compiling on the first boot, so wait on the
+# real health endpoint rather than eph's brief default readiness pause.
+healthcheck=curl -sf http://localhost:${server.port}/healthz
+ready-timeout=120
