@@ -328,22 +328,40 @@ each tool body's reference from its sentinel rather than the CAS.
    divergence.
 
 2. **Upload tool bodies (CAS).** Before sending a transformed chunk, the client
-   encodes and uploads the bodies that chunk references. Encoding is the client's
+   ensures the CAS holds every body that chunk references. Encoding is the client's
    job, not the server's: a body at or above a size threshold is zstd-compressed,
    a smaller one is left raw (see Compression under CAS), and the CAS key is the
    sha256 of the resulting STORED bytes. To learn the key the client streams the
    body through the encoder once, hashing the output, then checks and (if missing)
    re-streams it for the upload, a deliberate second compression pass it is happy
-   to pay to keep the server off the compression CPU path.
+   to pay to keep the server off the compression CPU path. Building keys for many
+   bodies at once (a fleet of files, or one large catch-up sync) is bounded to the
+   CPU count by a shared semaphore on the encoder, so the compression never
+   oversubscribes the machine.
+
+   Rather than check and upload each body inline as it is found, the client lifts a
+   body's key immediately (so it can write the chunk's sentinel) but defers the
+   round-trip: bodies are queued and ensured present in batches, before the chunk
+   that references them is sent and once more at the end of a pass (so a body lifted
+   from a withheld trailing turn is uploaded the tick it is first transformed, since
+   the held lines are cached and never re-transformed). A bound on the in-hand body
+   bytes held forces an early batch so memory stays flat regardless of how many
+   bodies a chunk references.
    - `POST /api/v1/ingest/blobs/check` with `{"sha256":[...]}` returns
-     `{"missing":[...]}`, the keys the CAS does not yet hold. The CAS dedupes
-     globally, so a body any session already stored (this one on an earlier sync,
-     or any other) is reported present and never re-sent. This is what makes a
-     re-sync of an unchanged file upload zero bodies. Because the encoding is
-     deterministic, the same body always yields the same key, so dedup holds.
+     `{"missing":[...]}`, the keys the CAS does not yet hold. The client sends at
+     most 100 hashes per request so the server's per-request work is bounded, and
+     fans the requests out in parallel for a large queue. The CAS dedupes globally,
+     so a body any session already stored (this one on an earlier sync, or any
+     other) is reported present and never re-sent, and is pinned by the check so it
+     survives until the referencing chunk lands. This is what makes a re-sync of an
+     unchanged file upload zero bodies. Because the encoding is deterministic, the
+     same body always yields the same key, so dedup holds.
    - `PUT /api/v1/ingest/blob/{sha256}?media_type=<type>&content_type=<enc>`
      streams one body's stored bytes to the CAS, where `content_type` is the
      storage encoding (`application/octet-stream` raw or `application/zstd`). The
+     missing bodies upload in parallel under an adaptive concurrency limiter that
+     walks the in-flight width from observed upload latency (shrinking when the
+     server sheds load or the network saturates, growing when it is healthy). The
      server streams the bytes to the large object in bounded slices and verifies
      they hash to the path's sha256, so a corrupt or mislabeled upload is rejected
      rather than poisoning the store; it never decompresses. Each upload pins the
@@ -351,10 +369,10 @@ each tool body's reference from its sentinel rather than the CAS.
      the window between uploading it and uploading the transcript that references
      it.
 
-   Bodies are uploaded before the transcript that references them, so the parse can
-   always resolve a sentinel to a present blob; a sentinel whose body is somehow
-   absent leaves the parse cursor for a retry rather than recording a dangling
-   reference.
+   Bodies are ensured present before the transcript that references them, so the
+   parse can always resolve a sentinel to a present blob; a sentinel whose body is
+   somehow absent leaves the parse cursor for a retry rather than recording a
+   dangling reference.
 
 3. **Append bytes.**
    `POST /api/v1/ingest/session/{id}/chunk?offset=40960`

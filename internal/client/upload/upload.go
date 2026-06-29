@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -78,8 +79,15 @@ type Client struct {
 	// enc encodes each tool body into the bytes the CAS stores (small bodies
 	// verbatim, large bodies zstd) and names its key. It is the single source of the
 	// stored-byte encoding for both the upload and the cold-cache prefix digest, so
-	// the sentinel a re-sync recomputes matches the one it first uploaded.
+	// the sentinel a re-sync recomputes matches the one it first uploaded. It bounds
+	// concurrent compression to the CPU count, so building keys for many bodies at once
+	// (a fleet of files, or a batch of uploads) does not oversubscribe the machine.
 	enc *casenc.Encoder
+
+	// uploads bounds how many tool-body uploads run at once, adapting the live width to
+	// observed round-trip latency. It is shared across every file this Client syncs, so
+	// the cap is a whole-client budget, not per file.
+	uploads uploadLimiter
 
 	// files caches per-path incremental sync state so that re-syncing a growing
 	// session does work proportional to the newly appended bytes, not to the whole
@@ -147,11 +155,19 @@ func New(httpClient *http.Client, baseURL, token string) *Client {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
+	uploads, err := newAdaptiveUploadLimiter()
+	if err != nil {
+		// The adaptive limiter is built from static, valid parameters, so this does not
+		// happen in practice; fall back to a fixed-width limiter so a Client is always
+		// usable rather than left without upload concurrency control.
+		uploads = newFixedUploadLimiter(uploadInitialConcurrency)
+	}
 	return &Client{
 		http:    httpClient,
 		baseURL: strings.TrimRight(baseURL, "/"),
 		token:   token,
-		enc:     casenc.New(),
+		enc:     casenc.NewLimited(runtime.NumCPU()),
+		uploads: uploads,
 		files:   map[string]*fileSync{},
 	}
 }
@@ -302,7 +318,7 @@ func (c *Client) syncOnce(ctx context.Context, t Target, fs *fileSync, f *os.Fil
 	// server accepts, so steady-state work is proportional to the newly appended
 	// bytes. A withheld trailing turn leaves origBase where it is and is re-examined
 	// next tick (the only repeated work, and only for an open final turn).
-	sink := &syncSink{c: c, fs: fs, sessionID: ann.SessionID, size: size, out: &out, seen: newSeenCache(), enc: c.enc}
+	sink := &syncSink{c: c, fs: fs, sessionID: ann.SessionID, size: size, out: &out, present: newSeenCache(), pendingShas: map[string]struct{}{}, enc: c.enc}
 	tr := newTransformer(f, fs.origBase, size, t.Agent, sink, c.enc, fs.pending, fs.partialSearch)
 	_, conflicted, err := tr.run(ctx, settled)
 	if err != nil {
@@ -314,6 +330,14 @@ func (c *Client) syncOnce(ctx context.Context, t Target, fs *fileSync, f *os.Fil
 		fs.pending = nil
 		fs.partialSearch = 0
 		return out, true, nil
+	}
+	// Upload any tool bodies lifted from a withheld trailing turn whose transcript chunk
+	// was not emitted this pass. The held lines are cached and never re-transformed, so
+	// this is the only tick those bodies are seen: ensuring them now (pinned on the
+	// server) means the chunk that references them, when it finally lands, finds the CAS
+	// already holding them.
+	if err := sink.flushPending(ctx); err != nil {
+		return out, false, err
 	}
 	// Carry an open Codex trailing turn to the next tick so it is not re-transformed.
 	// For Claude, pi, or a settled/closed turn this is nil and the cache clears.
@@ -330,18 +354,29 @@ func (c *Client) syncOnce(ctx context.Context, t Target, fs *fileSync, f *os.Fil
 }
 
 // syncSink wires the streaming transform to the client's CAS and chunk endpoints
-// for one sync pass. It uploads each body before the chunk that references it and
-// advances the verified-prefix cache as the server accepts chunks, so the
-// transform itself stays memory bounded: it hands off each chunk and body without
-// accumulating them.
+// for one sync pass. Bodies the transform lifts are registered (not uploaded inline)
+// and ensured present in batches: every pending body is checked and uploaded before
+// the chunk that references it lands, so the transform stays memory bounded (it never
+// accumulates a chunk) while existence checks and uploads run batched and in parallel.
+// It advances the verified-prefix cache as the server accepts chunks.
 type syncSink struct {
 	c         *Client
 	fs        *fileSync
 	sessionID int64
 	size      int64
 	out       *Outcome
-	seen      *seenCache // bounded recently-handled body hashes, to cut round-trips
 	enc       *casenc.Encoder
+
+	// pending holds bodies lifted since the last flush, awaiting a batched existence
+	// check and parallel upload. pendingShas dedups them and pendingBytes tracks the
+	// in-hand stored bytes held, bounding memory before a flush. present records hashes
+	// already confirmed in the CAS this pass so a repeat skips the round-trip; it is a
+	// bounded cache, so a re-check after eviction costs one extra request, never
+	// correctness.
+	pending      []pendingBody
+	pendingShas  map[string]struct{}
+	pendingBytes int64
+	present      *seenCache
 }
 
 // emitBody resolves a located body to its CAS key (the sha256 of the bytes the CAS
@@ -354,48 +389,29 @@ type syncSink struct {
 // a big line is encoded by streaming it from the file. Encoding it here is the only
 // way to learn its key, since the key is the hash of the compressed bytes, so a body
 // that turns out to be missing is deliberately encoded a second time for the upload
-// (HashStream below to hash, then StreamAs in putBody to upload). That second
+// (HashStream here to hash, then StreamAs in putBody to upload). That second
 // compression pass is an accepted tradeoff, not an inefficiency to remove: it keeps
 // the server from ever compressing, which is the whole point of the compressed-CAS
-// design. Dedup is the server's
-// job: MissingBlobs reports a body already in the CAS (from any session) as
-// not-missing and pins it, so a present body is never re-sent. The client keeps a
-// small bounded cache of recently handled hashes to skip the redundant round-trip for
-// a body that recurs back to back, which is the common case (the same tool result
-// echoed across adjacent turns). The cache is capped, so its memory does not grow with
+// design.
+//
+// emitBody does not check or upload inline: it computes the key, registers the body for
+// the next batched existence check, and returns the descriptor so the transform can
+// assemble the sentinel immediately. flushPending (called before each chunk and at the
+// end of the pass) then checks the queued hashes in parallel batches and uploads the
+// missing bodies concurrently. Dedup is the server's job: MissingBlobs reports a body
+// already in the CAS (from any session) as not-missing and pins it, so a present body is
+// never re-sent. The client also keeps a bounded cache of hashes already confirmed
+// present this pass, to skip the round-trip for a body that recurs (the same tool result
+// echoed across adjacent turns); the cache is capped, so its memory does not grow with
 // the number of distinct bodies in a session.
 func (s *syncSink) emitBody(ctx context.Context, ref bodyRef) (parser.Body, error) {
-	sha := ref.sha
-	contentType := ref.contentType
-	rawLen := ref.rawLen
-	if !ref.haveContent {
-		// Streamed big body: hash the stored (compressed) bytes by streaming the body
-		// through the encoder once, discarding the compressed output. A second pass
-		// re-streams it for the upload itself if the server turns out to lack it.
-		var err error
-		sha, contentType, rawLen, err = s.enc.HashStream(ctx, ref.canonicalReader(ctx))
-		if err != nil {
-			return parser.Body{}, err
-		}
-	}
-	body := parser.Body{SHA256: sha, Bytes: rawLen, MediaType: ref.media, Kind: ref.kind}
-
-	if s.seen.has(sha) {
-		return body, nil // handled very recently this pass; the server already holds it
-	}
-
-	missing, err := s.c.checkBlobs(ctx, []string{sha})
+	body, contentType, err := s.bodyDescriptor(ctx, ref)
 	if err != nil {
-		return parser.Body{}, fmt.Errorf("check tool body %s in CAS: %w", sha, err)
+		return parser.Body{}, err
 	}
-	if !missing[sha] {
-		s.seen.add(sha) // present on the server (global dedup), record so a repeat skips the check
-		return body, nil
+	if err := s.registerBody(ctx, body.SHA256, contentType, ref); err != nil {
+		return parser.Body{}, err
 	}
-	if err := s.c.putBody(ctx, s.enc, sha, contentType, ref); err != nil {
-		return parser.Body{}, fmt.Errorf("upload tool body %s to CAS: %w", sha, err)
-	}
-	s.seen.add(sha)
 	return body, nil
 }
 
@@ -431,7 +447,16 @@ func (c *seenCache) add(sha string) {
 // emitChunk uploads one transformed chunk and folds the result into the verified
 // prefix and the outcome. A 409 conflict is reported to the transform, which unwinds
 // so the caller re-announces.
+//
+// Every body the chunk's sentinels reference was registered while its lines were being
+// transformed, before this chunk was cut, so flushing the pending set here guarantees
+// the CAS holds them all before the transcript that points at them lands. flushPending
+// also covers bodies for lines beyond this chunk (a held open turn): uploading them
+// early is harmless, since the server pins them until their own chunk commits.
 func (s *syncSink) emitChunk(ctx context.Context, data []byte, origLen int64) (bool, error) {
+	if err := s.flushPending(ctx); err != nil {
+		return false, err
+	}
 	r, err := s.c.chunk(ctx, s.sessionID, s.fs.base, data)
 	if err != nil {
 		return false, err
@@ -689,9 +714,24 @@ func (c *Client) putBody(ctx context.Context, enc *casenc.Encoder, sha, contentT
 	defer resp.Body.Close()
 	payload, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("upload blob %s: server returned %d: %s", sha, resp.StatusCode, strings.TrimSpace(string(payload)))
+		// Return a typed status error so the upload limiter can tell a server shedding
+		// load (429/5xx) from a client-side fault and retune accordingly.
+		return &httpStatusError{op: fmt.Sprintf("upload blob %s", sha), code: resp.StatusCode, body: strings.TrimSpace(string(payload))}
 	}
 	return nil
+}
+
+// httpStatusError is a non-2xx server response carrying the status code, so callers
+// (notably the upload limiter's load-shed detection) can branch on the code rather than
+// parse a formatted string.
+type httpStatusError struct {
+	op   string
+	code int
+	body string
+}
+
+func (e *httpStatusError) Error() string {
+	return fmt.Sprintf("%s: server returned %d: %s", e.op, e.code, e.body)
 }
 
 // urlQueryEscape escapes a value for use in a query string.
