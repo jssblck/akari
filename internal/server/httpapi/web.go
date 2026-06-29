@@ -76,12 +76,18 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rng := web.ParseRange(r.URL.Query().Get("range"))
-	analytics, err := s.Store.Analytics(r.Context(), 0, web.RangeSince(rng, time.Now()))
+	users, err := s.Store.ListUsers(r.Context())
+	if err != nil {
+		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "overview"), http.StatusInternalServerError, "Could not load users."))
+		return
+	}
+	selected := web.SelectedUserIDs(r.URL.Query()["user"], users)
+	analytics, err := s.Store.Analytics(r.Context(), 0, web.RangeSince(rng, time.Now()), selected)
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "overview"), http.StatusInternalServerError, "Could not load analytics."))
 		return
 	}
-	render(w, r, http.StatusOK, web.OverviewPage(s.pageForNav(r, "Overview", "overview"), analytics, rng))
+	render(w, r, http.StatusOK, web.OverviewPage(s.pageForNav(r, "Overview", "overview"), analytics, rng, users, selected))
 }
 
 // handleProjectsIndex is the projects table (moved off the root to /projects when
@@ -185,7 +191,7 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load filters."))
 		return
 	}
-	analytics, err := s.Store.Analytics(r.Context(), id, time.Time{})
+	analytics, err := s.Store.Analytics(r.Context(), id, time.Time{}, nil)
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load analytics."))
 		return

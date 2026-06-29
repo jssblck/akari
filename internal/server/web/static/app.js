@@ -512,16 +512,46 @@
     initReparseWatch();
     initReparsePublic();
   }
+  // ---------------- Overview user filter ----------------
+  // The per-user filter is a <details> that lives inside #usage, so every range or
+  // user-toggle swap replaces it and it would otherwise snap shut mid-selection.
+  // Track its open state (the toggle event fires on the element; capture catches it
+  // since it does not bubble) and reapply it after the swap, so picking several
+  // users keeps the menu open. A click outside an open menu, or Escape, closes it.
+  var userFilterOpen = false;
+  document.addEventListener("toggle", function (e) {
+    var d = e.target;
+    if (d && d.classList && d.classList.contains("userfilter")) userFilterOpen = d.open;
+  }, true);
+  document.addEventListener("click", function (e) {
+    var open = document.querySelector(".userfilter[open]");
+    if (!open) return;
+    if (e.target.closest && e.target.closest(".userfilter")) return; // a click inside keeps it open
+    open.open = false;
+    userFilterOpen = false;
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key !== "Escape") return;
+    var open = document.querySelector(".userfilter[open]");
+    if (open) { open.open = false; userFilterOpen = false; }
+  });
+
   // Re-grow the breakdown bars after the overview's range selector swaps the usage
   // panel (#usage); the replacement bars start at width 0. Gate O(1) on the swapped
   // target's id so live transcript appends (which swap #session-body) do no work
   // here, then animate the live #usage by id (an outerHTML swap's target is the
-  // detached old node).
+  // detached old node). The same swap replaces the user filter, so reopen it when
+  // it was open before the swap.
   document.addEventListener("htmx:afterSwap", function (e) {
     var t = (e.detail && e.detail.target) || e.target;
     if (!t || t.id !== "usage") return;
     var root = document.getElementById("usage");
-    if (root) animateBars(root);
+    if (!root) return;
+    animateBars(root);
+    if (userFilterOpen) {
+      var d = root.querySelector(".userfilter");
+      if (d) d.open = true;
+    }
   });
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", init);

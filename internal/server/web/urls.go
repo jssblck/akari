@@ -3,11 +3,87 @@ package web
 import (
 	"fmt"
 	"net/url"
+	"strconv"
+	"strings"
 
 	"github.com/a-h/templ"
 
 	"github.com/jssblck/akari/internal/server/store"
 )
+
+// OverviewPath builds the overview URL for a range key and a set of selected user
+// ids: the shared target the range buttons link to and the user filter submits, so
+// the two controls always round-trip the full window-and-users state together
+// rather than each clobbering the other's selection.
+func OverviewPath(rng string, userIDs []int64) string {
+	q := url.Values{}
+	if rng != "" {
+		q.Set("range", rng)
+	}
+	for _, id := range userIDs {
+		q.Add("user", strconv.FormatInt(id, 10))
+	}
+	if s := q.Encode(); s != "" {
+		return "/?" + s
+	}
+	return "/"
+}
+
+// SelectedUserIDs parses the overview's repeated ?user= ids against the known
+// accounts, keeping only ids that name a real user and returning them in the
+// users-list order. A tampered, stale, or non-numeric id silently drops out, and
+// the stable order keeps the collapsed pills from reshuffling between requests.
+func SelectedUserIDs(raw []string, users []store.User) []int64 {
+	if len(raw) == 0 {
+		return nil
+	}
+	want := map[int64]bool{}
+	for _, v := range raw {
+		if id, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil {
+			want[id] = true
+		}
+	}
+	if len(want) == 0 {
+		return nil
+	}
+	var out []int64
+	for _, u := range users {
+		if want[u.ID] {
+			out = append(out, u.ID)
+		}
+	}
+	return out
+}
+
+// userIDSelected reports whether an account is in the current overview selection,
+// so its checkbox renders checked.
+func userIDSelected(id int64, selected []int64) bool {
+	for _, s := range selected {
+		if s == id {
+			return true
+		}
+	}
+	return false
+}
+
+// selectedUsers resolves the selected ids back to their accounts, in users-list
+// order, so the collapsed control can render one pill per chosen user.
+func selectedUsers(users []store.User, selected []int64) []store.User {
+	if len(selected) == 0 {
+		return nil
+	}
+	want := map[int64]bool{}
+	for _, id := range selected {
+		want[id] = true
+	}
+	var out []store.User
+	for _, u := range users {
+		if want[u.ID] {
+			out = append(out, u)
+		}
+	}
+	return out
+}
 
 // ProjectHref and friends return sanitized internal URLs for href attributes.
 func ProjectHref(id int64) templ.SafeURL { return templ.URL(fmt.Sprintf("/projects/%d", id)) }

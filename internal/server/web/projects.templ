@@ -90,7 +90,7 @@ templ ProjectPage(p Page, proj store.ProjectSummary, sessions []store.SessionSum
 				<span class="muted small mono">{ LocalPath(proj) }</span>
 			}
 		</div>
-		@analyticsPanel(a, "chart-project", ProjectTitle(proj), false, "")
+		@analyticsPanel(a, "chart-project", ProjectTitle(proj), false, "", nil, nil)
 		<section>
 			<div class="panel-head">
 				<h2>Sessions</h2>

@@ -59,6 +59,44 @@ func TestAnyFilterActive(t *testing.T) {
 	}
 }
 
+func TestOverviewPath(t *testing.T) {
+	cases := []struct {
+		name string
+		rng  string
+		ids  []int64
+		want string
+	}{
+		{"range only", "30d", nil, "/?range=30d"},
+		{"range and users", "7d", []int64{2, 5}, "/?range=7d&user=2&user=5"},
+		{"users no range", "", []int64{9}, "/?user=9"},
+		{"nothing", "", nil, "/"},
+	}
+	for _, c := range cases {
+		if got := OverviewPath(c.rng, c.ids); got != c.want {
+			t.Errorf("OverviewPath(%s) = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+func TestSelectedUserIDs(t *testing.T) {
+	users := []store.User{{ID: 2, Username: "ada"}, {ID: 5, Username: "grace"}, {ID: 9, Username: "hopper"}}
+	// Valid ids resolve and come back in users-list order, not query order.
+	if got := SelectedUserIDs([]string{"9", "2"}, users); len(got) != 2 || got[0] != 2 || got[1] != 9 {
+		t.Errorf("SelectedUserIDs should keep known ids in users order, got %v", got)
+	}
+	// Unknown and non-numeric ids drop out silently.
+	if got := SelectedUserIDs([]string{"5", "999", "abc"}, users); len(got) != 1 || got[0] != 5 {
+		t.Errorf("SelectedUserIDs should drop unknown/non-numeric ids, got %v", got)
+	}
+	// No selection is nil (the unscoped "all users" view).
+	if got := SelectedUserIDs(nil, users); got != nil {
+		t.Errorf("empty selection should be nil, got %v", got)
+	}
+	if got := SelectedUserIDs([]string{"oops"}, users); got != nil {
+		t.Errorf("all-invalid selection should be nil, got %v", got)
+	}
+}
+
 func TestNavClass(t *testing.T) {
 	if got := navClass("sessions", "sessions"); got != "nav active" {
 		t.Errorf("active navClass = %q", got)

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -103,6 +104,27 @@ func (s *Store) UserByID(ctx context.Context, id int64) (User, error) {
 		return User{}, ErrNotFound
 	}
 	return u, err
+}
+
+// ListUsers returns every account, id and username only, ordered by username, to
+// populate the overview's per-user activity filter. The password hash is left
+// zero: this list names identities for a scope control, it does not carry the
+// credential.
+func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
+	rows, err := s.Pool.Query(ctx, `SELECT id, username FROM users ORDER BY username`)
+	if err != nil {
+		return nil, fmt.Errorf("query users: %w", err)
+	}
+	defer rows.Close()
+	var out []User
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.ID, &u.Username); err != nil {
+			return nil, fmt.Errorf("scan user: %w", err)
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
 }
 
 // CreateAPIToken stores a token's hash with a scope and returns its row id.

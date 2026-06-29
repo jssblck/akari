@@ -100,7 +100,7 @@ func TestAnalyticsRollups(t *testing.T) {
 	seedUsage(t, st, s1, "claude-opus-4-8", 1.5, 500, 100, 1, "u2")
 	seedUsage(t, st, s2, "gpt-5.5", 1.0, 400, 80, 2, "u3")
 
-	a, err := st.Analytics(ctx, proj, time.Time{})
+	a, err := st.Analytics(ctx, proj, time.Time{}, nil)
 	if err != nil {
 		t.Fatalf("analytics: %v", err)
 	}
@@ -132,13 +132,94 @@ func TestAnalyticsRollups(t *testing.T) {
 	}
 
 	// Global scope (projectID 0) sees the same single project.
-	g, err := st.Analytics(ctx, 0, time.Time{})
+	g, err := st.Analytics(ctx, 0, time.Time{}, nil)
 	if err != nil {
 		t.Fatalf("global analytics: %v", err)
 	}
 	if g.Sessions != 2 || len(g.Series) != 3 {
 		t.Errorf("global rollup mismatch: %+v", g)
 	}
+}
+
+// A non-empty userIDs scopes every rollup to the named users' sessions, leaving
+// other users' usage out of the series, the breakdowns, and the totals. It
+// exercises both the unbounded by-agent path (reads the session rollups) and the
+// windowed path (slices usage_events), and confirms an empty selection is the
+// unscoped "all users" view.
+func TestAnalyticsUserFilter(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	// Two accounts, each with a session and recent usage on the same project.
+	graceID := seedUser(t, st, "grace")
+	adaID := seedUser(t, st, "ada")
+	proj, err := st.UpsertProject(ctx, "github.com/ada/engine", "github.com", "ada", "engine", "engine", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+
+	sg := seedSessionWithStats(t, st, graceID, proj, "claude", "sg", 3.0, 900, 180)
+	sa := seedSessionWithStats(t, st, adaID, proj, "codex", "sa", 1.0, 300, 60)
+	seedUsage(t, st, sg, "claude-opus-4-8", 3.0, 900, 180, 1, "g1")
+	seedUsage(t, st, sa, "gpt-5.5", 1.0, 300, 60, 1, "a1")
+
+	// Scoped to grace, all-time: only her session, spend, and agent survive.
+	g, err := st.Analytics(ctx, 0, time.Time{}, []int64{graceID})
+	if err != nil {
+		t.Fatalf("grace all-time analytics: %v", err)
+	}
+	if g.Sessions != 1 {
+		t.Errorf("grace scope should see only her session, got %d", g.Sessions)
+	}
+	if g.TotalCost < 2.99 || g.TotalCost > 3.01 {
+		t.Errorf("grace scope cost should be ~3.0 from session rollups, got %.2f", g.TotalCost)
+	}
+	if len(g.Agents) != 1 || g.Agents[0].Label != "claude" {
+		t.Errorf("grace scope agents should hold only claude: %+v", g.Agents)
+	}
+	if len(g.Models) != 1 || g.Models[0].Label != "claude-opus-4-8" {
+		t.Errorf("grace scope models should hold only her model: %+v", g.Models)
+	}
+
+	// Scoped to grace, windowed: the usage_events path agrees with the rollup path.
+	since := time.Now().AddDate(0, 0, -7)
+	gw, err := st.Analytics(ctx, 0, since, []int64{graceID})
+	if err != nil {
+		t.Fatalf("grace windowed analytics: %v", err)
+	}
+	if gw.Sessions != 1 || gw.TotalIn != 900 || gw.TotalOut != 180 {
+		t.Errorf("grace windowed scope wrong: sessions=%d in=%d out=%d", gw.Sessions, gw.TotalIn, gw.TotalOut)
+	}
+
+	// Both users selected matches the unscoped view: two sessions, full spend.
+	both, err := st.Analytics(ctx, 0, time.Time{}, []int64{graceID, adaID})
+	if err != nil {
+		t.Fatalf("both-user analytics: %v", err)
+	}
+	all, err := st.Analytics(ctx, 0, time.Time{}, nil)
+	if err != nil {
+		t.Fatalf("unscoped analytics: %v", err)
+	}
+	if both.Sessions != all.Sessions || both.Sessions != 2 {
+		t.Errorf("selecting every user should match the unscoped view (2 sessions): both=%d all=%d", both.Sessions, all.Sessions)
+	}
+	if both.TotalCost < 3.99 || both.TotalCost > 4.01 {
+		t.Errorf("both-user cost should sum both sessions (~4.0), got %.2f", both.TotalCost)
+	}
+}
+
+// seedUser inserts an account directly and returns its id, so a test can own
+// sessions by distinct users without driving the invite-gated registration flow.
+func seedUser(t *testing.T, st *store.Store, username string) int64 {
+	t.Helper()
+	var id int64
+	if err := st.Pool.QueryRow(context.Background(),
+		`INSERT INTO users (username, password_hash, is_admin) VALUES ($1, 'x', FALSE) RETURNING id`,
+		username).Scan(&id); err != nil {
+		t.Fatalf("seed user %q: %v", username, err)
+	}
+	return id
 }
 
 // A non-zero `since` bounds every rollup to the trailing window, slicing usage by
@@ -167,7 +248,7 @@ func TestAnalyticsTimeWindow(t *testing.T) {
 
 	// A 7-day window keeps only s1's two recent events.
 	since := time.Now().AddDate(0, 0, -7)
-	a, err := st.Analytics(ctx, 0, since)
+	a, err := st.Analytics(ctx, 0, since, nil)
 	if err != nil {
 		t.Fatalf("windowed analytics: %v", err)
 	}
@@ -191,7 +272,7 @@ func TestAnalyticsTimeWindow(t *testing.T) {
 	}
 
 	// The unbounded view still sees both sessions and the older spend.
-	full, err := st.Analytics(ctx, 0, time.Time{})
+	full, err := st.Analytics(ctx, 0, time.Time{}, nil)
 	if err != nil {
 		t.Fatalf("full analytics: %v", err)
 	}
@@ -236,7 +317,7 @@ func TestAnalyticsScopedWindowWithCacheTotals(t *testing.T) {
 	seedUsageCache(t, st, sB, "gpt-5.5", 9.0, 999, 999, 999, 999, 1, "b-recent")
 
 	since := time.Now().AddDate(0, 0, -7)
-	a, err := st.Analytics(ctx, projA, since)
+	a, err := st.Analytics(ctx, projA, since, nil)
 	if err != nil {
 		t.Fatalf("scoped windowed analytics: %v", err)
 	}
@@ -286,7 +367,7 @@ func TestAnalyticsAllTimeTokenTotals(t *testing.T) {
 	seedUsageCache(t, st, s1, "claude-opus-4-8", 1.0, 100, 20, 30, 7, 0, "c1")
 	seedUsageCache(t, st, s1, "claude-opus-4-8", 1.0, 200, 40, 60, 14, 3, "c2")
 
-	a, err := st.Analytics(ctx, proj, time.Time{})
+	a, err := st.Analytics(ctx, proj, time.Time{}, nil)
 	if err != nil {
 		t.Fatalf("all-time analytics: %v", err)
 	}
@@ -325,7 +406,7 @@ func TestAnalyticsWindowLowerBoundInclusive(t *testing.T) {
 	seedUsageAt(t, st, s1, "claude-opus-4-8", 1.0, 100, 20, bound, "at-bound")
 	seedUsageAt(t, st, s1, "claude-opus-4-8", 5.0, 500, 90, bound.Add(-time.Microsecond), "below-bound")
 
-	a, err := st.Analytics(ctx, proj, bound)
+	a, err := st.Analytics(ctx, proj, bound, nil)
 	if err != nil {
 		t.Fatalf("boundary analytics: %v", err)
 	}

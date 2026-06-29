@@ -472,6 +472,87 @@ func TestOverviewRangeWindow(t *testing.T) {
 	}
 }
 
+// TestOverviewUserFilter drives the overview's per-user scope end to end: an
+// unscoped load aggregates every user (both agents show in the breakdown) and
+// lists each account as a filter option; ?user=<id> narrows the analytics to that
+// user's sessions (the other user's agent drops out), marks their checkbox, and
+// the range buttons carry the selection forward.
+func TestOverviewUserFilter(t *testing.T) {
+	t.Parallel()
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+	c := newClient(t)
+
+	owner, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	// A second account, inserted directly (registration past the first user is
+	// invite-gated, which this test does not need to exercise).
+	var adaID int64
+	if err := st.Pool.QueryRow(ctx,
+		`INSERT INTO users (username, password_hash, is_admin) VALUES ('ada', 'x', FALSE) RETURNING id`).Scan(&adaID); err != nil {
+		t.Fatalf("seed ada: %v", err)
+	}
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+
+	// grace runs claude, ada runs codex; each gets one in-window usage event so the
+	// by-agent breakdown carries both agents in the unscoped view.
+	seed := func(userID int64, agent, src, model string) {
+		ann, err := st.Announce(ctx, store.AnnounceParams{
+			UserID: userID, Agent: agent, SourceSessionID: src,
+			ProjectID: projectID, Cwd: "/home/x/akari", Machine: "laptop",
+		})
+		if err != nil {
+			t.Fatalf("announce %s: %v", src, err)
+		}
+		if _, err := st.Pool.Exec(ctx,
+			`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cost_usd, occurred_at, dedup_key)
+			 VALUES ($1, $2, 100, 50, 1.0, now() - make_interval(days => 1), $3)`,
+			ann.SessionID, model, src+"-u"); err != nil {
+			t.Fatalf("seed usage %s: %v", src, err)
+		}
+	}
+	seed(owner.ID, "claude", "sess-grace", "claude-opus-4-8")
+	seed(adaID, "codex", "sess-ada", "gpt-5.5")
+
+	if _, err := c.PostForm(srv.URL+"/login", url.Values{
+		"username": {"grace"}, "password": {"hopper-1906"},
+	}); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+
+	// Unscoped: both users are offered, the collapsed control reads All Users, and
+	// codex (ada's agent) appears in the breakdown alongside claude.
+	body := readBody(t, mustGet(t, c, srv.URL+"/"))
+	for _, want := range []string{
+		fmt.Sprintf(`name="user" value="%d"`, owner.ID),
+		fmt.Sprintf(`name="user" value="%d"`, adaID),
+		`class="userfilter-all">All Users</span>`,
+		`>codex</span>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("unscoped overview missing %q, got:\n%s", want, body)
+		}
+	}
+
+	// Scoped to grace: her checkbox is checked, ada's codex usage drops out of the
+	// breakdown, and the range buttons carry ?user=<grace> forward.
+	body = readBody(t, mustGet(t, c, srv.URL+fmt.Sprintf("/?user=%d", owner.ID)))
+	if !strings.Contains(body, fmt.Sprintf(`value="%d" checked`, owner.ID)) {
+		t.Fatalf("grace scope should check her box, got:\n%s", body)
+	}
+	if strings.Contains(body, `>codex</span>`) {
+		t.Fatalf("grace scope should exclude ada's codex usage, got:\n%s", body)
+	}
+	if !strings.Contains(body, fmt.Sprintf(`hx-get="/?range=30d&amp;user=%d"`, owner.ID)) {
+		t.Fatalf("range buttons should carry the user scope, got:\n%s", body)
+	}
+}
+
 // TestSessionPageDuplicateIDChip drives the real session page over HTTP and confirms
 // the duplicate-id chip renders from store data: a session whose transcript repeated
 // a tool_use id shows the warning, computed by handleSessionPage through
