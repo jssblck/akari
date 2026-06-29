@@ -926,6 +926,17 @@ rebuild the cache; divergence is always decided by the server's `prefix_sha256`.
 server's `stored_bytes` per file, prints a summary (uploaded, skipped with
 reasons), and exits. This is the catch-up / cron-friendly mode.
 
+Discovered files sync in parallel, bounded by `--concurrency` (default
+`min(NumCPU, 8)`). The cap stays modest on purpose: each file already fans its
+own body uploads out under the client's shared adaptive limiter and CPU-bounded
+compression encoder, so the file loop only needs enough parallelism to overlap
+the per-file announce and existence-check round-trips. Outcomes are folded on one
+goroutine that owns the running tally and the printed lines, so counts stay exact
+and no two per-file lines interleave; the lines themselves now appear in
+completion order rather than discovery order. The time limit and Ctrl-C keep their
+meaning: once either fires, no new file is scheduled, but files already in flight
+finish on a detached context. A second Ctrl-C exits the process outright.
+
 ### Daemon management
 
 `akari watch` is the foreground loop. `akari daemon {start|stop|status}` manages
