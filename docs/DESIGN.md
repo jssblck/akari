@@ -260,12 +260,15 @@ single-line JSON object:
 happens strictly inside the body's JSON value span, so the line keeps its newline
 and a Codex turn-closing user line keeps its shape: the transformed stream has the
 same line and turn boundaries as the original, which is what keeps it resumable and
-turn aligned. The body bytes and media type are exactly what the server used to
-store inline, so the sha256 is identical and the existing hash-addressed blob
-serving keeps working unchanged. The extraction and the sentinel have one
-definition in `internal/parser`, used by both the client (to lift and rewrite) and
-the server reducer (to interpret), so the client-uploaded body set can never drift
-from what the server would have stored.
+turn aligned. `sha256` is the CAS key, the hash of the STORED bytes the CAS holds
+(the raw body for a small one, the zstd-compressed form for a large one: see
+Compression under CAS), not the raw body, so the transcript references exactly the
+bytes the CAS serves. `bytes` is the RAW body length, the size the row and UI
+report, kept independent of how the bytes are stored. `media_type` is the body's
+semantic type. The extraction and the sentinel have one definition in
+`internal/parser`, used by both the client (to lift and rewrite) and the server
+reducer (to interpret), so the client-uploaded body set can never drift from what
+the server records.
 
 **Resume model.** The client still resumes by the ORIGINAL on-disk file, because
 that is all it can recompute statelessly (offset plus prefix hash). But the bytes
@@ -325,18 +328,28 @@ each tool body's reference from its sentinel rather than the CAS.
    divergence.
 
 2. **Upload tool bodies (CAS).** Before sending a transformed chunk, the client
-   uploads the bodies that chunk references.
+   encodes and uploads the bodies that chunk references. Encoding is the client's
+   job, not the server's: a body at or above a size threshold is zstd-compressed,
+   a smaller one is left raw (see Compression under CAS), and the CAS key is the
+   sha256 of the resulting STORED bytes. To learn the key the client streams the
+   body through the encoder once, hashing the output, then checks and (if missing)
+   re-streams it for the upload, a deliberate second compression pass it is happy
+   to pay to keep the server off the compression CPU path.
    - `POST /api/v1/ingest/blobs/check` with `{"sha256":[...]}` returns
-     `{"missing":[...]}`, the hashes the CAS does not yet hold. The CAS dedupes
+     `{"missing":[...]}`, the keys the CAS does not yet hold. The CAS dedupes
      globally, so a body any session already stored (this one on an earlier sync,
      or any other) is reported present and never re-sent. This is what makes a
-     re-sync of an unchanged file upload zero bodies.
-   - `PUT /api/v1/ingest/blob/{sha256}?media_type=<type>` streams one body to the
-     CAS. The server streams it through to the large object in bounded slices and
-     verifies the bytes hash to the path's sha256, so a corrupt or mislabeled
-     upload is rejected rather than poisoning the store. Each upload pins the blob
-     against the sweep for a TTL (see CAS), so a body cannot be reclaimed in the
-     window between uploading it and uploading the transcript that references it.
+     re-sync of an unchanged file upload zero bodies. Because the encoding is
+     deterministic, the same body always yields the same key, so dedup holds.
+   - `PUT /api/v1/ingest/blob/{sha256}?media_type=<type>&content_type=<enc>`
+     streams one body's stored bytes to the CAS, where `content_type` is the
+     storage encoding (`application/octet-stream` raw or `application/zstd`). The
+     server streams the bytes to the large object in bounded slices and verifies
+     they hash to the path's sha256, so a corrupt or mislabeled upload is rejected
+     rather than poisoning the store; it never decompresses. Each upload pins the
+     blob against the sweep for a TTL (see CAS), so a body cannot be reclaimed in
+     the window between uploading it and uploading the transcript that references
+     it.
 
    Bodies are uploaded before the transcript that references them, so the parse can
    always resolve a sentinel to a present blob; a sentinel whose body is somehow
@@ -642,12 +655,14 @@ CREATE UNIQUE INDEX idx_usage_source ON usage_events(session_id, source_offset, 
 
 -- Content-addressed store (Postgres large objects): anything too large to inline
 -- (binary attachments, bulky tool input/result bodies), deduped by content hash.
+-- The bytes are stored exactly as uploaded; the server never (de)compresses them.
 CREATE TABLE blobs (
-  sha256     CHAR(64) PRIMARY KEY,
-  lo_oid     OID NOT NULL,               -- pg_largeobject id
-  byte_len   BIGINT NOT NULL,
-  media_type TEXT NOT NULL DEFAULT 'application/octet-stream',
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  sha256       CHAR(64) PRIMARY KEY,        -- key: sha256 of the STORED bytes
+  lo_oid       OID NOT NULL,               -- pg_largeobject id
+  byte_len     BIGINT NOT NULL,            -- stored (possibly compressed) size
+  media_type   TEXT NOT NULL DEFAULT 'application/octet-stream', -- body's semantic type
+  content_type TEXT NOT NULL DEFAULT 'application/octet-stream', -- storage encoding: octet-stream | zstd
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 -- No refcount column: liveness is computed at sweep time (see CAS).
 
@@ -676,12 +691,31 @@ that recurs across sessions, and lets the UI defer loading a body until the user
 asks for it.
 
 Tool bodies enter the CAS by client upload, ahead of the transcript that
-references them (see Ingest protocol): the client hashes each body, asks which
-hashes the server lacks, and streams the missing ones to
+references them (see Ingest protocol): the client encodes each body, asks which
+keys the server lacks, and streams the missing ones to
 `PUT /api/v1/ingest/blob/{sha256}`. The server streams the body to a large object
 in bounded slices, verifies it hashes to the declared key, and inserts the `blobs`
-row under `ON CONFLICT (sha256) DO NOTHING`. Binary attachments are written the
-same way server-side. Writes never touch a count.
+row under `ON CONFLICT (sha256) DO NOTHING`, recording the storage `content_type`
+the client declared. Binary attachments are written the same way server-side.
+Writes never touch a count, and the server never (de)compresses.
+
+**Compression.** Stored bytes are compressed, but the work and the policy live on
+the client, never the server. A body at or above a size threshold is
+zstd-compressed; a smaller one (where the frame overhead would not pay off) is
+stored raw. The CAS key is the sha256 of the STORED bytes, so the server stays a
+dumb byte store: it hashes whatever bytes arrive, compares them to the declared
+key, and stores them, never spending CPU on compression (a hugely CPU-bound
+operation we deliberately keep off the server). The encoding is deterministic (a
+single fixed zstd configuration, single-threaded so block boundaries are stable),
+and the size threshold sits far below the client's big-line streaming threshold,
+so a body encodes to the same key whether it was buffered in memory or streamed
+from disk: identical bytes always dedup. The `content_type` column records the
+encoding (`application/octet-stream` or `application/zstd`) so a reader knows how
+to decode; `byte_len` is the stored (compressed) size, while the raw body size is
+the `bytes` the sentinel and `tool_calls` carry. The encoder lives in
+`internal/casenc` (client side only), so the server binary never even links a
+compression library on its hot path; the parser, which the server does link, stays
+compression-agnostic and takes the encoder as an interface.
 
 A body uploaded this way is not yet referenced by any row, so a naive sweep would
 reclaim it in the gap before its transcript lands. Each upload therefore records
@@ -720,7 +754,10 @@ by the bare hash. Because a single blob can be shared by an `internal` and a
 see that session (authenticated, or reached through a valid `public_id`) and that
 the session actually references the hash before streaming it. This prevents the
 content-addressed dedup from leaking an internal body through a public session,
-and never exposes the numeric session id on the public path.
+and never exposes the numeric session id on the public path. The server streams the
+stored bytes untouched: `Content-Type` is the body's semantic `media_type`, and a
+zstd-stored blob is served with `Content-Encoding: zstd` so the browser (or any
+client) decompresses it transparently while the server spends no CPU decoding it.
 
 ### Web UI (server-rendered)
 
@@ -959,6 +996,7 @@ cmd/
   akari-server/     # server binary
 internal/
   parser/           # claude, codex, pi parsers + normalized types (server-side)
+  casenc/           # client-side CAS body encoder (zstd policy, deterministic)
   gitremote/        # remote URL canonicalization
   pricing/          # compiled-in rate table + cost computation
   server/

@@ -2,13 +2,12 @@ package upload
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"io"
 	"os"
 	"strings"
 	"testing"
 
+	"github.com/jssblck/akari/internal/casenc"
 	"github.com/jssblck/akari/internal/parser"
 )
 
@@ -27,49 +26,68 @@ func openTemp(t *testing.T, content string) (*os.File, int64) {
 	return f, info.Size()
 }
 
+// liftedBody is what collectSink records per body: the descriptor the protocol would
+// upload (key over the STORED bytes, raw byte length, semantic media, storage content
+// type) plus the recovered raw canonical content for assertions. The raw content is
+// kept here rather than on parser.Body, which carries only the encoded stored bytes.
+type liftedBody struct {
+	SHA256      string
+	Bytes       int
+	MediaType   string
+	ContentType string
+	Kind        string
+	Content     string // raw canonical content, recovered for assertions
+}
+
 // collectSink is a test chunkSink that records the transformed bytes and lifted
-// bodies in order, without a server. It hashes each body exactly as the real sink
-// does (from buffered content, or by streaming the file span), so the recorded
-// bodies carry the same sha/length/media the protocol would upload.
+// bodies in order, without a server. It encodes each body exactly as the real sink
+// does (using the same casenc encoder: stored bytes in hand for a small line, or by
+// streaming the file span for a big one), so the recorded keys, lengths, media, and
+// storage content types match what the protocol would upload.
 type collectSink struct {
+	enc      *casenc.Encoder
 	data     []byte
-	bodies   []parser.Body
+	bodies   []liftedBody
 	origEnd  int64
 	confAt   int // emit conflict on the chunk with this 1-based index, 0 to never
 	chunkNum int
 }
 
 func (s *collectSink) emitBody(ctx context.Context, ref bodyRef) (parser.Body, error) {
-	var sha string
-	var n int
+	if s.enc == nil {
+		s.enc = casenc.New()
+	}
+	var sha, contentType string
+	var rawLen int
+	var content string
 	if ref.haveContent {
-		sum := sha256.Sum256(ref.content)
-		sha = hex.EncodeToString(sum[:])
-		n = len(ref.content)
+		sha, contentType, rawLen = ref.sha, ref.contentType, ref.rawLen
+		// A raw-stored small body's stored bytes are its canonical content; a
+		// compressed one cannot be recovered here without decoding, and no assertion
+		// needs it.
+		if contentType == parser.ContentRaw {
+			content = string(ref.stored)
+		}
 	} else {
-		r := parser.CanonicalBodyReader(ctx, ref.file, ref.lineOff, ref.span, ref.bodyKind)
-		h := sha256.New()
-		written, err := io.Copy(h, r)
+		var err error
+		sha, contentType, rawLen, err = s.enc.HashStream(ctx, ref.canonicalReader(ctx))
 		if err != nil {
 			return parser.Body{}, err
 		}
-		sha = hex.EncodeToString(h.Sum(nil))
-		n = int(written)
-	}
-	// Recover the canonical content for assertions (test bodies are small).
-	var content string
-	if ref.haveContent {
-		content = string(ref.content)
-	} else {
-		data, err := io.ReadAll(parser.CanonicalBodyReader(ctx, ref.file, ref.lineOff, ref.span, ref.bodyKind))
+		data, err := io.ReadAll(ref.canonicalReader(ctx))
 		if err != nil {
 			return parser.Body{}, err
 		}
 		content = string(data)
 	}
-	b := parser.Body{SHA256: sha, Bytes: n, MediaType: ref.media, Kind: ref.kind, Content: content}
-	s.bodies = append(s.bodies, b)
-	return b, nil
+	s.bodies = append(s.bodies, liftedBody{
+		SHA256: sha, Bytes: rawLen, MediaType: ref.media,
+		ContentType: contentType, Kind: ref.kind, Content: content,
+	})
+	return parser.Body{
+		SHA256: sha, Bytes: rawLen, MediaType: ref.media,
+		ContentType: contentType, Kind: ref.kind,
+	}, nil
 }
 
 func (s *collectSink) emitChunk(ctx context.Context, data []byte, origLen int64) (bool, error) {
@@ -86,8 +104,9 @@ func (s *collectSink) emitChunk(ctx context.Context, data []byte, origLen int64)
 // and returns it after the pass.
 func runTransform(t *testing.T, f *os.File, origStart, size int64, agent string, settled bool) *collectSink {
 	t.Helper()
-	sink := &collectSink{}
-	tr := newTransformer(f, origStart, size, agent, sink, nil, 0)
+	enc := casenc.New()
+	sink := &collectSink{enc: enc}
+	tr := newTransformer(f, origStart, size, agent, sink, enc, nil, 0)
 	if _, _, err := tr.run(context.Background(), settled); err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +238,7 @@ func TestTransformOversizedLineRejected(t *testing.T) {
 	f, size := openTemp(t, content)
 
 	sink := &collectSink{}
-	tr := newTransformer(f, 0, size, "claude", sink, nil, 0)
+	tr := newTransformer(f, 0, size, "claude", sink, casenc.New(), nil, 0)
 	if _, _, err := tr.run(context.Background(), true); err == nil {
 		t.Fatal("expected an oversized-line error past hardCap")
 	}
@@ -254,8 +273,16 @@ func TestTransformStreamsBigLineBody(t *testing.T) {
 	if b.Content != big {
 		t.Fatalf("streamed body content mismatch (len %d, want %d)", len(b.Content), len(big))
 	}
-	if b.SHA256 != parser.HashString(big) || b.Bytes != len(big) {
+	// The body is well past the compression threshold, so it is stored zstd and keyed
+	// by the hash of the compressed bytes, not the raw body. Bytes is still the raw
+	// length the sentinel records. The key and encoding must match what the encoder
+	// produces for the same content in hand.
+	wantSHA, _, wantCT := casenc.New().EncodeBody([]byte(big))
+	if b.SHA256 != wantSHA || b.Bytes != len(big) {
 		t.Fatalf("streamed body metadata mismatch: sha=%s bytes=%d", b.SHA256, b.Bytes)
+	}
+	if b.ContentType != wantCT || b.ContentType != parser.ContentZstd {
+		t.Fatalf("streamed result content type = %q, want %q", b.ContentType, parser.ContentZstd)
 	}
 	if b.MediaType != "text/plain" {
 		t.Fatalf("streamed result media = %q, want text/plain", b.MediaType)
@@ -340,7 +367,7 @@ func TestTransformOpenTurnResumesFromCache(t *testing.T) {
 
 	// First tick: unsettled, so the open turn (assistant y1) is withheld and cached.
 	sink1 := &collectSink{}
-	tr1 := newTransformer(f, 0, int64(len(content1)), "codex", sink1, nil, 0)
+	tr1 := newTransformer(f, 0, int64(len(content1)), "codex", sink1, casenc.New(), nil, 0)
 	if _, _, err := tr1.run(context.Background(), false); err != nil {
 		t.Fatal(err)
 	}
@@ -365,7 +392,7 @@ func TestTransformOpenTurnResumesFromCache(t *testing.T) {
 	size2 := info.Size()
 
 	sink2 := &collectSink{}
-	tr2 := newTransformer(f, 0, size2, "codex", sink2, pend, 0)
+	tr2 := newTransformer(f, 0, size2, "codex", sink2, casenc.New(), pend, 0)
 	// The resumed scanner must begin at the cached offset, not at origBase 0.
 	if tr2.sc.bufBase != pend.scanEnd {
 		t.Fatalf("resumed scan base = %d, want cached scanEnd %d", tr2.sc.bufBase, pend.scanEnd)
@@ -434,7 +461,7 @@ func TestTransformTruncationIsHardError(t *testing.T) {
 	}
 
 	sink := &collectSink{}
-	tr := newTransformer(f, 0, fullSize, "claude", sink, nil, 0)
+	tr := newTransformer(f, 0, fullSize, "claude", sink, casenc.New(), nil, 0)
 	if _, _, err := tr.run(context.Background(), true); err == nil {
 		t.Fatal("expected a hard error on a file truncated mid-line, got nil")
 	}
@@ -544,7 +571,7 @@ func TestTransformConflictUnwindsWithoutAdvancing(t *testing.T) {
 	// The small file flushes as one chunk at finish; conflict on it and confirm the
 	// transform reports the conflict and accepts nothing.
 	sink := &collectSink{confAt: 1}
-	tr := newTransformer(f, 0, size, "claude", sink, nil, 0)
+	tr := newTransformer(f, 0, size, "claude", sink, casenc.New(), nil, 0)
 	_, conflicted, err := tr.run(context.Background(), true)
 	if err != nil {
 		t.Fatal(err)
@@ -568,7 +595,7 @@ func TestTransformBigLineNoBodyRejected(t *testing.T) {
 	f, size := openTemp(t, content)
 
 	sink := &collectSink{}
-	tr := newTransformer(f, 0, size, "claude", sink, nil, 0)
+	tr := newTransformer(f, 0, size, "claude", sink, casenc.New(), nil, 0)
 	if _, _, err := tr.run(context.Background(), true); err == nil {
 		t.Fatal("expected a big-line-with-no-body refusal")
 	}

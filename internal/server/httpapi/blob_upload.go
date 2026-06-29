@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/jssblck/akari/internal/parser"
 	"github.com/jssblck/akari/internal/server/store"
 )
 
@@ -49,9 +50,10 @@ func (s *Server) handleBlobCheck(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleBlobUpload stores one tool body in the CAS under its sha256 and pins it
-// against the sweep until the transcript that references it lands. The body
-// streams in from the request so neither side buffers it whole. The server
-// verifies the streamed bytes hash to the path's sha256, so a corrupt or
+// against the sweep until the transcript that references it lands. The body streams
+// in from the request as the STORED bytes (raw or zstd, per the content_type query
+// param) so neither side buffers it whole and the server never compresses. The
+// server verifies the streamed bytes hash to the path's sha256, so a corrupt or
 // mislabeled upload is rejected rather than poisoning the content-addressed store.
 func (s *Server) handleBlobUpload(w http.ResponseWriter, r *http.Request) {
 	sha := strings.ToLower(r.PathValue("sha256"))
@@ -60,10 +62,15 @@ func (s *Server) handleBlobUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	mediaType := strings.TrimSpace(r.URL.Query().Get("media_type"))
+	contentType, ok := normalizeStorageContentType(r.URL.Query().Get("content_type"))
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid blob content_type")
+		return
+	}
 
 	body := http.MaxBytesReader(w, r.Body, maxBlobUpload)
 	defer body.Close()
-	if err := s.Store.PutBlob(r.Context(), sha, mediaType, body); err != nil {
+	if err := s.Store.PutBlob(r.Context(), sha, mediaType, contentType, body); err != nil {
 		// A hash mismatch is the client's error (the bytes do not match the declared
 		// key); everything else is a server fault.
 		if errors.Is(err, store.ErrBlobHashMismatch) {
@@ -74,4 +81,20 @@ func (s *Server) handleBlobUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"sha256": sha})
+}
+
+// normalizeStorageContentType validates the declared storage encoding of an upload.
+// The server stores and serves these bytes opaquely, so it accepts only the two
+// encodings it knows how to label on the way back out (raw or zstd) and rejects
+// anything else fail-closed rather than storing a body it could not serve correctly.
+// An absent value defaults to raw, the encoding of a small uncompressed body.
+func normalizeStorageContentType(raw string) (string, bool) {
+	switch strings.TrimSpace(raw) {
+	case "", parser.ContentRaw:
+		return parser.ContentRaw, true
+	case parser.ContentZstd:
+		return parser.ContentZstd, true
+	default:
+		return "", false
+	}
 }

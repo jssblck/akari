@@ -13,12 +13,18 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Blob is a stored content-addressed body: its hash, size, and media type. The
-// bytes themselves live in a Postgres large object referenced by lo_oid.
+// Blob is a stored content-addressed body: its key, stored size, semantic media
+// type, and storage content type. The bytes themselves live in a Postgres large
+// object referenced by lo_oid and are stored exactly as the client uploaded them.
+// ContentType names how those bytes are encoded (application/octet-stream verbatim,
+// or application/zstd compressed): the server never (de)compresses, so it serves
+// this as the response's Content-Encoding and lets the client decode. ByteLen is the
+// stored (possibly compressed) size; the raw body size lives on the tool_calls row.
 type Blob struct {
-	SHA256    string
-	ByteLen   int64
-	MediaType string
+	SHA256      string
+	ByteLen     int64
+	MediaType   string
+	ContentType string
 }
 
 // HashBytes returns the lowercase hex sha256 of content, the key the CAS uses.
@@ -223,10 +229,15 @@ const blobPinTTL = time.Hour
 var ErrBlobHashMismatch = errors.New("uploaded blob bytes do not match the declared hash")
 
 // PutBlob stores a content-addressed body uploaded directly by the client and
-// pins it against the sweep for blobPinTTL. The body streams in from r in bounded
-// slices so neither side holds the whole body in memory: a 500 MiB tool result
-// lands as a large object without a 500 MiB buffer. The stored bytes are verified
-// against the claimed sha256, so a corrupt upload cannot poison the CAS.
+// pins it against the sweep for blobPinTTL. The bytes the client sends are the
+// STORED bytes (raw or zstd-compressed, as contentType declares); the server stores
+// them verbatim and never (de)compresses, so it stays off the compression CPU path.
+// The body streams in from r in bounded slices so neither side holds the whole body
+// in memory: a 500 MiB tool result lands as a large object without a 500 MiB buffer.
+// The stored bytes are verified against the claimed sha256 (which is the hash of the
+// stored bytes), so a corrupt upload cannot poison the CAS; the server does not
+// validate that a zstd-declared body actually decompresses, since that would cost the
+// CPU this design avoids and the key already pins the exact bytes.
 //
 // No database lock is held across the network read. An already-present body is
 // pinned and committed in a short transaction before its (redundant) body is
@@ -235,7 +246,7 @@ var ErrBlobHashMismatch = errors.New("uploaded blob bytes do not match the decla
 // one transaction (Postgres large objects require it), but that transaction holds
 // no lock on any existing row until it inserts the new blobs row at the end, so it
 // does not block the sweep either.
-func (s *Store) PutBlob(ctx context.Context, sha, mediaType string, r io.Reader) error {
+func (s *Store) PutBlob(ctx context.Context, sha, mediaType, contentType string, r io.Reader) error {
 	// Fast path: if the blob is already present, pin it and commit before touching
 	// the network, then drain the redundant body outside any transaction.
 	present, err := s.pinIfPresent(ctx, sha)
@@ -253,6 +264,9 @@ func (s *Store) PutBlob(ctx context.Context, sha, mediaType string, r io.Reader)
 
 	if mediaType == "" {
 		mediaType = "application/octet-stream"
+	}
+	if contentType == "" {
+		contentType = "application/octet-stream"
 	}
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		los := tx.LargeObjects()
@@ -303,9 +317,9 @@ func (s *Store) PutBlob(ctx context.Context, sha, mediaType string, r io.Reader)
 			return fmt.Errorf("%w: got %s for declared %s", ErrBlobHashMismatch, got, sha)
 		}
 		tag, err := tx.Exec(ctx,
-			`INSERT INTO blobs (sha256, lo_oid, byte_len, media_type)
-			 VALUES ($1, $2, $3, $4) ON CONFLICT (sha256) DO NOTHING`,
-			sha, oid, total, mediaType)
+			`INSERT INTO blobs (sha256, lo_oid, byte_len, media_type, content_type)
+			 VALUES ($1, $2, $3, $4, $5) ON CONFLICT (sha256) DO NOTHING`,
+			sha, oid, total, mediaType, contentType)
 		if err != nil {
 			return fmt.Errorf("insert blob row %s: %w", sha, err)
 		}
@@ -376,13 +390,15 @@ func upsertBlobPin(ctx context.Context, tx pgx.Tx, sha string) error {
 	return nil
 }
 
-// BlobMeta returns a blob's size and media type without reading its body.
+// BlobMeta returns a blob's stored size, media type, and storage content type
+// without reading its body. The content type lets the serve path set Content-Encoding
+// so the client decodes a compressed blob, while the server never touches the bytes.
 func (s *Store) BlobMeta(ctx context.Context, sha256hex string) (Blob, error) {
 	var b Blob
 	b.SHA256 = sha256hex
 	err := s.Pool.QueryRow(ctx,
-		"SELECT byte_len, media_type FROM blobs WHERE sha256 = $1", sha256hex).
-		Scan(&b.ByteLen, &b.MediaType)
+		"SELECT byte_len, media_type, content_type FROM blobs WHERE sha256 = $1", sha256hex).
+		Scan(&b.ByteLen, &b.MediaType, &b.ContentType)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Blob{}, ErrNotFound
 	}

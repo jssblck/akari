@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jssblck/akari/internal/parser"
 	"github.com/jssblck/akari/internal/server/store"
 )
 
@@ -41,8 +42,11 @@ func (s *Server) handlePublicBlob(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveBlobForSession verifies the session references the hash, then streams the
-// blob with its stored media type. nosniff keeps a browser from reinterpreting a
-// stored body as a richer type than it is.
+// blob's stored bytes. The Content-Type is the body's semantic media type so a
+// reader knows how to render it; when the stored bytes are zstd-compressed the
+// Content-Encoding tells the client (browser or API consumer) to decompress
+// transparently, which it does without the server ever touching the bytes. nosniff
+// keeps a browser from reinterpreting a stored body as a richer type than it is.
 func (s *Server) serveBlobForSession(w http.ResponseWriter, r *http.Request, sessionID int64, sha string) {
 	sha = strings.ToLower(sha)
 	if !isHexSHA256(sha) {
@@ -68,6 +72,11 @@ func (s *Server) serveBlobForSession(w http.ResponseWriter, r *http.Request, ses
 		return
 	}
 	w.Header().Set("Content-Type", safeBlobContentType(meta.MediaType))
+	if meta.ContentType == parser.ContentZstd {
+		// The stored bytes are zstd; advertise it so the client decompresses
+		// transparently. The server streams the compressed bytes untouched.
+		w.Header().Set("Content-Encoding", "zstd")
+	}
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Disposition", "inline")
 	w.Header().Set("Cache-Control", "private, max-age=300")

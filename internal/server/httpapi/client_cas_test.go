@@ -1,7 +1,15 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,9 +17,18 @@ import (
 	"time"
 
 	"github.com/jssblck/akari/internal/client/upload"
+	"github.com/jssblck/akari/internal/parser"
 	"github.com/jssblck/akari/internal/server/auth"
 	"github.com/jssblck/akari/internal/server/store"
+	"github.com/klauspost/compress/zstd"
 )
+
+// sha256Hex is the lowercase hex sha256 of b, for asserting a stored blob's bytes
+// hash to its CAS key.
+func sha256Hex(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
 
 // ingestClient brings up the real upload.Client against the test server with a
 // fresh ingest token, plus the owning user id for store assertions.
@@ -176,10 +193,36 @@ func TestClientCASBigBody(t *testing.T) {
 		t.Fatal(err)
 	}
 	if resultBytes != int64(len(big)) {
-		t.Fatalf("result_bytes = %d, want %d", resultBytes, len(big))
+		t.Fatalf("result_bytes = %d, want %d (the raw body length)", resultBytes, len(big))
 	}
-	if resultSHA != store.HashString(big) {
-		t.Fatalf("result sha mismatch")
+	// The body is far past the compression threshold, so the CAS stores it zstd and
+	// keys it by the hash of the compressed bytes, not the raw body. The stored blob's
+	// content type must say zstd, and decompressing its bytes must reproduce the body.
+	meta, err := st.BlobMeta(ctx, resultSHA)
+	if err != nil {
+		t.Fatalf("blob meta: %v", err)
+	}
+	if meta.ContentType != parser.ContentZstd {
+		t.Fatalf("big result content_type = %q, want %q", meta.ContentType, parser.ContentZstd)
+	}
+	var blobBytes bytes.Buffer
+	if _, err := st.WriteBlobTo(ctx, &blobBytes, resultSHA); err != nil {
+		t.Fatalf("read stored blob: %v", err)
+	}
+	if got := sha256Hex(blobBytes.Bytes()); got != resultSHA {
+		t.Fatalf("stored bytes do not hash to the key: got %s, key %s", got, resultSHA)
+	}
+	dec, err := zstd.NewReader(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dec.Close()
+	raw, err := dec.DecodeAll(blobBytes.Bytes(), nil)
+	if err != nil {
+		t.Fatalf("decompress stored blob: %v", err)
+	}
+	if len(raw) != len(big) || string(raw) != big {
+		t.Fatalf("decompressed body mismatch: got %d bytes, want %d", len(raw), len(big))
 	}
 }
 
@@ -228,6 +271,102 @@ func TestClientCASResume(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertBlob(t, st, resultSHA, "package a", "text/plain")
+}
+
+// TestBlobServeContentEncoding is the serve-side contract: a compressed blob is
+// handed back with Content-Encoding: zstd and the semantic media type, so a browser
+// decodes it transparently while the server streams the stored bytes untouched; a
+// small uncompressed blob carries no Content-Encoding and serves verbatim. The
+// server itself never (de)compresses on either path.
+func TestBlobServeContentEncoding(t *testing.T) {
+	srv, st := newTestServer(t)
+	c, ownerID := ingestClient(t, srv.URL, st)
+	ctx := context.Background()
+
+	// A small input (stored raw) and a large, highly compressible result (stored
+	// zstd) in one session.
+	smallInput := `{"file_path":"src/auth.ts"}`
+	bigResult := strings.Repeat("compress me ", 4096) // ~48 KiB, far over the threshold
+	content := `{"type":"user","message":{"content":"go"}}` + "\n" +
+		`{"type":"assistant","message":{"id":"m1","model":"claude-sonnet-4-20250514","content":[{"type":"tool_use","id":"t1","name":"Read","input":` + smallInput + `}]}}` + "\n" +
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":` + jsonStringLiteral(bigResult) + `,"is_error":false}]}}` + "\n"
+	if _, err := c.SyncFile(ctx, casTarget(writeSession(t, content))); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	sid := sessionID(t, st, ownerID)
+	var inputSHA, resultSHA string
+	if err := st.Pool.QueryRow(ctx,
+		"SELECT input_sha256, result_sha256 FROM tool_calls WHERE session_id=$1", sid).Scan(&inputSHA, &resultSHA); err != nil {
+		t.Fatal(err)
+	}
+
+	// Log in as the owner so the authenticated blob route is reachable.
+	web := newClient(t)
+	if _, err := web.PostForm(srv.URL+"/login", url.Values{
+		"username": {"grace"}, "password": {"hopper-1906"},
+	}); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	// The Go HTTP client only auto-decodes gzip, never zstd, and it did not request
+	// zstd, so the response body is the stored bytes verbatim: exactly what this test
+	// wants to inspect.
+	getRaw := func(sha string) (*http.Response, []byte) {
+		resp, err := web.Get(fmt.Sprintf("%s/api/v1/session/%d/blob/%s", srv.URL, sid, sha))
+		if err != nil {
+			t.Fatalf("get blob %s: %v", sha, err)
+		}
+		defer resp.Body.Close()
+		raw, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read blob %s: %v", sha, err)
+		}
+		return resp, raw
+	}
+
+	// The large result is served compressed: Content-Encoding zstd, semantic media
+	// type text/plain, and the bytes decode back to the original.
+	resp, gotBig := getRaw(resultSHA)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("big blob status = %d", resp.StatusCode)
+	}
+	if enc := resp.Header.Get("Content-Encoding"); enc != "zstd" {
+		t.Fatalf("big blob Content-Encoding = %q, want zstd", enc)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Fatalf("big blob Content-Type = %q, want text/plain", ct)
+	}
+	dec, err := zstd.NewReader(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dec.Close()
+	rawBig, err := dec.DecodeAll(gotBig, nil)
+	if err != nil {
+		t.Fatalf("decompress served big blob: %v", err)
+	}
+	if string(rawBig) != bigResult {
+		t.Fatalf("served big blob decoded to %d bytes, want %d", len(rawBig), len(bigResult))
+	}
+
+	// The small input is served verbatim with no Content-Encoding.
+	resp, gotSmall := getRaw(inputSHA)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("small blob status = %d", resp.StatusCode)
+	}
+	if enc := resp.Header.Get("Content-Encoding"); enc != "" {
+		t.Fatalf("small blob Content-Encoding = %q, want none", enc)
+	}
+	if string(gotSmall) != smallInput {
+		t.Fatalf("small blob body = %q, want %q", gotSmall, smallInput)
+	}
+}
+
+// jsonStringLiteral renders s as a JSON string literal for embedding a large body in
+// a transcript fixture line.
+func jsonStringLiteral(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
 }
 
 // --- helpers ---

@@ -1,0 +1,21 @@
+-- Compressed CAS content. The client now compresses each tool body it lifts (zstd
+-- for bodies large enough to be worth it, verbatim for small ones) and the CAS is
+-- keyed by the sha256 of the STORED bytes, not the raw body. The server stores and
+-- serves those bytes opaquely and never (de)compresses: it stays off the
+-- compression CPU path, and the browser decompresses transparently via the
+-- Content-Encoding the serve path derives from this column.
+--
+-- content_type names the storage encoding of a blob's bytes, a separate axis from
+-- media_type (the body's semantic type, e.g. application/json):
+--   application/octet-stream  the bytes are stored verbatim
+--   application/zstd          the bytes are zstd-compressed
+--
+-- The default covers the inline fallback write path (which stores raw bytes) and any
+-- pre-existing row. Because the key now hashes the stored (compressed) bytes rather
+-- than the raw body, blobs written before this change are keyed under the old scheme
+-- and their transcripts reference the old keys; like the client-CAS cutover in
+-- migration 0004 this is a format change, so existing session data must be cleared
+-- and re-synced. That bulk reclaim is an operator step (it has to batch across
+-- transactions), not part of this migration, which only adds the column.
+ALTER TABLE blobs
+  ADD COLUMN content_type TEXT NOT NULL DEFAULT 'application/octet-stream';

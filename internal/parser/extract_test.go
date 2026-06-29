@@ -7,6 +7,18 @@ import (
 	"testing"
 )
 
+// idEncoder is an identity BodyEncoder: it stores every body verbatim and keys it by
+// the hash of its raw bytes. The parser tests use it to exercise the locate-and-splice
+// logic of RewriteLine/ExtractBodies deterministically, independent of the real zstd
+// policy (which lives in internal/casenc and is tested there and end to end). With
+// identity encoding the sentinel key is HashString(raw), so the existing raw-hash
+// parity assertions hold unchanged.
+type idEncoder struct{}
+
+func (idEncoder) EncodeBody(raw []byte) (string, []byte, string) {
+	return HashString(string(raw)), raw, ContentRaw
+}
+
 // inlineBodies parses the original transcript and returns, in a stable order, the
 // tool input and result bodies the reducer would write to the CAS today: the set
 // the client extractor must reproduce exactly.
@@ -21,13 +33,15 @@ func inlineBodies(t *testing.T, agent Agent, raw []byte) []Body {
 		if tc.InputJSON != "" {
 			bodies = append(bodies, Body{
 				SHA256: HashString(tc.InputJSON), Bytes: len(tc.InputJSON),
-				MediaType: "application/json", Content: tc.InputJSON, Kind: "input",
+				MediaType: "application/json", Stored: []byte(tc.InputJSON),
+				ContentType: ContentRaw, Kind: "input",
 			})
 		}
 		if tc.ResultBody != "" {
 			bodies = append(bodies, Body{
 				SHA256: HashString(tc.ResultBody), Bytes: len(tc.ResultBody),
-				MediaType: tc.ResultMediaType, Content: tc.ResultBody, Kind: "result",
+				MediaType: tc.ResultMediaType, Stored: []byte(tc.ResultBody),
+				ContentType: ContentRaw, Kind: "result",
 			})
 		}
 	}
@@ -54,7 +68,8 @@ func assertSameBodies(t *testing.T, got, want []Body) {
 	}
 	for i := range want {
 		g, w := got[i], want[i]
-		if g.SHA256 != w.SHA256 || g.Bytes != w.Bytes || g.MediaType != w.MediaType || g.Content != w.Content {
+		if g.SHA256 != w.SHA256 || g.Bytes != w.Bytes || g.MediaType != w.MediaType ||
+			g.ContentType != w.ContentType || string(g.Stored) != string(w.Stored) {
 			t.Errorf("body %d mismatch:\n got=%+v\nwant=%+v", i, g, w)
 		}
 	}
@@ -78,7 +93,7 @@ func TestExtractionParity(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, extracted, err := ExtractBodies(c.agent, c.raw)
+			_, extracted, err := ExtractBodies(c.agent, c.raw, idEncoder{})
 			if err != nil {
 				t.Fatalf("extract: %v", err)
 			}
@@ -108,7 +123,7 @@ func TestRoundTripProjection(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parse original: %v", err)
 			}
-			transformed, _, err := ExtractBodies(c.agent, c.raw)
+			transformed, _, err := ExtractBodies(c.agent, c.raw, idEncoder{})
 			if err != nil {
 				t.Fatalf("extract: %v", err)
 			}

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/jssblck/akari/internal/casenc"
 	"github.com/jssblck/akari/internal/parser"
 )
 
@@ -24,10 +25,11 @@ import (
 // CAS does not yet hold. It returns the deduped body descriptor (sha, length,
 // media) the sentinel is built from.
 type chunkSink interface {
-	// emitBody streams one located body to the CAS (skipping the upload when the
-	// server already holds it) and returns its content hash, byte length, and media
-	// type. content, when non-nil, is the already-buffered body bytes of a small
-	// line; when nil the body is streamed from the file via the reader factory.
+	// emitBody uploads one located body's stored (possibly compressed) bytes to the
+	// CAS, skipping the upload when the server already holds the key, and returns the
+	// descriptor the sentinel is built from (key, raw byte length, media type). A
+	// small-line ref carries the stored bytes already encoded by RewriteLine; a
+	// big-line ref carries a file span the sink streams through the encoder.
 	emitBody(ctx context.Context, ref bodyRef) (parser.Body, error)
 	// emitChunk uploads one boundary-aligned transformed chunk and reports how far
 	// the original cursor advanced. It returns conflicted=true when the server's
@@ -35,22 +37,37 @@ type chunkSink interface {
 	emitChunk(ctx context.Context, data []byte, origLen int64) (conflicted bool, err error)
 }
 
-// bodyRef points at one tool body to be lifted to the CAS, either as bytes already
-// in hand (a small line buffered whole) or as a file span to be streamed (a big
-// line). Exactly one of content / (file, span, kind) is set.
+// bodyRef points at one tool body to be lifted to the CAS, either as stored bytes
+// already in hand (a small line buffered whole and encoded by RewriteLine) or as a
+// file span to be streamed and encoded on the fly (a big line). Exactly one of the
+// in-hand fields / (file, span, kind) group is set, distinguished by haveContent.
 type bodyRef struct {
 	media string
 	kind  string // "input" | "result", for diagnostics
 
-	// Small-line path: the canonical body bytes, already extracted by RewriteLine.
-	content     []byte
+	// Small-line path: the encoded stored bytes and their key/encoding, already
+	// produced by the encoder inside RewriteLine, plus the raw body length the
+	// sentinel records.
 	haveContent bool
+	sha         string
+	stored      []byte
+	contentType string
+	rawLen      int
 
-	// Big-line path: where to stream the canonical body from, never buffered whole.
+	// Big-line path: where to stream the canonical (raw) body from, never buffered
+	// whole. The key, encoding, and raw length are computed by streaming it through
+	// the encoder.
 	file     *os.File
 	lineOff  int64
 	span     parser.ValueSpan
 	bodyKind parser.BodyKind
+}
+
+// canonicalReader streams the body's raw canonical bytes for the big-line path. Each
+// call returns a fresh reader from the file, so the hash pass and the upload pass
+// each get the body from its start.
+func (r bodyRef) canonicalReader(ctx context.Context) io.Reader {
+	return parser.CanonicalBodyReader(ctx, r.file, r.lineOff, r.span, r.bodyKind)
 }
 
 // bigLineThreshold is the original-line size past which the transform stops
@@ -75,6 +92,7 @@ type transformer struct {
 	agent string
 	size  int64
 	sink  chunkSink
+	enc   *casenc.Encoder
 
 	sc  *origLineScanner
 	asm *chunkAssembler
@@ -107,7 +125,7 @@ type pendingTurn struct {
 // delta is processed. partialSearch, when positive, is an offset a previous tick
 // already searched the trailing partial line up to without finding a newline, so the
 // scanner skips re-searching it. Otherwise it starts fresh at origStart.
-func newTransformer(f *os.File, origStart, size int64, agent string, sink chunkSink, prev *pendingTurn, partialSearch int64) *transformer {
+func newTransformer(f *os.File, origStart, size int64, agent string, sink chunkSink, enc *casenc.Encoder, prev *pendingTurn, partialSearch int64) *transformer {
 	scanStart := origStart
 	asm := newChunkAssembler(agent, f.Name(), origStart)
 	if prev != nil && prev.scanEnd >= origStart && prev.scanEnd <= size {
@@ -126,6 +144,7 @@ func newTransformer(f *os.File, origStart, size int64, agent string, sink chunkS
 		agent: agent,
 		size:  size,
 		sink:  sink,
+		enc:   enc,
 		sc:    sc,
 		asm:   asm,
 	}
@@ -207,10 +226,10 @@ func (t *transformer) handleLine(ctx context.Context, line []byte, origOff, orig
 }
 
 // handleSmallLine rewrites a buffered line in one shot via RewriteLine, then uploads
-// each lifted body. The body bytes are already in hand, so emitBody streams from
-// them without a second copy.
+// each lifted body. RewriteLine already ran the encoder, so the stored bytes, key,
+// and encoding are in hand and emitBody uploads them without re-encoding.
 func (t *transformer) handleSmallLine(ctx context.Context, line []byte, origOff, origLen int64) error {
-	rewritten, bodies := parser.RewriteLine(parser.Agent(t.agent), line)
+	rewritten, bodies := parser.RewriteLine(parser.Agent(t.agent), line, t.enc)
 	if int64(len(rewritten)) > hardCap {
 		return errMessageTooBig(t.agent)
 	}
@@ -218,8 +237,11 @@ func (t *transformer) handleSmallLine(ctx context.Context, line []byte, origOff,
 		if _, err := t.sink.emitBody(ctx, bodyRef{
 			media:       b.MediaType,
 			kind:        b.Kind,
-			content:     []byte(b.Content),
 			haveContent: true,
+			sha:         b.SHA256,
+			stored:      b.Stored,
+			contentType: b.ContentType,
+			rawLen:      b.Bytes,
 		}); err != nil {
 			return err
 		}
@@ -401,7 +423,16 @@ func lineContentLen(f *os.File, origOff, origLen int64) (contentLen int64, hasNL
 // re-derives each rewritten line. A small line is rewritten whole; a big line is
 // rewritten from its literal regions plus sentinels, streaming each body once only
 // to recompute its hash, never buffering it.
-func transformPrefixDigest(ctx context.Context, f *os.File, agent string, size, wantTransformed int64) (hash.Hash, int64, bool, error) {
+//
+// Recomputing those hashes re-compresses the bodies (the key is the hash of the
+// compressed bytes, so there is no cheaper way to recover it). That is a deliberate
+// tradeoff of the compressed-CAS design, not wasted work to optimize away: it spends
+// client CPU on the cold-cache path so the server never compresses and stores no
+// recovery state for the client. It runs only when the verified-prefix cache is cold
+// (a fresh process or an evicted entry), and like the rest of the transform it
+// streams in a fixed window, so the cost is bounded client CPU, never input-sized
+// memory.
+func transformPrefixDigest(ctx context.Context, f *os.File, agent string, size, wantTransformed int64, enc *casenc.Encoder) (hash.Hash, int64, bool, error) {
 	sc := newOrigLineScanner(f, 0, size).withContext(ctx)
 	h := sha256.New()
 	var transformed, orig int64
@@ -416,7 +447,7 @@ func transformPrefixDigest(ctx context.Context, f *os.File, agent string, size, 
 		if !ok {
 			return nil, 0, false, nil // ran out of file before reaching the cursor
 		}
-		rewritten, err := rewriteForDigest(ctx, f, agent, line, origOff, origLen, isBig)
+		rewritten, err := rewriteForDigest(ctx, f, agent, line, origOff, origLen, isBig, enc)
 		if err != nil {
 			return nil, 0, false, err
 		}
@@ -432,11 +463,11 @@ func transformPrefixDigest(ctx context.Context, f *os.File, agent string, size, 
 
 // rewriteForDigest produces the transformed bytes of one line for prefix
 // verification, matching the bytes the transform uploaded. A big line is rewritten
-// by streaming, identical to handleBigLine, but the hashing is done locally rather
-// than through the sink.
-func rewriteForDigest(ctx context.Context, f *os.File, agent string, line []byte, origOff, origLen int64, isBig bool) ([]byte, error) {
+// by streaming, identical to handleBigLine, but the body is only hashed (through the
+// same encoder, so the key matches) rather than uploaded.
+func rewriteForDigest(ctx context.Context, f *os.File, agent string, line []byte, origOff, origLen int64, isBig bool, enc *casenc.Encoder) ([]byte, error) {
 	if !isBig {
-		rewritten, _ := parser.RewriteLine(parser.Agent(agent), line)
+		rewritten, _ := parser.RewriteLine(parser.Agent(agent), line, enc)
 		return rewritten, nil
 	}
 	contentLen, hasNL, err := lineContentLen(f, origOff, origLen)
@@ -452,7 +483,8 @@ func rewriteForDigest(ctx context.Context, f *os.File, agent string, line []byte
 		if loc.Span.Start < cursor || loc.Span.End > contentLen {
 			return nil
 		}
-		sha, n, err := hashBodySpan(ctx, f, origOff, loc.Span, loc.Kind)
+		reader := parser.CanonicalBodyReader(ctx, f, origOff, loc.Span, loc.Kind)
+		sha, _, rawLen, err := enc.HashStream(ctx, reader)
 		if err != nil {
 			return err
 		}
@@ -460,7 +492,7 @@ func rewriteForDigest(ctx context.Context, f *os.File, agent string, line []byte
 		if err != nil {
 			return err
 		}
-		rewritten = append(rewritten, parser.SentinelBytes(sha, n, loc.Media)...)
+		rewritten = append(rewritten, parser.SentinelBytes(sha, rawLen, loc.Media)...)
 		cursor = loc.Span.End
 		return nil
 	}
@@ -475,39 +507,6 @@ func rewriteForDigest(ctx context.Context, f *os.File, agent string, line []byte
 		rewritten = append(rewritten, '\n')
 	}
 	return rewritten, nil
-}
-
-// hashBodyChunk bounds how much of a body is hashed per read, so a huge body is
-// digested in fixed slices and the loop can check for cancellation between them.
-const hashBodyChunk = 256 << 10
-
-// hashBodySpan streams a located body through its canonical reader to compute its
-// sha256 and byte length without buffering it. It is the shared primitive both the
-// upload path and the digest path use, so the hash a sentinel carries is identical in
-// both. The copy is a bounded loop rather than io.Copy so a canceled sync stops
-// hashing a hundreds-of-MiB body instead of running to its end.
-func hashBodySpan(ctx context.Context, f *os.File, lineOff int64, span parser.ValueSpan, kind parser.BodyKind) (string, int, error) {
-	r := parser.CanonicalBodyReader(ctx, f, lineOff, span, kind)
-	h := sha256.New()
-	buf := make([]byte, hashBodyChunk)
-	var total int64
-	for {
-		if err := ctx.Err(); err != nil {
-			return "", 0, err
-		}
-		n, rerr := r.Read(buf)
-		if n > 0 {
-			h.Write(buf[:n])
-			total += int64(n)
-		}
-		if rerr == io.EOF {
-			break
-		}
-		if rerr != nil {
-			return "", 0, rerr
-		}
-	}
-	return parser.HexDigest(h.Sum(nil)), int(total), nil
 }
 
 // origLineScanner yields complete JSONL lines from the original file starting at a

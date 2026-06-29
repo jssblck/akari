@@ -237,6 +237,13 @@ reviewers:
           superlinear), evaluate that reasoning and, if it holds, pass.
         - When you cannot show the cost is real and reachable on real input,
           pass the gate and leave a non-blocking note rather than blocking.
+        - Weigh where the cost lands. This gate protects the server and ingest
+          path, not the client. Work the client takes on (recomputing a hash or
+          digest, re-scanning a file it already holds, doing the same encode more
+          than once to avoid a round-trip) is acceptable on its own and is not a
+          gate issue unless it is egregious: superlinear in the size of one
+          session, or it makes a sync cost grow with total history rather than the
+          appended tail. Note lesser client-side waste at most.
 
   - name: streaming-memory
     trigger:
@@ -297,3 +304,12 @@ reviewers:
           note instead.
         - When you cannot show the growth is real and reachable on real input,
           pass the gate and leave a non-blocking note rather than blocking.
+        - Weigh where the cost lands. This gate protects peak memory on the
+          server's data path; the client is not the constrained side. Redundant or
+          extra work the client takes on (re-reading a file it already holds,
+          recomputing a digest, encoding the same body more than once, holding a
+          small fixed-size buffer) is acceptable on its own and is not blockable.
+          Block client code only when its peak memory is egregious: an allocation
+          that scales with total input rather than a fixed processing window. A
+          client doing more work by design, within bounded memory, is not a
+          finding.

@@ -18,7 +18,7 @@ func TestPutBlobPinsAgainstSweep(t *testing.T) {
 	body := []byte("a freshly uploaded tool result, not yet referenced")
 	sha := HashBytes(body)
 
-	if err := st.PutBlob(ctx, sha, "text/plain", bytes.NewReader(body)); err != nil {
+	if err := st.PutBlob(ctx, sha, "text/plain", "application/octet-stream", bytes.NewReader(body)); err != nil {
 		t.Fatalf("put blob: %v", err)
 	}
 
@@ -69,7 +69,7 @@ func TestPutBlobRejectsHashMismatch(t *testing.T) {
 	ctx := context.Background()
 
 	wrong := HashBytes([]byte("the real bytes"))
-	if err := st.PutBlob(ctx, wrong, "text/plain", strings.NewReader("different bytes")); err == nil {
+	if err := st.PutBlob(ctx, wrong, "text/plain", "application/octet-stream", strings.NewReader("different bytes")); err == nil {
 		t.Fatal("expected a hash-mismatch error, got nil")
 	}
 	if _, err := st.BlobMeta(ctx, wrong); err == nil {
@@ -89,7 +89,7 @@ func TestMissingBlobsReportsAbsentAndPinsPresent(t *testing.T) {
 
 	present := []byte("already stored")
 	presentSHA := HashBytes(present)
-	if err := st.PutBlob(ctx, presentSHA, "text/plain", bytes.NewReader(present)); err != nil {
+	if err := st.PutBlob(ctx, presentSHA, "text/plain", "application/octet-stream", bytes.NewReader(present)); err != nil {
 		t.Fatal(err)
 	}
 	// Force the upload pin to expire so only a fresh pin from the check could keep
@@ -153,10 +153,10 @@ func TestApplyDeltaReferencesUploadedBlob(t *testing.T) {
 	resultSHA := HashString(result)
 
 	// The client uploaded both bodies before the transcript.
-	if err := st.PutBlob(ctx, inputSHA, "application/json", strings.NewReader(input)); err != nil {
+	if err := st.PutBlob(ctx, inputSHA, "application/json", "application/octet-stream", strings.NewReader(input)); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.PutBlob(ctx, resultSHA, "text/plain", strings.NewReader(result)); err != nil {
+	if err := st.PutBlob(ctx, resultSHA, "text/plain", "application/octet-stream", strings.NewReader(result)); err != nil {
 		t.Fatal(err)
 	}
 
