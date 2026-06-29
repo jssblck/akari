@@ -286,7 +286,7 @@ func (s *Service) execute(ctx context.Context, opts Options) (Result, error) {
 	if ctx.Err() == nil {
 		swept, err = s.st.SweepBlobs(ctx)
 		if err != nil {
-			return Result{Status: s.Status()}, err
+			return Result{Status: s.Status()}, fmt.Errorf("sweep orphaned blobs after reparse: %w", err)
 		}
 	}
 
