@@ -209,7 +209,6 @@ Projects, Search, Account); the signed-in user and log-out sit at its foot.
 - **Charts** are rendered by a small dependency-free SVG module bundled as a
   static asset; the UI fonts (Geist and Geist Mono) are self-hosted, so the binary
   stays self-contained with no Node toolchain.
-- **Search**: trigram substring search across message content.
 - **Account**: API tokens (ingest or full scope), and invites for admins.
 
 ### Visibility and publishing

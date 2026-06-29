@@ -25,7 +25,7 @@ type Page struct {
 	IsAdmin  bool
 	LoggedIn bool
 	// Active is the sidebar nav key for the current page ("overview",
-	// "sessions", "projects", "search", "account"), so the shell can mark the
+	// "sessions", "projects", "account"), so the shell can mark the
 	// current section. Empty leaves no item active.
 	Active string
 }
@@ -73,15 +73,6 @@ func ProjectFacetLabel(pf store.ProjectFacet) string {
 		return pf.Name
 	}
 	return pf.Key
-}
-
-// SearchHitLabel is the project name shown on a search result, friendly for a
-// local project and the remote key otherwise.
-func SearchHitLabel(h store.SearchHit) string {
-	if IsLocalKind(h.ProjectKind) {
-		return h.ProjectName
-	}
-	return h.ProjectKey
 }
 
 // LocalPath recovers the working-directory path from a local project's synthetic
