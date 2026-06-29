@@ -145,15 +145,22 @@ templ RegisterPage(p Page, errMsg string) {
 
 // ============================ Analytics ============================
 
-// analyticsPanel is the shared chart block used by the projects index (global)
-// and a single project page. scope is a short label ("Across all projects" or
-// the project key) shown as the panel subtitle.
-templ analyticsPanel(a store.Analytics, chartID, scope string) {
+// analyticsPanel is the shared usage block used by the overview (global), the
+// projects index (global), and a single project page. scope is a short label
+// ("Across all projects" or the project key) shown as the panel subtitle. When
+// heatmap is true the daily activity renders as a calendar grid (the overview's
+// front door) rather than the time-series line chart the project pages keep.
+templ analyticsPanel(a store.Analytics, chartID, scope string, heatmap bool) {
 	<section class="analytics">
-		<div class="panel-head">
-			<h2>Usage</h2>
-			<span class="muted small">{ scope }</span>
-		</div>
+		// The overview's page head already names the scope ("Overview / across all
+		// projects"), so a second "Usage / <scope>" line just repeats it. The chart
+		// pages (projects, single project) keep the header to title the panel.
+		if !heatmap {
+			<div class="panel-head">
+				<h2>Usage</h2>
+				<span class="muted small">{ scope }</span>
+			</div>
+		}
 		if !a.HasData() {
 			<div class="empty">No usage recorded yet.</div>
 		} else {
@@ -163,7 +170,11 @@ templ analyticsPanel(a store.Analytics, chartID, scope string) {
 				@stat("Output", FmtTokens(a.TotalOut), "")
 				@stat("Sessions", fmt.Sprintf("%d", a.Sessions), "")
 			</div>
-			@chartBlock(a, chartID)
+			if heatmap {
+				@heatmapBlock(a, chartID)
+			} else {
+				@chartBlock(a, chartID)
+			}
 			<div class="breakdowns">
 				@breakdownList("By model", BuildBreakdown(a.Models))
 				@breakdownList("By agent", BuildBreakdown(a.Agents))
@@ -182,6 +193,24 @@ templ chartBlock(a store.Analytics, chartID string) {
 			<button type="button" class="seg" data-metric="tokens" data-chart-target={ chartID }>Tokens</button>
 		</div>
 		<div class="chart" id={ chartID } data-chart data-series={ AnalyticsJSON(a) }></div>
+	</div>
+}
+
+// heatmapBlock holds the calendar activity grid and the same inline daily JSON
+// the line chart hydrates from. The grid always reads as a daily view (a cell
+// per day over a trailing year); the toggle switches whether cell intensity
+// scales by token volume or by dollars spent. Hovering a cell surfaces the
+// day's total and its token breakdown (in, out, cache read, cache write).
+templ heatmapBlock(a store.Analytics, chartID string) {
+	<div class="heatmap-wrap">
+		<div class="heatmap-head">
+			<span class="label">Daily activity</span>
+			<div class="chart-toolbar" role="group" aria-label="Metric">
+				<button type="button" class="seg active" data-metric="tokens" data-heatmap-target={ chartID }>Tokens</button>
+				<button type="button" class="seg" data-metric="cost" data-heatmap-target={ chartID }>Dollars</button>
+			</div>
+		</div>
+		<div class="heatmap" id={ chartID } data-heatmap data-series={ AnalyticsJSON(a) }></div>
 	</div>
 }
 
@@ -230,7 +259,7 @@ templ ProjectsPage(p Page, projects, locals []store.ProjectSummary, a store.Anal
 		<div class="page-head">
 			<h1>Projects</h1>
 		</div>
-		@analyticsPanel(a, "chart-global", "Across all projects")
+		@analyticsPanel(a, "chart-global", "Across all projects", false)
 		<section>
 			<div class="panel-head">
 				<h2>Projects</h2>
@@ -317,7 +346,7 @@ templ ProjectPage(p Page, proj store.ProjectSummary, sessions []store.SessionSum
 				<span class="muted small mono">{ LocalPath(proj) }</span>
 			}
 		</div>
-		@analyticsPanel(a, "chart-project", ProjectTitle(proj))
+		@analyticsPanel(a, "chart-project", ProjectTitle(proj), false)
 		<section>
 			<div class="panel-head">
 				<h2>Sessions</h2>
@@ -402,7 +431,7 @@ templ OverviewPage(p Page, a store.Analytics, recent []store.SessionRow) {
 			<h1>Overview</h1>
 			<span class="muted small">across all projects</span>
 		</div>
-		@analyticsPanel(a, "chart-global", "Across all projects")
+		@analyticsPanel(a, "chart-global", "Across all projects", true)
 		<section>
 			<div class="panel-head">
 				<h2>Recent activity</h2>
