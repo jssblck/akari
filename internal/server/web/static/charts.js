@@ -310,6 +310,8 @@
   }
 
   function initHeatmap(container) {
+    if (container._hydrated) return; // re-scans (e.g. after an htmx swap) skip live grids
+    container._hydrated = true;
     var raw = container.getAttribute("data-series");
     if (!raw) return;
     var data;
@@ -337,6 +339,8 @@
   }
 
   function initChart(container) {
+    if (container._hydrated) return; // re-scans (e.g. after an htmx swap) skip live charts
+    container._hydrated = true;
     var raw = container.getAttribute("data-series");
     if (!raw) { var s = container.querySelector(".chart-data"); raw = s && s.textContent; }
     if (!raw) return;
@@ -374,4 +378,18 @@
   } else {
     init();
   }
+  // The overview's range selector swaps the usage panel (#usage) in place,
+  // bringing a fresh, unhydrated heatmap. Hydrate only that panel, and only on that
+  // swap: gating on the swapped target's id by an O(1) check keeps live transcript
+  // appends (which swap #session-body on every SSE update) from scanning a growing
+  // document. Scan the live #usage by id, not the event's target: an outerHTML swap
+  // reports the detached old node. The _hydrated guard skips any chart that survived.
+  document.addEventListener("htmx:afterSwap", function (e) {
+    var t = (e.detail && e.detail.target) || e.target;
+    if (!t || t.id !== "usage") return;
+    var root = document.getElementById("usage");
+    if (!root) return;
+    Array.prototype.slice.call(root.querySelectorAll("[data-chart]")).forEach(initChart);
+    Array.prototype.slice.call(root.querySelectorAll("[data-heatmap]")).forEach(initHeatmap);
+  });
 })();
