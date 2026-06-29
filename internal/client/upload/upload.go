@@ -238,7 +238,7 @@ func (c *Client) syncOnce(ctx context.Context, t Target, fs *fileSync, f *os.Fil
 		// The server holds nothing: there is no prefix to verify.
 		fs.rewind(size)
 	} else {
-		ok, err := c.verifyPrefix(f, fs, t.Agent, ann.StoredBytes, size, ann.PrefixSHA256)
+		ok, err := c.verifyPrefix(ctx, f, fs, t.Agent, ann.StoredBytes, size, ann.PrefixSHA256)
 		if err != nil {
 			return Outcome{}, false, err
 		}
@@ -256,38 +256,20 @@ func (c *Client) syncOnce(ctx context.Context, t Target, fs *fileSync, f *os.Fil
 	out := Outcome{StoredBytes: ann.StoredBytes}
 
 	// Transform the unsent original tail into boundary-aligned transformed chunks,
-	// lifting every tool body to the CAS. Each pass reads original [origBase, size);
-	// origBase advances only past bytes the server accepts, so steady-state work is
-	// proportional to the newly appended bytes. A withheld trailing turn leaves
-	// origBase where it is and is re-examined next tick (the only repeated work, and
-	// only for an open final turn).
-	res, err := transformTail(f, fs.origBase, size, t.Agent, settled)
+	// streaming each chunk (and the bodies it references) to the CAS as it becomes
+	// ready, so no more than one chunk's worth of transcript is ever buffered. Each
+	// pass reads original [origBase, size); origBase advances only past bytes the
+	// server accepts, so steady-state work is proportional to the newly appended
+	// bytes. A withheld trailing turn leaves origBase where it is and is re-examined
+	// next tick (the only repeated work, and only for an open final turn).
+	sink := &syncSink{c: c, fs: fs, sessionID: ann.SessionID, size: size, out: &out, seen: map[string]bool{}}
+	tr := newTransformer(f, fs.origBase, size, t.Agent, sink)
+	_, conflicted, err := tr.run(ctx, settled)
 	if err != nil {
 		return out, false, err
 	}
-	for _, ch := range res.chunks {
-		// Upload the bodies this chunk references before the chunk itself, so the
-		// transcript never lands referencing a body the CAS does not yet hold.
-		if err := c.uploadBodies(ctx, ch.Bodies); err != nil {
-			return out, false, err
-		}
-		r, err := c.chunk(ctx, ann.SessionID, fs.base, ch.Data)
-		if err != nil {
-			return out, false, err
-		}
-		if r.conflict {
-			return out, true, nil // re-announce and re-verify the prefix
-		}
-		// The server accepted these transformed bytes, so extend the verified
-		// transformed-prefix digest over them (hashing the chunk we already hold) and
-		// advance the original cursor past the bytes they came from.
-		fs.prefixHasher.Write(ch.Data)
-		fs.base = r.storedBytes
-		fs.origBase += ch.OrigLen
-		fs.prefixSize = size
-		out.UploadedBytes += int64(len(ch.Data))
-		out.StoredBytes = r.storedBytes
-		out.MessageCount = r.messageCount
+	if conflicted {
+		return out, true, nil // re-announce and re-verify the prefix
 	}
 
 	if out.UploadedBytes == 0 && action != ActionReset {
@@ -295,6 +277,80 @@ func (c *Client) syncOnce(ctx context.Context, t Target, fs *fileSync, f *os.Fil
 	}
 	out.Action = action
 	return out, false, nil
+}
+
+// syncSink wires the streaming transform to the client's CAS and chunk endpoints
+// for one sync pass. It uploads each body before the chunk that references it and
+// advances the verified-prefix cache as the server accepts chunks, so the
+// transform itself stays memory bounded: it hands off each chunk and body without
+// accumulating them.
+type syncSink struct {
+	c         *Client
+	fs        *fileSync
+	sessionID int64
+	size      int64
+	out       *Outcome
+	seen      map[string]bool // bodies already uploaded this pass, deduped by sha
+}
+
+// emitBody hashes a located body (streaming it from the file, or using the bytes a
+// small line already holds), uploads it to the CAS when the server lacks it, and
+// returns the descriptor the sentinel is built from. A body seen earlier in this
+// pass is neither re-hashed-from-scratch nor re-uploaded.
+func (s *syncSink) emitBody(ctx context.Context, ref bodyRef) (parser.Body, error) {
+	var sha string
+	var n int
+	if ref.haveContent {
+		sha = parser.HashString(string(ref.content))
+		n = len(ref.content)
+	} else {
+		var err error
+		sha, n, err = hashBodySpan(ref.file, ref.lineOff, ref.span, ref.bodyKind)
+		if err != nil {
+			return parser.Body{}, err
+		}
+	}
+	body := parser.Body{SHA256: sha, Bytes: n, MediaType: ref.media, Kind: ref.kind}
+
+	if s.seen[sha] {
+		return body, nil // already handled this body this pass
+	}
+	s.seen[sha] = true
+
+	missing, err := s.c.checkBlobs(ctx, []string{sha})
+	if err != nil {
+		return parser.Body{}, err
+	}
+	if !missing[sha] {
+		return body, nil // the CAS already holds it (global dedup)
+	}
+	if err := s.c.putBlobStream(ctx, sha, ref); err != nil {
+		return parser.Body{}, err
+	}
+	return body, nil
+}
+
+// emitChunk uploads one transformed chunk and folds the result into the verified
+// prefix and the outcome. A 409 conflict is reported to the transform, which unwinds
+// so the caller re-announces.
+func (s *syncSink) emitChunk(ctx context.Context, data []byte, origLen int64) (bool, error) {
+	r, err := s.c.chunk(ctx, s.sessionID, s.fs.base, data)
+	if err != nil {
+		return false, err
+	}
+	if r.conflict {
+		return true, nil
+	}
+	// The server accepted these transformed bytes, so extend the verified
+	// transformed-prefix digest over them and advance the original cursor.
+	s.fs.prefixHasher.Write(data)
+	s.fs.base = r.storedBytes
+	s.fs.origBase += origLen
+	s.fs.prefixSize = s.size
+	s.out.UploadedBytes += int64(len(data))
+	s.out.StoredBytes = r.storedBytes
+	s.out.MessageCount = r.messageCount
+	return false, nil
 }
 
 // boundaryWithin returns the absolute file position just past the last message
@@ -380,7 +436,7 @@ func lastCodexTurnEnd(buf []byte) int {
 // transformed output reaches serverBytes, hashing as it goes and recovering the
 // origBase mapping. That cold pass re-reads and re-hashes the bodies in the prefix
 // once, the documented cost of a dropped cache, but never re-uploads them.
-func (c *Client) verifyPrefix(f *os.File, fs *fileSync, agent string, serverBytes, size int64, want string) (bool, error) {
+func (c *Client) verifyPrefix(ctx context.Context, f *os.File, fs *fileSync, agent string, serverBytes, size int64, want string) (bool, error) {
 	// serverBytes counts TRANSFORMED bytes and size counts ORIGINAL file bytes, so
 	// they are not directly comparable: a sentinel can be larger or smaller than the
 	// body it replaces. The fast path's guard is on the original coordinate: the
@@ -397,7 +453,7 @@ func (c *Client) verifyPrefix(f *os.File, fs *fileSync, agent string, serverByte
 	// output reaches serverBytes, computing both the digest and the original offset
 	// that maps to it. The transform is deterministic, so the recomputed prefix is
 	// byte identical to what was uploaded.
-	h, origBase, ok, err := transformPrefixDigest(f, agent, size, serverBytes)
+	h, origBase, ok, err := transformPrefixDigest(ctx, f, agent, size, serverBytes)
 	if err != nil {
 		return false, err
 	}
@@ -484,37 +540,6 @@ func (c *Client) chunk(ctx context.Context, sessionID, offset int64, data []byte
 	}
 }
 
-// uploadBodies uploads the tool bodies a transformed chunk references, sending
-// only the ones the server lacks. It asks the server which hashes are missing
-// (the CAS dedupes globally, so a body any session already stored is skipped),
-// then streams each missing body to the CAS under its hash. A body is uploaded
-// before the transcript that references it, and the server pins it against the
-// sweep, so the reference can never land on a body the CAS does not hold.
-func (c *Client) uploadBodies(ctx context.Context, bodies []parser.Body) error {
-	if len(bodies) == 0 {
-		return nil
-	}
-	shas := make([]string, len(bodies))
-	for i, b := range bodies {
-		shas[i] = b.SHA256
-	}
-	missing, err := c.checkBlobs(ctx, shas)
-	if err != nil {
-		return err
-	}
-	uploaded := map[string]bool{}
-	for _, b := range bodies {
-		if !missing[b.SHA256] || uploaded[b.SHA256] {
-			continue // already present on the server, or already sent this pass
-		}
-		if err := c.putBlob(ctx, b); err != nil {
-			return err
-		}
-		uploaded[b.SHA256] = true
-	}
-	return nil
-}
-
 // checkBlobs returns the set of hashes the server does not yet hold.
 func (c *Client) checkBlobs(ctx context.Context, shas []string) (map[string]bool, error) {
 	var resp struct {
@@ -531,20 +556,31 @@ func (c *Client) checkBlobs(ctx context.Context, shas []string) (map[string]bool
 	return missing, nil
 }
 
-// putBlob streams one tool body to the CAS. The body is held in memory as a
-// string (one line's worth, the size of a single tool input or result), so the
-// request streams from it without a second copy; a body larger than one line never
-// arises, since the transform lifts each body from its own line.
-func (c *Client) putBlob(ctx context.Context, b parser.Body) error {
+// putBlobStream streams one tool body to the CAS under its hash. For a small line
+// the body bytes are already in hand; for a big line the body is streamed straight
+// from the file through its canonical reader, so a hundreds-of-MiB body uploads in
+// O(window) memory and is never resident. The server verifies the streamed bytes
+// hash to sha and pins the body against the sweep, so a corrupt upload is rejected
+// and a present-but-unreferenced body survives until the transcript lands.
+func (c *Client) putBlobStream(ctx context.Context, sha string, ref bodyRef) error {
 	url := fmt.Sprintf("%s/api/v1/ingest/blob/%s?media_type=%s",
-		c.baseURL, b.SHA256, urlQueryEscape(b.MediaType))
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, strings.NewReader(b.Content))
+		c.baseURL, sha, urlQueryEscape(ref.media))
+
+	var bodyReader io.Reader
+	if ref.haveContent {
+		bodyReader = bytes.NewReader(ref.content)
+	} else {
+		bodyReader = parser.CanonicalBodyReader(ref.file, ref.lineOff, ref.span, ref.bodyKind)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bodyReader)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Content-Type", "application/octet-stream")
-	req.ContentLength = int64(len(b.Content))
+	if ref.haveContent {
+		req.ContentLength = int64(len(ref.content))
+	}
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -553,7 +589,7 @@ func (c *Client) putBlob(ctx context.Context, b parser.Body) error {
 	defer resp.Body.Close()
 	payload, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("upload blob %s: server returned %d: %s", b.SHA256, resp.StatusCode, strings.TrimSpace(string(payload)))
+		return fmt.Errorf("upload blob %s: server returned %d: %s", sha, resp.StatusCode, strings.TrimSpace(string(payload)))
 	}
 	return nil
 }

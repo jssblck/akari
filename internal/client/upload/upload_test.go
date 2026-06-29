@@ -303,13 +303,13 @@ func TestVerifyPrefixUsesCachedDigest(t *testing.T) {
 	fs := &fileSync{base: 3, prefixSize: 4, prefixHasher: sha256.New()}
 	fs.prefixHasher.Write([]byte("BBB")) // cache claims the first 3 transformed bytes were "BBB"
 
-	ok, err := c.verifyPrefix(f, fs, "claude", 3, 4, hexSHA("BBB"))
+	ok, err := c.verifyPrefix(context.Background(), f, fs, "claude", 3, 4, hexSHA("BBB"))
 	if err != nil || !ok {
 		t.Fatalf("fast path against cached digest: ok=%v err=%v", ok, err)
 	}
 	// The same call must reject a hash that matches the on-disk "AAA", because the
 	// fast path never looks at the file.
-	ok, err = c.verifyPrefix(f, fs, "claude", 3, 4, hexSHA("AAA"))
+	ok, err = c.verifyPrefix(context.Background(), f, fs, "claude", 3, 4, hexSHA("AAA"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,7 +334,7 @@ func TestVerifyPrefixColdReTransforms(t *testing.T) {
 
 	first := claudeLine("hi")
 	fs := &fileSync{}
-	ok, err := c.verifyPrefix(f, fs, "claude", int64(len(first)), int64(len(content)), hexSHA(first))
+	ok, err := c.verifyPrefix(context.Background(), f, fs, "claude", int64(len(first)), int64(len(content)), hexSHA(first))
 	if err != nil || !ok {
 		t.Fatalf("cold verify: ok=%v err=%v", ok, err)
 	}
@@ -343,7 +343,7 @@ func TestVerifyPrefixColdReTransforms(t *testing.T) {
 	}
 
 	// A wrong hash is rejected.
-	if ok, err := c.verifyPrefix(f, &fileSync{}, "claude", int64(len(first)), int64(len(content)), hexSHA("nope")); err != nil || ok {
+	if ok, err := c.verifyPrefix(context.Background(), f, &fileSync{}, "claude", int64(len(first)), int64(len(content)), hexSHA("nope")); err != nil || ok {
 		t.Fatalf("cold verify of wrong hash: ok=%v err=%v, want false", ok, err)
 	}
 }

@@ -133,31 +133,63 @@ func pinBlobRefTx(ctx context.Context, tx pgx.Tx, sha string) error {
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrBlobNotUploaded
 	}
-	return err
+	if err != nil {
+		return fmt.Errorf("lock referenced blob %s: %w", sha, err)
+	}
+	return nil
 }
 
-// HaveBlobs returns, for a set of candidate hashes, the subset the CAS already
-// holds. The client calls this before uploading tool bodies so a body the server
-// already has (from this session's earlier sync, or any other session's, since
-// the CAS dedupes globally) is never re-sent.
-func (s *Store) HaveBlobs(ctx context.Context, shas []string) (map[string]bool, error) {
-	have := map[string]bool{}
+// MissingBlobs reports which of a set of candidate hashes the CAS does not hold,
+// and atomically (re)pins every hash it does hold. The client calls this before
+// uploading tool bodies: a body the server already has (from an earlier sync, or
+// any other session, since the CAS dedupes globally) is reported absent from the
+// missing set and so not re-sent, but it is pinned here so it survives the sweep
+// until the transcript chunk that references it commits. Without the pin a present
+// but unreferenced, unpinned blob could be reclaimed in the window between this
+// check and the transcript append, stranding a sentinel with no body.
+//
+// The whole check-and-pin runs in one transaction so the pin is durable before
+// the client is told a body is present. Pinning takes the blob rows FOR KEY SHARE
+// (via the upsert's FK validation) which conflicts with the sweep's FOR UPDATE, so
+// a body cannot be both reported-present and swept.
+func (s *Store) MissingBlobs(ctx context.Context, shas []string) ([]string, error) {
+	missing := []string{}
 	if len(shas) == 0 {
-		return have, nil
+		return missing, nil
 	}
-	rows, err := s.Pool.Query(ctx, "SELECT sha256 FROM blobs WHERE sha256 = ANY($1)", shas)
-	if err != nil {
-		return nil, fmt.Errorf("query present blobs: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var sha string
-		if err := rows.Scan(&sha); err != nil {
-			return nil, err
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, "SELECT sha256 FROM blobs WHERE sha256 = ANY($1)", shas)
+		if err != nil {
+			return fmt.Errorf("scan present blobs among %d candidates: %w", len(shas), err)
 		}
-		have[sha] = true
+		present := map[string]bool{}
+		for rows.Next() {
+			var sha string
+			if err := rows.Scan(&sha); err != nil {
+				rows.Close()
+				return fmt.Errorf("iterate present blob hashes: %w", err)
+			}
+			present[sha] = true
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("iterate present blob hashes: %w", err)
+		}
+		for _, sha := range shas {
+			if present[sha] {
+				if err := upsertBlobPin(ctx, tx, sha); err != nil {
+					return err
+				}
+			} else {
+				missing = append(missing, sha)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	return have, rows.Err()
+	return missing, nil
 }
 
 // blobPinTTL is how long a freshly uploaded, not-yet-referenced blob is protected
@@ -168,48 +200,65 @@ func (s *Store) HaveBlobs(ctx context.Context, shas []string) (map[string]bool, 
 // a slow or retried sync cannot lose a body out from under its transcript.
 const blobPinTTL = time.Hour
 
-// PutBlob stores a content-addressed body uploaded directly by the client and
-// pins it against the sweep for blobPinTTL. The body is streamed in from r in
-// bounded slices so neither the client nor the server holds the whole body in
-// memory: a 500 MiB tool result lands as a large object without a 500 MiB buffer.
-// The stored bytes are verified against the claimed sha256, so a corrupt upload
-// cannot poison the CAS (a later transcript referencing that hash would serve
-// wrong bytes). An already-present body is not rewritten; its pin is refreshed so
-// a re-sync still protects it.
-func (s *Store) PutBlob(ctx context.Context, sha, mediaType string, r io.Reader) error {
-	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-		// Refresh the pin first, and on an already-present blob take FOR KEY SHARE so
-		// a racing sweep cannot delete it before the pin lands.
-		var dummy int
-		err := tx.QueryRow(ctx, "SELECT 1 FROM blobs WHERE sha256 = $1 FOR KEY SHARE", sha).Scan(&dummy)
-		if err == nil {
-			// Drain the request body so the upload completes cleanly even though we
-			// already have the content (the client need not special-case a 200 here).
-			_, _ = io.Copy(io.Discard, r)
-			return upsertBlobPin(ctx, tx, sha)
-		}
-		if !errors.Is(err, pgx.ErrNoRows) {
-			return err
-		}
+// ErrBlobHashMismatch reports that the uploaded bytes did not hash to the declared
+// key, so the body was not stored. The handler maps it to a 400: it is the
+// client's error, not a server fault.
+var ErrBlobHashMismatch = errors.New("uploaded blob bytes do not match the declared hash")
 
+// PutBlob stores a content-addressed body uploaded directly by the client and
+// pins it against the sweep for blobPinTTL. The body streams in from r in bounded
+// slices so neither side holds the whole body in memory: a 500 MiB tool result
+// lands as a large object without a 500 MiB buffer. The stored bytes are verified
+// against the claimed sha256, so a corrupt upload cannot poison the CAS.
+//
+// No database lock is held across the network read. An already-present body is
+// pinned and committed in a short transaction before its (redundant) body is
+// drained, so a slow duplicate upload cannot block the sweep's FOR UPDATE behind a
+// FOR KEY SHARE held across a client-controlled read. A new body is written inside
+// one transaction (Postgres large objects require it), but that transaction holds
+// no lock on any existing row until it inserts the new blobs row at the end, so it
+// does not block the sweep either.
+func (s *Store) PutBlob(ctx context.Context, sha, mediaType string, r io.Reader) error {
+	// Fast path: if the blob is already present, pin it and commit before touching
+	// the network, then drain the redundant body outside any transaction.
+	present, err := s.pinIfPresent(ctx, sha)
+	if err != nil {
+		return err
+	}
+	if present {
+		// Drain so the client's PUT completes cleanly; it need not special-case a body
+		// the server already has.
+		_, _ = io.Copy(io.Discard, r)
+		return nil
+	}
+
+	if mediaType == "" {
+		mediaType = "application/octet-stream"
+	}
+	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		los := tx.LargeObjects()
 		oid, err := los.Create(ctx, 0)
 		if err != nil {
-			return err
+			return fmt.Errorf("create large object for blob %s: %w", sha, err)
 		}
 		lo, err := los.Open(ctx, oid, pgx.LargeObjectModeWrite)
 		if err != nil {
-			return err
+			return fmt.Errorf("open large object for blob %s: %w", sha, err)
 		}
 		h := sha256.New()
 		buf := make([]byte, blobWriteChunk)
 		var total int64
 		for {
+			// Stop a canceled upload mid-stream rather than draining a huge body.
+			if err := ctx.Err(); err != nil {
+				_ = lo.Close()
+				return err
+			}
 			n, rerr := r.Read(buf)
 			if n > 0 {
 				if _, werr := lo.Write(buf[:n]); werr != nil {
 					_ = lo.Close()
-					return werr
+					return fmt.Errorf("write large object for blob %s: %w", sha, werr)
 				}
 				h.Write(buf[:n])
 				total += int64(n)
@@ -219,39 +268,59 @@ func (s *Store) PutBlob(ctx context.Context, sha, mediaType string, r io.Reader)
 			}
 			if rerr != nil {
 				_ = lo.Close()
-				return rerr
+				return fmt.Errorf("read upload body for blob %s: %w", sha, rerr)
 			}
 		}
 		if err := lo.Close(); err != nil {
-			return err
+			return fmt.Errorf("close large object for blob %s: %w", sha, err)
 		}
 
-		got := hex.EncodeToString(h.Sum(nil))
-		if got != sha {
-			// The bytes do not hash to the claimed key; drop the large object and
-			// reject so a mismatched body never enters the CAS under a wrong name.
-			_ = los.Unlink(ctx, oid)
-			return fmt.Errorf("uploaded blob hash %s does not match declared %s", got, sha)
-		}
-		if mediaType == "" {
-			mediaType = "application/octet-stream"
+		if got := hex.EncodeToString(h.Sum(nil)); got != sha {
+			// The bytes do not hash to the claimed key; drop the large object and reject
+			// so a mismatched body never enters the CAS under a wrong name.
+			if err := los.Unlink(ctx, oid); err != nil {
+				return fmt.Errorf("unlink mismatched large object for blob %s: %w", sha, err)
+			}
+			return fmt.Errorf("%w: got %s for declared %s", ErrBlobHashMismatch, got, sha)
 		}
 		tag, err := tx.Exec(ctx,
 			`INSERT INTO blobs (sha256, lo_oid, byte_len, media_type)
 			 VALUES ($1, $2, $3, $4) ON CONFLICT (sha256) DO NOTHING`,
 			sha, oid, total, mediaType)
 		if err != nil {
-			return err
+			return fmt.Errorf("insert blob row %s: %w", sha, err)
 		}
 		if tag.RowsAffected() == 0 {
-			// Another upload won the race for this hash; drop our duplicate large
-			// object rather than strand it.
+			// Another upload won the race for this hash; drop our duplicate large object
+			// rather than strand it.
 			if err := los.Unlink(ctx, oid); err != nil {
-				return err
+				return fmt.Errorf("unlink duplicate large object for blob %s: %w", sha, err)
 			}
 		}
 		return upsertBlobPin(ctx, tx, sha)
 	})
+}
+
+// pinIfPresent pins a blob and reports whether it exists, in one short
+// transaction that holds no lock across any network read. The pin upsert validates
+// the blob_pins FK by taking the blob row FOR KEY SHARE, which conflicts with the
+// sweep's FOR UPDATE, so a present blob cannot be swept between this check and the
+// commit.
+func (s *Store) pinIfPresent(ctx context.Context, sha string) (bool, error) {
+	var present bool
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		var dummy int
+		err := tx.QueryRow(ctx, "SELECT 1 FROM blobs WHERE sha256 = $1", sha).Scan(&dummy)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("check blob %s before storing: %w", sha, err)
+		}
+		present = true
+		return upsertBlobPin(ctx, tx, sha)
+	})
+	return present, err
 }
 
 // upsertBlobPin records or refreshes a sweep-protection pin for a blob, extending

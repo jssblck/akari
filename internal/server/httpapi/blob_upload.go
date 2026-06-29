@@ -1,8 +1,11 @@
 package httpapi
 
 import (
+	"errors"
 	"net/http"
 	"strings"
+
+	"github.com/jssblck/akari/internal/server/store"
 )
 
 // maxBlobUpload bounds a single tool body upload. A body the transcript no longer
@@ -18,9 +21,13 @@ type blobCheckRequest struct {
 }
 
 // handleBlobCheck reports which of a set of candidate tool-body hashes the CAS
-// already holds, so the client uploads only the bodies the server lacks. The CAS
-// dedupes globally, so a body any session already stored (this one on an earlier
-// sync, or any other) is reported present and never re-sent.
+// lacks, so the client uploads only those. It also pins every hash it finds
+// present: the client skips the PUT for a present body, so the body must be held
+// against the sweep until the transcript chunk that references it commits. Without
+// the pin a present, unreferenced body could be reclaimed between the check and the
+// transcript append, stranding a sentinel with no body. The CAS dedupes globally,
+// so a body any session already stored is reported absent from the missing set and
+// not re-sent.
 func (s *Server) handleBlobCheck(w http.ResponseWriter, r *http.Request) {
 	var req blobCheckRequest
 	if !decodeJSON(w, r, &req) {
@@ -33,16 +40,10 @@ func (s *Server) handleBlobCheck(w http.ResponseWriter, r *http.Request) {
 			clean = append(clean, sha)
 		}
 	}
-	have, err := s.Store.HaveBlobs(r.Context(), clean)
+	missing, err := s.Store.MissingBlobs(r.Context(), clean)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "check blobs")
 		return
-	}
-	missing := make([]string, 0)
-	for _, sha := range clean {
-		if !have[sha] {
-			missing = append(missing, sha)
-		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"missing": missing})
 }
@@ -65,7 +66,7 @@ func (s *Server) handleBlobUpload(w http.ResponseWriter, r *http.Request) {
 	if err := s.Store.PutBlob(r.Context(), sha, mediaType, body); err != nil {
 		// A hash mismatch is the client's error (the bytes do not match the declared
 		// key); everything else is a server fault.
-		if strings.Contains(err.Error(), "does not match declared") {
+		if errors.Is(err, store.ErrBlobHashMismatch) {
 			writeError(w, http.StatusBadRequest, "uploaded bytes do not match declared hash")
 			return
 		}

@@ -1,6 +1,10 @@
 package upload
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -23,13 +27,71 @@ func openTemp(t *testing.T, content string) (*os.File, int64) {
 	return f, info.Size()
 }
 
-// concatChunks joins the transformed chunk data in order.
-func concatChunks(chunks []transformedChunk) []byte {
-	var out []byte
-	for _, c := range chunks {
-		out = append(out, c.Data...)
+// collectSink is a test chunkSink that records the transformed bytes and lifted
+// bodies in order, without a server. It hashes each body exactly as the real sink
+// does (from buffered content, or by streaming the file span), so the recorded
+// bodies carry the same sha/length/media the protocol would upload.
+type collectSink struct {
+	data     []byte
+	bodies   []parser.Body
+	origEnd  int64
+	confAt   int // emit conflict on the chunk with this 1-based index, 0 to never
+	chunkNum int
+}
+
+func (s *collectSink) emitBody(ctx context.Context, ref bodyRef) (parser.Body, error) {
+	var sha string
+	var n int
+	if ref.haveContent {
+		sum := sha256.Sum256(ref.content)
+		sha = hex.EncodeToString(sum[:])
+		n = len(ref.content)
+	} else {
+		r := parser.CanonicalBodyReader(ref.file, ref.lineOff, ref.span, ref.bodyKind)
+		h := sha256.New()
+		written, err := io.Copy(h, r)
+		if err != nil {
+			return parser.Body{}, err
+		}
+		sha = hex.EncodeToString(h.Sum(nil))
+		n = int(written)
 	}
-	return out
+	// Recover the canonical content for assertions (test bodies are small).
+	var content string
+	if ref.haveContent {
+		content = string(ref.content)
+	} else {
+		data, err := io.ReadAll(parser.CanonicalBodyReader(ref.file, ref.lineOff, ref.span, ref.bodyKind))
+		if err != nil {
+			return parser.Body{}, err
+		}
+		content = string(data)
+	}
+	b := parser.Body{SHA256: sha, Bytes: n, MediaType: ref.media, Kind: ref.kind, Content: content}
+	s.bodies = append(s.bodies, b)
+	return b, nil
+}
+
+func (s *collectSink) emitChunk(ctx context.Context, data []byte, origLen int64) (bool, error) {
+	s.chunkNum++
+	if s.confAt != 0 && s.chunkNum == s.confAt {
+		return true, nil
+	}
+	s.data = append(s.data, data...)
+	s.origEnd += origLen
+	return false, nil
+}
+
+// runTransform drives a transformer over [origStart, size) with a collecting sink
+// and returns it after the pass.
+func runTransform(t *testing.T, f *os.File, origStart, size int64, agent string, settled bool) *collectSink {
+	t.Helper()
+	sink := &collectSink{}
+	tr := newTransformer(f, origStart, size, agent, sink)
+	if _, _, err := tr.run(context.Background(), settled); err != nil {
+		t.Fatal(err)
+	}
+	return sink
 }
 
 // TestTransformPassesThroughBodylessLines confirms a transcript with no tool body
@@ -39,15 +101,12 @@ func TestTransformPassesThroughBodylessLines(t *testing.T) {
 	content := claudeLine("hello") + claudeLine("world")
 	f, size := openTemp(t, content)
 
-	res, err := transformTail(f, 0, size, "claude", true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := string(concatChunks(res.chunks)); got != content {
+	sink := runTransform(t, f, 0, size, "claude", true)
+	if got := string(sink.data); got != content {
 		t.Fatalf("transformed = %q, want identity %q", got, content)
 	}
-	if res.origEnd != size {
-		t.Fatalf("origEnd = %d, want %d", res.origEnd, size)
+	if sink.origEnd != size {
+		t.Fatalf("origEnd = %d, want %d", sink.origEnd, size)
 	}
 }
 
@@ -60,11 +119,8 @@ func TestTransformLiftsClaudeToolBodies(t *testing.T) {
 	content := assistant + result
 	f, size := openTemp(t, content)
 
-	res, err := transformTail(f, 0, size, "claude", true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	out := string(concatChunks(res.chunks))
+	sink := runTransform(t, f, 0, size, "claude", true)
+	out := string(sink.data)
 	if strings.Contains(out, `"file_path":"a.go"`) {
 		t.Errorf("input body still inline in transformed transcript: %s", out)
 	}
@@ -75,19 +131,14 @@ func TestTransformLiftsClaudeToolBodies(t *testing.T) {
 		t.Errorf("transformed transcript carries no sentinel: %s", out)
 	}
 
-	// Two bodies, with content equal to what the parser records inline.
-	var bodies []parser.Body
-	for _, c := range res.chunks {
-		bodies = append(bodies, c.Bodies...)
-	}
-	if len(bodies) != 2 {
-		t.Fatalf("lifted %d bodies, want 2", len(bodies))
+	if len(sink.bodies) != 2 {
+		t.Fatalf("lifted %d bodies, want 2", len(sink.bodies))
 	}
 	want := map[string]string{
 		`{"file_path":"a.go"}`: "input",
 		"package a":            "result",
 	}
-	for _, b := range bodies {
+	for _, b := range sink.bodies {
 		kind, ok := want[b.Content]
 		if !ok {
 			t.Errorf("unexpected lifted body %q", b.Content)
@@ -124,24 +175,18 @@ func TestTransformCodexTurnBoundaries(t *testing.T) {
 	f, size := openTemp(t, content)
 
 	// Unsettled: the trailing open turn (assistant y) is withheld.
-	res, err := transformTail(f, 0, size, "codex", false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	sink := runTransform(t, f, 0, size, "codex", false)
 	wantUnsettled := meta + user("a") + asst("x") + user("b")
-	if got := string(concatChunks(res.chunks)); got != wantUnsettled {
+	if got := string(sink.data); got != wantUnsettled {
 		t.Fatalf("unsettled transform = %q, want through the closing user line %q", got, wantUnsettled)
 	}
-	if res.origEnd != int64(len(wantUnsettled)) {
-		t.Fatalf("unsettled origEnd = %d, want %d", res.origEnd, len(wantUnsettled))
+	if sink.origEnd != int64(len(wantUnsettled)) {
+		t.Fatalf("unsettled origEnd = %d, want %d", sink.origEnd, len(wantUnsettled))
 	}
 
 	// Settled: the final turn is flushed whole.
-	res, err = transformTail(f, 0, size, "codex", true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := string(concatChunks(res.chunks)); got != content {
+	sink = runTransform(t, f, 0, size, "codex", true)
+	if got := string(sink.data); got != content {
 		t.Fatalf("settled transform = %q, want the whole file", got)
 	}
 }
@@ -153,11 +198,8 @@ func TestTransformResumesFromOrigBase(t *testing.T) {
 	content := first + claudeLine("two")
 	f, size := openTemp(t, content)
 
-	res, err := transformTail(f, int64(len(first)), size, "claude", true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := string(concatChunks(res.chunks)); got != claudeLine("two") {
+	sink := runTransform(t, f, int64(len(first)), size, "claude", true)
+	if got := string(sink.data); got != claudeLine("two") {
 		t.Fatalf("resumed transform = %q, want only the appended line", got)
 	}
 }
@@ -176,8 +218,75 @@ func TestTransformOversizedLineRejected(t *testing.T) {
 	content := claudeLine(strings.Repeat("x", 200))
 	f, size := openTemp(t, content)
 
-	if _, err := transformTail(f, 0, size, "claude", true); err == nil {
+	sink := &collectSink{}
+	tr := newTransformer(f, 0, size, "claude", sink)
+	if _, _, err := tr.run(context.Background(), true); err == nil {
 		t.Fatal("expected an oversized-line error past hardCap")
+	}
+}
+
+// TestTransformStreamsBigLineBody confirms a tool body larger than bigLineThreshold
+// is lifted by the streaming path: the body never rides inline, the sentinel
+// replaces it, and the lifted body's hash and length match the canonical content,
+// proving the streamed body is byte identical to what the buffered path would store.
+func TestTransformStreamsBigLineBody(t *testing.T) {
+	setBigLineThreshold(t, 256)
+
+	// A Claude tool_result whose content string is well past the (shrunken) big-line
+	// threshold, so the line takes the streaming path.
+	big := strings.Repeat("Z", 4096)
+	result := `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"` + big + `"}]}}` + "\n"
+	f, size := openTemp(t, result)
+
+	sink := runTransform(t, f, 0, size, "claude", true)
+
+	out := string(sink.data)
+	if strings.Contains(out, big) {
+		t.Fatal("big body still inline after streaming transform")
+	}
+	if !strings.Contains(out, sentinelMarker) {
+		t.Fatalf("streamed line carries no sentinel: %s", out)
+	}
+	if len(sink.bodies) != 1 {
+		t.Fatalf("lifted %d bodies, want 1", len(sink.bodies))
+	}
+	b := sink.bodies[0]
+	if b.Content != big {
+		t.Fatalf("streamed body content mismatch (len %d, want %d)", len(b.Content), len(big))
+	}
+	if b.SHA256 != parser.HashString(big) || b.Bytes != len(big) {
+		t.Fatalf("streamed body metadata mismatch: sha=%s bytes=%d", b.SHA256, b.Bytes)
+	}
+	if b.MediaType != "text/plain" {
+		t.Fatalf("streamed result media = %q, want text/plain", b.MediaType)
+	}
+}
+
+// TestTransformBigAndSmallEquivalent confirms the streaming big-line path and the
+// buffered small-line path produce byte-identical transformed output and identical
+// lifted bodies for the same line, so the threshold is purely a memory tactic with
+// no effect on the result.
+func TestTransformBigAndSmallEquivalent(t *testing.T) {
+	body := strings.Repeat("payload-", 300) // ~2400 bytes
+	line := `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"` + body + `"}]}}` + "\n"
+	f, size := openTemp(t, line)
+
+	// Small path: threshold above the line.
+	setBigLineThreshold(t, 1<<20)
+	small := runTransform(t, f, 0, size, "claude", true)
+
+	// Big path: threshold below the line.
+	setBigLineThreshold(t, 256)
+	bigp := runTransform(t, f, 0, size, "claude", true)
+
+	if string(small.data) != string(bigp.data) {
+		t.Fatalf("big vs small transform differ:\n small=%q\n big  =%q", small.data, bigp.data)
+	}
+	if len(small.bodies) != 1 || len(bigp.bodies) != 1 {
+		t.Fatalf("body counts: small=%d big=%d", len(small.bodies), len(bigp.bodies))
+	}
+	if small.bodies[0].SHA256 != bigp.bodies[0].SHA256 {
+		t.Fatalf("big vs small body hash differ: %s vs %s", small.bodies[0].SHA256, bigp.bodies[0].SHA256)
 	}
 }
 
@@ -191,5 +300,121 @@ func TestRewindResetsBothCursors(t *testing.T) {
 	}
 	if fs.prefixSize != 150 {
 		t.Fatalf("prefixSize = %d, want 150", fs.prefixSize)
+	}
+}
+
+// setBigLineThreshold temporarily overrides the big-line threshold for a test,
+// restoring it on cleanup.
+func setBigLineThreshold(t *testing.T, n int64) {
+	t.Helper()
+	orig := bigLineThreshold
+	bigLineThreshold = n
+	t.Cleanup(func() { bigLineThreshold = orig })
+}
+
+// setChunkTarget temporarily overrides the chunk target so a small input emits
+// multiple chunks, exercising the steady-state drain and commit accounting.
+func setChunkTarget(t *testing.T, n int) {
+	t.Helper()
+	orig := chunkTarget
+	chunkTarget = n
+	t.Cleanup(func() { chunkTarget = orig })
+}
+
+// TestTransformMultiChunkAccounting confirms a stream that emits several chunks (a
+// small target over many boundary lines) reassembles to the whole transcript and
+// advances the original cursor exactly: the per-chunk commit must drop exactly the
+// lines it emitted, no more, no fewer.
+func TestTransformMultiChunkAccounting(t *testing.T) {
+	setChunkTarget(t, 8) // tiny, so nearly every Claude line flushes its own chunk
+	var b strings.Builder
+	for i := 0; i < 40; i++ {
+		b.WriteString(claudeLine(strings.Repeat("x", 10)))
+	}
+	content := b.String()
+	f, size := openTemp(t, content)
+
+	sink := runTransform(t, f, 0, size, "claude", true)
+	if string(sink.data) != content {
+		t.Fatalf("multi-chunk reassembly mismatch:\n got len=%d\n want len=%d", len(sink.data), len(content))
+	}
+	if sink.origEnd != size {
+		t.Fatalf("origEnd = %d, want %d", sink.origEnd, size)
+	}
+	if sink.chunkNum < 2 {
+		t.Fatalf("expected multiple chunks, got %d", sink.chunkNum)
+	}
+}
+
+// TestTransformConflictUnwindsWithoutAdvancing confirms a chunk conflict stops the
+// transform and reports the conflict, without emitting the conflicted chunk's bytes:
+// the caller re-announces and the pass is retried, so a conflict must not advance the
+// recorded transcript.
+func TestTransformConflictUnwindsWithoutAdvancing(t *testing.T) {
+	content := claudeLine("a") + claudeLine("b") + claudeLine("c")
+	f, size := openTemp(t, content)
+
+	// The small file flushes as one chunk at finish; conflict on it and confirm the
+	// transform reports the conflict and accepts nothing.
+	sink := &collectSink{confAt: 1}
+	tr := newTransformer(f, 0, size, "claude", sink)
+	_, conflicted, err := tr.run(context.Background(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !conflicted {
+		t.Fatal("expected the transform to report the chunk conflict")
+	}
+	if len(sink.data) != 0 {
+		t.Fatalf("conflicted transform recorded %q, want nothing accepted", sink.data)
+	}
+}
+
+// TestTransformBigLineNoBodyRejected confirms a line past the big-line threshold
+// that carries no liftable tool body is refused rather than buffered: there is
+// nothing to lift, so the line cannot be made small and must not be read whole.
+func TestTransformBigLineNoBodyRejected(t *testing.T) {
+	setBigLineThreshold(t, 256)
+	// A plain user line with a big inline content string and no tool_result block:
+	// nothing to lift to the CAS.
+	content := claudeLine(strings.Repeat("x", 4096))
+	f, size := openTemp(t, content)
+
+	sink := &collectSink{}
+	tr := newTransformer(f, 0, size, "claude", sink)
+	if _, _, err := tr.run(context.Background(), true); err == nil {
+		t.Fatal("expected a big-line-with-no-body refusal")
+	}
+}
+
+// TestScannerDetectsBigLine confirms the scanner reports a line longer than the
+// threshold as big (nil bytes, isBig=true) with the correct offset and length, and a
+// following small line normally, proving the two-tier handoff.
+func TestScannerDetectsBigLine(t *testing.T) {
+	setBigLineThreshold(t, 16)
+	big := strings.Repeat("Z", 64) + "\n"
+	small := "tiny\n"
+	f, size := openTemp(t, big+small)
+
+	sc := newOrigLineScanner(f, 0, size)
+	line, off, n, isBig, ok, err := sc.next()
+	if err != nil || !ok {
+		t.Fatalf("first next: ok=%v err=%v", ok, err)
+	}
+	if !isBig || line != nil {
+		t.Fatalf("first line should be big with nil bytes, got isBig=%v line=%q", isBig, line)
+	}
+	if off != 0 || n != int64(len(big)) {
+		t.Fatalf("big line off=%d n=%d, want 0/%d", off, n, len(big))
+	}
+	line, off, n, isBig, ok, err = sc.next()
+	if err != nil || !ok {
+		t.Fatalf("second next: ok=%v err=%v", ok, err)
+	}
+	if isBig || string(line) != small {
+		t.Fatalf("second line = %q isBig=%v, want %q small", line, isBig, small)
+	}
+	if off != int64(len(big)) || n != int64(len(small)) {
+		t.Fatalf("small line off=%d n=%d, want %d/%d", off, n, len(big), len(small))
 	}
 }

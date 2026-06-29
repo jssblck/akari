@@ -77,9 +77,13 @@ func TestPutBlobRejectsHashMismatch(t *testing.T) {
 	}
 }
 
-// TestHaveBlobsReportsPresence confirms the check endpoint's store method reports
-// exactly the present subset, so the client uploads only what the server lacks.
-func TestHaveBlobsReportsPresence(t *testing.T) {
+// TestMissingBlobsReportsAbsentAndPinsPresent confirms the check endpoint's store
+// method reports exactly the absent subset (so the client uploads only what the
+// server lacks) and pins every present hash so it survives the sweep until the
+// transcript that references it lands. The pin is the fix for the check-then-sweep
+// race: a present, unreferenced body would otherwise be reclaimable between the
+// check and the transcript append.
+func TestMissingBlobsReportsAbsentAndPinsPresent(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 
@@ -88,17 +92,41 @@ func TestHaveBlobsReportsPresence(t *testing.T) {
 	if err := st.PutBlob(ctx, presentSHA, "text/plain", bytes.NewReader(present)); err != nil {
 		t.Fatal(err)
 	}
+	// Force the upload pin to expire so only a fresh pin from the check could keep
+	// the present blob alive.
+	if _, err := st.Pool.Exec(ctx, "UPDATE blob_pins SET expires_at = now() - interval '1 hour'"); err != nil {
+		t.Fatal(err)
+	}
 	absentSHA := HashBytes([]byte("never uploaded"))
 
-	have, err := st.HaveBlobs(ctx, []string{presentSHA, absentSHA})
+	missing, err := st.MissingBlobs(ctx, []string{presentSHA, absentSHA})
 	if err != nil {
-		t.Fatalf("have blobs: %v", err)
+		t.Fatalf("missing blobs: %v", err)
 	}
-	if !have[presentSHA] {
-		t.Errorf("present blob reported missing")
+	if len(missing) != 1 || missing[0] != absentSHA {
+		t.Fatalf("missing = %v, want just the absent hash %s", missing, absentSHA)
 	}
-	if have[absentSHA] {
-		t.Errorf("absent blob reported present")
+
+	// The present blob was re-pinned by the check, so a sweep keeps it even though it
+	// is still unreferenced.
+	if removed, err := st.SweepBlobs(ctx); err != nil || removed != 0 {
+		t.Fatalf("sweep after check removed=%d err=%v, want 0 (check should re-pin)", removed, err)
+	}
+	if _, err := st.BlobMeta(ctx, presentSHA); err != nil {
+		t.Fatalf("present blob should survive after the check re-pinned it: %v", err)
+	}
+}
+
+// TestMissingBlobsEmpty confirms the no-candidates case returns an empty set
+// without a query.
+func TestMissingBlobsEmpty(t *testing.T) {
+	st := newTestStore(t)
+	missing, err := st.MissingBlobs(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(missing) != 0 {
+		t.Fatalf("missing = %v, want empty", missing)
 	}
 }
 

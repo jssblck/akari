@@ -56,6 +56,22 @@ type casRef struct {
 	MediaType string
 }
 
+// SentinelBytes renders the CAS reference that replaces a tool body, for callers
+// outside the package (the client's streaming big-line path) that build a rewritten
+// line from located spans rather than from a parsed line. It is the same encoding
+// RewriteLine uses, so a body lifted by streaming produces a byte-identical sentinel
+// to one lifted by the buffered path.
+func SentinelBytes(sha string, n int, media string) []byte {
+	return sentinelBytes(sha, n, media)
+}
+
+// HexDigest renders a raw digest as lowercase hex, the CAS key form. It lets the
+// client hash a streamed body and name it identically to HashString, which the
+// server uses over the same bytes.
+func HexDigest(sum []byte) string {
+	return hex.EncodeToString(sum)
+}
+
 // sentinelBytes renders the compact reference that replaces a body in the
 // transcript. It is a single-line JSON object so the rewritten transcript stays
 // valid JSONL and a Codex line keeps its turn-boundary shape: the client's chunk
