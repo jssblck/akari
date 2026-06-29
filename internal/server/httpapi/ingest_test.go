@@ -73,6 +73,95 @@ func TestChunkRejectsUnterminated(t *testing.T) {
 	}
 }
 
+func TestLocalProjectIdentity(t *testing.T) {
+	// Two worktrees of the same local-only repo report the same root, so they must
+	// collapse onto one project key and display as the repo folder.
+	k1, d1 := localProjectIdentity("grace-laptop", "/home/grace/wt/feature-a", "/home/grace/repo")
+	k2, d2 := localProjectIdentity("grace-laptop", "/home/grace/wt/feature-b", "/home/grace/repo")
+	if k1 != k2 {
+		t.Errorf("worktrees of one repo got different keys: %q vs %q", k1, k2)
+	}
+	if d1 != "repo" || d2 != "repo" {
+		t.Errorf("display names = %q/%q, want repo (the shared root's folder)", d1, d2)
+	}
+	// Without a root, the key falls back to the per-session cwd, so distinct folders
+	// stay distinct (orphaned worktrees, non-git folders, older clients).
+	k3, d3 := localProjectIdentity("grace-laptop", "/home/grace/wt/feature-a", "")
+	if k3 == k1 {
+		t.Error("rootless fallback collapsed onto the grouped key")
+	}
+	if d3 != "feature-a" {
+		t.Errorf("rootless display = %q, want feature-a (the cwd folder)", d3)
+	}
+	// An empty location still yields a stable, labeled key.
+	if _, d := localProjectIdentity("grace-laptop", "", ""); d != "(unknown location)" {
+		t.Errorf("empty-location display = %q, want (unknown location)", d)
+	}
+}
+
+// TestAnnounceGroupsWorktreesByLocalRoot drives the full ingest endpoint: two
+// standalone sessions from different worktrees of one local-only repo, both
+// reporting the same local_root, must land in a single project keyed on that root
+// and displayed as the repo folder. This is the server half of the worktree
+// collapse the resolver feeds.
+func TestAnnounceGroupsWorktreesByLocalRoot(t *testing.T) {
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+
+	owner, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	rawToken, err := auth.NewToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateAPIToken(ctx, owner.ID, "laptop", "ingest", auth.HashToken(rawToken)); err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+
+	announce := func(sid, cwd, root string) {
+		t.Helper()
+		body := fmt.Sprintf(
+			`{"agent":"claude","source_session_id":%q,"kind":"standalone","cwd":%q,"local_root":%q,"machine":"grace-laptop"}`,
+			sid, cwd, root)
+		req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/ingest/session", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+rawToken)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("announce %s: %v", sid, err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("announce %s status = %d, want 200", sid, resp.StatusCode)
+		}
+	}
+
+	announce("wt-a", "/home/grace/wt/feature-a", "/home/grace/repo")
+	announce("wt-b", "/home/grace/wt/feature-b", "/home/grace/repo")
+
+	projs, err := st.ListProjects(ctx)
+	if err != nil {
+		t.Fatalf("list projects: %v", err)
+	}
+	if len(projs) != 1 {
+		t.Fatalf("got %d projects, want 1 (the two worktrees should collapse)", len(projs))
+	}
+	p := projs[0]
+	if p.SessionCount != 2 {
+		t.Errorf("session count = %d, want 2", p.SessionCount)
+	}
+	if p.DisplayName != "repo" {
+		t.Errorf("display name = %q, want repo", p.DisplayName)
+	}
+	if !strings.HasPrefix(p.RemoteKey, "local:") {
+		t.Errorf("remote key = %q, want a local: synthetic key", p.RemoteKey)
+	}
+}
+
 func TestLocalProjectKey(t *testing.T) {
 	// Standalone and orphaned must share a key for the same machine+path so a
 	// deleted folder transitions kind in place rather than forking a second row.

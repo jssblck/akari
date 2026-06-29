@@ -29,12 +29,13 @@ import (
 // the stored bytes are the TRANSFORMED transcript, so prefix_sha256 is the hash of
 // buf and the client verifies its transformed prefix against it.
 type fakeServer struct {
-	mu        sync.Mutex
-	buf       []byte
-	blobs     map[string][]byte // sha256 -> stored (possibly compressed) body bytes
-	blobCT    map[string]string // sha256 -> declared storage content_type
-	blobMedia map[string]string // sha256 -> declared semantic media_type
-	puts      int               // count of accepted blob uploads, for dedup assertions
+	mu           sync.Mutex
+	buf          []byte
+	lastAnnounce map[string]string // the most recent announce request body, decoded
+	blobs        map[string][]byte // sha256 -> stored (possibly compressed) body bytes
+	blobCT       map[string]string // sha256 -> declared storage content_type
+	blobMedia    map[string]string // sha256 -> declared semantic media_type
+	puts         int               // count of accepted blob uploads, for dedup assertions
 
 	// Instrumentation for the batched/parallel upload tests. checkBatchSizes records the
 	// hash count of every existence-check request, so a test can assert no request
@@ -76,8 +77,11 @@ func (s *fakeServer) handler() http.Handler {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/ingest/session", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&body)
 		s.mu.Lock()
 		defer s.mu.Unlock()
+		s.lastAnnounce = body
 		sum := sha256.Sum256(s.buf)
 		writeJSON(w, map[string]any{
 			"session_id":    1,
@@ -222,6 +226,41 @@ func tempFile(t *testing.T, content string) string {
 
 func target(path string) Target {
 	return Target{Agent: "claude", Path: path, SourceID: "s1", ProjectKey: "github.com/o/r", Machine: "m"}
+}
+
+// TestAnnounceSerializesTargetFields guards the announce request wire shape, in
+// particular that a standalone session's LocalRoot is sent as "local_root": a
+// misspelled or dropped field would silently defeat the worktree grouping, since
+// the server would just fall back to keying on cwd.
+func TestAnnounceSerializesTargetFields(t *testing.T) {
+	c, fs := newTestClient(t)
+	tgt := Target{
+		Agent:     "claude",
+		Path:      tempFile(t, "l1\n"),
+		SourceID:  "s1",
+		Kind:      "standalone",
+		LocalRoot: "/home/grace/repo",
+		GitBranch: "feature-a",
+		Cwd:       "/home/grace/wt/feature-a",
+		Machine:   "grace-laptop",
+	}
+	if _, err := c.SyncFile(context.Background(), tgt); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"agent":             "claude",
+		"source_session_id": "s1",
+		"kind":              "standalone",
+		"local_root":        "/home/grace/repo",
+		"git_branch":        "feature-a",
+		"cwd":               "/home/grace/wt/feature-a",
+		"machine":           "grace-laptop",
+	}
+	for k, v := range want {
+		if got := fs.lastAnnounce[k]; got != v {
+			t.Errorf("announce[%q] = %q, want %q", k, got, v)
+		}
+	}
 }
 
 func TestSyncFresh(t *testing.T) {

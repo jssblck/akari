@@ -126,6 +126,19 @@ remote therefore maps every worktree of a repo to the same project with no
 special worktree handling. The same property makes branch names irrelevant: the
 remote does not change per branch.
 
+**Worktrees of a local-only repo.** A repo with no `origin` cannot collapse by
+remote, so its worktrees would otherwise each become a separate standalone
+folder. The same `commondir` that backs the remote case gives a high-confidence,
+non-heuristic fallback: `git -C <cwd> rev-parse --git-common-dir` resolves to the
+one `.git` shared by every worktree and the main checkout, so its parent (the
+main worktree) is a single root they all agree on. A standalone session in a live
+worktree reports that root, and the server keys the local project on it, so a
+local-only repo's worktrees collapse just like a remote-backed one's. This is
+best effort: it needs a live worktree git can still inspect, so a worktree that
+has already been archived (its checkout removed) cannot be matched back, its
+session metadata records only `cwd` and the branch, never the parent repo, and we
+do not guess from the path.
+
 **Remote selection.** Only the remote named `origin` is used. If a repository
 has no `origin`, or `origin` has more than one URL configured (or its URL is
 unrecognized), the session is classified standalone rather than guessed: it is
@@ -156,11 +169,16 @@ A project row stores the canonical key (unique), plus parsed host, owner, repo,
 and a display name (the repo segment), and first/last seen timestamps. It also
 records a **kind**: `remote` for a git-remote project, or `standalone` /
 `orphaned` for a local folder with no usable remote. A local project's key is
-synthetic (`local:<machine>:<cwd>`), so every standalone or orphaned session
-from the same folder on the same machine groups into one project. Standalone and
-orphaned share that key namespace, so a folder that is later deleted transitions
-from standalone to orphaned in place (its kind flips) rather than forking a
-second project.
+synthetic (`local:<machine>:<location>`), where the location is the repo root
+shared by a live worktree (see "Worktrees of a local-only repo") when one is
+reported, and otherwise the session's `cwd`. Every standalone or orphaned session
+that shares that location on the same machine groups into one project. Standalone
+and orphaned share the key namespace, so a folder deleted while keyed on its
+`cwd` transitions from standalone to orphaned in place (its kind flips) rather
+than forking. A worktree that was grouped under a repo root while live, then
+archived, can no longer report that root and so pops out into its own
+location-keyed project: the live repo group is unaffected, and an archived
+worktree has no reliable parent signal to recover anyway.
 
 ### Sessions
 
@@ -530,7 +548,7 @@ CREATE TABLE invite_tokens (             -- admin-issued, single-use registratio
 -- remote".
 CREATE TABLE projects (
   id           BIGSERIAL PRIMARY KEY,
-  remote_key   TEXT NOT NULL UNIQUE,      -- remote: github.com/jssblck/akari; local: local:<machine>:<cwd>
+  remote_key   TEXT NOT NULL UNIQUE,      -- remote: github.com/jssblck/akari; local: local:<machine>:<location>
   host         TEXT NOT NULL,             -- remote: hostname; local: machine
   owner        TEXT NOT NULL,
   repo         TEXT NOT NULL,
@@ -872,13 +890,18 @@ into one of three kinds, and backs up all three:
    git repository`, `... has no origin remote`, `... origin has multiple URLs`,
    or an unrecognized origin URL) makes the session standalone: a real local
    folder with no clean remote. A repository with remotes but no `origin` is
-   treated the same as one with no remote.
+   treated the same as one with no remote. When the folder is a git work tree, the
+   client also resolves `git -C <cwd> rev-parse --git-common-dir` to the repo root
+   shared by every worktree (the local-root, see "Worktrees of a local-only
+   repo") and sends it so the server can collapse the repo's worktrees; this is
+   best effort and omitted when git cannot report it.
 3. **Remote.** A single usable `origin` is canonicalized (see Projects); the
    result is the project key sent on ingest.
 
 A remote session uploads with its canonical key. A standalone or orphaned session
-uploads with its kind and its working directory; the server derives the synthetic
-local key from machine plus path. The per-kind counts are surfaced (a periodic
+uploads with its kind, its working directory, and (when it is a live worktree)
+the shared repo root; the server derives the synthetic local key from machine
+plus the root when present, else the working directory. The per-kind counts are surfaced (a periodic
 summary in watch mode, a final tally in one-shot mode) so a user can see what is
 backed up as standalone or orphaned. Only a file whose header cannot be read at
 all is truly skipped, since there is then nothing to identify or send. Git is

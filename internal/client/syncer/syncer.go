@@ -18,6 +18,7 @@ type Result struct {
 	File          discover.File
 	Kind          resolve.Kind
 	ProjectKey    string
+	LocalRoot     string
 	Cwd           string
 	Skipped       bool
 	Reason        string
@@ -28,14 +29,19 @@ type Result struct {
 }
 
 // Destination is a short label for where the file was backed up, for logs and
-// summaries. A remote session shows its project key; a standalone or orphaned
+// summaries. A remote session shows its project key; a standalone session backed
+// by a live worktree shows the repo root it grouped under; any other local
 // session shows its kind and working directory, since it has no remote.
 func (r Result) Destination() string {
 	if r.ProjectKey != "" {
 		return r.ProjectKey
 	}
-	if r.Cwd != "" {
-		return string(r.Kind) + ":" + r.Cwd
+	loc := r.LocalRoot
+	if loc == "" {
+		loc = r.Cwd
+	}
+	if loc != "" {
+		return string(r.Kind) + ":" + loc
 	}
 	return string(r.Kind)
 }
@@ -67,17 +73,19 @@ func (s *Syncer) SyncOne(ctx context.Context, f discover.File) Result {
 		SourceID:   res.Header.SourceID,
 		Kind:       string(res.Kind),
 		ProjectKey: res.ProjectKey,
+		LocalRoot:  res.LocalRoot,
 		GitBranch:  res.Header.GitBranch,
 		Cwd:        res.Header.Cwd,
 		Machine:    s.machine,
 	})
 	if err != nil {
-		return Result{File: f, Kind: res.Kind, ProjectKey: res.ProjectKey, Cwd: res.Header.Cwd, Reason: res.Reason, Err: err}
+		return Result{File: f, Kind: res.Kind, ProjectKey: res.ProjectKey, LocalRoot: res.LocalRoot, Cwd: res.Header.Cwd, Reason: res.Reason, Err: err}
 	}
 	return Result{
 		File:          f,
 		Kind:          res.Kind,
 		ProjectKey:    res.ProjectKey,
+		LocalRoot:     res.LocalRoot,
 		Cwd:           res.Header.Cwd,
 		Reason:        res.Reason,
 		Action:        out.Action,

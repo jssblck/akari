@@ -50,13 +50,17 @@ const (
 // Target is everything needed to upload one resolved session file. Kind is the
 // session's classification ("remote", "standalone", or "orphaned"). ProjectKey
 // is set only for a remote session; for standalone and orphaned sessions the
-// server derives the project key from Machine and Cwd.
+// server derives the project key from Machine and the local location. LocalRoot,
+// set only for a standalone session in a live worktree, is the repo root shared
+// by every worktree; the server keys on it so a local-only repo's worktrees
+// collapse into one project. When it is empty the server falls back to Cwd.
 type Target struct {
 	Agent      string
 	Path       string
 	SourceID   string
 	Kind       string
 	ProjectKey string
+	LocalRoot  string
 	GitBranch  string
 	Cwd        string
 	Machine    string
@@ -607,6 +611,7 @@ func (c *Client) announce(ctx context.Context, t Target) (announceResp, error) {
 		"source_session_id": t.SourceID,
 		"kind":              t.Kind,
 		"project_remote":    t.ProjectKey,
+		"local_root":        t.LocalRoot,
 		"git_branch":        t.GitBranch,
 		"cwd":               t.Cwd,
 		"machine":           t.Machine,
