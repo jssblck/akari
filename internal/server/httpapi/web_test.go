@@ -9,14 +9,13 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"strings"
 	"testing"
 
 	"github.com/jssblck/akari/internal/config"
 	"github.com/jssblck/akari/internal/server/auth"
 	"github.com/jssblck/akari/internal/server/store"
-	"github.com/jssblck/akari/migrations"
+	"github.com/jssblck/akari/internal/server/storetest"
 )
 
 // mustHash hashes a password for seeding a test account directly via the store.
@@ -29,36 +28,15 @@ func mustHash(t *testing.T, password string) string {
 	return h
 }
 
-// newTestServer brings up a full Routes() handler backed by a freshly migrated
-// test database, returning the server and its store. It is skipped unless
-// AKARI_TEST_DATABASE_URL is set.
+// newTestServer brings up a full Routes() handler backed by its own isolated,
+// freshly migrated database, returning the server and its store. The database is
+// created and force-dropped by the storetest package, so tests run safely in
+// parallel; it is skipped unless AKARI_TEST_DATABASE_URL is set.
 func newTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 	t.Helper()
-	dburl := os.Getenv("AKARI_TEST_DATABASE_URL")
-	if dburl == "" {
-		t.Skip("set AKARI_TEST_DATABASE_URL to run web integration tests")
-	}
-	ctx := context.Background()
-	if err := store.EnsureDatabase(ctx, dburl); err != nil {
-		t.Fatalf("ensure database: %v", err)
-	}
-	st, err := store.Open(ctx, dburl)
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	for _, q := range []string{"DROP SCHEMA public CASCADE", "CREATE SCHEMA public"} {
-		if _, err := st.Pool.Exec(ctx, q); err != nil {
-			t.Fatalf("reset schema (%s): %v", q, err)
-		}
-	}
-	if err := st.Migrate(ctx, migrations.FS); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	st := storetest.NewStore(t)
 	srv := httptest.NewServer(New(st, config.Server{}).Routes())
-	t.Cleanup(func() {
-		srv.Close()
-		st.Close()
-	})
+	t.Cleanup(srv.Close)
 	return srv, st
 }
 
@@ -74,6 +52,7 @@ func newClient(t *testing.T) *http.Client {
 }
 
 func TestWebFlow(t *testing.T) {
+	t.Parallel()
 	srv, _ := newTestServer(t)
 	c := newClient(t)
 
@@ -191,6 +170,7 @@ func TestWebFlow(t *testing.T) {
 // own "Sessions" section, tagged and labeled by folder, and that drilling into
 // one shows its state and path.
 func TestStandaloneOrphanedIndex(t *testing.T) {
+	t.Parallel()
 	srv, st := newTestServer(t)
 	ctx := context.Background()
 	c := newClient(t)
@@ -269,6 +249,7 @@ func TestStandaloneOrphanedIndex(t *testing.T) {
 }
 
 func TestLoginPreservesNext(t *testing.T) {
+	t.Parallel()
 	srv, _ := newTestServer(t)
 	c := newClient(t)
 
@@ -308,6 +289,7 @@ func TestLoginPreservesNext(t *testing.T) {
 }
 
 func TestPublicSessionFlow(t *testing.T) {
+	t.Parallel()
 	srv, st := newTestServer(t)
 	ctx := context.Background()
 	c := newClient(t)

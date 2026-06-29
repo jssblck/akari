@@ -77,6 +77,7 @@ func casTarget(path string) upload.Target {
 // transformed transcript, and the server records references whose bodies serve
 // back byte for byte. It is the end-to-end equivalent of the parser round-trip.
 func TestClientCASRoundTrip(t *testing.T) {
+	t.Parallel()
 	srv, st := newTestServer(t)
 	c, ownerID := ingestClient(t, srv.URL, st)
 	ctx := context.Background()
@@ -124,6 +125,7 @@ func TestClientCASRoundTrip(t *testing.T) {
 // content_type is accepted and persists that content_type, so the rejection is the
 // label and not the request shape.
 func TestBlobUploadRejectsUnknownContentType(t *testing.T) {
+	t.Parallel()
 	srv, st := newTestServer(t)
 	ctx := context.Background()
 	owner, err := st.Register(ctx, "ada", mustHash(t, "lovelace-1843"), "")
@@ -180,6 +182,7 @@ func TestBlobUploadRejectsUnknownContentType(t *testing.T) {
 // a second time uploads zero transcript bytes and zero bodies. It proves the
 // transform is byte stable and the CAS dedup short-circuits the body upload.
 func TestClientCASDedupOnResync(t *testing.T) {
+	t.Parallel()
 	srv, st := newTestServer(t)
 	c, _ := ingestClient(t, srv.URL, st)
 	ctx := context.Background()
@@ -219,6 +222,7 @@ func TestClientCASDedupOnResync(t *testing.T) {
 // far larger than the chunk cap uploads successfully because the transcript stays
 // tiny (a sentinel) and the body streams to the CAS as its own upload.
 func TestClientCASBigBody(t *testing.T) {
+	t.Parallel()
 	srv, st := newTestServer(t)
 	c, ownerID := ingestClient(t, srv.URL, st)
 	ctx := context.Background()
@@ -289,6 +293,7 @@ func TestClientCASBigBody(t *testing.T) {
 // (server already holds the first turn's transformed bytes) resumes from the
 // server's cursor and lands the same final transcript and references.
 func TestClientCASResume(t *testing.T) {
+	t.Parallel()
 	srv, st := newTestServer(t)
 	c, ownerID := ingestClient(t, srv.URL, st)
 	ctx := context.Background()
@@ -338,6 +343,7 @@ func TestClientCASResume(t *testing.T) {
 // small uncompressed blob carries no Content-Encoding and serves verbatim. The
 // server itself never (de)compresses on either path.
 func TestBlobServeContentEncoding(t *testing.T) {
+	t.Parallel()
 	srv, st := newTestServer(t)
 	c, ownerID := ingestClient(t, srv.URL, st)
 	ctx := context.Background()
