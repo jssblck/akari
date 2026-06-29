@@ -112,12 +112,21 @@ jobs:
 
       - name: Install the akari client
         # Pull the published client so this CI review's Codex sessions can be
-        # synced to akari. Mirrors the Bastion install above: the installer does
-        # not touch PATH, so expose its bin dir to later steps. Runs even when the
-        # review gated or errored, so a failed review still records its session.
+        # synced to akari. Resolve the version with the authenticated gh CLI and
+        # pass it as AKARI_VERSION, which skips the installer's anonymous
+        # api.github.com lookup of the latest release. That lookup is rate limited
+        # and returns 403 on back-to-back runs; pinning the tag avoids it and the
+        # release download itself is not rate limited. Best effort, like the sync
+        # below: a client that will not install must never fail the review gate.
+        # The installer does not touch PATH, so expose its bin dir to later steps.
         if: ${{ always() && env.HAS_AKARI == 'true' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          AKARI_VERSION="$(gh release view --repo jssblck/akari --json tagName -q .tagName)"
+          export AKARI_VERSION
           curl -sSfL https://raw.githubusercontent.com/jssblck/akari/main/scripts/install.sh | sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
