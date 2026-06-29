@@ -156,38 +156,47 @@ func Sparkline(vals []float64) string {
 // during render, so the outline adds no second session-sized structure.
 
 // OutlineTitle is a compact one-line label for an outline turn, drawn from the
-// start of the message content. It scans only the first runes up to the cap
-// (collapsing runs of whitespace), so its cost and allocation are bounded by the
-// label length, not the message size.
+// start of the message content. It collapses runs of whitespace and emits at
+// most 48 runes, and it never scans more than scanCap runes of input — so even a
+// whitespace-heavy message costs a fixed amount, independent of message size.
 func OutlineTitle(m store.Message) string {
-	const max = 48
+	const max = 48      // emitted label length
+	const scanCap = 256 // input runes examined, bounding the scan regardless of output
 	var b strings.Builder
 	b.Grow(max + 4)
 	space := false   // a pending collapsed space, emitted before the next word
 	started := false // have we emitted any non-space rune yet
-	n := 0
+	emitted := 0
+	scanned := 0
 	for _, r := range m.Content {
+		if scanned >= scanCap {
+			if started {
+				b.WriteRune('…')
+			}
+			return b.String()
+		}
+		scanned++
 		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
 			if started {
 				space = true
 			}
 			continue
 		}
-		if n >= max {
+		if emitted >= max {
 			b.WriteRune('…')
 			return b.String()
 		}
 		if space {
 			b.WriteByte(' ')
-			n++
+			emitted++
 			space = false
-			if n >= max {
+			if emitted >= max {
 				b.WriteRune('…')
 				return b.String()
 			}
 		}
 		b.WriteRune(r)
-		n++
+		emitted++
 		started = true
 	}
 	return b.String()

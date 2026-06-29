@@ -614,15 +614,21 @@ templ SessionPage(p Page, d store.SessionDetail, msgs []store.Message, tools map
 				</form>
 			</div>
 		}
-		if live {
-			<div id="session-body" data-sse={ SSEPath(d.ID) } data-body={ BodyPath(d.ID) }>
-				@SessionBody(d, msgs, tools, subagents)
-			</div>
-		} else {
-			<div id="session-body">
-				@SessionBody(d, msgs, tools, subagents)
-			</div>
-		}
+		<div class="session-grid">
+			<aside class="outline-rail" aria-label="Outline">
+				@Outline(msgs, tools, SessionBlobBase(d.ID))
+			</aside>
+			if live {
+				<div id="session-body" class="session-main" data-sse={ SSEPath(d.ID) } data-body={ BodyPath(d.ID) }>
+					@SessionMain(d, msgs, tools, subagents)
+				</div>
+			} else {
+				<div id="session-body" class="session-main">
+					@SessionMain(d, msgs, tools, subagents)
+				</div>
+			}
+			@inspectorPane()
+		</div>
 	}
 }
 
@@ -633,24 +639,20 @@ templ densityToolbar() {
 	</div>
 }
 
-templ SessionBody(d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, subagents []store.SessionSummary) {
-	<div class="session-grid">
-		<aside class="outline-rail" aria-label="Outline">
-			@Outline(msgs, tools, SessionBlobBase(d.ID))
-		</aside>
-		<div class="session-main">
-			@sessionStats(d)
-			if len(subagents) > 0 {
-				<h2>Subagents</h2>
-				<div class="subagents">
-					@SessionList(subagents)
-				</div>
-			}
-			<h2>Transcript</h2>
-			@Transcript(msgs, tools, SessionBlobBase(d.ID))
+// SessionMain is the live region of the session view: the stat header, any
+// subagents, and the transcript. Only this fragment is re-fetched and swapped on
+// a live SSE update, so the outline and inspector (its siblings in the grid)
+// persist across updates and are not re-rendered per refresh.
+templ SessionMain(d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, subagents []store.SessionSummary) {
+	@sessionStats(d)
+	if len(subagents) > 0 {
+		<h2>Subagents</h2>
+		<div class="subagents">
+			@SessionList(subagents)
 		</div>
-		@inspectorPane()
-	</div>
+	}
+	<h2>Transcript</h2>
+	@Transcript(msgs, tools, SessionBlobBase(d.ID))
 }
 
 // Outline is the left pane of the session view: one entry per turn, with its
@@ -666,7 +668,7 @@ templ Outline(msgs []store.Message, tools map[int][]store.ToolCallView, blobBase
 			{{ steps := tools[m.Ordinal] }}
 			{{ title := OutlineTitle(m) }}
 			<div class="ol-group">
-				<a class={ OutlineTurnClass(m.Role, steps) } href={ templ.SafeURL(fmt.Sprintf("#msg-%d", m.Ordinal)) } data-ord={ fmt.Sprintf("%d", m.Ordinal) }>
+				<a class={ OutlineTurnClass(m.Role, steps) } id={ fmt.Sprintf("ol-%d", m.Ordinal) } href={ templ.SafeURL(fmt.Sprintf("#msg-%d", m.Ordinal)) } data-ord={ fmt.Sprintf("%d", m.Ordinal) }>
 					<span class="ol-dot"></span>
 					<span class="ol-title">
 						if title != "" {

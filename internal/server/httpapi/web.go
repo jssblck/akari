@@ -359,7 +359,7 @@ func (s *Server) handleSessionBody(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	render(w, r, http.StatusOK, web.SessionBody(d, msgs, tools, subs))
+	render(w, r, http.StatusOK, web.SessionMain(d, msgs, tools, subs))
 }
 
 // handleSessionEvents is the SSE endpoint that signals a watching browser to

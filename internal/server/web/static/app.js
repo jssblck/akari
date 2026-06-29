@@ -38,31 +38,37 @@
   }
 
   // ---------------- Outline scroll spy ----------------
-  // Highlights the outline turn whose message is currently in view, so the left
-  // pane tracks the reader's position through the transcript.
-  var outlineObserver = null;
+  // Highlights the outline turn whose message is at the reading line. On scroll
+  // it samples the one message under a fixed point (O(1), rAF-throttled) and
+  // resolves its outline entry by id, so there are no per-message observers or
+  // indexes — nothing whose cost or memory grows with the session. Set up once;
+  // it reads the live DOM, so it keeps working across live transcript swaps.
+  var outlineScrollHandler = null;
   function initOutlineSpy() {
-    if (outlineObserver) { outlineObserver.disconnect(); outlineObserver = null; }
-    var msgs = document.querySelectorAll(".transcript .msg[data-ordinal]");
-    if (!msgs.length || !("IntersectionObserver" in window)) return;
-    // Index the outline entries by ordinal once, then each intersection toggles
-    // only the previous and current entries instead of scanning the whole outline.
-    var byOrd = {};
-    Array.prototype.slice.call(document.querySelectorAll(".outline [data-ord]")).forEach(function (elt) {
-      byOrd[elt.getAttribute("data-ord")] = elt;
-    });
+    if (outlineScrollHandler) {
+      window.removeEventListener("scroll", outlineScrollHandler);
+      outlineScrollHandler = null;
+    }
+    if (!document.querySelector(".transcript")) return;
     var current = null;
-    outlineObserver = new IntersectionObserver(function (entries) {
-      entries.forEach(function (e) {
-        if (!e.isIntersecting) return;
-        var elt = byOrd[e.target.getAttribute("data-ordinal")];
-        if (!elt || elt === current) return;
-        if (current) current.classList.remove("current");
-        elt.classList.add("current");
-        current = elt;
-      });
-    }, { rootMargin: "-45% 0px -50% 0px", threshold: 0 });
-    Array.prototype.slice.call(msgs).forEach(function (m) { outlineObserver.observe(m); });
+    var ticking = false;
+    function update() {
+      ticking = false;
+      var t = document.querySelector(".transcript");
+      if (!t) return;
+      var rect = t.getBoundingClientRect();
+      var el = document.elementFromPoint(rect.left + Math.min(rect.width / 2, 180), window.innerHeight * 0.32);
+      var msg = el && el.closest ? el.closest(".msg[data-ordinal]") : null;
+      if (!msg) return;
+      var entry = document.getElementById("ol-" + msg.getAttribute("data-ordinal"));
+      if (!entry || entry === current) return;
+      if (current) current.classList.remove("current");
+      entry.classList.add("current");
+      current = entry;
+    }
+    outlineScrollHandler = function () { if (!ticking) { ticking = true; requestAnimationFrame(update); } };
+    window.addEventListener("scroll", outlineScrollHandler, { passive: true });
+    update();
   }
 
   // ---------------- Stat needle-settle ----------------
@@ -84,10 +90,11 @@
     });
   }
 
+  // rehydrate runs after a live transcript swap. The outline spy and inspector
+  // live outside the swapped region (they persist across updates), so only the
+  // bars in the swapped fragment need re-animating here.
   function rehydrate() {
     animateBars();
-    initOutlineSpy();
-    resetInspector();
   }
 
   // ---------------- Live session updates ----------------
@@ -205,10 +212,9 @@
     lastBody = { url: "", res: null }; // drop any retained body on (re)load
     emptyInspector(insp);
   }
+  var selectedEl = null;
   function clearInspectSelection() {
-    Array.prototype.slice.call(document.querySelectorAll(".inspect-selected")).forEach(function (el) {
-      el.classList.remove("inspect-selected");
-    });
+    if (selectedEl) { selectedEl.classList.remove("inspect-selected"); selectedEl = null; }
   }
 
   // describe builds {tool, file, status, views:[{key,label,url,render}], initial}
@@ -265,10 +271,9 @@
       if (!r.ok) throw new Error("status " + r.status);
       var total = parseInt(r.headers.get("Content-Length") || "", 10);
       if (!r.body || !r.body.getReader || typeof TextDecoder === "undefined") {
-        return r.text().then(function (t) {
-          var truncated = t.length > cap;
-          return { text: truncated ? t.slice(0, cap) : t, truncated: truncated, total: t.length };
-        });
+        // Fail closed rather than read an input-sized body into memory: offer the
+        // raw link instead of an inline preview.
+        return { text: "", truncated: true, total: isNaN(total) ? -1 : total };
       }
       var reader = r.body.getReader();
       var decoder = new TextDecoder();
@@ -295,10 +300,12 @@
   function loadView(bodyEl, view, toolName) {
     function paint(res) {
       bodyEl.innerHTML = "";
-      var node = null;
-      if (view.render === "diff" && !res.truncated) node = diffElement(toolName, res.text);
-      if (!node) { node = document.createElement("pre"); node.className = "tool-body"; node.textContent = res.text; }
-      bodyEl.appendChild(node);
+      if (res.text) {
+        var node = null;
+        if (view.render === "diff" && !res.truncated) node = diffElement(toolName, res.text);
+        if (!node) { node = document.createElement("pre"); node.className = "tool-body"; node.textContent = res.text; }
+        bodyEl.appendChild(node);
+      }
       if (res.truncated) {
         var note = document.createElement("div");
         note.className = "insp-trunc muted";
@@ -375,7 +382,8 @@
     if (!desc) return false;
     renderInspector(insp, desc);
     clearInspectSelection();
-    (trigger.closest(".tool-chip") || trigger).classList.add("inspect-selected");
+    selectedEl = trigger.closest(".tool-chip") || trigger;
+    selectedEl.classList.add("inspect-selected");
     return true;
   }
 
@@ -443,7 +451,9 @@
   // ---------------- Init ----------------
   function init() {
     markDensity(currentDensity());
-    rehydrate();
+    animateBars();
+    initOutlineSpy();   // once; the spy reads the live DOM and survives swaps
+    resetInspector();   // once; the inspector persists across live updates
     initLive();
   }
   if (document.readyState === "loading") {
