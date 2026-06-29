@@ -9,19 +9,21 @@ import (
 	"github.com/jssblck/akari/internal/server/store"
 )
 
-func TestBuildBreakdownCostWidths(t *testing.T) {
+func TestBuildBreakdownTokenWidths(t *testing.T) {
+	// Bar width tracks token volume, not cost: the cheaper-per-token model can
+	// still draw the longer bar when it ran more tokens.
 	rows := BuildBreakdown([]store.Breakdown{
 		{Label: "claude-opus-4-8", CostUSD: 4, Tokens: 100, Sessions: 2},
-		{Label: "gpt-5.5", CostUSD: 1, Tokens: 50, Sessions: 1},
+		{Label: "gpt-5.5", CostUSD: 1, Tokens: 25, Sessions: 1},
 	})
 	if len(rows) != 2 {
 		t.Fatalf("want 2 rows, got %d", len(rows))
 	}
 	if rows[0].Pct != 100 {
-		t.Errorf("largest cost should be full width, got %.2f", rows[0].Pct)
+		t.Errorf("largest token count should be full width, got %.2f", rows[0].Pct)
 	}
 	if rows[1].Pct != 25 {
-		t.Errorf("second bar should be 25%% of max, got %.2f", rows[1].Pct)
+		t.Errorf("second bar should be 25%% of max tokens, got %.2f", rows[1].Pct)
 	}
 	if rows[0].Color != vizPalette[0] || rows[1].Color != vizPalette[1] {
 		t.Errorf("bars take categorical colors in order: %s, %s", rows[0].Color, rows[1].Color)
@@ -31,21 +33,24 @@ func TestBuildBreakdownCostWidths(t *testing.T) {
 	}
 }
 
-func TestBuildBreakdownTokenFallback(t *testing.T) {
-	// All-zero cost falls back to token share for the bar width.
+func TestBuildBreakdownTokensIgnoreCost(t *testing.T) {
+	// A high-cost slice with few tokens stays short; width is token-driven only.
 	rows := BuildBreakdown([]store.Breakdown{
-		{Label: "a", CostUSD: 0, Tokens: 80},
-		{Label: "b", CostUSD: 0, Tokens: 40},
+		{Label: "pricey", CostUSD: 100, Tokens: 10},
+		{Label: "chatty", CostUSD: 1, Tokens: 100},
 	})
-	if rows[0].Pct != 100 || rows[1].Pct != 50 {
-		t.Errorf("token fallback widths wrong: %.2f, %.2f", rows[0].Pct, rows[1].Pct)
+	if rows[0].Pct != 10 {
+		t.Errorf("cost should not widen the bar, got %.2f", rows[0].Pct)
+	}
+	if rows[1].Pct != 100 {
+		t.Errorf("the token leader should be full width, got %.2f", rows[1].Pct)
 	}
 }
 
 func TestBuildBreakdownTinySliver(t *testing.T) {
 	rows := BuildBreakdown([]store.Breakdown{
-		{Label: "big", CostUSD: 100},
-		{Label: "tiny", CostUSD: 0.5},
+		{Label: "big", Tokens: 10000},
+		{Label: "tiny", Tokens: 1},
 	})
 	if rows[1].Pct < 2 {
 		t.Errorf("a non-zero slice should keep a visible sliver, got %.2f", rows[1].Pct)
