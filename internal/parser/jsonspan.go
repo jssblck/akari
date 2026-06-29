@@ -1,9 +1,27 @@
 package parser
 
 import (
+	"context"
 	"errors"
 	"io"
 )
+
+// maxKeyLen caps how many bytes of an object key the span scanners buffer. The
+// scanners only buffer keys to compare them against path steps, and a real path
+// step (a field name like "content" or "arguments") is short. A raw tool body
+// that is a JSON object with an enormous key name would otherwise grow a
+// body-sized allocation just to locate a span, so once a key passes this cap it
+// can no longer equal any path step and the rest of its bytes are dropped: the
+// key is treated as a guaranteed non-match. The cap is generous relative to any
+// real field name so normal matching is untouched.
+const maxKeyLen = 4096
+
+// ctxCheckBytes bounds how many bytes the streaming scanners feed between
+// context cancellation checks. A single transcript line can be hundreds of MiB,
+// so a per-chunk check alone is not enough when one next() chunk is itself huge;
+// checking every ctxCheckBytes keeps cancellation responsive without paying an
+// atomic load per byte.
+const ctxCheckBytes = 64 << 10
 
 // ValueSpan is the byte range [Start,End) of one located JSON value within a
 // single JSONL line, relative to the line's first byte (offset 0 = first byte of
@@ -51,11 +69,23 @@ type LocatedSpan struct {
 // correct for any chunking, including a single byte per call, and it retains
 // only O(path depth) state plus the constant overhead of one chunk at a time. It
 // never accumulates the bytes of a located value.
-func LocateValues(paths [][]Step, next func() ([]byte, error)) ([]LocatedSpan, error) {
+//
+// ctx lets a caller cancel a scan of a huge line promptly: it is checked once
+// per chunk returned by next() and again every ctxCheckBytes within a chunk, so
+// a canceled hash or upload aborts instead of streaming the whole value.
+func LocateValues(ctx context.Context, paths [][]Step, next func() ([]byte, error)) ([]LocatedSpan, error) {
 	sc := newScanner(paths)
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		chunk, err := next()
-		for _, b := range chunk {
+		for i, b := range chunk {
+			if i%ctxCheckBytes == 0 && i > 0 {
+				if cerr := ctx.Err(); cerr != nil {
+					return nil, cerr
+				}
+			}
 			sc.feed(b)
 		}
 		if err != nil {
@@ -72,8 +102,8 @@ func LocateValues(paths [][]Step, next func() ([]byte, error)) ([]LocatedSpan, e
 
 // LocateValue is the single-path convenience wrapper over LocateValues. ok is
 // false when the path is absent from the line.
-func LocateValue(path []Step, next func() ([]byte, error)) (ValueSpan, bool, error) {
-	res, err := LocateValues([][]Step{path}, next)
+func LocateValue(ctx context.Context, path []Step, next func() ([]byte, error)) (ValueSpan, bool, error) {
+	res, err := LocateValues(ctx, [][]Step{path}, next)
 	if err != nil {
 		return ValueSpan{}, false, err
 	}
@@ -245,8 +275,11 @@ func (s *scanner) feed(b byte) {
 	if s.inString {
 		// Accumulate bytes only for object keys, which are small and must be
 		// decoded for path matching. Value strings (which can be hundreds of MiB)
-		// are skipped without retaining any bytes, keeping memory O(depth).
-		if s.stringIsKey {
+		// are skipped without retaining any bytes, keeping memory O(depth). A key
+		// is buffered only up to maxKeyLen: past that it cannot equal any path
+		// step, so the surplus bytes are dropped to bound the allocation while the
+		// scan still tracks the string to its closing quote.
+		if s.stringIsKey && len(s.keyBuf) < maxKeyLen {
 			s.keyBuf = append(s.keyBuf, b)
 		}
 		switch {
@@ -473,11 +506,24 @@ func (s *scanner) finish() {
 // Only direct members of an element object are matched for subKeys: a subKey is a
 // single Step (for example Key("type")), not a nested path, because block
 // discriminators and bodies live one level under the element.
-func WalkArrayElements(arrPath []Step, subKeys []Step, next func() ([]byte, error), visit func(idx int, elemSpan ValueSpan, subSpans map[Step]ValueSpan) error) error {
+//
+// ctx lets a caller abort a walk over a huge array promptly: it is checked once
+// per chunk returned by next() and again every ctxCheckBytes within a chunk, so
+// a canceled hash or upload of a large array result stops mid-enumeration rather
+// than draining the whole region.
+func WalkArrayElements(ctx context.Context, arrPath []Step, subKeys []Step, next func() ([]byte, error), visit func(idx int, elemSpan ValueSpan, subSpans map[Step]ValueSpan) error) error {
 	w := newArrayWalker(arrPath, subKeys, visit)
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		chunk, err := next()
-		for _, b := range chunk {
+		for i, b := range chunk {
+			if i%ctxCheckBytes == 0 && i > 0 {
+				if cerr := ctx.Err(); cerr != nil {
+					return cerr
+				}
+			}
 			if ferr := w.feed(b); ferr != nil {
 				return ferr
 			}
@@ -604,7 +650,11 @@ func (w *arrayWalker) feed(b byte) error {
 	w.off = off + 1
 
 	if w.inString {
-		if w.stringIsKey {
+		// Buffer an object key only up to maxKeyLen, mirroring the LocateValues
+		// scanner: a key longer than the cap cannot equal any short subKey, so its
+		// surplus bytes are dropped to keep a giant key from growing a body-sized
+		// allocation while the walk still tracks the string to its closing quote.
+		if w.stringIsKey && len(w.keyBuf) < maxKeyLen {
 			w.keyBuf = append(w.keyBuf, b)
 		}
 		switch {

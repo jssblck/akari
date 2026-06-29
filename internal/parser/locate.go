@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"context"
 	"fmt"
 	"io"
 )
@@ -20,7 +21,9 @@ func readFull(f io.ReaderAt, buf []byte, off int64) error {
 	if err == nil || err == io.EOF {
 		return fmt.Errorf("short read at [%d,%d): got %d of %d bytes: %w", off, off+int64(len(buf)), n, len(buf), io.ErrUnexpectedEOF)
 	}
-	return err
+	// A non-EOF read failure keeps the same [off,off+len) context so the caller can
+	// tell which span could not be read, not just that a read failed somewhere.
+	return fmt.Errorf("read at [%d,%d): %w", off, off+int64(len(buf)), err)
 }
 
 // BodyLocation is one tool body found in a transcript line by streaming, ready to
@@ -44,25 +47,35 @@ type BodyLocation struct {
 // The line lives at [lineOff, lineOff+lineLen) in f. Enumeration reads only the
 // small structural parts (block `type` discriminators), never a body. A line whose
 // shape is unknown or carries no tool body yields nothing.
-func LocateToolBodies(agent Agent, f io.ReaderAt, lineOff, lineLen int64) ([]BodyLocation, error) {
-	src := &lineSource{f: f, base: lineOff, size: lineLen}
+//
+// Results stream through emit, called once per located body in source order,
+// rather than being collected into a slice. This lets the client lift one body at
+// a time (upload it, rewrite its span) without the parser holding a slice whose
+// size grows with the block count, so peak memory stays bounded by the structural
+// scan, not by how many bodies a line carries. If emit returns an error the walk
+// aborts and that error is returned. ctx threads through the structural scans so a
+// canceled lift stops promptly even mid-line.
+func LocateToolBodies(ctx context.Context, agent Agent, f io.ReaderAt, lineOff, lineLen int64, emit func(BodyLocation) error) error {
+	src := &lineSource{ctx: ctx, f: f, base: lineOff, size: lineLen}
 	switch agent {
 	case AgentClaude:
-		return locateClaude(src)
+		return locateClaude(src, emit)
 	case AgentCodex:
-		return locateCodex(src)
+		return locateCodex(src, emit)
 	case AgentPi:
-		return locatePi(src)
+		return locatePi(src, emit)
 	default:
-		return nil, nil
+		return nil
 	}
 }
 
 // lineSource streams a single line's bytes from a file span and reads small fixed
 // spans within it. It exists so the enumerator can both run a streaming
 // LocateValues pass (via reader) and pull a tiny value (a block `type`) by span
-// without buffering the whole line.
+// without buffering the whole line. ctx carries the caller's cancellation into
+// every streaming scan the source drives.
 type lineSource struct {
+	ctx  context.Context
 	f    io.ReaderAt
 	base int64 // file offset of the line's first byte
 	size int64 // line length in bytes
@@ -122,7 +135,7 @@ func (s *lineSource) readSpan(sp ValueSpan) (string, error) {
 // locate runs one streaming LocateValues pass for the given paths and returns the
 // spans keyed by their path index.
 func (s *lineSource) locate(paths [][]Step) (map[int]ValueSpan, error) {
-	spans, err := LocateValues(paths, s.reader())
+	spans, err := LocateValues(s.ctx, paths, s.reader())
 	if err != nil {
 		return nil, fmt.Errorf("locate tool body spans: %w", err)
 	}
@@ -147,71 +160,72 @@ func (s *lineSource) unquoted(sp ValueSpan) (string, error) {
 }
 
 // locateClaude finds claude tool inputs (on an assistant line) and tool results
-// (on a user line) by probing content-block indices in batches.
-func locateClaude(s *lineSource) ([]BodyLocation, error) {
+// (on a user line) by walking the content array once, emitting each body as it is
+// found.
+func locateClaude(s *lineSource, emit func(BodyLocation) error) error {
 	typ, err := s.topType(Key("type"))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	switch typ {
 	case "assistant":
 		return s.locateBlocks(
 			[]Step{Key("message"), Key("content")},
-			"tool_use", Key("input"), BodyRaw, "application/json", false)
+			"tool_use", Key("input"), BodyRaw, "application/json", emit)
 	case "user":
 		return s.locateResultBlocks(
 			[]Step{Key("message"), Key("content")},
-			"tool_result", Key("content"))
+			"tool_result", Key("content"), emit)
 	}
-	return nil, nil
+	return nil
 }
 
 // locatePi finds pi tool inputs (assistant) and tool results (toolResult message).
-func locatePi(s *lineSource) ([]BodyLocation, error) {
+func locatePi(s *lineSource, emit func(BodyLocation) error) error {
 	typ, err := s.topType(Key("type"))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if typ != "message" {
-		return nil, nil
+		return nil
 	}
 	role, err := s.unquotedAt([]Step{Key("message"), Key("role")})
 	if err != nil {
-		return nil, err
+		return err
 	}
 	switch role {
 	case "assistant":
 		return s.locateBlocks(
 			[]Step{Key("message"), Key("content")},
-			"toolCall", Key("arguments"), BodyRaw, "application/json", false)
+			"toolCall", Key("arguments"), BodyRaw, "application/json", emit)
 	case "toolResult":
-		return s.locateSingleResult([]Step{Key("message"), Key("content")})
+		return s.locateSingleResult([]Step{Key("message"), Key("content")}, emit)
 	}
-	return nil, nil
+	return nil
 }
 
 // locateCodex finds the codex function_call argument body and function_call_output
 // result body. The argument body is a JSON-encoded string whose decoded contents
 // are what the CAS stores, so its kind is BodyJSONString.
-func locateCodex(s *lineSource) ([]BodyLocation, error) {
+func locateCodex(s *lineSource, emit func(BodyLocation) error) error {
 	typ, err := s.topType(Key("type"))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if typ != "response_item" {
-		return nil, nil
+		return nil
 	}
 	ptype, err := s.unquotedAt([]Step{Key("payload"), Key("type")})
 	if err != nil {
-		return nil, err
+		return err
 	}
 	switch ptype {
 	case "function_call":
-		return s.locateSingle([]Step{Key("payload"), Key("arguments")}, BodyJSONString, "application/json")
+		return s.locateSingle([]Step{Key("payload"), Key("arguments")}, BodyJSONString, "application/json", emit)
 	case "function_call_output":
-		return s.locateSingleResult([]Step{Key("payload"), Key("output")})
+		return s.locateSingleResult([]Step{Key("payload"), Key("output")}, emit)
 	}
-	return nil, nil
+	return nil
 }
 
 // topType reads a top-level discriminator string (the line `type`).
@@ -233,45 +247,47 @@ func (s *lineSource) unquotedAt(path []Step) (string, error) {
 	return s.unquoted(sp)
 }
 
-// locateSingle returns the body at a single fixed path with a known kind/media.
-func (s *lineSource) locateSingle(path []Step, kind BodyKind, media string) ([]BodyLocation, error) {
+// locateSingle emits the body at a single fixed path with a known kind/media. The
+// single-body cases call emit at most once.
+func (s *lineSource) locateSingle(path []Step, kind BodyKind, media string, emit func(BodyLocation) error) error {
 	spans, err := s.locate([][]Step{path})
 	if err != nil {
-		return nil, err
+		return err
 	}
 	sp, ok := spans[0]
 	if !ok || sp.End <= sp.Start {
-		return nil, nil
+		return nil
 	}
-	return []BodyLocation{{Span: sp, Kind: kind, Media: media}}, nil
+	return emit(BodyLocation{Span: sp, Kind: kind, Media: media})
 }
 
-// locateSingleResult returns a single result body at a fixed path, classifying its
+// locateSingleResult emits a single result body at a fixed path, classifying its
 // kind and media from its first byte (string, array, or object).
-func (s *lineSource) locateSingleResult(path []Step) ([]BodyLocation, error) {
+func (s *lineSource) locateSingleResult(path []Step, emit func(BodyLocation) error) error {
 	spans, err := s.locate([][]Step{path})
 	if err != nil {
-		return nil, err
+		return err
 	}
 	sp, ok := spans[0]
 	if !ok || sp.End <= sp.Start {
-		return nil, nil
+		return nil
 	}
 	loc, ok, err := s.classifyResult(sp)
 	if err != nil || !ok {
-		return nil, err
+		return err
 	}
-	return []BodyLocation{loc}, nil
+	return emit(loc)
 }
 
 // locateBlocks walks an array of content blocks in a single streaming pass,
-// returning the body at bodyKey for each block whose `type` matches wantType.
+// emitting the body at bodyKey for each block whose `type` matches wantType.
 // Inputs use a fixed kind/media. Walking the array once (rather than re-streaming
 // the whole line per batch of indices) keeps enumeration O(line); the walker hands
-// back only the tiny type and body spans per element, never the body bytes.
-func (s *lineSource) locateBlocks(arr []Step, wantType string, bodyKey Step, kind BodyKind, media string, _ bool) ([]BodyLocation, error) {
-	var out []BodyLocation
-	err := s.walkBlocks(arr, bodyKey, func(typeSpan, bodySpan ValueSpan, hasBody bool) error {
+// back only the tiny type and body spans per element, never the body bytes. Each
+// matching body is streamed to emit the instant its block is visited, so peak
+// memory does not scale with the block count.
+func (s *lineSource) locateBlocks(arr []Step, wantType string, bodyKey Step, kind BodyKind, media string, emit func(BodyLocation) error) error {
+	return s.walkBlocks(arr, bodyKey, func(typeSpan, bodySpan ValueSpan, hasBody bool) error {
 		bt, err := s.unquoted(typeSpan)
 		if err != nil {
 			return err
@@ -280,22 +296,18 @@ func (s *lineSource) locateBlocks(arr []Step, wantType string, bodyKey Step, kin
 			return nil
 		}
 		if hasBody && bodySpan.End > bodySpan.Start {
-			out = append(out, BodyLocation{Span: bodySpan, Kind: kind, Media: media})
+			return emit(BodyLocation{Span: bodySpan, Kind: kind, Media: media})
 		}
 		return nil
 	})
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
 }
 
 // locateResultBlocks walks claude tool_result blocks in a single streaming pass,
-// classifying each result body from its first byte. Like locateBlocks it relies on
-// WalkArrayElements so the line is streamed once regardless of block count.
-func (s *lineSource) locateResultBlocks(arr []Step, wantType string, bodyKey Step) ([]BodyLocation, error) {
-	var out []BodyLocation
-	err := s.walkBlocks(arr, bodyKey, func(typeSpan, bodySpan ValueSpan, hasBody bool) error {
+// classifying each result body from its first byte and emitting it as it is found.
+// Like locateBlocks it relies on WalkArrayElements so the line is streamed once
+// regardless of block count and no per-block slice accumulates.
+func (s *lineSource) locateResultBlocks(arr []Step, wantType string, bodyKey Step, emit func(BodyLocation) error) error {
+	return s.walkBlocks(arr, bodyKey, func(typeSpan, bodySpan ValueSpan, hasBody bool) error {
 		bt, err := s.unquoted(typeSpan)
 		if err != nil {
 			return err
@@ -311,14 +323,10 @@ func (s *lineSource) locateResultBlocks(arr []Step, wantType string, bodyKey Ste
 			return err
 		}
 		if ok {
-			out = append(out, loc)
+			return emit(loc)
 		}
 		return nil
 	})
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
 }
 
 // walkBlocks runs one WalkArrayElements pass over the content array, invoking
@@ -330,7 +338,7 @@ func (s *lineSource) locateResultBlocks(arr []Step, wantType string, bodyKey Ste
 // here because both callers key off the discriminator.
 func (s *lineSource) walkBlocks(arr []Step, bodyKey Step, onBlock func(typeSpan, bodySpan ValueSpan, hasBody bool) error) error {
 	subKeys := []Step{Key("type"), bodyKey}
-	return WalkArrayElements(arr, subKeys, s.reader(), func(_ int, _ ValueSpan, subs map[Step]ValueSpan) error {
+	return WalkArrayElements(s.ctx, arr, subKeys, s.reader(), func(_ int, _ ValueSpan, subs map[Step]ValueSpan) error {
 		typeSpan, hasType := subs[Key("type")]
 		if !hasType {
 			return nil

@@ -80,54 +80,80 @@ type transformer struct {
 	asm *chunkAssembler
 }
 
-// pendingTurn carries the assembler's withheld lines and scan offset across sync
-// ticks. For Codex, an open trailing turn (no closing user line yet) is withheld and
-// would otherwise be re-transformed from its start every tick, which is quadratic as
-// the turn grows. Caching the rewritten (body-free, small) held lines plus the offset
-// just past them lets the next tick resume scanning at the delta and re-seed the
-// assembler, so each tick processes only the newly appended bytes. The bodies in the
-// held lines were already uploaded the tick they were first seen, so re-seeding does
-// not re-upload them. It is purely a cache: dropping it costs a one-time re-transform
-// of the open turn, never correctness.
+// pendingTurn carries the assembler's withheld lines, its boundary counters, and the
+// scan offset across sync ticks. For Codex, an open trailing turn (no closing user
+// line yet) is withheld and would otherwise be re-transformed from its start every
+// tick, quadratic as the turn grows. Caching the rewritten (body-free, small) held
+// lines plus the offset just past them lets the next tick resume scanning at the delta
+// and re-seed the assembler, so each tick processes only the newly appended bytes. The
+// bodies in the held lines were already uploaded the tick they were first seen, so
+// re-seeding does not re-upload them.
+//
+// Ownership of the lines slice is transferred between the assembler and this struct
+// rather than copied, and the boundary counters travel with it, so resuming an open
+// turn is O(newly appended lines), not O(all withheld lines). It is purely a cache:
+// dropping it costs a one-time re-transform of the open turn, never correctness.
 type pendingTurn struct {
-	lines   []pendingLine
-	scanEnd int64 // original offset just past the held lines (where scanning resumes)
+	lines         []pendingLine
+	lastBoundary  int   // assembler's last-boundary index for these lines
+	pendingBytes  int   // transformed bytes held
+	boundaryBytes int   // releasable prefix bytes
+	scanEnd       int64 // original offset just past the held lines (where scanning resumes)
 }
 
 // newTransformer builds a transformer reading original [origStart, size). When prev
 // holds a cached open turn whose scanEnd is still consistent with origStart, the
 // transformer resumes from scanEnd with the held lines restored, so only the appended
-// delta is processed. Otherwise it starts fresh at origStart.
-func newTransformer(f *os.File, origStart, size int64, agent string, sink chunkSink, prev *pendingTurn) *transformer {
+// delta is processed. partialSearch, when positive, is an offset a previous tick
+// already searched the trailing partial line up to without finding a newline, so the
+// scanner skips re-searching it. Otherwise it starts fresh at origStart.
+func newTransformer(f *os.File, origStart, size int64, agent string, sink chunkSink, prev *pendingTurn, partialSearch int64) *transformer {
 	scanStart := origStart
 	asm := newChunkAssembler(agent, f.Name(), origStart)
 	if prev != nil && prev.scanEnd >= origStart && prev.scanEnd <= size {
-		// Resume past the already-processed held lines and restore them so the open turn
-		// is not re-transformed.
+		// Resume past the already-processed held lines and adopt them so the open turn is
+		// not re-transformed. Ownership transfers (no copy) and the counters come along,
+		// so this is O(1) regardless of how many lines were withheld.
 		scanStart = prev.scanEnd
-		asm.restore(prev.lines, origStart)
+		asm.adopt(prev, origStart)
+	}
+	sc := newOrigLineScanner(f, scanStart, size)
+	if partialSearch > scanStart && partialSearch <= size {
+		sc.withResumeSearch(partialSearch)
 	}
 	return &transformer{
 		f:     f,
 		agent: agent,
 		size:  size,
 		sink:  sink,
-		sc:    newOrigLineScanner(f, scanStart, size),
+		sc:    sc,
 		asm:   asm,
 	}
 }
 
-// snapshot captures the assembler's withheld lines and the scan offset just past
-// them, for caching across ticks. It returns nil when nothing is held (Claude and pi,
-// or a settled Codex turn that fully flushed), so the cache is populated only for an
-// open Codex turn.
+// partialSearchedTo returns how far the scanner searched an incomplete trailing line
+// for a newline without finding one, or 0 when no partial line is pending. The caller
+// caches it so the next tick resumes the search there.
+func (t *transformer) partialSearchedTo() int64 {
+	return t.sc.searchedTo
+}
+
+// snapshot hands the assembler's withheld lines and counters to a pendingTurn for
+// caching across ticks, transferring slice ownership rather than copying. It returns
+// nil when nothing is held (Claude and pi, or a settled Codex turn that fully
+// flushed), so the cache is populated only for an open Codex turn. The assembler is
+// not used again after snapshot in a given sync, so handing off its slice is safe.
 func (t *transformer) snapshot() *pendingTurn {
 	if len(t.asm.lines) == 0 {
 		return nil
 	}
-	held := make([]pendingLine, len(t.asm.lines))
-	copy(held, t.asm.lines)
-	return &pendingTurn{lines: held, scanEnd: t.sc.completeEnd()}
+	return &pendingTurn{
+		lines:         t.asm.lines,
+		lastBoundary:  t.asm.lastBoundary,
+		pendingBytes:  t.asm.pendingBytes,
+		boundaryBytes: t.asm.boundaryBytes,
+		scanEnd:       t.sc.completeEnd(),
+	}
 }
 
 // run scans the unsent tail, transforming each line and emitting chunks to the sink
@@ -216,27 +242,23 @@ func (t *transformer) handleBigLine(ctx context.Context, origOff, origLen int64)
 		return err
 	}
 
-	locs, err := parser.LocateToolBodies(parser.Agent(t.agent), t.f, origOff, contentLen)
-	if err != nil {
-		return err
-	}
-	if len(locs) == 0 {
-		// A big line with no tool body cannot be lifted; it must ride inline, but it
-		// exceeds hardCap by definition of "big". Refuse it rather than buffer it.
-		return errMessageTooBig(t.agent)
-	}
-
+	// Build the rewritten line incrementally as each body is located, so the parser
+	// never holds a slice of all body locations and the bodies upload one at a time.
+	// The emit callback runs once per body in source order: copy the literal gap up to
+	// the body, upload the body, append its sentinel, and advance the cursor.
 	var rewritten []byte
 	cursor := int64(0)
-	for _, loc := range locs {
+	found := false
+	emit := func(loc parser.BodyLocation) error {
 		// Honor cancellation between bodies: a big line can hold many bodies, each a
 		// streamed upload, so a shutdown must not have to wait for the whole line.
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if loc.Span.Start < cursor || loc.Span.End > contentLen {
-			continue // a span out of order or past the line: skip defensively
+			return nil // a span out of order or past the line: skip defensively
 		}
+		found = true
 		body, err := t.sink.emitBody(ctx, bodyRef{
 			media:    loc.Media,
 			kind:     "", // big-line kind is not surfaced; diagnostics use the small path
@@ -257,7 +279,17 @@ func (t *transformer) handleBigLine(ctx context.Context, origOff, origLen int64)
 		if int64(len(rewritten)) > hardCap {
 			return errMessageTooBig(t.agent)
 		}
+		return nil
 	}
+	if err := parser.LocateToolBodies(ctx, parser.Agent(t.agent), t.f, origOff, contentLen, emit); err != nil {
+		return err
+	}
+	if !found {
+		// A big line with no tool body cannot be lifted; it must ride inline, but it
+		// exceeds hardCap by definition of "big". Refuse it rather than buffer it.
+		return errMessageTooBig(t.agent)
+	}
+
 	rewritten, err = appendFileSpan(rewritten, t.f, t.agent, origOff+cursor, contentLen-cursor)
 	if err != nil {
 		return err
@@ -411,26 +443,29 @@ func rewriteForDigest(ctx context.Context, f *os.File, agent string, line []byte
 	if err != nil {
 		return nil, err
 	}
-	locs, err := parser.LocateToolBodies(parser.Agent(agent), f, origOff, contentLen)
-	if err != nil {
-		return nil, err
-	}
 	var rewritten []byte
 	cursor := int64(0)
-	for _, loc := range locs {
+	emit := func(loc parser.BodyLocation) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if loc.Span.Start < cursor || loc.Span.End > contentLen {
-			continue
+			return nil
 		}
 		sha, n, err := hashBodySpan(ctx, f, origOff, loc.Span, loc.Kind)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		rewritten, err = appendFileSpan(rewritten, f, agent, origOff+cursor, loc.Span.Start-cursor)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		rewritten = append(rewritten, parser.SentinelBytes(sha, n, loc.Media)...)
 		cursor = loc.Span.End
+		return nil
+	}
+	if err := parser.LocateToolBodies(ctx, parser.Agent(agent), f, origOff, contentLen, emit); err != nil {
+		return nil, err
 	}
 	rewritten, err = appendFileSpan(rewritten, f, agent, origOff+cursor, contentLen-cursor)
 	if err != nil {
@@ -452,7 +487,7 @@ const hashBodyChunk = 256 << 10
 // both. The copy is a bounded loop rather than io.Copy so a canceled sync stops
 // hashing a hundreds-of-MiB body instead of running to its end.
 func hashBodySpan(ctx context.Context, f *os.File, lineOff int64, span parser.ValueSpan, kind parser.BodyKind) (string, int, error) {
-	r := parser.CanonicalBodyReader(f, lineOff, span, kind)
+	r := parser.CanonicalBodyReader(ctx, f, lineOff, span, kind)
 	h := sha256.New()
 	buf := make([]byte, hashBodyChunk)
 	var total int64
@@ -494,10 +529,30 @@ type origLineScanner struct {
 	bufBase int64  // original offset of buf[0]
 	scanned int    // bytes of buf already scanned for a newline (incremental cursor)
 	done    bool
+
+	// resumeSearch is an absolute file offset at or before which a previous tick
+	// already searched the current (still-incomplete) trailing line for a newline and
+	// found none. The newline search for the first line skips ahead to it, so a line
+	// written over many appends is not re-searched from its start each tick. It is the
+	// fix for the otherwise quadratic newline search of a growing partial line.
+	resumeSearch int64
+	// searchedTo records how far (absolute offset) the scanner has searched the
+	// trailing line for a newline without finding one, so the next tick can resume
+	// there. It is meaningful only when next() reported no complete line at EOF.
+	searchedTo int64
 }
 
 func newOrigLineScanner(f *os.File, start, size int64) *origLineScanner {
-	return &origLineScanner{ctx: context.Background(), f: f, size: size, pos: start, bufBase: start}
+	return &origLineScanner{ctx: context.Background(), f: f, size: size, pos: start, bufBase: start, resumeSearch: start}
+}
+
+// withResumeSearch tells the scanner a previous tick already searched the trailing
+// line up to off without finding a newline, so the search can skip ahead to off.
+func (s *origLineScanner) withResumeSearch(off int64) *origLineScanner {
+	if off > s.resumeSearch {
+		s.resumeSearch = off
+	}
+	return s
 }
 
 // withContext attaches a context so the scan-to-EOF loop over a huge line can honor
@@ -524,8 +579,17 @@ const scanWindow = 1 << 20
 // bytes read, not quadratic in the buffer length.
 func (s *origLineScanner) next() (line []byte, origOff, origLen int64, isBig, ok bool, err error) {
 	for {
-		if rel := bytes.IndexByte(s.buf[s.scanned:], '\n'); rel >= 0 {
-			end := s.scanned + rel + 1
+		// Skip ahead to where a previous tick already searched this trailing line, so a
+		// partial line continued across appends is not re-searched from its start.
+		from := s.scanned
+		if skip := int(s.resumeSearch - s.bufBase); skip > from {
+			if skip > len(s.buf) {
+				skip = len(s.buf)
+			}
+			from = skip
+		}
+		if rel := bytes.IndexByte(s.buf[from:], '\n'); rel >= 0 {
+			end := from + rel + 1
 			if int64(end) > bigLineThreshold {
 				// The line is big even though it fits the buffer: hand it off by offset so
 				// the caller streams it rather than receiving its bytes. This also covers a
@@ -553,6 +617,9 @@ func (s *origLineScanner) next() (line []byte, origOff, origLen int64, isBig, ok
 			return s.takeBigLine()
 		}
 		if s.done {
+			// EOF with an incomplete trailing line. Record how far it was searched so the
+			// next tick resumes there rather than rescanning from the line start.
+			s.searchedTo = s.bufBase + int64(len(s.buf))
 			return nil, 0, 0, false, false, nil
 		}
 		s.scanned = len(s.buf) // everything buffered so far has been searched
@@ -569,16 +636,27 @@ func (s *origLineScanner) next() (line []byte, origOff, origLen int64, isBig, ok
 // incomplete trailing line: it is left unconsumed for a later tick.
 func (s *origLineScanner) takeBigLine() (line []byte, origOff, origLen int64, isBig, ok bool, err error) {
 	lineStart := s.bufBase
-	// Search the bytes already buffered first, then the rest of the file in windows.
-	searchFrom := s.bufBase + int64(s.scanned)
-	if rel := bytes.IndexByte(s.buf[s.scanned:], '\n'); rel >= 0 {
-		end := s.bufBase + int64(s.scanned+rel+1)
+	// Search the buffered bytes first, skipping any prefix a previous tick already
+	// searched, then the rest of the file in windows.
+	bufFrom := s.scanned
+	if skip := int(s.resumeSearch - s.bufBase); skip > bufFrom {
+		if skip > len(s.buf) {
+			skip = len(s.buf)
+		}
+		bufFrom = skip
+	}
+	searchFrom := s.bufBase + int64(bufFrom)
+	if rel := bytes.IndexByte(s.buf[bufFrom:], '\n'); rel >= 0 {
+		end := s.bufBase + int64(bufFrom+rel+1)
 		s.advancePast(end)
 		return nil, lineStart, end - lineStart, true, true, nil
 	}
 	scanPos := s.pos
 	if searchFrom > scanPos {
 		scanPos = searchFrom
+	}
+	if s.resumeSearch > scanPos {
+		scanPos = s.resumeSearch
 	}
 	win := make([]byte, scanWindow)
 	for scanPos < s.size {
@@ -602,7 +680,11 @@ func (s *origLineScanner) takeBigLine() (line []byte, origOff, origLen int64, is
 		}
 		scanPos = end
 	}
-	// Reached EOF without a newline: the big line is incomplete. Leave it unconsumed.
+	// Reached EOF without a newline: the big line is incomplete. Record how far it was
+	// searched so the next tick resumes from there instead of rescanning from the line
+	// start, which keeps the newline search over a growing big line linear, not
+	// quadratic. Leave the line unconsumed.
+	s.searchedTo = s.size
 	return nil, 0, 0, false, false, nil
 }
 
@@ -695,15 +777,17 @@ func newChunkAssembler(agent, file string, origStart int64) *chunkAssembler {
 	return &chunkAssembler{agent: agent, file: file, lastBoundary: -1, consumedOrigEnd: origStart}
 }
 
-// restore re-seeds the assembler with lines withheld on a previous tick (a cached
-// open Codex turn), so the turn is not re-transformed. consumedOrigEnd is the original
-// offset the held lines begin at: committing them advances the cursor exactly as if
-// they had just been produced. The boundary and byte counters are recomputed from the
-// restored lines.
-func (a *chunkAssembler) restore(lines []pendingLine, origStart int64) {
-	a.lines = append(a.lines[:0], lines...)
+// adopt re-seeds the assembler from a cached open Codex turn without copying or
+// recounting: it takes ownership of the cached lines slice and the precomputed
+// counters, so resuming an open turn is O(1) rather than O(withheld lines).
+// consumedOrigEnd is the original offset the held lines begin at, so committing them
+// advances the cursor exactly as if they had just been produced.
+func (a *chunkAssembler) adopt(prev *pendingTurn, origStart int64) {
+	a.lines = prev.lines
+	a.lastBoundary = prev.lastBoundary
+	a.pendingBytes = prev.pendingBytes
+	a.boundaryBytes = prev.boundaryBytes
 	a.consumedOrigEnd = origStart
-	a.recountBoundary()
 }
 
 // add records one rewritten line, classifying whether it closes a chunk boundary and

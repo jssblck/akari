@@ -126,6 +126,13 @@ type fileSync struct {
 	// after a turn closes or the file settles. Like the rest of fileSync it is a
 	// cache: dropping it costs a one-time re-transform, never correctness.
 	pending *pendingTurn
+
+	// partialSearch caches how far the scanner searched an incomplete trailing line
+	// for a newline on the last tick, so the next tick resumes the newline search there
+	// instead of rescanning the whole partial line. It keeps a line written over many
+	// appends from costing quadratic newline-search work. Zero when no partial line is
+	// pending. Also a cache: dropping it costs one redundant rescan.
+	partialSearch int64
 }
 
 // New builds a Client. baseURL is the server root (trailing slash optional).
@@ -163,8 +170,10 @@ func (fs *fileSync) rewind(size int64) {
 	fs.origBase = 0
 	fs.prefixHasher = sha256.New()
 	fs.prefixSize = size
-	// A reset re-transforms from zero, so any cached open turn is stale.
+	// A reset re-transforms from zero, so any cached open turn or partial-line search
+	// offset is stale.
 	fs.pending = nil
+	fs.partialSearch = 0
 }
 
 // maxConflictRetries bounds how many times a single SyncFile re-announces after
@@ -245,8 +254,21 @@ func (c *Client) syncOnce(ctx context.Context, t Target, fs *fileSync, f *os.Fil
 
 	action := ActionUploaded
 	if ann.StoredBytes == 0 {
-		// The server holds nothing: there is no prefix to verify.
-		fs.rewind(size)
+		// The server holds nothing: there is no prefix to verify. A new Codex session
+		// whose first turn is still open keeps the server at zero every tick (the turn
+		// is withheld), so a plain rewind here would discard the cached open turn and
+		// re-transform from offset zero each tick, quadratic over the growing turn.
+		// Preserve the pending open-turn cache when the file only grew and the cache is
+		// still consistent with it; the cursors are already zero, so nothing else needs
+		// resetting. Any sign the file shrank or diverged falls back to a full rewind.
+		if fs.pending != nil && size >= fs.prefixSize && fs.pending.scanEnd <= size {
+			fs.base = 0
+			fs.origBase = 0
+			fs.prefixHasher = sha256.New()
+			fs.prefixSize = size
+		} else {
+			fs.rewind(size)
+		}
 	} else {
 		ok, err := c.verifyPrefix(ctx, f, fs, t.Agent, ann.StoredBytes, size, ann.PrefixSHA256)
 		if err != nil {
@@ -273,7 +295,7 @@ func (c *Client) syncOnce(ctx context.Context, t Target, fs *fileSync, f *os.Fil
 	// bytes. A withheld trailing turn leaves origBase where it is and is re-examined
 	// next tick (the only repeated work, and only for an open final turn).
 	sink := &syncSink{c: c, fs: fs, sessionID: ann.SessionID, size: size, out: &out, seen: newSeenCache()}
-	tr := newTransformer(f, fs.origBase, size, t.Agent, sink, fs.pending)
+	tr := newTransformer(f, fs.origBase, size, t.Agent, sink, fs.pending, fs.partialSearch)
 	_, conflicted, err := tr.run(ctx, settled)
 	if err != nil {
 		return out, false, err
@@ -282,11 +304,15 @@ func (c *Client) syncOnce(ctx context.Context, t Target, fs *fileSync, f *os.Fil
 		// The server cursor moved; the cached open turn may no longer line up, so drop
 		// it and let the re-announce rebuild from the verified prefix.
 		fs.pending = nil
+		fs.partialSearch = 0
 		return out, true, nil
 	}
 	// Carry an open Codex trailing turn to the next tick so it is not re-transformed.
 	// For Claude, pi, or a settled/closed turn this is nil and the cache clears.
 	fs.pending = tr.snapshot()
+	// Carry how far an incomplete trailing line was searched, so the next tick resumes
+	// the newline search at the appended tail rather than from the line start.
+	fs.partialSearch = tr.partialSearchedTo()
 
 	if out.UploadedBytes == 0 && action != ActionReset {
 		action = ActionUpToDate
@@ -622,7 +648,7 @@ func (c *Client) putBlobStream(ctx context.Context, sha string, ref bodyRef) err
 	if ref.haveContent {
 		bodyReader = bytes.NewReader(ref.content)
 	} else {
-		bodyReader = parser.CanonicalBodyReader(ref.file, ref.lineOff, ref.span, ref.bodyKind)
+		bodyReader = parser.CanonicalBodyReader(ctx, ref.file, ref.lineOff, ref.span, ref.bodyKind)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bodyReader)
 	if err != nil {

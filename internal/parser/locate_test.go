@@ -1,10 +1,22 @@
 package parser
 
 import (
+	"context"
 	"io"
 	"strings"
 	"testing"
 )
+
+// collectToolBodies drains LocateToolBodies through its emit callback into a slice,
+// the shape the parity assertions compare against the buffered oracle.
+func collectToolBodies(ctx context.Context, agent Agent, f io.ReaderAt, off, length int64) ([]BodyLocation, error) {
+	var got []BodyLocation
+	err := LocateToolBodies(ctx, agent, f, off, length, func(b BodyLocation) error {
+		got = append(got, b)
+		return nil
+	})
+	return got, err
+}
 
 // locateParity is the core invariant for the streaming body locator: the bodies it
 // finds (by span + kind + media) must canonicalize to exactly the bodies the buffered
@@ -19,7 +31,7 @@ func locateParity(t *testing.T, agent Agent, line string) {
 	want := toolBodyFields(agent, []byte(line))
 
 	// Under test: the streaming locator over the same bytes.
-	got, err := LocateToolBodies(agent, f, 0, int64(len(line)))
+	got, err := collectToolBodies(context.Background(), agent, f, 0, int64(len(line)))
 	if err != nil {
 		t.Fatalf("locate %s: %v", agent, err)
 	}
@@ -28,7 +40,7 @@ func locateParity(t *testing.T, agent Agent, line string) {
 		t.Fatalf("%s: located %d bodies, oracle found %d\n line=%s", agent, len(got), len(want), line)
 	}
 	for i := range want {
-		canon := readAll(t, CanonicalBodyReader(f, 0, got[i].Span, got[i].Kind))
+		canon := readAll(t, CanonicalBodyReader(context.Background(), f, 0, got[i].Span, got[i].Kind))
 		if canon != want[i].content {
 			t.Errorf("%s body %d: canonical = %q, want %q", agent, i, canon, want[i].content)
 		}
@@ -91,7 +103,7 @@ func TestLocateStreamsInBoundedWindows(t *testing.T) {
 	line := `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"` + big + `"}]}}`
 	f := &countingReaderAt{r: strings.NewReader(line)}
 
-	got, err := LocateToolBodies(AgentClaude, f, 0, int64(len(line)))
+	got, err := collectToolBodies(context.Background(), AgentClaude, f, 0, int64(len(line)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +112,7 @@ func TestLocateStreamsInBoundedWindows(t *testing.T) {
 	}
 	// The span must cover the quoted big string, and its canonical contents must be
 	// the unquoted big body.
-	canon := readAll(t, CanonicalBodyReader(strings.NewReader(line), 0, got[0].Span, got[0].Kind))
+	canon := readAll(t, CanonicalBodyReader(context.Background(), strings.NewReader(line), 0, got[0].Span, got[0].Kind))
 	if canon != big {
 		t.Fatalf("canonical body length %d, want %d", len(canon), len(big))
 	}
@@ -143,7 +155,7 @@ func TestLocateTruncatedLineErrors(t *testing.T) {
 	line := `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"the body bytes are cut off"}]}}`
 	// Pretend the file holds only the first half of the line.
 	f := &truncatedReaderAt{data: []byte(line), size: int64(len(line) / 2)}
-	if _, err := LocateToolBodies(AgentClaude, f, 0, int64(len(line))); err == nil {
+	if _, err := collectToolBodies(context.Background(), AgentClaude, f, 0, int64(len(line))); err == nil {
 		t.Fatal("expected truncation error, got nil")
 	}
 }

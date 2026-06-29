@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"context"
 	"fmt"
 	"io"
 )
@@ -38,17 +39,54 @@ const (
 //   - BodyRaw: the raw span, copied verbatim.
 //   - BodyJSONString: the section inside the quotes, JSON-string-decoded on the fly.
 //   - BodyArrayText: the array's contributing blocks, decoded and newline-joined.
-func CanonicalBodyReader(f io.ReaderAt, lineOffset int64, span ValueSpan, kind BodyKind) io.Reader {
+//
+// ctx threads into the BodyArrayText enumeration so a canceled hash or upload of a
+// huge array result aborts during the lazy walk rather than scanning the whole
+// array. The BodyRaw and BodyJSONString readers stream a single contiguous span
+// and do not run a walk, so they take no ctx of their own.
+func CanonicalBodyReader(ctx context.Context, f io.ReaderAt, lineOffset int64, span ValueSpan, kind BodyKind) io.Reader {
 	switch kind {
 	case BodyJSONString:
 		return newJSONStringReader(f, lineOffset+span.Start, lineOffset+span.End)
 	case BodyArrayText:
-		return newArrayTextReader(f, lineOffset, span)
+		return newArrayTextReader(ctx, f, lineOffset, span)
 	default: // BodyRaw
 		// A raw value is its source bytes unchanged; a section reader streams them
-		// straight from the file with no buffering of our own.
-		return io.NewSectionReader(f, lineOffset+span.Start, span.End-span.Start)
+		// straight from the file with no buffering of our own. The section reader is
+		// wrapped so a file truncated mid-body surfaces as a hard error instead of a
+		// short clean EOF that would let the caller hash partial bytes.
+		length := span.End - span.Start
+		return &lengthEnforcingReader{
+			r:         io.NewSectionReader(f, lineOffset+span.Start, length),
+			remaining: length,
+			start:     lineOffset + span.Start,
+			end:       lineOffset + span.End,
+		}
 	}
+}
+
+// lengthEnforcingReader wraps a reader that is supposed to yield exactly a known
+// number of bytes (a raw body's declared span) and converts a premature EOF into
+// a contextual short-read error. A SectionReader over a truncated file returns a
+// clean io.EOF after fewer bytes than the span claims, which would let a caller
+// hash a partial body and mint a CAS sentinel for the wrong bytes. Tracking the
+// bytes still owed and failing when EOF arrives early keeps a corrupted store from
+// being mistaken for a valid shorter body.
+type lengthEnforcingReader struct {
+	r          io.Reader
+	remaining  int64
+	start, end int64 // the [start,end) file range, for the error message
+}
+
+func (r *lengthEnforcingReader) Read(p []byte) (int, error) {
+	n, err := r.r.Read(p)
+	r.remaining -= int64(n)
+	if err == io.EOF && r.remaining > 0 {
+		// The underlying stream ended before the declared span was satisfied: the
+		// file is shorter than the span claims, a truncation rather than a real end.
+		return n, fmt.Errorf("raw body short read at [%d,%d): %d bytes missing: %w", r.start, r.end, r.remaining, io.ErrUnexpectedEOF)
+	}
+	return n, err
 }
 
 // ClassifyResultBody peeks the first byte of a result value's raw span to choose
@@ -275,132 +313,197 @@ func appendRune4(out []byte, r rune) []byte {
 	}
 }
 
-// arrayPiece names one element's contribution to blockText: a span (relative to
-// the line) whose decoded string contents are the piece. Only contributing
-// elements (a bare string element, or an object block whose type is text-like)
-// produce a piece; everything else is skipped, exactly like blockText.
-type arrayPiece struct {
-	span ValueSpan
-}
-
 // newArrayTextReader builds a reader that streams blockText over the array whose
-// raw span is span within the line beginning at lineOffset in f. It enumerates only
-// the contributing element spans up front (each span is 16 bytes, so the slice is
-// bounded by element count and tiny), then streams one piece at a time: the reader
-// holds just the current jsonStringReader and builds the next piece's reader lazily
-// once the previous one is exhausted. The big text bodies are therefore never all
-// resident together, and no piece's contents are ever buffered, only its span.
-func newArrayTextReader(f io.ReaderAt, lineOffset int64, span ValueSpan) io.Reader {
-	pieces, err := enumerateArrayPieces(f, lineOffset, span)
-	if err != nil {
-		return &errReader{err: err}
+// raw span is span within the line beginning at lineOffset in f. It is fully lazy:
+// rather than enumerating every contributing piece up front, it drives one
+// WalkArrayElements pass that is paced by reads, pulling the next contributing
+// piece span only when the current piece is drained. The reader therefore holds
+// only the current piece's decoding reader plus the walk's O(depth) state, never a
+// list of all piece spans, so an array result with very many text blocks streams in
+// bounded memory. ctx aborts the walk promptly when the caller cancels.
+func newArrayTextReader(ctx context.Context, f io.ReaderAt, lineOffset int64, span ValueSpan) io.Reader {
+	regionBase := lineOffset + span.Start
+	r := &arrayTextReader{
+		ctx:        ctx,
+		f:          f,
+		lineOffset: lineOffset,
+		regionBase: regionBase,
+		pieces:     make(chan pieceSpan),
+		done:       make(chan struct{}),
 	}
-	return &arrayTextReader{f: f, lineOffset: lineOffset, pieces: pieces}
+	go r.walk(ctx, regionBase, span)
+	return r
 }
 
-// arrayTextReader streams blockText over a precomputed list of piece spans without
-// materializing more than one piece reader at a time. It walks pieces in order,
-// emitting a single "\n" between consecutive pieces (never leading or trailing, the
-// strings.Join(parts, "\n") shape), and constructs each piece's decoding reader
-// only when the previous piece is fully drained, bounding memory to one window.
+// pieceSpan carries one contributing piece's line-relative span (or a walk error)
+// from the enumeration goroutine to the reader. err non-nil ends the stream.
+type pieceSpan struct {
+	span ValueSpan
+	err  error
+}
+
+// arrayTextReader streams blockText over an array by pacing a single
+// WalkArrayElements pass with the consumer's reads. The walk runs in a goroutine
+// and hands one contributing piece span at a time over the pieces channel, blocking
+// until the reader is ready for the next, so at most one piece span is in flight and
+// nothing accumulates. The reader emits a single "\n" between consecutive pieces
+// (never leading or trailing, the strings.Join(parts, "\n") shape) and constructs
+// each piece's decoding reader only when the previous piece is fully drained,
+// bounding memory to one window.
 type arrayTextReader struct {
+	ctx        context.Context
 	f          io.ReaderAt
 	lineOffset int64
-	pieces     []arrayPiece
+	regionBase int64
 
-	idx int               // index of the next piece to start
-	cur *jsonStringReader // the piece currently being drained, or nil
-	// needSep is true when a single newline must be emitted before the next piece
-	// begins. It is set when a piece finishes and more pieces remain, so separators
-	// land strictly between pieces, never leading or trailing.
-	needSep bool
+	// pieces delivers contributing piece spans from the walk goroutine in source
+	// order; it is closed when the walk finishes. done is closed by the reader to
+	// signal early teardown so a blocked walk goroutine can exit.
+	pieces chan pieceSpan
+	done   chan struct{}
+
+	cur     *jsonStringReader // the piece currently being drained, or nil
+	started bool              // whether any piece has been emitted yet (separator gating)
+	needSep bool              // a newline is owed before the next piece begins
+	eof     bool              // the walk has signaled completion
+	err     error             // a terminal walk error, surfaced on the next Read
+	stopped bool              // done has been closed (idempotent teardown guard)
 }
 
-func (r *arrayTextReader) Read(p []byte) (int, error) {
-	for {
-		// Drain the current piece first; on exhaustion clear cur and arm a separator
-		// when another piece follows.
-		if r.cur != nil {
-			n, err := r.cur.Read(p)
-			if err == io.EOF {
-				r.cur = nil
-				err = nil
-				if r.idx < len(r.pieces) {
-					r.needSep = true
-				}
-			}
-			if n > 0 || err != nil {
-				return n, err
-			}
-			continue
-		}
-		// Emit the pending separator before building the next piece's reader so it
-		// sits between the two pieces' bytes.
-		if r.needSep {
-			if len(p) == 0 {
-				return 0, nil
-			}
-			p[0] = '\n'
-			r.needSep = false
-			return 1, nil
-		}
-		if r.idx >= len(r.pieces) {
-			return 0, io.EOF
-		}
-		pc := r.pieces[r.idx]
-		r.idx++
-		r.cur = newJSONStringReader(r.f, r.lineOffset+pc.span.Start, r.lineOffset+pc.span.End)
+// stop releases the walk goroutine if it is parked on a send, so a reader that
+// reaches its terminal state (EOF or error) never strands the goroutine. It is
+// idempotent because Read can hit a terminal branch more than once.
+func (r *arrayTextReader) stop() {
+	if !r.stopped {
+		r.stopped = true
+		close(r.done)
 	}
 }
 
-// enumerateArrayPieces walks the array in a single streaming pass and records the
-// span of each contributing piece. The earlier implementation probed one array
-// index per LocateValues call, restreaming the whole array region per element
-// (O(array * length)); WalkArrayElements visits every element in one pass over the
-// region (O(array)) while retaining only each element's small type and text spans,
-// never an element's body bytes. A bare string element contributes its own span; an
-// object element contributes its "text" span only when its "type" is one of the
-// text-like kinds, matching blockText exactly.
-//
-// Spans handed to visit are relative to the array region's first byte, so they are
-// rebased by span.Start to become line-relative like the caller expects.
-func enumerateArrayPieces(f io.ReaderAt, lineOffset int64, span ValueSpan) ([]arrayPiece, error) {
-	var pieces []arrayPiece
-	regionBase := lineOffset + span.Start
+// walk runs the single WalkArrayElements pass, sending each contributing piece's
+// line-relative span over the pieces channel. It mirrors blockText exactly: a bare
+// string element contributes its own span; an object element contributes its "text"
+// span only when its "type" is one of the text-like kinds. Spans the walker reports
+// are relative to the array region's first byte, so they are rebased by span.Start
+// to become line-relative like the consumer expects. The goroutine exits when the
+// walk ends, an error occurs, or the reader closes done.
+func (r *arrayTextReader) walk(ctx context.Context, regionBase int64, span ValueSpan) {
+	defer close(r.pieces)
 	regionLen := span.End - span.Start
-	err := WalkArrayElements([]Step{}, []Step{Key("type"), Key("text")},
-		sectionNext(f, regionBase, regionLen),
+	send := func(ps pieceSpan) error {
+		select {
+		case r.pieces <- ps:
+			return nil
+		case <-r.done:
+			// The reader was closed; stop the walk by returning an error that
+			// WalkArrayElements propagates without further visits.
+			return errReaderClosed
+		case <-ctx.Done():
+			// The caller canceled. Releasing the parked goroutine on ctx (not only on the
+			// reader's explicit stop) means a consumer that abandons the reader without
+			// reading to EOF, but cancels its context, never strands this goroutine.
+			return ctx.Err()
+		}
+	}
+	err := WalkArrayElements(ctx, []Step{}, []Step{Key("type"), Key("text")},
+		sectionNext(r.f, regionBase, regionLen),
 		func(_ int, elem ValueSpan, subs map[Step]ValueSpan) error {
 			typSpan, hasType := subs[Key("type")]
 			if !hasType {
 				// A bare string element (no nested type) is itself the text, matching
 				// blockText's b.Type == String branch.
-				isStr, err := isStringSpan(f, regionBase+elem.Start)
+				isStr, err := isStringSpan(r.f, regionBase+elem.Start)
 				if err != nil {
 					return err
 				}
 				if isStr {
-					pieces = append(pieces, arrayPiece{span: rebase(elem, span.Start)})
+					return send(pieceSpan{span: rebase(elem, span.Start)})
 				}
 				return nil
 			}
 			// An object block contributes its text only for a text-like type.
-			kind, err := readSpanString(f, regionBase, typSpan)
+			kind, err := readSpanString(r.f, regionBase, typSpan)
 			if err != nil {
 				return err
 			}
 			switch kind {
 			case "text", "output_text", "input_text":
 				if textSpan, ok := subs[Key("text")]; ok {
-					pieces = append(pieces, arrayPiece{span: rebase(textSpan, span.Start)})
+					return send(pieceSpan{span: rebase(textSpan, span.Start)})
 				}
 			}
 			return nil
 		})
-	if err != nil {
-		return nil, err
+	if err != nil && err != errReaderClosed {
+		// Surface a walk failure (including ctx cancellation) to the reader, unless
+		// the reader itself tore the walk down. The send selects on done too so a
+		// reader that has already stopped does not strand this goroutine.
+		_ = send(pieceSpan{err: err})
 	}
-	return pieces, nil
+}
+
+// errReaderClosed signals that the consumer closed the reader, so the walk
+// goroutine should stop quietly rather than reporting a failure.
+var errReaderClosed = fmt.Errorf("array text reader closed")
+
+func (r *arrayTextReader) Read(p []byte) (int, error) {
+	for {
+		if r.err != nil {
+			return 0, r.err
+		}
+		// Surface cancellation directly, independent of the walk goroutine's delivery
+		// race: an already-canceled context must abort the read rather than streaming
+		// the array or returning a premature EOF.
+		if err := r.ctx.Err(); err != nil {
+			r.err = err
+			r.stop()
+			return 0, err
+		}
+		// Drain the current piece first; on exhaustion clear cur and arm a separator
+		// when another piece follows (decided when the next piece arrives).
+		if r.cur != nil {
+			n, err := r.cur.Read(p)
+			if err == io.EOF {
+				r.cur = nil
+				r.needSep = true
+				err = nil
+			}
+			if n > 0 || err != nil {
+				return n, err
+			}
+			continue
+		}
+		// Pull the next contributing piece span, blocking until the walk produces it.
+		if r.eof {
+			return 0, io.EOF
+		}
+		ps, ok := <-r.pieces
+		if !ok {
+			// The walk finished and closed the channel: the stream is complete.
+			r.eof = true
+			r.stop()
+			return 0, io.EOF
+		}
+		if ps.err != nil {
+			r.err = ps.err
+			r.stop()
+			return 0, r.err
+		}
+		// Emit the separator before the piece's bytes so it lands strictly between
+		// two contributing pieces, never leading or trailing.
+		if r.started && r.needSep {
+			r.needSep = false
+			r.cur = newJSONStringReader(r.f, r.lineOffset+ps.span.Start, r.lineOffset+ps.span.End)
+			if len(p) == 0 {
+				return 0, nil
+			}
+			p[0] = '\n'
+			return 1, nil
+		}
+		r.started = true
+		r.needSep = false
+		r.cur = newJSONStringReader(r.f, r.lineOffset+ps.span.Start, r.lineOffset+ps.span.End)
+	}
 }
 
 // rebase shifts an array-region-relative span to be line-relative by adding the
@@ -476,10 +579,3 @@ func sectionNext(f io.ReaderAt, start, length int64) func() ([]byte, error) {
 		return window, perr
 	}
 }
-
-// errReader yields a fixed error on every Read, so a failure during piece
-// enumeration surfaces through the normal io.Reader contract rather than panicking
-// or silently truncating.
-type errReader struct{ err error }
-
-func (e *errReader) Read([]byte) (int, error) { return 0, e.err }

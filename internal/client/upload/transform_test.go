@@ -47,7 +47,7 @@ func (s *collectSink) emitBody(ctx context.Context, ref bodyRef) (parser.Body, e
 		sha = hex.EncodeToString(sum[:])
 		n = len(ref.content)
 	} else {
-		r := parser.CanonicalBodyReader(ref.file, ref.lineOff, ref.span, ref.bodyKind)
+		r := parser.CanonicalBodyReader(ctx, ref.file, ref.lineOff, ref.span, ref.bodyKind)
 		h := sha256.New()
 		written, err := io.Copy(h, r)
 		if err != nil {
@@ -61,7 +61,7 @@ func (s *collectSink) emitBody(ctx context.Context, ref bodyRef) (parser.Body, e
 	if ref.haveContent {
 		content = string(ref.content)
 	} else {
-		data, err := io.ReadAll(parser.CanonicalBodyReader(ref.file, ref.lineOff, ref.span, ref.bodyKind))
+		data, err := io.ReadAll(parser.CanonicalBodyReader(ctx, ref.file, ref.lineOff, ref.span, ref.bodyKind))
 		if err != nil {
 			return parser.Body{}, err
 		}
@@ -87,7 +87,7 @@ func (s *collectSink) emitChunk(ctx context.Context, data []byte, origLen int64)
 func runTransform(t *testing.T, f *os.File, origStart, size int64, agent string, settled bool) *collectSink {
 	t.Helper()
 	sink := &collectSink{}
-	tr := newTransformer(f, origStart, size, agent, sink, nil)
+	tr := newTransformer(f, origStart, size, agent, sink, nil, 0)
 	if _, _, err := tr.run(context.Background(), settled); err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +219,7 @@ func TestTransformOversizedLineRejected(t *testing.T) {
 	f, size := openTemp(t, content)
 
 	sink := &collectSink{}
-	tr := newTransformer(f, 0, size, "claude", sink, nil)
+	tr := newTransformer(f, 0, size, "claude", sink, nil, 0)
 	if _, _, err := tr.run(context.Background(), true); err == nil {
 		t.Fatal("expected an oversized-line error past hardCap")
 	}
@@ -340,7 +340,7 @@ func TestTransformOpenTurnResumesFromCache(t *testing.T) {
 
 	// First tick: unsettled, so the open turn (assistant y1) is withheld and cached.
 	sink1 := &collectSink{}
-	tr1 := newTransformer(f, 0, int64(len(content1)), "codex", sink1, nil)
+	tr1 := newTransformer(f, 0, int64(len(content1)), "codex", sink1, nil, 0)
 	if _, _, err := tr1.run(context.Background(), false); err != nil {
 		t.Fatal(err)
 	}
@@ -365,7 +365,7 @@ func TestTransformOpenTurnResumesFromCache(t *testing.T) {
 	size2 := info.Size()
 
 	sink2 := &collectSink{}
-	tr2 := newTransformer(f, 0, size2, "codex", sink2, pend)
+	tr2 := newTransformer(f, 0, size2, "codex", sink2, pend, 0)
 	// The resumed scanner must begin at the cached offset, not at origBase 0.
 	if tr2.sc.bufBase != pend.scanEnd {
 		t.Fatalf("resumed scan base = %d, want cached scanEnd %d", tr2.sc.bufBase, pend.scanEnd)
@@ -434,9 +434,56 @@ func TestTransformTruncationIsHardError(t *testing.T) {
 	}
 
 	sink := &collectSink{}
-	tr := newTransformer(f, 0, fullSize, "claude", sink, nil)
+	tr := newTransformer(f, 0, fullSize, "claude", sink, nil, 0)
 	if _, _, err := tr.run(context.Background(), true); err == nil {
 		t.Fatal("expected a hard error on a file truncated mid-line, got nil")
+	}
+}
+
+// TestScannerPartialLineResumesSearch proves the scanner skips re-searching the
+// already-scanned prefix of an incomplete trailing line: given a resume offset, it
+// finds the newline only in the appended tail. It also confirms the scanner reports
+// how far it searched when a line is still incomplete, so the cursor can advance.
+func TestScannerPartialLineResumesSearch(t *testing.T) {
+	// A complete line, then a partial trailing line with no newline yet.
+	complete := claudeLine("done")
+	partial := `{"type":"user","message":{"content":"in progress`
+	path := tempFile(t, complete+partial)
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { f.Close() })
+	size1 := int64(len(complete + partial))
+
+	sc := newOrigLineScanner(f, 0, size1)
+	line, _, _, _, ok, err := sc.next()
+	if err != nil || !ok || string(line) != complete {
+		t.Fatalf("first line: ok=%v err=%v line=%q", ok, err, line)
+	}
+	_, _, _, _, ok, err = sc.next()
+	if err != nil || ok {
+		t.Fatalf("partial line should yield no complete line: ok=%v err=%v", ok, err)
+	}
+	if sc.searchedTo != size1 {
+		t.Fatalf("searchedTo = %d, want the full size %d", sc.searchedTo, size1)
+	}
+
+	// Append the rest of the partial line plus its newline. A fresh scanner that
+	// resumes the search at the cached offset must still find the line and return it
+	// whole, having skipped re-searching the old prefix.
+	tail := ` more"}}` + "\n"
+	if err := os.WriteFile(path, []byte(complete+partial+tail), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	size2 := int64(len(complete + partial + tail))
+	resume := newOrigLineScanner(f, int64(len(complete)), size2).withResumeSearch(size1)
+	got, _, _, _, ok, err := resume.next()
+	if err != nil || !ok {
+		t.Fatalf("resumed line: ok=%v err=%v", ok, err)
+	}
+	if string(got) != partial+tail {
+		t.Fatalf("resumed line = %q, want the full partial line %q", got, partial+tail)
 	}
 }
 
@@ -497,7 +544,7 @@ func TestTransformConflictUnwindsWithoutAdvancing(t *testing.T) {
 	// The small file flushes as one chunk at finish; conflict on it and confirm the
 	// transform reports the conflict and accepts nothing.
 	sink := &collectSink{confAt: 1}
-	tr := newTransformer(f, 0, size, "claude", sink, nil)
+	tr := newTransformer(f, 0, size, "claude", sink, nil, 0)
 	_, conflicted, err := tr.run(context.Background(), true)
 	if err != nil {
 		t.Fatal(err)
@@ -521,7 +568,7 @@ func TestTransformBigLineNoBodyRejected(t *testing.T) {
 	f, size := openTemp(t, content)
 
 	sink := &collectSink{}
-	tr := newTransformer(f, 0, size, "claude", sink, nil)
+	tr := newTransformer(f, 0, size, "claude", sink, nil, 0)
 	if _, _, err := tr.run(context.Background(), true); err == nil {
 		t.Fatal("expected a big-line-with-no-body refusal")
 	}

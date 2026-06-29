@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -175,14 +176,30 @@ func (s *Store) MissingBlobs(ctx context.Context, shas []string) ([]string, erro
 		if err := rows.Err(); err != nil {
 			return fmt.Errorf("iterate present blob hashes: %w", err)
 		}
+		// Partition into present and missing. Pin the present hashes in a deterministic
+		// (sorted, deduped) order: two concurrent checks with overlapping hashes in
+		// opposite request order would otherwise each lock one pin row and then wait on
+		// the other, a classic two-row deadlock that Postgres resolves by aborting one.
+		// Locking in sorted order means any two transactions take the rows in the same
+		// sequence, so they queue instead of deadlocking.
+		var toPin []string
 		for _, sha := range shas {
 			if present[sha] {
-				if err := upsertBlobPin(ctx, tx, sha); err != nil {
-					return err
-				}
+				toPin = append(toPin, sha)
 			} else {
 				missing = append(missing, sha)
 			}
+		}
+		sort.Strings(toPin)
+		var lastPinned string
+		for _, sha := range toPin {
+			if sha == lastPinned {
+				continue // a duplicate hash in the request: pin once
+			}
+			if err := upsertBlobPin(ctx, tx, sha); err != nil {
+				return err
+			}
+			lastPinned = sha
 		}
 		return nil
 	})

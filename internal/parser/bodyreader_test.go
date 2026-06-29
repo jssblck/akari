@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"context"
 	"io"
 	"strings"
 	"testing"
@@ -24,7 +25,7 @@ func readAll(t *testing.T, r io.Reader) string {
 // feeds CanonicalBodyReader. The single value at path is returned.
 func locateValueSpan(t *testing.T, line string, path []Step) ValueSpan {
 	t.Helper()
-	span, ok, err := LocateValue(path, chunkedReader(line, 7))
+	span, ok, err := LocateValue(context.Background(), path, chunkedReader(line, 7))
 	if err != nil {
 		t.Fatalf("locate %v: %v", path, err)
 	}
@@ -50,7 +51,7 @@ func TestCanonicalBodyReaderCodexInput(t *testing.T) {
 	if want != `{"cmd":"go test ./..."}` {
 		t.Fatalf("oracle unexpected: %q", want)
 	}
-	rd := CanonicalBodyReader(strings.NewReader(line), 0, ValueSpan{0, int64(len(line))}, BodyJSONString)
+	rd := CanonicalBodyReader(context.Background(), strings.NewReader(line), 0, ValueSpan{0, int64(len(line))}, BodyJSONString)
 	if got := readAll(t, rd); got != want {
 		t.Errorf("codex input = %q, want %q", got, want)
 	}
@@ -75,7 +76,7 @@ func TestCanonicalBodyReaderResultStrings(t *testing.T) {
 			if m != media {
 				t.Errorf("media = %q, want %q", m, media)
 			}
-			rd := CanonicalBodyReader(strings.NewReader(tc.line), 0, ValueSpan{0, int64(len(tc.line))}, kind)
+			rd := CanonicalBodyReader(context.Background(), strings.NewReader(tc.line), 0, ValueSpan{0, int64(len(tc.line))}, kind)
 			if got := readAll(t, rd); got != want {
 				t.Errorf("body = %q, want %q", got, want)
 			}
@@ -107,7 +108,7 @@ func TestCanonicalBodyReaderResultArrays(t *testing.T) {
 			if m != media {
 				t.Errorf("media = %q, want %q", m, media)
 			}
-			rd := CanonicalBodyReader(strings.NewReader(tc.line), 0, ValueSpan{0, int64(len(tc.line))}, kind)
+			rd := CanonicalBodyReader(context.Background(), strings.NewReader(tc.line), 0, ValueSpan{0, int64(len(tc.line))}, kind)
 			if got := readAll(t, rd); got != want {
 				t.Errorf("body = %q, want %q", got, want)
 			}
@@ -124,7 +125,7 @@ func TestCanonicalBodyReaderResultObject(t *testing.T) {
 	if kind != BodyRaw || m != "application/json" || media != "application/json" {
 		t.Fatalf("classify = %v/%q (oracle media %q)", kind, m, media)
 	}
-	rd := CanonicalBodyReader(strings.NewReader(line), 0, ValueSpan{0, int64(len(line))}, kind)
+	rd := CanonicalBodyReader(context.Background(), strings.NewReader(line), 0, ValueSpan{0, int64(len(line))}, kind)
 	if got := readAll(t, rd); got != want {
 		t.Errorf("body = %q, want %q", got, want)
 	}
@@ -135,7 +136,7 @@ func TestCanonicalBodyReaderResultObject(t *testing.T) {
 func TestCanonicalBodyReaderClaudeInput(t *testing.T) {
 	line := `{"file_path":"a.go"}`
 	want := gjson.Parse(line).Raw // what claude.go records as InputJSON
-	rd := CanonicalBodyReader(strings.NewReader(line), 0, ValueSpan{0, int64(len(line))}, BodyRaw)
+	rd := CanonicalBodyReader(context.Background(), strings.NewReader(line), 0, ValueSpan{0, int64(len(line))}, BodyRaw)
 	if got := readAll(t, rd); got != want {
 		t.Errorf("claude input = %q, want %q", got, want)
 	}
@@ -149,7 +150,7 @@ func TestCanonicalBodyReaderLargeString(t *testing.T) {
 	const n = 5 << 20
 	payload := strings.Repeat("YWJjZGVmZ2hpamtsbW5vcA", (n/22)+1)[:n] // base64-ish, no escapes
 	line := `"` + payload + `"`
-	rd := CanonicalBodyReader(strings.NewReader(line), 0, ValueSpan{0, int64(len(line))}, BodyJSONString)
+	rd := CanonicalBodyReader(context.Background(), strings.NewReader(line), 0, ValueSpan{0, int64(len(line))}, BodyJSONString)
 
 	var sb strings.Builder
 	buf := make([]byte, 64<<10)
@@ -184,7 +185,7 @@ func TestCanonicalBodyReaderSpanWithinLine(t *testing.T) {
 
 	// Oracle: the unquoted arguments string, as codex.go records it.
 	want := gjson.Get(line, "payload.arguments").String()
-	rd := CanonicalBodyReader(strings.NewReader(line), 0, span, BodyJSONString)
+	rd := CanonicalBodyReader(context.Background(), strings.NewReader(line), 0, span, BodyJSONString)
 	if got := readAll(t, rd); got != want {
 		t.Errorf("embedded arguments = %q, want %q", got, want)
 	}
@@ -193,7 +194,7 @@ func TestCanonicalBodyReaderSpanWithinLine(t *testing.T) {
 	// lineOffset is applied.
 	const prefix = "GraceHopper\n"
 	span2 := locateValueSpan(t, line, []Step{Key("payload"), Key("arguments")})
-	rd2 := CanonicalBodyReader(strings.NewReader(prefix+line), int64(len(prefix)), span2, BodyJSONString)
+	rd2 := CanonicalBodyReader(context.Background(), strings.NewReader(prefix+line), int64(len(prefix)), span2, BodyJSONString)
 	if got := readAll(t, rd2); got != want {
 		t.Errorf("offset arguments = %q, want %q", got, want)
 	}
@@ -226,8 +227,60 @@ func TestCanonicalBodyReaderArrayMatchesParse(t *testing.T) {
 
 	// Now produce the same body from the raw array value via the reader.
 	kind, _ := ClassifyResultBody(arrayContent[0])
-	rd := CanonicalBodyReader(strings.NewReader(arrayContent), 0, ValueSpan{0, int64(len(arrayContent))}, kind)
+	rd := CanonicalBodyReader(context.Background(), strings.NewReader(arrayContent), 0, ValueSpan{0, int64(len(arrayContent))}, kind)
 	if got := readAll(t, rd); got != body {
 		t.Errorf("reader body = %q, want Parse body %q", got, body)
+	}
+}
+
+// TestCanonicalBodyReaderArrayTextLazyManyPieces exercises the lazy array text
+// reader over an array with many text blocks: it must still equal the buffered
+// oracle byte for byte while streaming one piece at a time. A large block count is
+// what the lazy walk is for, so this guards the separator placement and piece
+// ordering under the streaming path.
+func TestCanonicalBodyReaderArrayTextLazyManyPieces(t *testing.T) {
+	var sb strings.Builder
+	sb.WriteByte('[')
+	for i := 0; i < 200; i++ {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		sb.WriteString(`{"type":"text","text":"block ` + itoa(i) + `"}`)
+	}
+	sb.WriteByte(']')
+	arrayContent := sb.String()
+
+	want, _ := oracleBodyContent(arrayContent)
+	kind, _ := ClassifyResultBody(arrayContent[0])
+	rd := CanonicalBodyReader(context.Background(), strings.NewReader(arrayContent), 0, ValueSpan{0, int64(len(arrayContent))}, kind)
+	if got := readAll(t, rd); got != want {
+		t.Errorf("lazy array text body mismatch:\n got=%q\nwant=%q", got, want)
+	}
+}
+
+// TestCanonicalBodyReaderRawTruncated confirms the BodyRaw reader rejects a
+// truncated file: when the section the span declares runs past the file's real end,
+// draining the reader must surface an error rather than silently returning the
+// shorter prefix, which would let a caller hash partial bytes.
+func TestCanonicalBodyReaderRawTruncated(t *testing.T) {
+	line := `{"file_path":"a.go","contents":"some real bytes here"}`
+	// The file holds only the first half, but the span claims the whole object.
+	f := &truncatedReaderAt{data: []byte(line), size: int64(len(line) / 2)}
+	rd := CanonicalBodyReader(context.Background(), f, 0, ValueSpan{0, int64(len(line))}, BodyRaw)
+	if _, err := io.ReadAll(rd); err == nil {
+		t.Fatal("expected truncation error draining a raw body past the file end, got nil")
+	}
+}
+
+// TestCanonicalBodyReaderArrayTextCanceled confirms a canceled context aborts the
+// lazy array enumeration: reading the reader surfaces ctx.Err() rather than
+// streaming the whole array.
+func TestCanonicalBodyReaderArrayTextCanceled(t *testing.T) {
+	arrayContent := `[{"type":"text","text":"a"},{"type":"text","text":"b"},{"type":"text","text":"c"}]`
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	rd := CanonicalBodyReader(ctx, strings.NewReader(arrayContent), 0, ValueSpan{0, int64(len(arrayContent))}, BodyArrayText)
+	if _, err := io.ReadAll(rd); err == nil {
+		t.Fatal("expected cancellation error reading a canceled array text body, got nil")
 	}
 }

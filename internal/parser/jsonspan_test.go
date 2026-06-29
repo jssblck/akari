@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"context"
 	"errors"
 	"io"
 	"strings"
@@ -158,7 +159,7 @@ func TestJSONSpanParity(t *testing.T) {
 			// Run under several chunk sizes, including one byte at a time, to prove
 			// chunk-independence.
 			for _, chunk := range []int{1, 3, 7, len(tc.line)} {
-				res, err := LocateValues([][]Step{tc.path}, chunkedReader(tc.line, chunk))
+				res, err := LocateValues(context.Background(), [][]Step{tc.path}, chunkedReader(tc.line, chunk))
 				if err != nil {
 					t.Fatalf("chunk=%d: LocateValues error: %v", chunk, err)
 				}
@@ -196,7 +197,7 @@ func TestJSONSpanLargeValueStreaming(t *testing.T) {
 		t.Fatalf("oracle says path %q absent", gpath)
 	}
 
-	res, err := LocateValues([][]Step{path}, chunkedReader(line, 64*1024))
+	res, err := LocateValues(context.Background(), [][]Step{path}, chunkedReader(line, 64*1024))
 	if err != nil {
 		t.Fatalf("LocateValues error: %v", err)
 	}
@@ -211,7 +212,7 @@ func TestJSONSpanLargeValueStreaming(t *testing.T) {
 func TestJSONSpanAbsentPath(t *testing.T) {
 	line := `{"message":{"content":[{"input":{"k":"v"}}]}}`
 	path := []Step{Key("message"), Key("nope")}
-	res, err := LocateValues([][]Step{path}, chunkedReader(line, 5))
+	res, err := LocateValues(context.Background(), [][]Step{path}, chunkedReader(line, 5))
 	if err != nil {
 		t.Fatalf("LocateValues error: %v", err)
 	}
@@ -220,7 +221,7 @@ func TestJSONSpanAbsentPath(t *testing.T) {
 	}
 
 	// LocateValue convenience wrapper reports ok=false.
-	if _, ok, err := LocateValue(path, chunkedReader(line, 5)); err != nil || ok {
+	if _, ok, err := LocateValue(context.Background(), path, chunkedReader(line, 5)); err != nil || ok {
 		t.Fatalf("LocateValue absent: ok=%v err=%v", ok, err)
 	}
 }
@@ -237,7 +238,7 @@ func TestJSONSpanMultiplePathsSourceOrder(t *testing.T) {
 		{Key("message"), Key("content"), Idx(1), Key("input")},
 	}
 
-	res, err := LocateValues(paths, chunkedReader(line, 11))
+	res, err := LocateValues(context.Background(), paths, chunkedReader(line, 11))
 	if err != nil {
 		t.Fatalf("LocateValues error: %v", err)
 	}
@@ -269,7 +270,7 @@ func TestJSONSpanPathsRequestedOutOfOrder(t *testing.T) {
 		{Key("a"), Key("y")},
 		{Key("a"), Key("x")},
 	}
-	res, err := LocateValues(paths, chunkedReader(line, 2))
+	res, err := LocateValues(context.Background(), paths, chunkedReader(line, 2))
 	if err != nil {
 		t.Fatalf("LocateValues error: %v", err)
 	}
@@ -336,7 +337,7 @@ func TestWalkArrayElementsParity(t *testing.T) {
 
 			for _, chunk := range []int{1, 4, 13, len(tc.line)} {
 				var idx int
-				err := WalkArrayElements(tc.arr, tc.subKeys, chunkedReader(tc.line, chunk),
+				err := WalkArrayElements(context.Background(), tc.arr, tc.subKeys, chunkedReader(tc.line, chunk),
 					func(i int, elem ValueSpan, subs map[Step]ValueSpan) error {
 						if i != idx {
 							t.Fatalf("chunk=%d: element index %d, expected %d", chunk, i, idx)
@@ -388,7 +389,7 @@ func TestWalkArrayElementsVisitErrorPropagates(t *testing.T) {
 	line := `[{"type":"text","text":"a"},{"type":"text","text":"b"}]`
 	sentinel := errors.New("stop here")
 	calls := 0
-	err := WalkArrayElements([]Step{}, []Step{Key("type")}, chunkedReader(line, 3),
+	err := WalkArrayElements(context.Background(), []Step{}, []Step{Key("type")}, chunkedReader(line, 3),
 		func(int, ValueSpan, map[Step]ValueSpan) error {
 			calls++
 			return sentinel
@@ -398,5 +399,142 @@ func TestWalkArrayElementsVisitErrorPropagates(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("walk should abort after first visit error, got %d calls", calls)
+	}
+}
+
+// TestLocateValuesCanceledContext confirms an already-canceled context makes the
+// scan return ctx.Err() promptly without draining the whole input. The next() here
+// counts how many times it is asked for bytes; a canceled scan must stop before
+// pulling the (single huge) chunk.
+func TestLocateValuesCanceledContext(t *testing.T) {
+	big := strings.Repeat("x", 5*1024*1024)
+	line := `{"payload":{"output":"` + big + `"}}`
+	path := []Step{Key("payload"), Key("output")}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	pulls := 0
+	next := func() ([]byte, error) {
+		pulls++
+		return []byte(line), io.EOF
+	}
+	_, err := LocateValues(ctx, [][]Step{path}, next)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("want context.Canceled, got %v", err)
+	}
+	if pulls != 0 {
+		t.Fatalf("canceled scan pulled %d chunks, want 0 (it should bail before scanning)", pulls)
+	}
+}
+
+// TestWalkArrayElementsCanceledContext confirms the array walker also bails on an
+// already-canceled context before scanning.
+func TestWalkArrayElementsCanceledContext(t *testing.T) {
+	line := `[{"type":"text","text":"a"},{"type":"text","text":"b"}]`
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	visits := 0
+	err := WalkArrayElements(ctx, []Step{}, []Step{Key("type")}, chunkedReader(line, 3),
+		func(int, ValueSpan, map[Step]ValueSpan) error {
+			visits++
+			return nil
+		})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("want context.Canceled, got %v", err)
+	}
+	if visits != 0 {
+		t.Fatalf("canceled walk visited %d elements, want 0", visits)
+	}
+}
+
+// TestLocateToolBodiesCanceledContext confirms cancellation propagates through the
+// public LocateToolBodies entry point: an already-canceled context makes it return
+// ctx.Err() without emitting any body.
+func TestLocateToolBodiesCanceledContext(t *testing.T) {
+	line := `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"a.go"}}]}}`
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	emitted := 0
+	err := LocateToolBodies(ctx, AgentClaude, strings.NewReader(line), 0, int64(len(line)),
+		func(BodyLocation) error {
+			emitted++
+			return nil
+		})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("want context.Canceled, got %v", err)
+	}
+	if emitted != 0 {
+		t.Fatalf("canceled locate emitted %d bodies, want 0", emitted)
+	}
+}
+
+// TestLocateValuesOversizedKeyBounded confirms a JSON object with a key far larger
+// than any path step still locates the requested body span correctly and does not
+// buffer the giant key: the scanner caps key buffering at maxKeyLen, so the held
+// key bytes stay bounded no matter how large the source key is.
+func TestLocateValuesOversizedKeyBounded(t *testing.T) {
+	// A raw tool body that is an object carrying one enormous key plus the field we
+	// actually want to locate. The big key dwarfs maxKeyLen many times over.
+	bigKey := strings.Repeat("K", 4*maxKeyLen)
+	line := `{"` + bigKey + `":"ignored","wanted":"value"}`
+	path := []Step{Key("wanted")}
+
+	want, ok := oracleSpan(line, "wanted")
+	if !ok {
+		t.Fatalf("oracle says 'wanted' absent")
+	}
+
+	for _, chunk := range []int{1, 7, 64 * 1024, len(line)} {
+		res, err := LocateValues(context.Background(), [][]Step{path}, chunkedReader(line, chunk))
+		if err != nil {
+			t.Fatalf("chunk=%d: %v", chunk, err)
+		}
+		if len(res) != 1 {
+			t.Fatalf("chunk=%d: want 1 span, got %d", chunk, len(res))
+		}
+		if res[0].Span != want {
+			t.Fatalf("chunk=%d: span mismatch got=%+v want=%+v", chunk, res[0].Span, want)
+		}
+		// The delimited bytes must equal gjson's Raw for the value, the property the
+		// hashing relies on.
+		if string([]byte(line)[res[0].Span.Start:res[0].Span.End]) != gjson.Get(line, "wanted").Raw {
+			t.Fatalf("chunk=%d: delimited bytes != gjson Raw", chunk)
+		}
+	}
+}
+
+// TestWalkArrayElementsOversizedKeyBounded confirms the array walker likewise caps
+// key buffering: an element object with a giant key is still walked and its small
+// subKeys located correctly.
+func TestWalkArrayElementsOversizedKeyBounded(t *testing.T) {
+	bigKey := strings.Repeat("K", 4*maxKeyLen)
+	line := `[{"` + bigKey + `":"junk","type":"text","text":"hi"}]`
+
+	var gotType, gotText bool
+	err := WalkArrayElements(context.Background(), []Step{}, []Step{Key("type"), Key("text")},
+		chunkedReader(line, 64*1024),
+		func(_ int, _ ValueSpan, subs map[Step]ValueSpan) error {
+			if sp, ok := subs[Key("type")]; ok {
+				gotType = true
+				if string([]byte(line)[sp.Start:sp.End]) != gjson.Get(line, "0.type").Raw {
+					t.Errorf("type span mismatch")
+				}
+			}
+			if sp, ok := subs[Key("text")]; ok {
+				gotText = true
+				if string([]byte(line)[sp.Start:sp.End]) != gjson.Get(line, "0.text").Raw {
+					t.Errorf("text span mismatch")
+				}
+			}
+			return nil
+		})
+	if err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+	if !gotType || !gotText {
+		t.Fatalf("subKeys past a giant key not located: type=%v text=%v", gotType, gotText)
 	}
 }
