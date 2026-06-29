@@ -85,13 +85,14 @@ func TestOverviewPageRangeSelector(t *testing.T) {
 
 // The overview's headline strip reads Cost / Tokens / Sessions, with the combined
 // token figure and its per-class split (the same in/out/cache breakdown a heatmap
-// cell shows) behind the Tokens tooltip. It no longer splits Input and Output
-// into their own tiles.
+// cell shows) behind the Tokens tooltip. It shares the session header's Tokens tile
+// classes (tokens-stat trigger, stat-tip popup) and no longer splits Input and
+// Output into their own tiles.
 func TestOverviewPageTokensStat(t *testing.T) {
 	p := Page{Title: "Overview", LoggedIn: true, Active: "overview", Username: "Grace Hopper"}
 	html := renderComponent(t, OverviewPage(p, analyticsWithData(), DefaultRange))
 
-	for _, want := range []string{`>Tokens</div>`, `stat-tooltip`, `<dt>In</dt>`, `<dt>Out</dt>`, `<dt>Cache read</dt>`, `<dt>Cache write</dt>`} {
+	for _, want := range []string{`>Tokens</div>`, `tokens-stat`, `tokens-value`, `class="stat-tip"`, `<dt>In</dt>`, `<dt>Out</dt>`, `<dt>Cache read</dt>`, `<dt>Cache write</dt>`} {
 		if !strings.Contains(html, want) {
 			t.Errorf("tokens readout missing %q", want)
 		}

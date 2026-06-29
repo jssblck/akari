@@ -185,13 +185,15 @@ templ analyticsPanel(a store.Analytics, chartID, scope string, heatmap bool, rng
 }
 
 // statTokens is the combined-token readout: one headline figure with the per-class
-// split (in, out, cache read, cache write) behind a hover tooltip, the same
-// breakdown a heatmap cell shows for a single day.
+// split (in, out, cache read, cache write) behind a hover tooltip. It shares the
+// session header's Tokens tile classes (tokens-stat, tokens-value, stat-tip), so a
+// single tooltip system styles both. Cost is omitted here since the overview strip
+// already carries its own Cost tile.
 templ statTokens(a store.Analytics) {
-	<div class="stat stat-tip" tabindex="0">
+	<div class="stat tokens-stat" tabindex="0">
 		<div class="label">Tokens</div>
-		<div class="value">{ FmtTokens(a.TotalTokens()) }</div>
-		<div class="stat-tooltip" role="tooltip">
+		<div class="value tokens-value">{ FmtTokens(a.TotalTokens()) }</div>
+		<div class="stat-tip" role="tooltip">
 			<dl class="tt-grid">
 				<dt>In</dt>
 				<dd>{ FmtTokens(a.TotalIn) }</dd>
@@ -629,81 +631,76 @@ templ GlobalSessionList(rows []store.SessionRow) {
 
 templ SessionPage(p Page, d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, subagents []store.SessionSummary, live, owner bool) {
 	@layout(p) {
-		<div class="session-head">
-			<div class="session-title">
-				<h1>
-					<a href={ ProjectHref(d.ProjectID) }>{ SessionProjectLabel(d) }</a>
-					<span class="sep">/</span>
-					<span class="muted">session #{ fmt.Sprintf("%d", d.ID) }</span>
-				</h1>
-				<div class="session-meta">
-					<span class="tag agent">{ d.Agent }</span>
-					@kindTag(d.ProjectKind)
-					if d.Visibility == "public" {
-						<span class="tag public">public</span>
-					}
-					if live {
-						<span class="live-dot" title="Live: updating as new bytes are parsed">live</span>
-					}
-					if d.GitBranch != "" {
-						<span class="muted">{ d.GitBranch }</span>
-					}
-					<span class="muted">{ d.Username }</span>
-					<span class="muted">{ d.Machine }</span>
+		<div class="session-page">
+			<div class="session-head">
+				<div class="session-title">
+					<h1>
+						<a href={ ProjectHref(d.ProjectID) }>{ SessionProjectLabel(d) }</a>
+						<span class="sep">/</span>
+						<span class="muted">session #{ fmt.Sprintf("%d", d.ID) }</span>
+					</h1>
+					<div class="session-meta">
+						<span class="tag agent">{ d.Agent }</span>
+						@kindTag(d.ProjectKind)
+						if d.Visibility == "public" {
+							<span class="tag public">public</span>
+						}
+						if d.GitBranch != "" {
+							<span class="muted">{ d.GitBranch }</span>
+						}
+						<span class="muted">{ d.Username }</span>
+						<span class="muted">{ d.Machine }</span>
+					</div>
 				</div>
-			</div>
-			@densityToolbar()
-		</div>
-		if owner {
-			<div class="publish card">
-				if d.Visibility == "public" && d.PublicID != nil {
-					<span>Shared publicly at <a href={ PublicHref(*d.PublicID) }>{ PublicPath(*d.PublicID) }</a></span>
-					<form method="post" action={ templ.SafeURL(fmt.Sprintf("/sessions/%d/unpublish", d.ID)) } class="inline">
-						<button class="secondary" type="submit">Unpublish</button>
-					</form>
-				} else {
-					<span class="muted">This session is internal: visible to logged-in users only.</span>
-					<form method="post" action={ templ.SafeURL(fmt.Sprintf("/sessions/%d/publish", d.ID)) } class="inline">
-						<button type="submit">Publish</button>
-					</form>
+				if owner || p.IsAdmin {
+					@sessionActions(d, owner)
 				}
 			</div>
-		}
-		if owner || p.IsAdmin {
-			<div class="publish subtle">
-				<span class="muted small">
-					if !owner {
-						Admin:
-					}
-					Deleting removes this session and its transcript permanently.
-				</span>
-				<form method="post" action={ templ.SafeURL(fmt.Sprintf("/sessions/%d/delete", d.ID)) } class="inline" onsubmit="return confirm('Delete this session and its transcript permanently?')">
-					<button class="danger" type="submit">Delete session</button>
-				</form>
+			<div class="session-grid">
+				<aside class="outline-rail" aria-label="Outline">
+					@Outline(msgs, tools, SessionBlobBase(d.ID))
+				</aside>
+				if live {
+					<div id="session-body" class="session-main" data-sse={ SSEPath(d.ID) } data-body={ BodyPath(d.ID) }>
+						@SessionMain(d, msgs, tools, attachments, subagents)
+					</div>
+				} else {
+					<div id="session-body" class="session-main">
+						@SessionMain(d, msgs, tools, attachments, subagents)
+					</div>
+				}
 			</div>
-		}
-		<div class="session-grid">
-			<aside class="outline-rail" aria-label="Outline">
-				@Outline(msgs, tools, SessionBlobBase(d.ID))
-			</aside>
-			if live {
-				<div id="session-body" class="session-main" data-sse={ SSEPath(d.ID) } data-body={ BodyPath(d.ID) }>
-					@SessionMain(d, msgs, tools, attachments, subagents)
-				</div>
-			} else {
-				<div id="session-body" class="session-main">
-					@SessionMain(d, msgs, tools, attachments, subagents)
-				</div>
-			}
-			@inspectorPane()
 		</div>
+		@inspectorModal()
 	}
 }
 
-templ densityToolbar() {
-	<div class="density seg-group" role="group" aria-label="Transcript density">
-		<button type="button" class="seg" data-density="comfortable">Comfortable</button>
-		<button type="button" class="seg" data-density="compact">Compact</button>
+// sessionActions is the compact owner/admin control cluster pinned to the right
+// of the session header: the publish state and its toggle for an owner, and the
+// delete control for an owner or admin. It replaces the two full-width banners
+// that used to sit under the header, so the controls cost one header line rather
+// than two stacked rows.
+templ sessionActions(d store.SessionDetail, owner bool) {
+	<div class="session-actions">
+		if owner {
+			if d.Visibility == "public" && d.PublicID != nil {
+				<a class="share-link muted small" href={ PublicHref(*d.PublicID) } title="Public share link">{ PublicPath(*d.PublicID) }</a>
+				<form method="post" action={ templ.SafeURL(fmt.Sprintf("/sessions/%d/unpublish", d.ID)) } class="inline">
+					<button class="secondary small" type="submit">Unpublish</button>
+				</form>
+			} else {
+				<form method="post" action={ templ.SafeURL(fmt.Sprintf("/sessions/%d/publish", d.ID)) } class="inline">
+					<button class="small" type="submit" title="This session is internal: visible to logged-in users only. Publish to share a public link.">Publish</button>
+				</form>
+			}
+		}
+		<form method="post" action={ templ.SafeURL(fmt.Sprintf("/sessions/%d/delete", d.ID)) } class="inline" onsubmit="return confirm('Delete this session and its transcript permanently?')">
+			if owner {
+				<button class="danger small" type="submit" title="Deleting removes this session and its transcript permanently.">Delete</button>
+			} else {
+				<button class="danger small" type="submit" title="Admin: deleting removes this session and its transcript permanently.">Delete</button>
+			}
+		</form>
 	</div>
 }
 
@@ -787,17 +784,14 @@ templ Outline(msgs []store.Message, tools map[int][]store.ToolCallView, blobBase
 	</div>
 }
 
-// inspectorPane is the right pane: a stable surface where a selected tool call's
-// input and output open, so inspecting a body never reflows the transcript. It
-// starts empty and is populated by app.js when a tool chip or outline step is
-// clicked.
-templ inspectorPane() {
-	<aside class="inspector" id="session-inspector" aria-label="Inspector" aria-live="polite">
-		<div class="insp-empty">
-			<div class="insp-empty-glyph">⊟</div>
-			<div>Select a tool call to inspect its input and output here.</div>
-		</div>
-	</aside>
+// inspectorModal is the overlay host where a selected tool call's body opens as a
+// large dialog, so reading a body never competes with the transcript for width.
+// It starts hidden and empty; app.js fills #session-inspector and reveals the
+// overlay when a tool chip or outline step is clicked, then clears it on close.
+templ inspectorModal() {
+	<div class="modal-overlay" id="session-modal" hidden>
+		<div class="modal-dialog" id="session-inspector" role="dialog" aria-modal="true" aria-label="Tool call body"></div>
+	</div>
 }
 
 // sessionStats is the instrument header: stat tiles that stick to the top of the
@@ -806,12 +800,32 @@ templ sessionStats(d store.SessionDetail) {
 	<div class="stats sticky" id="session-stats">
 		@stat("Messages", fmt.Sprintf("%d", d.MessageCount), "messages")
 		@stat("User msgs", fmt.Sprintf("%d", d.UserMessageCount), "user")
-		@stat("Input", FmtTokens(d.TotalInput), "input")
-		@stat("Output", FmtTokens(d.TotalOutput), "output")
-		@stat("Cache write", FmtTokens(d.TotalCacheWrite), "cw")
-		@stat("Cache read", FmtTokens(d.TotalCacheRead), "cr")
-		@stat("Cost", FmtCost(d.TotalCostUSD, d.CostIncomplete), "cost")
+		@tokenStat(d)
 		@stat("Duration", FmtDuration(d.StartedAt, d.EndedAt), "dur")
+	</div>
+}
+
+// tokenStat folds the five token-and-cost readouts (input, output, cache read,
+// cache write, cost) into one Tokens tile: the total reads at a glance, and the
+// per-class breakdown plus cost reveal on hover or keyboard focus, the same detail
+// the overview heatmap surfaces for a day.
+templ tokenStat(d store.SessionDetail) {
+	<div class="stat tokens-stat" tabindex="0">
+		<div class="label">Tokens</div>
+		<div class="value tokens-value" data-stat-key="tokens">{ FmtTokens(d.TotalInput + d.TotalOutput + d.TotalCacheRead + d.TotalCacheWrite) }</div>
+		<div class="stat-tip" role="tooltip">
+			<dl class="tt-grid">
+				<dt>Input</dt>
+				<dd>{ FmtTokens(d.TotalInput) }</dd>
+				<dt>Output</dt>
+				<dd>{ FmtTokens(d.TotalOutput) }</dd>
+				<dt>Cache read</dt>
+				<dd>{ FmtTokens(d.TotalCacheRead) }</dd>
+				<dt>Cache write</dt>
+				<dd>{ FmtTokens(d.TotalCacheWrite) }</dd>
+			</dl>
+			<div class="tt-cost">{ FmtCost(d.TotalCostUSD, d.CostIncomplete) }</div>
+		</div>
 	</div>
 }
 
@@ -1032,52 +1046,53 @@ templ publicLayout(title string) {
 
 templ PublicSessionPage(d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, publicSubs []store.SessionSummary) {
 	@publicLayout(SessionProjectLabel(d) + " session") {
-		<div class="session-head">
-			<div class="session-title">
-				<h1>
-					<span>{ SessionProjectLabel(d) }</span>
-					<span class="sep">/</span>
-					<span class="muted">session</span>
-				</h1>
-				<div class="session-meta">
-					<span class="tag agent">{ d.Agent }</span>
-					@kindTag(d.ProjectKind)
-					<span class="tag public">public</span>
-					<span class="muted">Shared by { d.Username }</span>
+		<div class="session-page">
+			<div class="session-head">
+				<div class="session-title">
+					<h1>
+						<span>{ SessionProjectLabel(d) }</span>
+						<span class="sep">/</span>
+						<span class="muted">session</span>
+					</h1>
+					<div class="session-meta">
+						<span class="tag agent">{ d.Agent }</span>
+						@kindTag(d.ProjectKind)
+						<span class="tag public">public</span>
+						<span class="muted">Shared by { d.Username }</span>
+					</div>
 				</div>
 			</div>
-			@densityToolbar()
-		</div>
-		<div id="session-body">
-			<div class="session-grid">
-				<aside class="outline-rail" aria-label="Outline">
-					@Outline(msgs, tools, PublicBlobBase(*d.PublicID))
-				</aside>
-				<div class="session-main">
-					@sessionStats(d)
-					if len(publicSubs) > 0 {
-						<h2>Subagents</h2>
-						<div class="subagents">
-							<table class="grid">
-								<tbody>
-									for _, sub := range publicSubs {
-										if sub.PublicID != nil {
-											<tr data-row-href={ PublicPath(*sub.PublicID) }>
-												<td><a href={ PublicHref(*sub.PublicID) }>{ sub.Agent } subagent</a></td>
-												<td class="num">{ fmt.Sprintf("%d", sub.MessageCount) } messages</td>
-											</tr>
+			<div id="session-body">
+				<div class="session-grid">
+					<aside class="outline-rail" aria-label="Outline">
+						@Outline(msgs, tools, PublicBlobBase(*d.PublicID))
+					</aside>
+					<div class="session-main">
+						@sessionStats(d)
+						if len(publicSubs) > 0 {
+							<h2>Subagents</h2>
+							<div class="subagents">
+								<table class="grid">
+									<tbody>
+										for _, sub := range publicSubs {
+											if sub.PublicID != nil {
+												<tr data-row-href={ PublicPath(*sub.PublicID) }>
+													<td><a href={ PublicHref(*sub.PublicID) }>{ sub.Agent } subagent</a></td>
+													<td class="num">{ fmt.Sprintf("%d", sub.MessageCount) } messages</td>
+												</tr>
+											}
 										}
-									}
-								</tbody>
-							</table>
-						</div>
-					}
-					<h2>Transcript</h2>
-					@Transcript(msgs, tools, attachments, PublicBlobBase(*d.PublicID))
+									</tbody>
+								</table>
+							</div>
+						}
+						<h2>Transcript</h2>
+						@Transcript(msgs, tools, attachments, PublicBlobBase(*d.PublicID))
+					</div>
 				</div>
-				@inspectorPane()
 			</div>
 		</div>
+		@inspectorModal()
 	}
 }
 
