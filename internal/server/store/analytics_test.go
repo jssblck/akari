@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -336,6 +337,33 @@ func TestAnalyticsWindowLowerBoundInclusive(t *testing.T) {
 	}
 	if a.TotalIn != 100 || a.TotalOut != 20 {
 		t.Errorf("boundary token totals wrong: in=%d out=%d, want 100/20", a.TotalIn, a.TotalOut)
+	}
+}
+
+// The windowed overview rollups bound usage by ue.occurred_at, so they need a
+// supporting index or each bounded request seq-scans all accumulated history. This
+// pins the partial index's presence (migration 0012): drop it and the windowed
+// series, by-model, and by-agent rollups silently regress to full-table scans.
+func TestUsageEventsOccurredAtIndex(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	var indexdef string
+	err := st.Pool.QueryRow(ctx,
+		`SELECT indexdef FROM pg_indexes
+		  WHERE tablename = 'usage_events' AND indexname = 'idx_usage_events_occurred_at'`).
+		Scan(&indexdef)
+	if err != nil {
+		t.Fatalf("the occurred_at index should exist to keep windowed rollups window-bound: %v", err)
+	}
+	// It must be the partial index on occurred_at, not some unrelated index that
+	// happens to share the name: the lower bound seeks on occurred_at, and the
+	// NULL-excluding predicate keeps undated events (never in any window) out.
+	for _, want := range []string{"occurred_at", "WHERE", "IS NOT NULL"} {
+		if !strings.Contains(indexdef, want) {
+			t.Errorf("index def %q should mention %q (partial index on occurred_at)", indexdef, want)
+		}
 	}
 }
 
