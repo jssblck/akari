@@ -1,0 +1,302 @@
+/* akari: The Machinist's Bench. Dark violet-graphite steel under a muted lilac
+   signal. See DESIGN.md for the system; this stylesheet is its implementation.
+
+   base.css holds the shared foundation: fonts, design tokens, resets, the
+   typographic and utility primitives, and the components reused across every
+   page (tables, cards, stat tiles, tags, buttons, inputs, empty states). The
+   stylesheet is split per page area to match the templates; this file loads
+   first so the per-page files cascade over it. */
+
+/* ---- Fonts (self-hosted, embedded in the binary) ---- */
+@font-face {
+  font-family: "Geist";
+  src: url("/static/fonts/Geist-Regular.woff2") format("woff2");
+  font-weight: 400; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: "Geist";
+  src: url("/static/fonts/Geist-Medium.woff2") format("woff2");
+  font-weight: 500; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: "Geist";
+  src: url("/static/fonts/Geist-SemiBold.woff2") format("woff2");
+  font-weight: 600; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: "Geist Mono";
+  src: url("/static/fonts/GeistMono-Regular.woff2") format("woff2");
+  font-weight: 400 450; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: "Geist Mono";
+  src: url("/static/fonts/GeistMono-Medium.woff2") format("woff2");
+  font-weight: 500; font-style: normal; font-display: swap;
+}
+
+/* ---- Tokens ---- */
+:root {
+  --bg: #14131b;
+  --surface: #1b1a24;
+  --surface-2: #232230;
+  --surface-3: #2b2939;
+  --border: #383548;
+  --border-strong: #4a4660;
+  --text: #e6e3f0;
+  --subtext: #c5c1d6;
+  --muted: #9a94ad;
+  --faint: #6f6987;
+  --lilac: #c6a8f2;
+  --lilac-strong: #b693ea;
+  --ink: #1a1320;
+  --ok: #9fd6a6;
+  --err: #ef9aa9;
+  --warn: #f0c592;
+  --info: #92cfd4;
+  --msg-user: #272336;
+  --msg-assistant: #1f1f2b;
+
+  --sans: "Geist", "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-lg: 10px;
+
+  --sp-xs: 4px;
+  --sp-sm: 8px;
+  --sp-md: 12px;
+  --sp-lg: 16px;
+  --sp-xl: 24px;
+  --sp-2xl: 32px;
+
+  --dur-fast: 120ms;
+  --dur-base: 180ms;
+  --dur-slow: 220ms;
+  --ease-settle: cubic-bezier(0.165, 0.84, 0.44, 1);
+  --ease-state: cubic-bezier(0.4, 0, 0.2, 1);
+
+  --ring: 0 0 0 2px rgba(198, 168, 242, 0.5);
+  --shadow-overlay: 0 8px 24px -6px rgba(8, 6, 14, 0.6);
+
+  --z-sticky: 10;
+  --z-overlay: 40;
+
+  --maxw: 1180px;
+}
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 400 0.875rem/1.55 var(--sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* ---- Native-app feel ----
+   A single arrow cursor app-wide (no link/button pointer, no stray I-beam) and
+   no text selection over chrome. The I-beam and selection return only on genuine
+   text surfaces: form fields, code and tool bodies, and reading content. Author
+   `*` overrides the user-agent's link/text cursors; the text surfaces below have
+   higher specificity, so they win the I-beam back. */
+* { cursor: default; }
+body { -webkit-user-select: none; user-select: none; }
+input, textarea,
+.content, .thinking-body,
+pre, code, .tool-body, .diff, .diff-body {
+  -webkit-user-select: text; user-select: text; cursor: text;
+}
+::selection { background: rgba(198, 168, 242, 0.30); color: var(--text); }
+
+a { color: var(--lilac); text-decoration: none; }
+a:hover { text-decoration: underline; text-underline-offset: 2px; }
+
+:focus-visible { outline: none; box-shadow: var(--ring); border-radius: var(--r-sm); }
+
+h1, h2, h3 { font-weight: 600; letter-spacing: -0.01em; text-wrap: balance; }
+h1 { font-size: 1.75rem; line-height: 1.15; letter-spacing: -0.02em; margin: 0; }
+h2 { font-size: 1.25rem; margin: 0; }
+
+.muted { color: var(--muted); }
+.small { font-size: 0.75rem; }
+.mono { font-family: var(--mono); }
+.label {
+  font-weight: 500; font-size: 0.6875rem; line-height: 1.2;
+  letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted);
+}
+code, .mono { font-family: var(--mono); }
+.num, .value { font-variant-numeric: tabular-nums; }
+.spacer { flex: 1; }
+.inline { margin: 0; display: inline-flex; }
+
+main { max-width: var(--maxw); margin: 0 auto; padding: var(--sp-xl); }
+
+.page-head { display: flex; align-items: baseline; gap: var(--sp-md); margin-bottom: var(--sp-xl); }
+section { margin-top: var(--sp-2xl); }
+.panel-head { display: flex; align-items: baseline; gap: var(--sp-md); margin-bottom: var(--sp-md); }
+
+/* ---- Tables (the data grid) ---- */
+table.grid { width: 100%; border-collapse: collapse; }
+table.grid th, table.grid td {
+  text-align: left; padding: var(--sp-sm) var(--sp-md);
+  border-bottom: 1px solid var(--border);
+}
+table.grid th {
+  color: var(--muted); font-weight: 500; font-size: 0.6875rem;
+  text-transform: uppercase; letter-spacing: 0.08em;
+}
+table.grid td { transition: background var(--dur-fast) var(--ease-state); }
+table.grid tbody tr:hover td { background: var(--surface-2); }
+td.num, th.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.nowrap { white-space: nowrap; }
+
+/* ---- Cards ---- */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: var(--sp-lg);
+}
+
+/* ---- Stat tiles (instrument readouts) ---- */
+.stats { display: flex; flex-wrap: wrap; gap: var(--sp-md); margin-bottom: var(--sp-lg); }
+.stat {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-md); padding: 10px var(--sp-lg); min-width: 116px;
+}
+.stat .label { display: block; margin-bottom: 3px; }
+.stat .value { font-family: var(--mono); font-size: 1.125rem; font-variant-numeric: tabular-nums; color: var(--text); }
+/* The analytics panels (overview, projects, project) fuse their readouts into a
+   single instrument strip: one bordered row split by hairlines, instead of four
+   detached tiles floating above the chart. The strip stays overflow-visible so the
+   Tokens readout's hover tooltip can drop clear of it rather than being clipped;
+   the fused rounded ends come from the first/last tile instead of a clip. */
+.analytics .stats { gap: 0; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); overflow: visible; }
+.analytics .stat { flex: 1; min-width: 0; border: none; border-radius: 0; }
+.analytics .stat:first-child { border-top-left-radius: var(--r-md); border-bottom-left-radius: var(--r-md); }
+.analytics .stat:last-child { border-top-right-radius: var(--r-md); border-bottom-right-radius: var(--r-md); }
+.analytics .stat + .stat { border-left: 1px solid var(--border); }
+/* The session header fuses its readouts into the same instrument strip, sticky to
+   the top of the transcript. One bordered row split by hairlines reads as a single
+   gauge cluster and reclaims the vertical space the loose tiles used to wrap into.
+   It scrolls horizontally rather than wrapping when the viewport gets narrow. */
+.stats.sticky {
+  position: sticky; top: 0; z-index: var(--z-sticky);
+  display: flex; gap: 0; margin: 0 0 var(--sp-lg); padding: 0;
+  border: 1px solid var(--border); border-radius: var(--r-md);
+  background: var(--surface);
+}
+.stats.sticky .stat {
+  flex: 1 0 auto; min-width: 118px; padding: 8px var(--sp-lg);
+  border: none; border-radius: 0; border-left: 1px solid var(--border);
+}
+.stats.sticky .stat:first-child { border-left: 0; }
+/* The Tokens tile folds input, output, cache read, cache write, and cost into one
+   gauge. The per-class breakdown and cost reveal on hover or keyboard focus, the
+   same detail the overview heatmap surfaces for a day. */
+.tokens-stat { position: relative; outline: none; }
+.tokens-value { text-decoration: underline dotted var(--faint); text-underline-offset: 3px; }
+.tokens-stat:hover, .tokens-stat:focus-visible { background: var(--surface-2); }
+.stat-tip {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 20;
+  min-width: 190px; padding: var(--sp-sm) var(--sp-md);
+  background: var(--surface-2); border: 1px solid var(--border-strong);
+  border-radius: var(--r-md); box-shadow: var(--shadow-overlay);
+  opacity: 0; visibility: hidden; transform: translateY(-3px); pointer-events: none;
+  transition: opacity var(--dur-fast) var(--ease-state), transform var(--dur-fast) var(--ease-state), visibility 0s linear var(--dur-fast);
+}
+.tokens-stat:hover .stat-tip, .tokens-stat:focus-within .stat-tip {
+  opacity: 1; visibility: visible; transform: none; transition-delay: 0s;
+}
+.stat-tip .tt-grid { display: grid; grid-template-columns: auto auto; gap: 1px var(--sp-md); margin: 0; font: 450 0.75rem/1.6 var(--mono); }
+.stat-tip .tt-grid dt { color: var(--muted); }
+.stat-tip .tt-grid dd { margin: 0; color: var(--subtext); text-align: right; font-variant-numeric: tabular-nums; }
+.stat-tip .tt-cost { margin-top: 5px; padding-top: 5px; border-top: 1px solid var(--border); color: var(--text); font: 450 0.75rem var(--mono); font-variant-numeric: tabular-nums; text-align: right; }
+.value.settling { animation: settle var(--dur-slow) var(--ease-settle); }
+@keyframes settle {
+  0% { color: var(--lilac); text-shadow: 0 0 14px rgba(198, 168, 242, 0.75); }
+  100% { color: var(--text); text-shadow: none; }
+}
+
+/* ---- Tags (machined rectangles, never pills) ---- */
+.tag {
+  display: inline-block; padding: 2px 7px; border-radius: var(--r-sm);
+  font-size: 0.6875rem; font-weight: 500; letter-spacing: 0.03em;
+  background: var(--surface-2); border: 1px solid var(--border); color: var(--muted);
+  vertical-align: middle;
+}
+.tag.agent { color: var(--lilac); }
+.tag.public { color: var(--ok); border-color: rgba(159, 214, 166, 0.4); }
+.tag.model { color: var(--subtext); font-family: var(--mono); letter-spacing: 0; }
+/* Project state: standalone (no remote) reads as a caution; orphaned (folder
+   gone) reads as an error. */
+.tag.standalone { color: var(--warn); border-color: rgba(240, 197, 146, 0.4); }
+.tag.orphaned { color: var(--err); border-color: rgba(239, 154, 169, 0.4); }
+/* Data-quality caution: the session repeats a tool-call id across rows. */
+.tag.warn { color: var(--warn); border-color: rgba(240, 197, 146, 0.4); cursor: help; }
+
+/* ---- Buttons ---- */
+button, .btn {
+  font: 500 0.875rem/1 var(--sans);
+  background: var(--lilac); color: var(--ink);
+  border: none; border-radius: var(--r-sm); padding: 8px 14px;
+  transition: background var(--dur-fast) var(--ease-state), transform var(--dur-fast) var(--ease-state);
+}
+button:hover, .btn:hover { background: var(--lilac-strong); }
+button:active, .btn:active { transform: translateY(1px); }
+button.secondary { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); }
+button.secondary:hover { background: var(--surface-3); }
+button.ghost { background: transparent; color: var(--subtext); }
+button.ghost:hover { background: var(--surface-2); }
+button.danger { background: var(--surface-2); color: var(--err); border: 1px solid rgba(239, 154, 169, 0.4); }
+button.danger:hover { background: var(--err); color: var(--ink); border-color: var(--err); }
+button.small, .btn.small { padding: 5px 10px; font-size: 0.8125rem; }
+
+/* ---- Segmented controls (density / metric) ---- */
+.seg-group, .chart-toolbar { display: inline-flex; gap: 0; border: 1px solid var(--border); border-radius: var(--r-sm); overflow: hidden; }
+.seg {
+  background: var(--surface); color: var(--muted);
+  border: none; border-radius: 0; padding: 6px 12px; font-weight: 500; font-size: 0.8125rem;
+  transition: background var(--dur-fast) var(--ease-state), color var(--dur-fast) var(--ease-state);
+}
+.seg + .seg { border-left: 1px solid var(--border); }
+.seg:hover { background: var(--surface-2); color: var(--subtext); }
+.seg.active { background: var(--surface-3); color: var(--lilac); }
+
+/* ---- Inputs ---- */
+input, select, textarea {
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--r-sm);
+  padding: 7px 10px; font: inherit;
+  transition: border-color var(--dur-fast) var(--ease-state), box-shadow var(--dur-fast) var(--ease-state);
+}
+input::placeholder { color: var(--muted); }
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--lilac); box-shadow: var(--ring); }
+.filters { display: flex; gap: var(--sp-sm); flex-wrap: wrap; align-items: center; margin-bottom: var(--sp-md); }
+.filters .grow, input.grow { min-width: 320px; flex: 1; }
+
+/* Shared reveal animation: the "shown once" cards (account) fade in, and the
+   inspector overlay (session) reuses it for its backdrop. */
+@keyframes fadein { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+
+/* ---- Empty states ---- */
+.empty { color: var(--muted); padding: var(--sp-xl); text-align: center; border: 1px dashed var(--border); border-radius: var(--r-md); }
+.empty.big { padding: 64px var(--sp-xl); }
+.empty.big h1 { font-family: var(--mono); color: var(--lilac); }
+
+/* ---- Responsive ---- */
+@media (max-width: 860px) {
+  main { padding: var(--sp-lg); }
+}
+
+/* ---- Reduced motion ---- */
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
+  .bar-fill { transition: none; }
+}

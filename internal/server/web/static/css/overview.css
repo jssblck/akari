@@ -1,0 +1,112 @@
+/* The analytics surface: the usage panel shared by the Overview, the projects
+   index, and a single project page. The Overview renders it as a calendar
+   heatmap; the project pages render the time-series line chart. The breakdown
+   tooltip's inner grid is shared with the Sessions/Projects token card (.tok-tip,
+   defined in sessions.css), so a token total reads the same across surfaces. */
+
+/* ---- KPI tiles (Overview) ---- */
+.kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--sp-md); margin-bottom: var(--sp-lg); }
+.kpi { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); padding: var(--sp-md) var(--sp-lg); }
+.kpi .label { display: block; margin-bottom: var(--sp-sm); }
+.kpi .v { font-family: var(--mono); font-size: 1.5rem; font-variant-numeric: tabular-nums; color: var(--text); letter-spacing: -0.01em; }
+
+/* ---- Analytics ---- */
+.analytics { margin-top: var(--sp-md); }
+.chart-wrap { margin: var(--sp-md) 0 var(--sp-lg); }
+.chart-toolbar { margin-bottom: var(--sp-sm); }
+.chart {
+  position: relative; width: 100%; height: 240px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md);
+  padding: var(--sp-sm);
+}
+.chart svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.chart .grid-line { stroke: var(--border); stroke-width: 1; }
+.chart .axis-label { fill: var(--muted); font: 400 10px var(--mono); }
+.chart .series-line { fill: none; stroke-width: 1.75; stroke-linejoin: round; stroke-linecap: round; }
+.chart .series-area { opacity: 0.16; }
+.chart .crosshair { stroke: var(--lilac); stroke-width: 1; stroke-dasharray: 3 3; opacity: 0; }
+.chart .cursor-dot { fill: var(--lilac); opacity: 0; }
+.chart.cursor-on .crosshair, .chart.cursor-on .cursor-dot { opacity: 1; }
+.chart-readout {
+  position: absolute; top: var(--sp-sm); right: var(--sp-sm);
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-sm);
+  padding: 4px 8px; font: 450 0.75rem/1.4 var(--mono); color: var(--subtext);
+  pointer-events: none; opacity: 0; transition: opacity var(--dur-fast) var(--ease-state);
+  white-space: nowrap;
+}
+.chart.cursor-on .chart-readout { opacity: 1; }
+.chart-readout .ro-key { color: var(--lilac); }
+.chart-empty { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--muted); }
+
+/* ---- Calendar heatmap (overview activity grid) ---- */
+.heatmap-wrap { margin: var(--sp-md) 0 var(--sp-lg); }
+.heatmap-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-md); flex-wrap: wrap; margin-bottom: var(--sp-sm); }
+/* The trailing-window selector sits beside the metric toggle on the grid-head
+   row, parted by a hairline; the two segmented controls wrap together when
+   narrow. */
+.heatmap-controls { display: flex; align-items: center; gap: var(--sp-md); flex-wrap: wrap; justify-content: flex-end; }
+/* The metric toolbar's default margin-bottom (it usually sits above a chart) would
+   inflate this flex row past the toolbars' own height, dropping the separator
+   below them; here the toolbars sit side by side, so drop it. */
+.heatmap-controls .chart-toolbar { margin-bottom: 0; }
+/* A fixed-height hairline, centered, a touch shorter than the toolbars so it reads
+   as a divider inset a few px top and bottom. Fixed (not stretched) so it never
+   inflates the flex line. */
+.heatmap-controls .ctrl-sep { width: 1px; height: 18px; align-self: center; background: var(--border); flex: none; }
+.heatmap {
+  position: relative;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md);
+  padding: var(--sp-md);
+}
+.heatmap svg { display: block; width: 100%; height: auto; }
+.heatmap .hm-cell { transition: opacity var(--dur-fast) var(--ease-state); }
+.heatmap .hm-cell:hover { stroke: var(--text); stroke-width: 1; }
+.heatmap .lvl-0 { fill: var(--surface-3); }
+.heatmap .lvl-1 { fill: rgba(198, 168, 242, 0.28); }
+.heatmap .lvl-2 { fill: rgba(198, 168, 242, 0.5); }
+.heatmap .lvl-3 { fill: rgba(198, 168, 242, 0.74); }
+.heatmap .lvl-4 { fill: var(--lilac); }
+.heatmap .hm-month { fill: var(--muted); font: 400 10px var(--mono); }
+.heatmap-tooltip {
+  position: absolute; z-index: 5; min-width: 150px;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-sm);
+  padding: var(--sp-sm); pointer-events: none;
+  opacity: 0; transform: translateY(2px);
+  transition: opacity var(--dur-fast) var(--ease-state), transform var(--dur-fast) var(--ease-state);
+}
+.heatmap-tooltip.on { opacity: 1; transform: none; }
+/* The breakdown card's inner styles are shared by the heatmap tooltip and the
+   Sessions table's token card (.tok-tip), so a token total reads the same in
+   both places. */
+.heatmap-tooltip .tt-day { color: var(--lilac); font: 500 0.75rem var(--mono); margin-bottom: 4px; }
+.heatmap-tooltip .tt-total, .tok-tip .tt-total { color: var(--text); font: 450 0.8125rem var(--mono); font-variant-numeric: tabular-nums; }
+.heatmap-tooltip .tt-empty { color: var(--muted); font-size: 0.75rem; }
+/* The overview and session-header Tokens readouts render their own in/out/cache
+   breakdown through the .stat-tip tooltip styling above; this grid is the heatmap
+   cell tooltip and the Sessions table's token card (.tok-tip). */
+.heatmap-tooltip .tt-grid, .tok-tip .tt-grid {
+  display: grid; grid-template-columns: auto auto; gap: 1px var(--sp-sm);
+  margin: 0; font: 450 0.75rem/1.5 var(--mono);
+  margin-top: 5px;
+}
+.heatmap-tooltip .tt-grid dt, .tok-tip .tt-grid dt { color: var(--muted); }
+.heatmap-tooltip .tt-grid dd, .tok-tip .tt-grid dd { margin: 0; color: var(--subtext); text-align: right; font-variant-numeric: tabular-nums; }
+.heatmap-tooltip .tt-cost, .tok-tip .tt-cost {
+  margin-top: 5px; padding-top: 5px; border-top: 1px solid var(--border);
+  color: var(--subtext); font: 450 0.75rem var(--mono); font-variant-numeric: tabular-nums;
+}
+
+.breakdowns { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-xl); }
+.breakdown-title { margin-bottom: var(--sp-sm); }
+.bars { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--sp-md); }
+.bar-head { display: flex; justify-content: space-between; gap: var(--sp-sm); align-items: baseline; }
+.bar-label { color: var(--subtext); font-size: 0.8125rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 70%; }
+.bar-val { font-family: var(--mono); font-size: 0.8125rem; font-variant-numeric: tabular-nums; }
+.bar-track { height: 6px; background: var(--surface-2); border-radius: 999px; overflow: hidden; margin: 4px 0 3px; }
+.bar-fill { height: 100%; width: 0; border-radius: 999px; background: var(--lilac); transition: width 700ms var(--ease-settle); }
+
+/* ---- Responsive ---- */
+@media (max-width: 860px) {
+  .breakdowns { grid-template-columns: 1fr; gap: var(--sp-lg); }
+  .kpis { grid-template-columns: repeat(2, 1fr); }
+}

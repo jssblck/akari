@@ -1,0 +1,143 @@
+package web
+
+import "github.com/jssblck/akari/internal/version"
+
+templ layout(p Page) {
+	<!DOCTYPE html>
+	<html lang="en">
+		<head>
+			<meta charset="utf-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1"/>
+			<title>{ p.Title } - akari</title>
+			<link rel="preload" href="/static/fonts/Geist-Regular.woff2" as="font" type="font/woff2" crossorigin/>
+			<link rel="preload" href="/static/fonts/GeistMono-Regular.woff2" as="font" type="font/woff2" crossorigin/>
+			@stylesheets()
+			<script src="/static/htmx.min.js" defer></script>
+			<script src="/static/charts.js" defer></script>
+			<script src="/static/app.js" defer></script>
+		</head>
+		<body>
+			if p.LoggedIn {
+				<div class="app">
+					@sidebar(p)
+					<div class="content-scroll">
+						<main class={ "page-" + p.Active }>
+							{ children... }
+						</main>
+					</div>
+				</div>
+			} else {
+				<main>
+					{ children... }
+				</main>
+			}
+		</body>
+	</html>
+}
+
+// stylesheets links the per-area stylesheets in cascade order: the shared base
+// (tokens, resets, and shared components) first, then the app shell and each
+// page's own rules. The stylesheet was split to match the templates, so a change
+// to one page's styling touches only that page's file. Every page links the whole
+// set, since components are reused across pages; the split is organizational, not
+// a per-page subset.
+templ stylesheets() {
+	<link rel="stylesheet" href="/static/css/base.css"/>
+	<link rel="stylesheet" href="/static/css/layout.css"/>
+	<link rel="stylesheet" href="/static/css/auth.css"/>
+	<link rel="stylesheet" href="/static/css/overview.css"/>
+	<link rel="stylesheet" href="/static/css/projects.css"/>
+	<link rel="stylesheet" href="/static/css/sessions.css"/>
+	<link rel="stylesheet" href="/static/css/session.css"/>
+	<link rel="stylesheet" href="/static/css/account.css"/>
+}
+
+// navItem is one sidebar link. It carries its own icon as a child and marks
+// itself active when its key matches the page's active section.
+templ navItem(href, key, label, active string) {
+	<a class={ navClass(key, active) } href={ templ.SafeURL(href) }>
+		@navIcon(key)
+		<span class="nav-label">{ label }</span>
+	</a>
+}
+
+// sidebar is the persistent left navigation that replaced the three-link top
+// bar: the wordmark, the primary sections, and the signed-in user with a log-out
+// control pinned to the foot.
+templ sidebar(p Page) {
+	<aside class="sidebar">
+		<a class="brand" href="/">@brandMark()</a>
+		<nav class="navgroup" aria-label="Primary">
+			@navItem("/", "overview", "Overview", p.Active)
+			@navItem("/sessions", "sessions", "Sessions", p.Active)
+			@navItem("/projects", "projects", "Projects", p.Active)
+			@navItem("/account", "account", "Account", p.Active)
+		</nav>
+		<span class="spacer"></span>
+		<div class="sb-foot">
+			<span class="who">{ p.Username }</span>
+			<form method="post" action="/logout" class="inline">
+				<button class="ghost small" type="submit">Log out</button>
+			</form>
+		</div>
+	</aside>
+}
+
+// navIcon draws the small line glyph for a sidebar item, keyed by section.
+templ navIcon(key string) {
+	<svg class="nav-ico" viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
+		switch key {
+			case "overview":
+				<rect x="1.5" y="1.5" width="5" height="5" rx="1"></rect>
+				<rect x="9.5" y="1.5" width="5" height="5" rx="1"></rect>
+				<rect x="1.5" y="9.5" width="5" height="5" rx="1"></rect>
+				<rect x="9.5" y="9.5" width="5" height="5" rx="1"></rect>
+			case "sessions":
+				<path d="M2 4h12M2 8h12M2 12h8"></path>
+			case "projects":
+				<path d="M2 12V6l3-2 3 2 3-2 3 2v6"></path>
+				<path d="M2 12h12"></path>
+			case "account":
+				<circle cx="8" cy="5.5" r="2.6"></circle>
+				<path d="M3 14c0-2.8 2.2-4.5 5-4.5s5 1.7 5 4.5"></path>
+		}
+	</svg>
+}
+
+// brandMark is the wordmark: a small lilac aperture glyph beside the name, a nod
+// to akari (light) without leaning on a heavy logo.
+templ brandMark() {
+	<span class="brandmark">
+		<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" class="brandglyph">
+			<circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.4"></circle>
+			<circle cx="8" cy="8" r="2.2" fill="currentColor"></circle>
+		</svg>
+		<span>akari</span>
+		<span class="brandver">{ version.String() }</span>
+	</span>
+}
+
+templ publicLayout(title string) {
+	<!DOCTYPE html>
+	<html lang="en">
+		<head>
+			<meta charset="utf-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1"/>
+			<title>{ title } - akari</title>
+			<link rel="preload" href="/static/fonts/Geist-Regular.woff2" as="font" type="font/woff2" crossorigin/>
+			<link rel="preload" href="/static/fonts/GeistMono-Regular.woff2" as="font" type="font/woff2" crossorigin/>
+			@stylesheets()
+			<script src="/static/app.js" defer></script>
+		</head>
+		<body>
+			<header class="topbar">
+				<a class="brand" href="/">@brandMark()</a>
+				<span class="spacer"></span>
+				<a href="/login">Log in</a>
+			</header>
+			<main>
+				{ children... }
+			</main>
+		</body>
+	</html>
+}

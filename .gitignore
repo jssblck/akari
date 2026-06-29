@@ -12,6 +12,12 @@ coverage.*
 go.work
 go.work.sum
 
+# templ-generated Go. The .templ files are the source of truth; `templ generate`
+# (run via `go generate ./...` in CI, Docker, and `make build`) writes these on
+# every build, so they are not committed. Keeping them out of the tree is also
+# why a plain `go build` never reports a "-dirty" version from codegen.
+internal/server/web/*_templ.go
+
 # Editor and OS cruft
 .DS_Store
 *.swp

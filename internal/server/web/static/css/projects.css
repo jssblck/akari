@@ -1,0 +1,21 @@
+/* The projects index: a full-bleed table whose columns grow to their content,
+   with a 30-day cost sparkline per row. The token cell reuses the global session
+   list's .tok-cell hover card (defined in sessions.css), so only the overflow
+   rule is needed here. */
+
+th.trend, td.trend { width: 108px; }
+.sparkline { width: 96px; height: 24px; display: block; }
+
+/* ---- Projects index: a full-bleed table whose columns grow to their content ---- */
+/* The projects index is the page's only surface, so it drops the centered
+   max-width and runs the table the full content width. */
+main.page-projects { max-width: none; }
+/* Every figure column sizes to its content (no wrapping); the project-name
+   column takes width:100% so it absorbs the slack, letting names show in full
+   instead of clipping while the table still fills the available width. */
+table.grid.projects th, table.grid.projects td { white-space: nowrap; }
+table.grid.projects th.proj-name, table.grid.projects td.proj-name { width: 100%; }
+/* The tokens cell reuses the global session list's .tok-cell hover card, so its
+   styling (and the shared heatmap-tooltip rules) already apply here. The cell
+   only needs to let the card overflow the row, the same as the sessions table. */
+table.grid.projects td.num { overflow: visible; }
