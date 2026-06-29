@@ -70,6 +70,10 @@ jobs:
           author="$(printf '%s' "$AUTHOR" | tr '[:upper:]' '[:lower:]')"
           case "$author" in
             jssblck) cred="$CODEX_AUTH_JSSBLCK" ;;
+            # Dependabot opens PRs as a bot with no Codex subscription of its own,
+            # so bill its dependency-bump reviews to the maintainer's credential.
+            # The brackets are quoted to match the literal login, not a glob.
+            'dependabot[bot]') cred="$CODEX_AUTH_JSSBLCK" ;;
             *)
               echo "::error::No Codex credential mapped for PR author '$AUTHOR'. Add a CODEX_AUTH_<LOGIN> secret and a case arm in .github/workflows/bastion.yml." >&2
               exit 1 ;;
