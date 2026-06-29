@@ -59,7 +59,6 @@ templ sidebar(p Page) {
 			@navItem("/", "overview", "Overview", p.Active)
 			@navItem("/sessions", "sessions", "Sessions", p.Active)
 			@navItem("/projects", "projects", "Projects", p.Active)
-			@navItem("/search", "search", "Search", p.Active)
 			@navItem("/account", "account", "Account", p.Active)
 		</nav>
 		<span class="spacer"></span>
@@ -86,9 +85,6 @@ templ navIcon(key string) {
 			case "projects":
 				<path d="M2 12V6l3-2 3 2 3-2 3 2v6"></path>
 				<path d="M2 12h12"></path>
-			case "search":
-				<circle cx="7" cy="7" r="4.5"></circle>
-				<path d="M14 14l-3.5-3.5"></path>
 			case "account":
 				<circle cx="8" cy="5.5" r="2.6"></circle>
 				<path d="M3 14c0-2.8 2.2-4.5 5-4.5s5 1.7 5 4.5"></path>
@@ -933,39 +929,7 @@ templ ToolChip(t store.ToolCallView, blobBase string) {
 	</div>
 }
 
-// ============================ Search / Account ============================
-
-templ SearchPage(p Page, query string, hits []store.SearchHit) {
-	@layout(p) {
-		<div class="page-head">
-			<h1>Search</h1>
-		</div>
-		<form class="filters" method="get" action="/search">
-			<input name="q" value={ query } placeholder="search message content" autofocus class="grow"/>
-			<button type="submit">Search</button>
-		</form>
-		if query != "" {
-			if len(hits) == 0 {
-				<div class="empty">No messages match { query }.</div>
-			} else {
-				<div class="hits">
-					for _, h := range hits {
-						<a class="hit card" href={ SessionHref(h.SessionID) }>
-							<div class="meta muted small">
-								<span class="role">{ SearchHitLabel(h) }</span>
-								@kindTag(h.ProjectKind)
-								<span class="tag agent">{ h.Agent }</span>
-								<span>{ h.Username }</span>
-								<span>{ h.Role }</span>
-							</div>
-							<div class="content">{ h.Snippet }</div>
-						</a>
-					}
-				</div>
-			}
-		}
-	}
-}
+// ============================ Account ============================
 
 templ AccountPage(p Page, tokens []store.APIToken, newToken, newInvite string) {
 	@layout(p) {

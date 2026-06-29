@@ -399,8 +399,10 @@ upload time, so a transcript stays small however big the tool outputs are and th
 - session_raw.content is BYTEA (lossless raw bytes), distinct from the inline
   TEXT used for searchable message content in later milestones.
 - web_sessions.id stores sha256(cookie); the raw cookie is never persisted.
-- Integration tests share one Postgres database and each resets the public schema,
-  so run them serialized: `go test -p 1 ./...`. They skip unless
-  AKARI_TEST_DATABASE_URL is set (local: a dedicated `akari_test` database).
+- Integration tests provision an isolated database per test (create, migrate, drop
+  on cleanup; see internal/server/storetest), so they run at the default
+  parallelism: `go test ./...`, no `-p 1`. They skip unless
+  AKARI_TEST_DATABASE_URL is set; only its host and credentials are used, since
+  each test's database is created beside the one it names.
 - Tool-call input/result bodies are stored as size + media type only in M2; the
   CAS milestone will store the bodies themselves and back-reference them.
