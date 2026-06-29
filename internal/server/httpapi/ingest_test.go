@@ -164,6 +164,65 @@ func TestAnnounceGroupsWorktreesByLocalRoot(t *testing.T) {
 	}
 }
 
+func TestAnnounceLocalDowngradeDoesNotCreateEmptyProject(t *testing.T) {
+	t.Parallel()
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+
+	owner, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	rawToken, err := auth.NewToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateAPIToken(ctx, owner.ID, "laptop", "ingest", auth.HashToken(rawToken)); err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+
+	announce := func(body string) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/ingest/session", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+rawToken)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("announce: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("announce status = %d, want 200", resp.StatusCode)
+		}
+	}
+
+	announce(`{"agent":"claude","source_session_id":"sess-sticky","kind":"remote","project_remote":"github.com/jssblck/akari","cwd":"/home/grace/akari","machine":"laptop"}`)
+	announce(`{"agent":"claude","source_session_id":"sess-sticky","kind":"orphaned","cwd":"/home/grace/akari","machine":"laptop"}`)
+
+	var localProjects int
+	if err := st.Pool.QueryRow(ctx,
+		"SELECT count(*) FROM projects WHERE remote_key = 'local:laptop:/home/grace/akari'").Scan(&localProjects); err != nil {
+		t.Fatal(err)
+	}
+	if localProjects != 0 {
+		t.Fatalf("unused local downgrade projects = %d, want 0", localProjects)
+	}
+
+	var projectKey string
+	if err := st.Pool.QueryRow(ctx,
+		`SELECT p.remote_key
+		   FROM sessions s JOIN projects p ON p.id = s.project_id
+		  WHERE s.source_session_id = 'sess-sticky'`).Scan(&projectKey); err != nil {
+		t.Fatal(err)
+	}
+	if projectKey != "github.com/jssblck/akari" {
+		t.Fatalf("session project = %q, want remote project", projectKey)
+	}
+}
+
 func TestLocalProjectKey(t *testing.T) {
 	// Standalone and orphaned must share a key for the same machine+path so a
 	// deleted folder transitions kind in place rather than forking a second row.
