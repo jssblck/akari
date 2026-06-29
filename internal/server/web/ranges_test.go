@@ -1,8 +1,12 @@
 package web
 
 import (
+	"net/url"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/jssblck/akari/internal/server/store"
 )
 
 // ParseRange passes through every known key and falls back to the default for
@@ -36,5 +40,60 @@ func TestRangeSince(t *testing.T) {
 		if got := RangeSince(unbounded, now); !got.IsZero() {
 			t.Errorf("RangeSince(%q) = %v, want zero", unbounded, got)
 		}
+	}
+}
+
+// RangeOptions builds one button per window, each refetching basePath at its own
+// range. Anything in preserve rides along except an incoming range (each button
+// sets its own) and empty values (dropped), so a stray ?range= or a blank filter
+// never doubles or litters the href.
+func TestRangeOptions(t *testing.T) {
+	preserve := url.Values{
+		"range": {"7d"},     // dropped: every button sets the window itself
+		"agent": {"claude"}, // preserved
+		"user":  {""},       // dropped: empty value
+	}
+	opts := RangeOptions("/projects/7", preserve, "30d")
+	if len(opts) != len(DateRanges) {
+		t.Fatalf("want %d options, got %d", len(DateRanges), len(opts))
+	}
+	var active []RangeOption
+	for _, o := range opts {
+		if strings.Contains(o.Href, "user=") {
+			t.Errorf("empty filter value should be dropped: %s", o.Href)
+		}
+		if n := strings.Count(o.Href, "range="); n != 1 {
+			t.Errorf("href should carry exactly one range, got %d: %s", n, o.Href)
+		}
+		if o.Active {
+			active = append(active, o)
+		}
+	}
+	if len(active) != 1 {
+		t.Fatalf("exactly one window is active, got %d", len(active))
+	}
+	// The active (30d) button preserves the real filter and sets its own window.
+	if active[0].Href != "/projects/7?agent=claude&range=30d" {
+		t.Errorf("active href = %q", active[0].Href)
+	}
+}
+
+// ProjectRangeOptions preserves all three session filters (agent, user, machine),
+// not just agent, so switching the window on a filtered project list holds the
+// whole selection. url.Values.Encode sorts the keys, so the order is stable.
+func TestProjectRangeOptionsPreservesAllFilters(t *testing.T) {
+	sel := store.SessionFilter{ProjectID: 7, Agent: "claude", Username: "grace", Machine: "rig"}
+	opts := ProjectRangeOptions(7, sel, "90d")
+	var active *RangeOption
+	for i := range opts {
+		if opts[i].Active {
+			active = &opts[i]
+		}
+	}
+	if active == nil {
+		t.Fatal("no active option for 90d")
+	}
+	if active.Href != "/projects/7?agent=claude&machine=rig&range=90d&user=grace" {
+		t.Errorf("active href = %q", active.Href)
 	}
 }

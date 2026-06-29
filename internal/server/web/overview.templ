@@ -17,31 +17,22 @@ templ OverviewPage(p Page, a store.Analytics, rng string, users []store.User, se
 		<div class="page-head">
 			<h1>Overview</h1>
 		</div>
-		@analyticsPanel(a, "chart-global", "Across all projects", true, rng, users, selected)
+		@analyticsPanel(a, "chart-global", RangeOptions("/", userValues(selected), rng), rng, users, selected)
 	}
 }
 
-// analyticsPanel is the shared usage block used by the overview (global), the
-// projects index (global), and a single project page. scope is a short label
-// ("Across all projects" or the project key) shown as the panel subtitle. When
-// heatmap is true the daily activity renders as a calendar grid (the overview's
-// front door) rather than the time-series line chart the project pages keep.
-// analyticsPanel carries id="usage" so the overview's range selector can swap the
-// whole panel (stats, grid, and breakdowns all reflect the window) in one shot.
-// rng is the active range key and users/selected drive the per-user filter; all
-// three only feed the controls the heatmap variant renders, and are ignored by the
-// line-chart pages (which pass "", nil, nil).
-templ analyticsPanel(a store.Analytics, chartID, scope string, heatmap bool, rng string, users []store.User, selected []int64) {
+// analyticsPanel is the shared usage block: totals, the calendar activity grid
+// with its window selector, the per-user filter (overview only), and the
+// Tokens/Dollars toggle, plus the model and agent breakdowns. The overview renders
+// it fleet-wide and a project page renders it scoped to one project, so the two
+// surfaces read identically. The page head (Overview, or the project name) already
+// names the scope, so the panel carries no subtitle of its own. It carries
+// id="usage" so the range selector can swap the whole panel (stats, grid, and
+// breakdowns all reflect the window) in one shot. ranges is the prebuilt selector;
+// rng marks the active window, and users/selected drive the per-user filter, which
+// renders only when users is non-empty (the project page passes nil).
+templ analyticsPanel(a store.Analytics, chartID string, ranges []RangeOption, rng string, users []store.User, selected []int64) {
 	<section class="analytics" id="usage">
-		// The overview's page head already names the scope ("Overview"), so a second
-		// "Usage / <scope>" line just repeats it. The chart pages (projects, single
-		// project) keep the header to title the panel.
-		if !heatmap {
-			<div class="panel-head">
-				<h2>Usage</h2>
-				<span class="muted small">{ scope }</span>
-			</div>
-		}
 		if !a.HasData() {
 			<div class="empty">No usage recorded yet.</div>
 		} else {
@@ -50,13 +41,9 @@ templ analyticsPanel(a store.Analytics, chartID, scope string, heatmap bool, rng
 				@statTokens(a)
 				@stat("Sessions", fmt.Sprintf("%d", a.Sessions), "")
 			</div>
-			if heatmap {
-				@heatmapBlock(a, chartID, rng, users, selected)
-			} else {
-				@chartBlock(a, chartID)
-			}
+			@heatmapBlock(a, chartID, ranges, rng, users, selected)
 			<div class="breakdowns">
-				@breakdownList("By model", BuildBreakdown(a.Models))
+				@breakdownList("By model", BuildBreakdown(FoldUnknownModels(a.Models)))
 				@breakdownList("By agent", BuildBreakdown(a.Agents))
 			</div>
 		}
@@ -87,32 +74,22 @@ templ statTokens(a store.Analytics) {
 	</div>
 }
 
-// chartBlock holds the time-series canvas and the inline JSON the SVG chart
-// module hydrates from. The metric toggle lets the reader switch the series the
-// chart draws (cost or token classes) without a round trip.
-templ chartBlock(a store.Analytics, chartID string) {
-	<div class="chart-wrap">
-		<div class="chart-toolbar" role="group" aria-label="Metric">
-			<button type="button" class="seg active" data-metric="cost" data-chart-target={ chartID }>Cost</button>
-			<button type="button" class="seg" data-metric="tokens" data-chart-target={ chartID }>Tokens</button>
-		</div>
-		<div class="chart" id={ chartID } data-chart data-series={ AnalyticsJSON(a) }></div>
-	</div>
-}
-
-// heatmapBlock holds the calendar activity grid and the same inline daily JSON
-// the line chart hydrates from. The grid always reads as a daily view (a cell
-// per day over a trailing year); the toggle switches whether cell intensity
-// scales by token volume or by dollars spent. Hovering a cell surfaces the
-// day's total and its token breakdown (in, out, cache read, cache write).
-templ heatmapBlock(a store.Analytics, chartID, rng string, users []store.User, selected []int64) {
+// heatmapBlock holds the calendar activity grid and the inline daily JSON the
+// grid module hydrates from. The grid always reads as a daily view (a cell per
+// day over a trailing year); the toggle switches whether cell intensity scales
+// by token volume or by dollars spent. Hovering a cell surfaces the day's total
+// and its token breakdown (in, out, cache read, cache write). On the overview the
+// head also carries the per-user filter, rendered only when users is non-empty.
+templ heatmapBlock(a store.Analytics, chartID string, ranges []RangeOption, rng string, users []store.User, selected []int64) {
 	<div class="heatmap-wrap">
 		<div class="heatmap-head">
 			<span class="label">Daily activity</span>
 			<div class="heatmap-controls">
-				@rangeSelector(rng, selected)
-				<span class="ctrl-sep" aria-hidden="true"></span>
-				@userFilter(users, selected, rng)
+				@rangeSelector(ranges)
+				if len(users) > 0 {
+					<span class="ctrl-sep" aria-hidden="true"></span>
+					@userFilter(users, selected, rng)
+				}
 				<span class="ctrl-sep" aria-hidden="true"></span>
 				<div class="chart-toolbar" role="group" aria-label="Metric">
 					<button type="button" class="seg active" data-metric="tokens" data-heatmap-target={ chartID }>Tokens</button>
@@ -124,24 +101,24 @@ templ heatmapBlock(a store.Analytics, chartID, rng string, users []store.User, s
 	</div>
 }
 
-// rangeSelector is the trailing-window control, sat beside the user filter in the
-// grid head. Each button refetches the overview at its range and swaps the whole
-// usage panel in place (hx-select="#usage"), so the stats, grid intensity, and
-// breakdowns all move together; hx-push-url keeps the window in the address bar
-// across reloads. Each href carries the current user selection so switching the
-// window does not drop the chosen users.
-templ rangeSelector(rng string, selected []int64) {
+// rangeSelector is the trailing-window control, sat in the grid head beside the
+// metric toggle (and, on the overview, the per-user filter). Each button refetches
+// its surface at the chosen window and swaps the whole usage panel in place
+// (hx-select="#usage"), so the stats, grid intensity, and breakdowns all move
+// together; hx-push-url keeps the window (and any preserved filters, like the
+// overview's user selection) in the address bar across reloads.
+templ rangeSelector(ranges []RangeOption) {
 	<div class="chart-toolbar" role="group" aria-label="Date range">
-		for _, dr := range DateRanges {
+		for _, o := range ranges {
 			<button
 				type="button"
-				class={ rangeSegClass(dr.Key == rng) }
-				hx-get={ OverviewPath(dr.Key, selected) }
+				class={ rangeSegClass(o.Active) }
+				hx-get={ o.Href }
 				hx-target="#usage"
 				hx-select="#usage"
 				hx-swap="outerHTML"
 				hx-push-url="true"
-			>{ dr.Label }</button>
+			>{ o.Label }</button>
 		}
 	</div>
 }

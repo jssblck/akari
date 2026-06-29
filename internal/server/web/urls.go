@@ -29,6 +29,20 @@ func OverviewPath(rng string, userIDs []int64) string {
 	return "/"
 }
 
+// userValues encodes selected user ids as repeated ?user= params for the range
+// selector to preserve, so switching the overview's window holds the chosen users.
+// It mirrors what OverviewPath emits, fed through RangeOptions' generic preserve.
+func userValues(userIDs []int64) url.Values {
+	if len(userIDs) == 0 {
+		return nil
+	}
+	v := make(url.Values, 1)
+	for _, id := range userIDs {
+		v.Add("user", strconv.FormatInt(id, 10))
+	}
+	return v
+}
+
 // SelectedUserIDs parses the overview's repeated ?user= ids against the known
 // accounts, keeping only ids that name a real user and returning them in the
 // users-list order. A tampered, stale, or non-numeric id silently drops out, and

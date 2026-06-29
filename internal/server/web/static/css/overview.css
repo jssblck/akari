@@ -1,8 +1,8 @@
-/* The analytics surface: the usage panel shared by the Overview, the projects
-   index, and a single project page. The Overview renders it as a calendar
-   heatmap; the project pages render the time-series line chart. The breakdown
-   tooltip's inner grid is shared with the Sessions/Projects token card (.tok-tip,
-   defined in sessions.css), so a token total reads the same across surfaces. */
+/* The analytics surface: the usage panel shared by the Overview and a single
+   project page. Both render it as a calendar heatmap, so the project view reads
+   exactly like the Overview, scoped to one project. The breakdown tooltip's inner
+   grid is shared with the Sessions/Projects token card (.tok-tip, defined in
+   sessions.css), so a token total reads the same across surfaces. */
 
 /* ---- KPI tiles (Overview) ---- */
 .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--sp-md); margin-bottom: var(--sp-lg); }
@@ -12,30 +12,9 @@
 
 /* ---- Analytics ---- */
 .analytics { margin-top: var(--sp-md); }
-.chart-wrap { margin: var(--sp-md) 0 var(--sp-lg); }
+/* The metric toggle and the window selector share this segmented-control row; it
+   sits above the activity grid (and, for the window selector, in the grid head). */
 .chart-toolbar { margin-bottom: var(--sp-sm); }
-.chart {
-  position: relative; width: 100%; height: 240px;
-  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md);
-  padding: var(--sp-sm);
-}
-.chart svg { display: block; width: 100%; height: 100%; overflow: visible; }
-.chart .grid-line { stroke: var(--border); stroke-width: 1; }
-.chart .axis-label { fill: var(--muted); font: 400 10px var(--mono); }
-.chart .series-line { fill: none; stroke-width: 1.75; stroke-linejoin: round; stroke-linecap: round; }
-.chart .series-area { opacity: 0.16; }
-.chart .crosshair { stroke: var(--lilac); stroke-width: 1; stroke-dasharray: 3 3; opacity: 0; }
-.chart .cursor-dot { fill: var(--lilac); opacity: 0; }
-.chart.cursor-on .crosshair, .chart.cursor-on .cursor-dot { opacity: 1; }
-.chart-readout {
-  position: absolute; top: var(--sp-sm); right: var(--sp-sm);
-  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-sm);
-  padding: 4px 8px; font: 450 0.75rem/1.4 var(--mono); color: var(--subtext);
-  pointer-events: none; opacity: 0; transition: opacity var(--dur-fast) var(--ease-state);
-  white-space: nowrap;
-}
-.chart.cursor-on .chart-readout { opacity: 1; }
-.chart-readout .ro-key { color: var(--lilac); }
 .chart-empty { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--muted); }
 
 /* ---- Calendar heatmap (overview activity grid) ---- */

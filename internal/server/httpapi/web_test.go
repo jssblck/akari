@@ -472,6 +472,119 @@ func TestOverviewRangeWindow(t *testing.T) {
 	}
 }
 
+// TestProjectPageRangeWindow drives the project page through its range query param
+// and the htmx target gating. The project view reads like the overview, scoped to
+// one project: it renders the calendar heatmap with a window selector pointed at
+// the project's own path, the default load marks the 30-day window and ?range=90d
+// moves it, and the two htmx callers split by target: a request for #usage gets the
+// full usage panel (the range selector's swap), one for #session-list gets only the
+// session list (the filter form's swap).
+func TestProjectPageRangeWindow(t *testing.T) {
+	t.Parallel()
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+	c := newClient(t)
+
+	owner, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	ann, err := st.Announce(ctx, store.AnnounceParams{
+		UserID: owner.ID, Agent: "claude", SourceSessionID: "sess-1",
+		ProjectID: projectID, Cwd: "/home/grace/akari", Machine: "laptop",
+	})
+	if err != nil {
+		t.Fatalf("announce: %v", err)
+	}
+	if _, err := st.Pool.Exec(ctx,
+		`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cost_usd, occurred_at, dedup_key)
+		 VALUES ($1, 'claude-opus-4-8', 100, 50, 1.0, now() - make_interval(days => 1), 'u1')`,
+		ann.SessionID); err != nil {
+		t.Fatalf("seed usage: %v", err)
+	}
+
+	// A second session last active 60 days ago: outside the default 30-day window,
+	// so it should drop out of the session list under that window and reappear only
+	// when the window widens to all of history.
+	annOld, err := st.Announce(ctx, store.AnnounceParams{
+		UserID: owner.ID, Agent: "claude", SourceSessionID: "sess-old",
+		ProjectID: projectID, Cwd: "/home/grace/akari", Machine: "laptop",
+	})
+	if err != nil {
+		t.Fatalf("announce old: %v", err)
+	}
+	if _, err := st.Pool.Exec(ctx,
+		`UPDATE sessions SET updated_at = now() - make_interval(days => 60) WHERE id = $1`,
+		annOld.SessionID); err != nil {
+		t.Fatalf("age old session: %v", err)
+	}
+	recentPath := fmt.Sprintf("/sessions/%d", ann.SessionID)
+	oldPath := fmt.Sprintf("/sessions/%d", annOld.SessionID)
+
+	if _, err := c.PostForm(srv.URL+"/login", url.Values{
+		"username": {"grace"}, "password": {"hopper-1906"},
+	}); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+
+	base := fmt.Sprintf("/projects/%d", projectID)
+
+	// The default load renders the heatmap (not the old line chart) and opens on the
+	// year window (the shared default), with the selector refetching from the
+	// project's own path.
+	body := readBody(t, mustGet(t, c, srv.URL+base))
+	if !strings.Contains(body, "data-heatmap") || strings.Contains(body, "data-chart-target") {
+		t.Fatalf("project page should render the heatmap and no line chart, got:\n%s", body)
+	}
+	if !strings.Contains(body, `class="seg active" hx-get="`+base+`?range=year"`) {
+		t.Fatalf("default project page should mark the year window active, got:\n%s", body)
+	}
+
+	// ?range=90d moves the active window and leaves the default unmarked.
+	body = readBody(t, mustGet(t, c, srv.URL+base+"?range=90d"))
+	if !strings.Contains(body, `class="seg active" hx-get="`+base+`?range=90d"`) {
+		t.Fatalf("range=90d should mark the 90-day window active, got:\n%s", body)
+	}
+	if strings.Contains(body, `class="seg active" hx-get="`+base+`?range=year"`) {
+		t.Fatalf("range=90d should not also mark the default window active, got:\n%s", body)
+	}
+
+	// The session list is windowed by the same range: under a 30-day window the
+	// recent session shows and the 60-day-old one drops out; widening to all of
+	// history brings it back.
+	body = readBody(t, mustGet(t, c, srv.URL+base+"?range=30d"))
+	if !strings.Contains(body, recentPath) {
+		t.Fatalf("30-day window should list the recent session, got:\n%s", body)
+	}
+	if strings.Contains(body, oldPath) {
+		t.Fatalf("30-day window should drop the 60-day-old session, got:\n%s", body)
+	}
+	body = readBody(t, mustGet(t, c, srv.URL+base+"?range=all"))
+	if !strings.Contains(body, oldPath) {
+		t.Fatalf("the all-history window should list the 60-day-old session, got:\n%s", body)
+	}
+
+	// An htmx request that targets #usage (the range selector) gets the full panel.
+	reqUsage, _ := http.NewRequest(http.MethodGet, srv.URL+base+"?range=90d", nil)
+	reqUsage.Header.Set("HX-Request", "true")
+	reqUsage.Header.Set("HX-Target", "usage")
+	if body = readBody(t, mustDo(t, c, reqUsage)); !strings.Contains(body, "data-heatmap") {
+		t.Fatalf("an htmx request targeting #usage should render the usage panel, got:\n%s", body)
+	}
+
+	// An htmx request that targets #session-list (the filter form) gets only the list.
+	reqList, _ := http.NewRequest(http.MethodGet, srv.URL+base, nil)
+	reqList.Header.Set("HX-Request", "true")
+	reqList.Header.Set("HX-Target", "session-list")
+	if body = readBody(t, mustDo(t, c, reqList)); strings.Contains(body, "data-heatmap") {
+		t.Fatalf("a session-list htmx request should not include the usage panel, got:\n%s", body)
+	}
+}
+
 // TestOverviewUserFilter drives the overview's per-user scope end to end: an
 // unscoped load aggregates every user (both agents show in the breakdown) and
 // lists each account as a filter option; ?user=<id> narrows the analytics to that
@@ -634,6 +747,17 @@ func mustGet(t *testing.T, c *http.Client, url string) *http.Response {
 	resp, err := c.Get(url)
 	if err != nil {
 		t.Fatalf("get %s: %v", url, err)
+	}
+	return resp
+}
+
+// mustDo runs a prepared request (used to set htmx headers) through the cookie-
+// carrying client, failing the test on a transport error.
+func mustDo(t *testing.T, c *http.Client, req *http.Request) *http.Response {
+	t.Helper()
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatalf("do %s: %v", req.URL, err)
 	}
 	return resp
 }

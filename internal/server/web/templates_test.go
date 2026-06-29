@@ -255,19 +255,36 @@ func TestGlobalSessionListColumns(t *testing.T) {
 	}
 }
 
-// A single project page also keeps the line chart, keyed to its own chart id and
-// retaining the Usage panel header.
-func TestProjectPageKeepsLineChart(t *testing.T) {
+// The project page now reads exactly like the overview, scoped to one project: it
+// renders the calendar heatmap (keyed to its own chart id) with the Tokens/Dollars
+// toggle and a window selector that refetches the panel from the project's own
+// path, preserving any active session filter. It carries no line chart and no
+// redundant "Usage" panel header (the page head already names the project).
+func TestProjectPageRendersHeatmap(t *testing.T) {
 	p := Page{Title: "akari", LoggedIn: true, Active: "projects", Username: "Anna Winlock"}
 	proj := store.ProjectSummary{ID: 7, RemoteKey: "hopper/akari", Kind: "remote", SessionCount: 1}
-	html := renderComponent(t, ProjectPage(p, proj, nil, Facets{}, store.SessionFilter{}, analyticsWithData()))
+	sel := store.SessionFilter{ProjectID: 7, Agent: "claude"}
+	html := renderComponent(t, ProjectPage(p, proj, nil, Facets{}, sel, analyticsWithData(), "90d"))
 
-	for _, want := range []string{`data-chart`, `data-chart-target="chart-project"`, `<h2>Usage</h2>`} {
+	for _, want := range []string{
+		`data-heatmap`, `data-heatmap-target="chart-project"`, `>Tokens</button>`, `>Dollars</button>`,
+		`id="usage"`, `aria-label="Date range"`,
+		// The selector refetches the project's own path, carries the active window,
+		// and rides the active agent filter so switching the window keeps it.
+		`hx-get="/projects/7?agent=claude&amp;range=7d"`,
+		`class="seg active" hx-get="/projects/7?agent=claude&amp;range=90d"`,
+		`hx-target="#usage"`, `hx-select="#usage"`,
+		// The filter form carries the window so a filter submit does not reset it.
+		`<input type="hidden" name="range" value="90d"`,
+	} {
 		if !strings.Contains(html, want) {
-			t.Errorf("project page should render the line chart; missing %q", want)
+			t.Errorf("project page should read like the overview; missing %q", want)
 		}
 	}
-	if strings.Contains(html, `data-heatmap`) {
-		t.Error("project page should not render the heatmap")
+	if strings.Contains(html, `data-chart-target`) {
+		t.Error("project page should not render the line chart")
+	}
+	if strings.Contains(html, `<h2>Usage</h2>`) {
+		t.Error("project page should drop the redundant Usage panel header")
 	}
 }

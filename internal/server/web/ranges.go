@@ -1,9 +1,14 @@
 package web
 
-import "time"
+import (
+	"net/url"
+	"time"
 
-// DateRange is one option in the overview's trailing-window selector. Days is the
-// width of the window; a zero Days means all of history (no lower bound).
+	"github.com/jssblck/akari/internal/server/store"
+)
+
+// DateRange is one option in the trailing-window selector. Days is the width of
+// the window; a zero Days means all of history (no lower bound).
 type DateRange struct {
 	Key   string
 	Label string
@@ -54,4 +59,59 @@ func rangeSegClass(active bool) string {
 		return "seg active"
 	}
 	return "seg"
+}
+
+// RangeOption is one rendered button in the trailing-window selector: the window
+// label, the URL the button refetches the usage panel from, and whether it is the
+// active window. The href is built per panel so the selector can sit on any page
+// (the global overview or one project) and refetch from that page's own path.
+type RangeOption struct {
+	Label  string
+	Href   string
+	Active bool
+}
+
+// RangeOptions builds the selector's buttons for a panel rooted at basePath. Any
+// params in preserve (except range, which each button sets) ride along on every
+// href, so switching the window on a page that also carries other query state
+// (the project page's session filters) does not drop that state from the URL.
+func RangeOptions(basePath string, preserve url.Values, active string) []RangeOption {
+	opts := make([]RangeOption, 0, len(DateRanges))
+	for _, dr := range DateRanges {
+		q := url.Values{}
+		for k, vs := range preserve {
+			if k == "range" {
+				continue
+			}
+			for _, v := range vs {
+				if v != "" {
+					q.Add(k, v)
+				}
+			}
+		}
+		q.Set("range", dr.Key)
+		opts = append(opts, RangeOption{
+			Label:  dr.Label,
+			Href:   basePath + "?" + q.Encode(),
+			Active: dr.Key == active,
+		})
+	}
+	return opts
+}
+
+// ProjectRangeOptions is RangeOptions for a project's usage panel: it roots the
+// selector at the project path and preserves the active session filters, so the
+// window control and the filter rail share the URL without clobbering each other.
+func ProjectRangeOptions(projectID int64, sel store.SessionFilter, active string) []RangeOption {
+	preserve := url.Values{}
+	if sel.Agent != "" {
+		preserve.Set("agent", sel.Agent)
+	}
+	if sel.Username != "" {
+		preserve.Set("user", sel.Username)
+	}
+	if sel.Machine != "" {
+		preserve.Set("machine", sel.Machine)
+	}
+	return RangeOptions(ProjectPath(projectID), preserve, active)
 }

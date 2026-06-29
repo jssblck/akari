@@ -168,11 +168,17 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The same trailing window bounds both the usage panel and the session list, so
+	// the two read the same range; the heatmap's selector and the filter form both
+	// carry it on ?range.
+	rng := web.ParseRange(r.URL.Query().Get("range"))
+	since := web.RangeSince(rng, time.Now())
 	filter := store.SessionFilter{
 		ProjectID: id,
 		Agent:     strings.TrimSpace(r.URL.Query().Get("agent")),
 		Machine:   strings.TrimSpace(r.URL.Query().Get("machine")),
 		Username:  strings.TrimSpace(r.URL.Query().Get("user")),
+		Since:     since,
 	}
 	sessions, err := s.Store.ListSessions(r.Context(), filter)
 	if err != nil {
@@ -180,8 +186,11 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// An htmx request swaps only the session list; a normal load renders the page.
-	if r.Header.Get("HX-Request") == "true" {
+	// The session filter form swaps only the session list (it targets #session-list);
+	// the usage panel's range selector also refetches this handler but targets #usage
+	// and selects the full panel out of a complete page render, so only a session-list
+	// request short-circuits to the list fragment.
+	if r.Header.Get("HX-Request") == "true" && r.Header.Get("HX-Target") == "session-list" {
 		render(w, r, http.StatusOK, web.SessionList(sessions))
 		return
 	}
@@ -191,13 +200,15 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load filters."))
 		return
 	}
-	analytics, err := s.Store.Analytics(r.Context(), id, time.Time{}, nil)
+	// The project page has no per-user filter, so user scope is nil; the window is
+	// the same `since` the session list above is bounded to.
+	analytics, err := s.Store.Analytics(r.Context(), id, since, nil)
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load analytics."))
 		return
 	}
 	wf := web.Facets{Agents: facets.Agents, Machines: facets.Machines, Users: facets.Users}
-	render(w, r, http.StatusOK, web.ProjectPage(s.pageForNav(r, proj.RemoteKey, "projects"), proj, sessions, wf, filter, analytics))
+	render(w, r, http.StatusOK, web.ProjectPage(s.pageForNav(r, proj.RemoteKey, "projects"), proj, sessions, wf, filter, analytics, rng))
 }
 
 // sessionView loads everything the session page (and its live body fragment)

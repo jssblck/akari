@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jssblck/akari/internal/pricing"
 	"github.com/jssblck/akari/internal/server/store"
 )
 
@@ -67,16 +68,48 @@ type BreakdownRow struct {
 	Color    string
 }
 
+// OtherModelLabel is the bucket name for the model breakdown's long tail: every
+// model without a pricing entry folds into this one row.
+const OtherModelLabel = "Other"
+
+// FoldUnknownModels collapses every model without a pricing entry into a single
+// "Other" row, leaving the priced (well-known) models untouched and in their
+// incoming order. Only models we have rates for surface by name on the overview;
+// the rest contribute their totals to "Other" but never their IDs, so a model
+// still under a codename can be exercised without leaking its name.
+//
+// The input is taken in its store order (cost descending); "Other" is appended
+// last regardless of its totals, the usual place for a catch-all bucket. Summing
+// the per-model session counts can overcount a session that spanned several
+// unpriced models, the same approximation the by-model split already makes
+// across its rows.
+func FoldUnknownModels(bs []store.Breakdown) []store.Breakdown {
+	out := make([]store.Breakdown, 0, len(bs)+1)
+	other := store.Breakdown{Label: OtherModelLabel}
+	var folded bool
+	for _, b := range bs {
+		if _, known := pricing.Lookup(b.Label); known {
+			out = append(out, b)
+			continue
+		}
+		other.CostUSD += b.CostUSD
+		other.Tokens += b.Tokens
+		other.Sessions += b.Sessions
+		folded = true
+	}
+	if folded {
+		out = append(out, other)
+	}
+	return out
+}
+
 // BuildBreakdown turns store breakdowns into renderable bar rows. Bar width is
-// proportional to cost; when every slice is unpriced (all-zero cost) it falls
-// back to token share so the bars still carry information.
+// proportional to token volume so model and agent shares compare on the one
+// figure every slice carries: a model still under a codename (unpriced, so its
+// cost folds to zero) still draws a bar that reflects how much it was used.
 func BuildBreakdown(bs []store.Breakdown) []BreakdownRow {
-	var maxCost float64
 	var maxTok int64
 	for _, b := range bs {
-		if b.CostUSD > maxCost {
-			maxCost = b.CostUSD
-		}
 		if b.Tokens > maxTok {
 			maxTok = b.Tokens
 		}
@@ -84,10 +117,7 @@ func BuildBreakdown(bs []store.Breakdown) []BreakdownRow {
 	rows := make([]BreakdownRow, 0, len(bs))
 	for i, b := range bs {
 		pct := 0.0
-		switch {
-		case maxCost > 0:
-			pct = b.CostUSD / maxCost * 100
-		case maxTok > 0:
+		if maxTok > 0 {
 			pct = float64(b.Tokens) / float64(maxTok) * 100
 		}
 		// A non-zero slice always shows a sliver, so it never reads as empty.

@@ -123,8 +123,12 @@ type SessionFilter struct {
 	Agent     string
 	Machine   string
 	Username  string
-	Limit     int
-	Offset    int
+	// Since bounds the list to sessions last active at or after this instant,
+	// matching the analytics window so a project page's session list and its usage
+	// panel cover the same range. The zero time means no lower bound.
+	Since  time.Time
+	Limit  int
+	Offset int
 }
 
 // SessionRow is one row of the global (cross-project) session list: a session
@@ -224,6 +228,9 @@ func (s *Store) ListSessions(ctx context.Context, f SessionFilter) ([]SessionSum
 	if f.Username != "" {
 		add("u.username =", f.Username)
 	}
+	if !f.Since.IsZero() {
+		add("s.updated_at >=", f.Since)
+	}
 
 	q := sessionSelect
 	if len(conds) > 0 {
@@ -308,6 +315,9 @@ func (s *Store) ListAllSessions(ctx context.Context, f SessionFilter) ([]Session
 	}
 	if f.Username != "" {
 		add("u.username =", f.Username)
+	}
+	if !f.Since.IsZero() {
+		add("s.updated_at >=", f.Since)
 	}
 
 	q := globalSessionSelect
