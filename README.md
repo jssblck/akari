@@ -188,7 +188,7 @@ Projects, Search, Account); the signed-in user and log-out sit at its foot.
   recent sessions across every project, so the deep read and the spend view are
   both one click from the door.
 - **Sessions**: every session across all projects in one place, with a faceted
-  filter rail (agent, project, user, machine, each with counts) and a project
+  filter rail (agent, project, user, and machine, each with counts) and a project
   column, so a run is findable without first choosing its project.
 - **Projects index**: one full-width table of git-remote projects, each row with
   its session count, a single token total (hover it for the in/out/cache-read/
@@ -240,25 +240,28 @@ go test ./...     # unit tests
 templ generate    # regenerate templates after editing internal/server/web/*.templ
 ```
 
-Integration tests share one Postgres database and each resets the `public`
-schema, so run them serialized and point them at a throwaway database via
-`AKARI_TEST_DATABASE_URL`. The harness creates that database if it does not yet
-exist (connecting to the `postgres` maintenance database), so no manual setup
-step is needed.
+Integration tests provision an isolated database per test: each test creates a
+uniquely named database, migrates it, and drops it on cleanup (see
+`internal/server/storetest`). Because no two tests share a database, the suite
+runs at the default package parallelism (and individual tests run in parallel),
+so there is no `-p 1`. Point `AKARI_TEST_DATABASE_URL` at any Postgres whose role
+may create databases; only the host and credentials are used, since each test's
+database is created beside the one the URL names (via the `postgres` maintenance
+database), so that named database need not exist.
 
 Under [eph](#worktree-based-development-with-eph) the variable is already set to
-a dedicated `akari_test` database on the workspace's Postgres, separate from the
-`akari` database the running server uses, so the tests never disturb it:
+the workspace's Postgres, separate from the `akari` database the running server
+uses, so the tests never disturb it:
 
 ```sh
-eph run go test -p 1 ./...
+eph run go test ./...
 ```
 
-Without eph, point the variable at any Postgres you do not mind resetting:
+Without eph, point the variable at any Postgres you control:
 
 ```sh
-AKARI_TEST_DATABASE_URL=postgres://akari:akari@localhost:5432/akari_test \
-  go test -p 1 ./...
+AKARI_TEST_DATABASE_URL=postgres://akari:akari@localhost:5432/akari \
+  go test ./...
 ```
 
 Tests that need the database skip cleanly when `AKARI_TEST_DATABASE_URL` is unset.

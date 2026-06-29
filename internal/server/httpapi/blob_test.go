@@ -41,6 +41,7 @@ func seedToolSession(t *testing.T, st *store.Store, userID, projectID int64, sou
 }
 
 func TestDeleteSessionAuthz(t *testing.T) {
+	t.Parallel()
 	srv, st := newTestServer(t)
 	ctx := context.Background()
 
@@ -121,6 +122,7 @@ func TestDeleteSessionAuthz(t *testing.T) {
 }
 
 func TestBlobServingAccessControl(t *testing.T) {
+	t.Parallel()
 	srv, st := newTestServer(t)
 	ctx := context.Background()
 	c := newClient(t)

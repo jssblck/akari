@@ -33,7 +33,8 @@ func TestRelTimeFrom(t *testing.T) {
 }
 
 // FmtRelTime guards the nil/zero case the projects table can hand it (a project
-// with no recorded activity), where a dash reads cleaner than a bogus "today".
+// with no recorded activity), where a dash reads cleaner than a bogus "today",
+// and exercises the live path that reads the wall clock for a present timestamp.
 func TestFmtRelTimeEmpty(t *testing.T) {
 	if got := FmtRelTime(nil); got != "-" {
 		t.Errorf("FmtRelTime(nil) = %q, want %q", got, "-")
@@ -41,5 +42,14 @@ func TestFmtRelTimeEmpty(t *testing.T) {
 	var zero time.Time
 	if got := FmtRelTime(&zero); got != "-" {
 		t.Errorf("FmtRelTime(zero) = %q, want %q", got, "-")
+	}
+	// Noon of the current UTC day lands inside today's bucket whatever the wall
+	// clock reads (relTimeFrom counts whole calendar days), so the exported path
+	// that relTimeFrom's fixed-clock tests cannot reach resolves to "today"
+	// without flaking near midnight.
+	now := time.Now().UTC()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 12, 0, 0, 0, time.UTC)
+	if got := FmtRelTime(&today); got != "today" {
+		t.Errorf("FmtRelTime(today) = %q, want %q", got, "today")
 	}
 }

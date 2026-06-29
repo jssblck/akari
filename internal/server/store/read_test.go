@@ -1,15 +1,18 @@
-package store
+package store_test
 
 import (
 	"context"
 	"strconv"
 	"testing"
+
+	"github.com/jssblck/akari/internal/server/store"
+	"github.com/jssblck/akari/internal/server/storetest"
 )
 
 // seedSess inserts a session with a chosen agent and machine under a user and
 // project, bypassing ingest so the cross-project read paths can be asserted
 // against known inputs. Rows are returned newest-id last.
-func seedSess(t *testing.T, st *Store, userID, projectID int64, agent, machine, src string) int64 {
+func seedSess(t *testing.T, st *store.Store, userID, projectID int64, agent, machine, src string) int64 {
 	t.Helper()
 	var id int64
 	err := st.Pool.QueryRow(context.Background(),
@@ -25,7 +28,7 @@ func seedSess(t *testing.T, st *Store, userID, projectID int64, agent, machine, 
 // seedGlobalCorpus sets up one user, a remote and a local project, and six
 // sessions: four claude / two codex, with one claude session carrying a blank
 // machine to exercise the facet's blank exclusion. Returns the two project ids.
-func seedGlobalCorpus(t *testing.T, st *Store) (userID, remoteID, localID int64) {
+func seedGlobalCorpus(t *testing.T, st *store.Store) (userID, remoteID, localID int64) {
 	t.Helper()
 	ctx := context.Background()
 	u, err := st.Register(ctx, "grace", "hash", "")
@@ -49,12 +52,77 @@ func seedGlobalCorpus(t *testing.T, st *Store) (userID, remoteID, localID int64)
 	return u.ID, remoteID, localID
 }
 
+// TestListProjectsRollups asserts the projects-index rollup: session counts and
+// all four token classes (input, output, cache read, cache write) sum per
+// project, and the synthetic TotalTokens reduces them to the single figure the
+// index shows. Two sessions are seeded so the sums are not trivially one row.
+func TestListProjectsRollups(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	u, err := st.Register(ctx, "ada", "hash", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	projID, err := st.UpsertProject(ctx, "github.com/ada-lovelace/engine", "github.com", "ada-lovelace", "engine", "engine", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	seedTokens := func(src string, in, out, cr, cw int64, cost float64) {
+		t.Helper()
+		_, err := st.Pool.Exec(ctx,
+			`INSERT INTO sessions (user_id, project_id, agent, source_session_id, machine,
+			   total_input_tokens, total_output_tokens, total_cache_read_tokens,
+			   total_cache_write_tokens, total_cost_usd)
+			 VALUES ($1,$2,'claude',$3,'box',$4,$5,$6,$7,$8)`,
+			u.ID, projID, src, in, out, cr, cw, cost)
+		if err != nil {
+			t.Fatalf("seed tokens: %v", err)
+		}
+	}
+	seedTokens("s1", 100, 50, 30, 20, 1.25)
+	seedTokens("s2", 400, 150, 70, 80, 3.75)
+
+	projects, err := st.ListProjects(ctx)
+	if err != nil {
+		t.Fatalf("list projects: %v", err)
+	}
+	var got *store.ProjectSummary
+	for i := range projects {
+		if projects[i].ID == projID {
+			got = &projects[i]
+		}
+	}
+	if got == nil {
+		t.Fatal("seeded project not in ListProjects result")
+	}
+	if got.SessionCount != 2 {
+		t.Errorf("SessionCount = %d, want 2", got.SessionCount)
+	}
+	for _, c := range []struct {
+		name string
+		got  int64
+		want int64
+	}{
+		{"TotalInput", got.TotalInput, 500},
+		{"TotalOutput", got.TotalOutput, 200},
+		{"TotalCacheRead", got.TotalCacheRead, 100},
+		{"TotalCacheWrite", got.TotalCacheWrite, 100},
+		{"TotalTokens", got.TotalTokens(), 900},
+	} {
+		if c.got != c.want {
+			t.Errorf("%s = %d, want %d", c.name, c.got, c.want)
+		}
+	}
+}
+
 func TestListAllSessions(t *testing.T) {
-	st := newTestStore(t)
+	t.Parallel()
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 	_, remoteID, _ := seedGlobalCorpus(t, st)
 
-	all, err := st.ListAllSessions(ctx, SessionFilter{})
+	all, err := st.ListAllSessions(ctx, store.SessionFilter{})
 	if err != nil {
 		t.Fatalf("list all: %v", err)
 	}
@@ -73,21 +141,21 @@ func TestListAllSessions(t *testing.T) {
 	}
 
 	// Filters narrow the set.
-	claude, err := st.ListAllSessions(ctx, SessionFilter{Agent: "claude"})
+	claude, err := st.ListAllSessions(ctx, store.SessionFilter{Agent: "claude"})
 	if err != nil || len(claude) != 4 {
 		t.Fatalf("agent filter: len=%d err=%v, want 4", len(claude), err)
 	}
-	inRemote, err := st.ListAllSessions(ctx, SessionFilter{ProjectID: remoteID})
+	inRemote, err := st.ListAllSessions(ctx, store.SessionFilter{ProjectID: remoteID})
 	if err != nil || len(inRemote) != 3 {
 		t.Fatalf("project filter: len=%d err=%v, want 3", len(inRemote), err)
 	}
-	byMachine, err := st.ListAllSessions(ctx, SessionFilter{Machine: "rig"})
+	byMachine, err := st.ListAllSessions(ctx, store.SessionFilter{Machine: "rig"})
 	if err != nil || len(byMachine) != 2 {
 		t.Fatalf("machine filter: len=%d err=%v, want 2", len(byMachine), err)
 	}
 
 	// Limit caps the page.
-	capped, err := st.ListAllSessions(ctx, SessionFilter{Limit: 2})
+	capped, err := st.ListAllSessions(ctx, store.SessionFilter{Limit: 2})
 	if err != nil || len(capped) != 2 {
 		t.Fatalf("limit: len=%d err=%v, want 2", len(capped), err)
 	}
@@ -97,7 +165,8 @@ func TestListAllSessions(t *testing.T) {
 // up, a re-attribution (project change) shifts the count, and a delete counts
 // down and drops the emptied value.
 func TestSessionFacetTrigger(t *testing.T) {
-	st := newTestStore(t)
+	t.Parallel()
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 	u, err := st.Register(ctx, "grace", "hash", "")
 	if err != nil {
@@ -146,7 +215,8 @@ func TestSessionFacetTrigger(t *testing.T) {
 }
 
 func TestGlobalFacets(t *testing.T) {
-	st := newTestStore(t)
+	t.Parallel()
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 	seedGlobalCorpus(t, st)
 

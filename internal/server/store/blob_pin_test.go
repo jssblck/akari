@@ -1,10 +1,13 @@
-package store
+package store_test
 
 import (
 	"bytes"
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/jssblck/akari/internal/server/store"
+	"github.com/jssblck/akari/internal/server/storetest"
 )
 
 // TestPutBlobPinsAgainstSweep is the sweep-safety invariant for the client-CAS
@@ -12,11 +15,12 @@ import (
 // references it, must survive the sweep. The pin protects it; only after the pin
 // is forced to expire and the body is still unreferenced does the sweep reclaim it.
 func TestPutBlobPinsAgainstSweep(t *testing.T) {
-	st := newTestStore(t)
+	t.Parallel()
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 
 	body := []byte("a freshly uploaded tool result, not yet referenced")
-	sha := HashBytes(body)
+	sha := store.HashBytes(body)
 
 	if err := st.PutBlob(ctx, sha, "text/plain", "application/octet-stream", bytes.NewReader(body)); err != nil {
 		t.Fatalf("put blob: %v", err)
@@ -66,7 +70,8 @@ func TestPutBlobPinsAgainstSweep(t *testing.T) {
 // content type defaults to application/octet-stream (a raw body); a zstd label is kept
 // verbatim, since the server stores the bytes opaquely and never inspects them.
 func TestPutBlobPersistsContentType(t *testing.T) {
-	st := newTestStore(t)
+	t.Parallel()
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 
 	cases := []struct {
@@ -81,7 +86,7 @@ func TestPutBlobPersistsContentType(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			sha := HashString(tc.body) // distinct body per case, so no dedup collision
+			sha := store.HashString(tc.body) // distinct body per case, so no dedup collision
 			if err := st.PutBlob(ctx, sha, "text/plain", tc.ct, strings.NewReader(tc.body)); err != nil {
 				t.Fatalf("put blob: %v", err)
 			}
@@ -106,10 +111,11 @@ func TestPutBlobPersistsContentType(t *testing.T) {
 // declared hash is refused, so a corrupt upload cannot enter the CAS under a name
 // a later transcript would serve.
 func TestPutBlobRejectsHashMismatch(t *testing.T) {
-	st := newTestStore(t)
+	t.Parallel()
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 
-	wrong := HashBytes([]byte("the real bytes"))
+	wrong := store.HashBytes([]byte("the real bytes"))
 	if err := st.PutBlob(ctx, wrong, "text/plain", "application/octet-stream", strings.NewReader("different bytes")); err == nil {
 		t.Fatal("expected a hash-mismatch error, got nil")
 	}
@@ -125,11 +131,12 @@ func TestPutBlobRejectsHashMismatch(t *testing.T) {
 // race: a present, unreferenced body would otherwise be reclaimable between the
 // check and the transcript append.
 func TestMissingBlobsReportsAbsentAndPinsPresent(t *testing.T) {
-	st := newTestStore(t)
+	t.Parallel()
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 
 	present := []byte("already stored")
-	presentSHA := HashBytes(present)
+	presentSHA := store.HashBytes(present)
 	if err := st.PutBlob(ctx, presentSHA, "text/plain", "application/octet-stream", bytes.NewReader(present)); err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +145,7 @@ func TestMissingBlobsReportsAbsentAndPinsPresent(t *testing.T) {
 	if _, err := st.Pool.Exec(ctx, "UPDATE blob_pins SET expires_at = now() - interval '1 hour'"); err != nil {
 		t.Fatal(err)
 	}
-	absentSHA := HashBytes([]byte("never uploaded"))
+	absentSHA := store.HashBytes([]byte("never uploaded"))
 
 	missing, err := st.MissingBlobs(ctx, []string{presentSHA, absentSHA})
 	if err != nil {
@@ -161,7 +168,8 @@ func TestMissingBlobsReportsAbsentAndPinsPresent(t *testing.T) {
 // TestMissingBlobsEmpty confirms the no-candidates case returns an empty set
 // without a query.
 func TestMissingBlobsEmpty(t *testing.T) {
-	st := newTestStore(t)
+	t.Parallel()
+	st := storetest.NewStore(t)
 	missing, err := st.MissingBlobs(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -175,7 +183,8 @@ func TestMissingBlobsEmpty(t *testing.T) {
 // reference (no blob write) when the client already uploaded the body, and that
 // the reference plus the body survive a sweep together.
 func TestApplyDeltaReferencesUploadedBlob(t *testing.T) {
-	st := newTestStore(t)
+	t.Parallel()
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 
 	u, err := st.Register(ctx, "grace", "hash", "")
@@ -189,9 +198,9 @@ func TestApplyDeltaReferencesUploadedBlob(t *testing.T) {
 	sid := seedSession(t, st, u.ID, projectID, "ref-sess")
 
 	input := `{"file_path":"src/auth.ts"}`
-	inputSHA := HashString(input)
+	inputSHA := store.HashString(input)
 	result := "export function login() {}"
-	resultSHA := HashString(result)
+	resultSHA := store.HashString(result)
 
 	// The client uploaded both bodies before the transcript.
 	if err := st.PutBlob(ctx, inputSHA, "application/json", "application/octet-stream", strings.NewReader(input)); err != nil {
@@ -202,13 +211,13 @@ func TestApplyDeltaReferencesUploadedBlob(t *testing.T) {
 	}
 
 	// The parsed delta carries references, not inline bodies.
-	delta := ProjectionDelta{
-		Messages: []MessageDelta{{Ordinal: 0, Role: "assistant", Content: "x", HasToolUse: true}},
-		ToolCalls: []ProjToolCall{{
+	delta := store.ProjectionDelta{
+		Messages: []store.MessageDelta{{Ordinal: 0, Role: "assistant", Content: "x", HasToolUse: true}},
+		ToolCalls: []store.ProjToolCall{{
 			MessageOrdinal: 0, CallIndex: 0, ToolName: "Read", Category: "read",
 			InputSHA256: inputSHA, InputBytes: int64(len(input)), InputMediaType: "application/json", CallUID: "c1",
 		}},
-		ToolResults: []ToolResultDelta{{
+		ToolResults: []store.ToolResultDelta{{
 			CallUID: "c1", BodySHA256: resultSHA, Bytes: int64(len(result)), MediaType: "text/plain", Status: "ok",
 		}},
 	}
@@ -246,7 +255,8 @@ func TestApplyDeltaReferencesUploadedBlob(t *testing.T) {
 // TestApplyDeltaMissingUploadedBlobFails confirms a transcript referencing a body
 // the CAS does not hold is refused rather than recording a dangling reference.
 func TestApplyDeltaMissingUploadedBlobFails(t *testing.T) {
-	st := newTestStore(t)
+	t.Parallel()
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 
 	u, err := st.Register(ctx, "grace", "hash", "")
@@ -259,11 +269,11 @@ func TestApplyDeltaMissingUploadedBlobFails(t *testing.T) {
 	}
 	sid := seedSession(t, st, u.ID, projectID, "missing-sess")
 
-	delta := ProjectionDelta{
-		Messages: []MessageDelta{{Ordinal: 0, Role: "assistant", Content: "x", HasToolUse: true}},
-		ToolCalls: []ProjToolCall{{
+	delta := store.ProjectionDelta{
+		Messages: []store.MessageDelta{{Ordinal: 0, Role: "assistant", Content: "x", HasToolUse: true}},
+		ToolCalls: []store.ProjToolCall{{
 			MessageOrdinal: 0, CallIndex: 0, ToolName: "Read",
-			InputSHA256: HashString("never uploaded"), InputBytes: 5, InputMediaType: "application/json", CallUID: "c1",
+			InputSHA256: store.HashString("never uploaded"), InputBytes: 5, InputMediaType: "application/json", CallUID: "c1",
 		}},
 	}
 	if err := st.ApplyProjectionDelta(ctx, sid, delta); err == nil {
