@@ -5,11 +5,15 @@ package store
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"sort"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -33,6 +37,56 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 
 // Close releases the connection pool.
 func (s *Store) Close() { s.Pool.Close() }
+
+// EnsureDatabase creates the database named in databaseURL when it does not yet
+// exist, connecting to the server's "postgres" maintenance database to do so. It
+// is a no-op when the database is already present.
+//
+// This supports local and worktree development (and CI), where the integration
+// test database lives in a disposable Postgres that nothing else provisions: a
+// fresh `eph up` brings up an empty server, so the tests create their own target
+// rather than depending on an out-of-band seeding step. It is deliberately not
+// called by the server itself, which never creates its own database.
+func EnsureDatabase(ctx context.Context, databaseURL string) error {
+	u, err := url.Parse(databaseURL)
+	if err != nil {
+		return fmt.Errorf("parse database url: %w", err)
+	}
+	name := strings.TrimPrefix(u.Path, "/")
+	if name == "" {
+		return fmt.Errorf("database url has no database name")
+	}
+
+	admin := *u
+	admin.Path = "/postgres"
+	conn, err := pgx.Connect(ctx, admin.String())
+	if err != nil {
+		return fmt.Errorf("connect maintenance database: %w", err)
+	}
+	defer conn.Close(ctx)
+
+	var exists bool
+	if err := conn.QueryRow(ctx,
+		"SELECT EXISTS (SELECT FROM pg_database WHERE datname = $1)", name).Scan(&exists); err != nil {
+		return fmt.Errorf("check database %q: %w", name, err)
+	}
+	if exists {
+		return nil
+	}
+
+	// CREATE DATABASE cannot run inside a transaction or take a parameterized
+	// name, so quote the identifier ourselves; the name comes from our own URL.
+	quoted := `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+	if _, err := conn.Exec(ctx, "CREATE DATABASE "+quoted); err != nil {
+		// Tolerate a concurrent creator winning the race (duplicate_database).
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "42P04" {
+			return nil
+		}
+		return fmt.Errorf("create database %q: %w", name, err)
+	}
+	return nil
+}
 
 // Migrate applies every embedded migration not yet recorded, in lexical order,
 // each inside its own transaction. It is safe to run on every startup.
