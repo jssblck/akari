@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -12,6 +13,30 @@ import (
 	"github.com/jssblck/akari/internal/parser"
 	"github.com/klauspost/compress/zstd"
 )
+
+// errBoom is the sentinel a failing test reader returns instead of io.EOF.
+var errBoom = errors.New("boom")
+
+// errAfter yields n bytes of 'a', then returns errBoom in place of EOF, simulating a
+// read failure partway through a body. With remaining below the threshold it fails
+// during HashStream's peek; at or above it, peek succeeds and the failure lands in the
+// post-threshold copy.
+type errAfter struct{ remaining int }
+
+func (e *errAfter) Read(p []byte) (int, error) {
+	if e.remaining == 0 {
+		return 0, errBoom
+	}
+	n := len(p)
+	if n > e.remaining {
+		n = e.remaining
+	}
+	for i := 0; i < n; i++ {
+		p[i] = 'a'
+	}
+	e.remaining -= n
+	return n, nil
+}
 
 func sha256Hex(b []byte) string {
 	sum := sha256.Sum256(b)
@@ -159,5 +184,49 @@ func TestHashStreamCancel(t *testing.T) {
 	r := bytes.NewReader(bytes.Repeat([]byte("x"), 1<<20))
 	if _, _, _, err := New().HashStream(ctx, r); err == nil {
 		t.Fatal("expected a context error from a canceled hash stream")
+	}
+}
+
+// TestHashStreamPeekReadError confirms a read failure before the threshold (while
+// peeking to make the compression decision) is surfaced, not swallowed as a short body.
+func TestHashStreamPeekReadError(t *testing.T) {
+	withThreshold(t, 128)
+	r := &errAfter{remaining: 64} // fails inside the first Threshold bytes
+	if _, _, _, err := New().HashStream(context.Background(), r); err == nil {
+		t.Fatal("expected the peek read error to surface from HashStream")
+	}
+}
+
+// TestHashStreamCopyReadError confirms a read failure after the threshold (while
+// streaming the rest of a large body through the encoder) is surfaced, so a truncated
+// body never yields a key that would mislabel partial content as complete.
+func TestHashStreamCopyReadError(t *testing.T) {
+	withThreshold(t, 128)
+	r := &errAfter{remaining: 128 + 200} // peek fills, then the copy hits the error
+	if _, _, _, err := New().HashStream(context.Background(), r); err == nil {
+		t.Fatal("expected the post-threshold copy read error to surface from HashStream")
+	}
+}
+
+// TestStreamAsPropagatesSourceError confirms a read failure in the source surfaces on
+// the consumer's Read of the zstd pipe, so a failed compression aborts the upload
+// rather than yielding a truncated, wrong-keyed body.
+func TestStreamAsPropagatesSourceError(t *testing.T) {
+	withThreshold(t, 16)
+	r := New().StreamAs(context.Background(), &errAfter{remaining: 4096}, parser.ContentZstd)
+	if _, err := io.ReadAll(r); err == nil {
+		t.Fatal("expected the source read error to surface through the zstd pipe")
+	}
+}
+
+// TestStreamAsCancel confirms a canceled context aborts the streamed zstd output
+// instead of producing the whole compressed body.
+func TestStreamAsCancel(t *testing.T) {
+	withThreshold(t, 16)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r := New().StreamAs(ctx, bytes.NewReader(bytes.Repeat([]byte("x"), 1<<20)), parser.ContentZstd)
+	if _, err := io.ReadAll(r); err == nil {
+		t.Fatal("expected a context error from a canceled streamed encode")
 	}
 }

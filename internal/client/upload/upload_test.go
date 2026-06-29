@@ -15,6 +15,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/jssblck/akari/internal/casenc"
+	"github.com/jssblck/akari/internal/parser"
+	"github.com/klauspost/compress/zstd"
 )
 
 // fakeServer is an in-memory stand-in for the akari ingest endpoints. It holds
@@ -24,10 +28,12 @@ import (
 // the stored bytes are the TRANSFORMED transcript, so prefix_sha256 is the hash of
 // buf and the client verifies its transformed prefix against it.
 type fakeServer struct {
-	mu    sync.Mutex
-	buf   []byte
-	blobs map[string][]byte // sha256 -> body bytes
-	puts  int               // count of accepted blob uploads, for dedup assertions
+	mu        sync.Mutex
+	buf       []byte
+	blobs     map[string][]byte // sha256 -> stored (possibly compressed) body bytes
+	blobCT    map[string]string // sha256 -> declared storage content_type
+	blobMedia map[string]string // sha256 -> declared semantic media_type
+	puts      int               // count of accepted blob uploads, for dedup assertions
 
 	// conflictOnce, when set, makes the next chunk POST return 409 after first
 	// appending injectBytes, simulating another writer advancing the cursor.
@@ -41,6 +47,12 @@ type fakeServer struct {
 func (s *fakeServer) handler() http.Handler {
 	if s.blobs == nil {
 		s.blobs = map[string][]byte{}
+	}
+	if s.blobCT == nil {
+		s.blobCT = map[string]string{}
+	}
+	if s.blobMedia == nil {
+		s.blobMedia = map[string]string{}
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/ingest/session", func(w http.ResponseWriter, r *http.Request) {
@@ -111,6 +123,8 @@ func (s *fakeServer) handler() http.Handler {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		s.blobs[sha] = body
+		s.blobCT[sha] = r.URL.Query().Get("content_type")
+		s.blobMedia[sha] = r.URL.Query().Get("media_type")
 		s.puts++
 		writeJSON(w, map[string]any{"sha256": sha})
 	})
@@ -287,6 +301,82 @@ func TestSyncGivesUpAfterRepeatedConflicts(t *testing.T) {
 func hexSHA(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
+}
+
+// TestPutBodyDeclaresContentTypeAndUploadsStoredBytes proves putBody PUTs the exact
+// already-encoded stored bytes for an in-hand body and declares both the semantic
+// media type and the storage content type, for a raw small body and a zstd-compressed
+// one. The server keys on the bytes it receives, so the content type putBody declares
+// must match the bytes it sends.
+func TestPutBodyDeclaresContentTypeAndUploadsStoredBytes(t *testing.T) {
+	c, fs := newTestClient(t)
+	ctx := context.Background()
+	enc := casenc.New()
+
+	// Raw small body: stored verbatim, declared application/octet-stream.
+	raw := []byte(`{"file_path":"a.go"}`)
+	rawSHA, rawStored, rawCT := enc.EncodeBody(raw)
+	rawRef := bodyRef{media: "application/json", kind: "input", haveContent: true, sha: rawSHA, stored: rawStored, contentType: rawCT, rawLen: len(raw)}
+	if err := c.putBody(ctx, enc, rawSHA, rawCT, rawRef); err != nil {
+		t.Fatalf("put raw body: %v", err)
+	}
+	if got := fs.blobs[rawSHA]; !bytes.Equal(got, raw) {
+		t.Fatalf("server stored %q for the raw body, want the verbatim bytes", got)
+	}
+	if fs.blobCT[rawSHA] != parser.ContentRaw || fs.blobMedia[rawSHA] != "application/json" {
+		t.Fatalf("raw body declared content_type=%q media_type=%q, want %q/application/json", fs.blobCT[rawSHA], fs.blobMedia[rawSHA], parser.ContentRaw)
+	}
+
+	// Compressed body: stored zstd, declared application/zstd, server keeps the
+	// compressed bytes verbatim (it never decompresses).
+	body := []byte(strings.Repeat("compress me ", 400))
+	zSHA, zStored, zCT := enc.EncodeBody(body)
+	if zCT != parser.ContentZstd {
+		t.Fatalf("expected the large body to compress, got content type %q", zCT)
+	}
+	zRef := bodyRef{media: "text/plain", kind: "result", haveContent: true, sha: zSHA, stored: zStored, contentType: zCT, rawLen: len(body)}
+	if err := c.putBody(ctx, enc, zSHA, zCT, zRef); err != nil {
+		t.Fatalf("put compressed body: %v", err)
+	}
+	if got := fs.blobs[zSHA]; !bytes.Equal(got, zStored) {
+		t.Fatal("server stored bytes differ from the compressed stored bytes putBody sent")
+	}
+	if fs.blobCT[zSHA] != parser.ContentZstd {
+		t.Fatalf("compressed body declared content_type=%q, want %q", fs.blobCT[zSHA], parser.ContentZstd)
+	}
+}
+
+// TestSyncUploadsCompressedBigBody drives a full sync of a transcript whose tool
+// result is large and compressible: the streaming big-line path encodes it to zstd and
+// putBody streams those compressed bytes to the server. This exercises putBody's
+// streamed (not in-hand) branch, so the fake CAS must receive content_type=zstd and
+// bytes that decode to the original.
+func TestSyncUploadsCompressedBigBody(t *testing.T) {
+	setBigLineThreshold(t, 256)
+	c, fs := newTestClient(t)
+
+	body := strings.Repeat("compress me ", 400)
+	content := `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"` + body + `"}]}}` + "\n"
+	if _, err := c.SyncFile(context.Background(), target(tempFile(t, content))); err != nil {
+		t.Fatal(err)
+	}
+
+	wantSHA, _, _ := casenc.New().EncodeBody([]byte(body))
+	if fs.blobCT[wantSHA] != parser.ContentZstd {
+		t.Fatalf("streamed big body content_type = %q, want %q", fs.blobCT[wantSHA], parser.ContentZstd)
+	}
+	dec, err := zstd.NewReader(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dec.Close()
+	got, err := dec.DecodeAll(fs.blobs[wantSHA], nil)
+	if err != nil {
+		t.Fatalf("decode stored bytes: %v", err)
+	}
+	if string(got) != body {
+		t.Fatal("stored compressed bytes do not decode to the original body")
+	}
 }
 
 // TestVerifyPrefixUsesCachedDigest proves the fast path compares the cached digest

@@ -61,6 +61,47 @@ func TestPutBlobPinsAgainstSweep(t *testing.T) {
 	}
 }
 
+// TestPutBlobPersistsContentType confirms PutBlob records the storage content type and
+// BlobMeta reads it back, so the serve path can set Content-Encoding from it. An empty
+// content type defaults to application/octet-stream (a raw body); a zstd label is kept
+// verbatim, since the server stores the bytes opaquely and never inspects them.
+func TestPutBlobPersistsContentType(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	cases := []struct {
+		name string
+		body string
+		ct   string
+		want string
+	}{
+		{"explicit-raw", "a small raw body", "application/octet-stream", "application/octet-stream"},
+		{"empty-defaults-to-raw", "a different body", "", "application/octet-stream"},
+		{"zstd-preserved", "pretend these are compressed bytes", "application/zstd", "application/zstd"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sha := HashString(tc.body) // distinct body per case, so no dedup collision
+			if err := st.PutBlob(ctx, sha, "text/plain", tc.ct, strings.NewReader(tc.body)); err != nil {
+				t.Fatalf("put blob: %v", err)
+			}
+			meta, err := st.BlobMeta(ctx, sha)
+			if err != nil {
+				t.Fatalf("blob meta: %v", err)
+			}
+			if meta.ContentType != tc.want {
+				t.Errorf("content type = %q, want %q", meta.ContentType, tc.want)
+			}
+			if meta.MediaType != "text/plain" {
+				t.Errorf("media type = %q, want text/plain", meta.MediaType)
+			}
+			if meta.ByteLen != int64(len(tc.body)) {
+				t.Errorf("byte len = %d, want %d", meta.ByteLen, len(tc.body))
+			}
+		})
+	}
+}
+
 // TestPutBlobRejectsHashMismatch confirms a body whose bytes do not match the
 // declared hash is refused, so a corrupt upload cannot enter the CAS under a name
 // a later transcript would serve.

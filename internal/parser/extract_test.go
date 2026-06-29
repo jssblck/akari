@@ -2,6 +2,7 @@ package parser
 
 import (
 	"encoding/base64"
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
@@ -17,6 +18,57 @@ type idEncoder struct{}
 
 func (idEncoder) EncodeBody(raw []byte) (string, []byte, string) {
 	return HashString(string(raw)), raw, ContentRaw
+}
+
+// tagEncoder is a BodyEncoder whose outputs are deliberately distinct from the raw
+// body: a fixed key prefix, a transformed stored form, and the zstd content type. The
+// identity encoder above cannot tell whether the parser actually uses the encoder's
+// results or just hashes the raw bytes itself, since for identity encoding the two
+// coincide. This encoder makes them diverge, so a parser that ignored the injected
+// encoder (and fell back to a raw-bytes hash or the raw bytes as stored) would fail the
+// assertions below.
+type tagEncoder struct{}
+
+func (tagEncoder) EncodeBody(raw []byte) (string, []byte, string) {
+	return "key-" + HashString(string(raw)), append([]byte("ENC:"), raw...), ContentZstd
+}
+
+// TestRewriteLineUsesEncoderOutput is the dependency-injection contract: RewriteLine
+// must key the sentinel and the lifted body on the encoder's stored-byte hash, carry
+// the encoder's stored bytes and storage content type, and still record the RAW body
+// length. That is what lets the client swap in real zstd encoding without the parser
+// (and therefore the server) linking any compression code.
+func TestRewriteLineUsesEncoderOutput(t *testing.T) {
+	line := []byte(`{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"a.go"}}]}}` + "\n")
+	rewritten, bodies := RewriteLine(AgentClaude, line, tagEncoder{})
+
+	if len(bodies) != 1 {
+		t.Fatalf("lifted %d bodies, want 1", len(bodies))
+	}
+	raw := `{"file_path":"a.go"}`
+	wantKey := "key-" + HashString(raw)
+	b := bodies[0]
+	if b.SHA256 != wantKey {
+		t.Errorf("body key = %q, want the encoder's key %q (parser hashed the raw bytes itself?)", b.SHA256, wantKey)
+	}
+	if string(b.Stored) != "ENC:"+raw {
+		t.Errorf("stored bytes = %q, want the encoder's stored form %q", b.Stored, "ENC:"+raw)
+	}
+	if b.ContentType != ContentZstd {
+		t.Errorf("content type = %q, want the encoder's %q", b.ContentType, ContentZstd)
+	}
+	if b.Bytes != len(raw) {
+		t.Errorf("recorded bytes = %d, want the RAW length %d (compression must not change the recorded size)", b.Bytes, len(raw))
+	}
+
+	// The sentinel embedded in the rewritten line must carry the encoder's key and the
+	// raw body length, so the transcript references the stored bytes.
+	if !strings.Contains(string(rewritten), `"sha256":"`+wantKey+`"`) {
+		t.Errorf("sentinel does not carry the encoder key %q: %s", wantKey, rewritten)
+	}
+	if !strings.Contains(string(rewritten), fmt.Sprintf(`"bytes":%d`, len(raw))) {
+		t.Errorf("sentinel does not record the raw length %d: %s", len(raw), rewritten)
+	}
 }
 
 // inlineBodies parses the original transcript and returns, in a stable order, the

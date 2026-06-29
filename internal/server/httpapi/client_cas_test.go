@@ -117,6 +117,65 @@ func TestClientCASRoundTrip(t *testing.T) {
 	assertBlob(t, st, resultSHA, result, "text/plain")
 }
 
+// TestBlobUploadRejectsUnknownContentType confirms the upload handler refuses a
+// content_type it cannot label on the way back out, fail-closed, rather than storing a
+// body it could not serve with a correct Content-Encoding. Only raw and zstd are
+// accepted; anything else is a 400 and nothing is stored. The same body with a valid
+// content_type is accepted and persists that content_type, so the rejection is the
+// label and not the request shape.
+func TestBlobUploadRejectsUnknownContentType(t *testing.T) {
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+	owner, err := st.Register(ctx, "ada", mustHash(t, "lovelace-1843"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawToken, err := auth.NewToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateAPIToken(ctx, owner.ID, "laptop", "ingest", auth.HashToken(rawToken)); err != nil {
+		t.Fatal(err)
+	}
+
+	body := []byte("a tool body the server stores opaquely")
+	sha := store.HashBytes(body)
+	put := func(ct string) *http.Response {
+		u := fmt.Sprintf("%s/api/v1/ingest/blob/%s?media_type=text/plain&content_type=%s", srv.URL, sha, url.QueryEscape(ct))
+		req, err := http.NewRequest(http.MethodPut, u, bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+rawToken)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("put blob: %v", err)
+		}
+		return resp
+	}
+
+	resp := put("application/gzip")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unknown content_type status = %d, want 400", resp.StatusCode)
+	}
+	if _, err := st.BlobMeta(ctx, sha); err == nil {
+		t.Fatal("a rejected upload must not be stored")
+	}
+
+	// The bytes are labeled zstd but are not actually a zstd frame; the server stores
+	// them verbatim and never decompresses, so the hash match alone admits them.
+	resp = put(parser.ContentZstd)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("valid content_type status = %d, want 200", resp.StatusCode)
+	}
+	meta, err := st.BlobMeta(ctx, sha)
+	if err != nil || meta.ContentType != parser.ContentZstd {
+		t.Fatalf("stored content_type = %q (err=%v), want %q", meta.ContentType, err, parser.ContentZstd)
+	}
+}
+
 // TestClientCASDedupOnResync is the no-churn invariant: syncing an unchanged file
 // a second time uploads zero transcript bytes and zero bodies. It proves the
 // transform is byte stable and the CAS dedup short-circuits the body upload.

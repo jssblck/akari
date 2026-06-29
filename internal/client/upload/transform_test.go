@@ -2,6 +2,7 @@ package upload
 
 import (
 	"context"
+	"encoding/hex"
 	"io"
 	"os"
 	"strings"
@@ -314,6 +315,37 @@ func TestTransformBigAndSmallEquivalent(t *testing.T) {
 	}
 	if small.bodies[0].SHA256 != bigp.bodies[0].SHA256 {
 		t.Fatalf("big vs small body hash differ: %s vs %s", small.bodies[0].SHA256, bigp.bodies[0].SHA256)
+	}
+}
+
+// TestPrefixDigestRecomputesBigBodyKeys covers the cold-cache verification path for a
+// big line whose body is lifted by streaming. transformPrefixDigest must reproduce the
+// exact transformed bytes the upload produced, which for a big line means re-streaming
+// the body through the encoder to recompute its key, and here re-compressing it (the
+// key is the hash of the compressed bytes). The existing cold-verify test uses bodyless
+// input, so it never reaches the rewriteForDigest big-line branch.
+func TestPrefixDigestRecomputesBigBodyKeys(t *testing.T) {
+	setBigLineThreshold(t, 256)
+	// A result body well past both the big-line threshold and the compression
+	// threshold, and compressible, so the cold path streams and zstd-compresses it.
+	big := strings.Repeat("compress me ", 400)
+	content := `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"` + big + `"}]}}` + "\n"
+	f, size := openTemp(t, content)
+
+	// The transform produces the canonical transformed bytes (and would upload the body).
+	transformed := runTransform(t, f, 0, size, "claude", true).data
+
+	// The cold path must recompute a byte-identical transformed prefix over the whole
+	// file and recover the original cursor, by re-streaming and re-compressing the body.
+	h, orig, ok, err := transformPrefixDigest(context.Background(), f, "claude", size, int64(len(transformed)), casenc.New())
+	if err != nil || !ok {
+		t.Fatalf("cold prefix digest over a big body: ok=%v err=%v", ok, err)
+	}
+	if orig != size {
+		t.Fatalf("recovered original base = %d, want the full size %d", orig, size)
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); got != hexSHA(string(transformed)) {
+		t.Fatal("cold prefix digest does not match the transformed bytes the upload produced")
 	}
 }
 
