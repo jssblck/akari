@@ -77,18 +77,18 @@ type ToolResultOp struct {
 	Status     string
 }
 
-// Delta is everything one Reduce call produces for one raw region: rows to write
-// and the increments to fold into the session aggregates. It carries operations,
-// not a whole session, so applying it is append-only work proportional to the
-// region, never to the session.
+// Delta is everything one Reduce call produces for one raw region: the rows to
+// write and the region's timestamp span. It carries operations, not a whole
+// session, so applying it is append-only work proportional to the region, never to
+// the session. It deliberately carries no message/token counters: the session
+// rollups are derived downstream from the rows that actually persist (the store
+// dedups messages and usage on insert), so a counter here would only risk drifting
+// from that surviving set.
 type Delta struct {
 	Messages    []MessageOp
 	ToolCalls   []ToolCall
 	ToolResults []ToolResultOp
 	Usage       []Usage
-
-	MessagesAdded     int
-	UserMessagesAdded int
 
 	Started time.Time
 	Ended   time.Time
@@ -160,8 +160,6 @@ func (r *reducer) observe(t time.Time) {
 func (r *reducer) addUser(content string, ts time.Time) {
 	ord := r.st.NextOrdinal
 	r.st.NextOrdinal++
-	r.d.MessagesAdded++
-	r.d.UserMessagesAdded++
 	r.d.Messages = append(r.d.Messages, MessageOp{
 		Ordinal: ord, Role: RoleUser, Content: content, Timestamp: ts,
 	})
@@ -190,7 +188,6 @@ func (r *reducer) ensureAssistant(ts time.Time) int {
 	ord := r.st.NextOrdinal
 	r.st.NextOrdinal++
 	r.openCalls = 0
-	r.d.MessagesAdded++
 	r.open = &MessageOp{Ordinal: ord, Role: RoleAssistant, Model: r.st.Model, Timestamp: ts}
 	return ord
 }

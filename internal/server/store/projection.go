@@ -87,25 +87,46 @@ type ProjUsage struct {
 	SourceIndex    int
 }
 
-// ProjectionDelta is the incremental projection write for one parsed region:
-// rows to add and the increments to fold into the session aggregates.
+// ProjectionDelta is the incremental projection write for one parsed region: the
+// rows to add and the region's timestamp span. The session rollups are not folded
+// from precomputed counters carried here. They are derived from the rows that
+// actually persist (see appliedDelta), because the row inserts dedup on conflict
+// and the rollups must count exactly the surviving set. Claude repeats a usage
+// block across sidechain and summary lines, so a region can carry the same usage
+// several times while the ledger keeps one; folding precomputed per-region deltas
+// over-counted those duplicates.
 type ProjectionDelta struct {
 	Messages    []MessageDelta
 	ToolCalls   []ProjToolCall
 	ToolResults []ToolResultDelta
 	Usage       []ProjUsage
 
+	Started time.Time
+	Ended   time.Time
+}
+
+// appliedDelta is what one region's writes actually persisted: the rows that
+// inserted rather than the rows the reducer proposed. The ON CONFLICT DO NOTHING
+// guards on messages and usage drop replays and Claude's duplicated usage blocks,
+// so only the inserted rows contribute here. Folding this into the session rollups
+// is what holds the invariant that, for every agent, sessions.total_* equals the
+// matching sum over usage_events and message_count equals the count of messages
+// rows. Tool calls and results carry no rollup column, so they do not appear here.
+type appliedDelta struct {
 	MessagesAdded     int
 	UserMessagesAdded int
-	AddInput          int64
-	AddOutput         int64
-	AddCacheWrite     int64
-	AddCacheRead      int64
-	AddCostUSD        float64
+	Input             int64
+	Output            int64
+	CacheWrite        int64
+	CacheRead         int64
+	CostUSD           float64
 	CostIncomplete    bool
-	Started           time.Time
-	Ended             time.Time
 }
+
+// roleUser is the message role that counts toward user_message_count. The reducer
+// emits it as the normalized parser.RoleUser string; the store compares the stored
+// string so it does not depend on the parser package.
+const roleUser = "user"
 
 // ReduceFunc parses a raw region beginning at baseOffset, given the prior
 // serialized parser state, and returns the new state plus the projection delta.
@@ -196,7 +217,8 @@ func (s *Store) AdvanceProjection(ctx context.Context, sessionID int64, parserVe
 		if err != nil {
 			return fmt.Errorf("parse session %d region [%d,%d): %w", sessionID, parsedLen, regionEnd, err)
 		}
-		if err := applyDelta(ctx, tx, sessionID, d); err != nil {
+		applied, err := applyDelta(ctx, tx, sessionID, d)
+		if err != nil {
 			return err
 		}
 
@@ -207,7 +229,7 @@ func (s *Store) AdvanceProjection(ctx context.Context, sessionID int64, parserVe
 			sessionID, regionEnd, newState, parserVersion); err != nil {
 			return fmt.Errorf("advance parse cursor for session %d to %d: %w", sessionID, regionEnd, err)
 		}
-		if err := applyAggregates(ctx, tx, sessionID, parserVersion, d); err != nil {
+		if err := applyAggregates(ctx, tx, sessionID, parserVersion, applied, d.Started, d.Ended); err != nil {
 			return err
 		}
 
@@ -225,7 +247,8 @@ func (s *Store) AdvanceProjection(ctx context.Context, sessionID int64, parserVe
 // exercise the projection and CAS directly.
 func (s *Store) ApplyProjectionDelta(ctx context.Context, sessionID int64, d ProjectionDelta) error {
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-		return applyDelta(ctx, tx, sessionID, d)
+		_, err := applyDelta(ctx, tx, sessionID, d)
+		return err
 	})
 }
 
@@ -267,23 +290,38 @@ func readRawRegion(ctx context.Context, tx pgx.Tx, sessionID, from int64, cap in
 	return region, end, nil
 }
 
-// applyDelta writes one region's rows: message upserts, tool-call inserts (with
-// their input bodies in the CAS), tool-result back-patches, and usage inserts.
-func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDelta) error {
+// applyDelta writes one region's rows (message upserts, tool-call inserts with
+// their input bodies in the CAS, tool-result back-patches, and usage inserts) and
+// returns the aggregates that actually persisted. Each insert that survives its
+// ON CONFLICT guard contributes to the returned appliedDelta; a row dropped as a
+// duplicate does not, so the caller folds the deduped set into the session rollups
+// rather than the reducer's pre-dedup proposal.
+func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDelta) (appliedDelta, error) {
+	var applied appliedDelta
+
 	// Each ordinal is inserted once: a turn is folded whole within the region that
 	// carries it, so there is no in-place content rewrite and no quadratic append.
-	// The ON CONFLICT DO NOTHING is a replay guard only (a region is parsed once,
-	// since the cursor advances in the same transaction, and a reparse deletes
-	// these rows first), so a retried region never duplicates or rewrites a row.
+	// The ON CONFLICT DO NOTHING is a replay guard (a region is parsed once, since
+	// the cursor advances in the same transaction, and a reparse deletes these rows
+	// first), so a retried region never duplicates or rewrites a row. Counting only
+	// rows that inserted keeps message_count equal to the count of messages rows
+	// even if a region is ever replayed.
 	for _, m := range d.Messages {
-		if _, err := tx.Exec(ctx,
+		tag, err := tx.Exec(ctx,
 			`INSERT INTO messages
 			   (session_id, ordinal, role, content, thinking_text, model, timestamp, has_thinking, has_tool_use)
 			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
 			 ON CONFLICT (session_id, ordinal) DO NOTHING`,
 			sessionID, m.Ordinal, m.Role, m.Content, m.ThinkingText, m.Model,
-			nullTime(m.Timestamp), m.HasThinking, m.HasToolUse); err != nil {
-			return fmt.Errorf("write message %d for session %d: %w", m.Ordinal, sessionID, err)
+			nullTime(m.Timestamp), m.HasThinking, m.HasToolUse)
+		if err != nil {
+			return appliedDelta{}, fmt.Errorf("write message %d for session %d: %w", m.Ordinal, sessionID, err)
+		}
+		if tag.RowsAffected() > 0 {
+			applied.MessagesAdded++
+			if m.Role == roleUser {
+				applied.UserMessagesAdded++
+			}
 		}
 	}
 
@@ -296,13 +334,13 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 			// without re-storing the body. Re-lock it FOR KEY SHARE so a sweep racing
 			// this insert cannot delete the blob between here and the FK check.
 			if err := pinBlobRefTx(ctx, tx, t.InputSHA256); err != nil {
-				return fmt.Errorf("reference tool input blob %s for session %d call %d/%d: %w", t.InputSHA256, sessionID, t.MessageOrdinal, t.CallIndex, err)
+				return appliedDelta{}, fmt.Errorf("reference tool input blob %s for session %d call %d/%d: %w", t.InputSHA256, sessionID, t.MessageOrdinal, t.CallIndex, err)
 			}
 			inputSHA, inputMedia = t.InputSHA256, t.InputMediaType
 		case len(t.InputBody) > 0:
 			sha, err := writeBlobTx(ctx, tx, t.InputBody, t.InputMediaType)
 			if err != nil {
-				return fmt.Errorf("write tool input blob for session %d call %d/%d: %w", sessionID, t.MessageOrdinal, t.CallIndex, err)
+				return appliedDelta{}, fmt.Errorf("write tool input blob for session %d call %d/%d: %w", sessionID, t.MessageOrdinal, t.CallIndex, err)
 			}
 			inputSHA, inputMedia = sha, t.InputMediaType
 		}
@@ -314,7 +352,7 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 			 ON CONFLICT (session_id, message_ordinal, call_index) DO NOTHING`,
 			sessionID, t.MessageOrdinal, t.CallIndex, t.ToolName, t.Category, nullString(t.FilePath),
 			inputSHA, t.InputBytes, inputMedia, nullString(t.CallUID)); err != nil {
-			return fmt.Errorf("insert tool call %d/%d for session %d: %w", t.MessageOrdinal, t.CallIndex, sessionID, err)
+			return appliedDelta{}, fmt.Errorf("insert tool call %d/%d for session %d: %w", t.MessageOrdinal, t.CallIndex, sessionID, err)
 		}
 	}
 
@@ -326,13 +364,13 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 		switch {
 		case tr.BodySHA256 != "":
 			if err := pinBlobRefTx(ctx, tx, tr.BodySHA256); err != nil {
-				return fmt.Errorf("reference tool result blob %s for session %d call %q: %w", tr.BodySHA256, sessionID, tr.CallUID, err)
+				return appliedDelta{}, fmt.Errorf("reference tool result blob %s for session %d call %q: %w", tr.BodySHA256, sessionID, tr.CallUID, err)
 			}
 			resultSHA = tr.BodySHA256
 		case len(tr.Body) > 0:
 			sha, err := writeBlobTx(ctx, tx, tr.Body, tr.MediaType)
 			if err != nil {
-				return fmt.Errorf("write tool result blob for session %d call %q: %w", sessionID, tr.CallUID, err)
+				return appliedDelta{}, fmt.Errorf("write tool result blob for session %d call %q: %w", sessionID, tr.CallUID, err)
 			}
 			resultSHA = sha
 		}
@@ -345,10 +383,17 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 			    SET result_sha256 = $3, result_bytes = $4, result_media_type = $5, result_status = $6
 			  WHERE session_id = $1 AND call_uid = $2`,
 			sessionID, tr.CallUID, resultSHA, tr.Bytes, media, tr.Status); err != nil {
-			return fmt.Errorf("back-patch tool result for session %d call %q: %w", sessionID, tr.CallUID, err)
+			return appliedDelta{}, fmt.Errorf("back-patch tool result for session %d call %q: %w", sessionID, tr.CallUID, err)
 		}
 	}
 
+	// Only usage rows that actually insert fold into the rollups. Claude repeats a
+	// usage block across sidechain and summary lines (same dedup_key), and Codex's
+	// replays collide on (source_offset, source_index); ON CONFLICT DO NOTHING keeps
+	// one in the ledger, and counting RowsAffected here keeps the rollup in lockstep
+	// with that surviving set. cost_incomplete is derived the same way: a surviving
+	// row that carries tokens but no priced cost is what makes the session total a
+	// partial sum.
 	for _, u := range d.Usage {
 		var ord, cost any
 		if u.MessageOrdinal != nil {
@@ -357,7 +402,7 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 		if u.CostUSD != nil {
 			cost = *u.CostUSD
 		}
-		if _, err := tx.Exec(ctx,
+		tag, err := tx.Exec(ctx,
 			`INSERT INTO usage_events
 			   (session_id, message_ordinal, model, input_tokens, output_tokens,
 			    cache_write_tokens, cache_read_tokens, reasoning_tokens, cost_usd,
@@ -365,18 +410,37 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 			 ON CONFLICT DO NOTHING`,
 			sessionID, ord, u.Model, u.Input, u.Output, u.CacheWrite, u.CacheRead,
-			u.Reasoning, cost, nullTime(u.OccurredAt), u.DedupKey, u.SourceOffset, u.SourceIndex); err != nil {
-			return fmt.Errorf("insert usage event for session %d at offset %d: %w", sessionID, u.SourceOffset, err)
+			u.Reasoning, cost, nullTime(u.OccurredAt), u.DedupKey, u.SourceOffset, u.SourceIndex)
+		if err != nil {
+			return appliedDelta{}, fmt.Errorf("insert usage event for session %d at offset %d: %w", sessionID, u.SourceOffset, err)
+		}
+		if tag.RowsAffected() == 0 {
+			continue
+		}
+		applied.Input += int64(u.Input)
+		applied.Output += int64(u.Output)
+		applied.CacheWrite += int64(u.CacheWrite)
+		applied.CacheRead += int64(u.CacheRead)
+		switch {
+		case u.CostUSD != nil:
+			applied.CostUSD += *u.CostUSD
+		case u.Input+u.Output+u.CacheWrite+u.CacheRead+u.Reasoning > 0:
+			// Tokens spent on a model the pricing table does not know: the session
+			// total is a partial sum and the flag says so.
+			applied.CostIncomplete = true
 		}
 	}
-	return nil
+	return applied, nil
 }
 
-// applyAggregates folds a region's increments into the session rollups. Token and
-// cost totals add; the span widens by LEAST/GREATEST (both ignore NULLs, so a
-// region with no timestamps leaves the bounds unchanged); cost_incomplete is
-// sticky once any unpriced model is seen.
-func applyAggregates(ctx context.Context, tx pgx.Tx, sessionID int64, parserVersion int, d ProjectionDelta) error {
+// applyAggregates folds a region's persisted increments into the session rollups.
+// The counts and token/cost totals come from appliedDelta, the rows that actually
+// inserted, not from a pre-dedup per-region count, so the rollups equal the ledger
+// (sessions.total_* == sum over usage_events, message_count == count of messages
+// rows) for every agent. The span widens by LEAST/GREATEST (both ignore NULLs, so
+// a region with no timestamps leaves the bounds unchanged); cost_incomplete is
+// sticky once any surviving unpriced usage row is seen.
+func applyAggregates(ctx context.Context, tx pgx.Tx, sessionID int64, parserVersion int, a appliedDelta, started, ended time.Time) error {
 	_, err := tx.Exec(ctx,
 		`UPDATE sessions SET
 		   message_count = message_count + $2,
@@ -392,10 +456,10 @@ func applyAggregates(ctx context.Context, tx pgx.Tx, sessionID int64, parserVers
 		   parser_version = $12,
 		   updated_at = now()
 		 WHERE id = $1`,
-		sessionID, d.MessagesAdded, d.UserMessagesAdded,
-		d.AddInput, d.AddOutput, d.AddCacheWrite, d.AddCacheRead,
-		d.AddCostUSD, d.CostIncomplete,
-		nullTime(d.Started), nullTime(d.Ended), parserVersion)
+		sessionID, a.MessagesAdded, a.UserMessagesAdded,
+		a.Input, a.Output, a.CacheWrite, a.CacheRead,
+		a.CostUSD, a.CostIncomplete,
+		nullTime(started), nullTime(ended), parserVersion)
 	if err != nil {
 		return fmt.Errorf("update aggregates for session %d: %w", sessionID, err)
 	}

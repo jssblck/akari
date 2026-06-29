@@ -40,8 +40,7 @@ func TestCASWriteDedupReadSweep(t *testing.T) {
 	s1 := seedSession(t, st, u.ID, projectID, "sess-1")
 	s2 := seedSession(t, st, u.ID, projectID, "sess-2")
 	withInput := ProjectionDelta{
-		MessagesAdded: 1,
-		Messages:      []MessageDelta{{Ordinal: 0, Role: "assistant", Content: "x", HasToolUse: true}},
+		Messages: []MessageDelta{{Ordinal: 0, Role: "assistant", Content: "x", HasToolUse: true}},
 		ToolCalls: []ProjToolCall{{
 			MessageOrdinal: 0, CallIndex: 0, ToolName: "Read", Category: "read",
 			InputBody: string(body), InputBytes: int64(len(body)), InputMediaType: "application/json", CallUID: "c1",
@@ -132,9 +131,8 @@ func TestSweepSkipsBlobLockedByWriter(t *testing.T) {
 	sha := HashBytes(body)
 	sid := seedSession(t, st, u.ID, projectID, "sess-1")
 	withBlob := ProjectionDelta{
-		MessagesAdded: 1,
-		Messages:      []MessageDelta{{Ordinal: 0, Role: "assistant", Content: "x", HasToolUse: true}},
-		ToolCalls:     []ProjToolCall{{MessageOrdinal: 0, CallIndex: 0, ToolName: "Read", CallUID: "c1"}},
+		Messages:  []MessageDelta{{Ordinal: 0, Role: "assistant", Content: "x", HasToolUse: true}},
+		ToolCalls: []ProjToolCall{{MessageOrdinal: 0, CallIndex: 0, ToolName: "Read", CallUID: "c1"}},
 		ToolResults: []ToolResultDelta{{
 			CallUID: "c1", Body: string(body), Bytes: int64(len(body)), MediaType: "text/plain", Status: "ok",
 		}},

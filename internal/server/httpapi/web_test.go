@@ -325,8 +325,6 @@ func TestPublicSessionFlow(t *testing.T) {
 	}
 	sid := ann.SessionID
 	if err := st.ApplyProjectionDelta(ctx, sid, store.ProjectionDelta{
-		MessagesAdded:     1,
-		UserMessagesAdded: 1,
 		Messages: []store.MessageDelta{
 			{Ordinal: 0, Role: "user", Content: "Fix the secret login bug"},
 		},

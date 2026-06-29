@@ -203,8 +203,7 @@ func TestApplyDeltaReferencesUploadedBlob(t *testing.T) {
 
 	// The parsed delta carries references, not inline bodies.
 	delta := ProjectionDelta{
-		MessagesAdded: 1,
-		Messages:      []MessageDelta{{Ordinal: 0, Role: "assistant", Content: "x", HasToolUse: true}},
+		Messages: []MessageDelta{{Ordinal: 0, Role: "assistant", Content: "x", HasToolUse: true}},
 		ToolCalls: []ProjToolCall{{
 			MessageOrdinal: 0, CallIndex: 0, ToolName: "Read", Category: "read",
 			InputSHA256: inputSHA, InputBytes: int64(len(input)), InputMediaType: "application/json", CallUID: "c1",
@@ -261,8 +260,7 @@ func TestApplyDeltaMissingUploadedBlobFails(t *testing.T) {
 	sid := seedSession(t, st, u.ID, projectID, "missing-sess")
 
 	delta := ProjectionDelta{
-		MessagesAdded: 1,
-		Messages:      []MessageDelta{{Ordinal: 0, Role: "assistant", Content: "x", HasToolUse: true}},
+		Messages: []MessageDelta{{Ordinal: 0, Role: "assistant", Content: "x", HasToolUse: true}},
 		ToolCalls: []ProjToolCall{{
 			MessageOrdinal: 0, CallIndex: 0, ToolName: "Read",
 			InputSHA256: HashString("never uploaded"), InputBytes: 5, InputMediaType: "application/json", CallUID: "c1",

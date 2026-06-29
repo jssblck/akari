@@ -346,3 +346,87 @@ func TestCostIncompleteForUnknownModel(t *testing.T) {
 		t.Errorf("total_input_tokens = %d, want 500", totalIn)
 	}
 }
+
+// TestClaudeDuplicateUsageCountedOnce reproduces the Claude rollup over-count.
+// Claude repeats the same usage block across lines (a sidechain or summary
+// duplicate carries the same message id, hence the same dedup_key), so the usage
+// ledger keeps exactly one row while a naive per-region fold added every
+// occurrence (the 2.4x to 3.6x inflation seen in production). The invariant the
+// fix lands: the session rollups equal the deduped ledger, so total_* matches
+// sum(usage_events.*) rather than a multiple of it, and message_count matches the
+// count of messages rows.
+func TestClaudeDuplicateUsageCountedOnce(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	sid := seedSession(t, st, "claude-dup-usage")
+
+	// The same assistant turn replayed three times, all sharing message id
+	// "msg_dup" and the identical usage block. The dedup_key (message id) collides,
+	// so usage_events keeps one row however many times the line appears.
+	line := `{"type":"assistant","timestamp":"2024-01-01T10:00:05Z","message":{"id":"msg_dup","model":"claude-sonnet-4-20250514","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":1000,"output_tokens":2000,"cache_creation_input_tokens":300,"cache_read_input_tokens":400}}}` + "\n"
+	if _, err := st.AppendChunk(ctx, sid, 0, []byte(line+line+line)); err != nil {
+		t.Fatal(err)
+	}
+
+	// assertRollupsMatchLedger is the invariant: for this session the rollups equal
+	// the deduped ledger (total_* == sum(usage_events.*), message_count == count of
+	// messages rows), and the single surviving usage row carries the real numbers.
+	assertRollupsMatchLedger := func(t *testing.T, when string) {
+		t.Helper()
+		var usageRows int
+		var ledgerIn, ledgerOut, ledgerCW, ledgerCR int64
+		var ledgerCost float64
+		if err := st.Pool.QueryRow(ctx,
+			`SELECT count(*), coalesce(sum(input_tokens),0), coalesce(sum(output_tokens),0),
+			        coalesce(sum(cache_write_tokens),0), coalesce(sum(cache_read_tokens),0),
+			        coalesce(sum(cost_usd),0)
+			   FROM usage_events WHERE session_id=$1`, sid).
+			Scan(&usageRows, &ledgerIn, &ledgerOut, &ledgerCW, &ledgerCR, &ledgerCost); err != nil {
+			t.Fatal(err)
+		}
+		if usageRows != 1 {
+			t.Fatalf("%s: usage_events rows = %d, want 1 (deduped on dedup_key)", when, usageRows)
+		}
+
+		var rollIn, rollOut, rollCW, rollCR int64
+		var rollCost float64
+		var msgCount, rowCount int
+		if err := st.Pool.QueryRow(ctx,
+			`SELECT total_input_tokens, total_output_tokens, total_cache_write_tokens,
+			        total_cache_read_tokens, total_cost_usd, message_count
+			   FROM sessions WHERE id=$1`, sid).
+			Scan(&rollIn, &rollOut, &rollCW, &rollCR, &rollCost, &msgCount); err != nil {
+			t.Fatal(err)
+		}
+		if rollIn != ledgerIn || rollOut != ledgerOut || rollCW != ledgerCW || rollCR != ledgerCR {
+			t.Fatalf("%s: rollup tokens (in=%d out=%d cw=%d cr=%d) != ledger (in=%d out=%d cw=%d cr=%d)",
+				when, rollIn, rollOut, rollCW, rollCR, ledgerIn, ledgerOut, ledgerCW, ledgerCR)
+		}
+		if rollOut != 2000 {
+			t.Fatalf("%s: total_output_tokens = %d, want 2000 (the single deduped row, not 6000)", when, rollOut)
+		}
+		if rollCost != ledgerCost {
+			t.Fatalf("%s: total_cost_usd = %v != ledger cost %v", when, rollCost, ledgerCost)
+		}
+		if err := st.Pool.QueryRow(ctx, "SELECT count(*) FROM messages WHERE session_id=$1", sid).Scan(&rowCount); err != nil {
+			t.Fatal(err)
+		}
+		if msgCount != rowCount {
+			t.Fatalf("%s: message_count = %d, want %d (count of messages rows)", when, msgCount, rowCount)
+		}
+	}
+
+	// The live incremental path folds the deduped set.
+	if _, err := Advance(ctx, st, sid, "claude"); err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	assertRollupsMatchLedger(t, "after advance")
+
+	// Reparse is the remediation for already-ingested data: it zeroes the rollups
+	// and replays the stored raw through the same fixed fold, so it must land the
+	// same deduped totals rather than re-inflating them.
+	if _, err := Reparse(ctx, st, sid, "claude"); err != nil {
+		t.Fatalf("reparse: %v", err)
+	}
+	assertRollupsMatchLedger(t, "after reparse")
+}
