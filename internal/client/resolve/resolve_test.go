@@ -400,6 +400,70 @@ func TestResolveStandaloneGroupsByCommonDir(t *testing.T) {
 	}
 }
 
+// TestResolveStandaloneLocalRootAcrossBranches confirms every no-remote branch
+// (origin lookup error, empty output, multiple URLs, unrecognized URL) attaches
+// the shared root, not just the get-url error path: each is a real local-only
+// repo whose worktrees should collapse.
+func TestResolveStandaloneLocalRootAcrossBranches(t *testing.T) {
+	mainWT := t.TempDir()
+	common := filepath.Join(mainWT, ".git")
+	cases := []struct {
+		name      string
+		responses map[string]string
+		errs      map[string]error
+	}{
+		{
+			name:      "origin lookup errors",
+			responses: map[string]string{"rev-parse": "true", "git-common-dir": common},
+			errs:      map[string]error{"remote get-url": fmt.Errorf("no such remote")},
+		},
+		{
+			name:      "empty origin output",
+			responses: map[string]string{"rev-parse": "true", "git-common-dir": common, "remote get-url": ""},
+		},
+		{
+			name: "multiple origin urls",
+			responses: map[string]string{"rev-parse": "true", "git-common-dir": common,
+				"remote get-url": "git@github.com:o/r.git\nhttps://github.com/o/r.git"},
+		},
+		{
+			name:      "unrecognized origin url",
+			responses: map[string]string{"rev-parse": "true", "git-common-dir": common, "remote get-url": "not-a-url"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			file := writeFile(t, dir, "sess.jsonl",
+				fmt.Sprintf(`{"type":"user","cwd":%q}`+"\n", dir))
+			r := NewWith(fakeGit(c.responses, c.errs), nil)
+			res := r.Resolve(context.Background(), discover.File{Agent: "claude", Path: file})
+			if res.Kind != KindStandalone {
+				t.Fatalf("kind = %q, want standalone", res.Kind)
+			}
+			if res.LocalRoot != mainWT {
+				t.Errorf("local root = %q, want %q", res.LocalRoot, mainWT)
+			}
+		})
+	}
+}
+
+// TestResolveLocalRootBareRepoPreservesCommonDir covers the branch where the
+// common dir is not "<worktree>/.git" (a bare repo, or a separated git dir): with
+// no main worktree to point at, the common dir itself stands as the shared key.
+func TestResolveLocalRootBareRepoPreservesCommonDir(t *testing.T) {
+	bare := filepath.Join(t.TempDir(), "myrepo.git")
+	dir := t.TempDir()
+	file := writeFile(t, dir, "sess.jsonl",
+		fmt.Sprintf(`{"type":"user","cwd":%q}`+"\n", dir))
+	r := NewWith(fakeGit(map[string]string{"rev-parse": "true", "git-common-dir": bare},
+		map[string]error{"remote get-url": fmt.Errorf("no such remote")}), nil)
+	res := r.Resolve(context.Background(), discover.File{Agent: "claude", Path: file})
+	if res.LocalRoot != bare {
+		t.Errorf("local root = %q, want %q (bare common dir preserved)", res.LocalRoot, bare)
+	}
+}
+
 // TestResolveStandaloneNoRootWhenCommonDirUnavailable pins the best-effort
 // fallback: when git cannot report the common dir, the session is still
 // standalone but carries no LocalRoot, so the server keys it on its own cwd.
