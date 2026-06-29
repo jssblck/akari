@@ -77,8 +77,14 @@ func TestProjectsPageIsBareTable(t *testing.T) {
 		}
 	}
 	// The merged column shows the grand total (100+50+30+20 = 200) with thousands
-	// separators, plus the per-class breakdown in the hover card.
-	for _, want := range []string{`<th class="num">Tokens</th>`, `class="tok-total">200<`, `<dt>Cache read</dt>`, `<dd>30</dd>`} {
+	// separators, plus all four classes in the hover card. Each class is asserted
+	// as its full dt/dd pair with a distinct value, so dropping a row or wiring a
+	// class to the wrong figure (for example In showing the output total) fails.
+	for _, want := range []string{
+		`<th class="num">Tokens</th>`, `class="tok-total">200<`,
+		`<dt>In</dt><dd>100</dd>`, `<dt>Out</dt><dd>50</dd>`,
+		`<dt>Cache read</dt><dd>30</dd>`, `<dt>Cache write</dt><dd>20</dd>`,
+	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("projects tokens cell missing %q", want)
 		}
