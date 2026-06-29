@@ -207,6 +207,20 @@ func TestListSessionsSince(t *testing.T) {
 	if len(win) != 1 || win[0].ID != recent {
 		t.Fatalf("windowed list = %+v, want only the recent session %d", win, recent)
 	}
+
+	// The cross-project query honors Since the same way: unbounded lists both, a
+	// 30-day window drops the 40-day-old session.
+	allRows, err := st.ListAllSessions(ctx, store.SessionFilter{})
+	if err != nil || len(allRows) != 2 {
+		t.Fatalf("global unbounded: len=%d err=%v, want 2", len(allRows), err)
+	}
+	winRows, err := st.ListAllSessions(ctx, store.SessionFilter{Since: time.Now().AddDate(0, 0, -30)})
+	if err != nil {
+		t.Fatalf("global windowed: %v", err)
+	}
+	if len(winRows) != 1 || winRows[0].ID != recent {
+		t.Fatalf("global windowed list = %+v, want only the recent session %d", winRows, recent)
+	}
 }
 
 // TestSessionFacetTrigger exercises the rollup trigger directly: an insert counts

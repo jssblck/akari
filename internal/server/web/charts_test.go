@@ -47,6 +47,18 @@ func TestBuildBreakdownTokensIgnoreCost(t *testing.T) {
 	}
 }
 
+func TestBuildBreakdownZeroTokens(t *testing.T) {
+	// Width is token-driven with no cost fallback: when no slice has tokens, every
+	// bar stays at 0% even though cost is present.
+	rows := BuildBreakdown([]store.Breakdown{
+		{Label: "a", CostUSD: 5, Tokens: 0},
+		{Label: "b", CostUSD: 1, Tokens: 0},
+	})
+	if rows[0].Pct != 0 || rows[1].Pct != 0 {
+		t.Errorf("zero-token bars should stay at 0%%, got %.2f, %.2f", rows[0].Pct, rows[1].Pct)
+	}
+}
+
 func TestBuildBreakdownTinySliver(t *testing.T) {
 	rows := BuildBreakdown([]store.Breakdown{
 		{Label: "big", Tokens: 10000},
