@@ -93,18 +93,40 @@ func TestWebFlow(t *testing.T) {
 		t.Fatalf("register: %v", err)
 	}
 	body = readBody(t, resp)
-	if !strings.Contains(body, "Projects") {
-		t.Fatalf("after register should land on projects, got:\n%s", body)
+	if !strings.Contains(body, "Overview") {
+		t.Fatalf("after register should land on the overview, got:\n%s", body)
 	}
 
-	// The projects page is now reachable directly with the session cookie.
+	// The overview is now the landing surface, reachable directly with the
+	// session cookie; it shows the signed-in user in the sidebar.
 	resp, err = c.Get(srv.URL + "/")
 	if err != nil {
 		t.Fatalf("get / authed: %v", err)
 	}
 	body = readBody(t, resp)
-	if !strings.Contains(body, "grace") || !strings.Contains(body, "No git-remote projects yet") {
-		t.Fatalf("projects page missing expected content, got:\n%s", body)
+	if !strings.Contains(body, "grace") || !strings.Contains(body, "Overview") {
+		t.Fatalf("overview page missing expected content, got:\n%s", body)
+	}
+
+	// The projects table moved to /projects; with no projects yet it shows its
+	// empty state.
+	resp, err = c.Get(srv.URL + "/projects")
+	if err != nil {
+		t.Fatalf("get /projects: %v", err)
+	}
+	body = readBody(t, resp)
+	if !strings.Contains(body, "No git-remote projects yet") {
+		t.Fatalf("projects page missing empty state, got:\n%s", body)
+	}
+
+	// The global sessions list renders with no sessions yet.
+	resp, err = c.Get(srv.URL + "/sessions")
+	if err != nil {
+		t.Fatalf("get /sessions: %v", err)
+	}
+	body = readBody(t, resp)
+	if !strings.Contains(body, "Sessions") {
+		t.Fatalf("sessions page missing heading, got:\n%s", body)
 	}
 
 	// Create an ingest token via the account form; the secret is flashed once.
@@ -203,22 +225,22 @@ func TestStandaloneOrphanedIndex(t *testing.T) {
 	announce("standalone", "sess-standalone", "/home/grace/scratch")
 	announce("orphaned", "sess-orphaned", "/home/grace/deleted")
 
-	// The index shows a Sessions section with both states tagged and the folder
-	// name and path rendered (not the synthetic local: key).
-	resp, err := c.Get(srv.URL + "/")
+	// The projects index shows a Sessions section with both states tagged and the
+	// folder name and path rendered (not the synthetic local: key).
+	resp, err := c.Get(srv.URL + "/projects")
 	if err != nil {
-		t.Fatalf("get /: %v", err)
+		t.Fatalf("get /projects: %v", err)
 	}
 	body := readBody(t, resp)
 	for _, want := range []string{
 		">Sessions<", "standalone", "orphaned", "scratch", "/home/grace/scratch", "deleted",
 	} {
 		if !strings.Contains(body, want) {
-			t.Fatalf("index missing %q, got:\n%s", want, body)
+			t.Fatalf("projects index missing %q, got:\n%s", want, body)
 		}
 	}
 	if strings.Contains(body, "local:grace-laptop:") {
-		t.Fatalf("index leaked the synthetic local key, got:\n%s", body)
+		t.Fatalf("projects index leaked the synthetic local key, got:\n%s", body)
 	}
 
 	// Drilling into the standalone folder shows its state tag and path.

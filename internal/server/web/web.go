@@ -24,6 +24,10 @@ type Page struct {
 	Username string
 	IsAdmin  bool
 	LoggedIn bool
+	// Active is the sidebar nav key for the current page ("overview",
+	// "sessions", "projects", "search", "account"), so the shell can mark the
+	// current section. Empty leaves no item active.
+	Active string
 }
 
 // IsLocalKind reports whether a project kind is one of the non-remote kinds
@@ -51,6 +55,24 @@ func SessionProjectLabel(d store.SessionDetail) string {
 		return d.ProjectName
 	}
 	return d.ProjectKey
+}
+
+// SessionRowProject is the project label shown beside a session in the global
+// session list: the folder name for a local project, the remote key otherwise.
+func SessionRowProject(r store.SessionRow) string {
+	if IsLocalKind(r.ProjectKind) {
+		return r.ProjectName
+	}
+	return r.ProjectKey
+}
+
+// ProjectFacetLabel is the label for a project option in the session filter
+// rail, friendly for a local project and the remote key otherwise.
+func ProjectFacetLabel(pf store.ProjectFacet) string {
+	if IsLocalKind(pf.Kind) {
+		return pf.Name
+	}
+	return pf.Key
 }
 
 // SearchHitLabel is the project name shown on a search result, friendly for a
@@ -161,6 +183,25 @@ func FmtDuration(start, end *time.Time) string {
 	default:
 		return fmt.Sprintf("%ds", int(d.Seconds()))
 	}
+}
+
+// BaseName returns the last path segment of a file path (handling both / and \
+// separators), for a compact label in the outline. It returns the input
+// unchanged when there is no separator.
+func BaseName(p string) string {
+	if i := strings.LastIndexAny(p, `/\`); i >= 0 && i < len(p)-1 {
+		return p[i+1:]
+	}
+	return p
+}
+
+// navClass returns the sidebar link's class, adding "active" when its key is the
+// page's current section.
+func navClass(key, active string) string {
+	if key == active {
+		return "nav active"
+	}
+	return "nav"
 }
 
 // RoleClass maps a message role to a CSS class for styling.

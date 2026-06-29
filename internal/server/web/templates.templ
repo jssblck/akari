@@ -22,25 +22,77 @@ templ layout(p Page) {
 		</head>
 		<body>
 			if p.LoggedIn {
-				<header class="topbar">
-					<a class="brand" href="/">@brandMark()</a>
-					<nav>
-						<a href="/">Projects</a>
-						<a href="/search">Search</a>
-						<a href="/account">Account</a>
-					</nav>
-					<span class="spacer"></span>
-					<span class="who">{ p.Username }</span>
-					<form method="post" action="/logout" class="inline">
-						<button class="ghost" type="submit">Log out</button>
-					</form>
-				</header>
+				<div class="app">
+					@sidebar(p)
+					<div class="content-scroll">
+						<main>
+							{ children... }
+						</main>
+					</div>
+				</div>
+			} else {
+				<main>
+					{ children... }
+				</main>
 			}
-			<main>
-				{ children... }
-			</main>
 		</body>
 	</html>
+}
+
+// navItem is one sidebar link. It carries its own icon as a child and marks
+// itself active when its key matches the page's active section.
+templ navItem(href, key, label, active string) {
+	<a class={ navClass(key, active) } href={ templ.SafeURL(href) }>
+		@navIcon(key)
+		<span class="nav-label">{ label }</span>
+	</a>
+}
+
+// sidebar is the persistent left navigation that replaced the three-link top
+// bar: the wordmark, the primary sections, and the signed-in user with a log-out
+// control pinned to the foot.
+templ sidebar(p Page) {
+	<aside class="sidebar">
+		<a class="brand" href="/">@brandMark()</a>
+		<nav class="navgroup" aria-label="Primary">
+			@navItem("/", "overview", "Overview", p.Active)
+			@navItem("/sessions", "sessions", "Sessions", p.Active)
+			@navItem("/projects", "projects", "Projects", p.Active)
+			@navItem("/search", "search", "Search", p.Active)
+			@navItem("/account", "account", "Account", p.Active)
+		</nav>
+		<span class="spacer"></span>
+		<div class="sb-foot">
+			<span class="who">{ p.Username }</span>
+			<form method="post" action="/logout" class="inline">
+				<button class="ghost small" type="submit">Log out</button>
+			</form>
+		</div>
+	</aside>
+}
+
+// navIcon draws the small line glyph for a sidebar item, keyed by section.
+templ navIcon(key string) {
+	<svg class="nav-ico" viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
+		switch key {
+			case "overview":
+				<rect x="1.5" y="1.5" width="5" height="5" rx="1"></rect>
+				<rect x="9.5" y="1.5" width="5" height="5" rx="1"></rect>
+				<rect x="1.5" y="9.5" width="5" height="5" rx="1"></rect>
+				<rect x="9.5" y="9.5" width="5" height="5" rx="1"></rect>
+			case "sessions":
+				<path d="M2 4h12M2 8h12M2 12h8"></path>
+			case "projects":
+				<path d="M2 12V6l3-2 3 2 3-2 3 2v6"></path>
+				<path d="M2 12h12"></path>
+			case "search":
+				<circle cx="7" cy="7" r="4.5"></circle>
+				<path d="M14 14l-3.5-3.5"></path>
+			case "account":
+				<circle cx="8" cy="5.5" r="2.6"></circle>
+				<path d="M3 14c0-2.8 2.2-4.5 5-4.5s5 1.7 5 4.5"></path>
+		}
+	</svg>
 }
 
 // brandMark is the wordmark: a small lilac aperture glyph beside the name, a nod
@@ -200,7 +252,7 @@ templ ProjectsPage(p Page, projects, locals []store.ProjectSummary, a store.Anal
 					</thead>
 					<tbody>
 						for _, pr := range projects {
-							<tr>
+							<tr data-row-href={ ProjectPath(pr.ID) }>
 								<td><a href={ ProjectHref(pr.ID) }>{ pr.RemoteKey }</a></td>
 								<td class="trend">@templ.Raw(Sparkline(spark[pr.ID]))</td>
 								<td class="num">{ fmt.Sprintf("%d", pr.SessionCount) }</td>
@@ -235,7 +287,7 @@ templ ProjectsPage(p Page, projects, locals []store.ProjectSummary, a store.Anal
 					</thead>
 					<tbody>
 						for _, pr := range locals {
-							<tr>
+							<tr data-row-href={ ProjectPath(pr.ID) }>
 								<td>
 									<a href={ ProjectHref(pr.ID) }>{ pr.DisplayName }</a>
 									<div class="muted small mono">{ LocalPath(pr) }</div>
@@ -317,7 +369,7 @@ templ SessionList(sessions []store.SessionSummary) {
 			</thead>
 			<tbody>
 				for _, s := range sessions {
-					<tr>
+					<tr data-row-href={ SessionPath(s.ID) }>
 						<td>
 							<a href={ SessionHref(s.ID) }>#{ fmt.Sprintf("%d", s.ID) }</a>
 							if s.Visibility == "public" {
@@ -328,6 +380,173 @@ templ SessionList(sessions []store.SessionSummary) {
 						<td>{ s.Username }</td>
 						<td class="muted">{ s.Machine }</td>
 						<td class="muted">{ s.GitBranch }</td>
+						<td class="num">{ fmt.Sprintf("%d", s.MessageCount) }</td>
+						<td class="num">{ FmtCost(s.TotalCostUSD, s.CostIncomplete) }</td>
+						<td class="muted">{ FmtTime(s.UpdatedAt) }</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+	}
+}
+
+// ============================ Overview ============================
+
+// OverviewPage is the landing surface: the fleet-wide usage panel (totals,
+// spend-over-time, model and agent breakdowns) over a feed of the most recent
+// sessions across every project. It puts both front doors — the deep read and
+// the spend view — one click from the door, instead of behind the projects table.
+templ OverviewPage(p Page, a store.Analytics, recent []store.SessionRow) {
+	@layout(p) {
+		<div class="page-head">
+			<h1>Overview</h1>
+			<span class="muted small">across all projects</span>
+		</div>
+		@analyticsPanel(a, "chart-global", "Across all projects")
+		<section>
+			<div class="panel-head">
+				<h2>Recent activity</h2>
+				<span class="spacer"></span>
+				<a class="small" href="/sessions">All sessions &rarr;</a>
+			</div>
+			@GlobalSessionList(recent)
+		</section>
+	}
+}
+
+// ============================ Sessions (global) ============================
+
+// SessionsPage is the cross-project session list: a faceted filter rail beside a
+// feed of every session, newest first. It is the surface for "find a run"
+// without first picking a project.
+templ SessionsPage(p Page, rows []store.SessionRow, facets store.GlobalFacetValues, sel store.SessionFilter) {
+	@layout(p) {
+		<div class="page-head">
+			<h1>Sessions</h1>
+			<span class="muted small">{ fmt.Sprintf("%d projects", len(facets.Projects)) }</span>
+		</div>
+		<div class="sessions-layout">
+			<aside class="facets" aria-label="Filters">
+				@facetGroup("Agent", "agent", facets.Agents, sel)
+				@projectFacetGroup(facets.Projects, sel)
+				@facetGroup("User", "user", facets.Users, sel)
+				@facetGroup("Machine", "machine", facets.Machines, sel)
+			</aside>
+			<div class="sessions-main">
+				if AnyFilterActive(sel) {
+					<div class="active-filters">
+						@activeChip("agent", sel.Agent, sel)
+						@activeChip("user", sel.Username, sel)
+						@activeChip("machine", sel.Machine, sel)
+						@activeProjectChip(facets.Projects, sel)
+						<a class="small clear" href="/sessions">Clear all</a>
+					</div>
+				}
+				<div id="session-list">
+					@GlobalSessionList(rows)
+				</div>
+			</div>
+		</div>
+	}
+}
+
+// facetGroup renders one filter section: a labeled list of toggle links, each
+// with its session count, the selected one marked active.
+templ facetGroup(title, field string, opts []store.FacetCount, sel store.SessionFilter) {
+	if len(opts) > 0 {
+		<div class="facet">
+			<div class="facet-title label">{ title }</div>
+			<ul class="opts">
+				for _, o := range opts {
+					<li>
+						<a class={ facetOptClass(field, o.Value, sel) } href={ facetHref(field, o.Value, sel) }>
+							<span class="opt-label" title={ o.Value }>{ o.Value }</span>
+							<span class="opt-count">{ fmt.Sprintf("%d", o.Count) }</span>
+						</a>
+					</li>
+				}
+			</ul>
+		</div>
+	}
+}
+
+// projectFacetGroup is the project filter: like facetGroup but each option
+// carries a categorical swatch and links by project id.
+templ projectFacetGroup(opts []store.ProjectFacet, sel store.SessionFilter) {
+	if len(opts) > 0 {
+		<div class="facet">
+			<div class="facet-title label">Project</div>
+			<ul class="opts">
+				for i, o := range opts {
+					<li>
+						<a class={ projectOptClass(o.ID, sel) } href={ ProjectFacetHref(sel, o.ID) }>
+							<span class={ swatchClass(i) }></span>
+							<span class="opt-label" title={ ProjectFacetLabel(o) }>{ ProjectFacetLabel(o) }</span>
+							<span class="opt-count">{ fmt.Sprintf("%d", o.Count) }</span>
+						</a>
+					</li>
+				}
+			</ul>
+		</div>
+	}
+}
+
+// activeChip renders a removable chip for a selected text facet (agent / user /
+// machine); it renders nothing when that facet is unset.
+templ activeChip(field, value string, sel store.SessionFilter) {
+	if value != "" {
+		<a class="fchip" href={ facetHref(field, value, sel) }>
+			<span class="fchip-k">{ field }</span>
+			<span>{ value }</span>
+			<span class="fchip-x">&times;</span>
+		</a>
+	}
+}
+
+// activeProjectChip renders the removable chip for a selected project.
+templ activeProjectChip(opts []store.ProjectFacet, sel store.SessionFilter) {
+	if sel.ProjectID != 0 {
+		<a class="fchip" href={ ProjectFacetHref(sel, sel.ProjectID) }>
+			<span class="fchip-k">project</span>
+			<span>{ projectLabelByID(opts, sel.ProjectID) }</span>
+			<span class="fchip-x">&times;</span>
+		</a>
+	}
+}
+
+// GlobalSessionList renders the cross-project session feed: one row per session
+// with its project, agent, branch, and figures. It is the htmx-swappable body of
+// the Sessions page and the Overview's recent-activity feed.
+templ GlobalSessionList(rows []store.SessionRow) {
+	if len(rows) == 0 {
+		<div class="empty">No sessions match these filters.</div>
+	} else {
+		<table class="grid">
+			<thead>
+				<tr>
+					<th>Session</th>
+					<th>Project</th>
+					<th>Agent</th>
+					<th>Branch</th>
+					<th>User</th>
+					<th class="num">Messages</th>
+					<th class="num">Cost</th>
+					<th>Updated</th>
+				</tr>
+			</thead>
+			<tbody>
+				for _, s := range rows {
+					<tr data-row-href={ SessionPath(s.ID) }>
+						<td>
+							<a href={ SessionHref(s.ID) }>#{ fmt.Sprintf("%d", s.ID) }</a>
+							if s.Visibility == "public" {
+								<span class="tag public">public</span>
+							}
+						</td>
+						<td><a class="proj-link" href={ ProjectHref(s.ProjectID) }>{ SessionRowProject(s) }</a> @kindTag(s.ProjectKind)</td>
+						<td><span class="tag agent">{ s.Agent }</span></td>
+						<td class="muted mono small">{ s.GitBranch }</td>
+						<td class="muted">{ s.Username }</td>
 						<td class="num">{ fmt.Sprintf("%d", s.MessageCount) }</td>
 						<td class="num">{ FmtCost(s.TotalCostUSD, s.CostIncomplete) }</td>
 						<td class="muted">{ FmtTime(s.UpdatedAt) }</td>
@@ -395,15 +614,21 @@ templ SessionPage(p Page, d store.SessionDetail, msgs []store.Message, tools map
 				</form>
 			</div>
 		}
-		if live {
-			<div id="session-body" data-sse={ SSEPath(d.ID) } data-body={ BodyPath(d.ID) }>
-				@SessionBody(d, msgs, tools, subagents)
-			</div>
-		} else {
-			<div id="session-body">
-				@SessionBody(d, msgs, tools, subagents)
-			</div>
-		}
+		<div class="session-grid">
+			<aside class="outline-rail" aria-label="Outline">
+				@Outline(msgs, tools, SessionBlobBase(d.ID))
+			</aside>
+			if live {
+				<div id="session-body" class="session-main" data-sse={ SSEPath(d.ID) } data-body={ BodyPath(d.ID) }>
+					@SessionMain(d, msgs, tools, subagents)
+				</div>
+			} else {
+				<div id="session-body" class="session-main">
+					@SessionMain(d, msgs, tools, subagents)
+				</div>
+			}
+			@inspectorPane()
+		</div>
 	}
 }
 
@@ -414,23 +639,97 @@ templ densityToolbar() {
 	</div>
 }
 
-templ SessionBody(d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, subagents []store.SessionSummary) {
-	<div class="session-grid">
-		<aside class="rail" aria-label="Timeline">
-			@TimelineRail(BuildRail(msgs, tools))
-		</aside>
-		<div class="session-main">
-			@sessionStats(d)
-			if len(subagents) > 0 {
-				<h2>Subagents</h2>
-				<div class="subagents">
-					@SessionList(subagents)
-				</div>
-			}
-			<h2>Transcript</h2>
-			@Transcript(msgs, tools, SessionBlobBase(d.ID))
+// SessionMain is the live region of the session view: the stat header, any
+// subagents, and the transcript. Only this fragment is re-fetched and swapped on
+// a live SSE update, so the outline and inspector (its siblings in the grid)
+// persist across updates and are not re-rendered per refresh.
+templ SessionMain(d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, subagents []store.SessionSummary) {
+	@sessionStats(d)
+	if len(subagents) > 0 {
+		<h2>Subagents</h2>
+		<div class="subagents">
+			@SessionList(subagents)
 		</div>
+	}
+	<h2>Transcript</h2>
+	@Transcript(msgs, tools, SessionBlobBase(d.ID))
+}
+
+// Outline is the left pane of the session view: one entry per turn, with its
+// tool steps nested beneath. It renders straight from the transcript messages
+// and tool metadata the page already holds, so no second session-sized structure
+// is built. A turn links to its message; a step with a stored body opens that
+// body in the inspector pane (carrying the blob URLs so the inspector needs no
+// extra round trip to know what to fetch).
+templ Outline(msgs []store.Message, tools map[int][]store.ToolCallView, blobBase string) {
+	<div class="outline" aria-label="Session outline">
+		<div class="label outline-head">Outline</div>
+		for _, m := range msgs {
+			{{ steps := tools[m.Ordinal] }}
+			{{ title := OutlineTitle(m) }}
+			<div class="ol-group">
+				<a class={ OutlineTurnClass(m.Role, steps) } id={ fmt.Sprintf("ol-%d", m.Ordinal) } href={ templ.SafeURL(fmt.Sprintf("#msg-%d", m.Ordinal)) } data-ord={ fmt.Sprintf("%d", m.Ordinal) }>
+					<span class="ol-dot"></span>
+					<span class="ol-title">
+						if title != "" {
+							{ title }
+						} else {
+							<span class="ol-role">{ m.Role }</span>
+						}
+					</span>
+					if len(steps) > 0 {
+						<span class="ol-count">{ fmt.Sprintf("%d", len(steps)) }</span>
+					}
+				</a>
+				if len(steps) > 0 {
+					<div class="ol-steps">
+						for _, s := range steps {
+							if OutlineStepHasBody(s) {
+								<a
+									class={ OutlineStepClass(s) + " inspect-open" }
+									href={ templ.SafeURL(fmt.Sprintf("#msg-%d", m.Ordinal)) }
+									data-tool={ s.ToolName }
+									data-file={ s.FilePath }
+									data-status={ s.ResultStatus }
+									if DiffTool(s.ToolName) {
+										data-diff="1"
+									}
+									if s.InputSHA != "" {
+										data-input-url={ BlobURL(blobBase, s.InputSHA) }
+									}
+									if s.ResultSHA != "" {
+										data-result-url={ BlobURL(blobBase, s.ResultSHA) }
+									}
+								>
+									<span class="ol-tn">{ s.ToolName }</span>
+									if s.FilePath != "" {
+										<span class="ol-file">{ BaseName(s.FilePath) }</span>
+									}
+								</a>
+							} else {
+								<a class={ OutlineStepClass(s) } href={ templ.SafeURL(fmt.Sprintf("#msg-%d", m.Ordinal)) }>
+									<span class="ol-tn">{ s.ToolName }</span>
+								</a>
+							}
+						}
+					</div>
+				}
+			</div>
+		}
 	</div>
+}
+
+// inspectorPane is the right pane: a stable surface where a selected tool call's
+// input and output open, so inspecting a body never reflows the transcript. It
+// starts empty and is populated by app.js when a tool chip or outline step is
+// clicked.
+templ inspectorPane() {
+	<aside class="inspector" id="session-inspector" aria-label="Inspector" aria-live="polite">
+		<div class="insp-empty">
+			<div class="insp-empty-glyph">⊟</div>
+			<div>Select a tool call to inspect its input and output here.</div>
+		</div>
+	</aside>
 }
 
 // sessionStats is the instrument header: stat tiles that stick to the top of the
@@ -455,23 +754,6 @@ templ stat(label, value, key string) {
 			<div class="value" data-stat-key={ key }>{ value }</div>
 		} else {
 			<div class="value">{ value }</div>
-		}
-	</div>
-}
-
-templ TimelineRail(markers []RailMarker) {
-	<div class="rail-inner">
-		for _, m := range markers {
-			<a
-				class={ RailClass(m) }
-				href={ templ.SafeURL(fmt.Sprintf("#msg-%d", m.Ordinal)) }
-				data-rail={ fmt.Sprintf("%d", m.Ordinal) }
-				title={ railTitle(m) }
-			>
-				if m.ToolCount > 0 {
-					<span class="rail-count">{ fmt.Sprintf("%d", m.ToolCount) }</span>
-				}
-			</a>
 		}
 	</div>
 }
@@ -699,8 +981,8 @@ templ PublicSessionPage(d store.SessionDetail, msgs []store.Message, tools map[i
 		</div>
 		<div id="session-body">
 			<div class="session-grid">
-				<aside class="rail" aria-label="Timeline">
-					@TimelineRail(BuildRail(msgs, tools))
+				<aside class="outline-rail" aria-label="Outline">
+					@Outline(msgs, tools, PublicBlobBase(*d.PublicID))
 				</aside>
 				<div class="session-main">
 					@sessionStats(d)
@@ -711,7 +993,7 @@ templ PublicSessionPage(d store.SessionDetail, msgs []store.Message, tools map[i
 								<tbody>
 									for _, sub := range publicSubs {
 										if sub.PublicID != nil {
-											<tr>
+											<tr data-row-href={ PublicPath(*sub.PublicID) }>
 												<td><a href={ PublicHref(*sub.PublicID) }>{ sub.Agent } subagent</a></td>
 												<td class="num">{ fmt.Sprintf("%d", sub.MessageCount) } messages</td>
 											</tr>
@@ -724,6 +1006,7 @@ templ PublicSessionPage(d store.SessionDetail, msgs []store.Message, tools map[i
 					<h2>Transcript</h2>
 					@Transcript(msgs, tools, PublicBlobBase(*d.PublicID))
 				</div>
+				@inspectorPane()
 			</div>
 		</div>
 	}

@@ -161,6 +161,16 @@ warning rather than uploaded under an ambiguous project.
 
 ## The web UI
 
+A persistent left sidebar carries the primary sections (Overview, Sessions,
+Projects, Search, Account); the signed-in user and log-out sit at its foot.
+
+- **Overview**: the landing surface. A fleet-wide usage panel (cost and token
+  trends over time, a by-model and by-agent breakdown) over a feed of the most
+  recent sessions across every project, so the deep read and the spend view are
+  both one click from the door.
+- **Sessions**: every session across all projects in one place, with a faceted
+  filter rail (agent, project, user, machine — each with counts) and a project
+  column, so a run is findable without first choosing its project.
 - **Projects index**: every project with session counts, token totals, and cost,
   plus an inline analytics panel (cost and token trends over time, a by-model and
   by-agent breakdown) and a 30-day cost sparkline per project row.

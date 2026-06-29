@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>akari — Session trace inspector (mockup)</title>
+<link rel="stylesheet" href="mockup.css"/>
+<style>
+  .content { max-width: 1320px; }
+  .shead { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
+  .shead h1 { font-size: 1.1875rem; display: flex; align-items: baseline; gap: 8px; }
+  .shead h1 .sep { color: var(--faint); }
+  .shead h1 .sid { color: var(--muted); font-family: var(--mono); font-size: 1rem; }
+  .statstrip { display: flex; gap: 0; border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden; margin: 12px 0 16px; }
+  .statstrip .s { padding: 9px 16px; border-right: 1px solid var(--border); }
+  .statstrip .s:last-child { border-right: 0; }
+  .statstrip .s .label { margin-bottom: 4px; }
+  .statstrip .s .v { font-family: var(--mono); font-size: 1.0625rem; font-variant-numeric: tabular-nums; }
+  .statstrip .s .v.cost { color: var(--lilac); }
+
+  /* three panes */
+  .panes { display: grid; grid-template-columns: 232px minmax(0,1fr) 360px; gap: 16px; align-items: start; }
+
+  /* left: turn / step outline */
+  .outline { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); padding: 8px; position: sticky; top: 12px; }
+  .outline .label { padding: 6px 8px; }
+  .turn { padding: 2px 0; }
+  .turn .t { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: var(--r-sm); color: var(--subtext); font-size: 0.8125rem; }
+  .turn .t .role { width: 5px; height: 5px; border-radius: 50%; flex: none; }
+  .turn .t .role.u { background: var(--info); } .turn .t .role.a { background: var(--lilac); }
+  .turn .t .dur { margin-left: auto; font-family: var(--mono); font-size: 0.6875rem; color: var(--faint); }
+  .turn .steps { margin: 2px 0 4px 16px; border-left: 1px solid var(--border); padding-left: 8px; display: flex; flex-direction: column; gap: 1px; }
+  .step { display: flex; align-items: center; gap: 7px; padding: 4px 7px; border-radius: var(--r-sm); color: var(--muted); font: 450 0.75rem/1.3 var(--mono); }
+  .step .ic { color: var(--lilac); }
+  .step.err { color: var(--err); } .step.err .ic { color: var(--err); }
+  .step.sel { background: var(--surface-3); color: var(--text); }
+
+  /* center: transcript */
+  .tmain { min-width: 0; }
+  .msg { border: 1px solid var(--border); border-radius: var(--r-md); padding: 12px 16px; margin-bottom: 12px; }
+  .msg.user { background: var(--msg-user); } .msg.assistant { background: var(--msg-assistant); }
+  .msg .meta { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 0.75rem; }
+  .msg .meta .role { color: var(--subtext); font-weight: 500; letter-spacing: .04em; text-transform: uppercase; font-size: 0.6875rem; }
+  .msg .meta .spacer { flex: 1; }
+  .msg .content { white-space: pre-wrap; max-width: 74ch; color: var(--text); }
+  .thinking { color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 8px; }
+  .tools { display: flex; flex-direction: column; gap: 5px; margin-top: 11px; }
+  .tchip { display: inline-flex; gap: 8px; align-items: center; flex-wrap: wrap; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 5px 10px; font: 450 0.8125rem/1.4 var(--mono); width: fit-content; max-width: 100%; }
+  .tchip.sel { border-color: var(--lilac); box-shadow: 0 0 0 1px var(--lilac); }
+  .tchip .tn { color: var(--lilac); font-weight: 500; }
+  .tchip .tp { color: var(--muted); }
+  .tchip .stamp { background: var(--surface-2); color: var(--subtext); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 1px 7px; }
+  .tchip .st.ok { color: var(--ok); } .tchip .st.err { color: var(--err); }
+
+  /* right: inspector */
+  .inspector { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); position: sticky; top: 12px; overflow: hidden; }
+  .insp-head { display: flex; align-items: center; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--border); }
+  .insp-head .tn { color: var(--lilac); font-family: var(--mono); font-weight: 500; }
+  .insp-head .x { margin-left: auto; color: var(--faint); }
+  .insp-body { padding: 14px; display: flex; flex-direction: column; gap: 14px; }
+  .kv { display: grid; grid-template-columns: 76px 1fr; gap: 6px 10px; font-size: 0.8125rem; }
+  .kv .k { color: var(--muted); }
+  .kv .vv { font-family: var(--mono); color: var(--subtext); word-break: break-all; }
+  .insp-seg { display: inline-flex; border: 1px solid var(--border); border-radius: var(--r-sm); overflow: hidden; }
+  .insp-seg .seg { padding: 5px 11px; font-size: 0.75rem; }
+  .codeblock { background: var(--bg); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 10px; font: 400 0.6875rem/1.5 var(--mono); color: var(--subtext); max-height: 150px; overflow: hidden; white-space: pre; }
+  .diffline { display: block; padding: 0 6px; }
+  .diffline.add { background: rgba(159,214,166,.1); color: var(--ok); }
+  .diffline.del { background: rgba(239,154,169,.1); color: var(--err); }
+  .ctx-panel .label { margin-bottom: 8px; display:block; }
+  .ctxrow { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 0.75rem; color: var(--muted); margin-top: 6px; }
+  .ctxrow .bar { flex: 1; height: 5px; background: var(--surface-2); border-radius: 999px; overflow: hidden; }
+  .ctxrow .bar > span { display: block; height: 100%; border-radius: 999px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand"><svg viewBox="0 0 16 16" width="18" height="18"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="8" cy="8" r="2.2" fill="currentColor"/></svg>akari</div>
+    <div class="navgroup">
+      <div class="nav"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="1.5" y="1.5" width="5" height="5" rx="1"/><rect x="9.5" y="1.5" width="5" height="5" rx="1"/><rect x="1.5" y="9.5" width="5" height="5" rx="1"/><rect x="9.5" y="9.5" width="5" height="5" rx="1"/></svg>Overview</div>
+      <div class="nav active"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 4h12M2 8h12M2 12h8"/></svg>Sessions<span class="count">1.2k</span></div>
+      <div class="nav"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 12V6l3-2 3 2 3-2 3 2v6"/><path d="M2 12h12"/></svg>Projects<span class="count">37</span></div>
+      <div class="nav"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="7" cy="7" r="4.5"/><path d="M14 14l-3.5-3.5"/></svg>Search</div>
+      <div class="nav"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 13l3-5 3 3 3-6 3 4"/></svg>Insights</div>
+    </div>
+    <div class="spacer"></div>
+    <div class="sb-foot"><span class="avatar"></span><span>jess</span><span class="dot" style="background:var(--ok); margin-left:auto"></span></div>
+  </aside>
+
+  <main class="content">
+    <div class="shead">
+      <h1><a href="#">akari</a><span class="sep">/</span><span class="sid">session #2041</span></h1>
+      <span class="tag agent">claude</span>
+      <span class="tag model">claude-opus-4-8</span>
+      <span class="live">live</span>
+      <span class="muted small mono">claude/ui-org · jess · linux-rig</span>
+      <span class="spacer"></span>
+      <span class="btn ghost">Publish</span>
+      <span class="seg-group"><span class="seg active">Comfortable</span><span class="seg">Compact</span></span>
+    </div>
+
+    <div class="statstrip">
+      <div class="s"><div class="label">Messages</div><div class="v">142</div></div>
+      <div class="s"><div class="label">User msgs</div><div class="v">18</div></div>
+      <div class="s"><div class="label">Input</div><div class="v">6.4M</div></div>
+      <div class="s"><div class="label">Output</div><div class="v">412k</div></div>
+      <div class="s"><div class="label">Cache read</div><div class="v">38.1M</div></div>
+      <div class="s"><div class="label">Cost</div><div class="v cost">$8.12</div></div>
+      <div class="s"><div class="label">Duration</div><div class="v">23m 41s</div></div>
+    </div>
+
+    <div class="panes">
+      <!-- LEFT: turn/step outline (replaces the thin rail) -->
+      <div class="outline">
+        <span class="label">Outline</span>
+        <div class="turn">
+          <div class="t"><span class="role u"></span>You: reorganize the UI<span class="dur">—</span></div>
+        </div>
+        <div class="turn">
+          <div class="t"><span class="role a"></span>Assistant<span class="dur">2.1s</span></div>
+          <div class="steps">
+            <div class="step"><span class="ic">⊞</span>Read templates.templ</div>
+            <div class="step"><span class="ic">⊞</span>Grep "session-grid"</div>
+          </div>
+        </div>
+        <div class="turn">
+          <div class="t"><span class="role a"></span>Assistant<span class="dur">8.4s</span></div>
+          <div class="steps">
+            <div class="step sel"><span class="ic">✎</span>Edit templates.templ</div>
+            <div class="step"><span class="ic">✎</span>Edit app.css</div>
+            <div class="step err"><span class="ic">!</span>Bash: templ generate</div>
+          </div>
+        </div>
+        <div class="turn">
+          <div class="t"><span class="role a"></span>Assistant<span class="dur">3.0s</span></div>
+          <div class="steps">
+            <div class="step"><span class="ic">⊞</span>Bash: go build ./...</div>
+          </div>
+        </div>
+        <div class="turn">
+          <div class="t"><span class="role u"></span>You: now wire SSE<span class="dur">—</span></div>
+        </div>
+      </div>
+
+      <!-- CENTER: transcript -->
+      <div class="tmain">
+        <div class="msg user">
+          <div class="meta"><span class="role">user</span><span class="spacer"></span><span class="muted">14:02:09</span></div>
+          <div class="content">Reorganize the session view into a three-pane inspector: outline on the left, transcript center, and a detail drawer on the right that shows the selected tool call.</div>
+        </div>
+        <div class="msg assistant">
+          <div class="meta"><span class="role">assistant</span><span class="tag model">opus-4-8</span><span class="spacer"></span><span class="muted">14:02:11</span></div>
+          <div class="thinking">▸ Thinking · 1.2s</div>
+          <div class="content">I'll restructure the layout. First the template, then the stylesheet, then regenerate and build.</div>
+          <div class="tools">
+            <div class="tchip sel"><span class="tn">Edit</span><span class="tp">internal/server/web/templates.templ</span><span class="stamp">in: 2.1 KB diff</span><span class="st ok">ok</span><span class="stamp">out: 0.4 KB</span></div>
+            <div class="tchip"><span class="tn">Edit</span><span class="tp">…/static/app.css</span><span class="stamp">in: 3.4 KB diff</span><span class="st ok">ok</span></div>
+            <div class="tchip"><span class="tn">Bash</span><span class="tp">templ generate</span><span class="st err">error</span><span class="stamp">out: 1.1 KB</span></div>
+          </div>
+        </div>
+        <div class="msg assistant">
+          <div class="meta"><span class="role">assistant</span><span class="tag model">opus-4-8</span><span class="spacer"></span><span class="muted">14:02:22</span></div>
+          <div class="content">The generate step needs the templ binary on PATH. Installing and retrying.</div>
+          <div class="tools">
+            <div class="tchip"><span class="tn">Bash</span><span class="tp">go run ./vendor/templ generate</span><span class="st ok">ok</span><span class="stamp">out: 0.2 KB</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- RIGHT: inspector drawer for the selected tool call -->
+      <div class="inspector">
+        <div class="insp-head"><span class="tn">Edit</span><span class="muted small">step 14 · turn 3</span><span class="x">✕</span></div>
+        <div class="insp-body">
+          <div class="kv">
+            <span class="k">File</span><span class="vv">internal/server/web/templates.templ</span>
+            <span class="k">Status</span><span class="vv" style="color:var(--ok)">ok · 41ms</span>
+            <span class="k">Input</span><span class="vv">2.1 KB · diff</span>
+            <span class="k">Result</span><span class="vv">0.4 KB · text</span>
+          </div>
+          <div>
+            <div class="flex" style="justify-content:space-between; margin-bottom:8px"><span class="label">Body</span><span class="insp-seg"><span class="seg active">Diff</span><span class="seg">Input</span><span class="seg">Result</span></span></div>
+            <div class="codeblock"><span class="diffline">  templ SessionBody(d store.SessionDetail …) {</span><span class="diffline del">-   &lt;aside class="rail"&gt;</span><span class="diffline del">-     @TimelineRail(BuildRail(msgs))</span><span class="diffline add">+   &lt;aside class="outline"&gt;</span><span class="diffline add">+     @Outline(BuildOutline(msgs, tools))</span><span class="diffline">  &lt;/aside&gt;</span><span class="diffline add">+   &lt;section class="inspector" …&gt;</span></div>
+          </div>
+          <hr class="divider"/>
+          <div class="ctx-panel">
+            <span class="label">Context window at this step</span>
+            <div class="ctxrow"><span style="width:64px">used</span><span class="bar"><span style="width:62%;background:var(--lilac)"></span></span><span>124k / 200k</span></div>
+            <div class="ctxrow"><span style="width:64px">cache hit</span><span class="bar"><span style="width:86%;background:var(--v2)"></span></span><span>86%</span></div>
+            <div class="ctxrow"><span style="width:64px">cost so far</span><span class="bar"><span style="width:48%;background:var(--v3)"></span></span><span>$3.91</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+</body>
+</html>

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -112,6 +113,17 @@ type SessionFilter struct {
 	Username  string
 	Limit     int
 	Offset    int
+}
+
+// SessionRow is one row of the global (cross-project) session list: a session
+// summary plus the project it ran in, so a reader can scan and filter every
+// session in one place without first choosing a project.
+type SessionRow struct {
+	SessionSummary
+	ProjectID   int64
+	ProjectKey  string
+	ProjectName string
+	ProjectKind string
 }
 
 // ListProjects returns every project with rolled-up stats, most recently active
@@ -228,6 +240,221 @@ func (s *Store) ListSessions(ctx context.Context, f SessionFilter) ([]SessionSum
 		out = append(out, sm)
 	}
 	return out, rows.Err()
+}
+
+// globalSessionSelect is the column list and joins for cross-project session
+// rows: the same session columns as sessionSelect, plus the owning project's
+// identity so the list can show and link a project per row.
+const globalSessionSelect = `
+	SELECT s.id, s.agent, s.machine, s.git_branch, u.username,
+	       s.message_count, s.user_message_count,
+	       s.total_input_tokens, s.total_output_tokens,
+	       s.total_cache_write_tokens, s.total_cache_read_tokens,
+	       s.total_cost_usd, s.cost_incomplete, s.visibility, s.public_id,
+	       s.started_at, s.ended_at, s.updated_at,
+	       p.id, p.remote_key, p.display_name, p.kind
+	  FROM sessions s
+	  JOIN users u ON u.id = s.user_id
+	  JOIN projects p ON p.id = s.project_id`
+
+func scanSessionRow(rows pgx.Rows) (SessionRow, error) {
+	var r SessionRow
+	err := rows.Scan(&r.ID, &r.Agent, &r.Machine, &r.GitBranch, &r.Username,
+		&r.MessageCount, &r.UserMessageCount,
+		&r.TotalInput, &r.TotalOutput, &r.TotalCacheWrite, &r.TotalCacheRead,
+		&r.TotalCostUSD, &r.CostIncomplete, &r.Visibility, &r.PublicID,
+		&r.StartedAt, &r.EndedAt, &r.UpdatedAt,
+		&r.ProjectID, &r.ProjectKey, &r.ProjectName, &r.ProjectKind)
+	if err != nil {
+		return r, fmt.Errorf("scan global session row: %w", err)
+	}
+	return r, nil
+}
+
+// ListAllSessions returns sessions across every project matching the filter,
+// newest first. A zero ProjectID means "all projects"; the other fields narrow
+// the set exactly as ListSessions does. This backs the global Sessions view and
+// the Overview's recent-activity feed.
+func (s *Store) ListAllSessions(ctx context.Context, f SessionFilter) ([]SessionRow, error) {
+	var conds []string
+	var args []any
+	add := func(cond string, val any) {
+		args = append(args, val)
+		conds = append(conds, cond+" $"+itoa(len(args)))
+	}
+	if f.ProjectID != 0 {
+		add("s.project_id =", f.ProjectID)
+	}
+	if f.Agent != "" {
+		add("s.agent =", f.Agent)
+	}
+	if f.Machine != "" {
+		add("s.machine =", f.Machine)
+	}
+	if f.Username != "" {
+		add("u.username =", f.Username)
+	}
+
+	q := globalSessionSelect
+	if len(conds) > 0 {
+		q += " WHERE " + strings.Join(conds, " AND ")
+	}
+	q += " ORDER BY s.updated_at DESC NULLS LAST, s.id DESC"
+	limit := f.Limit
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	args = append(args, limit)
+	q += " LIMIT $" + itoa(len(args))
+	if f.Offset > 0 {
+		args = append(args, f.Offset)
+		q += " OFFSET $" + itoa(len(args))
+	}
+
+	rows, err := s.Pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query global sessions: %w", err)
+	}
+	defer rows.Close()
+	var out []SessionRow
+	for rows.Next() {
+		r, err := scanSessionRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate global sessions: %w", err)
+	}
+	return out, nil
+}
+
+// FacetCount is one filter value and how many sessions carry it, for a faceted
+// filter rail that shows counts beside each option.
+type FacetCount struct {
+	Value string
+	Count int
+}
+
+// ProjectFacet is one project option in the global session filter: enough to
+// label, color, and link it, plus its session count.
+type ProjectFacet struct {
+	ID    int64
+	Key   string
+	Name  string
+	Kind  string
+	Count int
+}
+
+// GlobalFacetValues holds the filter options for the cross-project session view,
+// each with a count so the rail reads like an instrument.
+type GlobalFacetValues struct {
+	Agents   []FacetCount
+	Machines []FacetCount
+	Users    []FacetCount
+	Projects []ProjectFacet
+}
+
+// facetLimit caps each facet category to its busiest values, so the rail (and
+// the memory backing it) stays a fixed top-N rather than growing with the total
+// distinct agents, machines, users, or projects ever ingested.
+const facetLimit = 50
+
+// GlobalFacets returns the busiest agents, machines, usernames, and projects
+// across all sessions, each with its session count, ordered busiest first. The
+// counts are read from the session_facets rollup (maintained incrementally by a
+// trigger on the sessions table, see migration 0005), so each category is a
+// bounded top-N index read rather than a GROUP BY over the whole sessions table.
+// It backs the global Sessions view's filter rail.
+func (s *Store) GlobalFacets(ctx context.Context) (GlobalFacetValues, error) {
+	var f GlobalFacetValues
+
+	// Agent and machine values are stored verbatim, so they read straight from
+	// the rollup. Each kind is its own bounded subquery off the (kind, n DESC)
+	// index, so one busy category cannot crowd out another.
+	rows, err := s.Pool.Query(ctx,
+		`(SELECT kind, key, n FROM session_facets WHERE kind = 'agent'   ORDER BY n DESC, key LIMIT $1)
+		 UNION ALL
+		 (SELECT kind, key, n FROM session_facets WHERE kind = 'machine' ORDER BY n DESC, key LIMIT $1)`,
+		facetLimit)
+	if err != nil {
+		return f, fmt.Errorf("query session facets: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var kind, val string
+		var n int
+		if err := rows.Scan(&kind, &val, &n); err != nil {
+			return f, fmt.Errorf("scan session facet row: %w", err)
+		}
+		fc := FacetCount{Value: val, Count: n}
+		switch kind {
+		case "agent":
+			f.Agents = append(f.Agents, fc)
+		case "machine":
+			f.Machines = append(f.Machines, fc)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return f, fmt.Errorf("iterate session facets: %w", err)
+	}
+	// UNION ALL does not guarantee the final emission order, so re-establish the
+	// busiest-first contract per category rather than trusting the scan order.
+	sortFacets := func(fs []FacetCount) {
+		sort.Slice(fs, func(i, j int) bool {
+			if fs[i].Count != fs[j].Count {
+				return fs[i].Count > fs[j].Count
+			}
+			return fs[i].Value < fs[j].Value
+		})
+	}
+	sortFacets(f.Agents)
+	sortFacets(f.Machines)
+
+	// User and project facets store the id in the rollup; take the bounded top-N
+	// off the (kind, n DESC, key) index first, then resolve the display label, so
+	// the limit is applied by the index scan rather than after joining every row.
+	urows, err := s.Pool.Query(ctx,
+		`SELECT u.username, f.n
+		   FROM (SELECT key, n FROM session_facets WHERE kind = 'user' ORDER BY n DESC, key LIMIT $1) f
+		   JOIN users u ON u.id = f.key::bigint
+		  ORDER BY f.n DESC, u.username`, facetLimit)
+	if err != nil {
+		return f, fmt.Errorf("query user facets: %w", err)
+	}
+	defer urows.Close()
+	for urows.Next() {
+		var fc FacetCount
+		if err := urows.Scan(&fc.Value, &fc.Count); err != nil {
+			return f, fmt.Errorf("scan user facet row: %w", err)
+		}
+		f.Users = append(f.Users, fc)
+	}
+	if err := urows.Err(); err != nil {
+		return f, fmt.Errorf("iterate user facets: %w", err)
+	}
+
+	prows, err := s.Pool.Query(ctx,
+		`SELECT p.id, p.remote_key, p.display_name, p.kind, f.n
+		   FROM (SELECT key, n FROM session_facets WHERE kind = 'project' ORDER BY n DESC, key LIMIT $1) f
+		   JOIN projects p ON p.id = f.key::bigint
+		  ORDER BY f.n DESC, p.remote_key`, facetLimit)
+	if err != nil {
+		return f, fmt.Errorf("query project facets: %w", err)
+	}
+	defer prows.Close()
+	for prows.Next() {
+		var pf ProjectFacet
+		if err := prows.Scan(&pf.ID, &pf.Key, &pf.Name, &pf.Kind, &pf.Count); err != nil {
+			return f, fmt.Errorf("scan project facet row: %w", err)
+		}
+		f.Projects = append(f.Projects, pf)
+	}
+	if err := prows.Err(); err != nil {
+		return f, fmt.Errorf("iterate project facets: %w", err)
+	}
+	return f, nil
 }
 
 // scanDetail loads one session with its project, by an arbitrary WHERE clause.

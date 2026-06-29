@@ -66,26 +66,71 @@ func TestSparklineEmptyAndShape(t *testing.T) {
 	}
 }
 
-func TestBuildRail(t *testing.T) {
-	msgs := []store.Message{{Ordinal: 0, Role: "user"}, {Ordinal: 1, Role: "assistant"}}
-	tools := map[int][]store.ToolCallView{
-		1: {{ResultStatus: "ok"}, {ResultStatus: "error"}},
+func TestOutlineTitle(t *testing.T) {
+	// Leading/internal/trailing whitespace collapses to single spaces, one line.
+	if got := OutlineTitle(store.Message{Content: "  Reorganize   the\nUI please "}); got != "Reorganize the UI please" {
+		t.Errorf("title = %q", got)
 	}
-	rail := BuildRail(msgs, tools)
-	if len(rail) != 2 {
-		t.Fatalf("want 2 markers, got %d", len(rail))
+	// Empty / whitespace-only content yields an empty title (the view shows the role).
+	if got := OutlineTitle(store.Message{Content: "   \n\t "}); got != "" {
+		t.Errorf("blank title = %q", got)
 	}
-	if rail[0].ToolCount != 0 || rail[0].HasError {
-		t.Error("user turn has no tools and no error")
+	// Content beyond the cap is truncated with an ellipsis and never longer than
+	// the cap (+ the ellipsis rune), regardless of the message size.
+	long := ""
+	for i := 0; i < 500; i++ {
+		long += "word "
 	}
-	if rail[1].ToolCount != 2 || !rail[1].HasError {
-		t.Errorf("assistant turn should count 2 tools and flag the error: %+v", rail[1])
+	got := OutlineTitle(store.Message{Content: long})
+	if []rune(got)[len([]rune(got))-1] != '…' {
+		t.Errorf("a long title should end with an ellipsis: %q", got)
 	}
-	if RailClass(rail[1]) != "rail-tick rail-error" {
-		t.Errorf("an errored turn reads in rose regardless of role: %s", RailClass(rail[1]))
+	if n := len([]rune(got)); n > 50 {
+		t.Errorf("a long title should stay bounded, got %d runes: %q", n, got)
 	}
-	if RailClass(rail[0]) != "rail-tick rail-user" {
-		t.Errorf("user tick class: %s", RailClass(rail[0]))
+}
+
+func TestOutlineClasses(t *testing.T) {
+	steps := []store.ToolCallView{
+		{ToolName: "Edit", ResultStatus: "ok", InputSHA: "deadbeef"},
+		{ToolName: "Bash", ResultStatus: "error"},
+	}
+	// A turn with a failed step reads in rose regardless of role.
+	if got := OutlineTurnClass("assistant", steps); got != "ol-turn ol-error" {
+		t.Errorf("errored turn class = %q", got)
+	}
+	if got := OutlineTurnClass("assistant", steps[:1]); got != "ol-turn ol-assistant" {
+		t.Errorf("assistant turn class = %q", got)
+	}
+	if got := OutlineTurnClass("user", nil); got != "ol-turn ol-user" {
+		t.Errorf("user turn class = %q", got)
+	}
+	if got := OutlineTurnClass("system", nil); got != "ol-turn ol-other" {
+		t.Errorf("default turn class = %q", got)
+	}
+	if got := OutlineStepClass(steps[1]); got != "ol-step ol-step-error" {
+		t.Errorf("errored step class = %q", got)
+	}
+	if got := OutlineStepClass(steps[0]); got != "ol-step" {
+		t.Errorf("ok step class = %q", got)
+	}
+	if !OutlineStepHasBody(steps[0]) || OutlineStepHasBody(steps[1]) {
+		t.Errorf("step body detection wrong: %+v", steps)
+	}
+}
+
+func TestBaseName(t *testing.T) {
+	cases := map[string]string{
+		"a/b/c.txt":     "c.txt",
+		"c.txt":         "c.txt",
+		"a\\b\\c.txt":   "c.txt",
+		"/leading/x.go": "x.go",
+		"":              "",
+	}
+	for in, want := range cases {
+		if got := BaseName(in); got != want {
+			t.Errorf("BaseName(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 

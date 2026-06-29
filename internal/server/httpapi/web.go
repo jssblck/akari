@@ -47,6 +47,14 @@ func (s *Server) pageFor(r *http.Request, title string) web.Page {
 	return pg
 }
 
+// pageForNav is pageFor with the active sidebar section set, so the shell can
+// mark the current nav item.
+func (s *Server) pageForNav(r *http.Request, title, active string) web.Page {
+	pg := s.pageFor(r, title)
+	pg.Active = active
+	return pg
+}
+
 // render writes a templ component, mapping a render error to a 500.
 func render(w http.ResponseWriter, r *http.Request, status int, c templ.Component) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -58,14 +66,32 @@ func render(w http.ResponseWriter, r *http.Request, status int, c templ.Componen
 	}
 }
 
-func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
+// handleOverview is the landing surface at /: fleet-wide usage plus a feed of the
+// most recent sessions across every project.
+func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
-		render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(r, "Not found"), http.StatusNotFound, "Page not found."))
+		render(w, r, http.StatusNotFound, web.ErrorPage(s.pageForNav(r, "Not found", ""), http.StatusNotFound, "Page not found."))
 		return
 	}
+	analytics, err := s.Store.Analytics(r.Context(), 0)
+	if err != nil {
+		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "overview"), http.StatusInternalServerError, "Could not load analytics."))
+		return
+	}
+	recent, err := s.Store.ListAllSessions(r.Context(), store.SessionFilter{Limit: 15})
+	if err != nil {
+		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "overview"), http.StatusInternalServerError, "Could not load sessions."))
+		return
+	}
+	render(w, r, http.StatusOK, web.OverviewPage(s.pageForNav(r, "Overview", "overview"), analytics, recent))
+}
+
+// handleProjectsIndex is the projects table (moved off the root to /projects when
+// Overview became the landing surface).
+func (s *Server) handleProjectsIndex(w http.ResponseWriter, r *http.Request) {
 	projects, err := s.Store.ListProjects(r.Context())
 	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load projects."))
+		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "projects"), http.StatusInternalServerError, "Could not load projects."))
 		return
 	}
 	// Git-remote projects and local (standalone/orphaned) folders render in
@@ -80,15 +106,52 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	analytics, err := s.Store.Analytics(r.Context(), 0)
 	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load analytics."))
+		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "projects"), http.StatusInternalServerError, "Could not load analytics."))
 		return
 	}
 	spark, err := s.Store.ProjectSparklines(r.Context(), 30)
 	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load analytics."))
+		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "projects"), http.StatusInternalServerError, "Could not load analytics."))
 		return
 	}
-	render(w, r, http.StatusOK, web.ProjectsPage(s.pageFor(r, "Projects"), remotes, locals, analytics, spark))
+	render(w, r, http.StatusOK, web.ProjectsPage(s.pageForNav(r, "Projects", "projects"), remotes, locals, analytics, spark))
+}
+
+// handleSessions is the global, faceted session list across every project. An
+// htmx request swaps only the list; a normal load renders the page with its
+// filter rail.
+func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	filter := store.SessionFilter{
+		Agent:    strings.TrimSpace(q.Get("agent")),
+		Machine:  strings.TrimSpace(q.Get("machine")),
+		Username: strings.TrimSpace(q.Get("user")),
+	}
+	// A present-but-malformed project filter is a bad request, not a silent
+	// fall-through to the unfiltered list (which would mislead the caller).
+	if v := strings.TrimSpace(q.Get("project")); v != "" {
+		pid, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			render(w, r, http.StatusBadRequest, web.ErrorPage(s.pageForNav(r, "Bad request", "sessions"), http.StatusBadRequest, "Invalid project filter."))
+			return
+		}
+		filter.ProjectID = pid
+	}
+	rows, err := s.Store.ListAllSessions(r.Context(), filter)
+	if err != nil {
+		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "sessions"), http.StatusInternalServerError, "Could not load sessions."))
+		return
+	}
+	if r.Header.Get("HX-Request") == "true" {
+		render(w, r, http.StatusOK, web.GlobalSessionList(rows))
+		return
+	}
+	facets, err := s.Store.GlobalFacets(r.Context())
+	if err != nil {
+		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "sessions"), http.StatusInternalServerError, "Could not load filters."))
+		return
+	}
+	render(w, r, http.StatusOK, web.SessionsPage(s.pageForNav(r, "Sessions", "sessions"), rows, facets, filter))
 }
 
 func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
@@ -136,7 +199,7 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	wf := web.Facets{Agents: facets.Agents, Machines: facets.Machines, Users: facets.Users}
-	render(w, r, http.StatusOK, web.ProjectPage(s.pageFor(r, proj.RemoteKey), proj, sessions, wf, filter, analytics))
+	render(w, r, http.StatusOK, web.ProjectPage(s.pageForNav(r, proj.RemoteKey, "projects"), proj, sessions, wf, filter, analytics))
 }
 
 // sessionView loads everything the session page (and its live body fragment)
@@ -179,7 +242,7 @@ func (s *Server) handleSessionPage(w http.ResponseWriter, r *http.Request) {
 	title := fmt.Sprintf("Session #%d", d.ID)
 	p, _ := principalFrom(r.Context())
 	owner := p.UserID == d.OwnerID
-	render(w, r, http.StatusOK, web.SessionPage(s.pageFor(r, title), d, msgs, tools, subs, true, owner))
+	render(w, r, http.StatusOK, web.SessionPage(s.pageForNav(r, title, "sessions"), d, msgs, tools, subs, true, owner))
 }
 
 // handlePublishSession marks the owner's session public and redirects back to it.
@@ -296,7 +359,7 @@ func (s *Server) handleSessionBody(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	render(w, r, http.StatusOK, web.SessionBody(d, msgs, tools, subs))
+	render(w, r, http.StatusOK, web.SessionMain(d, msgs, tools, subs))
 }
 
 // handleSessionEvents is the SSE endpoint that signals a watching browser to
@@ -371,7 +434,7 @@ func (s *Server) handleSearchPage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	render(w, r, http.StatusOK, web.SearchPage(s.pageFor(r, "Search"), query, hits))
+	render(w, r, http.StatusOK, web.SearchPage(s.pageForNav(r, "Search", "search"), query, hits))
 }
 
 func (s *Server) handleAccountPage(w http.ResponseWriter, r *http.Request) {
@@ -385,7 +448,7 @@ func (s *Server) handleAccountPage(w http.ResponseWriter, r *http.Request) {
 	// cleared, so a page reload does not keep showing them.
 	newToken := readFlash(w, r, "akari_new_token")
 	newInvite := readFlash(w, r, "akari_new_invite")
-	render(w, r, http.StatusOK, web.AccountPage(s.pageFor(r, "Account"), tokens, newToken, newInvite))
+	render(w, r, http.StatusOK, web.AccountPage(s.pageForNav(r, "Account", "account"), tokens, newToken, newInvite))
 }
 
 // Login and register, form (HTML) variants. These mirror the JSON handlers but
