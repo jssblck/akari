@@ -137,6 +137,52 @@ func TestProjectsPageKeepsLineChart(t *testing.T) {
 	}
 }
 
+// GlobalSessionList drives the redesigned global session table. A non-empty
+// render must drop the session-id column, fold state into one Tags column (the
+// local-kind chip plus the public visibility chip), show the Tokens cell with
+// its breakdown card and cost, and render Updated as relative time carrying the
+// exact stamp as a title.
+func TestGlobalSessionListColumns(t *testing.T) {
+	ts := time.Now().UTC().Add(-3 * 24 * time.Hour)
+	rows := []store.SessionRow{{
+		SessionSummary: store.SessionSummary{
+			ID: 7, Agent: "claude", GitBranch: "main", Username: "grace",
+			MessageCount: 12,
+			TotalInput:   100, TotalOutput: 50, TotalCacheRead: 7, TotalCacheWrite: 3,
+			TotalCostUSD: 1.25, Visibility: "public", UpdatedAt: &ts,
+		},
+		ProjectID: 4, ProjectKey: "scratch", ProjectName: "scratch", ProjectKind: "standalone",
+	}}
+	html := renderComponent(t, GlobalSessionList(rows))
+
+	// Tags column carries both the local-kind chip and the public chip.
+	for _, want := range []string{`>Tags</th>`, `class="tag standalone"`, `class="tag public"`, `>public</span>`} {
+		if !strings.Contains(html, want) {
+			t.Errorf("tags column missing %q", want)
+		}
+	}
+	// Tokens cell: the total, the breakdown rows, and the cost, replacing Cost.
+	for _, want := range []string{`>Tokens</th>`, "160 tokens", "<dt>In</dt>", "<dt>Out</dt>", "<dt>Cache read</dt>", "<dt>Cache write</dt>", "$1.25"} {
+		if !strings.Contains(html, want) {
+			t.Errorf("tokens cell missing %q", want)
+		}
+	}
+	if strings.Contains(html, `>Cost</th>`) {
+		t.Error("Cost column should be gone")
+	}
+	// Updated reads relative, with the exact stamp as the cell title.
+	if rel := FmtRelTime(&ts); !strings.Contains(html, ">"+rel+"<") {
+		t.Errorf("updated cell missing relative time %q", rel)
+	}
+	if titled := `title="` + FmtTime(&ts) + `"`; !strings.Contains(html, titled) {
+		t.Errorf("updated cell missing exact-time title %q", titled)
+	}
+	// The session-id column is gone: no "#7" label and no Session header.
+	if strings.Contains(html, "#7") || strings.Contains(html, `>Session</th>`) {
+		t.Error("session-id column should be dropped")
+	}
+}
+
 // A single project page also keeps the line chart, keyed to its own chart id and
 // retaining the Usage panel header.
 func TestProjectPageKeepsLineChart(t *testing.T) {

@@ -187,7 +187,12 @@ main { max-width: var(--maxw); margin: 0 auto; padding: var(--sp-xl); }
 .viz-6 { background: #ddc885; } .viz-7 { background: #a98ad4; }
 
 /* ---- Sessions: faceted layout ---- */
-.sessions-layout { display: grid; grid-template-columns: 196px minmax(0, 1fr); gap: var(--sp-xl); align-items: start; }
+/* The global Sessions view runs edge to edge: a faceted rail plus a wide table
+   put the whole viewport to use, unlike the reading-width pages. The rail column
+   sizes to its widest label (no more clipped project names) rather than a fixed
+   width, and the table takes the rest. */
+main:has(.sessions-layout) { max-width: none; }
+.sessions-layout { display: grid; grid-template-columns: minmax(196px, max-content) minmax(0, 1fr); gap: var(--sp-xl); align-items: start; }
 .facets { display: flex; flex-direction: column; gap: var(--sp-lg); position: sticky; top: var(--sp-md); }
 .facet-title { margin-bottom: var(--sp-sm); }
 .facets .opts { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
@@ -199,7 +204,9 @@ main { max-width: var(--maxw); margin: 0 auto; padding: var(--sp-xl); }
 }
 .facets .opt:hover { background: var(--surface-2); text-decoration: none; }
 .facets .opt.active { background: var(--surface-3); color: var(--text); }
-.facets .opt-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The rail column sizes to the widest label, so labels stay on one line and show
+   in full rather than truncating with an ellipsis. */
+.facets .opt-label { white-space: nowrap; }
 .facets .opt-count { margin-left: auto; font-family: var(--mono); font-size: 0.75rem; color: var(--faint); font-variant-numeric: tabular-nums; }
 .facets .opt.active .opt-count { color: var(--lilac); }
 .sessions-main { min-width: 0; }
@@ -215,6 +222,31 @@ main { max-width: var(--maxw); margin: 0 auto; padding: var(--sp-xl); }
 .active-filters .clear { margin-left: 4px; }
 .proj-link { color: var(--subtext); }
 .proj-link:hover { color: var(--lilac); }
+
+/* The Sessions table fills the wide page: every column sizes to its content and
+   never wraps, with the Project column (col-grow) absorbing the slack so the row
+   stays flush rather than leaving a ragged right edge. */
+table.sessions th, table.sessions td { white-space: nowrap; }
+table.sessions .col-grow { width: 100%; }
+table.sessions td.tags .tag + .tag { margin-left: 4px; }
+
+/* Tokens column: the figure carries a hover/focus card that breaks it down by
+   class and cost, reusing the heatmap tooltip's inner styles. The cell lifts its
+   stacking context on hover so the card paints over the rows below. */
+table.sessions td.tokens { overflow: visible; }
+.tok-cell { position: relative; display: inline-block; }
+.tok-cell:hover, .tok-cell:focus-within { z-index: var(--z-overlay); }
+.tok-total { border-bottom: 1px dotted var(--border-strong); }
+.tok-tip {
+  display: none; position: absolute; right: 0; top: calc(100% + 6px);
+  min-width: 170px; text-align: left; z-index: var(--z-overlay);
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-sm);
+  padding: var(--sp-sm); box-shadow: var(--shadow-overlay);
+}
+.tok-cell:hover .tok-tip, .tok-cell:focus-within .tok-tip { display: block; }
+/* The card's rows are spans here (the heatmap builds them as divs), so make them
+   stack. */
+.tok-tip .tt-total, .tok-tip .tt-cost { display: block; }
 
 /* ---- KPI tiles (Overview) ---- */
 .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--sp-md); margin-bottom: var(--sp-lg); }
@@ -429,20 +461,23 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--l
   transition: opacity var(--dur-fast) var(--ease-state), transform var(--dur-fast) var(--ease-state);
 }
 .heatmap-tooltip.on { opacity: 1; transform: none; }
+/* The breakdown card's inner styles are shared by the heatmap tooltip and the
+   Sessions table's token card (.tok-tip), so a token total reads the same in
+   both places. */
 .heatmap-tooltip .tt-day { color: var(--lilac); font: 500 0.75rem var(--mono); margin-bottom: 4px; }
-.heatmap-tooltip .tt-total { color: var(--text); font: 450 0.8125rem var(--mono); font-variant-numeric: tabular-nums; }
+.heatmap-tooltip .tt-total, .tok-tip .tt-total { color: var(--text); font: 450 0.8125rem var(--mono); font-variant-numeric: tabular-nums; }
 .heatmap-tooltip .tt-empty { color: var(--muted); font-size: 0.75rem; }
-/* The heatmap cell tooltip's token-split grid. The overview and session Tokens
-   readouts render the same in/out/cache breakdown through the shared .stat-tip
-   tooltip styling above. */
-.heatmap-tooltip .tt-grid {
+/* The overview and session-header Tokens readouts render their own in/out/cache
+   breakdown through the .stat-tip tooltip styling above; this grid is the heatmap
+   cell tooltip and the Sessions table's token card (.tok-tip). */
+.heatmap-tooltip .tt-grid, .tok-tip .tt-grid {
   display: grid; grid-template-columns: auto auto; gap: 1px var(--sp-sm);
   margin: 0; font: 450 0.75rem/1.5 var(--mono);
   margin-top: 5px;
 }
-.heatmap-tooltip .tt-grid dt { color: var(--muted); }
-.heatmap-tooltip .tt-grid dd { margin: 0; color: var(--subtext); text-align: right; font-variant-numeric: tabular-nums; }
-.heatmap-tooltip .tt-cost {
+.heatmap-tooltip .tt-grid dt, .tok-tip .tt-grid dt { color: var(--muted); }
+.heatmap-tooltip .tt-grid dd, .tok-tip .tt-grid dd { margin: 0; color: var(--subtext); text-align: right; font-variant-numeric: tabular-nums; }
+.heatmap-tooltip .tt-cost, .tok-tip .tt-cost {
   margin-top: 5px; padding-top: 5px; border-top: 1px solid var(--border);
   color: var(--subtext); font: 450 0.75rem var(--mono); font-variant-numeric: tabular-nums;
 }
