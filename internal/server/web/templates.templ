@@ -26,7 +26,7 @@ templ layout(p Page) {
 				<div class="app">
 					@sidebar(p)
 					<div class="content-scroll">
-						<main>
+						<main class={ "page-" + p.Active }>
 							{ children... }
 						</main>
 					</div>
@@ -304,87 +304,67 @@ templ kindTag(kind string) {
 	}
 }
 
-templ ProjectsPage(p Page, projects, locals []store.ProjectSummary, a store.Analytics, spark map[int64][]float64) {
+// ProjectsPage is the projects index: a single full-width table of git-remote
+// projects, one row each. The page deliberately carries no usage panel (the
+// Overview owns fleet usage) and no local-folder list (those reach the reader
+// through the Sessions filter rail), so the table is the whole surface. The page
+// has no heading because the sidebar already marks this section as Projects.
+templ ProjectsPage(p Page, projects []store.ProjectSummary, spark map[int64][]float64) {
 	@layout(p) {
-		<div class="page-head">
-			<h1>Projects</h1>
-		</div>
-		@analyticsPanel(a, "chart-global", "Across all projects", false, "")
-		<section>
-			<div class="panel-head">
-				<h2>Projects</h2>
-			</div>
-			if len(projects) == 0 {
-				<div class="empty">No git-remote projects yet.</div>
-			} else {
-				<table class="grid">
-					<thead>
-						<tr>
-							<th>Project</th>
-							<th class="trend">30d</th>
-							<th class="num">Sessions</th>
-							<th class="num">Input</th>
-							<th class="num">Output</th>
-							<th class="num">Cost</th>
-							<th>Last activity</th>
+		if len(projects) == 0 {
+			<div class="empty">No git-remote projects yet.</div>
+		} else {
+			<table class="grid projects">
+				<thead>
+					<tr>
+						<th class="proj-name">Project</th>
+						<th class="trend">30d</th>
+						<th class="num">Sessions</th>
+						<th class="num">Tokens</th>
+						<th class="num">Cost</th>
+						<th>Updated</th>
+					</tr>
+				</thead>
+				<tbody>
+					for _, pr := range projects {
+						<tr data-row-href={ ProjectPath(pr.ID) }>
+							<td class="proj-name"><a href={ ProjectHref(pr.ID) }>{ pr.RemoteKey }</a></td>
+							<td class="trend">@templ.Raw(Sparkline(spark[pr.ID]))</td>
+							<td class="num">{ fmt.Sprintf("%d", pr.SessionCount) }</td>
+							<td class="num">@tokensCell(pr)</td>
+							<td class="num">{ FmtCost(pr.TotalCostUSD, false) }</td>
+							<td class="muted nowrap">{ FmtRelTime(pr.LastActivity) }</td>
 						</tr>
-					</thead>
-					<tbody>
-						for _, pr := range projects {
-							<tr data-row-href={ ProjectPath(pr.ID) }>
-								<td><a href={ ProjectHref(pr.ID) }>{ pr.RemoteKey }</a></td>
-								<td class="trend">@templ.Raw(Sparkline(spark[pr.ID]))</td>
-								<td class="num">{ fmt.Sprintf("%d", pr.SessionCount) }</td>
-								<td class="num">{ FmtTokens(pr.TotalInput) }</td>
-								<td class="num">{ FmtTokens(pr.TotalOutput) }</td>
-								<td class="num">{ FmtCost(pr.TotalCostUSD, false) }</td>
-								<td class="muted">{ FmtTime(pr.LastActivity) }</td>
-							</tr>
-						}
-					</tbody>
-				</table>
-			}
-		</section>
-		if len(locals) > 0 {
-			<section>
-				<div class="panel-head">
-					<h2>Sessions</h2>
-					<span class="muted small">Folders without a git remote</span>
-				</div>
-				<table class="grid">
-					<thead>
-						<tr>
-							<th>Folder</th>
-							<th>State</th>
-							<th>Machine</th>
-							<th class="num">Sessions</th>
-							<th class="num">Input</th>
-							<th class="num">Output</th>
-							<th class="num">Cost</th>
-							<th>Last activity</th>
-						</tr>
-					</thead>
-					<tbody>
-						for _, pr := range locals {
-							<tr data-row-href={ ProjectPath(pr.ID) }>
-								<td>
-									<a href={ ProjectHref(pr.ID) }>{ pr.DisplayName }</a>
-									<div class="muted small mono">{ LocalPath(pr) }</div>
-								</td>
-								<td>@kindTag(pr.Kind)</td>
-								<td class="muted">{ pr.Host }</td>
-								<td class="num">{ fmt.Sprintf("%d", pr.SessionCount) }</td>
-								<td class="num">{ FmtTokens(pr.TotalInput) }</td>
-								<td class="num">{ FmtTokens(pr.TotalOutput) }</td>
-								<td class="num">{ FmtCost(pr.TotalCostUSD, false) }</td>
-								<td class="muted">{ FmtTime(pr.LastActivity) }</td>
-							</tr>
-						}
-					</tbody>
-				</table>
-			</section>
+					}
+				</tbody>
+			</table>
 		}
 	}
+}
+
+// tokensCell shows a project's total token count with the same hover card the
+// global session list uses (.tok-cell), so the breakdown into the four classes
+// (in, out, cache read, cache write) and the cost line read identically across
+// surfaces and share the heatmap tooltip's styling. The card is pure CSS, so it
+// needs no hydration in the server-rendered table.
+templ tokensCell(pr store.ProjectSummary) {
+	<span class="tok-cell" tabindex="0">
+		<span class="tok-total">{ FmtTokens(pr.TotalTokens()) }</span>
+		<span class="tok-tip" role="tooltip">
+			<span class="tt-total">{ FmtTokens(pr.TotalTokens()) } tokens</span>
+			<dl class="tt-grid">
+				<dt>In</dt>
+				<dd>{ FmtTokens(pr.TotalInput) }</dd>
+				<dt>Out</dt>
+				<dd>{ FmtTokens(pr.TotalOutput) }</dd>
+				<dt>Cache read</dt>
+				<dd>{ FmtTokens(pr.TotalCacheRead) }</dd>
+				<dt>Cache write</dt>
+				<dd>{ FmtTokens(pr.TotalCacheWrite) }</dd>
+			</dl>
+			<span class="tt-cost">{ FmtCost(pr.TotalCostUSD, false) }</span>
+		</span>
+	</span>
 }
 
 templ ProjectPage(p Page, proj store.ProjectSummary, sessions []store.SessionSummary, facets Facets, sel store.SessionFilter, a store.Analytics) {

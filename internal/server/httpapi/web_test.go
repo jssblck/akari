@@ -165,10 +165,11 @@ func TestWebFlow(t *testing.T) {
 	}
 }
 
-// TestStandaloneOrphanedIndex drives the real ingest endpoint with a non-remote
-// kind and confirms the index renders standalone and orphaned folders in their
-// own "Sessions" section, tagged and labeled by folder, and that drilling into
-// one shows its state and path.
+// TestStandaloneOrphanedIndex drives the real ingest endpoint with both a remote
+// and non-remote kinds and confirms the projects index lists only the git-remote
+// project: standalone and orphaned folders are kept off this surface (they reach
+// the reader through the Sessions filter rail), while drilling straight into a
+// local folder still shows its state and path.
 func TestStandaloneOrphanedIndex(t *testing.T) {
 	t.Parallel()
 	srv, st := newTestServer(t)
@@ -191,12 +192,16 @@ func TestStandaloneOrphanedIndex(t *testing.T) {
 		t.Fatalf("create token: %v", err)
 	}
 
-	announce := func(kind, source, cwd string) {
+	announce := func(kind, source, cwd, remote string) {
 		t.Helper()
-		body, _ := json.Marshal(map[string]string{
+		payload := map[string]string{
 			"agent": "claude", "source_session_id": source, "kind": kind,
 			"cwd": cwd, "machine": "grace-laptop",
-		})
+		}
+		if remote != "" {
+			payload["project_remote"] = remote
+		}
+		body, _ := json.Marshal(payload)
 		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/ingest/session", bytes.NewReader(body))
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Content-Type", "application/json")
@@ -210,28 +215,34 @@ func TestStandaloneOrphanedIndex(t *testing.T) {
 		}
 	}
 
-	announce("standalone", "sess-standalone", "/home/grace/scratch")
-	announce("orphaned", "sess-orphaned", "/home/grace/deleted")
+	announce("remote", "sess-remote", "/home/grace/akari", "github.com/grace-hopper/akari")
+	announce("standalone", "sess-standalone", "/home/grace/scratch", "")
+	announce("orphaned", "sess-orphaned", "/home/grace/deleted", "")
 
-	// The projects index shows a Sessions section with both states tagged and the
-	// folder name and path rendered (not the synthetic local: key).
+	// The projects index lists the git-remote project and nothing else: no local
+	// folders, no "Sessions" section, and never the synthetic local: key.
 	resp, err := c.Get(srv.URL + "/projects")
 	if err != nil {
 		t.Fatalf("get /projects: %v", err)
 	}
 	body := readBody(t, resp)
-	for _, want := range []string{
-		">Sessions<", "standalone", "orphaned", "scratch", "/home/grace/scratch", "deleted",
+	if !strings.Contains(body, "github.com/grace-hopper/akari") {
+		t.Fatalf("projects index missing the remote project, got:\n%s", body)
+	}
+	// "Folders without a git remote" was the old local-folder section's subtitle;
+	// the folder names, paths, state tags, and synthetic key must all be gone too.
+	// (">Sessions<" is avoided here: the sidebar nav link would match it.)
+	for _, gone := range []string{
+		"Folders without a git remote", "standalone", "orphaned",
+		"scratch", "/home/grace/scratch", "deleted", "local:grace-laptop:",
 	} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("projects index missing %q, got:\n%s", want, body)
+		if strings.Contains(body, gone) {
+			t.Fatalf("projects index should exclude local folders; found %q in:\n%s", gone, body)
 		}
 	}
-	if strings.Contains(body, "local:grace-laptop:") {
-		t.Fatalf("projects index leaked the synthetic local key, got:\n%s", body)
-	}
 
-	// Drilling into the standalone folder shows its state tag and path.
+	// Drilling into the standalone folder still shows its state tag and path: the
+	// folder is off the index, not unreachable.
 	var projID int64
 	if err := st.Pool.QueryRow(ctx, "SELECT id FROM projects WHERE kind = 'standalone'").Scan(&projID); err != nil {
 		t.Fatalf("find standalone project: %v", err)

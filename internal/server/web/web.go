@@ -194,7 +194,8 @@ func RowTokens(s store.SessionSummary) int64 {
 // FmtRelTime renders a timestamp as a coarse "time ago" for the recent past
 // (today, 1 day ago, ...), falling back to an absolute stamp once it is a week
 // or more old, where a relative phrasing stops being useful. It reads "now" from
-// the wall clock; relTime holds the testable core.
+// the wall clock; relTime holds the testable core. It backs both the global
+// session list's and the projects index's "Updated" column.
 func FmtRelTime(t *time.Time) string {
 	if t == nil || t.IsZero() {
 		return "-"
