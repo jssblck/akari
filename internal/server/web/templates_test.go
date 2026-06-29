@@ -31,7 +31,7 @@ func analyticsWithData() store.Analytics {
 		TotalIn:   100,
 		TotalOut:  50,
 		Series: []store.DayPoint{{
-			Day: time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC),
+			Day:   time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC),
 			Input: 100, Output: 20, CacheRead: 5, CacheWrite: 2, CostUSD: 1.25,
 		}},
 	}
