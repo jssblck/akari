@@ -93,4 +93,49 @@ func TestApplyDeltaDuplicateCallUIDBackPatchesEveryCopy(t *testing.T) {
 	if unkeyedStatus != "" {
 		t.Fatalf("unkeyed call should be unpatched, got result_status=%q", unkeyedStatus)
 	}
+
+	// The session view's chip reads this scalar: exactly one id ("dup") appears on
+	// more than one row, and the unkeyed call is not counted.
+	dups, err := st.DuplicateCallUIDCount(ctx, sid)
+	if err != nil {
+		t.Fatalf("duplicate count: %v", err)
+	}
+	if dups != 1 {
+		t.Fatalf("DuplicateCallUIDCount = %d, want 1", dups)
+	}
+}
+
+// TestDuplicateCallUIDCountZeroWhenUnique confirms the chip scalar is zero for a
+// session whose call ids are all distinct, so the warning never shows on clean data.
+func TestDuplicateCallUIDCountZeroWhenUnique(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	u, err := st.Register(ctx, "anna", "hash", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid := seedSession(t, st, u.ID, projectID, "sess-calluid-unique")
+
+	delta := ProjectionDelta{
+		Messages: []MessageDelta{{Ordinal: 0, Role: "assistant", HasToolUse: true}},
+		ToolCalls: []ProjToolCall{
+			{MessageOrdinal: 0, CallIndex: 0, ToolName: "Read", CallUID: "a"},
+			{MessageOrdinal: 0, CallIndex: 1, ToolName: "Bash", CallUID: "b"},
+		},
+	}
+	if err := st.ApplyProjectionDelta(ctx, sid, delta); err != nil {
+		t.Fatalf("apply delta: %v", err)
+	}
+	dups, err := st.DuplicateCallUIDCount(ctx, sid)
+	if err != nil {
+		t.Fatalf("duplicate count: %v", err)
+	}
+	if dups != 0 {
+		t.Fatalf("DuplicateCallUIDCount = %d, want 0 for unique ids", dups)
+	}
 }

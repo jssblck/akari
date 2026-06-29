@@ -369,7 +369,7 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 		// the back-patch UPDATE ... WHERE call_uid = $1 stamp the same result onto each
 		// replayed copy, which is what a reader expects to see. The ON CONFLICT still
 		// guards the (message_ordinal, call_index) key against a region replay. A session
-		// that carries a duplicate id is surfaced in the UI (DuplicateToolCallIDs), so a
+		// that carries a duplicate id is surfaced in the UI (DuplicateCallUIDCount), so a
 		// genuinely malformed id reuse, the only case where stamping both rows is wrong,
 		// is visible rather than silent.
 		if _, err := tx.Exec(ctx,
@@ -406,14 +406,18 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 		if media == "" {
 			media = "text/plain"
 		}
-		// Touches one row in the common case and every replayed copy when a transcript
-		// repeated the call's id (the index is non-unique by design), so each visible
-		// copy of a duplicated turn carries the same result rather than one looking
-		// pending.
+		// Patches one row in the common case and every still-pending copy when a
+		// transcript repeated the call's id (the index is non-unique by design), so each
+		// visible copy of a duplicated turn carries the same result rather than one
+		// looking pending. The result_status IS NULL guard keeps this linear: a row is
+		// patched once and then skipped, so a replayed turn that delivers its tool_result
+		// K times does not rewrite the K accumulated copies on each delivery (which would
+		// be O(K^2)). A freshly inserted tool_call has result_status NULL until its result
+		// arrives, so the guard matches exactly the copies that have not been resolved.
 		if _, err := tx.Exec(ctx,
 			`UPDATE tool_calls
 			    SET result_sha256 = $3, result_bytes = $4, result_media_type = $5, result_status = $6
-			  WHERE session_id = $1 AND call_uid = $2`,
+			  WHERE session_id = $1 AND call_uid = $2 AND result_status IS NULL`,
 			sessionID, tr.CallUID, resultSHA, tr.Bytes, media, tr.Status); err != nil {
 			return appliedDelta{}, fmt.Errorf("back-patch tool result for session %d call %q: %w", sessionID, tr.CallUID, err)
 		}

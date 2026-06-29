@@ -2587,7 +2587,7 @@ func GlobalSessionList(rows []store.SessionRow) templ.Component {
 }
 
 // ============================ Session ============================
-func SessionPage(p Page, d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, subagents []store.SessionSummary, live, owner bool) templ.Component {
+func SessionPage(p Page, d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, subagents []store.SessionSummary, dupIDs int, live, owner bool) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
 		if templ_7745c5c3_CtxErr := ctx.Err(); templ_7745c5c3_CtxErr != nil {
@@ -2686,15 +2686,15 @@ func SessionPage(p Page, d store.SessionDetail, msgs []store.Message, tools map[
 					return templ_7745c5c3_Err
 				}
 			}
-			if n := DuplicateToolCallIDs(tools); n > 0 {
+			if dupIDs > 0 {
 				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 205, "<span class=\"tag warn\" title=\"This session repeats a tool-call id across rows (a resumed or compacted transcript replaying earlier turns). Each copy is shown with the same result. A high count across many sessions may signal genuinely malformed ids.\">")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 				var templ_7745c5c3_Var131 string
-				templ_7745c5c3_Var131, templ_7745c5c3_Err = templ.JoinStringErrs(DuplicateIDsLabel(n))
+				templ_7745c5c3_Var131, templ_7745c5c3_Err = templ.JoinStringErrs(DuplicateIDsLabel(dupIDs))
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/server/web/templates.templ`, Line: 609, Col: 279}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/server/web/templates.templ`, Line: 609, Col: 284}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var131))
 				if templ_7745c5c3_Err != nil {
