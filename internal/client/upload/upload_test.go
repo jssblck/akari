@@ -57,6 +57,11 @@ type fakeServer struct {
 
 	// alwaysConflict makes every chunk POST return 409, to exercise the retry cap.
 	alwaysConflict bool
+
+	// failCheckStatus / failPutStatus, when non-zero, make the blob-check or blob-upload
+	// endpoint return that HTTP status, to drive the client's error paths.
+	failCheckStatus int
+	failPutStatus   int
 }
 
 func (s *fakeServer) handler() http.Handler {
@@ -117,6 +122,13 @@ func (s *fakeServer) handler() http.Handler {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		s.mu.Lock()
+		if s.failCheckStatus != 0 {
+			status := s.failCheckStatus
+			s.mu.Unlock()
+			w.WriteHeader(status)
+			writeJSON(w, map[string]any{"error": "check failed"})
+			return
+		}
 		s.checkBatchSizes = append(s.checkBatchSizes, len(req.SHA256))
 		s.curChecks++
 		if s.curChecks > s.maxConcurrentChecks {
@@ -143,6 +155,14 @@ func (s *fakeServer) handler() http.Handler {
 	mux.HandleFunc("PUT /api/v1/ingest/blob/{sha256}", func(w http.ResponseWriter, r *http.Request) {
 		sha := r.PathValue("sha256")
 		body := readAll(r)
+		s.mu.Lock()
+		failPut := s.failPutStatus
+		s.mu.Unlock()
+		if failPut != 0 {
+			w.WriteHeader(failPut)
+			writeJSON(w, map[string]any{"error": "upload failed"})
+			return
+		}
 		sum := sha256.Sum256(body)
 		if hex.EncodeToString(sum[:]) != sha {
 			w.WriteHeader(http.StatusBadRequest)

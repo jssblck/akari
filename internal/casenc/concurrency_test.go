@@ -3,6 +3,7 @@ package casenc
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"sync"
@@ -38,6 +39,68 @@ func TestNewLimitedMatchesNew(t *testing.T) {
 	}
 	if hsSHA != plainSHA {
 		t.Fatalf("streamed key %s != in-hand key %s", hsSHA, plainSHA)
+	}
+}
+
+// TestNewLimitedNonPositiveIsUnbounded proves a non-positive bound is treated as no
+// bound at all, matching New: the exported edge case must not install a zero-width
+// semaphore that would deadlock every compression.
+func TestNewLimitedNonPositiveIsUnbounded(t *testing.T) {
+	withThreshold(t, 16)
+	raw := []byte(strings.Repeat("compress me ", 100))
+	wantSHA, wantStored, wantCT := New().EncodeBody(raw)
+	for _, bound := range []int{0, -1} {
+		enc := NewLimited(bound)
+		if enc.compSem != nil {
+			t.Fatalf("NewLimited(%d) installed a semaphore, want unbounded", bound)
+		}
+		sha, stored, ct := enc.EncodeBody(raw)
+		if sha != wantSHA || ct != wantCT || !bytes.Equal(stored, wantStored) {
+			t.Fatalf("NewLimited(%d).EncodeBody differs from New", bound)
+		}
+	}
+}
+
+// TestHashStreamAcquireHonorsContext proves the compression-permit wait inside
+// HashStream is cancellable: when the only permit is held and the caller's context is
+// canceled while it waits, HashStream returns the context error rather than blocking
+// forever. This exercises the acquire-error path, distinct from the existing peek-time
+// cancellation which returns before any permit wait.
+func TestHashStreamAcquireHonorsContext(t *testing.T) {
+	withThreshold(t, 16)
+	enc := NewLimited(1) // a single permit, so the second compression must wait
+
+	release := make(chan struct{})
+	defer close(release)
+	holderEntered := make(chan struct{})
+	go func() {
+		// Hold the only permit, parked mid-compression past the peek.
+		r := &gateReader{
+			peek:    bytes.Repeat([]byte("A"), 16),
+			tail:    bytes.Repeat([]byte("B"), 4096),
+			release: release,
+			onGate:  func() { close(holderEntered) },
+		}
+		_, _, _, _ = enc.HashStream(context.Background(), r)
+	}()
+	<-holderEntered // the permit is now held
+
+	ctx, cancel := context.WithCancel(context.Background())
+	got := make(chan error, 1)
+	go func() {
+		// This call clears the peek (ctx still live) then blocks on the held permit.
+		_, _, _, err := enc.HashStream(ctx, bytes.NewReader(bytes.Repeat([]byte("C"), 4096)))
+		got <- err
+	}()
+	time.Sleep(50 * time.Millisecond) // let it reach the permit wait
+	cancel()
+	select {
+	case err := <-got:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("HashStream during a canceled permit wait = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("HashStream did not return after its context was canceled")
 	}
 }
 

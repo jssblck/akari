@@ -2,7 +2,9 @@ package upload
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -158,6 +160,91 @@ func TestEarlyFlushOnByteBudgetUploadsEverything(t *testing.T) {
 	}
 	if string(fs.buf) == "" {
 		t.Fatal("server stored no transcript, want the rewritten lines")
+	}
+}
+
+// TestNewFallsBackToFixedLimiter proves the Client's limiter wiring degrades to a fixed
+// limiter when the adaptive one cannot be built, and otherwise uses what the constructor
+// returns.
+func TestNewFallsBackToFixedLimiter(t *testing.T) {
+	got := uploadLimiterOrFallback(func() (uploadLimiter, error) { return nil, errors.New("boom") })
+	if _, ok := got.(*fixedUploadLimiter); !ok {
+		t.Fatalf("fallback limiter = %T, want *fixedUploadLimiter", got)
+	}
+	sentinel := newFixedUploadLimiter(3)
+	if got := uploadLimiterOrFallback(func() (uploadLimiter, error) { return sentinel, nil }); got != sentinel {
+		t.Fatalf("constructor result not used; got %v", got)
+	}
+}
+
+// TestRegisterBodySkipsAlreadyPresent proves a body already confirmed present this pass
+// is not re-queued, so it costs neither a check nor an upload. This is the present-skip
+// branch, distinct from the duplicate-still-pending skip the dedup test covers.
+func TestRegisterBodySkipsAlreadyPresent(t *testing.T) {
+	c, _ := newTestClient(t)
+	sink := &syncSink{c: c, present: newSeenCache(), pendingShas: map[string]struct{}{}, enc: c.enc}
+	sha := hexSHA("a body already in the CAS")
+	sink.present.add(sha)
+	if err := sink.registerBody(context.Background(), sha, "application/octet-stream", bodyRef{haveContent: true, stored: []byte("x")}); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.pending) != 0 {
+		t.Fatalf("a present body was queued (%d pending), want it skipped", len(sink.pending))
+	}
+}
+
+// TestCheckMissingFailurePropagates proves a failing existence check fails the sync
+// rather than silently proceeding to upload or commit.
+func TestCheckMissingFailurePropagates(t *testing.T) {
+	setChunkTarget(t, 1<<30)
+	c, fs := newTestClient(t)
+	fs.failCheckStatus = http.StatusInternalServerError
+	if _, err := c.SyncFile(context.Background(), target(tempFile(t, claudeToolResult("t1", "a body")))); err == nil {
+		t.Fatal("expected an error when the blob-check endpoint fails")
+	}
+}
+
+// TestPresentBodyIsNotReuploaded proves the existence check short-circuits the upload: a
+// body a prior session already stored is reported present and never PUT again, even from
+// a different session referencing it.
+func TestPresentBodyIsNotReuploaded(t *testing.T) {
+	setChunkTarget(t, 1<<30)
+	c, fs := newTestClient(t)
+	body := "a shared tool result body two sessions reference"
+
+	if _, err := c.SyncFile(context.Background(), target(tempFile(t, claudeToolResult("t1", body)))); err != nil {
+		t.Fatal(err)
+	}
+	if fs.puts != 1 {
+		t.Fatalf("first sync uploaded %d bodies, want 1", fs.puts)
+	}
+
+	// A second session (fresh server-side session state, fresh client file state via a
+	// new path) references the same body; the check reports it present, so no second PUT.
+	fs.mu.Lock()
+	fs.buf = nil
+	fs.mu.Unlock()
+	if _, err := c.SyncFile(context.Background(), target(tempFile(t, claudeToolResult("t2", body)))); err != nil {
+		t.Fatal(err)
+	}
+	if fs.puts != 1 {
+		t.Fatalf("present body re-uploaded: puts=%d, want 1", fs.puts)
+	}
+}
+
+// TestPutBodyTypedStatusErrorPropagates proves a failed upload surfaces as the typed
+// status error the upload limiter classifies on, carrying the server's status code.
+func TestPutBodyTypedStatusErrorPropagates(t *testing.T) {
+	setChunkTarget(t, 1<<30)
+	c, fs := newTestClient(t)
+	fs.failPutStatus = http.StatusServiceUnavailable
+	_, err := c.SyncFile(context.Background(), target(tempFile(t, claudeToolResult("t1", "a body"))))
+	if err == nil {
+		t.Fatal("expected an error when the blob upload fails")
+	}
+	var se *httpStatusError
+	if !errors.As(err, &se) || se.code != http.StatusServiceUnavailable {
+		t.Fatalf("error = %v, want a *httpStatusError with code %d", err, http.StatusServiceUnavailable)
 	}
 }
 

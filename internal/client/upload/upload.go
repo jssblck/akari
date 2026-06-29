@@ -155,21 +155,26 @@ func New(httpClient *http.Client, baseURL, token string) *Client {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
-	uploads, err := newAdaptiveUploadLimiter()
-	if err != nil {
-		// The adaptive limiter is built from static, valid parameters, so this does not
-		// happen in practice; fall back to a fixed-width limiter so a Client is always
-		// usable rather than left without upload concurrency control.
-		uploads = newFixedUploadLimiter(uploadInitialConcurrency)
-	}
 	return &Client{
 		http:    httpClient,
 		baseURL: strings.TrimRight(baseURL, "/"),
 		token:   token,
 		enc:     casenc.NewLimited(runtime.NumCPU()),
-		uploads: uploads,
+		uploads: uploadLimiterOrFallback(newAdaptiveUploadLimiter),
 		files:   map[string]*fileSync{},
 	}
+}
+
+// uploadLimiterOrFallback returns the adaptive limiter built by make, or a fixed-width
+// limiter when make fails. The adaptive limiter is built from static, valid parameters,
+// so the fallback does not trigger in practice; it exists so a Client is always usable
+// rather than left without upload concurrency control. It takes the constructor as a
+// parameter so a test can drive the fallback branch.
+func uploadLimiterOrFallback(make func() (uploadLimiter, error)) uploadLimiter {
+	if lim, err := make(); err == nil {
+		return lim
+	}
+	return newFixedUploadLimiter(uploadInitialConcurrency)
 }
 
 // fileState returns the cached sync state for a path, creating an empty one (cold
