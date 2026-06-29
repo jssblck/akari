@@ -1,14 +1,17 @@
-package store
+package store_test
 
 import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/jssblck/akari/internal/server/store"
+	"github.com/jssblck/akari/internal/server/storetest"
 )
 
 // seedUsage inserts a session and a usage event directly, bypassing the ingest
 // pipeline, so the analytics rollups can be asserted against known inputs.
-func seedSessionWithStats(t *testing.T, st *Store, userID, projectID int64, agent, src string, cost float64, in, out int64) int64 {
+func seedSessionWithStats(t *testing.T, st *store.Store, userID, projectID int64, agent, src string, cost float64, in, out int64) int64 {
 	t.Helper()
 	var id int64
 	err := st.Pool.QueryRow(context.Background(),
@@ -22,7 +25,7 @@ func seedSessionWithStats(t *testing.T, st *Store, userID, projectID int64, agen
 	return id
 }
 
-func seedUsage(t *testing.T, st *Store, sessionID int64, model string, cost float64, in, out int64, daysAgo int, dedup string) {
+func seedUsage(t *testing.T, st *store.Store, sessionID int64, model string, cost float64, in, out int64, daysAgo int, dedup string) {
 	t.Helper()
 	_, err := st.Pool.Exec(context.Background(),
 		`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cost_usd, occurred_at, dedup_key)
@@ -36,7 +39,7 @@ func seedUsage(t *testing.T, st *Store, sessionID int64, model string, cost floa
 // seedUsageCache is seedUsage with the two cache-token classes set, so the cache
 // totals the overview's Tokens tooltip surfaces can be asserted against known
 // inputs.
-func seedUsageCache(t *testing.T, st *Store, sessionID int64, model string, cost float64, in, out, cacheRead, cacheWrite int64, daysAgo int, dedup string) {
+func seedUsageCache(t *testing.T, st *store.Store, sessionID int64, model string, cost float64, in, out, cacheRead, cacheWrite int64, daysAgo int, dedup string) {
 	t.Helper()
 	_, err := st.Pool.Exec(context.Background(),
 		`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, occurred_at, dedup_key)
@@ -50,7 +53,7 @@ func seedUsageCache(t *testing.T, st *Store, sessionID int64, model string, cost
 // seedUsageAt inserts a usage event at an explicit occurred_at, so the window's
 // inclusive lower bound (`occurred_at >= since`) can be pinned to the exact
 // instant rather than a clearly-inside or clearly-outside day.
-func seedUsageAt(t *testing.T, st *Store, sessionID int64, model string, cost float64, in, out int64, at time.Time, dedup string) {
+func seedUsageAt(t *testing.T, st *store.Store, sessionID int64, model string, cost float64, in, out int64, at time.Time, dedup string) {
 	t.Helper()
 	_, err := st.Pool.Exec(context.Background(),
 		`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cost_usd, occurred_at, dedup_key)
@@ -64,17 +67,19 @@ func seedUsageAt(t *testing.T, st *Store, sessionID int64, model string, cost fl
 // TotalTokens sums the four token classes; it is the figure the overview's Tokens
 // readout shows. Pure, so it runs without a database.
 func TestAnalyticsTotalTokens(t *testing.T) {
-	a := Analytics{TotalIn: 100, TotalOut: 50, TotalCacheRead: 30, TotalCacheWrite: 7}
+	t.Parallel()
+	a := store.Analytics{TotalIn: 100, TotalOut: 50, TotalCacheRead: 30, TotalCacheWrite: 7}
 	if got := a.TotalTokens(); got != 187 {
 		t.Errorf("TotalTokens = %d, want 187 (100+50+30+7)", got)
 	}
-	if got := (Analytics{}).TotalTokens(); got != 0 {
+	if got := (store.Analytics{}).TotalTokens(); got != 0 {
 		t.Errorf("empty TotalTokens = %d, want 0", got)
 	}
 }
 
 func TestAnalyticsRollups(t *testing.T) {
-	st := newTestStore(t)
+	t.Parallel()
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 
 	admin, err := st.Register(ctx, "grace", "h", "")
@@ -139,7 +144,8 @@ func TestAnalyticsRollups(t *testing.T) {
 // event time. Only events at or after the bound count toward the series, the
 // breakdowns, the totals, and the distinct-session count.
 func TestAnalyticsTimeWindow(t *testing.T) {
-	st := newTestStore(t)
+	t.Parallel()
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 
 	admin, err := st.Register(ctx, "grace", "h", "")
@@ -201,7 +207,8 @@ func TestAnalyticsTimeWindow(t *testing.T) {
 // in-window usage and exclude both another project and out-of-window events. This
 // also exercises the cache-token totals the unscoped window test leaves at zero.
 func TestAnalyticsScopedWindowWithCacheTotals(t *testing.T) {
-	st := newTestStore(t)
+	t.Parallel()
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 
 	admin, err := st.Register(ctx, "grace", "h", "")
@@ -260,7 +267,8 @@ func TestAnalyticsScopedWindowWithCacheTotals(t *testing.T) {
 // tokens at zero, so this pins the all-time cache and combined-token aggregation
 // that the overview's Tokens readout and its tooltip surface.
 func TestAnalyticsAllTimeTokenTotals(t *testing.T) {
-	st := newTestStore(t)
+	t.Parallel()
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 
 	admin, err := st.Register(ctx, "grace", "h", "")
@@ -296,7 +304,8 @@ func TestAnalyticsAllTimeTokenTotals(t *testing.T) {
 // `since` counts, while one a single instant earlier does not. The other store
 // tests only use clearly inside/outside dates, leaving this edge unpinned.
 func TestAnalyticsWindowLowerBoundInclusive(t *testing.T) {
-	st := newTestStore(t)
+	t.Parallel()
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 
 	admin, err := st.Register(ctx, "grace", "h", "")
@@ -331,7 +340,8 @@ func TestAnalyticsWindowLowerBoundInclusive(t *testing.T) {
 }
 
 func TestProjectSparklines(t *testing.T) {
-	st := newTestStore(t)
+	t.Parallel()
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 	admin, _ := st.Register(ctx, "grace", "h", "")
 	proj, _ := st.UpsertProject(ctx, "github.com/ada/engine", "github.com", "ada", "engine", "engine", "remote")

@@ -1,15 +1,18 @@
-package store
+package store_test
 
 import (
 	"bytes"
 	"context"
 	"testing"
+
+	"github.com/jssblck/akari/internal/server/store"
+	"github.com/jssblck/akari/internal/server/storetest"
 )
 
 // seedSession announces a fresh session for the given user and returns its id.
-func seedSession(t *testing.T, st *Store, userID, projectID int64, source string) int64 {
+func seedSession(t *testing.T, st *store.Store, userID, projectID int64, source string) int64 {
 	t.Helper()
-	ann, err := st.Announce(context.Background(), AnnounceParams{
+	ann, err := st.Announce(context.Background(), store.AnnounceParams{
 		UserID: userID, Agent: "claude", SourceSessionID: source,
 		ProjectID: projectID, GitBranch: "main", Cwd: "/home/grace/akari", Machine: "laptop",
 	})
@@ -20,7 +23,8 @@ func seedSession(t *testing.T, st *Store, userID, projectID int64, source string
 }
 
 func TestCASWriteDedupReadSweep(t *testing.T) {
-	st := newTestStore(t)
+	t.Parallel()
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 
 	u, err := st.Register(ctx, "grace", "hash", "")
@@ -33,15 +37,15 @@ func TestCASWriteDedupReadSweep(t *testing.T) {
 	}
 
 	body := []byte(`{"file_path":"src/auth.ts"}`)
-	bodySHA := HashBytes(body)
+	bodySHA := store.HashBytes(body)
 
 	// Two sessions whose tool calls share the same input body must dedupe to one
 	// blob (content-addressed across sessions).
 	s1 := seedSession(t, st, u.ID, projectID, "sess-1")
 	s2 := seedSession(t, st, u.ID, projectID, "sess-2")
-	withInput := ProjectionDelta{
-		Messages: []MessageDelta{{Ordinal: 0, Role: "assistant", Content: "x", HasToolUse: true}},
-		ToolCalls: []ProjToolCall{{
+	withInput := store.ProjectionDelta{
+		Messages: []store.MessageDelta{{Ordinal: 0, Role: "assistant", Content: "x", HasToolUse: true}},
+		ToolCalls: []store.ProjToolCall{{
 			MessageOrdinal: 0, CallIndex: 0, ToolName: "Read", Category: "read",
 			InputBody: string(body), InputBytes: int64(len(body)), InputMediaType: "application/json", CallUID: "c1",
 		}},
@@ -81,7 +85,7 @@ func TestCASWriteDedupReadSweep(t *testing.T) {
 			t.Fatalf("session %d should reference blob: ok=%v err=%v", sid, ok, err)
 		}
 	}
-	if ok, _ := st.SessionReferencesBlob(ctx, s1, HashBytes([]byte("nope"))); ok {
+	if ok, _ := st.SessionReferencesBlob(ctx, s1, store.HashBytes([]byte("nope"))); ok {
 		t.Fatal("session should not reference an unrelated hash")
 	}
 
@@ -115,7 +119,8 @@ func TestCASWriteDedupReadSweep(t *testing.T) {
 // reclaimed by a concurrent sweep, even though it is unreferenced in committed
 // state.
 func TestSweepSkipsBlobLockedByWriter(t *testing.T) {
-	st := newTestStore(t)
+	t.Parallel()
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 
 	u, err := st.Register(ctx, "grace", "hash", "")
@@ -128,12 +133,12 @@ func TestSweepSkipsBlobLockedByWriter(t *testing.T) {
 	}
 
 	body := []byte("shared tool body")
-	sha := HashBytes(body)
+	sha := store.HashBytes(body)
 	sid := seedSession(t, st, u.ID, projectID, "sess-1")
-	withBlob := ProjectionDelta{
-		Messages:  []MessageDelta{{Ordinal: 0, Role: "assistant", Content: "x", HasToolUse: true}},
-		ToolCalls: []ProjToolCall{{MessageOrdinal: 0, CallIndex: 0, ToolName: "Read", CallUID: "c1"}},
-		ToolResults: []ToolResultDelta{{
+	withBlob := store.ProjectionDelta{
+		Messages:  []store.MessageDelta{{Ordinal: 0, Role: "assistant", Content: "x", HasToolUse: true}},
+		ToolCalls: []store.ProjToolCall{{MessageOrdinal: 0, CallIndex: 0, ToolName: "Read", CallUID: "c1"}},
+		ToolResults: []store.ToolResultDelta{{
 			CallUID: "c1", Body: string(body), Bytes: int64(len(body)), MediaType: "text/plain", Status: "ok",
 		}},
 	}
@@ -152,7 +157,7 @@ func TestSweepSkipsBlobLockedByWriter(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback(ctx)
-	if _, err := writeBlobTx(ctx, tx, string(body), "text/plain"); err != nil {
+	if _, err := store.WriteBlobTx(ctx, tx, string(body), "text/plain"); err != nil {
 		t.Fatalf("writeBlobTx: %v", err)
 	}
 
