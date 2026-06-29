@@ -26,10 +26,12 @@ func renderComponent(t *testing.T, c interface {
 // renders its chart (or heatmap) branch rather than the empty state.
 func analyticsWithData() store.Analytics {
 	return store.Analytics{
-		Sessions:  3,
-		TotalCost: 12.5,
-		TotalIn:   100,
-		TotalOut:  50,
+		Sessions:        3,
+		TotalCost:       12.5,
+		TotalIn:         100,
+		TotalOut:        50,
+		TotalCacheRead:  30,
+		TotalCacheWrite: 12,
 		Series: []store.DayPoint{{
 			Day:   time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC),
 			Input: 100, Output: 20, CacheRead: 5, CacheWrite: 2, CostUSD: 1.25,
@@ -43,7 +45,7 @@ func analyticsWithData() store.Analytics {
 // would otherwise repeat the scope already named in the page head.
 func TestOverviewPageRendersHeatmap(t *testing.T) {
 	p := Page{Title: "Overview", LoggedIn: true, Active: "overview", Username: "Grace Hopper"}
-	html := renderComponent(t, OverviewPage(p, analyticsWithData(), nil))
+	html := renderComponent(t, OverviewPage(p, analyticsWithData(), DefaultRange))
 
 	for _, want := range []string{`data-heatmap`, `data-heatmap-target="chart-global"`, `>Tokens</button>`, `>Dollars</button>`} {
 		if !strings.Contains(html, want) {
@@ -55,6 +57,65 @@ func TestOverviewPageRendersHeatmap(t *testing.T) {
 	}
 	if strings.Contains(html, `<h2>Usage</h2>`) {
 		t.Error("overview should drop the redundant Usage panel header")
+	}
+}
+
+// The overview's usage panel is the htmx swap target for the range selector, so
+// it must carry the stable id and the selector must offer every window, mark the
+// active one, and refetch into that same target.
+func TestOverviewPageRangeSelector(t *testing.T) {
+	p := Page{Title: "Overview", LoggedIn: true, Active: "overview", Username: "Grace Hopper"}
+	html := renderComponent(t, OverviewPage(p, analyticsWithData(), "90d"))
+
+	for _, want := range []string{`id="usage"`, `aria-label="Date range"`, `hx-get="/?range=7d"`, `hx-get="/?range=all"`, `hx-target="#usage"`, `hx-select="#usage"`} {
+		if !strings.Contains(html, want) {
+			t.Errorf("range selector missing %q", want)
+		}
+	}
+	for _, dr := range DateRanges {
+		if !strings.Contains(html, ">"+dr.Label+"</button>") {
+			t.Errorf("range selector should offer %q", dr.Label)
+		}
+	}
+	// The active window (90d) is the one marked.
+	if !strings.Contains(html, `class="seg active" hx-get="/?range=90d"`) {
+		t.Error("the active range button should carry the active class")
+	}
+}
+
+// The overview's headline strip reads Cost / Tokens / Sessions, with the combined
+// token figure and its per-class split (the same in/out/cache breakdown a heatmap
+// cell shows) behind the Tokens tooltip. It no longer splits Input and Output
+// into their own tiles.
+func TestOverviewPageTokensStat(t *testing.T) {
+	p := Page{Title: "Overview", LoggedIn: true, Active: "overview", Username: "Grace Hopper"}
+	html := renderComponent(t, OverviewPage(p, analyticsWithData(), DefaultRange))
+
+	for _, want := range []string{`>Tokens</div>`, `stat-tooltip`, `<dt>In</dt>`, `<dt>Out</dt>`, `<dt>Cache read</dt>`, `<dt>Cache write</dt>`} {
+		if !strings.Contains(html, want) {
+			t.Errorf("tokens readout missing %q", want)
+		}
+	}
+	// Combined total: 100 + 50 + 30 + 12 = 192.
+	if !strings.Contains(html, `>192</div>`) {
+		t.Error("tokens readout should show the combined token total (192)")
+	}
+	if strings.Contains(html, `>Input</div>`) || strings.Contains(html, `>Output</div>`) {
+		t.Error("the Input/Output tiles should be folded into the Tokens readout")
+	}
+}
+
+// The landing surface drops the recent-activity feed and the redundant scope
+// subtitle: the panel is the page.
+func TestOverviewPageDropsRecentActivity(t *testing.T) {
+	p := Page{Title: "Overview", LoggedIn: true, Active: "overview", Username: "Grace Hopper"}
+	html := renderComponent(t, OverviewPage(p, analyticsWithData(), DefaultRange))
+
+	if strings.Contains(html, "Recent activity") {
+		t.Error("overview should no longer render the recent-activity feed")
+	}
+	if strings.Contains(html, "across all projects") {
+		t.Error("overview should drop the scope subtitle")
 	}
 }
 

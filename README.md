@@ -183,10 +183,10 @@ warning rather than uploaded under an ambiguous project.
 A persistent left sidebar carries the primary sections (Overview, Sessions,
 Projects, Search, Account); the signed-in user and log-out sit at its foot.
 
-- **Overview**: the landing surface. A fleet-wide usage panel (cost and token
-  trends over time, a by-model and by-agent breakdown) over a feed of the most
-  recent sessions across every project, so the deep read and the spend view are
-  both one click from the door.
+- **Overview**: the landing surface. A fleet-wide usage panel bounded to a
+  trailing window (7, 30, or 90 days, a year, or all of history): cost, combined
+  tokens, and session totals, a daily-activity heatmap, and a by-model and
+  by-agent breakdown, every figure scoped to the chosen window.
 - **Sessions**: every session across all projects in one place, with a faceted
   filter rail (agent, project, user, machine — each with counts) and a project
   column, so a run is findable without first choosing its project.

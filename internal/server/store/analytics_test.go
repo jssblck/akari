@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 // seedUsage inserts a session and a usage event directly, bypassing the ingest
@@ -53,7 +54,7 @@ func TestAnalyticsRollups(t *testing.T) {
 	seedUsage(t, st, s1, "claude-opus-4-8", 1.5, 500, 100, 1, "u2")
 	seedUsage(t, st, s2, "gpt-5.5", 1.0, 400, 80, 2, "u3")
 
-	a, err := st.Analytics(ctx, proj)
+	a, err := st.Analytics(ctx, proj, time.Time{})
 	if err != nil {
 		t.Fatalf("analytics: %v", err)
 	}
@@ -85,12 +86,73 @@ func TestAnalyticsRollups(t *testing.T) {
 	}
 
 	// Global scope (projectID 0) sees the same single project.
-	g, err := st.Analytics(ctx, 0)
+	g, err := st.Analytics(ctx, 0, time.Time{})
 	if err != nil {
 		t.Fatalf("global analytics: %v", err)
 	}
 	if g.Sessions != 2 || len(g.Series) != 3 {
 		t.Errorf("global rollup mismatch: %+v", g)
+	}
+}
+
+// A non-zero `since` bounds every rollup to the trailing window, slicing usage by
+// event time. Only events at or after the bound count toward the series, the
+// breakdowns, the totals, and the distinct-session count.
+func TestAnalyticsTimeWindow(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	admin, err := st.Register(ctx, "grace", "h", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	proj, err := st.UpsertProject(ctx, "github.com/ada/engine", "github.com", "ada", "engine", "engine", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+
+	// s1 is active inside the window; s2 only has activity well before it.
+	s1 := seedSessionWithStats(t, st, admin.ID, proj, "claude", "s1", 2.0, 600, 120)
+	s2 := seedSessionWithStats(t, st, admin.ID, proj, "codex", "s2", 9.0, 400, 80)
+	seedUsage(t, st, s1, "claude-opus-4-8", 1.0, 300, 60, 0, "in1")
+	seedUsage(t, st, s1, "claude-opus-4-8", 1.0, 300, 60, 3, "in2")
+	seedUsage(t, st, s2, "gpt-5.5", 9.0, 400, 80, 40, "old")
+
+	// A 7-day window keeps only s1's two recent events.
+	since := time.Now().AddDate(0, 0, -7)
+	a, err := st.Analytics(ctx, 0, since)
+	if err != nil {
+		t.Fatalf("windowed analytics: %v", err)
+	}
+	if len(a.Series) != 2 {
+		t.Errorf("want 2 in-window daily points, got %d", len(a.Series))
+	}
+	if a.TotalCost < 1.99 || a.TotalCost > 2.01 {
+		t.Errorf("windowed cost should sum only in-window events (~2.0), got %.2f", a.TotalCost)
+	}
+	if a.Sessions != 1 {
+		t.Errorf("only s1 is active in-window, want 1 session, got %d", a.Sessions)
+	}
+	if a.TotalIn != 600 || a.TotalOut != 120 {
+		t.Errorf("windowed token totals wrong: in=%d out=%d", a.TotalIn, a.TotalOut)
+	}
+	if len(a.Models) != 1 || a.Models[0].Label != "claude-opus-4-8" {
+		t.Errorf("windowed models should hold only the in-window model: %+v", a.Models)
+	}
+	if len(a.Agents) != 1 || a.Agents[0].Label != "claude" {
+		t.Errorf("windowed agents should hold only the in-window agent: %+v", a.Agents)
+	}
+
+	// The unbounded view still sees both sessions and the older spend.
+	full, err := st.Analytics(ctx, 0, time.Time{})
+	if err != nil {
+		t.Fatalf("full analytics: %v", err)
+	}
+	if full.Sessions != 2 {
+		t.Errorf("unbounded view should see both sessions, got %d", full.Sessions)
+	}
+	if full.TotalCost < 10.99 || full.TotalCost > 11.01 {
+		t.Errorf("unbounded cost from session rollups should be ~11.0, got %.2f", full.TotalCost)
 	}
 }
 

@@ -261,10 +261,29 @@ th.trend, td.trend { width: 108px; }
 .stat .value { font-family: var(--mono); font-size: 1.125rem; font-variant-numeric: tabular-nums; color: var(--text); }
 /* The analytics panels (overview, projects, project) fuse their readouts into a
    single instrument strip: one bordered row split by hairlines, instead of four
-   detached tiles floating above the chart. The session page keeps loose tiles. */
-.analytics .stats { gap: 0; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); overflow: hidden; }
+   detached tiles floating above the chart. The session page keeps loose tiles.
+   The strip stays overflow-visible so the Tokens readout's hover tooltip can lift
+   clear of it; the fused rounded ends come from the first/last tile instead of a
+   clip. */
+.analytics .stats { gap: 0; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); overflow: visible; }
 .analytics .stat { flex: 1; min-width: 0; border: none; border-radius: 0; }
+.analytics .stat:first-child { border-top-left-radius: var(--r-md); border-bottom-left-radius: var(--r-md); }
+.analytics .stat:last-child { border-top-right-radius: var(--r-md); border-bottom-right-radius: var(--r-md); }
 .analytics .stat + .stat { border-left: 1px solid var(--border); }
+
+/* The Tokens tile carries the combined figure; its per-class split (in, out,
+   cache read, cache write) lifts on hover, the same card the heatmap uses. */
+.stat-tip { position: relative; }
+.stat-tip:focus-visible { outline: none; }
+.stat-tooltip {
+  position: absolute; z-index: var(--z-sticky); left: var(--sp-lg); bottom: calc(100% - 6px);
+  min-width: 168px;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-sm);
+  padding: var(--sp-sm); pointer-events: none;
+  opacity: 0; transform: translateY(3px);
+  transition: opacity var(--dur-fast) var(--ease-state), transform var(--dur-fast) var(--ease-state);
+}
+.stat-tip:hover .stat-tooltip, .stat-tip:focus-within .stat-tooltip { opacity: 1; transform: none; }
 .stats.sticky {
   position: sticky; top: 0; z-index: var(--z-sticky);
   padding: var(--sp-md) 0; margin: 0 0 var(--sp-lg);
@@ -361,7 +380,14 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--l
 
 /* ---- Calendar heatmap (overview activity grid) ---- */
 .heatmap-wrap { margin: var(--sp-md) 0 var(--sp-lg); }
-.heatmap-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--sp-sm); }
+.heatmap-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-md); flex-wrap: wrap; margin-bottom: var(--sp-sm); }
+/* The trailing-window selector sits beside the metric toggle on the grid-head
+   row, parted by a hairline; the two segmented controls wrap together when
+   narrow. */
+.heatmap-controls { display: flex; align-items: stretch; gap: var(--sp-md); flex-wrap: wrap; justify-content: flex-end; }
+/* Stretch the hairline to the controls' own height (with a small symmetric inset)
+   so it always reads as vertically centered between them, whatever their size. */
+.heatmap-controls .ctrl-sep { width: 1px; align-self: stretch; margin: 3px 0; background: var(--border); flex: none; }
 .heatmap {
   position: relative;
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md);
@@ -387,12 +413,15 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--l
 .heatmap-tooltip .tt-day { color: var(--lilac); font: 500 0.75rem var(--mono); margin-bottom: 4px; }
 .heatmap-tooltip .tt-total { color: var(--text); font: 450 0.8125rem var(--mono); font-variant-numeric: tabular-nums; }
 .heatmap-tooltip .tt-empty { color: var(--muted); font-size: 0.75rem; }
-.heatmap-tooltip .tt-grid {
+/* The token-split grid is shared between the heatmap cell tooltip and the Tokens
+   readout tooltip, so both render the in/out/cache breakdown identically. */
+.heatmap-tooltip .tt-grid, .stat-tooltip .tt-grid {
   display: grid; grid-template-columns: auto auto; gap: 1px var(--sp-sm);
-  margin: 5px 0 0; font: 450 0.75rem/1.5 var(--mono);
+  margin: 0; font: 450 0.75rem/1.5 var(--mono);
 }
-.heatmap-tooltip .tt-grid dt { color: var(--muted); }
-.heatmap-tooltip .tt-grid dd { margin: 0; color: var(--subtext); text-align: right; font-variant-numeric: tabular-nums; }
+.heatmap-tooltip .tt-grid { margin-top: 5px; }
+.heatmap-tooltip .tt-grid dt, .stat-tooltip .tt-grid dt { color: var(--muted); }
+.heatmap-tooltip .tt-grid dd, .stat-tooltip .tt-grid dd { margin: 0; color: var(--subtext); text-align: right; font-variant-numeric: tabular-nums; }
 .heatmap-tooltip .tt-cost {
   margin-top: 5px; padding-top: 5px; border-top: 1px solid var(--border);
   color: var(--subtext); font: 450 0.75rem var(--mono); font-variant-numeric: tabular-nums;

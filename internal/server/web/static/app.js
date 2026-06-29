@@ -456,6 +456,10 @@
     resetInspector();   // once; the inspector persists across live updates
     initLive();
   }
+  // The overview's range selector swaps the usage panel; its replacement bars
+  // start at width 0, so grow them in. animateBars guards already-grown bars, so
+  // bars elsewhere on the page are left alone.
+  document.addEventListener("htmx:afterSwap", function () { animateBars(); });
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", init);
   } else {

@@ -152,11 +152,15 @@ templ RegisterPage(p Page, errMsg string) {
 // ("Across all projects" or the project key) shown as the panel subtitle. When
 // heatmap is true the daily activity renders as a calendar grid (the overview's
 // front door) rather than the time-series line chart the project pages keep.
-templ analyticsPanel(a store.Analytics, chartID, scope string, heatmap bool) {
-	<section class="analytics">
-		// The overview's page head already names the scope ("Overview / across all
-		// projects"), so a second "Usage / <scope>" line just repeats it. The chart
-		// pages (projects, single project) keep the header to title the panel.
+// analyticsPanel carries id="usage" so the overview's range selector can swap the
+// whole panel (stats, grid, and breakdowns all reflect the window) in one shot.
+// rng is the active range key; it only drives the selector the heatmap variant
+// renders, and is ignored by the line-chart pages.
+templ analyticsPanel(a store.Analytics, chartID, scope string, heatmap bool, rng string) {
+	<section class="analytics" id="usage">
+		// The overview's page head already names the scope ("Overview"), so a second
+		// "Usage / <scope>" line just repeats it. The chart pages (projects, single
+		// project) keep the header to title the panel.
 		if !heatmap {
 			<div class="panel-head">
 				<h2>Usage</h2>
@@ -168,12 +172,11 @@ templ analyticsPanel(a store.Analytics, chartID, scope string, heatmap bool) {
 		} else {
 			<div class="stats">
 				@stat("Cost", FmtCost(a.TotalCost, false), "")
-				@stat("Input", FmtTokens(a.TotalIn), "")
-				@stat("Output", FmtTokens(a.TotalOut), "")
+				@statTokens(a)
 				@stat("Sessions", fmt.Sprintf("%d", a.Sessions), "")
 			</div>
 			if heatmap {
-				@heatmapBlock(a, chartID)
+				@heatmapBlock(a, chartID, rng)
 			} else {
 				@chartBlock(a, chartID)
 			}
@@ -183,6 +186,28 @@ templ analyticsPanel(a store.Analytics, chartID, scope string, heatmap bool) {
 			</div>
 		}
 	</section>
+}
+
+// statTokens is the combined-token readout: one headline figure with the per-class
+// split (in, out, cache read, cache write) behind a hover tooltip, the same
+// breakdown a heatmap cell shows for a single day.
+templ statTokens(a store.Analytics) {
+	<div class="stat stat-tip" tabindex="0">
+		<div class="label">Tokens</div>
+		<div class="value">{ FmtTokens(a.TotalTokens()) }</div>
+		<div class="stat-tooltip" role="tooltip">
+			<dl class="tt-grid">
+				<dt>In</dt>
+				<dd>{ FmtTokens(a.TotalIn) }</dd>
+				<dt>Out</dt>
+				<dd>{ FmtTokens(a.TotalOut) }</dd>
+				<dt>Cache read</dt>
+				<dd>{ FmtTokens(a.TotalCacheRead) }</dd>
+				<dt>Cache write</dt>
+				<dd>{ FmtTokens(a.TotalCacheWrite) }</dd>
+			</dl>
+		</div>
+	</div>
 }
 
 // chartBlock holds the time-series canvas and the inline JSON the SVG chart
@@ -203,16 +228,41 @@ templ chartBlock(a store.Analytics, chartID string) {
 // per day over a trailing year); the toggle switches whether cell intensity
 // scales by token volume or by dollars spent. Hovering a cell surfaces the
 // day's total and its token breakdown (in, out, cache read, cache write).
-templ heatmapBlock(a store.Analytics, chartID string) {
+templ heatmapBlock(a store.Analytics, chartID, rng string) {
 	<div class="heatmap-wrap">
 		<div class="heatmap-head">
 			<span class="label">Daily activity</span>
-			<div class="chart-toolbar" role="group" aria-label="Metric">
-				<button type="button" class="seg active" data-metric="tokens" data-heatmap-target={ chartID }>Tokens</button>
-				<button type="button" class="seg" data-metric="cost" data-heatmap-target={ chartID }>Dollars</button>
+			<div class="heatmap-controls">
+				@rangeSelector(rng)
+				<span class="ctrl-sep" aria-hidden="true"></span>
+				<div class="chart-toolbar" role="group" aria-label="Metric">
+					<button type="button" class="seg active" data-metric="tokens" data-heatmap-target={ chartID }>Tokens</button>
+					<button type="button" class="seg" data-metric="cost" data-heatmap-target={ chartID }>Dollars</button>
+				</div>
 			</div>
 		</div>
 		<div class="heatmap" id={ chartID } data-heatmap data-series={ AnalyticsJSON(a) }></div>
+	</div>
+}
+
+// rangeSelector is the trailing-window control, sat beside the metric toggle in
+// the grid head. Each button refetches the overview at its range and swaps the
+// whole usage panel in place (hx-select="#usage"), so the stats, grid intensity,
+// and breakdowns all move together; hx-push-url keeps the window in the address
+// bar across reloads.
+templ rangeSelector(rng string) {
+	<div class="chart-toolbar" role="group" aria-label="Date range">
+		for _, dr := range DateRanges {
+			<button
+				type="button"
+				class={ rangeSegClass(dr.Key == rng) }
+				hx-get={ "/?range=" + dr.Key }
+				hx-target="#usage"
+				hx-select="#usage"
+				hx-swap="outerHTML"
+				hx-push-url="true"
+			>{ dr.Label }</button>
+		}
 	</div>
 }
 
@@ -261,7 +311,7 @@ templ ProjectsPage(p Page, projects, locals []store.ProjectSummary, a store.Anal
 		<div class="page-head">
 			<h1>Projects</h1>
 		</div>
-		@analyticsPanel(a, "chart-global", "Across all projects", false)
+		@analyticsPanel(a, "chart-global", "Across all projects", false, "")
 		<section>
 			<div class="panel-head">
 				<h2>Projects</h2>
@@ -348,7 +398,7 @@ templ ProjectPage(p Page, proj store.ProjectSummary, sessions []store.SessionSum
 				<span class="muted small mono">{ LocalPath(proj) }</span>
 			}
 		</div>
-		@analyticsPanel(a, "chart-project", ProjectTitle(proj), false)
+		@analyticsPanel(a, "chart-project", ProjectTitle(proj), false, "")
 		<section>
 			<div class="panel-head">
 				<h2>Sessions</h2>
@@ -423,25 +473,16 @@ templ SessionList(sessions []store.SessionSummary) {
 
 // ============================ Overview ============================
 
-// OverviewPage is the landing surface: the fleet-wide usage panel (totals,
-// spend-over-time, model and agent breakdowns) over a feed of the most recent
-// sessions across every project. It puts both front doors (the deep read and the
-// spend view) one click away, instead of behind the projects table.
-templ OverviewPage(p Page, a store.Analytics, recent []store.SessionRow) {
+// OverviewPage is the landing surface: the fleet-wide usage panel (totals, the
+// activity grid, and model and agent breakdowns), bounded to the selected
+// trailing window. rng is the active range key, which the panel's selector marks
+// and the store has already applied to a.
+templ OverviewPage(p Page, a store.Analytics, rng string) {
 	@layout(p) {
 		<div class="page-head">
 			<h1>Overview</h1>
-			<span class="muted small">across all projects</span>
 		</div>
-		@analyticsPanel(a, "chart-global", "Across all projects", true)
-		<section>
-			<div class="panel-head">
-				<h2>Recent activity</h2>
-				<span class="spacer"></span>
-				<a class="small" href="/sessions">All sessions &rarr;</a>
-			</div>
-			@GlobalSessionList(recent)
-		</section>
+		@analyticsPanel(a, "chart-global", "Across all projects", true, rng)
 	}
 }
 

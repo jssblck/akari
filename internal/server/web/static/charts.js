@@ -310,6 +310,8 @@
   }
 
   function initHeatmap(container) {
+    if (container._hydrated) return; // re-scans (e.g. after an htmx swap) skip live grids
+    container._hydrated = true;
     var raw = container.getAttribute("data-series");
     if (!raw) return;
     var data;
@@ -337,6 +339,8 @@
   }
 
   function initChart(container) {
+    if (container._hydrated) return; // re-scans (e.g. after an htmx swap) skip live charts
+    container._hydrated = true;
     var raw = container.getAttribute("data-series");
     if (!raw) { var s = container.querySelector(".chart-data"); raw = s && s.textContent; }
     if (!raw) return;
@@ -374,4 +378,8 @@
   } else {
     init();
   }
+  // The overview's range selector swaps the usage panel in place; its replacement
+  // heatmap is a fresh, unhydrated node, so re-scan after every htmx swap. The
+  // _hydrated guard keeps the rescan from re-binding charts that survived.
+  document.addEventListener("htmx:afterSwap", init);
 })();
