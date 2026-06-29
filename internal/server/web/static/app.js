@@ -456,10 +456,17 @@
     resetInspector();   // once; the inspector persists across live updates
     initLive();
   }
-  // The overview's range selector swaps the usage panel; its replacement bars
-  // start at width 0, so grow them in. animateBars guards already-grown bars, so
-  // bars elsewhere on the page are left alone.
-  document.addEventListener("htmx:afterSwap", function () { animateBars(); });
+  // Re-grow the breakdown bars after the overview's range selector swaps the usage
+  // panel (#usage); the replacement bars start at width 0. Gate O(1) on the swapped
+  // target's id so live transcript appends (which swap #session-body) do no work
+  // here, then animate the live #usage by id (an outerHTML swap's target is the
+  // detached old node).
+  document.addEventListener("htmx:afterSwap", function (e) {
+    var t = (e.detail && e.detail.target) || e.target;
+    if (!t || t.id !== "usage") return;
+    var root = document.getElementById("usage");
+    if (root) animateBars(root);
+  });
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", init);
   } else {

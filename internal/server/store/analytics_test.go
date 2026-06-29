@@ -33,6 +33,32 @@ func seedUsage(t *testing.T, st *Store, sessionID int64, model string, cost floa
 	}
 }
 
+// seedUsageCache is seedUsage with the two cache-token classes set, so the cache
+// totals the overview's Tokens tooltip surfaces can be asserted against known
+// inputs.
+func seedUsageCache(t *testing.T, st *Store, sessionID int64, model string, cost float64, in, out, cacheRead, cacheWrite int64, daysAgo int, dedup string) {
+	t.Helper()
+	_, err := st.Pool.Exec(context.Background(),
+		`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, occurred_at, dedup_key)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7, now() - make_interval(days => $8), $9)`,
+		sessionID, model, in, out, cacheRead, cacheWrite, cost, daysAgo, dedup)
+	if err != nil {
+		t.Fatalf("seed usage cache: %v", err)
+	}
+}
+
+// TotalTokens sums the four token classes; it is the figure the overview's Tokens
+// readout shows. Pure, so it runs without a database.
+func TestAnalyticsTotalTokens(t *testing.T) {
+	a := Analytics{TotalIn: 100, TotalOut: 50, TotalCacheRead: 30, TotalCacheWrite: 7}
+	if got := a.TotalTokens(); got != 187 {
+		t.Errorf("TotalTokens = %d, want 187 (100+50+30+7)", got)
+	}
+	if got := (Analytics{}).TotalTokens(); got != 0 {
+		t.Errorf("empty TotalTokens = %d, want 0", got)
+	}
+}
+
 func TestAnalyticsRollups(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
@@ -153,6 +179,65 @@ func TestAnalyticsTimeWindow(t *testing.T) {
 	}
 	if full.TotalCost < 10.99 || full.TotalCost > 11.01 {
 		t.Errorf("unbounded cost from session rollups should be ~11.0, got %.2f", full.TotalCost)
+	}
+}
+
+// A project scope and a time bound apply together: the placeholders are numbered
+// in order ($1 project, $2 since), so the analytics isolate one project's
+// in-window usage and exclude both another project and out-of-window events. This
+// also exercises the cache-token totals the unscoped window test leaves at zero.
+func TestAnalyticsScopedWindowWithCacheTotals(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	admin, err := st.Register(ctx, "grace", "h", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	projA, err := st.UpsertProject(ctx, "github.com/ada/a", "github.com", "ada", "a", "a", "remote")
+	if err != nil {
+		t.Fatalf("project a: %v", err)
+	}
+	projB, err := st.UpsertProject(ctx, "github.com/ada/b", "github.com", "ada", "b", "b", "remote")
+	if err != nil {
+		t.Fatalf("project b: %v", err)
+	}
+
+	sA := seedSessionWithStats(t, st, admin.ID, projA, "claude", "sa", 1.0, 100, 50)
+	sB := seedSessionWithStats(t, st, admin.ID, projB, "codex", "sb", 9.0, 999, 999)
+
+	// Project A, in window: the only events that should count.
+	seedUsageCache(t, st, sA, "claude-opus-4-8", 1.0, 100, 50, 30, 7, 1, "a-recent")
+	// Project A, out of a 7-day window: excluded by the time bound.
+	seedUsageCache(t, st, sA, "claude-opus-4-8", 4.0, 400, 80, 200, 20, 40, "a-old")
+	// Project B, in window: excluded by the project scope.
+	seedUsageCache(t, st, sB, "gpt-5.5", 9.0, 999, 999, 999, 999, 1, "b-recent")
+
+	since := time.Now().AddDate(0, 0, -7)
+	a, err := st.Analytics(ctx, projA, since)
+	if err != nil {
+		t.Fatalf("scoped windowed analytics: %v", err)
+	}
+	if a.TotalIn != 100 || a.TotalOut != 50 {
+		t.Errorf("scoped window in/out wrong: in=%d out=%d, want 100/50", a.TotalIn, a.TotalOut)
+	}
+	if a.TotalCacheRead != 30 || a.TotalCacheWrite != 7 {
+		t.Errorf("scoped window cache totals wrong: read=%d write=%d, want 30/7", a.TotalCacheRead, a.TotalCacheWrite)
+	}
+	if got := a.TotalTokens(); got != 187 {
+		t.Errorf("scoped window combined tokens = %d, want 187 (100+50+30+7)", got)
+	}
+	if a.TotalCost < 0.99 || a.TotalCost > 1.01 {
+		t.Errorf("scoped window cost should be the one in-window event (~1.0), got %.2f", a.TotalCost)
+	}
+	if a.Sessions != 1 {
+		t.Errorf("scoped window should see only project A's in-window session, got %d", a.Sessions)
+	}
+	if len(a.Models) != 1 || a.Models[0].Label != "claude-opus-4-8" {
+		t.Errorf("scoped window should hold only project A's in-window model: %+v", a.Models)
+	}
+	if len(a.Agents) != 1 || a.Agents[0].Label != "claude" {
+		t.Errorf("scoped window should hold only project A's agent: %+v", a.Agents)
 	}
 }
 
