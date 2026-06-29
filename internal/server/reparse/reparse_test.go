@@ -248,3 +248,32 @@ func TestFleetStatusReflectsHeldLock(t *testing.T) {
 		t.Fatal("fleet status should report idle once the lock is released")
 	}
 }
+
+// TestFleetStatusDoesNotCacheNegative confirms a follower that just saw the lock free
+// still detects a reparse that starts immediately after, so it cannot serve parsed
+// pages during another instance's reparse. It runs at the default (non-zero) TTL on
+// purpose: a cached "not held" would mask the freshly taken lock for the TTL window,
+// which is the regression this guards. Only a positive result may be cached.
+func TestFleetStatusDoesNotCacheNegative(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	svc := New(ctx, st)
+	// An idle check; with a negative cache this would pin "not held" for the whole TTL.
+	if svc.FleetStatus(ctx).InProgress {
+		t.Fatal("fleet status should be idle before any lock is held")
+	}
+
+	// Another instance takes the lock right after the idle check. The next check must
+	// read it fresh rather than return a cached "not held".
+	held, ok, err := st.AcquireReparseLock(ctx)
+	if err != nil || !ok {
+		t.Fatalf("hold lock: ok=%v err=%v", ok, err)
+	}
+	defer held.Release(ctx)
+
+	if !svc.FleetStatus(ctx).InProgress {
+		t.Fatal("fleet status must detect a lock taken right after an idle check; the not-held result must not be cached")
+	}
+}

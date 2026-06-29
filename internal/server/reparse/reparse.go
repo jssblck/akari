@@ -101,8 +101,9 @@ type Service struct {
 	status     Status
 	onProgress func(Status)
 
-	// fleetCheckedAt/fleetHeld cache the cross-process advisory-lock check so the UI
-	// gate does not query the database on every parsed-page request.
+	// fleetCheckedAt/fleetHeld cache only a positive cross-process advisory-lock check,
+	// so the gate does not query pg_locks on every request while a reparse runs. The
+	// "not held" answer is deliberately never cached (see fleetLockHeld).
 	fleetCheckedAt time.Time
 	fleetHeld      bool
 
@@ -295,6 +296,7 @@ func (s *Service) execute(ctx context.Context, opts Options) (Result, error) {
 func (s *Service) finish() {
 	s.mu.Lock()
 	s.status.InProgress = false
+	s.fleetHeld = false
 	s.fleetCheckedAt = time.Time{}
 	s.mu.Unlock()
 	s.emit()
@@ -323,16 +325,19 @@ func (s *Service) FleetStatus(ctx context.Context) Status {
 	return st
 }
 
-// fleetLockHeld reports whether any instance holds the reparse advisory lock,
-// caching the answer for a short TTL so the gating hot path does not query the
-// database on every request. A check error is treated as "not held" so a transient
+// fleetLockHeld reports whether any instance holds the reparse advisory lock. Only
+// a positive ("held") answer is cached, and only for a short TTL: a stale "held"
+// can at worst keep a follower gated for the TTL after a reparse finishes, which is
+// safe (it briefly over-gates). A "not held" answer is never cached, because a stale
+// "not held" would let a follower serve half-rebuilt pages in the window between
+// another instance taking the lock and the cache expiring, so that answer is always
+// read fresh from pg_locks. A check error is treated as "not held" so a transient
 // database blip fails open (serving pages) rather than wedging the UI gated.
 func (s *Service) fleetLockHeld(ctx context.Context) bool {
 	s.mu.Lock()
-	if !s.fleetCheckedAt.IsZero() && time.Since(s.fleetCheckedAt) < s.fleetTTL {
-		held := s.fleetHeld
+	if s.fleetHeld && time.Since(s.fleetCheckedAt) < s.fleetTTL {
 		s.mu.Unlock()
-		return held
+		return true
 	}
 	s.mu.Unlock()
 
@@ -341,8 +346,14 @@ func (s *Service) fleetLockHeld(ctx context.Context) bool {
 		return false
 	}
 	s.mu.Lock()
-	s.fleetHeld = held
-	s.fleetCheckedAt = time.Now()
+	if held {
+		s.fleetHeld = true
+		s.fleetCheckedAt = time.Now()
+	} else {
+		// Drop any prior positive cache so a later check cannot return a stale "held".
+		s.fleetHeld = false
+		s.fleetCheckedAt = time.Time{}
+	}
 	s.mu.Unlock()
 	return held
 }
