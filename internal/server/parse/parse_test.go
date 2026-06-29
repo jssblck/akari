@@ -313,6 +313,89 @@ func TestCodexTrailingTurnFlushedWhole(t *testing.T) {
 	}
 }
 
+// TestClaudeDuplicateCallUIDDoesNotAbort reproduces the reparse failure that kept
+// four production sessions stale: a resumed or compacted Claude transcript replays
+// a prior assistant turn verbatim, so two distinct tool_use rows carry the same
+// agent call id. The ON CONFLICT on (message_ordinal, call_index) does not cover
+// the separate unique index on (session_id, call_uid), so the second insert used to
+// violate it and roll the whole parse back. The fix keeps the parse total: the first
+// row wins the id, the duplicate is stored with call_uid NULL, and the back-patched
+// result lands on the one row that still owns the id. The two duplicate turns are
+// delivered as separate chunks so they parse in separate regions (and so separate
+// transactions), which is the cross-region path the EXISTS guard must cover.
+func TestClaudeDuplicateCallUIDDoesNotAbort(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	sid := seedSession(t, st, "claude-dup-calluid")
+
+	// Two assistant turns whose tool_use blocks share id "toolu_dup" (the replay), and
+	// a user turn whose tool_result names that id. The message ids differ so this
+	// isolates the call_uid collision from the usage dedup path.
+	first := `{"type":"assistant","timestamp":"2024-01-01T10:00:01Z","message":{"id":"msg_a","model":"claude-sonnet-4-20250514","content":[{"type":"tool_use","id":"toolu_dup","name":"Read","input":{"file_path":"auth.go"}}]}}` + "\n"
+	second := `{"type":"assistant","timestamp":"2024-01-01T10:00:02Z","message":{"id":"msg_b","model":"claude-sonnet-4-20250514","content":[{"type":"tool_use","id":"toolu_dup","name":"Read","input":{"file_path":"auth.go"}}]}}` + "\n"
+	result := `{"type":"user","timestamp":"2024-01-01T10:00:03Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_dup","content":"package auth","is_error":false}]}}` + "\n"
+
+	// The first chunk's region commits before the second parses, so the duplicate's
+	// dedup is decided against an already-committed row, not a sibling in the batch.
+	uploadAndParse(t, st, sid, first, second, result)
+
+	assertDuplicateCallUID := func(t *testing.T, when string) {
+		t.Helper()
+		var total, withUID, nulls int
+		if err := st.Pool.QueryRow(ctx,
+			`SELECT count(*),
+			        count(*) FILTER (WHERE call_uid IS NOT NULL),
+			        count(*) FILTER (WHERE call_uid IS NULL)
+			   FROM tool_calls WHERE session_id=$1`, sid).
+			Scan(&total, &withUID, &nulls); err != nil {
+			t.Fatal(err)
+		}
+		if total != 2 {
+			t.Fatalf("%s: tool_calls rows = %d, want 2 (both turns kept)", when, total)
+		}
+		if withUID != 1 || nulls != 1 {
+			t.Fatalf("%s: call_uid split = (set %d, null %d), want (1, 1)", when, withUID, nulls)
+		}
+
+		// First writer wins: the lower ordinal keeps the id, so the result back-patches
+		// it. The nulled duplicate stays pending, the honest state for an ambiguous id.
+		var winnerOrd int
+		var status string
+		var bytes int64
+		if err := st.Pool.QueryRow(ctx,
+			`SELECT message_ordinal, result_status, result_bytes
+			   FROM tool_calls WHERE session_id=$1 AND call_uid='toolu_dup'`, sid).
+			Scan(&winnerOrd, &status, &bytes); err != nil {
+			t.Fatal(err)
+		}
+		if winnerOrd != 0 {
+			t.Fatalf("%s: id kept by ordinal %d, want 0 (first writer)", when, winnerOrd)
+		}
+		if status != "ok" || bytes != int64(len("package auth")) {
+			t.Fatalf("%s: back-patch on the id-owning row: status=%q bytes=%d", when, status, bytes)
+		}
+
+		var dupStatus *string
+		if err := st.Pool.QueryRow(ctx,
+			`SELECT result_status FROM tool_calls WHERE session_id=$1 AND call_uid IS NULL`, sid).
+			Scan(&dupStatus); err != nil {
+			t.Fatal(err)
+		}
+		if dupStatus != nil && *dupStatus != "" {
+			t.Fatalf("%s: nulled duplicate should be unpatched, got result_status=%q", when, *dupStatus)
+		}
+	}
+
+	assertDuplicateCallUID(t, "after advance")
+
+	// Reparse is the production remediation for the four stalled sessions: it must run
+	// to completion and land the same shape rather than rolling back as it did before.
+	if _, err := Reparse(ctx, st, sid, "claude"); err != nil {
+		t.Fatalf("reparse: %v", err)
+	}
+	assertDuplicateCallUID(t, "after reparse")
+}
+
 // TestCostIncompleteForUnknownModel confirms an unpriced model flips the
 // session's cost_incomplete flag while still recording token totals.
 func TestCostIncompleteForUnknownModel(t *testing.T) {

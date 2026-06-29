@@ -675,9 +675,13 @@ CREATE TABLE tool_calls (
   PRIMARY KEY (session_id, message_ordinal, call_index)
 );
 -- Unique per session: a call id is unique within a session, so back-patching a
--- result touches exactly one row in constant time. Safe because storage and
--- parsing are separate transactions, so a malformed duplicate id can only stall
--- that session's parse (recoverable by reparse), never fail an append.
+-- result touches exactly one row in constant time. A duplicate id is possible (a
+-- resumed or compacted Claude transcript replays prior assistant turns, so the same
+-- tool_use id can ride two rows), so the projection writer nulls the colliding id
+-- rather than letting it abort the parse. The first row keeps the id and the later
+-- one is stored with call_uid NULL, so the back-patch still names one call and the
+-- duplicate is left unpatched. That keeps parse and reparse total over a malformed
+-- session instead of rolling it back.
 CREATE UNIQUE INDEX idx_tool_calls_call_uid ON tool_calls(session_id, call_uid)
   WHERE call_uid IS NOT NULL;
 
