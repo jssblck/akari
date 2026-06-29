@@ -37,22 +37,24 @@
     });
   }
 
-  // ---------------- Timeline rail scroll spy ----------------
-  var railObserver = null;
-  function initRailSpy() {
-    if (railObserver) { railObserver.disconnect(); railObserver = null; }
+  // ---------------- Outline scroll spy ----------------
+  // Highlights the outline turn whose message is currently in view, so the left
+  // pane tracks the reader's position through the transcript.
+  var outlineObserver = null;
+  function initOutlineSpy() {
+    if (outlineObserver) { outlineObserver.disconnect(); outlineObserver = null; }
     var msgs = document.querySelectorAll(".transcript .msg[data-ordinal]");
     if (!msgs.length || !("IntersectionObserver" in window)) return;
-    railObserver = new IntersectionObserver(function (entries) {
+    outlineObserver = new IntersectionObserver(function (entries) {
       entries.forEach(function (e) {
         if (!e.isIntersecting) return;
         var ord = e.target.getAttribute("data-ordinal");
-        Array.prototype.slice.call(document.querySelectorAll(".rail-tick")).forEach(function (t) {
-          t.classList.toggle("current", t.getAttribute("data-rail") === ord);
+        Array.prototype.slice.call(document.querySelectorAll(".outline [data-ord]")).forEach(function (t) {
+          t.classList.toggle("current", t.getAttribute("data-ord") === ord);
         });
       });
     }, { rootMargin: "-45% 0px -50% 0px", threshold: 0 });
-    Array.prototype.slice.call(msgs).forEach(function (m) { railObserver.observe(m); });
+    Array.prototype.slice.call(msgs).forEach(function (m) { outlineObserver.observe(m); });
   }
 
   // ---------------- Stat needle-settle ----------------
@@ -76,7 +78,8 @@
 
   function rehydrate() {
     animateBars();
-    initRailSpy();
+    initOutlineSpy();
+    resetInspector();
   }
 
   // ---------------- Live session updates ----------------
@@ -174,11 +177,150 @@
     return patchElement(text);
   }
 
-  // ---------------- Tool body expansion ----------------
-  document.addEventListener("click", function (ev) {
-    var btn = ev.target.closest ? ev.target.closest(".body-toggle") : null;
-    if (!btn) return;
-    ev.preventDefault();
+  // ---------------- Inspector pane ----------------
+  // A selected tool call's bodies open in the right-hand inspector instead of
+  // inline, so reading the transcript and inspecting a body never fight for the
+  // same column. Triggers are the chip stamps (.body-toggle) and the outline
+  // steps (.inspect-open); both resolve to the same view descriptor.
+  function inspectorEl() { return document.getElementById("session-inspector"); }
+
+  var inspectorEmptyHTML = "";
+
+  function emptyInspector(insp) {
+    if (inspectorEmptyHTML) { insp.innerHTML = inspectorEmptyHTML; }
+    clearInspectSelection();
+  }
+  function resetInspector() {
+    var insp = inspectorEl();
+    if (!insp) return;
+    if (!inspectorEmptyHTML) inspectorEmptyHTML = insp.innerHTML; // capture the server-rendered empty state once
+    emptyInspector(insp);
+  }
+  function clearInspectSelection() {
+    Array.prototype.slice.call(document.querySelectorAll(".inspect-selected")).forEach(function (el) {
+      el.classList.remove("inspect-selected");
+    });
+  }
+
+  // describe builds {tool, file, status, views:[{key,label,url,render}], initial}
+  // from either a chip stamp or an outline step.
+  function describe(trigger) {
+    var views = [];
+    var tool = "", file = "", status = "", initial = "";
+    var diff = trigger.getAttribute("data-diff") === "1";
+    if (trigger.classList.contains("body-toggle")) {
+      var chip = trigger.closest(".tool-chip");
+      if (chip) {
+        var tn = chip.querySelector(".tname"); tool = tn ? tn.textContent : "";
+        var tp = chip.querySelector(".tpath"); file = tp ? tp.textContent : "";
+        var ts = chip.querySelector(".tstatus"); status = ts ? ts.textContent : "";
+        var input = chip.querySelector('.body-toggle[data-slot="input"]');
+        var result = chip.querySelector('.body-toggle[data-slot="result"]');
+        var inputUrl = input ? input.getAttribute("data-blob-url") : "";
+        var resultUrl = result ? result.getAttribute("data-blob-url") : "";
+        var inputDiff = input ? input.getAttribute("data-diff") === "1" : false;
+        views = buildViews(inputUrl, resultUrl, inputDiff);
+      }
+      initial = trigger.getAttribute("data-slot") === "result" ? "result" : (diff ? "diff" : "input");
+    } else {
+      tool = trigger.getAttribute("data-tool") || "";
+      file = trigger.getAttribute("data-file") || "";
+      status = trigger.getAttribute("data-status") || "";
+      views = buildViews(trigger.getAttribute("data-input-url") || "", trigger.getAttribute("data-result-url") || "", diff);
+    }
+    if (!views.length) return null;
+    if (!initial || !views.some(function (v) { return v.key === initial; })) initial = views[0].key;
+    return { tool: tool, file: file, status: status, views: views, initial: initial };
+  }
+  function buildViews(inputUrl, resultUrl, inputDiff) {
+    var views = [];
+    if (inputUrl && inputDiff) views.push({ key: "diff", label: "Diff", url: inputUrl, render: "diff" });
+    if (inputUrl) views.push({ key: "input", label: "Input", url: inputUrl, render: "text" });
+    if (resultUrl) views.push({ key: "result", label: "Result", url: resultUrl, render: "text" });
+    return views;
+  }
+
+  var bodyCache = {};
+  function loadView(bodyEl, view, toolName) {
+    function paint(text) {
+      bodyEl.innerHTML = "";
+      var node = null;
+      if (view.render === "diff") node = diffElement(toolName, text);
+      if (!node) { node = document.createElement("pre"); node.className = "tool-body"; node.textContent = text; }
+      bodyEl.appendChild(node);
+    }
+    if (bodyCache[view.url] !== undefined) { paint(bodyCache[view.url]); return; }
+    bodyEl.innerHTML = "";
+    var loading = document.createElement("div");
+    loading.className = "insp-loading muted"; loading.textContent = "Loading…";
+    bodyEl.appendChild(loading);
+    fetch(view.url, { credentials: "same-origin" })
+      .then(function (r) { if (!r.ok) throw new Error("status " + r.status); return r.text(); })
+      .then(function (text) { bodyCache[view.url] = text; paint(text); })
+      .catch(function () {
+        bodyEl.innerHTML = "";
+        var pre = document.createElement("pre"); pre.className = "tool-body error";
+        pre.textContent = "Could not load body."; bodyEl.appendChild(pre);
+      });
+  }
+
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  }
+  function renderInspector(insp, desc) {
+    insp.innerHTML = "";
+    var head = el("div", "insp-head");
+    head.appendChild(el("span", "insp-tn", desc.tool));
+    if (desc.file) head.appendChild(el("span", "insp-file mono", desc.file));
+    var close = el("button", "insp-close", "✕");
+    close.setAttribute("aria-label", "Close inspector");
+    close.addEventListener("click", function () { emptyInspector(insp); });
+    head.appendChild(close);
+    insp.appendChild(head);
+
+    if (desc.status) {
+      var meta = el("div", "insp-meta");
+      var st = el("span", "tstatus " + (desc.status === "error" ? "err" : "ok"), desc.status);
+      meta.appendChild(st);
+      insp.appendChild(meta);
+    }
+
+    var body = el("div", "insp-body");
+    var views = el("div", "seg-group insp-views");
+    desc.views.forEach(function (v) {
+      var b = el("button", "seg", v.label);
+      b.addEventListener("click", function () {
+        Array.prototype.slice.call(views.children).forEach(function (c) { c.classList.remove("active"); });
+        b.classList.add("active");
+        loadView(body, v, desc.tool);
+      });
+      views.appendChild(b);
+    });
+    insp.appendChild(views);
+    insp.appendChild(body);
+
+    // Activate the initial view.
+    var initialBtn = views.children[desc.views.map(function (v) { return v.key; }).indexOf(desc.initial)] || views.children[0];
+    if (initialBtn) initialBtn.click();
+  }
+
+  function openInspector(trigger) {
+    var insp = inspectorEl();
+    if (!insp) return false; // no pane on this page → caller falls back to inline
+    if (!inspectorEmptyHTML) inspectorEmptyHTML = insp.innerHTML;
+    var desc = describe(trigger);
+    if (!desc) return false;
+    renderInspector(insp, desc);
+    clearInspectSelection();
+    (trigger.closest(".tool-chip") || trigger).classList.add("inspect-selected");
+    return true;
+  }
+
+  // Inline fallback for pages without an inspector pane (kept minimal).
+  function expandInline(btn) {
     if (btn._bodyEl) { btn._bodyEl.remove(); btn._bodyEl = null; btn.classList.remove("open"); return; }
     var url = btn.getAttribute("data-blob-url");
     if (!url) return;
@@ -190,25 +332,25 @@
         if (btn.getAttribute("data-diff") === "1" && btn.getAttribute("data-slot") === "input") {
           node = diffElement(btn.getAttribute("data-tool") || "", text);
         }
-        if (!node) {
-          node = document.createElement("pre");
-          node.className = "tool-body";
-          node.textContent = text;
-        }
-        var chip = btn.closest(".tool-chip");
-        (chip || btn).after(node);
-        btn._bodyEl = node;
-        btn.classList.add("open");
+        if (!node) { node = el("pre", "tool-body"); node.textContent = text; }
+        (btn.closest(".tool-chip") || btn).after(node);
+        btn._bodyEl = node; btn.classList.add("open");
       })
       .catch(function () {
-        var pre = document.createElement("pre");
-        pre.className = "tool-body error";
-        pre.textContent = "Could not load body.";
-        var chip = btn.closest(".tool-chip");
-        (chip || btn).after(pre);
-        btn._bodyEl = pre;
+        var pre = el("pre", "tool-body error"); pre.textContent = "Could not load body.";
+        (btn.closest(".tool-chip") || btn).after(pre); btn._bodyEl = pre;
       })
       .finally(function () { btn.classList.remove("loading"); });
+  }
+
+  document.addEventListener("click", function (ev) {
+    var trigger = ev.target.closest ? ev.target.closest(".body-toggle, .inspect-open") : null;
+    if (!trigger) return;
+    // Outline steps are anchors (they also scroll to the message); chip stamps
+    // are buttons. Only suppress default for the buttons.
+    if (trigger.classList.contains("body-toggle")) ev.preventDefault();
+    if (openInspector(trigger)) return;
+    if (trigger.classList.contains("body-toggle")) expandInline(trigger);
   });
 
   // ---------------- Whole-row navigation ----------------

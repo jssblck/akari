@@ -66,26 +66,58 @@ func TestSparklineEmptyAndShape(t *testing.T) {
 	}
 }
 
-func TestBuildRail(t *testing.T) {
-	msgs := []store.Message{{Ordinal: 0, Role: "user"}, {Ordinal: 1, Role: "assistant"}}
+func TestBuildOutline(t *testing.T) {
+	msgs := []store.Message{
+		{Ordinal: 0, Role: "user", Content: "  Reorganize   the\nUI please "},
+		{Ordinal: 1, Role: "assistant"},
+	}
 	tools := map[int][]store.ToolCallView{
-		1: {{ResultStatus: "ok"}, {ResultStatus: "error"}},
+		1: {
+			{CallIndex: 0, ToolName: "Edit", FilePath: "a/b/templates.templ", ResultStatus: "ok", InputSHA: "deadbeef"},
+			{CallIndex: 1, ToolName: "Bash", ResultStatus: "error"},
+		},
 	}
-	rail := BuildRail(msgs, tools)
-	if len(rail) != 2 {
-		t.Fatalf("want 2 markers, got %d", len(rail))
+	out := BuildOutline(msgs, tools)
+	if len(out) != 2 {
+		t.Fatalf("want 2 turns, got %d", len(out))
 	}
-	if rail[0].ToolCount != 0 || rail[0].HasError {
-		t.Error("user turn has no tools and no error")
+	// The user turn title collapses whitespace into one line.
+	if out[0].Title != "Reorganize the UI please" {
+		t.Errorf("outline title = %q", out[0].Title)
 	}
-	if rail[1].ToolCount != 2 || !rail[1].HasError {
-		t.Errorf("assistant turn should count 2 tools and flag the error: %+v", rail[1])
+	if len(out[0].Steps) != 0 {
+		t.Errorf("user turn should have no steps")
 	}
-	if RailClass(rail[1]) != "rail-tick rail-error" {
-		t.Errorf("an errored turn reads in rose regardless of role: %s", RailClass(rail[1]))
+	if len(out[1].Steps) != 2 {
+		t.Fatalf("assistant turn should carry 2 steps, got %d", len(out[1].Steps))
 	}
-	if RailClass(rail[0]) != "rail-tick rail-user" {
-		t.Errorf("user tick class: %s", RailClass(rail[0]))
+	if !out[1].Steps[0].IsDiff || out[1].Steps[0].InputSHA == "" {
+		t.Errorf("an Edit step is a diff with an input body: %+v", out[1].Steps[0])
+	}
+	// A turn with a failed step reads in rose regardless of role.
+	if OutlineTurnClass(out[1]) != "ol-turn ol-error" {
+		t.Errorf("errored turn class = %q", OutlineTurnClass(out[1]))
+	}
+	if OutlineTurnClass(out[0]) != "ol-turn ol-user" {
+		t.Errorf("user turn class = %q", OutlineTurnClass(out[0]))
+	}
+	if OutlineStepClass(out[1].Steps[1]) != "ol-step ol-step-error" {
+		t.Errorf("errored step class = %q", OutlineStepClass(out[1].Steps[1]))
+	}
+}
+
+func TestBaseName(t *testing.T) {
+	cases := map[string]string{
+		"a/b/c.txt":     "c.txt",
+		"c.txt":         "c.txt",
+		"a\\b\\c.txt":   "c.txt",
+		"/leading/x.go": "x.go",
+		"":              "",
+	}
+	for in, want := range cases {
+		if got := BaseName(in); got != want {
+			t.Errorf("BaseName(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 

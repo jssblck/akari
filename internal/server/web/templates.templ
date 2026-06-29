@@ -635,8 +635,8 @@ templ densityToolbar() {
 
 templ SessionBody(d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, subagents []store.SessionSummary) {
 	<div class="session-grid">
-		<aside class="rail" aria-label="Timeline">
-			@TimelineRail(BuildRail(msgs, tools))
+		<aside class="outline-rail" aria-label="Outline">
+			@Outline(BuildOutline(msgs, tools), SessionBlobBase(d.ID))
 		</aside>
 		<div class="session-main">
 			@sessionStats(d)
@@ -649,7 +649,81 @@ templ SessionBody(d store.SessionDetail, msgs []store.Message, tools map[int][]s
 			<h2>Transcript</h2>
 			@Transcript(msgs, tools, SessionBlobBase(d.ID))
 		</div>
+		@inspectorPane()
 	</div>
+}
+
+// Outline is the left pane of the session view: one entry per turn, with its
+// tool steps nested beneath. A turn links to its message; a step with a stored
+// body opens that body in the inspector pane (carrying the blob URLs so the
+// inspector needs no extra round trip to know what to fetch).
+templ Outline(turns []OutlineTurn, blobBase string) {
+	<div class="outline" aria-label="Session outline">
+		<div class="label outline-head">Outline</div>
+		for _, t := range turns {
+			<div class="ol-group">
+				<a class={ OutlineTurnClass(t) } href={ templ.SafeURL(fmt.Sprintf("#msg-%d", t.Ordinal)) } data-ord={ fmt.Sprintf("%d", t.Ordinal) }>
+					<span class="ol-dot"></span>
+					<span class="ol-title">
+						if t.Title != "" {
+							{ t.Title }
+						} else {
+							<span class="ol-role">{ t.Role }</span>
+						}
+					</span>
+					if len(t.Steps) > 0 {
+						<span class="ol-count">{ fmt.Sprintf("%d", len(t.Steps)) }</span>
+					}
+				</a>
+				if len(t.Steps) > 0 {
+					<div class="ol-steps">
+						for _, s := range t.Steps {
+							if s.InputSHA != "" || s.ResultSHA != "" {
+								<a
+									class={ OutlineStepClass(s) + " inspect-open" }
+									href={ templ.SafeURL(fmt.Sprintf("#msg-%d", s.Ordinal)) }
+									data-tool={ s.ToolName }
+									data-file={ s.FilePath }
+									data-status={ s.Status }
+									if s.IsDiff {
+										data-diff="1"
+									}
+									if s.InputSHA != "" {
+										data-input-url={ BlobURL(blobBase, s.InputSHA) }
+									}
+									if s.ResultSHA != "" {
+										data-result-url={ BlobURL(blobBase, s.ResultSHA) }
+									}
+								>
+									<span class="ol-tn">{ s.ToolName }</span>
+									if s.FilePath != "" {
+										<span class="ol-file">{ BaseName(s.FilePath) }</span>
+									}
+								</a>
+							} else {
+								<a class={ OutlineStepClass(s) } href={ templ.SafeURL(fmt.Sprintf("#msg-%d", s.Ordinal)) }>
+									<span class="ol-tn">{ s.ToolName }</span>
+								</a>
+							}
+						}
+					</div>
+				}
+			</div>
+		}
+	</div>
+}
+
+// inspectorPane is the right pane: a stable surface where a selected tool call's
+// input and output open, so inspecting a body never reflows the transcript. It
+// starts empty and is populated by app.js when a tool chip or outline step is
+// clicked.
+templ inspectorPane() {
+	<aside class="inspector" id="session-inspector" aria-label="Inspector" aria-live="polite">
+		<div class="insp-empty">
+			<div class="insp-empty-glyph">⊟</div>
+			<div>Select a tool call to inspect its input and output here.</div>
+		</div>
+	</aside>
 }
 
 // sessionStats is the instrument header: stat tiles that stick to the top of the
@@ -674,23 +748,6 @@ templ stat(label, value, key string) {
 			<div class="value" data-stat-key={ key }>{ value }</div>
 		} else {
 			<div class="value">{ value }</div>
-		}
-	</div>
-}
-
-templ TimelineRail(markers []RailMarker) {
-	<div class="rail-inner">
-		for _, m := range markers {
-			<a
-				class={ RailClass(m) }
-				href={ templ.SafeURL(fmt.Sprintf("#msg-%d", m.Ordinal)) }
-				data-rail={ fmt.Sprintf("%d", m.Ordinal) }
-				title={ railTitle(m) }
-			>
-				if m.ToolCount > 0 {
-					<span class="rail-count">{ fmt.Sprintf("%d", m.ToolCount) }</span>
-				}
-			</a>
 		}
 	</div>
 }
@@ -918,8 +975,8 @@ templ PublicSessionPage(d store.SessionDetail, msgs []store.Message, tools map[i
 		</div>
 		<div id="session-body">
 			<div class="session-grid">
-				<aside class="rail" aria-label="Timeline">
-					@TimelineRail(BuildRail(msgs, tools))
+				<aside class="outline-rail" aria-label="Outline">
+					@Outline(BuildOutline(msgs, tools), PublicBlobBase(*d.PublicID))
 				</aside>
 				<div class="session-main">
 					@sessionStats(d)
@@ -943,6 +1000,7 @@ templ PublicSessionPage(d store.SessionDetail, msgs []store.Message, tools map[i
 					<h2>Transcript</h2>
 					@Transcript(msgs, tools, PublicBlobBase(*d.PublicID))
 				</div>
+				@inspectorPane()
 			</div>
 		</div>
 	}

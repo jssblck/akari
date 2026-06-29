@@ -185,6 +185,16 @@ func FmtDuration(start, end *time.Time) string {
 	}
 }
 
+// BaseName returns the last path segment of a file path (handling both / and \
+// separators), for a compact label in the outline. It returns the input
+// unchanged when there is no separator.
+func BaseName(p string) string {
+	if i := strings.LastIndexAny(p, `/\`); i >= 0 && i < len(p)-1 {
+		return p[i+1:]
+	}
+	return p
+}
+
 // navClass returns the sidebar link's class, adding "active" when its key is the
 // page's current section.
 func navClass(key, active string) string {

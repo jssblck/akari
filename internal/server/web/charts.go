@@ -150,62 +150,97 @@ func Sparkline(vals []float64) string {
 			`</svg>`, w, h, area, line)
 }
 
-// RailMarker is one tick on the session timeline rail: a message, its role, how
-// many tool calls hang off it, and whether any of those failed (so the rail can
-// flag errors in rose at a glance).
-type RailMarker struct {
+// OutlineStep is one tool call in the session outline: enough to label it, flag
+// an error, and (when its bodies live in the CAS) open them in the inspector
+// pane without leaving the outline.
+type OutlineStep struct {
 	Ordinal   int
-	Role      string
-	ToolCount int
+	CallIndex int
+	ToolName  string
+	FilePath  string
+	Status    string // "", "ok", or "error"
 	HasError  bool
+	IsDiff    bool
+	InputSHA  string
+	ResultSHA string
 }
 
-// BuildRail derives the timeline-rail markers from the transcript and its tool
-// metadata. One marker per message, in order.
-func BuildRail(msgs []store.Message, tools map[int][]store.ToolCallView) []RailMarker {
-	out := make([]RailMarker, 0, len(msgs))
+// OutlineTurn is one message in the session outline: its role, a short title
+// drawn from its content, and the tool steps that hang off it. It replaces the
+// old tick rail with a navigable, labeled structure.
+type OutlineTurn struct {
+	Ordinal int
+	Role    string
+	Title   string
+	Steps   []OutlineStep
+}
+
+// BuildOutline derives the session outline from the transcript and its tool
+// metadata: one turn per message, in order, each carrying its tool steps. The
+// turn title is a trimmed one-line excerpt of the message content so a reader
+// can scan what happened without opening every turn.
+func BuildOutline(msgs []store.Message, tools map[int][]store.ToolCallView) []OutlineTurn {
+	out := make([]OutlineTurn, 0, len(msgs))
 	for _, m := range msgs {
-		mk := RailMarker{Ordinal: m.Ordinal, Role: m.Role}
+		turn := OutlineTurn{Ordinal: m.Ordinal, Role: m.Role, Title: outlineTitle(m)}
 		for _, t := range tools[m.Ordinal] {
-			mk.ToolCount++
-			if t.ResultStatus == "error" {
-				mk.HasError = true
-			}
+			turn.Steps = append(turn.Steps, OutlineStep{
+				Ordinal:   m.Ordinal,
+				CallIndex: t.CallIndex,
+				ToolName:  t.ToolName,
+				FilePath:  t.FilePath,
+				Status:    t.ResultStatus,
+				HasError:  t.ResultStatus == "error",
+				IsDiff:    DiffTool(t.ToolName),
+				InputSHA:  t.InputSHA,
+				ResultSHA: t.ResultSHA,
+			})
 		}
-		out = append(out, mk)
+		out = append(out, turn)
 	}
 	return out
 }
 
-// RailClass maps a rail marker to its CSS modifier (role tone, with an error
-// override so a failed turn reads in rose regardless of role).
-func RailClass(m RailMarker) string {
-	if m.HasError {
-		return "rail-tick rail-error"
+// outlineTitle builds a compact one-line label for an outline turn from its
+// message content, collapsing whitespace and capping the length.
+func outlineTitle(m store.Message) string {
+	s := strings.TrimSpace(m.Content)
+	if s == "" {
+		return ""
 	}
-	switch m.Role {
+	s = strings.Join(strings.Fields(s), " ")
+	const max = 48
+	if len(s) > max {
+		s = strings.TrimSpace(s[:max]) + "…"
+	}
+	return s
+}
+
+// OutlineTurnClass maps an outline turn to its CSS modifier (role tone, with an
+// error override so a turn with a failed tool reads in rose).
+func OutlineTurnClass(t OutlineTurn) string {
+	for _, s := range t.Steps {
+		if s.HasError {
+			return "ol-turn ol-error"
+		}
+	}
+	switch t.Role {
 	case "user":
-		return "rail-tick rail-user"
+		return "ol-turn ol-user"
 	case "assistant":
-		return "rail-tick rail-assistant"
+		return "ol-turn ol-assistant"
 	default:
-		return "rail-tick rail-other"
+		return "ol-turn ol-other"
 	}
 }
 
-// railTitle is the hover label for a rail tick: the turn's role, its tool count,
-// and an error flag.
-func railTitle(m RailMarker) string {
-	s := fmt.Sprintf("#%d %s", m.Ordinal, m.Role)
-	if m.ToolCount == 1 {
-		s += ", 1 tool"
-	} else if m.ToolCount > 1 {
-		s += fmt.Sprintf(", %d tools", m.ToolCount)
+// OutlineStepClass maps an outline step to its CSS modifier, flagging an errored
+// step in rose.
+func OutlineStepClass(s OutlineStep) string {
+	if s.HasError {
+		return "ol-step ol-step-error"
 	}
-	if m.HasError {
-		s += ", error"
-	}
-	return s
+	return "ol-step"
 }
 
 // DiffTool reports whether a tool's input body is worth rendering as an inline
