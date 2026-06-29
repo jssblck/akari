@@ -102,8 +102,7 @@ body {
 body { -webkit-user-select: none; user-select: none; }
 input, textarea,
 .content, .thinking-body,
-pre, code, .tool-body, .diff, .diff-body,
-.hit .content {
+pre, code, .tool-body, .diff, .diff-body {
   -webkit-user-select: text; user-select: text; cursor: text;
 }
 ::selection { background: rgba(198, 168, 242, 0.30); color: var(--text); }
@@ -593,13 +592,6 @@ a.attachment.file { width: fit-content; text-decoration: none; }
 
 /* ---- Subagents ---- */
 .subagents { margin: var(--sp-sm) 0 var(--sp-lg); padding-left: var(--sp-md); border-left: 1px solid var(--border); }
-
-/* ---- Search hits ---- */
-.hits { display: flex; flex-direction: column; gap: var(--sp-md); }
-.hit { display: block; }
-.hit:hover { text-decoration: none; border-color: var(--border-strong); }
-.hit .meta { display: flex; align-items: center; gap: var(--sp-sm); margin-bottom: var(--sp-sm); }
-.hit .content { white-space: pre-wrap; word-break: break-word; color: var(--text); max-width: 90ch; }
 
 /* ---- Auth ---- */
 .auth-wrap { max-width: 360px; margin: 64px auto; }

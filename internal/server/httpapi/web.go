@@ -431,20 +431,6 @@ func (s *Server) handleSessionEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleSearchPage(w http.ResponseWriter, r *http.Request) {
-	query := strings.TrimSpace(r.URL.Query().Get("q"))
-	var hits []store.SearchHit
-	if query != "" {
-		var err error
-		hits, err = s.Store.Search(r.Context(), query, 0, 50)
-		if err != nil {
-			render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Search failed."))
-			return
-		}
-	}
-	render(w, r, http.StatusOK, web.SearchPage(s.pageForNav(r, "Search", "search"), query, hits))
-}
-
 func (s *Server) handleAccountPage(w http.ResponseWriter, r *http.Request) {
 	p, _ := principalFrom(r.Context())
 	tokens, err := s.Store.ListAPITokens(r.Context(), p.UserID)

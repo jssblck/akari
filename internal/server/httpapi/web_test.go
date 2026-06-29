@@ -89,6 +89,10 @@ func TestWebFlow(t *testing.T) {
 	if !strings.Contains(body, "grace") || !strings.Contains(body, "Overview") {
 		t.Fatalf("overview page missing expected content, got:\n%s", body)
 	}
+	// The standalone search page was retired, so the sidebar must not link to it.
+	if strings.Contains(body, `href="/search"`) {
+		t.Fatalf("sidebar still links to the removed search page, got:\n%s", body)
+	}
 
 	// The projects table moved to /projects; with no projects yet it shows its
 	// empty state.
@@ -139,14 +143,15 @@ func TestWebFlow(t *testing.T) {
 		t.Fatalf("admin account page should show invites, got:\n%s", body)
 	}
 
-	// Search with no query renders the form without error.
+	// The /search route was removed with the page; an authenticated request for
+	// it now falls through to a 404 rather than rendering anything.
 	resp, err = c.Get(srv.URL + "/search")
 	if err != nil {
-		t.Fatalf("search: %v", err)
+		t.Fatalf("get /search: %v", err)
 	}
-	body = readBody(t, resp)
-	if !strings.Contains(body, "search message content") {
-		t.Fatalf("search page missing form, got:\n%s", body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET /search after removal = %d, want 404", resp.StatusCode)
 	}
 
 	// Logout clears the session; the root redirects to login again.
@@ -260,25 +265,25 @@ func TestLoginPreservesNext(t *testing.T) {
 	}
 
 	// The login page carries the next target as a hidden field.
-	resp, err := c.Get(srv.URL + "/login?next=%2Fsearch")
+	resp, err := c.Get(srv.URL + "/login?next=%2Faccount")
 	if err != nil {
 		t.Fatalf("login page: %v", err)
 	}
 	body := readBody(t, resp)
-	if !strings.Contains(body, `name="next" value="/search"`) {
+	if !strings.Contains(body, `name="next" value="/account"`) {
 		t.Fatalf("login page should carry next, got:\n%s", body)
 	}
 
 	// Stop following redirects so we can inspect the post-login Location.
 	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	resp, err = c.PostForm(srv.URL+"/login", url.Values{
-		"username": {"ada"}, "password": {"lovelace-1843"}, "next": {"/search"},
+		"username": {"ada"}, "password": {"lovelace-1843"}, "next": {"/account"},
 	})
 	if err != nil {
 		t.Fatalf("login post: %v", err)
 	}
-	if loc := resp.Header.Get("Location"); loc != "/search" {
-		t.Fatalf("post-login redirect = %q, want /search", loc)
+	if loc := resp.Header.Get("Location"); loc != "/account" {
+		t.Fatalf("post-login redirect = %q, want /account", loc)
 	}
 	resp.Body.Close()
 }
@@ -451,7 +456,7 @@ func TestSafeNext(t *testing.T) {
 		"/projects/1":       "/projects/1",
 		"//evil.example":    "/",
 		"https://evil/x":    "/",
-		"/search?q=a":       "/search?q=a",
+		"/sessions?q=a":     "/sessions?q=a",
 		"javascript:alert1": "/",
 	}
 	for in, want := range cases {

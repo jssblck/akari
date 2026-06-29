@@ -646,7 +646,9 @@ func (s *Store) SessionFacets(ctx context.Context, projectID int64) (FacetValues
 }
 
 // Search finds messages whose content matches the query (trigram-accelerated
-// substring match), optionally scoped to one project.
+// substring match), optionally scoped to one project. The standalone search
+// page was retired; this stays as the query layer for search folded into other
+// views, backed by the pg_trgm index on messages.content.
 func (s *Store) Search(ctx context.Context, query string, projectID int64, limit int) ([]SearchHit, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
