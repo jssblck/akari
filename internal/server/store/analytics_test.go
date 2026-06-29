@@ -47,6 +47,20 @@ func seedUsageCache(t *testing.T, st *Store, sessionID int64, model string, cost
 	}
 }
 
+// seedUsageAt inserts a usage event at an explicit occurred_at, so the window's
+// inclusive lower bound (`occurred_at >= since`) can be pinned to the exact
+// instant rather than a clearly-inside or clearly-outside day.
+func seedUsageAt(t *testing.T, st *Store, sessionID int64, model string, cost float64, in, out int64, at time.Time, dedup string) {
+	t.Helper()
+	_, err := st.Pool.Exec(context.Background(),
+		`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cost_usd, occurred_at, dedup_key)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+		sessionID, model, in, out, cost, at, dedup)
+	if err != nil {
+		t.Fatalf("seed usage at: %v", err)
+	}
+}
+
 // TotalTokens sums the four token classes; it is the figure the overview's Tokens
 // readout shows. Pure, so it runs without a database.
 func TestAnalyticsTotalTokens(t *testing.T) {
@@ -238,6 +252,81 @@ func TestAnalyticsScopedWindowWithCacheTotals(t *testing.T) {
 	}
 	if len(a.Agents) != 1 || a.Agents[0].Label != "claude" {
 		t.Errorf("scoped window should hold only project A's agent: %+v", a.Agents)
+	}
+}
+
+// The unbounded (all-time) path derives its headline token totals from the daily
+// series, which carries all four token classes. TestAnalyticsRollups leaves cache
+// tokens at zero, so this pins the all-time cache and combined-token aggregation
+// that the overview's Tokens readout and its tooltip surface.
+func TestAnalyticsAllTimeTokenTotals(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	admin, err := st.Register(ctx, "grace", "h", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	proj, err := st.UpsertProject(ctx, "github.com/ada/engine", "github.com", "ada", "engine", "engine", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+
+	s1 := seedSessionWithStats(t, st, admin.ID, proj, "claude", "s1", 2.0, 0, 0)
+	// Two dated events on different days, both carrying cache tokens.
+	seedUsageCache(t, st, s1, "claude-opus-4-8", 1.0, 100, 20, 30, 7, 0, "c1")
+	seedUsageCache(t, st, s1, "claude-opus-4-8", 1.0, 200, 40, 60, 14, 3, "c2")
+
+	a, err := st.Analytics(ctx, proj, time.Time{})
+	if err != nil {
+		t.Fatalf("all-time analytics: %v", err)
+	}
+	if a.TotalIn != 300 || a.TotalOut != 60 {
+		t.Errorf("all-time in/out wrong: in=%d out=%d, want 300/60", a.TotalIn, a.TotalOut)
+	}
+	if a.TotalCacheRead != 90 || a.TotalCacheWrite != 21 {
+		t.Errorf("all-time cache totals wrong: read=%d write=%d, want 90/21", a.TotalCacheRead, a.TotalCacheWrite)
+	}
+	if got := a.TotalTokens(); got != 471 {
+		t.Errorf("all-time combined tokens = %d, want 471 (300+60+90+21)", got)
+	}
+}
+
+// The window's lower bound is inclusive: an event whose occurred_at is exactly
+// `since` counts, while one a single instant earlier does not. The other store
+// tests only use clearly inside/outside dates, leaving this edge unpinned.
+func TestAnalyticsWindowLowerBoundInclusive(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	admin, err := st.Register(ctx, "grace", "h", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	proj, err := st.UpsertProject(ctx, "github.com/ada/engine", "github.com", "ada", "engine", "engine", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+
+	s1 := seedSessionWithStats(t, st, admin.ID, proj, "claude", "s1", 0, 0, 0)
+	// Postgres timestamps are microsecond-resolution, so truncate to the same grid
+	// and step by one microsecond to straddle the bound exactly.
+	bound := time.Now().Add(-24 * time.Hour).Truncate(time.Microsecond)
+	seedUsageAt(t, st, s1, "claude-opus-4-8", 1.0, 100, 20, bound, "at-bound")
+	seedUsageAt(t, st, s1, "claude-opus-4-8", 5.0, 500, 90, bound.Add(-time.Microsecond), "below-bound")
+
+	a, err := st.Analytics(ctx, proj, bound)
+	if err != nil {
+		t.Fatalf("boundary analytics: %v", err)
+	}
+	if len(a.Series) != 1 {
+		t.Errorf("only the at-bound event should land in the series, got %d points", len(a.Series))
+	}
+	if a.TotalCost < 0.99 || a.TotalCost > 1.01 {
+		t.Errorf("inclusive bound should keep the at-bound event and drop the one below it (~1.0), got %.2f", a.TotalCost)
+	}
+	if a.TotalIn != 100 || a.TotalOut != 20 {
+		t.Errorf("boundary token totals wrong: in=%d out=%d, want 100/20", a.TotalIn, a.TotalOut)
 	}
 }
 

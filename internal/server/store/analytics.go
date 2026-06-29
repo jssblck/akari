@@ -136,18 +136,21 @@ func (s *Store) analyticsSeries(ctx context.Context, projectID int64, since time
 		  GROUP BY day
 		  ORDER BY day`, args...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("query analytics daily series: %w", err)
 	}
 	defer rows.Close()
 	var out []DayPoint
 	for rows.Next() {
 		var p DayPoint
 		if err := rows.Scan(&p.Day, &p.CostUSD, &p.Input, &p.Output, &p.CacheRead, &p.CacheWrite); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scan analytics daily series: %w", err)
 		}
 		out = append(out, p)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate analytics daily series: %w", err)
+	}
+	return out, nil
 }
 
 func (s *Store) analyticsByModel(ctx context.Context, projectID int64, since time.Time) ([]Breakdown, error) {
@@ -163,10 +166,14 @@ func (s *Store) analyticsByModel(ctx context.Context, projectID int64, since tim
 		  GROUP BY ue.model
 		  ORDER BY 2 DESC, 3 DESC`, args...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("query analytics by model: %w", err)
 	}
 	defer rows.Close()
-	return scanBreakdowns(rows)
+	out, err := scanBreakdowns(rows)
+	if err != nil {
+		return nil, fmt.Errorf("scan analytics by model: %w", err)
+	}
+	return out, nil
 }
 
 func (s *Store) analyticsByAgent(ctx context.Context, projectID int64, since time.Time) ([]Breakdown, error) {
@@ -185,10 +192,14 @@ func (s *Store) analyticsByAgent(ctx context.Context, projectID int64, since tim
 			  GROUP BY s.agent
 			  ORDER BY 2 DESC, 4 DESC`, args...)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("query windowed analytics by agent: %w", err)
 		}
 		defer rows.Close()
-		return scanBreakdowns(rows)
+		out, err := scanBreakdowns(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan windowed analytics by agent: %w", err)
+		}
+		return out, nil
 	}
 
 	where := ""
@@ -206,10 +217,14 @@ func (s *Store) analyticsByAgent(ctx context.Context, projectID int64, since tim
 		  GROUP BY s.agent
 		  ORDER BY 2 DESC, 4 DESC`, args...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("query analytics by agent: %w", err)
 	}
 	defer rows.Close()
-	return scanBreakdowns(rows)
+	out, err := scanBreakdowns(rows)
+	if err != nil {
+		return nil, fmt.Errorf("scan analytics by agent: %w", err)
+	}
+	return out, nil
 }
 
 func scanBreakdowns(rows interface {
