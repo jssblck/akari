@@ -33,9 +33,9 @@ type fakeServer struct {
 	buf          []byte
 	lastAnnounce map[string]string // the most recent announce request body, decoded
 	blobs        map[string][]byte // sha256 -> stored (possibly compressed) body bytes
-	blobCT    map[string]string // sha256 -> declared storage content_type
-	blobMedia map[string]string // sha256 -> declared semantic media_type
-	puts      int               // count of accepted blob uploads, for dedup assertions
+	blobCT       map[string]string // sha256 -> declared storage content_type
+	blobMedia    map[string]string // sha256 -> declared semantic media_type
+	puts         int               // count of accepted blob uploads, for dedup assertions
 
 	// Instrumentation for the batched/parallel upload tests. checkBatchSizes records the
 	// hash count of every existence-check request, so a test can assert no request
