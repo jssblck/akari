@@ -100,6 +100,10 @@ func writeBlobTx(ctx context.Context, tx pgx.Tx, content string, mediaType strin
 		return "", err
 	}
 
+	// media_type is a Postgres text column fed by session-derived metadata, so it
+	// is sanitized here for the same reason the projection columns are: a NUL or
+	// invalid UTF-8 byte in a declared media type would otherwise fail the insert.
+	mediaType = sanitizeText(mediaType)
 	if mediaType == "" {
 		mediaType = "application/octet-stream"
 	}
@@ -262,6 +266,11 @@ func (s *Store) PutBlob(ctx context.Context, sha, mediaType, contentType string,
 		return drainBody(ctx, r)
 	}
 
+	// Both columns are Postgres text fed by client-supplied headers, so they take
+	// the same sanitization as the projection text columns: a NUL or invalid UTF-8
+	// byte in a header would otherwise fail the blobs insert.
+	mediaType = sanitizeText(mediaType)
+	contentType = sanitizeText(contentType)
 	if mediaType == "" {
 		mediaType = "application/octet-stream"
 	}
