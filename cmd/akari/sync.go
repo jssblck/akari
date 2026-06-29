@@ -230,8 +230,10 @@ func (s *summary) foldSync(r syncer.Result) (line string, stderr bool) {
 // It stops scheduling new files as soon as deadline is cancelled (a first Ctrl-C
 // or an elapsed time limit), but lets files already in flight finish on the
 // detached work context: those run with no cancellation, exactly as the sequential
-// loop let the single in-flight file finish. It returns the folded summary and
-// whether it stopped early.
+// loop let the single in-flight file finish. The cancellation is honored even
+// while a launch is blocked waiting for a concurrency slot (see the re-check
+// below), so a deadline that fires mid-wait never starts a fresh file. It returns
+// the folded summary and whether it stopped early.
 //
 // The file-level cap is intentionally modest. Each file already fans its own body
 // uploads out under the client's shared adaptive limiter and CPU-bounded encoder,
@@ -269,6 +271,16 @@ func syncAll(work, deadline context.Context, files []discover.File, concurrency 
 			break
 		}
 		g.Go(func() error {
+			// SetLimit makes g.Go block here until a concurrency slot frees, and that
+			// wait can outlast the deadline: a slot frees only when an in-flight file
+			// finishes, which may be seconds into a slow upload. Re-check before
+			// starting any work so a deadline that fired during the wait does not let a
+			// fresh file begin. That keeps the contract that cancellation stops new
+			// files and only lets already-running ones finish; the loop's top-of-loop
+			// check then breaks and reports interrupted on the next iteration.
+			if deadline.Err() != nil {
+				return nil
+			}
 			results <- run(work, f)
 			return nil
 		})

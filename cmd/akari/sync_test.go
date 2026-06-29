@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -217,5 +218,128 @@ func TestSyncAllStopsSchedulingAfterDeadline(t *testing.T) {
 	// Every started file is still folded, so the tally is never silently dropped.
 	if sum.upToDate != int(atomic.LoadInt32(&started)) {
 		t.Fatalf("folded %d up-to-date, but started %d", sum.upToDate, started)
+	}
+}
+
+// TestSyncAllDeadlineDuringSlotWaitStartsNoNewFile pins the interruption edge that
+// concurrency exposes: with the slots saturated, a launch blocks inside the
+// scheduler waiting for one to free, and that wait can outlast the deadline. When
+// the deadline fires during the wait, no fresh file may start; only the files
+// already running finish. This is the case concurrency 1 cannot reach, since
+// nothing blocks on a slot there.
+func TestSyncAllDeadlineDuringSlotWaitStartsNoNewFile(t *testing.T) {
+	const concurrency = 2
+	const n = 10
+	files := make([]discover.File, n)
+	for i := range files {
+		files[i] = discover.File{Path: fmt.Sprintf("session-%02d", i)}
+	}
+
+	deadlineCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var started int32
+	firstWaveFull := make(chan struct{}, concurrency) // signals each held slot
+	release := make(chan struct{})                    // frees the first wave
+
+	run := func(_ context.Context, f discover.File) outcome {
+		atomic.AddInt32(&started, 1)
+		// The first wave holds its slots until released, so every later launch is
+		// blocked in the scheduler waiting for a slot when the deadline fires.
+		firstWaveFull <- struct{}{}
+		<-release
+		return outcome{sync: &syncer.Result{File: f, Action: upload.ActionUpToDate}}
+	}
+
+	go func() {
+		// Once both slots are occupied, cancel while the scheduler is blocked trying
+		// to launch the next file, then free the wave so slots reopen.
+		for i := 0; i < concurrency; i++ {
+			<-firstWaveFull
+		}
+		cancel()
+		close(release)
+	}()
+
+	sum, interrupted := syncAll(context.Background(), deadlineCtx, files, concurrency, run)
+	if !interrupted {
+		t.Fatal("expected interrupted = true after the deadline fired")
+	}
+	if got := atomic.LoadInt32(&started); got != concurrency {
+		t.Fatalf("started %d files, want exactly %d: a file began after cancellation", got, concurrency)
+	}
+	if sum.upToDate != concurrency {
+		t.Fatalf("folded %d up-to-date, want %d", sum.upToDate, concurrency)
+	}
+}
+
+// TestFoldResolve covers the dry-run fold branches end to end: a skip tallies its
+// reason and goes to stderr, and each resolvable kind reports the destination a
+// real run would have uploaded to, on stdout.
+func TestFoldResolve(t *testing.T) {
+	file := func(name string) discover.File { return discover.File{Path: name} }
+
+	t.Run("skipped", func(t *testing.T) {
+		s := newSummary()
+		line, stderr := s.foldResolve(resolve.Result{File: file("clarke"), Skipped: true, Reason: "could not read header"})
+		if !stderr {
+			t.Fatal("a skip should print to stderr")
+		}
+		if line != "skip clarke: could not read header" {
+			t.Fatalf("line = %q", line)
+		}
+		if s.skipped != 1 || s.skipReasons["could not read header"] != 1 {
+			t.Fatalf("skipped=%d reasons=%v", s.skipped, s.skipReasons)
+		}
+	})
+
+	t.Run("standalone", func(t *testing.T) {
+		s := newSummary()
+		line, stderr := s.foldResolve(resolve.Result{File: file("lovelace"), Kind: resolve.KindStandalone, Header: resolve.Header{Cwd: "/home/ada"}})
+		if stderr {
+			t.Fatal("a would-upload line belongs on stdout")
+		}
+		if line != "would upload lovelace -> standalone:/home/ada" {
+			t.Fatalf("line = %q", line)
+		}
+		if s.standalone != 1 {
+			t.Fatalf("standalone = %d, want 1", s.standalone)
+		}
+	})
+
+	t.Run("orphaned", func(t *testing.T) {
+		s := newSummary()
+		line, _ := s.foldResolve(resolve.Result{File: file("johnson"), Kind: resolve.KindOrphaned})
+		if line != "would upload johnson -> orphaned" {
+			t.Fatalf("line = %q", line)
+		}
+		if s.orphaned != 1 {
+			t.Fatalf("orphaned = %d, want 1", s.orphaned)
+		}
+	})
+
+	t.Run("remote", func(t *testing.T) {
+		s := newSummary()
+		line, _ := s.foldResolve(resolve.Result{File: file("winlock"), Kind: resolve.KindRemote, ProjectKey: "github.com/x/y"})
+		if line != "would upload winlock -> github.com/x/y" {
+			t.Fatalf("line = %q", line)
+		}
+		if s.standalone != 0 || s.orphaned != 0 {
+			t.Fatalf("a remote dry run should not count standalone/orphaned: standalone=%d orphaned=%d", s.standalone, s.orphaned)
+		}
+	})
+}
+
+// TestRunSyncRejectsBadConcurrency confirms the flag is validated before any
+// config or discovery work, so a bad value fails fast with a clear message.
+func TestRunSyncRejectsBadConcurrency(t *testing.T) {
+	for _, v := range []string{"0", "-1"} {
+		err := runSync(context.Background(), []string{"--concurrency", v})
+		if err == nil {
+			t.Fatalf("concurrency %s: expected an error", v)
+		}
+		if !strings.Contains(err.Error(), "concurrency") {
+			t.Fatalf("concurrency %s: error = %v, want it to mention concurrency", v, err)
+		}
 	}
 }
