@@ -477,11 +477,16 @@ aggregate folded from the region directly, because widening `started_at` /
 
 The batch parser used by tests and the bulk reparse is a thin wrapper over the
 same reducer fed the whole file at once, so incremental and full parsing cannot
-diverge. Reparse reaches already-ingested data after a parser upgrade: it clears
-the derived rows, rewinds the cursor, and replays the stored raw through the
-reducer from scratch. A session partially parsed by an older parser version refuses
-to advance incrementally (the stored `parse_state_version` no longer matches) until
-that reparse rewinds it, so a version change can never blend two parsers' output.
+diverge. Reparse reaches already-ingested data after a parser upgrade: in one
+transaction per session (`store.ReparseSession`) it clears the derived rows, rewinds
+the cursor, and replays the stored raw through the reducer from scratch. Doing the
+clear and replay atomically matters: a reader never sees a session empty or half
+rebuilt (it reads the old projection until the new one commits), and any failure (a
+malformed-transcript parser error or an operational store error) rolls the rebuild
+back, leaving the prior projection in place rather than a cleared session. A session
+partially parsed by an older parser version refuses to advance incrementally (the
+stored `parse_state_version` no longer matches) until that reparse rewinds it, so a
+version change can never blend two parsers' output.
 
 The reparse runs on its own after a parser upgrade. The trigger is `parse.Epoch`, a
 binary constant bumped whenever parser or reducer output changes (new rows, changed
@@ -504,15 +509,22 @@ multiple server instances from reparsing at once, and an in-process guard makes 
 second trigger a no-op that returns the running status. Shutdown cancels an in-flight
 reparse the same way it winds down the blob sweep, before the pool closes; a partial
 or agent-filtered run never advances the epoch, so the next startup finishes the job.
+A per-session parser error is counted and the run still completes (re-running would
+fail identically, and the session kept its prior projection), so it does not block the
+epoch; an operational error aborts the run without advancing the epoch, so a transient
+store or CAS failure is retried on the next start rather than masked by a stamped epoch.
 
-Because a reparse rebuilds each session's projection in place (delete then replay),
-a session genuinely has old-or-absent parsed data mid-reparse, so the server gates
-the parsed UI while one runs: pages that serve projected data return a "reparse in
-progress" view with a live progress bar (pushed over SSE, with `GET
-/api/v1/reparse/status` as a poll fallback) instead of stale or half-rebuilt rows,
-while raw-data, auth, and account endpoints stay available. A future improvement
-could build a shadow projection and swap it in atomically per session, removing the
-need to gate; the current design takes the simpler in-place rebuild.
+Because a reparse rebuilds each session's projection atomically but works through the
+corpus one session at a time, a cross-session view can briefly mix already-rebuilt and
+not-yet-rebuilt sessions mid-reparse, so the server gates the parsed UI while one runs:
+pages that serve projected data return a "reparse in progress" view with a live
+progress bar (pushed over SSE, with `GET /api/v1/reparse/status` as a poll fallback)
+instead of that transitional mix, while raw-data, auth, and account endpoints stay
+available. The gate is best-effort (a request can still race a reparse that starts
+mid-render), which is acceptable now that each session is individually consistent: the
+worst a race serves is a mix of valid old and new sessions, never an empty or
+half-built one. A future improvement could build a shadow projection and swap it across
+the whole corpus atomically, removing the gate.
 
 Per-agent specifics the parser must handle:
 

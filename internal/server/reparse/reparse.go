@@ -6,17 +6,23 @@
 // the same cross-process advisory lock, the same progress reporting, and the same
 // post-reparse blob sweep.
 //
-// A reparse rebuilds in place: per session it deletes the old projection then
-// replays the raw through the reducer, so mid-reparse a session genuinely has
-// old-or-absent parsed data. That is why the HTTP layer gates the parsed UI while a
-// reparse runs rather than serving half-rebuilt rows. A future improvement could
-// build a shadow projection and swap it atomically per session, removing the need
-// to gate; this service deliberately does the simpler in-place rebuild and leaves
-// gating to the caller.
+// A reparse rebuilds in place but atomically per session: store.ReparseSession
+// clears and replays each session in one transaction, so a reader never sees that
+// session empty or half rebuilt (it reads the old projection until the new one
+// commits). What is not atomic is the corpus as a whole: while the loop works through
+// sessions, a cross-session view (the overview, the session list) can briefly mix
+// already-rebuilt and not-yet-rebuilt sessions. The HTTP layer gates the parsed UI
+// for the duration so it shows progress rather than that transient mix. The gate is
+// best-effort: a request can still race a reparse that starts mid-render and read a
+// mixed aggregate, which is acceptable because every individual session stays
+// consistent (no empty or half-built rows). A future improvement could build a shadow
+// projection and swap it atomically across the whole corpus, removing the gate.
 package reparse
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -245,6 +251,21 @@ func (s *Service) execute(ctx context.Context, opts Options) (Result, error) {
 				break
 			}
 			if _, err := parse.Reparse(ctx, s.st, t.ID, t.Agent); err != nil {
+				if ctx.Err() != nil {
+					// Shutdown landed mid-session; stop cleanly and let the post-loop
+					// cancellation path skip the epoch stamp.
+					break
+				}
+				var perr *parse.ParserError
+				if !errors.As(err, &perr) {
+					// Operational error (store/CAS): the atomic reparse rolled back, so the
+					// session keeps its prior projection. Abort the run without stamping the
+					// epoch so the next start retries rather than masking a transient failure.
+					return Result{Status: s.Status()}, fmt.Errorf("reparse session %d (%s): %w", t.ID, t.Agent, err)
+				}
+				// Deterministic parser failure: the session kept its prior projection and
+				// re-running would fail identically. Count it and continue; it does not
+				// block stamping the epoch.
 				failed++
 				log.Printf("reparse: session %d (%s): %v", t.ID, t.Agent, err)
 			}

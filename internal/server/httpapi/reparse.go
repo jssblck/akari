@@ -11,11 +11,13 @@ import (
 )
 
 // gateParsed wraps a server-rendered page that shows parsed/projected session data.
-// While a reparse is rebuilding the projection in place, those rows are stale or
-// half-rebuilt, so instead of the normal page it renders a "reparse in progress"
-// view with a live progress bar. An htmx partial swap gets just the banner fragment
-// so an in-page list swap shows the same state. It runs inside requireReadHTML, so
-// the principal is already on the request for the page shell.
+// While a reparse rebuilds the corpus session by session, a cross-session view can
+// mix already-rebuilt and not-yet-rebuilt sessions, so instead of the normal page it
+// renders a "reparse in progress" view with a live progress bar. An htmx partial swap
+// gets just the banner fragment so an in-page list swap shows the same state. The gate
+// is best-effort: each session is rebuilt atomically (no empty or half-built rows), so
+// a request that races a reparse starting mid-render only ever sees a mix of valid
+// sessions. It runs inside requireReadHTML, so the principal is already on the request.
 func (s *Server) gateParsed(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		st := s.reparser.FleetStatus(r.Context())

@@ -2,10 +2,106 @@ package store_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
+	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/storetest"
 )
+
+// TestReparseSessionIsAtomic confirms a session's reparse is all-or-nothing: a reduce
+// failure partway through rolls back the clear, so the session keeps its prior
+// projection rather than being left empty, and a success replaces it. This is the
+// property the reparse service relies on to tolerate a per-session parser failure
+// without data loss and to retry an operational failure safely.
+func TestReparseSessionIsAtomic(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	uid, err := st.Register(ctx, "grace", "hash", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	pid, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatalf("upsert project: %v", err)
+	}
+	ann, err := st.Announce(ctx, store.AnnounceParams{
+		UserID: uid.ID, Agent: "claude", SourceSessionID: "s-atomic", ProjectID: pid,
+		GitBranch: "main", Cwd: "/home/grace/akari", Machine: "laptop",
+	})
+	if err != nil {
+		t.Fatalf("announce: %v", err)
+	}
+	sid := ann.SessionID
+	if _, err := st.AppendChunk(ctx, sid, 0, []byte("one transcript line\n")); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+
+	// emit ignores the raw and produces a single message with the given content, so the
+	// projection content is whatever the most recent successful reduce chose.
+	emit := func(content string) store.ReduceFunc {
+		return func(_, _ []byte, _ int64) ([]byte, store.ProjectionDelta, error) {
+			return []byte("{}"), store.ProjectionDelta{
+				Messages: []store.MessageDelta{{Ordinal: 0, Role: "user", Content: content}},
+			}, nil
+		}
+	}
+	readMessage := func() (count int, content string) {
+		if err := st.Pool.QueryRow(ctx, "SELECT count(*) FROM messages WHERE session_id = $1", sid).Scan(&count); err != nil {
+			t.Fatalf("count messages: %v", err)
+		}
+		if count == 1 {
+			if err := st.Pool.QueryRow(ctx, "SELECT content FROM messages WHERE session_id = $1", sid).Scan(&content); err != nil {
+				t.Fatalf("read message: %v", err)
+			}
+		}
+		return count, content
+	}
+	parsedLen := func() int64 {
+		var n int64
+		if err := st.Pool.QueryRow(ctx, "SELECT parsed_byte_len FROM session_raw WHERE session_id = $1", sid).Scan(&n); err != nil {
+			t.Fatalf("read cursor: %v", err)
+		}
+		return n
+	}
+
+	// Build the original projection.
+	if err := st.ReparseSession(ctx, sid, 3, emit("original")); err != nil {
+		t.Fatalf("initial reparse: %v", err)
+	}
+	if n, c := readMessage(); n != 1 || c != "original" {
+		t.Fatalf("after initial reparse got %d message(s) %q, want 1 %q", n, c, "original")
+	}
+	cursor := parsedLen()
+	if cursor == 0 {
+		t.Fatal("cursor should have advanced past zero after the initial reparse")
+	}
+
+	// A reduce that fails mid-replay must leave the original projection untouched.
+	boom := errors.New("operational failure mid-replay")
+	failing := func(_, _ []byte, _ int64) ([]byte, store.ProjectionDelta, error) {
+		return nil, store.ProjectionDelta{}, boom
+	}
+	if err := st.ReparseSession(ctx, sid, 3, failing); !errors.Is(err, boom) {
+		t.Fatalf("failing reparse error = %v, want it to wrap boom", err)
+	}
+	if n, c := readMessage(); n != 1 || c != "original" {
+		t.Fatalf("after a failed reparse got %d message(s) %q, want the original 1 %q preserved", n, c, "original")
+	}
+	if got := parsedLen(); got != cursor {
+		t.Fatalf("a failed reparse moved the cursor to %d, want it left at %d", got, cursor)
+	}
+
+	// A successful reparse replaces the projection.
+	if err := st.ReparseSession(ctx, sid, 3, emit("rebuilt")); err != nil {
+		t.Fatalf("second reparse: %v", err)
+	}
+	if n, c := readMessage(); n != 1 || c != "rebuilt" {
+		t.Fatalf("after a successful reparse got %d message(s) %q, want 1 %q", n, c, "rebuilt")
+	}
+}
 
 // TestReparsedEpochRoundTrip confirms a fresh database reports epoch 0 (so the
 // server treats its corpus as needing a reparse and converges) and that a write

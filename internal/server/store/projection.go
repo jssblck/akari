@@ -516,12 +516,14 @@ func applyAggregates(ctx context.Context, tx pgx.Tx, sessionID int64, parserVers
 	return nil
 }
 
-// ResetProjectionForReparse clears a session's parser-owned projection rows and
-// its aggregates, and rewinds the parse cursor to zero at the given version,
-// keeping the raw bytes and their hash. The reparse loop then replays the stored
-// raw through the parser from scratch. Attachments are now parser-owned (the reducer
-// emits them from the transcript's image events), so they are cleared here too; a
-// reparse rewrites them, and the orphan sweep reclaims any blob left unreferenced.
+// ResetProjectionForReparse clears a session's parser-owned projection rows and its
+// aggregates, and rewinds the parse cursor to zero at the given version, keeping the
+// raw bytes and their hash. It is the standalone clear without the replay: the server
+// reparses through ReparseSession, which composes this clear with an in-transaction
+// replay so the rebuild is atomic. This form is kept for store tests that exercise the
+// clear and its blob pin on their own. Attachments are parser-owned (the reducer emits
+// them from the transcript's image events), so they are cleared here too; a reparse
+// rewrites them, and the orphan sweep reclaims any blob left unreferenced.
 func (s *Store) ResetProjectionForReparse(ctx context.Context, sessionID int64, parserVersion int) error {
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		// Parent session first, then session_raw: the same order DeleteSession takes,
@@ -529,45 +531,125 @@ func (s *Store) ResetProjectionForReparse(ctx context.Context, sessionID int64, 
 		if err := lockSession(ctx, tx, sessionID); err != nil {
 			return err
 		}
-		var dummy int64
-		if err := tx.QueryRow(ctx,
-			`SELECT session_id FROM session_raw WHERE session_id = $1 FOR UPDATE`, sessionID).Scan(&dummy); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return ErrNotFound
-			}
-			return fmt.Errorf("lock session_raw for reparse of session %d: %w", sessionID, err)
-		}
-		// Pin every blob this session references (lifted tool inputs and results, and
-		// image attachments) before clearing the rows that reference them. Reparse
-		// deletes these rows in this transaction and rebuilds the references in the
-		// Advance that follows, after this commits; the original upload pins have long
-		// since lapsed, so without a fresh pin a sweep running in that gap would see the
-		// blob as unreferenced and reclaim it, and the rebuild's pinBlobRefTx would then
-		// fail with ErrBlobNotUploaded. The pin (taken FOR KEY SHARE via the FK on insert)
-		// conflicts with the sweep's FOR UPDATE, so the blob survives until Advance
-		// re-records the reference well inside the pin TTL.
-		if err := pinSessionBlobsTx(ctx, tx, sessionID); err != nil {
+		if _, err := lockSessionRaw(ctx, tx, sessionID); err != nil {
 			return err
 		}
-		for _, q := range []string{
-			"DELETE FROM messages WHERE session_id = $1",
-			"DELETE FROM tool_calls WHERE session_id = $1",
-			"DELETE FROM usage_events WHERE session_id = $1",
-			"DELETE FROM attachments WHERE session_id = $1",
-		} {
-			if _, err := tx.Exec(ctx, q, sessionID); err != nil {
-				return fmt.Errorf("clear projection for reparse of session %d (%s): %w", sessionID, q, err)
-			}
-		}
-		if _, err := tx.Exec(ctx,
-			`UPDATE session_raw
-			    SET parsed_byte_len = 0, parse_state = '{}'::jsonb,
-			        parse_state_version = $2, parse_error = ''
-			  WHERE session_id = $1`, sessionID, parserVersion); err != nil {
-			return fmt.Errorf("rewind parse cursor for session %d: %w", sessionID, err)
-		}
-		return resetSessionAggregates(ctx, tx, sessionID)
+		return clearProjectionForReparseTx(ctx, tx, sessionID, parserVersion)
 	})
+}
+
+// ReparseSession rebuilds a session's projection from its stored raw bytes in a
+// single transaction: it clears the derived rows and rewinds the cursor, then
+// replays the whole session through reduce, all atomically. Because the clear and
+// the replay commit together, two correctness properties hold that the older
+// reset-then-advance path did not provide:
+//
+//   - A concurrent reader never sees the session empty or half rebuilt. It sees the
+//     prior projection until this transaction commits, then the new one; there is no
+//     window of cleared-but-not-yet-replayed rows.
+//   - Any failure rolls the whole rebuild back. A parser error on malformed bytes or
+//     an operational store/CAS error leaves the prior projection intact rather than a
+//     cleared session, so a per-session parser failure loses no data and an
+//     operational failure is safe to retry.
+//
+// The raw bytes are never modified. The replay is bounded to one region at a time
+// (parseBatchBytes), so peak memory does not scale with session size even though the
+// whole session is rebuilt in one transaction.
+func (s *Store) ReparseSession(ctx context.Context, sessionID int64, parserVersion int, reduce ReduceFunc) error {
+	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		if err := lockSession(ctx, tx, sessionID); err != nil {
+			return err
+		}
+		byteLen, err := lockSessionRaw(ctx, tx, sessionID)
+		if err != nil {
+			return err
+		}
+		if err := clearProjectionForReparseTx(ctx, tx, sessionID, parserVersion); err != nil {
+			return err
+		}
+		// Replay every region from the rewound cursor in this same transaction.
+		// readRawRegion guarantees the chunk at the cursor always qualifies, so the
+		// loop makes progress and ends exactly on the stored length.
+		state := []byte("{}")
+		var parsedLen int64
+		for parsedLen < byteLen {
+			region, regionEnd, err := readRawRegion(ctx, tx, sessionID, parsedLen, parseBatchBytes)
+			if err != nil {
+				return err
+			}
+			newState, d, err := reduce(state, region, parsedLen)
+			if err != nil {
+				return fmt.Errorf("parse session %d region [%d,%d): %w", sessionID, parsedLen, regionEnd, err)
+			}
+			applied, err := applyDelta(ctx, tx, sessionID, d)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx,
+				`UPDATE session_raw
+				    SET parsed_byte_len = $2, parse_state = $3, parse_state_version = $4, parse_error = ''
+				  WHERE session_id = $1`,
+				sessionID, regionEnd, newState, parserVersion); err != nil {
+				return fmt.Errorf("advance parse cursor for session %d to %d: %w", sessionID, regionEnd, err)
+			}
+			if err := applyAggregates(ctx, tx, sessionID, parserVersion, applied, d.Started, d.Ended); err != nil {
+				return err
+			}
+			state = newState
+			parsedLen = regionEnd
+		}
+		return nil
+	})
+}
+
+// lockSessionRaw locks the session_raw row (the caller must already hold the parent
+// session row, per the (session, session_raw) order DeleteSession takes) and returns
+// the stored byte length. It centralizes the FOR UPDATE the reparse and reset paths
+// share.
+func lockSessionRaw(ctx context.Context, tx pgx.Tx, sessionID int64) (int64, error) {
+	var byteLen int64
+	if err := tx.QueryRow(ctx,
+		`SELECT byte_len FROM session_raw WHERE session_id = $1 FOR UPDATE`, sessionID).Scan(&byteLen); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, ErrNotFound
+		}
+		return 0, fmt.Errorf("lock session_raw for session %d: %w", sessionID, err)
+	}
+	return byteLen, nil
+}
+
+// clearProjectionForReparseTx clears the parser-owned rows, pins the session's blobs,
+// rewinds the cursor to zero at parserVersion, and zeroes the aggregates, within the
+// caller's transaction (which must already hold the session and session_raw locks).
+// It is shared by ReparseSession and the standalone ResetProjectionForReparse.
+func clearProjectionForReparseTx(ctx context.Context, tx pgx.Tx, sessionID int64, parserVersion int) error {
+	// Pin every blob this session references (lifted tool inputs and results, and
+	// image attachments) before clearing the rows that reference them, so a concurrent
+	// sweep cannot reclaim a still-live blob. In ReparseSession the clear and rebuild
+	// commit together so this is belt-and-suspenders; in the standalone reset it is
+	// load-bearing for the window before a separate rebuild re-records the reference.
+	// The pin (FOR KEY SHARE via the FK) conflicts with the sweep's FOR UPDATE.
+	if err := pinSessionBlobsTx(ctx, tx, sessionID); err != nil {
+		return err
+	}
+	for _, q := range []string{
+		"DELETE FROM messages WHERE session_id = $1",
+		"DELETE FROM tool_calls WHERE session_id = $1",
+		"DELETE FROM usage_events WHERE session_id = $1",
+		"DELETE FROM attachments WHERE session_id = $1",
+	} {
+		if _, err := tx.Exec(ctx, q, sessionID); err != nil {
+			return fmt.Errorf("clear projection for reparse of session %d (%s): %w", sessionID, q, err)
+		}
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE session_raw
+		    SET parsed_byte_len = 0, parse_state = '{}'::jsonb,
+		        parse_state_version = $2, parse_error = ''
+		  WHERE session_id = $1`, sessionID, parserVersion); err != nil {
+		return fmt.Errorf("rewind parse cursor for session %d: %w", sessionID, err)
+	}
+	return resetSessionAggregates(ctx, tx, sessionID)
 }
 
 // resetSessionAggregates zeroes a session's rollups so a from-scratch parse can

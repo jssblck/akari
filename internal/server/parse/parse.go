@@ -50,15 +50,28 @@ func Advance(ctx context.Context, st *store.Store, sessionID int64, agent string
 	return st.MessageCount(ctx, sessionID)
 }
 
-// Reparse rebuilds a session's projection from its stored raw bytes: it clears
-// the derived rows and rewinds the parse cursor, then replays the whole session
-// through the same reducer the live path uses. This is how a parser improvement
-// reaches already-ingested data without re-uploading anything.
+// ParserError marks a failure that came from the parser reducer itself: malformed
+// transcript bytes the reducer cannot turn into a projection. It is distinct from an
+// operational error (a store query, a CAS read, a cancelled context), which travels
+// up un-wrapped. The reparse service uses this distinction: a parser error is
+// per-session and deterministic (re-running fails the same way), so it is counted and
+// the run still completes; an operational error is treated as transient and aborts
+// the run without stamping the epoch, so the next start retries rather than masking it.
+type ParserError struct{ err error }
+
+func (e *ParserError) Error() string { return e.err.Error() }
+func (e *ParserError) Unwrap() error { return e.err }
+
+// Reparse rebuilds a session's projection from its stored raw bytes by clearing the
+// derived rows and replaying the whole session through the same reducer the live path
+// uses, atomically (see store.ReparseSession): on any failure the prior projection is
+// left intact rather than a cleared session. This is how a parser improvement reaches
+// already-ingested data without re-uploading anything.
 func Reparse(ctx context.Context, st *store.Store, sessionID int64, agent string) (int, error) {
-	if err := st.ResetProjectionForReparse(ctx, sessionID, Version); err != nil {
+	if err := st.ReparseSession(ctx, sessionID, Version, reduceFunc(agent)); err != nil {
 		return 0, err
 	}
-	return Advance(ctx, st, sessionID, agent)
+	return st.MessageCount(ctx, sessionID)
 }
 
 // reduceFunc adapts the per-agent reducer to the store's ReduceFunc: it decodes
@@ -72,7 +85,9 @@ func reduceFunc(agent string) store.ReduceFunc {
 		}
 		next, d, err := parser.Reduce(parser.Agent(agent), st, region, baseOffset)
 		if err != nil {
-			return nil, store.ProjectionDelta{}, err
+			// A reducer failure is a deterministic parse error on these bytes; mark it so
+			// a reparse can tell it apart from an operational store/CAS error.
+			return nil, store.ProjectionDelta{}, &ParserError{err: err}
 		}
 		encoded, err := next.Encode()
 		if err != nil {
