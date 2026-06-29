@@ -194,6 +194,7 @@
     var insp = inspectorEl();
     if (!insp) return;
     if (!inspectorEmptyHTML) inspectorEmptyHTML = insp.innerHTML; // capture the server-rendered empty state once
+    lastBody = { url: "", text: "" }; // drop any retained body on (re)load
     emptyInspector(insp);
   }
   function clearInspectSelection() {
@@ -240,23 +241,39 @@
     return views;
   }
 
-  var bodyCache = {};
+  // One-entry cache: re-toggling the same view does not refetch, but clicking
+  // through many bodies never accumulates more than the current one in memory.
+  var lastBody = { url: "", text: "" };
+  // Cap the text rendered into the DOM so a huge tool body cannot blow up the
+  // page; the rest stays one click away as the raw blob.
+  var BODY_DISPLAY_CAP = 200000;
   function loadView(bodyEl, view, toolName) {
     function paint(text) {
       bodyEl.innerHTML = "";
+      var truncated = text.length > BODY_DISPLAY_CAP;
+      var shown = truncated ? text.slice(0, BODY_DISPLAY_CAP) : text;
       var node = null;
-      if (view.render === "diff") node = diffElement(toolName, text);
-      if (!node) { node = document.createElement("pre"); node.className = "tool-body"; node.textContent = text; }
+      if (view.render === "diff" && !truncated) node = diffElement(toolName, shown);
+      if (!node) { node = document.createElement("pre"); node.className = "tool-body"; node.textContent = shown; }
       bodyEl.appendChild(node);
+      if (truncated) {
+        var note = document.createElement("div");
+        note.className = "insp-trunc muted";
+        note.textContent = "Showing the first " + Math.round(BODY_DISPLAY_CAP / 1000) + " KB of " + Math.round(text.length / 1000) + " KB. ";
+        var a = document.createElement("a");
+        a.href = view.url; a.target = "_blank"; a.rel = "noopener"; a.textContent = "Open raw";
+        note.appendChild(a);
+        bodyEl.appendChild(note);
+      }
     }
-    if (bodyCache[view.url] !== undefined) { paint(bodyCache[view.url]); return; }
+    if (lastBody.url === view.url) { paint(lastBody.text); return; }
     bodyEl.innerHTML = "";
     var loading = document.createElement("div");
     loading.className = "insp-loading muted"; loading.textContent = "Loading…";
     bodyEl.appendChild(loading);
     fetch(view.url, { credentials: "same-origin" })
       .then(function (r) { if (!r.ok) throw new Error("status " + r.status); return r.text(); })
-      .then(function (text) { bodyCache[view.url] = text; paint(text); })
+      .then(function (text) { lastBody = { url: view.url, text: text }; paint(text); })
       .catch(function () {
         bodyEl.innerHTML = "";
         var pre = document.createElement("pre"); pre.className = "tool-body error";

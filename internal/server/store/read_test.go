@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"strconv"
 	"testing"
 )
 
@@ -89,6 +90,58 @@ func TestListAllSessions(t *testing.T) {
 	capped, err := st.ListAllSessions(ctx, SessionFilter{Limit: 2})
 	if err != nil || len(capped) != 2 {
 		t.Fatalf("limit: len=%d err=%v, want 2", len(capped), err)
+	}
+}
+
+// TestSessionFacetTrigger exercises the rollup trigger directly: an insert counts
+// up, a re-attribution (project change) shifts the count, and a delete counts
+// down and drops the emptied value.
+func TestSessionFacetTrigger(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	u, err := st.Register(ctx, "grace", "hash", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	a, err := st.UpsertProject(ctx, "github.com/x/a", "github.com", "x", "a", "a", "remote")
+	if err != nil {
+		t.Fatalf("project a: %v", err)
+	}
+	b, err := st.UpsertProject(ctx, "github.com/x/b", "github.com", "x", "b", "b", "remote")
+	if err != nil {
+		t.Fatalf("project b: %v", err)
+	}
+	count := func(kind, key string) int {
+		var n int
+		err := st.Pool.QueryRow(ctx, "SELECT coalesce((SELECT n FROM session_facets WHERE kind=$1 AND key=$2),0)", kind, key).Scan(&n)
+		if err != nil {
+			t.Fatalf("count %s/%s: %v", kind, key, err)
+		}
+		return n
+	}
+
+	id := seedSess(t, st, u.ID, a, "claude", "box", "s1")
+	if count("project", strconv.FormatInt(a, 10)) != 1 || count("agent", "claude") != 1 {
+		t.Fatalf("after insert: project a=%d agent claude=%d", count("project", strconv.FormatInt(a, 10)), count("agent", "claude"))
+	}
+
+	// Re-attribute the session from project a to project b.
+	if _, err := st.Pool.Exec(ctx, "UPDATE sessions SET project_id=$1 WHERE id=$2", b, id); err != nil {
+		t.Fatalf("reattribute: %v", err)
+	}
+	if count("project", strconv.FormatInt(a, 10)) != 0 || count("project", strconv.FormatInt(b, 10)) != 1 {
+		t.Fatalf("after reattribute: a=%d b=%d", count("project", strconv.FormatInt(a, 10)), count("project", strconv.FormatInt(b, 10)))
+	}
+	if count("agent", "claude") != 1 {
+		t.Errorf("agent count should be unchanged by a project move: %d", count("agent", "claude"))
+	}
+
+	// Deleting the session drops every facet it backed.
+	if _, err := st.Pool.Exec(ctx, "DELETE FROM sessions WHERE id=$1", id); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if count("project", strconv.FormatInt(b, 10)) != 0 || count("agent", "claude") != 0 {
+		t.Errorf("after delete: project b=%d agent claude=%d", count("project", strconv.FormatInt(b, 10)), count("agent", "claude"))
 	}
 }
 

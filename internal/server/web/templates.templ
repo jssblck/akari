@@ -636,7 +636,7 @@ templ densityToolbar() {
 templ SessionBody(d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, subagents []store.SessionSummary) {
 	<div class="session-grid">
 		<aside class="outline-rail" aria-label="Outline">
-			@Outline(BuildOutline(msgs, tools), SessionBlobBase(d.ID))
+			@Outline(msgs, tools, SessionBlobBase(d.ID))
 		</aside>
 		<div class="session-main">
 			@sessionStats(d)
@@ -654,38 +654,42 @@ templ SessionBody(d store.SessionDetail, msgs []store.Message, tools map[int][]s
 }
 
 // Outline is the left pane of the session view: one entry per turn, with its
-// tool steps nested beneath. A turn links to its message; a step with a stored
-// body opens that body in the inspector pane (carrying the blob URLs so the
-// inspector needs no extra round trip to know what to fetch).
-templ Outline(turns []OutlineTurn, blobBase string) {
+// tool steps nested beneath. It renders straight from the transcript messages
+// and tool metadata the page already holds, so no second session-sized structure
+// is built. A turn links to its message; a step with a stored body opens that
+// body in the inspector pane (carrying the blob URLs so the inspector needs no
+// extra round trip to know what to fetch).
+templ Outline(msgs []store.Message, tools map[int][]store.ToolCallView, blobBase string) {
 	<div class="outline" aria-label="Session outline">
 		<div class="label outline-head">Outline</div>
-		for _, t := range turns {
+		for _, m := range msgs {
+			{{ steps := tools[m.Ordinal] }}
+			{{ title := OutlineTitle(m) }}
 			<div class="ol-group">
-				<a class={ OutlineTurnClass(t) } href={ templ.SafeURL(fmt.Sprintf("#msg-%d", t.Ordinal)) } data-ord={ fmt.Sprintf("%d", t.Ordinal) }>
+				<a class={ OutlineTurnClass(m.Role, steps) } href={ templ.SafeURL(fmt.Sprintf("#msg-%d", m.Ordinal)) } data-ord={ fmt.Sprintf("%d", m.Ordinal) }>
 					<span class="ol-dot"></span>
 					<span class="ol-title">
-						if t.Title != "" {
-							{ t.Title }
+						if title != "" {
+							{ title }
 						} else {
-							<span class="ol-role">{ t.Role }</span>
+							<span class="ol-role">{ m.Role }</span>
 						}
 					</span>
-					if len(t.Steps) > 0 {
-						<span class="ol-count">{ fmt.Sprintf("%d", len(t.Steps)) }</span>
+					if len(steps) > 0 {
+						<span class="ol-count">{ fmt.Sprintf("%d", len(steps)) }</span>
 					}
 				</a>
-				if len(t.Steps) > 0 {
+				if len(steps) > 0 {
 					<div class="ol-steps">
-						for _, s := range t.Steps {
-							if s.InputSHA != "" || s.ResultSHA != "" {
+						for _, s := range steps {
+							if OutlineStepHasBody(s) {
 								<a
 									class={ OutlineStepClass(s) + " inspect-open" }
-									href={ templ.SafeURL(fmt.Sprintf("#msg-%d", s.Ordinal)) }
+									href={ templ.SafeURL(fmt.Sprintf("#msg-%d", m.Ordinal)) }
 									data-tool={ s.ToolName }
 									data-file={ s.FilePath }
-									data-status={ s.Status }
-									if s.IsDiff {
+									data-status={ s.ResultStatus }
+									if DiffTool(s.ToolName) {
 										data-diff="1"
 									}
 									if s.InputSHA != "" {
@@ -701,7 +705,7 @@ templ Outline(turns []OutlineTurn, blobBase string) {
 									}
 								</a>
 							} else {
-								<a class={ OutlineStepClass(s) } href={ templ.SafeURL(fmt.Sprintf("#msg-%d", s.Ordinal)) }>
+								<a class={ OutlineStepClass(s) } href={ templ.SafeURL(fmt.Sprintf("#msg-%d", m.Ordinal)) }>
 									<span class="ol-tn">{ s.ToolName }</span>
 								</a>
 							}
@@ -976,7 +980,7 @@ templ PublicSessionPage(d store.SessionDetail, msgs []store.Message, tools map[i
 		<div id="session-body">
 			<div class="session-grid">
 				<aside class="outline-rail" aria-label="Outline">
-					@Outline(BuildOutline(msgs, tools), PublicBlobBase(*d.PublicID))
+					@Outline(msgs, tools, PublicBlobBase(*d.PublicID))
 				</aside>
 				<div class="session-main">
 					@sessionStats(d)

@@ -441,6 +441,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--l
 .insp-body { padding: 0 var(--sp-md) var(--sp-md); overflow: auto; min-height: 0; }
 .insp-body .tool-body, .insp-body .diff { margin-top: 0; max-height: none; }
 .insp-loading { padding: var(--sp-md); font-size: 0.8125rem; }
+.insp-trunc { padding: var(--sp-sm) 0 2px; font-size: 0.75rem; }
 /* The selected chip in the transcript reads as wired to the open inspector. */
 .tool-chip.inspect-selected { border-color: var(--lilac); box-shadow: 0 0 0 1px var(--lilac); }
 

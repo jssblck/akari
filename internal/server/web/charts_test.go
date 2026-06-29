@@ -66,43 +66,56 @@ func TestSparklineEmptyAndShape(t *testing.T) {
 	}
 }
 
-func TestBuildOutline(t *testing.T) {
-	msgs := []store.Message{
-		{Ordinal: 0, Role: "user", Content: "  Reorganize   the\nUI please "},
-		{Ordinal: 1, Role: "assistant"},
+func TestOutlineTitle(t *testing.T) {
+	// Leading/internal/trailing whitespace collapses to single spaces, one line.
+	if got := OutlineTitle(store.Message{Content: "  Reorganize   the\nUI please "}); got != "Reorganize the UI please" {
+		t.Errorf("title = %q", got)
 	}
-	tools := map[int][]store.ToolCallView{
-		1: {
-			{CallIndex: 0, ToolName: "Edit", FilePath: "a/b/templates.templ", ResultStatus: "ok", InputSHA: "deadbeef"},
-			{CallIndex: 1, ToolName: "Bash", ResultStatus: "error"},
-		},
+	// Empty / whitespace-only content yields an empty title (the view shows the role).
+	if got := OutlineTitle(store.Message{Content: "   \n\t "}); got != "" {
+		t.Errorf("blank title = %q", got)
 	}
-	out := BuildOutline(msgs, tools)
-	if len(out) != 2 {
-		t.Fatalf("want 2 turns, got %d", len(out))
+	// Content beyond the cap is truncated with an ellipsis and never longer than
+	// the cap (+ the ellipsis rune), regardless of the message size.
+	long := ""
+	for i := 0; i < 500; i++ {
+		long += "word "
 	}
-	// The user turn title collapses whitespace into one line.
-	if out[0].Title != "Reorganize the UI please" {
-		t.Errorf("outline title = %q", out[0].Title)
+	got := OutlineTitle(store.Message{Content: long})
+	if []rune(got)[len([]rune(got))-1] != '…' {
+		t.Errorf("a long title should end with an ellipsis: %q", got)
 	}
-	if len(out[0].Steps) != 0 {
-		t.Errorf("user turn should have no steps")
+	if n := len([]rune(got)); n > 50 {
+		t.Errorf("a long title should stay bounded, got %d runes: %q", n, got)
 	}
-	if len(out[1].Steps) != 2 {
-		t.Fatalf("assistant turn should carry 2 steps, got %d", len(out[1].Steps))
-	}
-	if !out[1].Steps[0].IsDiff || out[1].Steps[0].InputSHA == "" {
-		t.Errorf("an Edit step is a diff with an input body: %+v", out[1].Steps[0])
+}
+
+func TestOutlineClasses(t *testing.T) {
+	steps := []store.ToolCallView{
+		{ToolName: "Edit", ResultStatus: "ok", InputSHA: "deadbeef"},
+		{ToolName: "Bash", ResultStatus: "error"},
 	}
 	// A turn with a failed step reads in rose regardless of role.
-	if OutlineTurnClass(out[1]) != "ol-turn ol-error" {
-		t.Errorf("errored turn class = %q", OutlineTurnClass(out[1]))
+	if got := OutlineTurnClass("assistant", steps); got != "ol-turn ol-error" {
+		t.Errorf("errored turn class = %q", got)
 	}
-	if OutlineTurnClass(out[0]) != "ol-turn ol-user" {
-		t.Errorf("user turn class = %q", OutlineTurnClass(out[0]))
+	if got := OutlineTurnClass("assistant", steps[:1]); got != "ol-turn ol-assistant" {
+		t.Errorf("assistant turn class = %q", got)
 	}
-	if OutlineStepClass(out[1].Steps[1]) != "ol-step ol-step-error" {
-		t.Errorf("errored step class = %q", OutlineStepClass(out[1].Steps[1]))
+	if got := OutlineTurnClass("user", nil); got != "ol-turn ol-user" {
+		t.Errorf("user turn class = %q", got)
+	}
+	if got := OutlineTurnClass("system", nil); got != "ol-turn ol-other" {
+		t.Errorf("default turn class = %q", got)
+	}
+	if got := OutlineStepClass(steps[1]); got != "ol-step ol-step-error" {
+		t.Errorf("errored step class = %q", got)
+	}
+	if got := OutlineStepClass(steps[0]); got != "ol-step" {
+		t.Errorf("ok step class = %q", got)
+	}
+	if !OutlineStepHasBody(steps[0]) || OutlineStepHasBody(steps[1]) {
+		t.Errorf("step body detection wrong: %+v", steps)
 	}
 }
 

@@ -25,32 +25,40 @@ CREATE INDEX idx_session_facets_rank ON session_facets(kind, n DESC, key);
 -- (e.g. project re-attribution) shifts the count; unchanged fields net to zero.
 CREATE OR REPLACE FUNCTION akari_bump_session_facets() RETURNS trigger AS $$
 BEGIN
-  IF TG_OP = 'INSERT' OR TG_OP = 'UPDATE' THEN
-    IF NEW.agent <> '' THEN
-      INSERT INTO session_facets(kind, key, n) VALUES ('agent', NEW.agent, 1)
-        ON CONFLICT (kind, key) DO UPDATE SET n = session_facets.n + 1;
-    END IF;
-    IF NEW.machine <> '' THEN
-      INSERT INTO session_facets(kind, key, n) VALUES ('machine', NEW.machine, 1)
-        ON CONFLICT (kind, key) DO UPDATE SET n = session_facets.n + 1;
-    END IF;
-    INSERT INTO session_facets(kind, key, n) VALUES ('user', NEW.user_id::text, 1)
-      ON CONFLICT (kind, key) DO UPDATE SET n = session_facets.n + 1;
-    INSERT INTO session_facets(kind, key, n) VALUES ('project', NEW.project_id::text, 1)
-      ON CONFLICT (kind, key) DO UPDATE SET n = session_facets.n + 1;
-  END IF;
-  IF TG_OP = 'UPDATE' OR TG_OP = 'DELETE' THEN
-    IF OLD.agent <> '' THEN
-      UPDATE session_facets SET n = n - 1 WHERE kind = 'agent' AND key = OLD.agent;
-    END IF;
-    IF OLD.machine <> '' THEN
-      UPDATE session_facets SET n = n - 1 WHERE kind = 'machine' AND key = OLD.machine;
-    END IF;
-    UPDATE session_facets SET n = n - 1 WHERE kind = 'user' AND key = OLD.user_id::text;
-    UPDATE session_facets SET n = n - 1 WHERE kind = 'project' AND key = OLD.project_id::text;
-    -- Drop values that no longer back any session so the rollup stays bounded by
-    -- the live distinct values, not the historical ones.
-    DELETE FROM session_facets WHERE n <= 0;
+  -- Aggregate the row change into signed per-(kind,key) deltas: +1 for the new
+  -- row's facet values, -1 for the old row's. An unchanged field nets to zero
+  -- and is skipped (HAVING). Applying the upsert in (kind,key) order makes every
+  -- concurrent writer take row locks in the same sequence, so two opposite
+  -- re-attributions (A->B and B->A) can never deadlock.
+  WITH delta(kind, key, d) AS (
+    SELECT kind, key, sum(d) AS d
+      FROM (
+                  SELECT 'agent'   AS kind, NEW.agent           AS key,  1 AS d WHERE TG_OP <> 'DELETE' AND NEW.agent <> ''
+        UNION ALL SELECT 'machine',         NEW.machine,                 1      WHERE TG_OP <> 'DELETE' AND NEW.machine <> ''
+        UNION ALL SELECT 'user',            NEW.user_id::text,           1      WHERE TG_OP <> 'DELETE'
+        UNION ALL SELECT 'project',         NEW.project_id::text,        1      WHERE TG_OP <> 'DELETE'
+        UNION ALL SELECT 'agent',           OLD.agent,                  -1      WHERE TG_OP <> 'INSERT' AND OLD.agent <> ''
+        UNION ALL SELECT 'machine',         OLD.machine,                -1      WHERE TG_OP <> 'INSERT' AND OLD.machine <> ''
+        UNION ALL SELECT 'user',            OLD.user_id::text,          -1      WHERE TG_OP <> 'INSERT'
+        UNION ALL SELECT 'project',         OLD.project_id::text,       -1      WHERE TG_OP <> 'INSERT'
+      ) s
+     GROUP BY kind, key
+    HAVING sum(d) <> 0
+  )
+  INSERT INTO session_facets(kind, key, n)
+    SELECT kind, key, d FROM delta ORDER BY kind, key
+  ON CONFLICT (kind, key) DO UPDATE SET n = session_facets.n + EXCLUDED.n;
+
+  -- Only an old value can be driven to zero. Delete just those (already locked)
+  -- rows by primary key, so the cleanup neither scans the whole rollup nor takes
+  -- a lock out of order.
+  IF TG_OP <> 'INSERT' THEN
+    DELETE FROM session_facets sf
+     WHERE sf.n <= 0
+       AND ( (sf.kind = 'agent'   AND sf.key = OLD.agent)
+          OR (sf.kind = 'machine' AND sf.key = OLD.machine)
+          OR (sf.kind = 'user'    AND sf.key = OLD.user_id::text)
+          OR (sf.kind = 'project' AND sf.key = OLD.project_id::text) );
   END IF;
   RETURN NULL;
 END;

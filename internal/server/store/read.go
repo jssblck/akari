@@ -412,14 +412,14 @@ func (s *Store) GlobalFacets(ctx context.Context) (GlobalFacetValues, error) {
 	sortFacets(f.Agents)
 	sortFacets(f.Machines)
 
-	// User and project facets store the id in the rollup; resolve the display
-	// label by joining the busiest rows to their owning table.
+	// User and project facets store the id in the rollup; take the bounded top-N
+	// off the (kind, n DESC, key) index first, then resolve the display label, so
+	// the limit is applied by the index scan rather than after joining every row.
 	urows, err := s.Pool.Query(ctx,
 		`SELECT u.username, f.n
-		   FROM session_facets f JOIN users u ON u.id = f.key::bigint
-		  WHERE f.kind = 'user'
-		  ORDER BY f.n DESC, u.username
-		  LIMIT $1`, facetLimit)
+		   FROM (SELECT key, n FROM session_facets WHERE kind = 'user' ORDER BY n DESC, key LIMIT $1) f
+		   JOIN users u ON u.id = f.key::bigint
+		  ORDER BY f.n DESC, u.username`, facetLimit)
 	if err != nil {
 		return f, fmt.Errorf("query user facets: %w", err)
 	}
@@ -437,10 +437,9 @@ func (s *Store) GlobalFacets(ctx context.Context) (GlobalFacetValues, error) {
 
 	prows, err := s.Pool.Query(ctx,
 		`SELECT p.id, p.remote_key, p.display_name, p.kind, f.n
-		   FROM session_facets f JOIN projects p ON p.id = f.key::bigint
-		  WHERE f.kind = 'project'
-		  ORDER BY f.n DESC, p.remote_key
-		  LIMIT $1`, facetLimit)
+		   FROM (SELECT key, n FROM session_facets WHERE kind = 'project' ORDER BY n DESC, key LIMIT $1) f
+		   JOIN projects p ON p.id = f.key::bigint
+		  ORDER BY f.n DESC, p.remote_key`, facetLimit)
 	if err != nil {
 		return f, fmt.Errorf("query project facets: %w", err)
 	}

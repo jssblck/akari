@@ -150,81 +150,64 @@ func Sparkline(vals []float64) string {
 			`</svg>`, w, h, area, line)
 }
 
-// OutlineStep is one tool call in the session outline: enough to label it, flag
-// an error, and (when its bodies live in the CAS) open them in the inspector
-// pane without leaving the outline.
-type OutlineStep struct {
-	Ordinal   int
-	CallIndex int
-	ToolName  string
-	FilePath  string
-	Status    string // "", "ok", or "error"
-	HasError  bool
-	IsDiff    bool
-	InputSHA  string
-	ResultSHA string
-}
+// The session outline (left pane of the session view) renders directly from the
+// transcript messages and their tool metadata, which the page already holds in
+// memory for the transcript itself. These helpers compute a row's label and tone
+// during render, so the outline adds no second session-sized structure.
 
-// OutlineTurn is one message in the session outline: its role, a short title
-// drawn from its content, and the tool steps that hang off it. It replaces the
-// old tick rail with a navigable, labeled structure.
-type OutlineTurn struct {
-	Ordinal int
-	Role    string
-	Title   string
-	Steps   []OutlineStep
-}
-
-// BuildOutline derives the session outline from the transcript and its tool
-// metadata: one turn per message, in order, each carrying its tool steps. The
-// turn title is a trimmed one-line excerpt of the message content so a reader
-// can scan what happened without opening every turn.
-func BuildOutline(msgs []store.Message, tools map[int][]store.ToolCallView) []OutlineTurn {
-	out := make([]OutlineTurn, 0, len(msgs))
-	for _, m := range msgs {
-		turn := OutlineTurn{Ordinal: m.Ordinal, Role: m.Role, Title: outlineTitle(m)}
-		for _, t := range tools[m.Ordinal] {
-			turn.Steps = append(turn.Steps, OutlineStep{
-				Ordinal:   m.Ordinal,
-				CallIndex: t.CallIndex,
-				ToolName:  t.ToolName,
-				FilePath:  t.FilePath,
-				Status:    t.ResultStatus,
-				HasError:  t.ResultStatus == "error",
-				IsDiff:    DiffTool(t.ToolName),
-				InputSHA:  t.InputSHA,
-				ResultSHA: t.ResultSHA,
-			})
-		}
-		out = append(out, turn)
-	}
-	return out
-}
-
-// outlineTitle builds a compact one-line label for an outline turn from its
-// message content, collapsing whitespace and capping the length.
-func outlineTitle(m store.Message) string {
-	s := strings.TrimSpace(m.Content)
-	if s == "" {
-		return ""
-	}
-	s = strings.Join(strings.Fields(s), " ")
+// OutlineTitle is a compact one-line label for an outline turn, drawn from the
+// start of the message content. It scans only the first runes up to the cap
+// (collapsing runs of whitespace), so its cost and allocation are bounded by the
+// label length, not the message size.
+func OutlineTitle(m store.Message) string {
 	const max = 48
-	if len(s) > max {
-		s = strings.TrimSpace(s[:max]) + "…"
+	var b strings.Builder
+	b.Grow(max + 4)
+	space := false   // a pending collapsed space, emitted before the next word
+	started := false // have we emitted any non-space rune yet
+	n := 0
+	for _, r := range m.Content {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+			if started {
+				space = true
+			}
+			continue
+		}
+		if n >= max {
+			b.WriteRune('…')
+			return b.String()
+		}
+		if space {
+			b.WriteByte(' ')
+			n++
+			space = false
+			if n >= max {
+				b.WriteRune('…')
+				return b.String()
+			}
+		}
+		b.WriteRune(r)
+		n++
+		started = true
 	}
-	return s
+	return b.String()
 }
 
-// OutlineTurnClass maps an outline turn to its CSS modifier (role tone, with an
-// error override so a turn with a failed tool reads in rose).
-func OutlineTurnClass(t OutlineTurn) string {
-	for _, s := range t.Steps {
-		if s.HasError {
+// OutlineStepHasBody reports whether a tool step has a stored input or result
+// body, so the outline can wire only those steps to the inspector.
+func OutlineStepHasBody(t store.ToolCallView) bool {
+	return t.InputSHA != "" || t.ResultSHA != ""
+}
+
+// OutlineTurnClass maps a turn (its role and its tool steps) to its CSS modifier:
+// role tone, with an error override so a turn with a failed tool reads in rose.
+func OutlineTurnClass(role string, steps []store.ToolCallView) string {
+	for _, t := range steps {
+		if t.ResultStatus == "error" {
 			return "ol-turn ol-error"
 		}
 	}
-	switch t.Role {
+	switch role {
 	case "user":
 		return "ol-turn ol-user"
 	case "assistant":
@@ -234,10 +217,10 @@ func OutlineTurnClass(t OutlineTurn) string {
 	}
 }
 
-// OutlineStepClass maps an outline step to its CSS modifier, flagging an errored
-// step in rose.
-func OutlineStepClass(s OutlineStep) string {
-	if s.HasError {
+// OutlineStepClass maps a tool step to its CSS modifier, flagging an errored step
+// in rose.
+func OutlineStepClass(t store.ToolCallView) string {
+	if t.ResultStatus == "error" {
 		return "ol-step ol-step-error"
 	}
 	return "ol-step"
