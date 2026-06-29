@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -58,30 +59,31 @@ func (a Analytics) TotalTokens() int64 {
 // Analytics aggregates usage for the charts. projectID 0 means the whole
 // instance; a non-zero id scopes every query to that project. A non-zero `since`
 // bounds every rollup to events at or after that instant; the zero time means
-// all of history. It runs three rollups (daily series, by-model, by-agent) and
-// derives the headline totals from them.
+// all of history. A non-empty userIDs scopes every rollup to sessions owned by
+// those users; nil or empty means every user. It runs three rollups (daily
+// series, by-model, by-agent) and derives the headline totals from them.
 //
 // With no time bound the by-agent split and its totals come from the
 // authoritative session rollups, so unpriced or undated usage still counts. A
 // time bound has to slice usage by event time, which only the usage_events have,
 // so the bounded path derives every figure from those events (undated events,
 // having no place on the time axis, fall out of the bounded view).
-func (s *Store) Analytics(ctx context.Context, projectID int64, since time.Time) (Analytics, error) {
+func (s *Store) Analytics(ctx context.Context, projectID int64, since time.Time, userIDs []int64) (Analytics, error) {
 	var a Analytics
 
-	series, err := s.analyticsSeries(ctx, projectID, since)
+	series, err := s.analyticsSeries(ctx, projectID, since, userIDs)
 	if err != nil {
 		return a, err
 	}
 	a.Series = series
 
-	models, err := s.analyticsByModel(ctx, projectID, since)
+	models, err := s.analyticsByModel(ctx, projectID, since, userIDs)
 	if err != nil {
 		return a, err
 	}
 	a.Models = models
 
-	agents, err := s.analyticsByAgent(ctx, projectID, since)
+	agents, err := s.analyticsByAgent(ctx, projectID, since, userIDs)
 	if err != nil {
 		return a, err
 	}
@@ -104,15 +106,19 @@ func (s *Store) Analytics(ctx context.Context, projectID int64, since time.Time)
 }
 
 // usageFilter builds the conjunctive WHERE additions for a usage_events query
-// joined to sessions as `s`: the optional project scope and the optional trailing
-// time bound. Placeholders are numbered so it can follow an existing WHERE clause
-// that already opened the predicate.
-func usageFilter(projectID int64, since time.Time) (string, []any) {
+// joined to sessions as `s`: the optional project scope, the optional set-of-users
+// scope, and the optional trailing time bound. Placeholders are numbered so it can
+// follow an existing WHERE clause that already opened the predicate.
+func usageFilter(projectID int64, since time.Time, userIDs []int64) (string, []any) {
 	var clauses string
 	var args []any
 	if projectID != 0 {
 		args = append(args, projectID)
 		clauses += fmt.Sprintf(" AND s.project_id = $%d", len(args))
+	}
+	if len(userIDs) > 0 {
+		args = append(args, userIDs)
+		clauses += fmt.Sprintf(" AND s.user_id = ANY($%d)", len(args))
 	}
 	if !since.IsZero() {
 		args = append(args, since)
@@ -121,8 +127,30 @@ func usageFilter(projectID int64, since time.Time) (string, []any) {
 	return clauses, args
 }
 
-func (s *Store) analyticsSeries(ctx context.Context, projectID int64, since time.Time) ([]DayPoint, error) {
-	filter, args := usageFilter(projectID, since)
+// sessionScope builds the optional WHERE predicates for a query that reads the
+// sessions table aliased `s` directly (no usage_events join, so no prior WHERE to
+// append to): the project scope and the set-of-users scope, either or both
+// optional. It opens its own WHERE clause and returns an empty string when nothing
+// is scoped.
+func sessionScope(projectID int64, userIDs []int64) (string, []any) {
+	var preds []string
+	var args []any
+	if projectID != 0 {
+		args = append(args, projectID)
+		preds = append(preds, fmt.Sprintf("s.project_id = $%d", len(args)))
+	}
+	if len(userIDs) > 0 {
+		args = append(args, userIDs)
+		preds = append(preds, fmt.Sprintf("s.user_id = ANY($%d)", len(args)))
+	}
+	if len(preds) == 0 {
+		return "", nil
+	}
+	return " WHERE " + strings.Join(preds, " AND "), args
+}
+
+func (s *Store) analyticsSeries(ctx context.Context, projectID int64, since time.Time, userIDs []int64) ([]DayPoint, error) {
+	filter, args := usageFilter(projectID, since, userIDs)
 	rows, err := s.Pool.Query(ctx,
 		`SELECT date_trunc('day', ue.occurred_at) AS day,
 		        coalesce(sum(ue.cost_usd), 0),
@@ -153,8 +181,8 @@ func (s *Store) analyticsSeries(ctx context.Context, projectID int64, since time
 	return out, nil
 }
 
-func (s *Store) analyticsByModel(ctx context.Context, projectID int64, since time.Time) ([]Breakdown, error) {
-	filter, args := usageFilter(projectID, since)
+func (s *Store) analyticsByModel(ctx context.Context, projectID int64, since time.Time, userIDs []int64) ([]Breakdown, error) {
+	filter, args := usageFilter(projectID, since, userIDs)
 	rows, err := s.Pool.Query(ctx,
 		`SELECT ue.model,
 		        coalesce(sum(ue.cost_usd), 0),
@@ -176,11 +204,11 @@ func (s *Store) analyticsByModel(ctx context.Context, projectID int64, since tim
 	return out, nil
 }
 
-func (s *Store) analyticsByAgent(ctx context.Context, projectID int64, since time.Time) ([]Breakdown, error) {
+func (s *Store) analyticsByAgent(ctx context.Context, projectID int64, since time.Time, userIDs []int64) ([]Breakdown, error) {
 	// Bounded to a window, the split has to slice usage by event time, which lives
 	// on usage_events; the unbounded view reads the authoritative session rollups.
 	if !since.IsZero() {
-		filter, args := usageFilter(projectID, since)
+		filter, args := usageFilter(projectID, since, userIDs)
 		rows, err := s.Pool.Query(ctx,
 			`SELECT s.agent,
 			        coalesce(sum(ue.cost_usd), 0),
@@ -202,12 +230,7 @@ func (s *Store) analyticsByAgent(ctx context.Context, projectID int64, since tim
 		return out, nil
 	}
 
-	where := ""
-	var args []any
-	if projectID != 0 {
-		where = " WHERE s.project_id = $1"
-		args = []any{projectID}
-	}
+	where, args := sessionScope(projectID, userIDs)
 	rows, err := s.Pool.Query(ctx,
 		`SELECT s.agent,
 		        coalesce(sum(s.total_cost_usd), 0),

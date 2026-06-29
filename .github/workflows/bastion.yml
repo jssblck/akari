@@ -31,6 +31,11 @@ jobs:
       # An optional GitHub App gives the PR comment a bot identity instead of the
       # default Actions token. Leave the secrets unset to fall back to GITHUB_TOKEN.
       HAS_BASTION_APP: ${{ secrets.BASTION_APP_ID != '' && secrets.BASTION_APP_PRIVATE_KEY != '' }}
+      # Bastion drives Codex, which leaves rollout logs on the runner. When both
+      # the akari server URL and an ingest token are configured, the steps at the
+      # end of this job push those logs to akari. Leave either unset to skip the
+      # sync (for example on a fork, which gets no secrets) without failing.
+      HAS_AKARI: ${{ vars.AKARI_SERVER_URL != '' && secrets.AKARI_INGEST_TOKEN != '' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -65,6 +70,10 @@ jobs:
           author="$(printf '%s' "$AUTHOR" | tr '[:upper:]' '[:lower:]')"
           case "$author" in
             jssblck) cred="$CODEX_AUTH_JSSBLCK" ;;
+            # Dependabot opens PRs as a bot with no Codex subscription of its own,
+            # so bill its dependency-bump reviews to the maintainer's credential.
+            # The brackets are quoted to match the literal login, not a glob.
+            'dependabot[bot]') cred="$CODEX_AUTH_JSSBLCK" ;;
             *)
               echo "::error::No Codex credential mapped for PR author '$AUTHOR'. Add a CODEX_AUTH_<LOGIN> secret and a case arm in .github/workflows/bastion.yml." >&2
               exit 1 ;;
@@ -100,3 +109,39 @@ jobs:
             --repo "${{ github.repository }}" \
             --pr "${{ github.event.pull_request.number }}" \
             --sha "${{ github.event.pull_request.head.sha }}"
+
+      - name: Install the akari client
+        # Pull the published client so this CI review's Codex sessions can be
+        # synced to akari. Resolve the version with the authenticated gh CLI and
+        # pass it as AKARI_VERSION, which skips the installer's anonymous
+        # api.github.com lookup of the latest release. That lookup is rate limited
+        # and returns 403 on back-to-back runs; pinning the tag avoids it and the
+        # release download itself is not rate limited. Best effort, like the sync
+        # below: a client that will not install must never fail the review gate.
+        # The installer does not touch PATH, so expose its bin dir to later steps.
+        if: ${{ always() && env.HAS_AKARI == 'true' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          AKARI_VERSION="$(gh release view --repo jssblck/akari --json tagName -q .tagName)"
+          export AKARI_VERSION
+          curl -sSfL https://raw.githubusercontent.com/jssblck/akari/main/scripts/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Sync this review's Codex sessions to akari
+        # Codex wrote its rollout logs under ~/.codex while Bastion reviewed; push
+        # them so every CI review lands in akari's own history, attributed to this
+        # repo through the checkout's git remote. Best effort: a sync hiccup must
+        # not flip the review verdict, so this step never fails the job. --time-limit 0
+        # lifts the default cap since there is only this run's handful of sessions.
+        if: ${{ always() && env.HAS_AKARI == 'true' }}
+        continue-on-error: true
+        env:
+          AKARI_SERVER_URL: ${{ vars.AKARI_SERVER_URL }}
+          AKARI_INGEST_TOKEN: ${{ secrets.AKARI_INGEST_TOKEN }}
+        run: |
+          set -euo pipefail
+          akari login --server "$AKARI_SERVER_URL" --token "$AKARI_INGEST_TOKEN"
+          akari sync --time-limit 0
