@@ -260,16 +260,46 @@ th.trend, td.trend { width: 108px; }
 .stat .value { font-family: var(--mono); font-size: 1.125rem; font-variant-numeric: tabular-nums; color: var(--text); }
 /* The analytics panels (overview, projects, project) fuse their readouts into a
    single instrument strip: one bordered row split by hairlines, instead of four
-   detached tiles floating above the chart. The session page keeps loose tiles. */
+   detached tiles floating above the chart. */
 .analytics .stats { gap: 0; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); overflow: hidden; }
 .analytics .stat { flex: 1; min-width: 0; border: none; border-radius: 0; }
 .analytics .stat + .stat { border-left: 1px solid var(--border); }
+/* The session header fuses its readouts into the same instrument strip, sticky to
+   the top of the transcript. One bordered row split by hairlines reads as a single
+   gauge cluster and reclaims the vertical space the loose tiles used to wrap into.
+   It scrolls horizontally rather than wrapping when the viewport gets narrow. */
 .stats.sticky {
   position: sticky; top: 0; z-index: var(--z-sticky);
-  padding: var(--sp-md) 0; margin: 0 0 var(--sp-lg);
-  background: linear-gradient(var(--bg) 78%, rgba(20, 19, 27, 0));
-  backdrop-filter: blur(2px);
+  display: flex; gap: 0; margin: 0 0 var(--sp-lg); padding: 0;
+  border: 1px solid var(--border); border-radius: var(--r-md);
+  background: var(--surface);
 }
+.stats.sticky .stat {
+  flex: 1 0 auto; min-width: 118px; padding: 8px var(--sp-lg);
+  border: none; border-radius: 0; border-left: 1px solid var(--border);
+}
+.stats.sticky .stat:first-child { border-left: 0; }
+/* The Tokens tile folds input, output, cache read, cache write, and cost into one
+   gauge. The per-class breakdown and cost reveal on hover or keyboard focus, the
+   same detail the overview heatmap surfaces for a day. */
+.tokens-stat { position: relative; outline: none; }
+.tokens-value { text-decoration: underline dotted var(--faint); text-underline-offset: 3px; }
+.tokens-stat:hover, .tokens-stat:focus-visible { background: var(--surface-2); }
+.stat-tip {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 20;
+  min-width: 190px; padding: var(--sp-sm) var(--sp-md);
+  background: var(--surface-2); border: 1px solid var(--border-strong);
+  border-radius: var(--r-md); box-shadow: var(--shadow-overlay);
+  opacity: 0; visibility: hidden; transform: translateY(-3px); pointer-events: none;
+  transition: opacity var(--dur-fast) var(--ease-state), transform var(--dur-fast) var(--ease-state), visibility 0s linear var(--dur-fast);
+}
+.tokens-stat:hover .stat-tip, .tokens-stat:focus-within .stat-tip {
+  opacity: 1; visibility: visible; transform: none; transition-delay: 0s;
+}
+.stat-tip .tt-grid { display: grid; grid-template-columns: auto auto; gap: 1px var(--sp-md); margin: 0; font: 450 0.75rem/1.6 var(--mono); }
+.stat-tip .tt-grid dt { color: var(--muted); }
+.stat-tip .tt-grid dd { margin: 0; color: var(--subtext); text-align: right; font-variant-numeric: tabular-nums; }
+.stat-tip .tt-cost { margin-top: 5px; padding-top: 5px; border-top: 1px solid var(--border); color: var(--text); font: 450 0.75rem var(--mono); font-variant-numeric: tabular-nums; text-align: right; }
 .value.settling { animation: settle var(--dur-slow) var(--ease-settle); }
 @keyframes settle {
   0% { color: var(--lilac); text-shadow: 0 0 14px rgba(198, 168, 242, 0.75); }
@@ -406,6 +436,12 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--l
 .bar-track { height: 6px; background: var(--surface-2); border-radius: 999px; overflow: hidden; margin: 4px 0 3px; }
 .bar-fill { height: 100%; width: 0; border-radius: 999px; background: var(--lilac); transition: width 700ms var(--ease-settle); }
 
+/* The session view is the one page that takes the full content width: its outline,
+   stat strip, tool chips, and diffs all earn the room, while prose inside a message
+   stays capped at a readable measure (see .msg .content). Every other page keeps
+   the centered --maxw column. */
+main:has(> .session-page) { max-width: none; }
+
 /* ---- Session head ---- */
 .session-head {
   display: flex; align-items: flex-start; justify-content: space-between;
@@ -414,18 +450,17 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--l
 .session-title h1 { display: flex; align-items: baseline; gap: var(--sp-sm); flex-wrap: wrap; }
 .session-title h1 .sep { color: var(--faint); }
 .session-meta { display: flex; align-items: center; gap: var(--sp-md); flex-wrap: wrap; margin-top: var(--sp-sm); font-size: 0.8125rem; }
-.live-dot { color: var(--warn); font-size: 0.6875rem; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; display: inline-flex; align-items: center; gap: 5px; }
-.live-dot::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--warn); box-shadow: 0 0 8px var(--warn); animation: pulse 1.6s var(--ease-state) infinite; }
-@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 
-.publish { display: flex; align-items: center; gap: var(--sp-lg); margin-bottom: var(--sp-md); flex-wrap: wrap; }
-.publish.subtle { margin-bottom: var(--sp-lg); }
-.publish code, .publish a { font-family: var(--mono); }
+/* The owner/admin controls ride on the header's top line opposite the title, so
+   publishing and deleting cost no vertical band of their own. */
+.session-actions { display: flex; align-items: center; gap: var(--sp-sm); flex: none; flex-wrap: wrap; justify-content: flex-end; }
+.session-actions .share-link { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 26ch; }
+button.small, .btn.small { padding: 5px 10px; font-size: 0.8125rem; }
 .reveal { animation: fadein var(--dur-slow) var(--ease-settle); }
 @keyframes fadein { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
 
-/* ---- Session grid: outline + main + inspector ---- */
-.session-grid { display: grid; grid-template-columns: 212px minmax(0, 1fr) 360px; gap: var(--sp-lg); align-items: start; }
+/* ---- Session grid: outline + transcript (the body opens in a modal, not a third column) ---- */
+.session-grid { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: var(--sp-lg); align-items: start; }
 .session-main { min-width: 0; }
 
 /* ---- Outline (left pane) ---- */
@@ -464,26 +499,34 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--l
 .ol-step.ol-step-error .ol-tn { color: var(--err); }
 .ol-step .ol-file { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
 
-/* ---- Inspector (right pane) ---- */
-.inspector {
-  position: sticky; top: var(--sp-md); align-self: start;
-  max-height: calc(100vh - var(--sp-lg)); overflow: hidden;
-  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md);
-  display: flex; flex-direction: column;
+/* ---- Inspector (tool-body modal) ----
+   A selected tool call's bodies open in a large centered dialog instead of a
+   docked column, so reading a body has the room a 360px rail never did and the
+   transcript keeps the full width when nothing is open. One overlay layer only,
+   dismissed by the backdrop, Esc, or the close control. */
+.modal-overlay {
+  position: fixed; inset: 0; z-index: var(--z-overlay);
+  display: flex; align-items: center; justify-content: center; padding: var(--sp-2xl);
+  background: rgba(8, 6, 14, 0.62);
+  animation: fadein var(--dur-base) var(--ease-settle);
 }
-.insp-empty {
-  padding: var(--sp-xl) var(--sp-lg); text-align: center; color: var(--muted);
-  display: flex; flex-direction: column; align-items: center; gap: var(--sp-sm); font-size: 0.8125rem;
+.modal-overlay[hidden] { display: none; }
+.modal-dialog {
+  width: min(1100px, 92vw); height: min(880px, 88vh);
+  display: flex; flex-direction: column; overflow: hidden;
+  background: var(--surface); border: 1px solid var(--border-strong);
+  border-radius: var(--r-lg); box-shadow: var(--shadow-overlay);
 }
-.insp-empty-glyph { font-family: var(--mono); font-size: 1.5rem; color: var(--faint); }
+body.modal-open { overflow: hidden; }
 .insp-head { display: flex; align-items: center; gap: var(--sp-sm); padding: var(--sp-md) var(--sp-md); border-bottom: 1px solid var(--border); }
 .insp-tn { color: var(--lilac); font-family: var(--mono); font-weight: 500; font-size: 0.8125rem; flex: none; }
 .insp-file { color: var(--muted); font-size: 0.75rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.insp-close { margin-left: auto; background: transparent; color: var(--faint); border: none; padding: 2px 6px; font-size: 0.875rem; flex: none; }
+.insp-spacer { flex: 1 1 auto; }
+.insp-status { flex: none; font-size: 0.75rem; font-weight: 500; }
+.insp-close { background: transparent; color: var(--faint); border: none; padding: 2px 6px; font-size: 0.875rem; flex: none; }
 .insp-close:hover { background: var(--surface-2); color: var(--subtext); }
-.insp-meta { padding: var(--sp-sm) var(--sp-md) 0; }
 .insp-views { margin: var(--sp-sm) var(--sp-md); }
-.insp-body { padding: 0 var(--sp-md) var(--sp-md); overflow: auto; min-height: 0; }
+.insp-body { flex: 1; padding: 0 var(--sp-md) var(--sp-md); overflow: auto; min-height: 0; }
 .insp-body .tool-body, .insp-body .diff { margin-top: 0; max-height: none; }
 .insp-loading { padding: var(--sp-md); font-size: 0.8125rem; }
 .insp-trunc { padding: var(--sp-sm) 0 2px; font-size: 0.75rem; }
@@ -569,14 +612,6 @@ a.attachment.file { width: fit-content; text-decoration: none; }
 .empty.big { padding: 64px var(--sp-xl); }
 .empty.big h1 { font-family: var(--mono); color: var(--lilac); }
 
-/* ---- Density: compact ---- */
-body.density-compact .transcript { gap: var(--sp-sm); }
-body.density-compact .msg { padding: var(--sp-sm) var(--sp-md); }
-body.density-compact .msg .content { max-width: none; }
-body.density-compact .thinking { display: none; }
-body.density-compact .stats.sticky { padding: var(--sp-sm) 0; }
-body.density-compact .stat { padding: 6px var(--sp-md); min-width: 100px; }
-
 /* ---- Responsive ---- */
 @media (max-width: 980px) {
   /* Collapse the sidebar into a horizontal top strip so the content gets the
@@ -601,17 +636,15 @@ body.density-compact .stat { padding: 6px var(--sp-md); min-width: 100px; }
   .sessions-layout { grid-template-columns: 1fr; gap: var(--sp-lg); }
 }
 @media (max-width: 1100px) {
-  /* Drop the inspector to a full-width row below the transcript rather than
-     hiding it, so opening a body still works on a narrower screen. */
   .session-grid { grid-template-columns: 200px minmax(0, 1fr); }
-  .inspector { position: static; grid-column: 1 / -1; max-height: 520px; }
 }
 @media (max-width: 720px) {
   .session-grid { grid-template-columns: 1fr; }
   .outline-rail { display: none; }
-  .inspector { grid-column: auto; }
   header.topbar { gap: var(--sp-md); flex-wrap: wrap; padding: var(--sp-sm) var(--sp-md); }
   .session-head { flex-direction: column; }
+  .modal-overlay { padding: var(--sp-md); }
+  .modal-dialog { width: 96vw; height: 92vh; }
 }
 
 /* ---- Reduced motion ---- */
@@ -619,5 +652,4 @@ body.density-compact .stat { padding: 6px var(--sp-md); min-width: 100px; }
   html { scroll-behavior: auto; }
   *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
   .bar-fill { transition: none; }
-  .live-dot::before { animation: none; }
 }
