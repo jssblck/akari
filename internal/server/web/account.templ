@@ -1,0 +1,72 @@
+package web
+
+import (
+	"fmt"
+
+	"github.com/jssblck/akari/internal/server/store"
+)
+
+templ AccountPage(p Page, tokens []store.APIToken, newToken, newInvite string) {
+	@layout(p) {
+		<div class="page-head">
+			<h1>Account</h1>
+		</div>
+		if newToken != "" {
+			<div class="card reveal">
+				<strong>New token (shown once):</strong> <code>{ newToken }</code>
+			</div>
+		}
+		<section>
+			<div class="panel-head"><h2>API tokens</h2></div>
+			<form method="post" action="/account/tokens" class="filters">
+				<input name="name" placeholder="token name"/>
+				<select name="scope">
+					<option value="ingest">ingest (push only)</option>
+					<option value="full">full (push and read)</option>
+				</select>
+				<button type="submit">Create token</button>
+			</form>
+			if len(tokens) == 0 {
+				<div class="empty">No tokens yet.</div>
+			} else {
+				<table class="grid">
+					<thead>
+						<tr><th>Name</th><th>Scope</th><th>Created</th><th>Last used</th><th></th></tr>
+					</thead>
+					<tbody>
+						for _, t := range tokens {
+							<tr>
+								<td>{ t.Name }</td>
+								<td><span class="tag">{ t.Scope }</span></td>
+								<td class="muted">{ FmtTimeAt(t.CreatedAt) }</td>
+								<td class="muted">{ FmtTime(t.LastUsedAt) }</td>
+								<td>
+									if t.RevokedAt != nil {
+										<span class="muted">revoked</span>
+									} else {
+										<form method="post" action={ templ.SafeURL(fmt.Sprintf("/account/tokens/%d/revoke", t.ID)) } class="inline">
+											<button class="secondary" type="submit">Revoke</button>
+										</form>
+									}
+								</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			}
+		</section>
+		if p.IsAdmin {
+			<section>
+				<div class="panel-head"><h2>Invites</h2></div>
+				if newInvite != "" {
+					<div class="card reveal">
+						<strong>New invite (shown once):</strong> <code>{ newInvite }</code>
+					</div>
+				}
+				<form method="post" action="/account/invites">
+					<button type="submit">Create invite</button>
+				</form>
+			</section>
+		}
+	}
+}

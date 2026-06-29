@@ -232,11 +232,32 @@ reclaimed by the next sweep.
 
 ## Development
 
+The web UI is server-rendered with [templ](https://templ.guide). The `.templ`
+files under `internal/server/web/` are the source of truth; the Go they compile
+to (`*_templ.go`) is gitignored and regenerated on every build rather than
+committed, so editing one page no longer collides with another on a regenerated
+file. templ is pinned as a Go tool in `go.mod`, so no separate install is needed:
+`go generate ./...` runs the right version.
+
+A `Makefile` wraps the common tasks and regenerates the templ output first, so a
+fresh clone is one command from a binary:
+
 ```sh
-go build ./...    # compile everything
+make build        # go generate ./... then go build ./...
+make test         # go generate ./... then go test -race ./...
+make generate     # regenerate templ output after editing a *.templ
+make vet
+make fmt          # report files that are not gofmt-clean
+```
+
+Without `make`, regenerate once after cloning (or after editing a template) and
+then use the Go tools directly:
+
+```sh
+go generate ./...   # regenerate internal/server/web/*_templ.go (gitignored)
+go build ./...      # compile everything
 go vet ./...
-go test ./...     # unit tests
-templ generate    # regenerate templates after editing internal/server/web/*.templ
+go test ./...       # unit tests
 ```
 
 Integration tests provision an isolated database per test: each test creates a

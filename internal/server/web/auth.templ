@@ -1,0 +1,37 @@
+package web
+
+templ LoginPage(p Page, next, errMsg string) {
+	@layout(p) {
+		<div class="auth-wrap card">
+			<h1>Log in</h1>
+			if errMsg != "" {
+				<div class="error">{ errMsg }</div>
+			}
+			<form method="post" action="/login">
+				<input type="hidden" name="next" value={ next }/>
+				<input name="username" placeholder="username" autofocus/>
+				<input name="password" type="password" placeholder="password"/>
+				<button type="submit">Log in</button>
+			</form>
+			<p class="muted">Have an invite? <a href="/register">Register</a>.</p>
+		</div>
+	}
+}
+
+templ RegisterPage(p Page, errMsg string) {
+	@layout(p) {
+		<div class="auth-wrap card">
+			<h1>Register</h1>
+			if errMsg != "" {
+				<div class="error">{ errMsg }</div>
+			}
+			<form method="post" action="/register">
+				<input name="username" placeholder="username" autofocus/>
+				<input name="password" type="password" placeholder="password"/>
+				<input name="invite_token" placeholder="invite token"/>
+				<button type="submit">Register</button>
+			</form>
+			<p class="muted">The first account needs no invite and becomes admin. <a href="/login">Log in</a>.</p>
+		</div>
+	}
+}

@@ -1,0 +1,6 @@
+/* The account page: API tokens and (for admins) invites. It builds on the shared
+   table, card, and form primitives in base.css; the one page-specific touch is
+   the "shown once" reveal card for a freshly minted token or invite, which fades
+   in via the shared @keyframes fadein (base.css). */
+
+.reveal { animation: fadein var(--dur-slow) var(--ease-settle); }

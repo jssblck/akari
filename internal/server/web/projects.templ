@@ -1,0 +1,164 @@
+package web
+
+import (
+	"fmt"
+
+	"github.com/jssblck/akari/internal/server/store"
+)
+
+// kindTag renders a state chip for a non-remote project. A remote project gets
+// no chip: it is the default and needs no label. The chip is shared across the
+// projects index, the global session list, and the session views, so it lives
+// with the projects domain that owns the notion of a project kind.
+templ kindTag(kind string) {
+	if kind == "standalone" {
+		<span class="tag standalone" title="No .git, or no git origin remote">standalone</span>
+	} else if kind == "orphaned" {
+		<span class="tag orphaned" title="The working directory no longer exists on disk">orphaned</span>
+	}
+}
+
+// ProjectsPage is the projects index: a single full-width table of git-remote
+// projects, one row each. The page deliberately carries no usage panel (the
+// Overview owns fleet usage) and no local-folder list (those reach the reader
+// through the Sessions filter rail), so the table is the whole surface. The page
+// has no heading because the sidebar already marks this section as Projects.
+templ ProjectsPage(p Page, projects []store.ProjectSummary, spark map[int64][]float64) {
+	@layout(p) {
+		if len(projects) == 0 {
+			<div class="empty">No git-remote projects yet.</div>
+		} else {
+			<table class="grid projects">
+				<thead>
+					<tr>
+						<th class="proj-name">Project</th>
+						<th class="trend">30d</th>
+						<th class="num">Sessions</th>
+						<th class="num">Tokens</th>
+						<th class="num">Cost</th>
+						<th>Updated</th>
+					</tr>
+				</thead>
+				<tbody>
+					for _, pr := range projects {
+						<tr data-row-href={ ProjectPath(pr.ID) }>
+							<td class="proj-name"><a href={ ProjectHref(pr.ID) }>{ pr.RemoteKey }</a></td>
+							<td class="trend">@templ.Raw(Sparkline(spark[pr.ID]))</td>
+							<td class="num">{ fmt.Sprintf("%d", pr.SessionCount) }</td>
+							<td class="num">@tokensCell(pr)</td>
+							<td class="num">{ FmtCost(pr.TotalCostUSD, false) }</td>
+							<td class="muted nowrap">{ FmtRelTime(pr.LastActivity) }</td>
+						</tr>
+					}
+				</tbody>
+			</table>
+		}
+	}
+}
+
+// tokensCell shows a project's total token count with the same hover card the
+// global session list uses (.tok-cell), so the breakdown into the four classes
+// (in, out, cache read, cache write) and the cost line read identically across
+// surfaces and share the heatmap tooltip's styling. The card is pure CSS, so it
+// needs no hydration in the server-rendered table.
+templ tokensCell(pr store.ProjectSummary) {
+	<span class="tok-cell" tabindex="0">
+		<span class="tok-total">{ FmtTokens(pr.TotalTokens()) }</span>
+		<span class="tok-tip" role="tooltip">
+			<span class="tt-total">{ FmtTokens(pr.TotalTokens()) } tokens</span>
+			<dl class="tt-grid">
+				<dt>In</dt>
+				<dd>{ FmtTokens(pr.TotalInput) }</dd>
+				<dt>Out</dt>
+				<dd>{ FmtTokens(pr.TotalOutput) }</dd>
+				<dt>Cache read</dt>
+				<dd>{ FmtTokens(pr.TotalCacheRead) }</dd>
+				<dt>Cache write</dt>
+				<dd>{ FmtTokens(pr.TotalCacheWrite) }</dd>
+			</dl>
+			<span class="tt-cost">{ FmtCost(pr.TotalCostUSD, false) }</span>
+		</span>
+	</span>
+}
+
+templ ProjectPage(p Page, proj store.ProjectSummary, sessions []store.SessionSummary, facets Facets, sel store.SessionFilter, a store.Analytics) {
+	@layout(p) {
+		<div class="page-head">
+			<h1>{ ProjectTitle(proj) }</h1>
+			@kindTag(proj.Kind)
+			if IsLocalKind(proj.Kind) {
+				<span class="muted small mono">{ LocalPath(proj) }</span>
+			}
+		</div>
+		@analyticsPanel(a, "chart-project", ProjectTitle(proj), false, "")
+		<section>
+			<div class="panel-head">
+				<h2>Sessions</h2>
+			</div>
+			<form class="filters" method="get" hx-get={ ProjectPath(proj.ID) } hx-target="#session-list" hx-push-url="true">
+				<select name="agent">
+					<option value="">all agents</option>
+					for _, ag := range facets.Agents {
+						<option value={ ag } selected?={ sel.Agent == ag }>{ ag }</option>
+					}
+				</select>
+				<select name="user">
+					<option value="">all users</option>
+					for _, u := range facets.Users {
+						<option value={ u } selected?={ sel.Username == u }>{ u }</option>
+					}
+				</select>
+				<select name="machine">
+					<option value="">all machines</option>
+					for _, m := range facets.Machines {
+						<option value={ m } selected?={ sel.Machine == m }>{ m }</option>
+					}
+				</select>
+				<button type="submit">Filter</button>
+			</form>
+			<div id="session-list">
+				@SessionList(sessions)
+			</div>
+		</section>
+	}
+}
+
+templ SessionList(sessions []store.SessionSummary) {
+	if len(sessions) == 0 {
+		<div class="empty">No sessions match these filters.</div>
+	} else {
+		<table class="grid">
+			<thead>
+				<tr>
+					<th>Session</th>
+					<th>Agent</th>
+					<th>User</th>
+					<th>Machine</th>
+					<th>Branch</th>
+					<th class="num">Messages</th>
+					<th class="num">Cost</th>
+					<th>Updated</th>
+				</tr>
+			</thead>
+			<tbody>
+				for _, s := range sessions {
+					<tr data-row-href={ SessionPath(s.ID) }>
+						<td>
+							<a href={ SessionHref(s.ID) }>#{ fmt.Sprintf("%d", s.ID) }</a>
+							if s.Visibility == "public" {
+								<span class="tag public">public</span>
+							}
+						</td>
+						<td><span class="tag agent">{ s.Agent }</span></td>
+						<td>{ s.Username }</td>
+						<td class="muted">{ s.Machine }</td>
+						<td class="muted">{ s.GitBranch }</td>
+						<td class="num">{ fmt.Sprintf("%d", s.MessageCount) }</td>
+						<td class="num">{ FmtCost(s.TotalCostUSD, s.CostIncomplete) }</td>
+						<td class="muted">{ FmtTime(s.UpdatedAt) }</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+	}
+}

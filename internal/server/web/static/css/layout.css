@@ -1,0 +1,71 @@
+/* App shell: the wordmark, the persistent left sidebar (logged-in pages), and the
+   public topbar. Shared by both the app layout and the public layout. */
+
+/* ---- Topbar ---- */
+header.topbar {
+  display: flex; align-items: center; gap: var(--sp-xl);
+  padding: var(--sp-md) var(--sp-xl);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  position: sticky; top: 0; z-index: var(--z-sticky);
+}
+.brand { color: var(--text); font-weight: 600; font-size: 1rem; }
+.brand:hover { text-decoration: none; }
+.brandmark { display: inline-flex; align-items: center; gap: var(--sp-sm); }
+.brandglyph { color: var(--lilac); display: block; }
+.brandver { color: var(--muted); font-family: var(--mono); font-size: 0.6875rem; font-weight: 400; align-self: flex-end; }
+header.topbar nav { display: flex; gap: var(--sp-lg); }
+header.topbar nav a { color: var(--subtext); }
+header.topbar nav a:hover { color: var(--lilac); text-decoration: none; }
+header.topbar .who { color: var(--muted); font-family: var(--mono); font-size: 0.8125rem; }
+
+/* ---- App shell: persistent sidebar + content ---- */
+:root { --sidebar-w: 232px; }
+.app { display: grid; grid-template-columns: var(--sidebar-w) minmax(0, 1fr); min-height: 100vh; }
+.content-scroll { min-width: 0; }
+.sidebar {
+  position: sticky; top: 0; align-self: start; height: 100vh;
+  display: flex; flex-direction: column; gap: var(--sp-lg);
+  padding: var(--sp-lg) var(--sp-md);
+  background: var(--surface); border-right: 1px solid var(--border);
+}
+.sidebar .brand { padding: 4px var(--sp-sm); }
+.sidebar .brand:hover { text-decoration: none; }
+.sidebar .navgroup { display: flex; flex-direction: column; gap: 2px; }
+.sidebar .nav {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 10px; border-radius: var(--r-sm);
+  color: var(--subtext); font-weight: 500;
+  transition: background var(--dur-fast) var(--ease-state), color var(--dur-fast) var(--ease-state);
+}
+.sidebar .nav:hover { background: var(--surface-2); text-decoration: none; }
+.sidebar .nav.active { background: var(--surface-3); color: var(--text); }
+.sidebar .nav .nav-ico { color: var(--muted); flex: none; display: block; }
+.sidebar .nav.active .nav-ico { color: var(--lilac); }
+.sidebar .nav-label { min-width: 0; }
+.sidebar .sb-foot {
+  display: flex; align-items: center; gap: var(--sp-sm); flex-wrap: wrap;
+  padding: var(--sp-sm) 10px 0; border-top: 1px solid var(--border);
+}
+.sidebar .who { color: var(--muted); font-family: var(--mono); font-size: 0.8125rem; }
+.sidebar .sb-foot .spacer { flex: 1; }
+
+/* ---- Responsive ---- */
+@media (max-width: 980px) {
+  /* Collapse the sidebar into a horizontal top strip so the content gets the
+     full width on narrow screens. */
+  .app { grid-template-columns: 1fr; }
+  .sidebar {
+    position: sticky; top: 0; height: auto; z-index: var(--z-sticky);
+    flex-direction: row; align-items: center; gap: var(--sp-md);
+    border-right: 0; border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+  }
+  .sidebar .navgroup { flex-direction: row; }
+  .sidebar .spacer { flex: 1; }
+  .sidebar .sb-foot { border-top: 0; padding: 0; }
+  .sidebar .nav-label { display: none; }
+}
+@media (max-width: 720px) {
+  header.topbar { gap: var(--sp-md); flex-wrap: wrap; padding: var(--sp-sm) var(--sp-md); }
+}
