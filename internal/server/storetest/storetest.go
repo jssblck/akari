@@ -1,19 +1,14 @@
 // Package storetest provisions throwaway, fully isolated Postgres databases for
 // the akari server's integration tests.
 //
-// Every call to URL hands back a connection string for a freshly created,
-// uniquely named database that is force-dropped when the test finishes. Because
-// no two tests ever share a database, the integration tests run correctly under
-// Go's default package parallelism and individual tests may call t.Parallel. This
-// replaces the older shared-database harness, where each test reset the global
-// `public` schema in one database, so concurrent packages clobbered each other's
-// schema_migrations table and the suite had to be serialized with `go test -p 1`.
-//
-// The package is deliberately free of any dependency on the store package it
-// supports: the store package's own white-box tests live in `package store`, so
-// importing store here would create a test-time import cycle. Callers open and
-// migrate the returned URL with store.Open / store.Migrate themselves, exactly as
-// the server does on boot.
+// NewStore is the one entry point every integration test uses, in the spirit of
+// Rust's sqlx::test: it hands back a Store backed by a uniquely named database
+// that was just created and migrated, and dropped again when the test finishes.
+// Because no two tests share a database, the suite runs at Go's default package
+// parallelism and individual tests may call t.Parallel. This replaces the older
+// shared-database harness, where each test reset the global `public` schema in
+// one database, so concurrent packages clobbered each other's schema_migrations
+// table and the suite had to be serialized with `go test -p 1`.
 package storetest
 
 import (
@@ -27,6 +22,8 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jssblck/akari/internal/server/store"
+	"github.com/jssblck/akari/migrations"
 )
 
 // EnvDatabaseURL is the environment variable that opts a run in to the
@@ -35,14 +32,33 @@ import (
 // beside the one the URL names rather than being it.
 const EnvDatabaseURL = "AKARI_TEST_DATABASE_URL"
 
-// URL provisions an isolated, empty database and returns its connection string.
+// NewStore returns a Store backed by its own isolated, freshly migrated database.
 // The test is skipped when EnvDatabaseURL is unset, so a developer without a
 // Postgres handy still gets a green (skipped) run.
 //
 // The database is dropped on t.Cleanup with WITH (FORCE), which terminates any
 // connection still attached. That keeps cleanup robust when a test fails or
 // leaves its pool open, so a run never leaks databases behind it.
-func URL(t *testing.T) string {
+func NewStore(t *testing.T) *store.Store {
+	t.Helper()
+	dbURL := provision(t)
+
+	ctx := context.Background()
+	st, err := store.Open(ctx, dbURL)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	t.Cleanup(st.Close)
+	if err := st.Migrate(ctx, migrations.FS); err != nil {
+		t.Fatalf("migrate test store: %v", err)
+	}
+	return st
+}
+
+// provision creates an isolated, empty database and returns its connection
+// string, registering the force-drop cleanup before it returns so a test that
+// fails between here and NewStore's return still drops its database.
+func provision(t *testing.T) string {
 	t.Helper()
 	base := os.Getenv(EnvDatabaseURL)
 	if base == "" {
@@ -59,8 +75,6 @@ func URL(t *testing.T) string {
 	if err := createDatabase(ctx, admin, name); err != nil {
 		t.Fatalf("create test database: %v", err)
 	}
-	// Register the drop before handing the URL back, so a test that fails after
-	// opening a pool still drops its database. WITH (FORCE) handles the open pool.
 	t.Cleanup(func() {
 		if err := dropDatabase(context.Background(), admin, name); err != nil {
 			t.Errorf("drop test database %q: %v", name, err)

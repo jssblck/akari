@@ -1,9 +1,12 @@
-package store
+package store_test
 
 import (
 	"bytes"
 	"context"
 	"testing"
+
+	"github.com/jssblck/akari/internal/server/store"
+	"github.com/jssblck/akari/internal/server/storetest"
 )
 
 // TestAttachmentProjectionWriteReadSweep exercises the inline attachment path end to
@@ -14,7 +17,7 @@ import (
 // by TestAttachmentReferencePathAndReparsePin.
 func TestAttachmentProjectionWriteReadSweep(t *testing.T) {
 	t.Parallel()
-	st := newTestStore(t)
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 
 	u, err := st.Register(ctx, "grace", "hash", "")
@@ -29,16 +32,16 @@ func TestAttachmentProjectionWriteReadSweep(t *testing.T) {
 	// Both images arrive inline (the server decodes and stores them): one pasted by the
 	// user, one generated on the assistant turn.
 	generated := []byte("\x89PNG generated image bytes")
-	generatedSHA := HashBytes(generated)
+	generatedSHA := store.HashBytes(generated)
 	pasted := []byte("\xff\xd8\xff jpeg pasted image bytes")
-	pastedSHA := HashBytes(pasted)
+	pastedSHA := store.HashBytes(pasted)
 
 	sid := seedSession(t, st, u.ID, projectID, "sess-1")
 
 	// The pasted image, inline on the user turn.
-	pastedDelta := ProjectionDelta{
-		Messages: []MessageDelta{{Ordinal: 0, Role: "user", Content: "trace this"}},
-		Attachments: []AttachmentDelta{{
+	pastedDelta := store.ProjectionDelta{
+		Messages: []store.MessageDelta{{Ordinal: 0, Role: "user", Content: "trace this"}},
+		Attachments: []store.AttachmentDelta{{
 			MessageOrdinal: 0, Body: string(pasted), Bytes: int64(len(pasted)),
 			MediaType: "image/jpeg", Filename: "pasted.jpg",
 		}},
@@ -48,9 +51,9 @@ func TestAttachmentProjectionWriteReadSweep(t *testing.T) {
 	}
 
 	// The generated image, both inline (server writes it) on the assistant turn.
-	genDelta := ProjectionDelta{
-		Messages: []MessageDelta{{Ordinal: 1, Role: "assistant", Content: "here you go", HasToolUse: true}},
-		Attachments: []AttachmentDelta{{
+	genDelta := store.ProjectionDelta{
+		Messages: []store.MessageDelta{{Ordinal: 1, Role: "assistant", Content: "here you go", HasToolUse: true}},
+		Attachments: []store.AttachmentDelta{{
 			MessageOrdinal: 1, Body: string(generated), Bytes: int64(len(generated)),
 			MediaType: "image/png", Filename: "kitten.png",
 		}},
@@ -143,7 +146,7 @@ func TestAttachmentProjectionWriteReadSweep(t *testing.T) {
 // instead of reclaiming a live image.
 func TestAttachmentReferencePathAndReparsePin(t *testing.T) {
 	t.Parallel()
-	st := newTestStore(t)
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 
 	u, err := st.Register(ctx, "ada", "hash", "")
@@ -164,7 +167,7 @@ func TestAttachmentReferencePathAndReparsePin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pastedSHA, err := writeBlobTx(ctx, tx, string(pasted), "image/jpeg")
+	pastedSHA, err := store.WriteBlobTx(ctx, tx, string(pasted), "image/jpeg")
 	if err != nil {
 		tx.Rollback(ctx)
 		t.Fatalf("pre-store referenced blob: %v", err)
@@ -175,9 +178,9 @@ func TestAttachmentReferencePathAndReparsePin(t *testing.T) {
 
 	// The sentinel reference: SHA256 set, no inline body, so the projection takes the
 	// reference branch (pinBlobRefTx) rather than writing the bytes again.
-	refDelta := ProjectionDelta{
-		Messages: []MessageDelta{{Ordinal: 0, Role: "user", Content: "trace this"}},
-		Attachments: []AttachmentDelta{{
+	refDelta := store.ProjectionDelta{
+		Messages: []store.MessageDelta{{Ordinal: 0, Role: "user", Content: "trace this"}},
+		Attachments: []store.AttachmentDelta{{
 			MessageOrdinal: 0, SHA256: pastedSHA, Bytes: int64(len(pasted)),
 			MediaType: "image/jpeg", Filename: "pasted.jpg",
 		}},

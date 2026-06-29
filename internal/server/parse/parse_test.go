@@ -6,26 +6,7 @@ import (
 
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/storetest"
-	"github.com/jssblck/akari/migrations"
 )
-
-// newTestStore opens a Store on its own isolated, freshly migrated database, the
-// same harness the store package uses. The database is created and force-dropped
-// by the storetest package, so tests run safely in parallel; the test is skipped
-// when AKARI_TEST_DATABASE_URL is unset.
-func newTestStore(t *testing.T) *store.Store {
-	t.Helper()
-	ctx := context.Background()
-	st, err := store.Open(ctx, storetest.URL(t))
-	if err != nil {
-		t.Fatalf("open test store: %v", err)
-	}
-	t.Cleanup(st.Close)
-	if err := st.Migrate(ctx, migrations.FS); err != nil {
-		t.Fatalf("migrate test store: %v", err)
-	}
-	return st
-}
 
 // The three lines of a minimal Claude session: one user turn, one assistant turn
 // with a tool use and token usage, then a user turn carrying only the tool
@@ -89,7 +70,7 @@ func uploadAndParse(t *testing.T, st *store.Store, sessionID int64, pieces ...st
 
 func TestAdvanceSingleChunk(t *testing.T) {
 	t.Parallel()
-	st := newTestStore(t)
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 	sid := seedSession(t, st, "single")
 
@@ -117,7 +98,7 @@ func TestAdvanceSingleChunk(t *testing.T) {
 // projection is identical to the single-shot upload.
 func TestAdvanceChunkedMatchesSingle(t *testing.T) {
 	t.Parallel()
-	st := newTestStore(t)
+	st := storetest.NewStore(t)
 	sid := seedSession(t, st, "chunked")
 
 	if mc := uploadAndParse(t, st, sid, claudeLines[0], claudeLines[1], claudeLines[2]); mc != 2 {
@@ -204,7 +185,7 @@ func assertClaudeProjection(t *testing.T, st *store.Store, sid int64) {
 // closed by the following user turn, with its tool use recorded.
 func TestCodexTurnFoldedInOneChunk(t *testing.T) {
 	t.Parallel()
-	st := newTestStore(t)
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 
 	uid := firstUser(t, st)
@@ -267,7 +248,7 @@ func TestCodexTurnFoldedInOneChunk(t *testing.T) {
 // region's end rather than carrying it.
 func TestCodexTrailingTurnFlushedWhole(t *testing.T) {
 	t.Parallel()
-	st := newTestStore(t)
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 
 	uid := firstUser(t, st)
@@ -310,7 +291,7 @@ func TestCodexTrailingTurnFlushedWhole(t *testing.T) {
 // session's cost_incomplete flag while still recording token totals.
 func TestCostIncompleteForUnknownModel(t *testing.T) {
 	t.Parallel()
-	st := newTestStore(t)
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 	sid := seedSession(t, st, "unpriced")
 
@@ -351,7 +332,7 @@ func TestCostIncompleteForUnknownModel(t *testing.T) {
 // count of messages rows.
 func TestClaudeDuplicateUsageCountedOnce(t *testing.T) {
 	t.Parallel()
-	st := newTestStore(t)
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 	sid := seedSession(t, st, "claude-dup-usage")
 

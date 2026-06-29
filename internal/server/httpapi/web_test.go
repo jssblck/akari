@@ -16,7 +16,6 @@ import (
 	"github.com/jssblck/akari/internal/server/auth"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/storetest"
-	"github.com/jssblck/akari/migrations"
 )
 
 // mustHash hashes a password for seeding a test account directly via the store.
@@ -35,15 +34,7 @@ func mustHash(t *testing.T, password string) string {
 // parallel; it is skipped unless AKARI_TEST_DATABASE_URL is set.
 func newTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 	t.Helper()
-	ctx := context.Background()
-	st, err := store.Open(ctx, storetest.URL(t))
-	if err != nil {
-		t.Fatalf("open test store: %v", err)
-	}
-	t.Cleanup(st.Close)
-	if err := st.Migrate(ctx, migrations.FS); err != nil {
-		t.Fatalf("migrate test store: %v", err)
-	}
+	st := storetest.NewStore(t)
 	srv := httptest.NewServer(New(st, config.Server{}).Routes())
 	t.Cleanup(srv.Close)
 	return srv, st

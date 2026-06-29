@@ -1,15 +1,18 @@
-package store
+package store_test
 
 import (
 	"context"
 	"strconv"
 	"testing"
+
+	"github.com/jssblck/akari/internal/server/store"
+	"github.com/jssblck/akari/internal/server/storetest"
 )
 
 // seedSess inserts a session with a chosen agent and machine under a user and
 // project, bypassing ingest so the cross-project read paths can be asserted
 // against known inputs. Rows are returned newest-id last.
-func seedSess(t *testing.T, st *Store, userID, projectID int64, agent, machine, src string) int64 {
+func seedSess(t *testing.T, st *store.Store, userID, projectID int64, agent, machine, src string) int64 {
 	t.Helper()
 	var id int64
 	err := st.Pool.QueryRow(context.Background(),
@@ -25,7 +28,7 @@ func seedSess(t *testing.T, st *Store, userID, projectID int64, agent, machine, 
 // seedGlobalCorpus sets up one user, a remote and a local project, and six
 // sessions: four claude / two codex, with one claude session carrying a blank
 // machine to exercise the facet's blank exclusion. Returns the two project ids.
-func seedGlobalCorpus(t *testing.T, st *Store) (userID, remoteID, localID int64) {
+func seedGlobalCorpus(t *testing.T, st *store.Store) (userID, remoteID, localID int64) {
 	t.Helper()
 	ctx := context.Background()
 	u, err := st.Register(ctx, "grace", "hash", "")
@@ -51,11 +54,11 @@ func seedGlobalCorpus(t *testing.T, st *Store) (userID, remoteID, localID int64)
 
 func TestListAllSessions(t *testing.T) {
 	t.Parallel()
-	st := newTestStore(t)
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 	_, remoteID, _ := seedGlobalCorpus(t, st)
 
-	all, err := st.ListAllSessions(ctx, SessionFilter{})
+	all, err := st.ListAllSessions(ctx, store.SessionFilter{})
 	if err != nil {
 		t.Fatalf("list all: %v", err)
 	}
@@ -74,21 +77,21 @@ func TestListAllSessions(t *testing.T) {
 	}
 
 	// Filters narrow the set.
-	claude, err := st.ListAllSessions(ctx, SessionFilter{Agent: "claude"})
+	claude, err := st.ListAllSessions(ctx, store.SessionFilter{Agent: "claude"})
 	if err != nil || len(claude) != 4 {
 		t.Fatalf("agent filter: len=%d err=%v, want 4", len(claude), err)
 	}
-	inRemote, err := st.ListAllSessions(ctx, SessionFilter{ProjectID: remoteID})
+	inRemote, err := st.ListAllSessions(ctx, store.SessionFilter{ProjectID: remoteID})
 	if err != nil || len(inRemote) != 3 {
 		t.Fatalf("project filter: len=%d err=%v, want 3", len(inRemote), err)
 	}
-	byMachine, err := st.ListAllSessions(ctx, SessionFilter{Machine: "rig"})
+	byMachine, err := st.ListAllSessions(ctx, store.SessionFilter{Machine: "rig"})
 	if err != nil || len(byMachine) != 2 {
 		t.Fatalf("machine filter: len=%d err=%v, want 2", len(byMachine), err)
 	}
 
 	// Limit caps the page.
-	capped, err := st.ListAllSessions(ctx, SessionFilter{Limit: 2})
+	capped, err := st.ListAllSessions(ctx, store.SessionFilter{Limit: 2})
 	if err != nil || len(capped) != 2 {
 		t.Fatalf("limit: len=%d err=%v, want 2", len(capped), err)
 	}
@@ -99,7 +102,7 @@ func TestListAllSessions(t *testing.T) {
 // down and drops the emptied value.
 func TestSessionFacetTrigger(t *testing.T) {
 	t.Parallel()
-	st := newTestStore(t)
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 	u, err := st.Register(ctx, "grace", "hash", "")
 	if err != nil {
@@ -149,7 +152,7 @@ func TestSessionFacetTrigger(t *testing.T) {
 
 func TestGlobalFacets(t *testing.T) {
 	t.Parallel()
-	st := newTestStore(t)
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 	seedGlobalCorpus(t, st)
 
