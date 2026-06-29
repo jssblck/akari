@@ -156,6 +156,7 @@ templ rangeSelector(rng string, selected []int64) {
 // checked state always reflects the URL; app.js reapplies the open state across
 // that swap so a multi-select stays open.
 templ userFilter(users []store.User, selected []int64, rng string) {
+	{{ sel := selectedSet(selected) }}
 	<details class="userfilter">
 		<summary class="userfilter-summary">
 			<span class="userfilter-pills">
@@ -196,7 +197,7 @@ templ userFilter(users []store.User, selected []int64, rng string) {
 						class="userfilter-box"
 						name="user"
 						value={ fmt.Sprintf("%d", u.ID) }
-						checked?={ userIDSelected(u.ID, selected) }
+						checked?={ sel[u.ID] }
 						hx-get="/"
 						hx-include="closest .userfilter-menu"
 						hx-target="#usage"

@@ -55,15 +55,19 @@ func SelectedUserIDs(raw []string, users []store.User) []int64 {
 	return out
 }
 
-// userIDSelected reports whether an account is in the current overview selection,
-// so its checkbox renders checked.
-func userIDSelected(id int64, selected []int64) bool {
-	for _, s := range selected {
-		if s == id {
-			return true
-		}
+// selectedSet indexes the selected ids so the account rows can test membership in
+// O(1) while rendering. Marking checkboxes then stays linear in the user count
+// rather than O(users * selected), which matters because the menu lists every
+// account and the selection can grow to that same set.
+func selectedSet(selected []int64) map[int64]bool {
+	if len(selected) == 0 {
+		return nil
 	}
-	return false
+	m := make(map[int64]bool, len(selected))
+	for _, id := range selected {
+		m[id] = true
+	}
+	return m
 }
 
 // selectedUsers resolves the selected ids back to their accounts, in users-list

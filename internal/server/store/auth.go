@@ -124,7 +124,10 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 		}
 		out = append(out, u)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate users: %w", err)
+	}
+	return out, nil
 }
 
 // CreateAPIToken stores a token's hash with a scope and returns its row id.

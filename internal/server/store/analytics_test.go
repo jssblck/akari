@@ -209,6 +209,100 @@ func TestAnalyticsUserFilter(t *testing.T) {
 	}
 }
 
+// A project scope and a user scope apply together: the placeholders are numbered
+// in order ($1 project, $2 users, then $3 since on the windowed path), so the
+// analytics isolate one user's sessions within one project and exclude both that
+// user's other projects and other users in the same project. This pins the
+// combined WHERE construction the single-axis tests leave unexercised, on both the
+// windowed usage_events path and the unbounded session-rollup path.
+func TestAnalyticsProjectAndUserScope(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	graceID := seedUser(t, st, "grace")
+	adaID := seedUser(t, st, "ada")
+	projA, err := st.UpsertProject(ctx, "github.com/ada/a", "github.com", "ada", "a", "a", "remote")
+	if err != nil {
+		t.Fatalf("project a: %v", err)
+	}
+	projB, err := st.UpsertProject(ctx, "github.com/ada/b", "github.com", "ada", "b", "b", "remote")
+	if err != nil {
+		t.Fatalf("project b: %v", err)
+	}
+
+	// grace works in both projects; ada works in project A. Only grace's project A
+	// session should survive the combined scope.
+	gA := seedSessionWithStats(t, st, graceID, projA, "claude", "gA", 2.0, 200, 40)
+	gB := seedSessionWithStats(t, st, graceID, projB, "pi", "gB", 5.0, 500, 100)
+	aA := seedSessionWithStats(t, st, adaID, projA, "codex", "aA", 9.0, 900, 180)
+	seedUsage(t, st, gA, "claude-opus-4-8", 2.0, 200, 40, 1, "gA1")
+	seedUsage(t, st, gB, "pi-1", 5.0, 500, 100, 1, "gB1")
+	seedUsage(t, st, aA, "gpt-5.5", 9.0, 900, 180, 1, "aA1")
+
+	assertGraceProjA := func(label string, a store.Analytics) {
+		if a.Sessions != 1 {
+			t.Errorf("%s: combined scope should see only grace's project A session, got %d", label, a.Sessions)
+		}
+		if a.TotalCost < 1.99 || a.TotalCost > 2.01 {
+			t.Errorf("%s: combined scope cost should be ~2.0 (gA only), got %.2f", label, a.TotalCost)
+		}
+		if len(a.Agents) != 1 || a.Agents[0].Label != "claude" {
+			t.Errorf("%s: combined scope agents should hold only claude (not ada's codex, not grace's pi): %+v", label, a.Agents)
+		}
+	}
+
+	// Windowed path (usage_events): project A AND grace.
+	since := time.Now().AddDate(0, 0, -7)
+	w, err := st.Analytics(ctx, projA, since, []int64{graceID})
+	if err != nil {
+		t.Fatalf("windowed combined analytics: %v", err)
+	}
+	assertGraceProjA("windowed", w)
+	if w.TotalIn != 200 || w.TotalOut != 40 {
+		t.Errorf("windowed combined token totals wrong: in=%d out=%d, want 200/40", w.TotalIn, w.TotalOut)
+	}
+
+	// Unbounded path (session rollups): project A AND grace.
+	all, err := st.Analytics(ctx, projA, time.Time{}, []int64{graceID})
+	if err != nil {
+		t.Fatalf("all-time combined analytics: %v", err)
+	}
+	assertGraceProjA("all-time", all)
+}
+
+// ListUsers returns every account ordered by username, carrying only the identity
+// (id and username) and never the credential.
+func TestListUsers(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	// Inserted out of alphabetical order to prove the query, not the insert order,
+	// sets the result order.
+	seedUser(t, st, "grace")
+	seedUser(t, st, "ada")
+	seedUser(t, st, "katherine")
+
+	users, err := st.ListUsers(ctx)
+	if err != nil {
+		t.Fatalf("list users: %v", err)
+	}
+	var names []string
+	for _, u := range users {
+		names = append(names, u.Username)
+		if u.ID == 0 {
+			t.Errorf("user %q has zero id", u.Username)
+		}
+		if u.PasswordHash != "" {
+			t.Errorf("ListUsers should not carry the password hash, got %q for %q", u.PasswordHash, u.Username)
+		}
+	}
+	if got := strings.Join(names, ","); got != "ada,grace,katherine" {
+		t.Errorf("ListUsers order = %q, want ada,grace,katherine", got)
+	}
+}
+
 // seedUser inserts an account directly and returns its id, so a test can own
 // sessions by distinct users without driving the invite-gated registration flow.
 func seedUser(t *testing.T, st *store.Store, username string) int64 {
