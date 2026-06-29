@@ -53,7 +53,7 @@ templ analyticsPanel(a store.Analytics, chartID, scope string, heatmap bool, rng
 				@chartBlock(a, chartID)
 			}
 			<div class="breakdowns">
-				@breakdownList("By model", BuildBreakdown(a.Models))
+				@breakdownList("By model", BuildBreakdown(FoldUnknownModels(a.Models)))
 				@breakdownList("By agent", BuildBreakdown(a.Agents))
 			</div>
 		}

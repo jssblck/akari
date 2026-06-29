@@ -52,6 +52,51 @@ func TestBuildBreakdownTinySliver(t *testing.T) {
 	}
 }
 
+func TestFoldUnknownModels(t *testing.T) {
+	// Priced models keep their identity and order; everything unpriced (including
+	// a codenamed pre-release) collapses into a single trailing "Other" row.
+	folded := FoldUnknownModels([]store.Breakdown{
+		{Label: "claude-opus-4-8", CostUSD: 4, Tokens: 100, Sessions: 2},
+		{Label: "skunkworks-preview", CostUSD: 0, Tokens: 30, Sessions: 1},
+		{Label: "gpt-5.5", CostUSD: 1, Tokens: 50, Sessions: 1},
+		{Label: "internal-codename-x", CostUSD: 0, Tokens: 20, Sessions: 2},
+	})
+	if len(folded) != 3 {
+		t.Fatalf("want 3 rows (two priced + Other), got %d: %+v", len(folded), folded)
+	}
+	if folded[0].Label != "claude-opus-4-8" || folded[1].Label != "gpt-5.5" {
+		t.Errorf("priced models should keep order and name: %+v", folded[:2])
+	}
+	other := folded[2]
+	if other.Label != OtherModelLabel {
+		t.Fatalf("the catch-all row should sit last and be %q, got %q", OtherModelLabel, other.Label)
+	}
+	for _, row := range folded {
+		if strings.Contains(row.Label, "preview") || strings.Contains(row.Label, "codename") {
+			t.Errorf("an unpriced model name leaked into the overview: %q", row.Label)
+		}
+	}
+	if other.Tokens != 50 || other.Sessions != 3 {
+		t.Errorf("Other should sum the unpriced tail: tokens=%d sessions=%d", other.Tokens, other.Sessions)
+	}
+}
+
+func TestFoldUnknownModelsAllKnown(t *testing.T) {
+	// With every model priced, nothing folds and no "Other" row appears.
+	folded := FoldUnknownModels([]store.Breakdown{
+		{Label: "claude-opus-4-8", CostUSD: 4},
+		{Label: "gpt-5.5", CostUSD: 1},
+	})
+	if len(folded) != 2 {
+		t.Fatalf("no Other row when all models are priced, got %d rows", len(folded))
+	}
+	for _, row := range folded {
+		if row.Label == OtherModelLabel {
+			t.Errorf("unexpected Other row: %+v", folded)
+		}
+	}
+}
+
 func TestSparklineEmptyAndShape(t *testing.T) {
 	if Sparkline(nil) != "" || Sparkline([]float64{1}) != "" {
 		t.Error("a sparkline needs at least two points")
