@@ -362,20 +362,21 @@ type GlobalFacetValues struct {
 const facetLimit = 50
 
 // GlobalFacets returns the busiest agents, machines, usernames, and projects
-// across all sessions, each with its session count, ordered by count then name.
-// Every category is bounded to facetLimit so the result set is a fixed size
-// regardless of corpus growth. It backs the global Sessions view's filter rail.
+// across all sessions, each with its session count, ordered busiest first. The
+// counts are read from the session_facets rollup (maintained incrementally by a
+// trigger on the sessions table, see migration 0005), so each category is a
+// bounded top-N index read rather than a GROUP BY over the whole sessions table.
+// It backs the global Sessions view's filter rail.
 func (s *Store) GlobalFacets(ctx context.Context) (GlobalFacetValues, error) {
 	var f GlobalFacetValues
 
-	// Each category is its own bounded subquery, so one busy category cannot
-	// crowd out another and the overall row count is fixed at 3*facetLimit.
+	// Agent and machine values are stored verbatim, so they read straight from
+	// the rollup. Each kind is its own bounded subquery off the (kind, n DESC)
+	// index, so one busy category cannot crowd out another.
 	rows, err := s.Pool.Query(ctx,
-		`(SELECT 'agent' AS kind, s.agent AS val, count(*) AS n FROM sessions s WHERE s.agent <> '' GROUP BY s.agent ORDER BY n DESC, s.agent LIMIT $1)
+		`(SELECT kind, key, n FROM session_facets WHERE kind = 'agent'   ORDER BY n DESC, key LIMIT $1)
 		 UNION ALL
-		 (SELECT 'machine', s.machine, count(*) FROM sessions s WHERE s.machine <> '' GROUP BY s.machine ORDER BY count(*) DESC, s.machine LIMIT $1)
-		 UNION ALL
-		 (SELECT 'user', u.username, count(*) FROM sessions s JOIN users u ON u.id = s.user_id GROUP BY u.username ORDER BY count(*) DESC, u.username LIMIT $1)`,
+		 (SELECT kind, key, n FROM session_facets WHERE kind = 'machine' ORDER BY n DESC, key LIMIT $1)`,
 		facetLimit)
 	if err != nil {
 		return f, fmt.Errorf("query session facets: %w", err)
@@ -393,15 +394,13 @@ func (s *Store) GlobalFacets(ctx context.Context) (GlobalFacetValues, error) {
 			f.Agents = append(f.Agents, fc)
 		case "machine":
 			f.Machines = append(f.Machines, fc)
-		case "user":
-			f.Users = append(f.Users, fc)
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return f, fmt.Errorf("iterate session facets: %w", err)
 	}
 	// UNION ALL does not guarantee the final emission order, so re-establish the
-	// busiest-first contract per category here rather than trusting the scan order.
+	// busiest-first contract per category rather than trusting the scan order.
 	sortFacets := func(fs []FacetCount) {
 		sort.Slice(fs, func(i, j int) bool {
 			if fs[i].Count != fs[j].Count {
@@ -412,13 +411,35 @@ func (s *Store) GlobalFacets(ctx context.Context) (GlobalFacetValues, error) {
 	}
 	sortFacets(f.Agents)
 	sortFacets(f.Machines)
-	sortFacets(f.Users)
+
+	// User and project facets store the id in the rollup; resolve the display
+	// label by joining the busiest rows to their owning table.
+	urows, err := s.Pool.Query(ctx,
+		`SELECT u.username, f.n
+		   FROM session_facets f JOIN users u ON u.id = f.key::bigint
+		  WHERE f.kind = 'user'
+		  ORDER BY f.n DESC, u.username
+		  LIMIT $1`, facetLimit)
+	if err != nil {
+		return f, fmt.Errorf("query user facets: %w", err)
+	}
+	defer urows.Close()
+	for urows.Next() {
+		var fc FacetCount
+		if err := urows.Scan(&fc.Value, &fc.Count); err != nil {
+			return f, fmt.Errorf("scan user facet row: %w", err)
+		}
+		f.Users = append(f.Users, fc)
+	}
+	if err := urows.Err(); err != nil {
+		return f, fmt.Errorf("iterate user facets: %w", err)
+	}
 
 	prows, err := s.Pool.Query(ctx,
-		`SELECT p.id, p.remote_key, p.display_name, p.kind, count(s.id) AS n
-		   FROM projects p JOIN sessions s ON s.project_id = p.id
-		  GROUP BY p.id
-		  ORDER BY n DESC, p.remote_key
+		`SELECT p.id, p.remote_key, p.display_name, p.kind, f.n
+		   FROM session_facets f JOIN projects p ON p.id = f.key::bigint
+		  WHERE f.kind = 'project'
+		  ORDER BY f.n DESC, p.remote_key
 		  LIMIT $1`, facetLimit)
 	if err != nil {
 		return f, fmt.Errorf("query project facets: %w", err)
