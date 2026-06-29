@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -279,5 +280,123 @@ func TestJSONSpanPathsRequestedOutOfOrder(t *testing.T) {
 	// of request order.
 	if res[0].PathIndex != 1 || res[1].PathIndex != 0 {
 		t.Fatalf("expected source order (x then y): %+v", res)
+	}
+}
+
+// TestWalkArrayElementsParity checks the single-pass array walker against gjson:
+// every element span and every matched subKey span must equal gjson's authoritative
+// span, elements arrive in source order, and a subKey absent from an element is
+// reported absent. It runs each line under several chunk sizes to prove the walk is
+// chunk-independent and truly single-pass (one next() drain per call).
+func TestWalkArrayElementsParity(t *testing.T) {
+	cases := []struct {
+		name    string
+		line    string
+		arr     []Step
+		gprefix string // gjson dotted prefix of the array (empty for a root array)
+		subKeys []Step
+	}{
+		{
+			name:    "claude assistant content blocks",
+			line:    `{"type":"assistant","message":{"content":[{"type":"text","text":"thinking"},{"type":"tool_use","id":"t1","name":"Read","input":{"x":1}},{"type":"tool_use","id":"t2","name":"Write","input":{"y":[1,2,3]}}]}}`,
+			arr:     []Step{Key("message"), Key("content")},
+			gprefix: "message.content",
+			subKeys: []Step{Key("type"), Key("input")},
+		},
+		{
+			name:    "claude result text array",
+			line:    `[{"type":"text","text":"line one"},{"type":"output_text","text":"line two"}]`,
+			arr:     []Step{},
+			gprefix: "",
+			subKeys: []Step{Key("type"), Key("text")},
+		},
+		{
+			name:    "mixed bare strings, scalars, objects",
+			line:    `["just text",{"type":"input_text","text":"c"},42,{"type":"text","text":"hi"},true]`,
+			arr:     []Step{},
+			gprefix: "",
+			subKeys: []Step{Key("type"), Key("text")},
+		},
+		{
+			name:    "empty array yields no elements",
+			line:    `{"message":{"content":[]}}`,
+			arr:     []Step{Key("message"), Key("content")},
+			gprefix: "message.content",
+			subKeys: []Step{Key("type")},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			arrGjson := tc.gprefix
+			if arrGjson == "" {
+				arrGjson = "@this"
+			}
+			want := gjson.Get(tc.line, arrGjson).Array()
+
+			for _, chunk := range []int{1, 4, 13, len(tc.line)} {
+				var idx int
+				err := WalkArrayElements(tc.arr, tc.subKeys, chunkedReader(tc.line, chunk),
+					func(i int, elem ValueSpan, subs map[Step]ValueSpan) error {
+						if i != idx {
+							t.Fatalf("chunk=%d: element index %d, expected %d", chunk, i, idx)
+						}
+						gp := tc.gprefix
+						if gp != "" {
+							gp += "."
+						}
+						gp += itoa(i)
+						g := gjson.Get(tc.line, gp)
+						if int64(g.Index) != elem.Start || int64(g.Index+len(g.Raw)) != elem.End {
+							t.Errorf("chunk=%d elem %d: span [%d,%d), want [%d,%d)", chunk, i, elem.Start, elem.End, g.Index, g.Index+len(g.Raw))
+						}
+						for _, sk := range tc.subKeys {
+							k := string(sk.(Key))
+							gs := gjson.Get(tc.line, gp+"."+k)
+							span, have := subs[sk]
+							// gjson reports a present member with a real Index; a member at
+							// the very start of the document has Index 0, which cannot occur
+							// here since elements are never at offset 0.
+							present := gs.Exists() && gs.Index > 0
+							if present != have {
+								t.Errorf("chunk=%d elem %d sub %q: present=%v have=%v", chunk, i, k, present, have)
+								continue
+							}
+							if have {
+								if int64(gs.Index) != span.Start || int64(gs.Index+len(gs.Raw)) != span.End {
+									t.Errorf("chunk=%d elem %d sub %q: span [%d,%d), want [%d,%d)", chunk, i, k, span.Start, span.End, gs.Index, gs.Index+len(gs.Raw))
+								}
+							}
+						}
+						idx++
+						return nil
+					})
+				if err != nil {
+					t.Fatalf("chunk=%d: walk error: %v", chunk, err)
+				}
+				if idx != len(want) {
+					t.Fatalf("chunk=%d: walked %d elements, want %d", chunk, idx, len(want))
+				}
+			}
+		})
+	}
+}
+
+// TestWalkArrayElementsVisitErrorPropagates confirms a visit error aborts the walk
+// and surfaces to the caller rather than being swallowed.
+func TestWalkArrayElementsVisitErrorPropagates(t *testing.T) {
+	line := `[{"type":"text","text":"a"},{"type":"text","text":"b"}]`
+	sentinel := errors.New("stop here")
+	calls := 0
+	err := WalkArrayElements([]Step{}, []Step{Key("type")}, chunkedReader(line, 3),
+		func(int, ValueSpan, map[Step]ValueSpan) error {
+			calls++
+			return sentinel
+		})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("want sentinel error, got %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("walk should abort after first visit error, got %d calls", calls)
 	}
 }

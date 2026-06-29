@@ -87,7 +87,7 @@ func (s *collectSink) emitChunk(ctx context.Context, data []byte, origLen int64)
 func runTransform(t *testing.T, f *os.File, origStart, size int64, agent string, settled bool) *collectSink {
 	t.Helper()
 	sink := &collectSink{}
-	tr := newTransformer(f, origStart, size, agent, sink)
+	tr := newTransformer(f, origStart, size, agent, sink, nil)
 	if _, _, err := tr.run(context.Background(), settled); err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +219,7 @@ func TestTransformOversizedLineRejected(t *testing.T) {
 	f, size := openTemp(t, content)
 
 	sink := &collectSink{}
-	tr := newTransformer(f, 0, size, "claude", sink)
+	tr := newTransformer(f, 0, size, "claude", sink, nil)
 	if _, _, err := tr.run(context.Background(), true); err == nil {
 		t.Fatal("expected an oversized-line error past hardCap")
 	}
@@ -312,6 +312,146 @@ func setBigLineThreshold(t *testing.T, n int64) {
 	t.Cleanup(func() { bigLineThreshold = orig })
 }
 
+// codexUser / codexAsst build Codex turn lines for the incremental tests.
+func codexUser(s string) string {
+	return `{"type":"response_item","payload":{"role":"user","content":[{"type":"input_text","text":` + jsonString(s) + `}]}}` + "\n"
+}
+func codexAsst(s string) string {
+	return `{"type":"response_item","payload":{"role":"assistant","content":[{"type":"output_text","text":` + jsonString(s) + `}]}}` + "\n"
+}
+
+// TestTransformOpenTurnResumesFromCache proves the open-Codex-turn cache stops the
+// quadratic re-transform: a second tick over a file whose final turn is still open
+// scans only the appended delta, not the whole held turn. The scanner's resume offset
+// (the cached scanEnd) must land past the lines processed on the first tick.
+func TestTransformOpenTurnResumesFromCache(t *testing.T) {
+	// meta, then a closed turn (user a, assistant x, user b), then an open trailing
+	// turn that grows between ticks.
+	meta := `{"type":"session_meta","payload":{"cwd":"/x"}}` + "\n"
+	base := meta + codexUser("a") + codexAsst("x") + codexUser("b")
+	open1 := codexAsst("y1")
+	content1 := base + open1
+	path := tempFile(t, content1)
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { f.Close() })
+
+	// First tick: unsettled, so the open turn (assistant y1) is withheld and cached.
+	sink1 := &collectSink{}
+	tr1 := newTransformer(f, 0, int64(len(content1)), "codex", sink1, nil)
+	if _, _, err := tr1.run(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(sink1.data); got != base {
+		t.Fatalf("first tick emitted %q, want through the closed turn %q", got, base)
+	}
+	pend := tr1.snapshot()
+	if pend == nil {
+		t.Fatal("expected an open-turn snapshot after the first tick")
+	}
+	if pend.scanEnd != int64(len(content1)) {
+		t.Fatalf("cached scanEnd = %d, want past the held open line %d", pend.scanEnd, len(content1))
+	}
+
+	// Grow the open turn and settle it. The second tick must resume at scanEnd: its
+	// scanner starts there, so it reads only the appended delta.
+	open2 := codexAsst("y2")
+	if err := os.WriteFile(path, []byte(content1+open2), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, _ := f.Stat()
+	size2 := info.Size()
+
+	sink2 := &collectSink{}
+	tr2 := newTransformer(f, 0, size2, "codex", sink2, pend)
+	// The resumed scanner must begin at the cached offset, not at origBase 0.
+	if tr2.sc.bufBase != pend.scanEnd {
+		t.Fatalf("resumed scan base = %d, want cached scanEnd %d", tr2.sc.bufBase, pend.scanEnd)
+	}
+	if _, _, err := tr2.run(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	// Settled now, so the whole open turn (y1 cached + y2 new) flushes, and the two
+	// ticks together reconstruct the full file.
+	full := string(sink1.data) + string(sink2.data)
+	if full != content1+open2 {
+		t.Fatalf("two ticks reconstructed %q, want the full file %q", full, content1+open2)
+	}
+}
+
+// TestTransformOversizedOpenTurnBackstop proves the documented constant cap fires: an
+// open Codex turn whose rewritten size exceeds maxTurnBytes is force-flushed
+// line-aligned rather than held without bound. Memory stays bounded by the cap.
+func TestTransformOversizedOpenTurnBackstop(t *testing.T) {
+	orig := maxTurnBytes
+	maxTurnBytes = 4 << 10
+	defer func() { maxTurnBytes = orig }()
+
+	// A long run of assistant lines with no closing user line: a single open turn that
+	// never closes. Its rewritten size (no bodies to lift) crosses the shrunken cap.
+	meta := `{"type":"session_meta","payload":{"cwd":"/x"}}` + "\n"
+	var b strings.Builder
+	b.WriteString(meta)
+	for i := 0; i < 200; i++ {
+		b.WriteString(codexAsst(strings.Repeat("z", 64)))
+	}
+	content := b.String()
+	f, size := openTemp(t, content)
+
+	// Unsettled: without the backstop the whole open turn would be withheld and never
+	// emitted. With it, the run force-flushes once it crosses the cap.
+	sink := runTransform(t, f, 0, size, "codex", false)
+	if len(sink.data) == 0 {
+		t.Fatal("backstop did not fire: nothing emitted for an oversized open turn")
+	}
+	if sink.chunkNum == 0 {
+		t.Fatal("expected at least one forced partial chunk")
+	}
+}
+
+// TestTransformTruncationIsHardError proves a file truncated mid-line during the
+// transform aborts rather than splicing zero-filled or partial bytes into the
+// transcript. The scanner frames a big line, then the file shrinks before its body is
+// read, so the body read must fail.
+func TestTransformTruncationIsHardError(t *testing.T) {
+	setBigLineThreshold(t, 64)
+	big := strings.Repeat("Z", 4096)
+	line := `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"` + big + `"}]}}` + "\n"
+	path := tempFile(t, line)
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { f.Close() })
+
+	// Claim the original (untruncated) size to the transformer, then truncate the file
+	// so the big-line body read runs past EOF and must error.
+	fullSize := int64(len(line))
+	if err := os.Truncate(path, 128); err != nil {
+		t.Fatal(err)
+	}
+
+	sink := &collectSink{}
+	tr := newTransformer(f, 0, fullSize, "claude", sink, nil)
+	if _, _, err := tr.run(context.Background(), true); err == nil {
+		t.Fatal("expected a hard error on a file truncated mid-line, got nil")
+	}
+}
+
+// TestSeenCacheStaysBounded proves the recently-seen body cache never exceeds its cap,
+// so its memory does not grow with the number of distinct bodies.
+func TestSeenCacheStaysBounded(t *testing.T) {
+	c := newSeenCache()
+	for i := 0; i < seenCacheCap*3; i++ {
+		c.add(hexSHA(strings.Repeat("x", i%97) + jsonString(string(rune(i)))))
+	}
+	if len(c.m) > seenCacheCap {
+		t.Fatalf("seen cache holds %d entries, cap is %d", len(c.m), seenCacheCap)
+	}
+}
+
 // setChunkTarget temporarily overrides the chunk target so a small input emits
 // multiple chunks, exercising the steady-state drain and commit accounting.
 func setChunkTarget(t *testing.T, n int) {
@@ -357,7 +497,7 @@ func TestTransformConflictUnwindsWithoutAdvancing(t *testing.T) {
 	// The small file flushes as one chunk at finish; conflict on it and confirm the
 	// transform reports the conflict and accepts nothing.
 	sink := &collectSink{confAt: 1}
-	tr := newTransformer(f, 0, size, "claude", sink)
+	tr := newTransformer(f, 0, size, "claude", sink, nil)
 	_, conflicted, err := tr.run(context.Background(), true)
 	if err != nil {
 		t.Fatal(err)
@@ -381,7 +521,7 @@ func TestTransformBigLineNoBodyRejected(t *testing.T) {
 	f, size := openTemp(t, content)
 
 	sink := &collectSink{}
-	tr := newTransformer(f, 0, size, "claude", sink)
+	tr := newTransformer(f, 0, size, "claude", sink, nil)
 	if _, _, err := tr.run(context.Background(), true); err == nil {
 		t.Fatal("expected a big-line-with-no-body refusal")
 	}

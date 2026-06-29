@@ -111,3 +111,57 @@ func TestLocateStreamsInBoundedWindows(t *testing.T) {
 type countingReaderAt struct{ r io.ReaderAt }
 
 func (c *countingReaderAt) ReadAt(p []byte, off int64) (int, error) { return c.r.ReadAt(p, off) }
+
+// truncatedReaderAt reports the file as size bytes long even though the line claims
+// more, so reads past size return a short count with io.EOF. It models a corrupted
+// or partially written store, the case the readFull discipline must reject.
+type truncatedReaderAt struct {
+	data []byte
+	size int64
+}
+
+func (t *truncatedReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	if off >= t.size {
+		return 0, io.EOF
+	}
+	avail := t.size - off
+	n := int64(len(p))
+	if n > avail {
+		n = avail
+	}
+	copy(p[:n], t.data[off:off+n])
+	if n < int64(len(p)) {
+		return int(n), io.EOF
+	}
+	return int(n), nil
+}
+
+// TestLocateTruncatedLineErrors confirms a line whose declared length runs past the
+// file's real end is reported as an error rather than silently zero-filling a body.
+// The block walk streams the line, so the short read surfaces through readFull.
+func TestLocateTruncatedLineErrors(t *testing.T) {
+	line := `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"the body bytes are cut off"}]}}`
+	// Pretend the file holds only the first half of the line.
+	f := &truncatedReaderAt{data: []byte(line), size: int64(len(line) / 2)}
+	if _, err := LocateToolBodies(AgentClaude, f, 0, int64(len(line))); err == nil {
+		t.Fatal("expected truncation error, got nil")
+	}
+}
+
+// TestReadFullShortRead pins the helper directly: a full read succeeds, a short
+// read is an io.ErrUnexpectedEOF, and a genuine error is propagated.
+func TestReadFullShortRead(t *testing.T) {
+	data := []byte("Grace Hopper")
+	f := &truncatedReaderAt{data: data, size: 5}
+
+	buf := make([]byte, 5)
+	if err := readFull(f, buf, 0); err != nil {
+		t.Fatalf("full read within size: %v", err)
+	}
+	if string(buf) != "Grace" {
+		t.Fatalf("read %q, want %q", buf, "Grace")
+	}
+	if err := readFull(f, make([]byte, 5), 3); err == nil {
+		t.Fatal("expected short-read error past declared size")
+	}
+}

@@ -1,7 +1,7 @@
 package parser
 
 import (
-	"bytes"
+	"fmt"
 	"io"
 )
 
@@ -154,21 +154,15 @@ func (r *jsonStringReader) fill() error {
 		r.in = make([]byte, want)
 	}
 	buf := r.in[:want]
-	n, err := r.f.ReadAt(buf, r.pos)
-	r.pos += int64(n)
-	if n == 0 {
-		if err == nil {
-			err = io.EOF
-		}
+	// want bytes all lie before the declared end of the string, so a short read here
+	// is a truncated file, not the natural end of the value. Treat it as a hard
+	// error rather than zero-filling, which would silently corrupt the decoded body.
+	if err := readFull(r.f, buf, r.pos); err != nil {
 		r.err = err
 		return err
 	}
-	r.decode(buf[:n])
-	// A short read that also reported an error other than the natural end is
-	// fatal; otherwise keep going and let the pos>=end check end the stream.
-	if err != nil && err != io.EOF {
-		r.err = err
-	}
+	r.pos += want
+	r.decode(buf)
 	return nil
 }
 
@@ -290,87 +284,121 @@ type arrayPiece struct {
 }
 
 // newArrayTextReader builds a reader that streams blockText over the array whose
-// raw span is span within the line beginning at lineOffset in f. It enumerates the
-// contributing element spans up front (a streaming pass per index, reading only
-// the tiny type strings into memory), then chains a decoding reader per piece with
-// a literal newline between pieces, so the big text bodies still stream one at a
-// time and are never all resident together.
+// raw span is span within the line beginning at lineOffset in f. It enumerates only
+// the contributing element spans up front (each span is 16 bytes, so the slice is
+// bounded by element count and tiny), then streams one piece at a time: the reader
+// holds just the current jsonStringReader and builds the next piece's reader lazily
+// once the previous one is exhausted. The big text bodies are therefore never all
+// resident together, and no piece's contents are ever buffered, only its span.
 func newArrayTextReader(f io.ReaderAt, lineOffset int64, span ValueSpan) io.Reader {
 	pieces, err := enumerateArrayPieces(f, lineOffset, span)
 	if err != nil {
 		return &errReader{err: err}
 	}
-	readers := make([]io.Reader, 0, len(pieces)*2)
-	for i, pc := range pieces {
-		if i > 0 {
-			// strings.Join(parts, "\n"): a separator between pieces, never leading
-			// or trailing.
-			readers = append(readers, bytes.NewReader([]byte("\n")))
-		}
-		readers = append(readers, newJSONStringReader(f, lineOffset+pc.span.Start, lineOffset+pc.span.End))
-	}
-	return io.MultiReader(readers...)
+	return &arrayTextReader{f: f, lineOffset: lineOffset, pieces: pieces}
 }
 
-// enumerateArrayPieces walks the array element by element and records the span of
-// each contributing piece. For each index i it locates, in one streaming pass over
-// the array region, the element (Idx i), its type (Idx i then Key "type"), and its
-// text (Idx i then Key "text"). A bare string element contributes its own span; an
-// object element contributes its text span only when its type is one of the
-// text-like kinds. The loop stops at the first index whose element is absent, so
-// the array length need not be known ahead of time.
-//
-// Spans returned by LocateValues are relative to the array region's first byte, so
-// they are rebased by span.Start to become line-relative like the caller expects.
-func enumerateArrayPieces(f io.ReaderAt, lineOffset int64, span ValueSpan) ([]arrayPiece, error) {
-	var pieces []arrayPiece
-	for i := 0; ; i++ {
-		paths := [][]Step{
-			{Idx(i)},              // 0: the element value
-			{Idx(i), Key("type")}, // 1: its type, if an object
-			{Idx(i), Key("text")}, // 2: its text, if an object block
-		}
-		located, err := LocateValues(paths, sectionNext(f, lineOffset+span.Start, span.End-span.Start))
-		if err != nil {
-			return nil, err
-		}
-		var elem, typ, text *ValueSpan
-		for _, ls := range located {
-			s := ls.Span
-			switch ls.PathIndex {
-			case 0:
-				v := s
-				elem = &v
-			case 1:
-				v := s
-				typ = &v
-			case 2:
-				v := s
-				text = &v
+// arrayTextReader streams blockText over a precomputed list of piece spans without
+// materializing more than one piece reader at a time. It walks pieces in order,
+// emitting a single "\n" between consecutive pieces (never leading or trailing, the
+// strings.Join(parts, "\n") shape), and constructs each piece's decoding reader
+// only when the previous piece is fully drained, bounding memory to one window.
+type arrayTextReader struct {
+	f          io.ReaderAt
+	lineOffset int64
+	pieces     []arrayPiece
+
+	idx int               // index of the next piece to start
+	cur *jsonStringReader // the piece currently being drained, or nil
+	// needSep is true when a single newline must be emitted before the next piece
+	// begins. It is set when a piece finishes and more pieces remain, so separators
+	// land strictly between pieces, never leading or trailing.
+	needSep bool
+}
+
+func (r *arrayTextReader) Read(p []byte) (int, error) {
+	for {
+		// Drain the current piece first; on exhaustion clear cur and arm a separator
+		// when another piece follows.
+		if r.cur != nil {
+			n, err := r.cur.Read(p)
+			if err == io.EOF {
+				r.cur = nil
+				err = nil
+				if r.idx < len(r.pieces) {
+					r.needSep = true
+				}
 			}
-		}
-		if elem == nil {
-			break // no element at this index: end of the array
-		}
-		// A bare string element (no nested type) is itself the text, matching
-		// blockText's b.Type == String branch.
-		if typ == nil {
-			if isStringSpan(f, lineOffset+span.Start+elem.Start) {
-				pieces = append(pieces, arrayPiece{span: rebase(*elem, span.Start)})
+			if n > 0 || err != nil {
+				return n, err
 			}
 			continue
 		}
-		// An object block contributes its text only for a text-like type.
-		kind, err := readSpanString(f, lineOffset+span.Start, *typ)
-		if err != nil {
-			return nil, err
-		}
-		switch kind {
-		case "text", "output_text", "input_text":
-			if text != nil {
-				pieces = append(pieces, arrayPiece{span: rebase(*text, span.Start)})
+		// Emit the pending separator before building the next piece's reader so it
+		// sits between the two pieces' bytes.
+		if r.needSep {
+			if len(p) == 0 {
+				return 0, nil
 			}
+			p[0] = '\n'
+			r.needSep = false
+			return 1, nil
 		}
+		if r.idx >= len(r.pieces) {
+			return 0, io.EOF
+		}
+		pc := r.pieces[r.idx]
+		r.idx++
+		r.cur = newJSONStringReader(r.f, r.lineOffset+pc.span.Start, r.lineOffset+pc.span.End)
+	}
+}
+
+// enumerateArrayPieces walks the array in a single streaming pass and records the
+// span of each contributing piece. The earlier implementation probed one array
+// index per LocateValues call, restreaming the whole array region per element
+// (O(array * length)); WalkArrayElements visits every element in one pass over the
+// region (O(array)) while retaining only each element's small type and text spans,
+// never an element's body bytes. A bare string element contributes its own span; an
+// object element contributes its "text" span only when its "type" is one of the
+// text-like kinds, matching blockText exactly.
+//
+// Spans handed to visit are relative to the array region's first byte, so they are
+// rebased by span.Start to become line-relative like the caller expects.
+func enumerateArrayPieces(f io.ReaderAt, lineOffset int64, span ValueSpan) ([]arrayPiece, error) {
+	var pieces []arrayPiece
+	regionBase := lineOffset + span.Start
+	regionLen := span.End - span.Start
+	err := WalkArrayElements([]Step{}, []Step{Key("type"), Key("text")},
+		sectionNext(f, regionBase, regionLen),
+		func(_ int, elem ValueSpan, subs map[Step]ValueSpan) error {
+			typSpan, hasType := subs[Key("type")]
+			if !hasType {
+				// A bare string element (no nested type) is itself the text, matching
+				// blockText's b.Type == String branch.
+				isStr, err := isStringSpan(f, regionBase+elem.Start)
+				if err != nil {
+					return err
+				}
+				if isStr {
+					pieces = append(pieces, arrayPiece{span: rebase(elem, span.Start)})
+				}
+				return nil
+			}
+			// An object block contributes its text only for a text-like type.
+			kind, err := readSpanString(f, regionBase, typSpan)
+			if err != nil {
+				return err
+			}
+			switch kind {
+			case "text", "output_text", "input_text":
+				if textSpan, ok := subs[Key("text")]; ok {
+					pieces = append(pieces, arrayPiece{span: rebase(textSpan, span.Start)})
+				}
+			}
+			return nil
+		})
+	if err != nil {
+		return nil, err
 	}
 	return pieces, nil
 }
@@ -383,40 +411,69 @@ func rebase(s ValueSpan, base int64) ValueSpan {
 
 // isStringSpan reports whether the value at fileOff begins with a quote, i.e. it
 // is a JSON string. A bare string array element is detected this way so it can be
-// decoded as a piece.
-func isStringSpan(f io.ReaderAt, fileOff int64) bool {
+// decoded as a piece. A read error is propagated rather than swallowed: the byte is
+// known to exist (the element span is non-empty), so a short read means the file is
+// truncated, which must not be silently treated as "not a string".
+func isStringSpan(f io.ReaderAt, fileOff int64) (bool, error) {
 	var one [1]byte
-	if _, err := f.ReadAt(one[:], fileOff); err != nil && err != io.EOF {
-		return false
+	if err := readFull(f, one[:], fileOff); err != nil {
+		return false, err
 	}
-	return one[0] == '"'
+	return one[0] == '"', nil
 }
 
-// readSpanString decodes a small JSON string value (a block's type) fully into
-// memory. Only structural strings flow through here; the large text bodies stream
-// via newJSONStringReader instead, so this bounded read does not break the memory
-// budget.
+// readSpanStringCap bounds how many decoded bytes readSpanString will accept. A
+// block discriminator (its "type") is always a short token, so a value that
+// decodes past this cap is malformed or hostile and is rejected rather than
+// buffered, keeping this structural read from ever holding a body's worth of bytes.
+const readSpanStringCap = 64 << 10
+
+// readSpanString decodes a small JSON string value (a block's type) into memory,
+// refusing to buffer more than readSpanStringCap bytes. Only structural strings
+// flow through here; the large text bodies stream via newJSONStringReader instead.
+// Exceeding the cap returns an error rather than silently truncating, because a
+// truncated discriminator could be misclassified.
 func readSpanString(f io.ReaderAt, base int64, rel ValueSpan) (string, error) {
 	rd := newJSONStringReader(f, base+rel.Start, base+rel.End)
-	data, err := io.ReadAll(rd)
+	limited := io.LimitReader(rd, readSpanStringCap+1)
+	data, err := io.ReadAll(limited)
 	if err != nil {
 		return "", err
+	}
+	if len(data) > readSpanStringCap {
+		return "", fmt.Errorf("block type string exceeds %d-byte cap", readSpanStringCap)
 	}
 	return string(data), nil
 }
 
-// sectionNext adapts a file section into the chunked next() that LocateValues
-// consumes, reading in bounded windows so the locator stays O(window) over the
-// array region rather than buffering it.
+// sectionNext adapts a file region into the chunked next() that LocateValues and
+// WalkArrayElements consume, reading in bounded windows so the walker stays
+// O(window) over the region rather than buffering it. Each window is read in full
+// or the read fails: a short read before the declared region end is a truncated
+// file (surfaced as an error), while reaching the region end returns a clean
+// io.EOF. Using readFull rather than a SectionReader prevents a truncation from
+// masquerading as a normal end-of-stream.
 func sectionNext(f io.ReaderAt, start, length int64) func() ([]byte, error) {
-	sr := io.NewSectionReader(f, start, length)
+	pos := int64(0)
 	buf := make([]byte, jsonStringChunk)
 	return func() ([]byte, error) {
-		n, err := sr.Read(buf)
-		if n > 0 {
-			return buf[:n], nil
+		if pos >= length {
+			return nil, io.EOF
 		}
-		return nil, err
+		n := length - pos
+		if n > int64(len(buf)) {
+			n = int64(len(buf))
+		}
+		window := buf[:n]
+		if err := readFull(f, window, start+pos); err != nil {
+			return nil, err
+		}
+		pos += n
+		var perr error
+		if pos >= length {
+			perr = io.EOF
+		}
+		return window, perr
 	}
 }
 

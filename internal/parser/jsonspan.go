@@ -448,6 +448,391 @@ func (s *scanner) finish() {
 	s.results = filtered
 }
 
+// WalkArrayElements scans the JSONL line exactly once, streaming, and invokes
+// visit for each direct element of the array located at arrPath, in source order.
+// For every element it reports the element's own byte span plus, for an object
+// element, the byte spans of any requested subKeys that are present as direct
+// members. Elements that are not objects (a bare string, a number) simply carry
+// an empty subSpans map.
+//
+// This is the single-pass primitive behind the block walkers: a transcript line's
+// content array can hold many blocks, and probing each block index with its own
+// LocateValues pass restreams the whole line per element (O(line * elements)).
+// Walking the array once is O(line) total while keeping memory at O(path depth):
+// element bodies (which can be hundreds of MiB) are never buffered, only the tiny
+// element span and the small subKey spans are retained, and each is handed to
+// visit as soon as the element closes so nothing accumulates across elements.
+//
+// next supplies the line incrementally exactly as LocateValues consumes it: each
+// call returns the next chunk of bytes until it reports io.EOF, and the walker is
+// correct for any chunking. visit is called with the element index (0-based), the
+// element span, and a map from the matched subKey Step to its span. Returning a
+// non-nil error from visit aborts the walk and is propagated. The reported spans
+// are byte-identical to gjson (value .Index for Start, .Index+len(.Raw) for End).
+//
+// Only direct members of an element object are matched for subKeys: a subKey is a
+// single Step (for example Key("type")), not a nested path, because block
+// discriminators and bodies live one level under the element.
+func WalkArrayElements(arrPath []Step, subKeys []Step, next func() ([]byte, error), visit func(idx int, elemSpan ValueSpan, subSpans map[Step]ValueSpan) error) error {
+	w := newArrayWalker(arrPath, subKeys, visit)
+	for {
+		chunk, err := next()
+		for _, b := range chunk {
+			if ferr := w.feed(b); ferr != nil {
+				return ferr
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return err
+		}
+	}
+	return w.finish()
+}
+
+// arrayWalker is the single-pass scanner backing WalkArrayElements. It tracks the
+// container stack to recognize when it enters the target array, then captures one
+// element's span (and its requested subKey spans) at a time, flushing each to the
+// visit callback the instant the element closes so element bodies are never
+// retained.
+type arrayWalker struct {
+	arrPath []Step
+	subKeys []Step
+	visit   func(idx int, elemSpan ValueSpan, subSpans map[Step]ValueSpan) error
+
+	off   int64
+	stack []frame
+
+	// inString / escNext / uLeft / stringIsKey / keyBuf mirror the LocateValues
+	// scanner's string state: structural braces and brackets inside a string are
+	// literal and must not move the container stack, and object keys are decoded
+	// for subKey matching while value bytes are skipped.
+	inString    bool
+	escNext     bool
+	uLeft       int
+	stringIsKey bool
+	keyBuf      []byte
+
+	inScalar  bool
+	expectKey bool
+
+	// arrDepth is the stack depth of the target array's frame once entered, or -1
+	// when the walker is not inside the target array. Elements are the values that
+	// live directly in that array, at stack depth arrDepth+1.
+	arrDepth int
+
+	// elem is the span of the array element currently being scanned, valid while
+	// inElem is true. elemSubs collects the matched subKey spans for that element.
+	// elemContainer marks an element that is itself an object or array, whose End is
+	// its matching close bracket rather than a scalar/string terminator.
+	inElem        bool
+	elemContainer bool
+	elem          ValueSpan
+	elemSubs      map[Step]ValueSpan
+	elemIdx       int
+
+	// sub tracks a subKey value currently open inside the element object so its End
+	// can be recorded when it closes. subActive is the matched Step; subContainer
+	// distinguishes a container value's close-bracket terminator.
+	subActive    Step
+	subOpen      bool
+	subContainer bool
+	subStart     int64
+	subDepth     int
+}
+
+func newArrayWalker(arrPath, subKeys []Step, visit func(idx int, elemSpan ValueSpan, subSpans map[Step]ValueSpan) error) *arrayWalker {
+	return &arrayWalker{
+		arrPath:  arrPath,
+		subKeys:  subKeys,
+		visit:    visit,
+		arrDepth: -1,
+	}
+}
+
+// arrayMatchesPath reports whether the array value about to begin (its opening
+// bracket is being processed) sits exactly at arrPath. It mirrors the LocateValues
+// atPath convention: a value living directly inside the current containers sits at
+// depth len(stack), so its path has exactly len(stack) steps, and each enclosing
+// frame's current key/index must agree with the corresponding step. The innermost
+// frame's curKey/arrIdx already describes the position of the value being scanned,
+// so there is no separate parent-vs-final split.
+func (w *arrayWalker) arrayMatchesPath() bool {
+	if len(w.arrPath) != len(w.stack) {
+		return false
+	}
+	for i, fr := range w.stack {
+		switch step := w.arrPath[i].(type) {
+		case Key:
+			if !fr.isObject || fr.curKey != string(step) {
+				return false
+			}
+		case Idx:
+			if fr.isObject || fr.arrIdx != int(step) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func (w *arrayWalker) top() *frame {
+	if len(w.stack) == 0 {
+		return nil
+	}
+	return &w.stack[len(w.stack)-1]
+}
+
+// inTargetArray reports whether the value about to begin is a direct element of
+// the target array (the innermost frame is that array).
+func (w *arrayWalker) inTargetArray() bool {
+	return w.arrDepth >= 0 && len(w.stack) == w.arrDepth+1
+}
+
+// inElementObject reports whether the value about to begin is a direct member of
+// the current element object (one level below the array).
+func (w *arrayWalker) inElementObject() bool {
+	return w.inElem && w.arrDepth >= 0 && len(w.stack) == w.arrDepth+2 && w.top() != nil && w.top().isObject
+}
+
+func (w *arrayWalker) feed(b byte) error {
+	off := w.off
+	w.off = off + 1
+
+	if w.inString {
+		if w.stringIsKey {
+			w.keyBuf = append(w.keyBuf, b)
+		}
+		switch {
+		case w.escNext:
+			w.escNext = false
+			if b == 'u' {
+				w.uLeft = 4
+			}
+		case w.uLeft > 0:
+			w.uLeft--
+		case b == '\\':
+			w.escNext = true
+		case b == '"':
+			return w.endString(off)
+		}
+		return nil
+	}
+
+	if w.inScalar {
+		if isScalarByte(b) {
+			return nil
+		}
+		w.inScalar = false
+		if err := w.closeNonContainer(off); err != nil {
+			return err
+		}
+		// fall through to handle b as structure
+	}
+
+	switch b {
+	case ' ', '\t', '\n', '\r':
+		return nil
+	case '"':
+		return w.startString(off)
+	case '{':
+		return w.openContainer(off, true)
+	case '[':
+		return w.openContainer(off, false)
+	case '}', ']':
+		return w.closeContainer(off)
+	case ':':
+		return nil
+	case ',':
+		if top := w.top(); top != nil && top.isObject {
+			w.expectKey = true
+		}
+		return nil
+	default:
+		return w.startScalar(off)
+	}
+}
+
+// preValue advances the array element index of the innermost array frame, matching
+// the LocateValues scanner so atPath-style checks see the right index.
+func (w *arrayWalker) preValue() {
+	top := w.top()
+	if top != nil && !top.isObject {
+		top.arrIdx++
+	}
+}
+
+// noteValueStart records the start of an element or subKey value when the position
+// matches. container says the value is an object or array whose End is its close
+// bracket.
+func (w *arrayWalker) noteValueStart(startOff int64, container bool) {
+	if w.inTargetArray() {
+		w.inElem = true
+		w.elemContainer = container
+		w.elem = ValueSpan{Start: startOff, End: -1}
+		w.elemSubs = nil
+		w.elemIdx = w.top().arrIdx
+		return
+	}
+	if w.inElementObject() && !w.subOpen {
+		key := w.top().curKey
+		for _, sk := range w.subKeys {
+			if k, ok := sk.(Key); ok && string(k) == key {
+				w.subActive = sk
+				w.subOpen = true
+				w.subContainer = container
+				w.subStart = startOff
+				w.subDepth = len(w.stack)
+				break
+			}
+		}
+	}
+}
+
+func (w *arrayWalker) startString(off int64) error {
+	top := w.top()
+	if top != nil && top.isObject && w.expectKey {
+		w.inString = true
+		w.stringIsKey = true
+		w.expectKey = false
+		w.keyBuf = w.keyBuf[:0]
+		w.keyBuf = append(w.keyBuf, '"')
+		return nil
+	}
+	w.preValue()
+	w.noteValueStart(off, false)
+	w.inString = true
+	w.stringIsKey = false
+	w.keyBuf = w.keyBuf[:0]
+	return nil
+}
+
+func (w *arrayWalker) endString(off int64) error {
+	w.inString = false
+	w.escNext = false
+	w.uLeft = 0
+	if w.stringIsKey {
+		if top := w.top(); top != nil {
+			top.curKey = decodeKey(w.keyBuf)
+		}
+		w.stringIsKey = false
+		w.keyBuf = w.keyBuf[:0]
+		return nil
+	}
+	// A string value ends just past its closing quote.
+	w.keyBuf = w.keyBuf[:0]
+	return w.closeNonContainer(off + 1)
+}
+
+func (w *arrayWalker) startScalar(off int64) error {
+	w.preValue()
+	w.noteValueStart(off, false)
+	w.inScalar = true
+	return nil
+}
+
+func (w *arrayWalker) openContainer(off int64, isObject bool) error {
+	w.preValue()
+	w.noteValueStart(off, true)
+	// Recognize entry into the target array before pushing its frame, while the
+	// stack still holds the parent containers that arrayMatchesPath inspects.
+	enterTarget := !isObject && w.arrDepth < 0 && w.arrayMatchesPath()
+	w.stack = append(w.stack, frame{isObject: isObject, arrIdx: -1})
+	if isObject {
+		w.expectKey = true
+	}
+	if enterTarget {
+		w.arrDepth = len(w.stack) - 1
+	}
+	return nil
+}
+
+func (w *arrayWalker) closeContainer(off int64) error {
+	if len(w.stack) == 0 {
+		return nil
+	}
+	closedDepth := len(w.stack) - 1
+	w.stack = w.stack[:len(w.stack)-1]
+	end := off + 1
+
+	// An open subKey container closes when its own depth is the depth just popped.
+	if w.subOpen && w.subContainer && w.subDepth == closedDepth {
+		w.recordSub(end)
+	}
+	// An element container closes when the array frame is now the innermost frame
+	// again (the element lived one level deeper than the array).
+	if w.inElem && w.elemContainer && w.arrDepth >= 0 && len(w.stack) == w.arrDepth+1 {
+		w.elem.End = end
+		if err := w.flushElem(); err != nil {
+			return err
+		}
+	}
+	// Leaving the target array entirely: the popped frame was the array frame.
+	if w.arrDepth >= 0 && closedDepth == w.arrDepth {
+		w.arrDepth = -1
+	}
+	w.expectKey = false
+	return nil
+}
+
+// closeNonContainer records the End of an open string/scalar element or subKey at
+// end, flushing a completed element to visit.
+func (w *arrayWalker) closeNonContainer(end int64) error {
+	// A subKey string/scalar value closes first (it is deeper than the element).
+	if w.subOpen && !w.subContainer && w.subDepth == len(w.stack) {
+		w.recordSub(end)
+		return nil
+	}
+	if w.inElem && !w.elemContainer {
+		w.elem.End = end
+		return w.flushElem()
+	}
+	return nil
+}
+
+// recordSub stores a matched subKey span on the current element.
+func (w *arrayWalker) recordSub(end int64) {
+	if w.elemSubs == nil {
+		w.elemSubs = make(map[Step]ValueSpan, len(w.subKeys))
+	}
+	w.elemSubs[w.subActive] = ValueSpan{Start: w.subStart, End: end}
+	w.subOpen = false
+	w.subActive = nil
+}
+
+// flushElem hands the completed element to visit and clears element state so the
+// next element starts fresh and nothing accumulates across elements.
+func (w *arrayWalker) flushElem() error {
+	subs := w.elemSubs
+	if subs == nil {
+		subs = map[Step]ValueSpan{}
+	}
+	idx := w.elemIdx
+	elem := w.elem
+	w.inElem = false
+	w.elemSubs = nil
+	w.elem = ValueSpan{}
+	w.subOpen = false
+	w.subActive = nil
+	return w.visit(idx, elem, subs)
+}
+
+// finish flushes a scalar element still open at EOF (a bare scalar at the very end
+// of the array region has no trailing structure byte to terminate it).
+func (w *arrayWalker) finish() error {
+	if w.inScalar {
+		w.inScalar = false
+		if err := w.closeNonContainer(w.off); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // isScalarByte reports whether b can be part of a bare JSON scalar token
 // (number, true, false, null). The set is deliberately permissive: the input is
 // assumed well-formed, so this only needs to distinguish token bytes from the

@@ -5,6 +5,24 @@ import (
 	"io"
 )
 
+// readFull reads exactly len(buf) bytes at off from f, treating any short read as
+// a hard error rather than silently zero-filling. A transcript line declares the
+// byte ranges of its values; if the file holds fewer bytes than a span claims the
+// file is truncated, and reporting that as io.ErrUnexpectedEOF (with the range)
+// keeps a corrupted store from being mistaken for valid empty data. It mirrors the
+// full-read-or-error discipline of internal/client/upload.readAt, adapted to the
+// io.ReaderAt the parser is handed rather than an *os.File.
+func readFull(f io.ReaderAt, buf []byte, off int64) error {
+	n, err := f.ReadAt(buf, off)
+	if n == len(buf) {
+		return nil
+	}
+	if err == nil || err == io.EOF {
+		return fmt.Errorf("short read at [%d,%d): got %d of %d bytes: %w", off, off+int64(len(buf)), n, len(buf), io.ErrUnexpectedEOF)
+	}
+	return err
+}
+
 // BodyLocation is one tool body found in a transcript line by streaming, ready to
 // be lifted to the CAS without ever buffering the body. Span is the raw byte range
 // of the value within the line (relative to the line's first byte), the bytes the
@@ -68,7 +86,9 @@ func (s *lineSource) reader() func() ([]byte, error) {
 			n = scanChunk
 		}
 		buf := make([]byte, n)
-		if _, err := s.f.ReadAt(buf, s.base+pos); err != nil && err != io.EOF {
+		// The window lies wholly within the declared line, so a short read here means
+		// the file is shorter than the line claims: a truncation, not a clean EOF.
+		if err := readFull(s.f, buf, s.base+pos); err != nil {
 			return nil, err
 		}
 		pos += n
@@ -91,7 +111,9 @@ func (s *lineSource) readSpan(sp ValueSpan) (string, error) {
 		return "", nil
 	}
 	buf := make([]byte, n)
-	if _, err := s.f.ReadAt(buf, s.base+sp.Start); err != nil && err != io.EOF {
+	// The span sits within the line, so fewer bytes than the span length means a
+	// truncated file rather than a legitimately short value.
+	if err := readFull(s.f, buf, s.base+sp.Start); err != nil {
 		return "", err
 	}
 	return string(buf), nil
@@ -123,11 +145,6 @@ func (s *lineSource) unquoted(sp ValueSpan) (string, error) {
 	}
 	return raw, nil
 }
-
-// blockBatch is how many array indices the enumerator probes per LocateValues
-// pass. A transcript line has only a handful of content blocks, so one batch
-// almost always covers them; a longer line just runs another pass.
-const blockBatch = 64
 
 // locateClaude finds claude tool inputs (on an assistant line) and tool results
 // (on a user line) by probing content-block indices in batches.
@@ -247,82 +264,80 @@ func (s *lineSource) locateSingleResult(path []Step) ([]BodyLocation, error) {
 	return []BodyLocation{loc}, nil
 }
 
-// locateBlocks walks an array of content blocks, returning the body at bodyKey for
-// each block whose `type` matches wantType. inputs use a fixed kind/media.
+// locateBlocks walks an array of content blocks in a single streaming pass,
+// returning the body at bodyKey for each block whose `type` matches wantType.
+// Inputs use a fixed kind/media. Walking the array once (rather than re-streaming
+// the whole line per batch of indices) keeps enumeration O(line); the walker hands
+// back only the tiny type and body spans per element, never the body bytes.
 func (s *lineSource) locateBlocks(arr []Step, wantType string, bodyKey Step, kind BodyKind, media string, _ bool) ([]BodyLocation, error) {
 	var out []BodyLocation
-	for start := 0; ; start += blockBatch {
-		paths, meta := blockPaths(arr, start, bodyKey)
-		spans, err := s.locate(paths)
+	err := s.walkBlocks(arr, bodyKey, func(typeSpan, bodySpan ValueSpan, hasBody bool) error {
+		bt, err := s.unquoted(typeSpan)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		seen := false
-		for i := 0; i < blockBatch; i++ {
-			typeSpan, hasType := spans[meta.typeIdx(i)]
-			if !hasType {
-				continue // no such block
-			}
-			seen = true
-			bt, err := s.unquoted(typeSpan)
-			if err != nil {
-				return nil, err
-			}
-			if bt != wantType {
-				continue
-			}
-			if bodySpan, ok := spans[meta.bodyIdx(i)]; ok && bodySpan.End > bodySpan.Start {
-				out = append(out, BodyLocation{Span: bodySpan, Kind: kind, Media: media})
-			}
+		if bt != wantType {
+			return nil
 		}
-		if !seen {
-			break // the batch found no block: the array is exhausted
+		if hasBody && bodySpan.End > bodySpan.Start {
+			out = append(out, BodyLocation{Span: bodySpan, Kind: kind, Media: media})
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return out, nil
 }
 
-// locateResultBlocks walks claude tool_result blocks, classifying each result body
-// from its first byte.
+// locateResultBlocks walks claude tool_result blocks in a single streaming pass,
+// classifying each result body from its first byte. Like locateBlocks it relies on
+// WalkArrayElements so the line is streamed once regardless of block count.
 func (s *lineSource) locateResultBlocks(arr []Step, wantType string, bodyKey Step) ([]BodyLocation, error) {
 	var out []BodyLocation
-	for start := 0; ; start += blockBatch {
-		paths, meta := blockPaths(arr, start, bodyKey)
-		spans, err := s.locate(paths)
+	err := s.walkBlocks(arr, bodyKey, func(typeSpan, bodySpan ValueSpan, hasBody bool) error {
+		bt, err := s.unquoted(typeSpan)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		seen := false
-		for i := 0; i < blockBatch; i++ {
-			typeSpan, hasType := spans[meta.typeIdx(i)]
-			if !hasType {
-				continue
-			}
-			seen = true
-			bt, err := s.unquoted(typeSpan)
-			if err != nil {
-				return nil, err
-			}
-			if bt != wantType {
-				continue
-			}
-			bodySpan, ok := spans[meta.bodyIdx(i)]
-			if !ok || bodySpan.End <= bodySpan.Start {
-				continue
-			}
-			loc, ok, err := s.classifyResult(bodySpan)
-			if err != nil {
-				return nil, err
-			}
-			if ok {
-				out = append(out, loc)
-			}
+		if bt != wantType {
+			return nil
 		}
-		if !seen {
-			break
+		if !hasBody || bodySpan.End <= bodySpan.Start {
+			return nil
 		}
+		loc, ok, err := s.classifyResult(bodySpan)
+		if err != nil {
+			return err
+		}
+		if ok {
+			out = append(out, loc)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return out, nil
+}
+
+// walkBlocks runs one WalkArrayElements pass over the content array, invoking
+// onBlock for each element that carries a `type` discriminator. It is the shared
+// single-pass spine of locateBlocks and locateResultBlocks: both need each block's
+// type span (to decide whether it is the wanted kind) and its body span (the value
+// at bodyKey), and both must preserve source order, which the walker guarantees.
+// An element without a `type` (a bare string element of a result array) is skipped
+// here because both callers key off the discriminator.
+func (s *lineSource) walkBlocks(arr []Step, bodyKey Step, onBlock func(typeSpan, bodySpan ValueSpan, hasBody bool) error) error {
+	subKeys := []Step{Key("type"), bodyKey}
+	return WalkArrayElements(arr, subKeys, s.reader(), func(_ int, _ ValueSpan, subs map[Step]ValueSpan) error {
+		typeSpan, hasType := subs[Key("type")]
+		if !hasType {
+			return nil
+		}
+		bodySpan, hasBody := subs[bodyKey]
+		return onBlock(typeSpan, bodySpan, hasBody)
+	})
 }
 
 // classifyResult reads a result value's first byte to choose its canonicalization
@@ -342,30 +357,12 @@ func (s *lineSource) readHead(sp ValueSpan) (byte, error) {
 		return 0, nil
 	}
 	var b [1]byte
-	if _, err := s.f.ReadAt(b[:], s.base+sp.Start); err != nil && err != io.EOF {
+	// The span is non-empty (checked above), so the first byte must exist; a short
+	// read here is a truncated file, not an absent value.
+	if err := readFull(s.f, b[:], s.base+sp.Start); err != nil {
 		return 0, err
 	}
 	return b[0], nil
-}
-
-// batchMeta maps a block index within a batch to its path indices in the flat
-// paths slice passed to LocateValues (two paths per block: its type and its body).
-type batchMeta struct{ start int }
-
-func (m batchMeta) typeIdx(i int) int { return i * 2 }
-func (m batchMeta) bodyIdx(i int) int { return i*2 + 1 }
-
-// blockPaths builds the type+body path pair for blockBatch consecutive array
-// indices starting at start, plus the meta to read results back.
-func blockPaths(arr []Step, start int, bodyKey Step) ([][]Step, batchMeta) {
-	paths := make([][]Step, 0, blockBatch*2)
-	for i := 0; i < blockBatch; i++ {
-		idx := Idx(start + i)
-		typePath := append(append([]Step{}, arr...), idx, Key("type"))
-		bodyPath := append(append([]Step{}, arr...), idx, bodyKey)
-		paths = append(paths, typePath, bodyPath)
-	}
-	return paths, batchMeta{start: start}
 }
 
 // jsonUnquote decodes a small JSON string literal (a block `type`), resolving the

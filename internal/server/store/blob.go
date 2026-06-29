@@ -227,9 +227,11 @@ func (s *Store) PutBlob(ctx context.Context, sha, mediaType string, r io.Reader)
 	}
 	if present {
 		// Drain so the client's PUT completes cleanly; it need not special-case a body
-		// the server already has.
-		_, _ = io.Copy(io.Discard, r)
-		return nil
+		// the server already has. The drain is a bounded, cancellation-aware loop rather
+		// than io.Copy so a canceled request (a shutdown, or the client hanging up) stops
+		// reading a large redundant body instead of running to its end. The body is
+		// discarded, so its bytes are never held.
+		return drainBody(ctx, r)
 	}
 
 	if mediaType == "" {
@@ -299,6 +301,27 @@ func (s *Store) PutBlob(ctx context.Context, sha, mediaType string, r io.Reader)
 		}
 		return upsertBlobPin(ctx, tx, sha)
 	})
+}
+
+// drainBody reads and discards r in bounded slices, checking for cancellation
+// between them. It lets the server consume a redundant duplicate-upload body (one it
+// already holds) so the client's PUT completes, without io.Copy's unbounded,
+// uncancellable read. A read error is not fatal: the body is being thrown away, so a
+// truncated or reset duplicate upload changes nothing.
+func drainBody(ctx context.Context, r io.Reader) error {
+	buf := make([]byte, blobWriteChunk)
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		_, err := r.Read(buf)
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return nil // discarding the body, so a read failure here is harmless
+		}
+	}
 }
 
 // pinIfPresent pins a blob and reports whether it exists, in one short

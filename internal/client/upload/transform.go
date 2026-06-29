@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"hash"
 	"io"
+	"log/slog"
 	"os"
 
 	"github.com/jssblck/akari/internal/parser"
@@ -79,16 +80,54 @@ type transformer struct {
 	asm *chunkAssembler
 }
 
-// newTransformer builds a transformer reading original [origStart, size).
-func newTransformer(f *os.File, origStart, size int64, agent string, sink chunkSink) *transformer {
+// pendingTurn carries the assembler's withheld lines and scan offset across sync
+// ticks. For Codex, an open trailing turn (no closing user line yet) is withheld and
+// would otherwise be re-transformed from its start every tick, which is quadratic as
+// the turn grows. Caching the rewritten (body-free, small) held lines plus the offset
+// just past them lets the next tick resume scanning at the delta and re-seed the
+// assembler, so each tick processes only the newly appended bytes. The bodies in the
+// held lines were already uploaded the tick they were first seen, so re-seeding does
+// not re-upload them. It is purely a cache: dropping it costs a one-time re-transform
+// of the open turn, never correctness.
+type pendingTurn struct {
+	lines   []pendingLine
+	scanEnd int64 // original offset just past the held lines (where scanning resumes)
+}
+
+// newTransformer builds a transformer reading original [origStart, size). When prev
+// holds a cached open turn whose scanEnd is still consistent with origStart, the
+// transformer resumes from scanEnd with the held lines restored, so only the appended
+// delta is processed. Otherwise it starts fresh at origStart.
+func newTransformer(f *os.File, origStart, size int64, agent string, sink chunkSink, prev *pendingTurn) *transformer {
+	scanStart := origStart
+	asm := newChunkAssembler(agent, f.Name(), origStart)
+	if prev != nil && prev.scanEnd >= origStart && prev.scanEnd <= size {
+		// Resume past the already-processed held lines and restore them so the open turn
+		// is not re-transformed.
+		scanStart = prev.scanEnd
+		asm.restore(prev.lines, origStart)
+	}
 	return &transformer{
 		f:     f,
 		agent: agent,
 		size:  size,
 		sink:  sink,
-		sc:    newOrigLineScanner(f, origStart, size),
-		asm:   newChunkAssembler(agent, origStart),
+		sc:    newOrigLineScanner(f, scanStart, size),
+		asm:   asm,
 	}
+}
+
+// snapshot captures the assembler's withheld lines and the scan offset just past
+// them, for caching across ticks. It returns nil when nothing is held (Claude and pi,
+// or a settled Codex turn that fully flushed), so the cache is populated only for an
+// open Codex turn.
+func (t *transformer) snapshot() *pendingTurn {
+	if len(t.asm.lines) == 0 {
+		return nil
+	}
+	held := make([]pendingLine, len(t.asm.lines))
+	copy(held, t.asm.lines)
+	return &pendingTurn{lines: held, scanEnd: t.sc.completeEnd()}
 }
 
 // run scans the unsent tail, transforming each line and emitting chunks to the sink
@@ -98,6 +137,7 @@ func newTransformer(f *os.File, origStart, size int64, agent string, sink chunkS
 // transformed bytes plus one line's small head, with big bodies streamed straight
 // through to the CAS.
 func (t *transformer) run(ctx context.Context, settled bool) (origEnd int64, conflicted bool, err error) {
+	t.sc.withContext(ctx)
 	for {
 		if err := ctx.Err(); err != nil {
 			return 0, false, err
@@ -171,17 +211,9 @@ func (t *transformer) handleBigLine(ctx context.Context, origOff, origLen int64)
 	// The line spans [origOff, origOff+origLen) in the file, trailing newline
 	// included. Locate bodies over the content without the newline so a span never
 	// includes it.
-	contentLen := origLen
-	hasNL := false
-	if contentLen > 0 {
-		var last [1]byte
-		if _, err := t.f.ReadAt(last[:], origOff+contentLen-1); err != nil && err != io.EOF {
-			return err
-		}
-		if last[0] == '\n' {
-			contentLen--
-			hasNL = true
-		}
+	contentLen, hasNL, err := lineContentLen(t.f, origOff, origLen)
+	if err != nil {
+		return err
 	}
 
 	locs, err := parser.LocateToolBodies(parser.Agent(t.agent), t.f, origOff, contentLen)
@@ -197,6 +229,11 @@ func (t *transformer) handleBigLine(ctx context.Context, origOff, origLen int64)
 	var rewritten []byte
 	cursor := int64(0)
 	for _, loc := range locs {
+		// Honor cancellation between bodies: a big line can hold many bodies, each a
+		// streamed upload, so a shutdown must not have to wait for the whole line.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if loc.Span.Start < cursor || loc.Span.End > contentLen {
 			continue // a span out of order or past the line: skip defensively
 		}
@@ -211,14 +248,20 @@ func (t *transformer) handleBigLine(ctx context.Context, origOff, origLen int64)
 		if err != nil {
 			return err
 		}
-		rewritten = appendFileSpan(rewritten, t.f, origOff+cursor, loc.Span.Start-cursor)
+		rewritten, err = appendFileSpan(rewritten, t.f, t.agent, origOff+cursor, loc.Span.Start-cursor)
+		if err != nil {
+			return err
+		}
 		rewritten = append(rewritten, sentinelFor(body)...)
 		cursor = loc.Span.End
 		if int64(len(rewritten)) > hardCap {
 			return errMessageTooBig(t.agent)
 		}
 	}
-	rewritten = appendFileSpan(rewritten, t.f, origOff+cursor, contentLen-cursor)
+	rewritten, err = appendFileSpan(rewritten, t.f, t.agent, origOff+cursor, contentLen-cursor)
+	if err != nil {
+		return err
+	}
 	if hasNL {
 		rewritten = append(rewritten, '\n')
 	}
@@ -250,26 +293,68 @@ func (t *transformer) drain(ctx context.Context, final bool) (bool, error) {
 	}
 }
 
-// appendFileSpan appends n bytes read from f at off to dst. It is used to copy the
-// small literal regions of a big line (the JSON structure around the bodies) into
-// the rewritten line; n is bounded by the gaps between bodies, which are small.
-func appendFileSpan(dst []byte, f *os.File, off, n int64) []byte {
+// appendFileSpanBuf bounds how much of a literal gap is read at once when copying
+// the non-body regions of a big line into the rewritten line. Copying through a
+// fixed window keeps a pathological gap (a giant non-body string between bodies)
+// from allocating its whole length in one read.
+const appendFileSpanBuf = 256 << 10
+
+// appendFileSpan appends n bytes read from f at off to dst, copying through a fixed
+// bounded window rather than allocating the whole gap, and enforcing hardCap as it
+// goes so the rewritten line cannot grow without bound. A short read is a hard error
+// (the file was truncated mid-line): it must never be treated as success, which would
+// splice zero-filled or partial bytes into the transcript. The gap between two bodies
+// is normally tiny (JSON structure), but the bound makes the worst case a constant.
+func appendFileSpan(dst []byte, f *os.File, agent string, off, n int64) ([]byte, error) {
 	if n <= 0 {
-		return dst
+		return dst, nil
 	}
-	buf := make([]byte, n)
-	if _, err := f.ReadAt(buf, off); err != nil && err != io.EOF {
-		// A read error here is surfaced by the surrounding emitChunk failing on a
-		// short/garbled line; appending nothing keeps the slice valid meanwhile.
-		return dst
+	buf := make([]byte, appendFileSpanBuf)
+	remaining := n
+	at := off
+	for remaining > 0 {
+		want := remaining
+		if want > int64(len(buf)) {
+			want = int64(len(buf))
+		}
+		if err := readAt(f, buf[:want], at); err != nil {
+			return dst, err
+		}
+		dst = append(dst, buf[:want]...)
+		if int64(len(dst)) > hardCap {
+			return dst, errMessageTooBig(agent)
+		}
+		remaining -= want
+		at += want
 	}
-	return append(dst, buf...)
+	return dst, nil
 }
 
 // sentinelFor renders the CAS reference that replaces a body, reusing the parser's
 // canonical encoding so the bytes match what RewriteLine produces for a small line.
 func sentinelFor(b parser.Body) []byte {
 	return parser.SentinelBytes(b.SHA256, b.Bytes, b.MediaType)
+}
+
+// lineContentLen returns the byte length of a line's content (its bytes minus a
+// trailing newline) and whether it ended in a newline, reading only the line's last
+// byte. The read is full-or-error: a short read means the file was truncated between
+// the scan and now, which must abort the transform rather than misjudge the line
+// shape. The byte lies inside a line the scanner already framed, so in practice it is
+// always present.
+func lineContentLen(f *os.File, origOff, origLen int64) (contentLen int64, hasNL bool, err error) {
+	contentLen = origLen
+	if contentLen <= 0 {
+		return 0, false, nil
+	}
+	var last [1]byte
+	if err := readAt(f, last[:], origOff+contentLen-1); err != nil {
+		return 0, false, err
+	}
+	if last[0] == '\n' {
+		return contentLen - 1, true, nil
+	}
+	return contentLen, false, nil
 }
 
 // transformPrefixDigest re-transforms the original file from byte zero, hashing the
@@ -285,7 +370,7 @@ func sentinelFor(b parser.Body) []byte {
 // rewritten from its literal regions plus sentinels, streaming each body once only
 // to recompute its hash, never buffering it.
 func transformPrefixDigest(ctx context.Context, f *os.File, agent string, size, wantTransformed int64) (hash.Hash, int64, bool, error) {
-	sc := newOrigLineScanner(f, 0, size)
+	sc := newOrigLineScanner(f, 0, size).withContext(ctx)
 	h := sha256.New()
 	var transformed, orig int64
 	for transformed < wantTransformed {
@@ -299,7 +384,7 @@ func transformPrefixDigest(ctx context.Context, f *os.File, agent string, size, 
 		if !ok {
 			return nil, 0, false, nil // ran out of file before reaching the cursor
 		}
-		rewritten, err := rewriteForDigest(f, agent, line, origOff, origLen, isBig)
+		rewritten, err := rewriteForDigest(ctx, f, agent, line, origOff, origLen, isBig)
 		if err != nil {
 			return nil, 0, false, err
 		}
@@ -317,22 +402,14 @@ func transformPrefixDigest(ctx context.Context, f *os.File, agent string, size, 
 // verification, matching the bytes the transform uploaded. A big line is rewritten
 // by streaming, identical to handleBigLine, but the hashing is done locally rather
 // than through the sink.
-func rewriteForDigest(f *os.File, agent string, line []byte, origOff, origLen int64, isBig bool) ([]byte, error) {
+func rewriteForDigest(ctx context.Context, f *os.File, agent string, line []byte, origOff, origLen int64, isBig bool) ([]byte, error) {
 	if !isBig {
 		rewritten, _ := parser.RewriteLine(parser.Agent(agent), line)
 		return rewritten, nil
 	}
-	contentLen := origLen
-	hasNL := false
-	if contentLen > 0 {
-		var last [1]byte
-		if _, err := f.ReadAt(last[:], origOff+contentLen-1); err != nil && err != io.EOF {
-			return nil, err
-		}
-		if last[0] == '\n' {
-			contentLen--
-			hasNL = true
-		}
+	contentLen, hasNL, err := lineContentLen(f, origOff, origLen)
+	if err != nil {
+		return nil, err
 	}
 	locs, err := parser.LocateToolBodies(parser.Agent(agent), f, origOff, contentLen)
 	if err != nil {
@@ -344,33 +421,58 @@ func rewriteForDigest(f *os.File, agent string, line []byte, origOff, origLen in
 		if loc.Span.Start < cursor || loc.Span.End > contentLen {
 			continue
 		}
-		sha, n, err := hashBodySpan(f, origOff, loc.Span, loc.Kind)
+		sha, n, err := hashBodySpan(ctx, f, origOff, loc.Span, loc.Kind)
 		if err != nil {
 			return nil, err
 		}
-		rewritten = appendFileSpan(rewritten, f, origOff+cursor, loc.Span.Start-cursor)
+		rewritten, err = appendFileSpan(rewritten, f, agent, origOff+cursor, loc.Span.Start-cursor)
+		if err != nil {
+			return nil, err
+		}
 		rewritten = append(rewritten, parser.SentinelBytes(sha, n, loc.Media)...)
 		cursor = loc.Span.End
 	}
-	rewritten = appendFileSpan(rewritten, f, origOff+cursor, contentLen-cursor)
+	rewritten, err = appendFileSpan(rewritten, f, agent, origOff+cursor, contentLen-cursor)
+	if err != nil {
+		return nil, err
+	}
 	if hasNL {
 		rewritten = append(rewritten, '\n')
 	}
 	return rewritten, nil
 }
 
+// hashBodyChunk bounds how much of a body is hashed per read, so a huge body is
+// digested in fixed slices and the loop can check for cancellation between them.
+const hashBodyChunk = 256 << 10
+
 // hashBodySpan streams a located body through its canonical reader to compute its
 // sha256 and byte length without buffering it. It is the shared primitive both the
-// upload path and the digest path use, so the hash a sentinel carries is identical
-// in both.
-func hashBodySpan(f *os.File, lineOff int64, span parser.ValueSpan, kind parser.BodyKind) (string, int, error) {
+// upload path and the digest path use, so the hash a sentinel carries is identical in
+// both. The copy is a bounded loop rather than io.Copy so a canceled sync stops
+// hashing a hundreds-of-MiB body instead of running to its end.
+func hashBodySpan(ctx context.Context, f *os.File, lineOff int64, span parser.ValueSpan, kind parser.BodyKind) (string, int, error) {
 	r := parser.CanonicalBodyReader(f, lineOff, span, kind)
 	h := sha256.New()
-	n, err := io.Copy(h, r)
-	if err != nil {
-		return "", 0, err
+	buf := make([]byte, hashBodyChunk)
+	var total int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", 0, err
+		}
+		n, rerr := r.Read(buf)
+		if n > 0 {
+			h.Write(buf[:n])
+			total += int64(n)
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			return "", 0, rerr
+		}
 	}
-	return parser.HexDigest(h.Sum(nil)), int(n), nil
+	return parser.HexDigest(h.Sum(nil)), int(total), nil
 }
 
 // origLineScanner yields complete JSONL lines from the original file starting at a
@@ -384,6 +486,7 @@ func hashBodySpan(f *os.File, lineOff int64, span parser.ValueSpan, kind parser.
 // The scanner therefore never holds more than bigLineThreshold of a single line plus
 // one read window, so one giant line cannot blow the memory budget.
 type origLineScanner struct {
+	ctx     context.Context
 	f       *os.File
 	size    int64
 	pos     int64  // next original byte to read
@@ -394,7 +497,16 @@ type origLineScanner struct {
 }
 
 func newOrigLineScanner(f *os.File, start, size int64) *origLineScanner {
-	return &origLineScanner{f: f, size: size, pos: start, bufBase: start}
+	return &origLineScanner{ctx: context.Background(), f: f, size: size, pos: start, bufBase: start}
+}
+
+// withContext attaches a context so the scan-to-EOF loop over a huge line can honor
+// cancellation. The transformer sets it from the sync's context.
+func (s *origLineScanner) withContext(ctx context.Context) *origLineScanner {
+	if ctx != nil {
+		s.ctx = ctx
+	}
+	return s
 }
 
 // scanWindow is how many bytes the scanner pulls from the file at a time while
@@ -468,16 +580,22 @@ func (s *origLineScanner) takeBigLine() (line []byte, origOff, origLen int64, is
 	if searchFrom > scanPos {
 		scanPos = searchFrom
 	}
+	win := make([]byte, scanWindow)
 	for scanPos < s.size {
+		// A pathological line can span the whole file, so the scan-to-newline loop must
+		// honor cancellation rather than read the entire file before noticing a shutdown.
+		if err := s.ctx.Err(); err != nil {
+			return nil, 0, 0, false, false, err
+		}
 		end := scanPos + scanWindow
 		if end > s.size {
 			end = s.size
 		}
-		win := make([]byte, end-scanPos)
-		if err := readAt(s.f, win, scanPos); err != nil {
+		w := win[:end-scanPos]
+		if err := readAt(s.f, w, scanPos); err != nil {
 			return nil, 0, 0, false, false, err
 		}
-		if rel := bytes.IndexByte(win, '\n'); rel >= 0 {
+		if rel := bytes.IndexByte(w, '\n'); rel >= 0 {
 			lineEnd := scanPos + int64(rel) + 1
 			s.advancePast(lineEnd)
 			return nil, lineStart, lineEnd - lineStart, true, true, nil
@@ -561,6 +679,7 @@ type pendingLine struct {
 // on settle).
 type chunkAssembler struct {
 	agent string
+	file  string // session file path, for the oversized-turn warning
 	lines []pendingLine
 
 	lastBoundary  int   // index of the last boundary line in lines, or -1
@@ -572,8 +691,19 @@ type chunkAssembler struct {
 	consumedOrigEnd int64 // original offset just past everything emitted so far
 }
 
-func newChunkAssembler(agent string, origStart int64) *chunkAssembler {
-	return &chunkAssembler{agent: agent, lastBoundary: -1, consumedOrigEnd: origStart}
+func newChunkAssembler(agent, file string, origStart int64) *chunkAssembler {
+	return &chunkAssembler{agent: agent, file: file, lastBoundary: -1, consumedOrigEnd: origStart}
+}
+
+// restore re-seeds the assembler with lines withheld on a previous tick (a cached
+// open Codex turn), so the turn is not re-transformed. consumedOrigEnd is the original
+// offset the held lines begin at: committing them advances the cursor exactly as if
+// they had just been produced. The boundary and byte counters are recomputed from the
+// restored lines.
+func (a *chunkAssembler) restore(lines []pendingLine, origStart int64) {
+	a.lines = append(a.lines[:0], lines...)
+	a.consumedOrigEnd = origStart
+	a.recountBoundary()
 }
 
 // add records one rewritten line, classifying whether it closes a chunk boundary and
@@ -631,7 +761,21 @@ func (a *chunkAssembler) takeReady(final bool) (data []byte, origLen int64, ok b
 		cut = len(a.lines) - 1
 	}
 	if cut < 0 {
-		return nil, 0, false // no boundary yet, and not flushing all
+		// No turn boundary yet. A Codex turn folds across lines, so normally the run is
+		// withheld until its closing user line. The accepted bound: rewritten turns are
+		// body-free and tiny (the 508 MiB image turn becomes a few MB of ref lines), so
+		// truly bounding an arbitrarily long turn would require the server reducer to
+		// fold a turn across regions, which it deliberately does not do (a chunk is
+		// whole turns, so a region is always whole turns). Rather than rewrite the
+		// reducer, cap the accumulated run by a constant: if a single open turn's
+		// rewritten size somehow exceeds maxTurnBytes, emit a line-aligned partial chunk
+		// as a hard backstop so worst-case memory is bounded by maxTurnBytes, not by
+		// turn length. This sacrifices turn-alignment for that one pathological chunk; it
+		// is not expected to fire in practice.
+		if a.pendingBytes >= maxTurnBytes {
+			return a.forcePartialFlush()
+		}
+		return nil, 0, false
 	}
 	if !final && a.boundaryBytes < chunkTarget {
 		// Steady state withholds a sub-target releasable prefix so chunks stay near
@@ -641,6 +785,24 @@ func (a *chunkAssembler) takeReady(final bool) (data []byte, origLen int64, ok b
 	}
 
 	return a.cutChunk(cut)
+}
+
+// maxTurnBytes is the hard backstop on the rewritten bytes a single open Codex turn
+// may accumulate before the assembler force-flushes it line-aligned. It converts the
+// otherwise turn-length-bounded memory into a constant bound. It is generous (a
+// rewritten turn is body-free) so it only fires for genuinely pathological input, and
+// is a var so a test can shrink it to exercise the backstop.
+var maxTurnBytes = 16 << 20
+
+// forcePartialFlush emits the whole held run as one line-aligned chunk when an open
+// turn has grown past maxTurnBytes without closing. It logs a warning naming the file
+// because the emitted chunk is not turn-aligned, which the server reducer does not
+// normally see; the warning makes the rare event visible rather than silent.
+func (a *chunkAssembler) forcePartialFlush() (data []byte, origLen int64, ok bool) {
+	last := len(a.lines) - 1
+	slog.Warn("akari: forcing a non-turn-aligned partial chunk for an oversized open turn",
+		"file", a.file, "rewritten_bytes", a.pendingBytes, "cap", maxTurnBytes)
+	return a.cutChunk(last)
 }
 
 // cutChunk builds the chunk covering lines [0, cut], leaving the rest pending. It

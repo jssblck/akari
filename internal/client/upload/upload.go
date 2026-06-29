@@ -118,6 +118,14 @@ type fileSync struct {
 	origBase     int64
 	prefixHasher hash.Hash
 	prefixSize   int64
+
+	// pending caches an open Codex trailing turn (its withheld rewritten lines and
+	// the scan offset just past them) so a repeated sync of a session whose final
+	// turn is still open re-transforms only the appended delta, not the whole turn.
+	// It is nil for Claude and pi (every line is a boundary, nothing is withheld) and
+	// after a turn closes or the file settles. Like the rest of fileSync it is a
+	// cache: dropping it costs a one-time re-transform, never correctness.
+	pending *pendingTurn
 }
 
 // New builds a Client. baseURL is the server root (trailing slash optional).
@@ -155,6 +163,8 @@ func (fs *fileSync) rewind(size int64) {
 	fs.origBase = 0
 	fs.prefixHasher = sha256.New()
 	fs.prefixSize = size
+	// A reset re-transforms from zero, so any cached open turn is stale.
+	fs.pending = nil
 }
 
 // maxConflictRetries bounds how many times a single SyncFile re-announces after
@@ -262,15 +272,21 @@ func (c *Client) syncOnce(ctx context.Context, t Target, fs *fileSync, f *os.Fil
 	// server accepts, so steady-state work is proportional to the newly appended
 	// bytes. A withheld trailing turn leaves origBase where it is and is re-examined
 	// next tick (the only repeated work, and only for an open final turn).
-	sink := &syncSink{c: c, fs: fs, sessionID: ann.SessionID, size: size, out: &out, seen: map[string]bool{}}
-	tr := newTransformer(f, fs.origBase, size, t.Agent, sink)
+	sink := &syncSink{c: c, fs: fs, sessionID: ann.SessionID, size: size, out: &out, seen: newSeenCache()}
+	tr := newTransformer(f, fs.origBase, size, t.Agent, sink, fs.pending)
 	_, conflicted, err := tr.run(ctx, settled)
 	if err != nil {
 		return out, false, err
 	}
 	if conflicted {
-		return out, true, nil // re-announce and re-verify the prefix
+		// The server cursor moved; the cached open turn may no longer line up, so drop
+		// it and let the re-announce rebuild from the verified prefix.
+		fs.pending = nil
+		return out, true, nil
 	}
+	// Carry an open Codex trailing turn to the next tick so it is not re-transformed.
+	// For Claude, pi, or a settled/closed turn this is nil and the cache clears.
+	fs.pending = tr.snapshot()
 
 	if out.UploadedBytes == 0 && action != ActionReset {
 		action = ActionUpToDate
@@ -290,13 +306,19 @@ type syncSink struct {
 	sessionID int64
 	size      int64
 	out       *Outcome
-	seen      map[string]bool // bodies already uploaded this pass, deduped by sha
+	seen      *seenCache // bounded recently-handled body hashes, to cut round-trips
 }
 
 // emitBody hashes a located body (streaming it from the file, or using the bytes a
 // small line already holds), uploads it to the CAS when the server lacks it, and
-// returns the descriptor the sentinel is built from. A body seen earlier in this
-// pass is neither re-hashed-from-scratch nor re-uploaded.
+// returns the descriptor the sentinel is built from.
+//
+// Dedup is the server's job: MissingBlobs reports a body already in the CAS (from any
+// session) as not-missing and pins it, so a present body is never re-sent. The client
+// keeps only a small bounded cache of recently handled hashes to skip the redundant
+// round-trip for a body that recurs back to back, which is the common case (the same
+// tool result echoed across adjacent turns). The cache is capped, so its memory does
+// not grow with the number of distinct bodies in a session.
 func (s *syncSink) emitBody(ctx context.Context, ref bodyRef) (parser.Body, error) {
 	var sha string
 	var n int
@@ -305,29 +327,59 @@ func (s *syncSink) emitBody(ctx context.Context, ref bodyRef) (parser.Body, erro
 		n = len(ref.content)
 	} else {
 		var err error
-		sha, n, err = hashBodySpan(ref.file, ref.lineOff, ref.span, ref.bodyKind)
+		sha, n, err = hashBodySpan(ctx, ref.file, ref.lineOff, ref.span, ref.bodyKind)
 		if err != nil {
 			return parser.Body{}, err
 		}
 	}
 	body := parser.Body{SHA256: sha, Bytes: n, MediaType: ref.media, Kind: ref.kind}
 
-	if s.seen[sha] {
-		return body, nil // already handled this body this pass
+	if s.seen.has(sha) {
+		return body, nil // handled very recently this pass; the server already holds it
 	}
-	s.seen[sha] = true
 
 	missing, err := s.c.checkBlobs(ctx, []string{sha})
 	if err != nil {
-		return parser.Body{}, err
+		return parser.Body{}, fmt.Errorf("check tool body %s in CAS: %w", sha, err)
 	}
 	if !missing[sha] {
-		return body, nil // the CAS already holds it (global dedup)
+		s.seen.add(sha) // present on the server (global dedup), record so a repeat skips the check
+		return body, nil
 	}
 	if err := s.c.putBlobStream(ctx, sha, ref); err != nil {
-		return parser.Body{}, err
+		return parser.Body{}, fmt.Errorf("upload tool body %s to CAS: %w", sha, err)
 	}
+	s.seen.add(sha)
 	return body, nil
+}
+
+// seenCacheCap bounds the recently-handled-body cache. It is a small constant: the
+// cache only exists to collapse back-to-back duplicate uploads, not to track every
+// body, so its memory is fixed regardless of how many distinct bodies a session has.
+const seenCacheCap = 1024
+
+// seenCache is a bounded set of recently handled body hashes with simple wholesale
+// eviction: when it fills, it is cleared. It never grows past seenCacheCap entries, so
+// it cannot leak with unique body count. A miss after eviction costs one extra server
+// check, never a correctness problem (the server is authoritative for presence).
+type seenCache struct {
+	m map[string]struct{}
+}
+
+func newSeenCache() *seenCache { return &seenCache{m: make(map[string]struct{}, seenCacheCap)} }
+
+func (c *seenCache) has(sha string) bool {
+	_, ok := c.m[sha]
+	return ok
+}
+
+func (c *seenCache) add(sha string) {
+	if len(c.m) >= seenCacheCap {
+		// Drop the whole set rather than track recency: cheap, and a re-check after a
+		// flush is harmless. This keeps the cache strictly bounded.
+		c.m = make(map[string]struct{}, seenCacheCap)
+	}
+	c.m[sha] = struct{}{}
 }
 
 // emitChunk uploads one transformed chunk and folds the result into the verified
