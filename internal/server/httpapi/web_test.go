@@ -9,7 +9,6 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"strings"
 	"testing"
 
@@ -17,7 +16,7 @@ import (
 	"github.com/jssblck/akari/internal/server/auth"
 	"github.com/jssblck/akari/internal/server/reparse"
 	"github.com/jssblck/akari/internal/server/store"
-	"github.com/jssblck/akari/migrations"
+	"github.com/jssblck/akari/internal/server/storetest"
 )
 
 // mustHash hashes a password for seeding a test account directly via the store.
@@ -30,9 +29,10 @@ func mustHash(t *testing.T, password string) string {
 	return h
 }
 
-// newTestServer brings up a full Routes() handler backed by a freshly migrated
-// test database, returning the server and its store. It is skipped unless
-// AKARI_TEST_DATABASE_URL is set.
+// newTestServer brings up a full Routes() handler backed by its own isolated,
+// freshly migrated database, returning the server and its store. The database is
+// created and force-dropped by the storetest package, so tests run safely in
+// parallel; it is skipped unless AKARI_TEST_DATABASE_URL is set.
 func newTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 	t.Helper()
 	srv, st, _ := newTestServerWithReparse(t)
@@ -43,32 +43,10 @@ func newTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 // wired into the server, so a test can force its status to exercise the UI gating.
 func newTestServerWithReparse(t *testing.T) (*httptest.Server, *store.Store, *reparse.Service) {
 	t.Helper()
-	dburl := os.Getenv("AKARI_TEST_DATABASE_URL")
-	if dburl == "" {
-		t.Skip("set AKARI_TEST_DATABASE_URL to run web integration tests")
-	}
-	ctx := context.Background()
-	if err := store.EnsureDatabase(ctx, dburl); err != nil {
-		t.Fatalf("ensure database: %v", err)
-	}
-	st, err := store.Open(ctx, dburl)
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	for _, q := range []string{"DROP SCHEMA public CASCADE", "CREATE SCHEMA public"} {
-		if _, err := st.Pool.Exec(ctx, q); err != nil {
-			t.Fatalf("reset schema (%s): %v", q, err)
-		}
-	}
-	if err := st.Migrate(ctx, migrations.FS); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	rp := reparse.New(ctx, st)
+	st := storetest.NewStore(t)
+	rp := reparse.New(context.Background(), st)
 	srv := httptest.NewServer(New(st, config.Server{}, rp).Routes())
-	t.Cleanup(func() {
-		srv.Close()
-		st.Close()
-	})
+	t.Cleanup(srv.Close)
 	return srv, st, rp
 }
 
@@ -84,6 +62,7 @@ func newClient(t *testing.T) *http.Client {
 }
 
 func TestWebFlow(t *testing.T) {
+	t.Parallel()
 	srv, _ := newTestServer(t)
 	c := newClient(t)
 
@@ -119,6 +98,10 @@ func TestWebFlow(t *testing.T) {
 	body = readBody(t, resp)
 	if !strings.Contains(body, "grace") || !strings.Contains(body, "Overview") {
 		t.Fatalf("overview page missing expected content, got:\n%s", body)
+	}
+	// The standalone search page was retired, so the sidebar must not link to it.
+	if strings.Contains(body, `href="/search"`) {
+		t.Fatalf("sidebar still links to the removed search page, got:\n%s", body)
 	}
 
 	// The projects table moved to /projects; with no projects yet it shows its
@@ -170,14 +153,15 @@ func TestWebFlow(t *testing.T) {
 		t.Fatalf("admin account page should show invites, got:\n%s", body)
 	}
 
-	// Search with no query renders the form without error.
+	// The /search route was removed with the page; an authenticated request for
+	// it now falls through to a 404 rather than rendering anything.
 	resp, err = c.Get(srv.URL + "/search")
 	if err != nil {
-		t.Fatalf("search: %v", err)
+		t.Fatalf("get /search: %v", err)
 	}
-	body = readBody(t, resp)
-	if !strings.Contains(body, "search message content") {
-		t.Fatalf("search page missing form, got:\n%s", body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET /search after removal = %d, want 404", resp.StatusCode)
 	}
 
 	// Logout clears the session; the root redirects to login again.
@@ -196,6 +180,7 @@ func TestWebFlow(t *testing.T) {
 // own "Sessions" section, tagged and labeled by folder, and that drilling into
 // one shows its state and path.
 func TestStandaloneOrphanedIndex(t *testing.T) {
+	t.Parallel()
 	srv, st := newTestServer(t)
 	ctx := context.Background()
 	c := newClient(t)
@@ -274,6 +259,7 @@ func TestStandaloneOrphanedIndex(t *testing.T) {
 }
 
 func TestLoginPreservesNext(t *testing.T) {
+	t.Parallel()
 	srv, _ := newTestServer(t)
 	c := newClient(t)
 
@@ -289,30 +275,31 @@ func TestLoginPreservesNext(t *testing.T) {
 	}
 
 	// The login page carries the next target as a hidden field.
-	resp, err := c.Get(srv.URL + "/login?next=%2Fsearch")
+	resp, err := c.Get(srv.URL + "/login?next=%2Faccount")
 	if err != nil {
 		t.Fatalf("login page: %v", err)
 	}
 	body := readBody(t, resp)
-	if !strings.Contains(body, `name="next" value="/search"`) {
+	if !strings.Contains(body, `name="next" value="/account"`) {
 		t.Fatalf("login page should carry next, got:\n%s", body)
 	}
 
 	// Stop following redirects so we can inspect the post-login Location.
 	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	resp, err = c.PostForm(srv.URL+"/login", url.Values{
-		"username": {"ada"}, "password": {"lovelace-1843"}, "next": {"/search"},
+		"username": {"ada"}, "password": {"lovelace-1843"}, "next": {"/account"},
 	})
 	if err != nil {
 		t.Fatalf("login post: %v", err)
 	}
-	if loc := resp.Header.Get("Location"); loc != "/search" {
-		t.Fatalf("post-login redirect = %q, want /search", loc)
+	if loc := resp.Header.Get("Location"); loc != "/account" {
+		t.Fatalf("post-login redirect = %q, want /account", loc)
 	}
 	resp.Body.Close()
 }
 
 func TestPublicSessionFlow(t *testing.T) {
+	t.Parallel()
 	srv, st := newTestServer(t)
 	ctx := context.Background()
 	c := newClient(t)
@@ -424,7 +411,7 @@ func TestSafeNext(t *testing.T) {
 		"/projects/1":       "/projects/1",
 		"//evil.example":    "/",
 		"https://evil/x":    "/",
-		"/search?q=a":       "/search?q=a",
+		"/sessions?q=a":     "/sessions?q=a",
 		"javascript:alert1": "/",
 	}
 	for in, want := range cases {

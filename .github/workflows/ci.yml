@@ -63,7 +63,8 @@ jobs:
         run: go vet ./...
 
       - name: Test
-        # -p 1 serializes packages: the store, parse, and web integration tests
-        # share one database and each resets the public schema, so they must not
-        # run concurrently. -race needs CGO, which the ubuntu runner has.
-        run: go test -race -p 1 ./...
+        # The integration tests provision an isolated database per test (see
+        # internal/server/storetest), so packages run concurrently at the default
+        # parallelism with no clobbering. -race needs CGO, which the ubuntu runner
+        # has.
+        run: go test -race ./...

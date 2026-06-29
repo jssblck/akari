@@ -28,6 +28,7 @@ func registerAdmin(t *testing.T, srvURL string) *http.Client {
 // TestReparseButtonRequiresAdmin confirms POST /account/reparse is admin-only: the
 // admin is redirected back to the account page, a non-admin is forbidden.
 func TestReparseButtonRequiresAdmin(t *testing.T) {
+	t.Parallel()
 	srv, st := newTestServer(t)
 	ctx := context.Background()
 	admin := registerAdmin(t, srv.URL)
@@ -77,6 +78,7 @@ func TestReparseButtonRequiresAdmin(t *testing.T) {
 // the status endpoint reports the live counts, the account page stays available,
 // and the normal pages return once the reparse clears.
 func TestParsedEndpointsGateDuringReparse(t *testing.T) {
+	t.Parallel()
 	srv, _, rp := newTestServerWithReparse(t)
 	c := registerAdmin(t, srv.URL)
 
@@ -89,7 +91,7 @@ func TestParsedEndpointsGateDuringReparse(t *testing.T) {
 	rp.SetStatusForTest(reparse.Status{InProgress: true, Done: 2, Total: 5, Failed: 1})
 
 	// Parsed pages are gated: they show the progress stand-in.
-	for _, path := range []string{"/", "/sessions", "/projects", "/search"} {
+	for _, path := range []string{"/", "/sessions", "/projects"} {
 		body := getBody(t, c, srv.URL+path)
 		if !strings.Contains(body, "Reparse in progress") {
 			t.Fatalf("%s should be gated during a reparse, got:\n%s", path, body)

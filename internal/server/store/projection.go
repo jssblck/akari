@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -150,38 +151,12 @@ const roleUser = "user"
 // must not perform I/O.
 type ReduceFunc func(state, region []byte, baseOffset int64) (newState []byte, d ProjectionDelta, err error)
 
-// ReparseTarget identifies a session to re-parse.
+// ReparseTarget identifies a session to re-parse. The reparse loop fetches targets
+// a bounded page at a time (see SessionsForReparsePage), so the server never holds
+// the whole session list resident at once.
 type ReparseTarget struct {
 	ID    int64
 	Agent string
-}
-
-// SessionsForReparse lists sessions, optionally filtered to one agent.
-func (s *Store) SessionsForReparse(ctx context.Context, agent string) ([]ReparseTarget, error) {
-	q := "SELECT id, agent FROM sessions"
-	var args []any
-	if agent != "" {
-		q += " WHERE agent = $1"
-		args = append(args, agent)
-	}
-	q += " ORDER BY id"
-	rows, err := s.Pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, fmt.Errorf("list sessions for reparse (agent=%q): %w", agent, err)
-	}
-	defer rows.Close()
-	var out []ReparseTarget
-	for rows.Next() {
-		var t ReparseTarget
-		if err := rows.Scan(&t.ID, &t.Agent); err != nil {
-			return nil, fmt.Errorf("scan reparse target: %w", err)
-		}
-		out = append(out, t)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate reparse targets: %w", err)
-	}
-	return out, nil
 }
 
 // AdvanceProjection parses the next unparsed region of a session and applies it
@@ -328,7 +303,8 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 			   (session_id, ordinal, role, content, thinking_text, model, timestamp, has_thinking, has_tool_use)
 			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
 			 ON CONFLICT (session_id, ordinal) DO NOTHING`,
-			sessionID, m.Ordinal, m.Role, m.Content, m.ThinkingText, m.Model,
+			sessionID, m.Ordinal, sanitizeText(m.Role), sanitizeText(m.Content),
+			sanitizeText(m.ThinkingText), sanitizeText(m.Model),
 			nullTime(m.Timestamp), m.HasThinking, m.HasToolUse)
 		if err != nil {
 			return appliedDelta{}, fmt.Errorf("write message %d for session %d: %w", m.Ordinal, sessionID, err)
@@ -352,13 +328,13 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 			if err := pinBlobRefTx(ctx, tx, t.InputSHA256); err != nil {
 				return appliedDelta{}, fmt.Errorf("reference tool input blob %s for session %d call %d/%d: %w", t.InputSHA256, sessionID, t.MessageOrdinal, t.CallIndex, err)
 			}
-			inputSHA, inputMedia = t.InputSHA256, t.InputMediaType
+			inputSHA, inputMedia = t.InputSHA256, sanitizeText(t.InputMediaType)
 		case len(t.InputBody) > 0:
 			sha, err := writeBlobTx(ctx, tx, t.InputBody, t.InputMediaType)
 			if err != nil {
 				return appliedDelta{}, fmt.Errorf("write tool input blob for session %d call %d/%d: %w", sessionID, t.MessageOrdinal, t.CallIndex, err)
 			}
-			inputSHA, inputMedia = sha, t.InputMediaType
+			inputSHA, inputMedia = sha, sanitizeText(t.InputMediaType)
 		}
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO tool_calls
@@ -366,8 +342,9 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 			    input_sha256, input_bytes, input_media_type, call_uid)
 			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
 			 ON CONFLICT (session_id, message_ordinal, call_index) DO NOTHING`,
-			sessionID, t.MessageOrdinal, t.CallIndex, t.ToolName, t.Category, nullString(t.FilePath),
-			inputSHA, t.InputBytes, inputMedia, nullString(t.CallUID)); err != nil {
+			sessionID, t.MessageOrdinal, t.CallIndex, sanitizeText(t.ToolName), sanitizeText(t.Category),
+			nullString(sanitizeText(t.FilePath)),
+			inputSHA, t.InputBytes, inputMedia, nullString(sanitizeText(t.CallUID))); err != nil {
 			return appliedDelta{}, fmt.Errorf("insert tool call %d/%d for session %d: %w", t.MessageOrdinal, t.CallIndex, sessionID, err)
 		}
 	}
@@ -390,7 +367,7 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 			}
 			resultSHA = sha
 		}
-		media := tr.MediaType
+		media := sanitizeText(tr.MediaType)
 		if media == "" {
 			media = "text/plain"
 		}
@@ -398,7 +375,7 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 			`UPDATE tool_calls
 			    SET result_sha256 = $3, result_bytes = $4, result_media_type = $5, result_status = $6
 			  WHERE session_id = $1 AND call_uid = $2`,
-			sessionID, tr.CallUID, resultSHA, tr.Bytes, media, tr.Status); err != nil {
+			sessionID, sanitizeText(tr.CallUID), resultSHA, tr.Bytes, media, sanitizeText(tr.Status)); err != nil {
 			return appliedDelta{}, fmt.Errorf("back-patch tool result for session %d call %q: %w", sessionID, tr.CallUID, err)
 		}
 	}
@@ -425,8 +402,8 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 			    occurred_at, dedup_key, source_offset, source_index)
 			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 			 ON CONFLICT DO NOTHING`,
-			sessionID, ord, u.Model, u.Input, u.Output, u.CacheWrite, u.CacheRead,
-			u.Reasoning, cost, nullTime(u.OccurredAt), u.DedupKey, u.SourceOffset, u.SourceIndex)
+			sessionID, ord, sanitizeText(u.Model), u.Input, u.Output, u.CacheWrite, u.CacheRead,
+			u.Reasoning, cost, nullTime(u.OccurredAt), sanitizeText(u.DedupKey), u.SourceOffset, u.SourceIndex)
 		if err != nil {
 			return appliedDelta{}, fmt.Errorf("insert usage event for session %d at offset %d: %w", sessionID, u.SourceOffset, err)
 		}
@@ -468,7 +445,7 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 		default:
 			continue // an attachment with no body is nothing to store
 		}
-		media := a.MediaType
+		media := sanitizeText(a.MediaType)
 		if media == "" {
 			media = "application/octet-stream"
 		}
@@ -478,7 +455,7 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 			`INSERT INTO attachments (session_id, message_ordinal, sha256, filename, media_type, byte_len)
 			 VALUES ($1,$2,$3,$4,$5,$6)
 			 ON CONFLICT (session_id, message_ordinal, sha256) DO NOTHING`,
-			sessionID, a.MessageOrdinal, sha, nullString(a.Filename), media, a.Bytes); err != nil {
+			sessionID, a.MessageOrdinal, sha, nullString(sanitizeText(a.Filename)), media, a.Bytes); err != nil {
 			return appliedDelta{}, fmt.Errorf("insert attachment for session %d ordinal %d: %w", sessionID, a.MessageOrdinal, err)
 		}
 	}
@@ -621,4 +598,17 @@ func nullString(s string) any {
 		return nil
 	}
 	return s
+}
+
+// sanitizeText makes a session-derived string safe for a Postgres text column.
+// Postgres rejects a NUL byte (0x00) outright and any byte sequence that is not
+// valid UTF-8, and a single offending byte fails the whole INSERT: that is how a
+// reparse of one Claude session (a message body carrying a raw NUL) rolled back
+// and kept its stale projection. Replacing the bad bytes with U+FFFD keeps the
+// row writable and marks where the transcript was malformed, rather than dropping
+// the message or stranding the session. NUL is itself valid UTF-8, so ToValidUTF8
+// leaves it in place and it is replaced separately; both calls return the input
+// unchanged when there is nothing to fix, so the clean path does not allocate.
+func sanitizeText(s string) string {
+	return strings.ReplaceAll(strings.ToValidUTF8(s, "�"), "\x00", "�")
 }

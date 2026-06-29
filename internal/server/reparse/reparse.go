@@ -25,6 +25,23 @@ import (
 	"github.com/jssblck/akari/internal/server/store"
 )
 
+// defaultReparsePageSize bounds how many reparse targets are resident at once. The
+// loop pages through sessions by id, so peak memory is one page plus the session
+// being reparsed, not the whole corpus. It seeds each Service's pageSize, which
+// tests shrink per-instance to exercise the multi-page path without racing on
+// shared state.
+const defaultReparsePageSize = 512
+
+// reparseUnlockTimeout caps the advisory-lock release so a stuck unlock cannot
+// block shutdown.
+const reparseUnlockTimeout = 5 * time.Second
+
+// defaultFleetCacheTTL is how long the cross-process "is a reparse running" answer
+// is cached, so gating a parsed-page request does not query pg_locks every time. It
+// seeds each Service's fleetTTL, which tests set to zero per-instance to observe
+// lock transitions without waiting out the cache or racing on shared state.
+const defaultFleetCacheTTL = 2 * time.Second
+
 // Status is a snapshot of the current (or last) reparse. It is what the HTTP
 // status endpoint and the SSE progress stream serialize, so its JSON tags are the
 // wire contract the frontend reads.
@@ -74,9 +91,20 @@ type Service struct {
 	baseCtx context.Context
 	st      *store.Store
 
+	// pageSize bounds the reparse target page; it seeds from defaultReparsePageSize
+	// and is set only at construction, so it carries no lock. fleetTTL likewise seeds
+	// from defaultFleetCacheTTL and is construction-only.
+	pageSize int
+	fleetTTL time.Duration
+
 	mu         sync.Mutex
 	status     Status
 	onProgress func(Status)
+
+	// fleetCheckedAt/fleetHeld cache the cross-process advisory-lock check so the UI
+	// gate does not query the database on every parsed-page request.
+	fleetCheckedAt time.Time
+	fleetHeld      bool
 
 	// wg tracks the goroutine of any in-flight reparse so Wait can block shutdown
 	// until it winds down, before the connection pool closes.
@@ -87,7 +115,7 @@ type Service struct {
 // reparses (the startup auto-run and the admin button) are cancelled on shutdown;
 // the CLI passes context.Background() to Run directly and does not rely on it.
 func New(baseCtx context.Context, st *store.Store) *Service {
-	return &Service{baseCtx: baseCtx, st: st}
+	return &Service{baseCtx: baseCtx, st: st, pageSize: defaultReparsePageSize, fleetTTL: defaultFleetCacheTTL}
 }
 
 // SetProgressHook registers a callback invoked with the latest Status whenever it
@@ -174,8 +202,9 @@ func (s *Service) execute(ctx context.Context, opts Options) (Result, error) {
 	s.emit()
 
 	// Serialize across processes: if another instance holds the lock, skip rather
-	// than reparse the same corpus twice. Release with a fresh context so the unlock
-	// reaches Postgres even when ctx is already cancelled by shutdown.
+	// than reparse the same corpus twice. The follower still gates its parsed UI for
+	// the duration via the shared advisory-lock check (see FleetStatus), so it never
+	// serves the half-rebuilt rows the holder is writing.
 	lock, ok, err := s.st.AcquireReparseLock(ctx)
 	if err != nil {
 		return Result{Status: s.Status()}, err
@@ -184,7 +213,7 @@ func (s *Service) execute(ctx context.Context, opts Options) (Result, error) {
 		log.Printf("reparse: another instance holds the reparse lock, skipping")
 		return Result{Status: s.Status()}, nil
 	}
-	defer lock.Release(context.WithoutCancel(ctx))
+	defer s.releaseLock(ctx, lock)
 
 	source := "startup"
 	if opts.Force {
@@ -192,32 +221,48 @@ func (s *Service) execute(ctx context.Context, opts Options) (Result, error) {
 	}
 	log.Printf("reparse: starting (%s, agent=%q)", source, opts.Agent)
 
-	targets, err := s.st.SessionsForReparse(ctx, opts.Agent)
+	total, maxID, err := s.st.ReparseScope(ctx, opts.Agent)
 	if err != nil {
 		return Result{Status: s.Status()}, err
 	}
-	s.setTotal(len(targets))
+	s.setTotal(total)
 
-	var failed int
-	for i, t := range targets {
-		if ctx.Err() != nil {
-			log.Printf("reparse: cancelled after %d/%d session(s)", i, len(targets))
+	// Page through targets by id rather than loading the whole list, so peak memory
+	// is one page plus the current session even on a corpus of any size.
+	var done, failed int
+	var afterID int64
+	for ctx.Err() == nil {
+		page, err := s.st.SessionsForReparsePage(ctx, opts.Agent, afterID, maxID, s.pageSize)
+		if err != nil {
+			return Result{Status: s.Status()}, err
+		}
+		if len(page) == 0 {
 			break
 		}
-		if _, err := parse.Reparse(ctx, s.st, t.ID, t.Agent); err != nil {
-			failed++
-			log.Printf("reparse: session %d (%s): %v", t.ID, t.Agent, err)
+		for _, t := range page {
+			if ctx.Err() != nil {
+				break
+			}
+			if _, err := parse.Reparse(ctx, s.st, t.ID, t.Agent); err != nil {
+				failed++
+				log.Printf("reparse: session %d (%s): %v", t.ID, t.Agent, err)
+			}
+			done++
+			afterID = t.ID
+			s.advance(done, failed)
 		}
-		s.advance(i+1, failed)
+	}
+	if ctx.Err() != nil {
+		log.Printf("reparse: cancelled after %d/%d session(s)", done, total)
 	}
 
 	// A parser change can rewrite tool bodies and image attachments, orphaning their
-	// old blobs, so sweep once the projections are rebuilt. Skip it on a cancelled
-	// (shutdown) pass so winding down stays snappy: the periodic background sweep
-	// reclaims any orphans the partial reparse left.
+	// old blobs, so sweep once the projections are rebuilt. ctx flows in, so a
+	// shutdown cancellation that lands during the sweep stops it promptly; the
+	// periodic background sweep reclaims any orphans a partial pass left.
 	var swept int
 	if ctx.Err() == nil {
-		swept, err = s.st.SweepBlobs(context.WithoutCancel(ctx))
+		swept, err = s.st.SweepBlobs(ctx)
 		if err != nil {
 			return Result{Status: s.Status()}, err
 		}
@@ -229,7 +274,7 @@ func (s *Service) execute(ctx context.Context, opts Options) (Result, error) {
 	// failed in the parser and re-running converges to the same failure, so blocking
 	// would re-trigger a full reparse on every restart forever.
 	if ctx.Err() == nil && opts.Agent == "" {
-		if err := s.st.SetReparsedEpoch(context.WithoutCancel(ctx), parse.Epoch); err != nil {
+		if err := s.st.SetReparsedEpoch(ctx, parse.Epoch); err != nil {
 			return Result{Status: s.Status(), SweptBlobs: swept}, err
 		}
 	}
@@ -244,12 +289,62 @@ func (s *Service) execute(ctx context.Context, opts Options) (Result, error) {
 	return Result{Status: final, SweptBlobs: swept}, nil
 }
 
-// finish clears the in-progress flag and emits the terminal status.
+// finish clears the in-progress flag and emits the terminal status. It also voids
+// the fleet cache: the advisory lock has been released by the time finish runs, so
+// the next gate check should re-read it rather than trust a stale "held".
 func (s *Service) finish() {
 	s.mu.Lock()
 	s.status.InProgress = false
+	s.fleetCheckedAt = time.Time{}
 	s.mu.Unlock()
 	s.emit()
+}
+
+// releaseLock unlocks the advisory lock under a bounded, cancellation-detached
+// context, so a stuck unlock during shutdown cannot block Wait (and thus the pool
+// close) indefinitely.
+func (s *Service) releaseLock(ctx context.Context, lock *store.ReparseLock) {
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), reparseUnlockTimeout)
+	defer cancel()
+	lock.Release(rctx)
+}
+
+// FleetStatus is Status with InProgress widened to reflect a reparse running on any
+// instance, not just this process. It is what the UI gate and the status endpoint
+// read, so a server that is not itself reparsing still gates its parsed pages while
+// another instance rebuilds the shared projection. The progress counts stay this
+// process's: an observing instance reports the gate without counts, which the UI
+// renders as an indeterminate bar.
+func (s *Service) FleetStatus(ctx context.Context) Status {
+	st := s.Status()
+	if !st.InProgress && s.fleetLockHeld(ctx) {
+		st.InProgress = true
+	}
+	return st
+}
+
+// fleetLockHeld reports whether any instance holds the reparse advisory lock,
+// caching the answer for a short TTL so the gating hot path does not query the
+// database on every request. A check error is treated as "not held" so a transient
+// database blip fails open (serving pages) rather than wedging the UI gated.
+func (s *Service) fleetLockHeld(ctx context.Context) bool {
+	s.mu.Lock()
+	if !s.fleetCheckedAt.IsZero() && time.Since(s.fleetCheckedAt) < s.fleetTTL {
+		held := s.fleetHeld
+		s.mu.Unlock()
+		return held
+	}
+	s.mu.Unlock()
+
+	held, err := s.st.ReparseLockHeld(ctx)
+	if err != nil {
+		return false
+	}
+	s.mu.Lock()
+	s.fleetHeld = held
+	s.fleetCheckedAt = time.Now()
+	s.mu.Unlock()
+	return held
 }
 
 func (s *Service) setTotal(total int) {

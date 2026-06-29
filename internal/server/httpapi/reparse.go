@@ -18,7 +18,7 @@ import (
 // the principal is already on the request for the page shell.
 func (s *Server) gateParsed(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		st := s.reparser.Status()
+		st := s.reparser.FleetStatus(r.Context())
 		if !st.InProgress {
 			next(w, r)
 			return
@@ -36,7 +36,7 @@ func (s *Server) gateParsed(next http.HandlerFunc) http.HandlerFunc {
 // to watch the status stream), so a finished reparse brings the real page back.
 func (s *Server) gatePublicParsed(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		st := s.reparser.Status()
+		st := s.reparser.FleetStatus(r.Context())
 		if !st.InProgress {
 			next(w, r)
 			return
@@ -46,9 +46,11 @@ func (s *Server) gatePublicParsed(next http.HandlerFunc) http.HandlerFunc {
 }
 
 // handleReparseStatus returns the current reparse status as JSON, the poll-fallback
-// source for the progress UI when the SSE stream is unavailable.
+// source for the progress UI when the SSE stream is unavailable. It reports fleet
+// status, so a follower instance that is only observing another's reparse still
+// tells its pages to stay gated.
 func (s *Server) handleReparseStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.reparser.Status())
+	writeJSON(w, http.StatusOK, s.reparser.FleetStatus(r.Context()))
 }
 
 // handleReparseForm is the admin Reparse button: it forces a reparse (regardless of
@@ -89,7 +91,7 @@ func (s *Server) handleReparseEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	// Paint the current status immediately so a page that connects mid-reparse (or
 	// after it finished) does not wait for the next frame to learn the state.
-	if b, err := json.Marshal(s.reparser.Status()); err == nil {
+	if b, err := json.Marshal(s.reparser.FleetStatus(r.Context())); err == nil {
 		if !write("event: status\ndata: " + string(b) + "\n\n") {
 			return
 		}

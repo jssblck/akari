@@ -1,15 +1,18 @@
-package store
+package store_test
 
 import (
 	"context"
 	"testing"
+
+	"github.com/jssblck/akari/internal/server/storetest"
 )
 
 // TestReparsedEpochRoundTrip confirms a fresh database reports epoch 0 (so the
 // server treats its corpus as needing a reparse and converges) and that a write
 // is read back.
 func TestReparsedEpochRoundTrip(t *testing.T) {
-	st := newTestStore(t)
+	t.Parallel()
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 
 	got, err := st.ReparsedEpoch(ctx)
@@ -47,10 +50,17 @@ func TestReparsedEpochRoundTrip(t *testing.T) {
 
 // TestAcquireReparseLock confirms the advisory lock is mutually exclusive across
 // connections and is reusable after release: this is what keeps two server
-// instances from reparsing the same corpus at once.
+// instances from reparsing the same corpus at once. ReparseLockHeld observes the
+// same state from any connection, which is how a follower instance gates its
+// parsed UI while another instance reparses.
 func TestAcquireReparseLock(t *testing.T) {
-	st := newTestStore(t)
+	t.Parallel()
+	st := storetest.NewStore(t)
 	ctx := context.Background()
+
+	if held, err := st.ReparseLockHeld(ctx); err != nil || held {
+		t.Fatalf("lock should be free initially: held=%v err=%v", held, err)
+	}
 
 	first, ok, err := st.AcquireReparseLock(ctx)
 	if err != nil {
@@ -58,6 +68,10 @@ func TestAcquireReparseLock(t *testing.T) {
 	}
 	if !ok {
 		t.Fatal("first acquire should succeed on a free lock")
+	}
+
+	if held, err := st.ReparseLockHeld(ctx); err != nil || !held {
+		t.Fatalf("lock should read as held while owned: held=%v err=%v", held, err)
 	}
 
 	// A second acquire takes a different pooled connection, so the session-scoped
@@ -73,6 +87,9 @@ func TestAcquireReparseLock(t *testing.T) {
 
 	// After release the lock is free again.
 	first.Release(ctx)
+	if held, err := st.ReparseLockHeld(ctx); err != nil || held {
+		t.Fatalf("lock should read as free after release: held=%v err=%v", held, err)
+	}
 	third, ok, err := st.AcquireReparseLock(ctx)
 	if err != nil {
 		t.Fatalf("acquire third: %v", err)

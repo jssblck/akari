@@ -102,7 +102,6 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /sessions/{id}/publish", s.requireFull(s.handlePublishSession))
 	mux.HandleFunc("POST /sessions/{id}/unpublish", s.requireFull(s.handleUnpublishSession))
 	mux.HandleFunc("POST /sessions/{id}/delete", s.requireFull(s.handleDeleteSession))
-	mux.HandleFunc("GET /search", s.requireReadHTML(s.gateParsed(s.handleSearchPage)))
 
 	// Account stays fully available during a reparse: it is not parsed data, and it
 	// hosts the reparse status and the admin Reparse button.
