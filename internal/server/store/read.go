@@ -114,6 +114,17 @@ type SessionFilter struct {
 	Offset    int
 }
 
+// SessionRow is one row of the global (cross-project) session list: a session
+// summary plus the project it ran in, so a reader can scan and filter every
+// session in one place without first choosing a project.
+type SessionRow struct {
+	SessionSummary
+	ProjectID   int64
+	ProjectKey  string
+	ProjectName string
+	ProjectKind string
+}
+
 // ListProjects returns every project with rolled-up stats, most recently active
 // first.
 func (s *Store) ListProjects(ctx context.Context) ([]ProjectSummary, error) {
@@ -228,6 +239,170 @@ func (s *Store) ListSessions(ctx context.Context, f SessionFilter) ([]SessionSum
 		out = append(out, sm)
 	}
 	return out, rows.Err()
+}
+
+// globalSessionSelect is the column list and joins for cross-project session
+// rows: the same session columns as sessionSelect, plus the owning project's
+// identity so the list can show and link a project per row.
+const globalSessionSelect = `
+	SELECT s.id, s.agent, s.machine, s.git_branch, u.username,
+	       s.message_count, s.user_message_count,
+	       s.total_input_tokens, s.total_output_tokens,
+	       s.total_cache_write_tokens, s.total_cache_read_tokens,
+	       s.total_cost_usd, s.cost_incomplete, s.visibility, s.public_id,
+	       s.started_at, s.ended_at, s.updated_at,
+	       p.id, p.remote_key, p.display_name, p.kind
+	  FROM sessions s
+	  JOIN users u ON u.id = s.user_id
+	  JOIN projects p ON p.id = s.project_id`
+
+func scanSessionRow(rows pgx.Rows) (SessionRow, error) {
+	var r SessionRow
+	err := rows.Scan(&r.ID, &r.Agent, &r.Machine, &r.GitBranch, &r.Username,
+		&r.MessageCount, &r.UserMessageCount,
+		&r.TotalInput, &r.TotalOutput, &r.TotalCacheWrite, &r.TotalCacheRead,
+		&r.TotalCostUSD, &r.CostIncomplete, &r.Visibility, &r.PublicID,
+		&r.StartedAt, &r.EndedAt, &r.UpdatedAt,
+		&r.ProjectID, &r.ProjectKey, &r.ProjectName, &r.ProjectKind)
+	return r, err
+}
+
+// ListAllSessions returns sessions across every project matching the filter,
+// newest first. A zero ProjectID means "all projects"; the other fields narrow
+// the set exactly as ListSessions does. This backs the global Sessions view and
+// the Overview's recent-activity feed.
+func (s *Store) ListAllSessions(ctx context.Context, f SessionFilter) ([]SessionRow, error) {
+	var conds []string
+	var args []any
+	add := func(cond string, val any) {
+		args = append(args, val)
+		conds = append(conds, cond+" $"+itoa(len(args)))
+	}
+	if f.ProjectID != 0 {
+		add("s.project_id =", f.ProjectID)
+	}
+	if f.Agent != "" {
+		add("s.agent =", f.Agent)
+	}
+	if f.Machine != "" {
+		add("s.machine =", f.Machine)
+	}
+	if f.Username != "" {
+		add("u.username =", f.Username)
+	}
+
+	q := globalSessionSelect
+	if len(conds) > 0 {
+		q += " WHERE " + strings.Join(conds, " AND ")
+	}
+	q += " ORDER BY s.updated_at DESC NULLS LAST, s.id DESC"
+	limit := f.Limit
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	args = append(args, limit)
+	q += " LIMIT $" + itoa(len(args))
+	if f.Offset > 0 {
+		args = append(args, f.Offset)
+		q += " OFFSET $" + itoa(len(args))
+	}
+
+	rows, err := s.Pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SessionRow
+	for rows.Next() {
+		r, err := scanSessionRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// FacetCount is one filter value and how many sessions carry it, for a faceted
+// filter rail that shows counts beside each option.
+type FacetCount struct {
+	Value string
+	Count int
+}
+
+// ProjectFacet is one project option in the global session filter: enough to
+// label, color, and link it, plus its session count.
+type ProjectFacet struct {
+	ID    int64
+	Key   string
+	Name  string
+	Kind  string
+	Count int
+}
+
+// GlobalFacetValues holds the filter options for the cross-project session view,
+// each with a count so the rail reads like an instrument.
+type GlobalFacetValues struct {
+	Agents   []FacetCount
+	Machines []FacetCount
+	Users    []FacetCount
+	Projects []ProjectFacet
+}
+
+// GlobalFacets returns the distinct agents, machines, usernames, and projects
+// present across all sessions, each with its session count, ordered by count
+// then name. It backs the global Sessions view's faceted filter rail.
+func (s *Store) GlobalFacets(ctx context.Context) (GlobalFacetValues, error) {
+	var f GlobalFacetValues
+
+	rows, err := s.Pool.Query(ctx,
+		`SELECT 'agent' AS kind, s.agent AS val, count(*) FROM sessions s WHERE s.agent <> '' GROUP BY s.agent
+		 UNION ALL
+		 SELECT 'machine', s.machine, count(*) FROM sessions s WHERE s.machine <> '' GROUP BY s.machine
+		 UNION ALL
+		 SELECT 'user', u.username, count(*) FROM sessions s JOIN users u ON u.id = s.user_id GROUP BY u.username
+		 ORDER BY 1, 3 DESC, 2`)
+	if err != nil {
+		return f, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var kind, val string
+		var n int
+		if err := rows.Scan(&kind, &val, &n); err != nil {
+			return f, err
+		}
+		fc := FacetCount{Value: val, Count: n}
+		switch kind {
+		case "agent":
+			f.Agents = append(f.Agents, fc)
+		case "machine":
+			f.Machines = append(f.Machines, fc)
+		case "user":
+			f.Users = append(f.Users, fc)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return f, err
+	}
+
+	prows, err := s.Pool.Query(ctx,
+		`SELECT p.id, p.remote_key, p.display_name, p.kind, count(s.id) AS n
+		   FROM projects p JOIN sessions s ON s.project_id = p.id
+		  GROUP BY p.id
+		  ORDER BY n DESC, p.remote_key`)
+	if err != nil {
+		return f, err
+	}
+	defer prows.Close()
+	for prows.Next() {
+		var pf ProjectFacet
+		if err := prows.Scan(&pf.ID, &pf.Key, &pf.Name, &pf.Kind, &pf.Count); err != nil {
+			return f, err
+		}
+		f.Projects = append(f.Projects, pf)
+	}
+	return f, prows.Err()
 }
 
 // scanDetail loads one session with its project, by an arbitrary WHERE clause.

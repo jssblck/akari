@@ -59,7 +59,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /logout", s.handleLogoutForm)
 
 	// Server-rendered UI: read pages (require a full-scope credential).
-	mux.HandleFunc("GET /{$}", s.requireReadHTML(s.handleIndex))
+	mux.HandleFunc("GET /{$}", s.requireReadHTML(s.handleOverview))
+	mux.HandleFunc("GET /projects", s.requireReadHTML(s.handleProjectsIndex))
+	mux.HandleFunc("GET /sessions", s.requireReadHTML(s.handleSessions))
 	mux.HandleFunc("GET /projects/{id}", s.requireReadHTML(s.handleProjectPage))
 	mux.HandleFunc("GET /sessions/{id}", s.requireReadHTML(s.handleSessionPage))
 	mux.HandleFunc("GET /sessions/{id}/body", s.requireReadHTML(s.handleSessionBody))
