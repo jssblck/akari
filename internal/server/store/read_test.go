@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"testing"
 )
@@ -191,5 +192,67 @@ func TestGlobalFacets(t *testing.T) {
 	if f.Projects[0].Kind != "remote" {
 		t.Errorf("project facet order = [%q (%s), %q (%s)], want the remote project first",
 			f.Projects[0].Key, f.Projects[0].Kind, f.Projects[1].Key, f.Projects[1].Kind)
+	}
+}
+
+// TestGlobalFacetsProjectOrder exercises the full ordering contract with all
+// three kinds present and counts that would interleave the groups if sorted by
+// count alone: every git-remote project ranks above every standalone or orphaned
+// folder, and within each group the busier project still comes first.
+func TestGlobalFacetsProjectOrder(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	u, err := st.Register(ctx, "grace", "hash", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	// A local folder is the busiest of all, so a count-only sort would float it
+	// to the top; the kind grouping must override that.
+	remoteA, err := st.UpsertProject(ctx, "github.com/x/a", "github.com", "x", "a", "a", "remote")
+	if err != nil {
+		t.Fatalf("remote a: %v", err)
+	}
+	remoteB, err := st.UpsertProject(ctx, "github.com/x/b", "github.com", "x", "b", "b", "remote")
+	if err != nil {
+		t.Fatalf("remote b: %v", err)
+	}
+	standalone, err := st.UpsertProject(ctx, "local:rig:/home/grace/scratch", "rig", "", "scratch", "scratch", "standalone")
+	if err != nil {
+		t.Fatalf("standalone: %v", err)
+	}
+	orphaned, err := st.UpsertProject(ctx, "local:rig:/home/grace/gone", "rig", "", "gone", "gone", "orphaned")
+	if err != nil {
+		t.Fatalf("orphaned: %v", err)
+	}
+
+	// Counts: remoteB=2, remoteA=1, standalone=4, orphaned=3. Busiest-first inside
+	// each group gives [remoteB, remoteA] then [standalone, orphaned].
+	seed := func(projectID int64, n int) {
+		for i := 0; i < n; i++ {
+			seedSess(t, st, u.ID, projectID, "claude", "box", fmt.Sprintf("p%d-%d", projectID, i))
+		}
+	}
+	seed(remoteA, 1)
+	seed(remoteB, 2)
+	seed(standalone, 4)
+	seed(orphaned, 3)
+
+	f, err := st.GlobalFacets(ctx)
+	if err != nil {
+		t.Fatalf("facets: %v", err)
+	}
+	wantIDs := []int64{remoteB, remoteA, standalone, orphaned}
+	if len(f.Projects) != len(wantIDs) {
+		t.Fatalf("project facet = %+v, want %d entries", f.Projects, len(wantIDs))
+	}
+	for i, want := range wantIDs {
+		if f.Projects[i].ID != want {
+			gotOrder := make([]string, len(f.Projects))
+			for j, p := range f.Projects {
+				gotOrder[j] = fmt.Sprintf("%s(%s,%d)", p.Key, p.Kind, p.Count)
+			}
+			t.Fatalf("project facet order = %v, want remotes busiest-first then locals busiest-first", gotOrder)
+		}
 	}
 }
