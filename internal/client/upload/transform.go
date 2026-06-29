@@ -253,11 +253,15 @@ func (t *transformer) handleSmallLine(ctx context.Context, line []byte, origOff,
 	return nil
 }
 
-// handleBigLine transforms a line too large to buffer. It locates each tool body's
+// handleBigLine transforms a line past bigLineThreshold. It locates each tool body's
 // raw span by streaming the line, streams each body to the CAS (so the body itself
-// is never resident), and assembles the rewritten line from the small literal
-// regions between bodies plus the sentinels. The rewritten line is small (its bulk
-// lifted to the CAS), so it is bounded by hardCap like any other.
+// is never resident), and assembles the rewritten line from the literal regions
+// between bodies plus the sentinels. When the line carries liftable bodies its
+// rewritten form is small (its bulk lifted to the CAS). When it carries none (or
+// keeps non-body bulk between bodies) the remainder rides inline, copied through a
+// bounded window and capped at hardCap: a large-but-bodyless line is buffered and
+// sent like any other message rather than refused, and only a line that truly
+// exceeds hardCap errors.
 func (t *transformer) handleBigLine(ctx context.Context, origOff, origLen int64) error {
 	// The line spans [origOff, origOff+origLen) in the file, trailing newline
 	// included. Locate bodies over the content without the newline so a span never
@@ -273,7 +277,6 @@ func (t *transformer) handleBigLine(ctx context.Context, origOff, origLen int64)
 	// the body, upload the body, append its sentinel, and advance the cursor.
 	var rewritten []byte
 	cursor := int64(0)
-	found := false
 	emit := func(loc parser.BodyLocation) error {
 		// Honor cancellation between bodies: a big line can hold many bodies, each a
 		// streamed upload, so a shutdown must not have to wait for the whole line.
@@ -283,7 +286,6 @@ func (t *transformer) handleBigLine(ctx context.Context, origOff, origLen int64)
 		if loc.Span.Start < cursor || loc.Span.End > contentLen {
 			return nil // a span out of order or past the line: skip defensively
 		}
-		found = true
 		body, err := t.sink.emitBody(ctx, bodyRef{
 			media:    loc.Media,
 			kind:     "", // big-line kind is not surfaced; diagnostics use the small path
@@ -309,12 +311,15 @@ func (t *transformer) handleBigLine(ctx context.Context, origOff, origLen int64)
 	if err := parser.LocateToolBodies(ctx, parser.Agent(t.agent), t.f, origOff, contentLen, emit); err != nil {
 		return err
 	}
-	if !found {
-		// A big line with no tool body cannot be lifted; it must ride inline, but it
-		// exceeds hardCap by definition of "big". Refuse it rather than buffer it.
-		return errMessageTooBig(t.agent)
-	}
 
+	// A big line with no liftable body (or one whose tail follows the last lifted
+	// body) rides inline: appendFileSpan copies the remaining content into the
+	// rewritten line through a bounded window, enforcing hardCap as it goes. Only a
+	// line that genuinely exceeds hardCap is refused; a merely-large bodyless line
+	// (an image-progress event, a compacted history, anything past bigLineThreshold
+	// but under the cap) is buffered and sent like any other message. This keeps the
+	// memory-bounded streaming for liftable bodies while never rejecting a line the
+	// server could store.
 	rewritten, err = appendFileSpan(rewritten, t.f, t.agent, origOff+cursor, contentLen-cursor)
 	if err != nil {
 		return err

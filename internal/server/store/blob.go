@@ -390,6 +390,37 @@ func upsertBlobPin(ctx context.Context, tx pgx.Tx, sha string) error {
 	return nil
 }
 
+// pinSessionBlobsTx refreshes a sweep-protection pin on every blob a session
+// references through its lifted tool bodies and image attachments. The reparse path
+// calls it before clearing those rows so the blobs survive the window between the
+// clear (committed here) and the rebuild (the following Advance).
+//
+// The pin runs entirely in the database as one INSERT ... SELECT over the union of
+// referenced hashes, so no per-session slice of hashes is held in Go: a session with
+// many lifted bodies or images costs the same resident memory as one with a few. The
+// UNION dedups a blob referenced by two rows down to a single pin, and the ORDER BY
+// fixes the order rows are inserted and so the order their pin rows are locked, so two
+// concurrent pinners take the rows in the same sequence and queue rather than deadlock,
+// the same discipline the row-at-a-time pinners follow.
+func pinSessionBlobsTx(ctx context.Context, tx pgx.Tx, sessionID int64) error {
+	_, err := tx.Exec(ctx,
+		`INSERT INTO blob_pins (sha256, expires_at)
+		 SELECT sha, now() + $2 FROM (
+		     SELECT input_sha256 AS sha FROM tool_calls WHERE session_id = $1 AND input_sha256 IS NOT NULL
+		     UNION
+		     SELECT result_sha256 FROM tool_calls WHERE session_id = $1 AND result_sha256 IS NOT NULL
+		     UNION
+		     SELECT sha256 FROM attachments WHERE session_id = $1
+		 ) refs
+		 ORDER BY sha
+		 ON CONFLICT (sha256) DO UPDATE SET expires_at = EXCLUDED.expires_at`,
+		sessionID, blobPinTTL)
+	if err != nil {
+		return fmt.Errorf("pin referenced blobs for session %d: %w", sessionID, err)
+	}
+	return nil
+}
+
 // BlobMeta returns a blob's stored size, media type, and storage content type
 // without reading its body. The content type lets the serve path set Content-Encoding
 // so the client decodes a compressed blob, while the server never touches the bytes.
@@ -433,15 +464,24 @@ func (s *Store) WriteBlobTo(ctx context.Context, w io.Writer, sha256hex string) 
 // tool call's input or result or through an attachment. Blob serving is gated on
 // this so a session can never read a blob it does not reference, even though the
 // CAS dedupes content across sessions.
+//
+// Lifting Codex images to the CAS means a session view fetches a blob per rendered
+// image as well as per tool body, so this runs once per blob on every open and live
+// refresh: it must stay logarithmic in the session's references, not scan them. Each
+// arm is a hash-leading index lookup: tool_calls by (input_sha256, session_id) and
+// (result_sha256, session_id), attachments by (sha256, session_id). The parameter is
+// cast to char(64) so it matches the bpchar columns and their indexes; a bare text
+// parameter would compare bpchar against text, cast the columns, and fall back to
+// scanning the session's whole slice of tool calls and attachments.
 func (s *Store) SessionReferencesBlob(ctx context.Context, sessionID int64, sha256hex string) (bool, error) {
 	var ok bool
 	err := s.Pool.QueryRow(ctx,
 		`SELECT EXISTS (
 		   SELECT 1 FROM tool_calls
-		    WHERE session_id = $1 AND (input_sha256 = $2 OR result_sha256 = $2)
+		    WHERE session_id = $1 AND (input_sha256 = $2::char(64) OR result_sha256 = $2::char(64))
 		   UNION ALL
 		   SELECT 1 FROM attachments
-		    WHERE session_id = $1 AND sha256 = $2
+		    WHERE session_id = $1 AND sha256 = $2::char(64)
 		 )`, sessionID, sha256hex).Scan(&ok)
 	return ok, err
 }

@@ -97,6 +97,18 @@ func inlineBodies(t *testing.T, agent Agent, raw []byte) []Body {
 			})
 		}
 	}
+	// Binary attachments (lifted images) are the third lifted-body kind. On the inline
+	// parse Content holds the decoded bytes and SHA256 is left empty (the server keys
+	// the blob it writes, exactly as the inline tool-body path does), so the oracle hashes
+	// the content to get the key the server would store under: same sha, raw byte length,
+	// and media as the client extractor produces.
+	for _, a := range s.Attachments {
+		bodies = append(bodies, Body{
+			SHA256: HashString(a.Content), Bytes: a.Bytes,
+			MediaType: a.MediaType, Stored: []byte(a.Content),
+			ContentType: ContentRaw, Kind: bodyKindAttachment,
+		})
+	}
 	return bodies
 }
 
@@ -142,6 +154,7 @@ func TestExtractionParity(t *testing.T) {
 		{"codex", AgentCodex, loadFixture(t, "codex.jsonl")},
 		{"pi", AgentPi, loadFixture(t, "pi.jsonl")},
 		{"claude-image", AgentClaude, claudeImageTranscript()},
+		{"codex-image", AgentCodex, codexImageTranscript()},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -168,6 +181,7 @@ func TestRoundTripProjection(t *testing.T) {
 		{"codex", AgentCodex, loadFixture(t, "codex.jsonl")},
 		{"pi", AgentPi, loadFixture(t, "pi.jsonl")},
 		{"claude-image", AgentClaude, claudeImageTranscript()},
+		{"codex-image", AgentCodex, codexImageTranscript()},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -249,6 +263,143 @@ func claudeImageTranscript() []byte {
 	// A tool result delivered as a text block carrying the base64 payload.
 	b.WriteString(`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":` + jsonQuote(img) + `}],"is_error":false}]}}` + "\n")
 	return []byte(b.String())
+}
+
+// fakePNGBase64 returns the base64 of a byte string that begins with the real PNG
+// signature, so the media sniffer recognizes it as image/png, padded out to a size
+// worth lifting. It is synthetic (not a decodable image), which is all the parser
+// needs: it keys and stores the bytes, it never renders them.
+func fakePNGBase64() string {
+	return base64.StdEncoding.EncodeToString([]byte("\x89PNG\r\n\x1a\n" + strings.Repeat("kitten pixels ", 300)))
+}
+
+// codexImageTranscript is a Codex session that inlines images two ways: a user turn
+// that pastes one as a data-URI image_url block, and an assistant turn that emits a
+// generated image as an image_generation_end event carrying the base64 result. The
+// image_generation_end shape is what made the 16 real sessions exceed the message cap;
+// both must be lifted to binary attachments rather than left as base64 inline. The two
+// images are distinct so the parity oracle sees two separate lifted bodies.
+func codexImageTranscript() []byte {
+	pasted := dataURIImage(fakeJPEGBase64())
+	generated := fakePNGBase64()
+	var b strings.Builder
+	b.WriteString(`{"type":"session_meta","payload":{"cwd":"/home/ada/proj","git":{"branch":"main"}}}` + "\n")
+	b.WriteString(`{"type":"response_item","payload":{"role":"user","content":[{"type":"input_text","text":"trace this"},{"type":"input_image","image_url":` + jsonQuote(pasted) + `}]}}` + "\n")
+	b.WriteString(`{"type":"response_item","payload":{"role":"assistant","content":[{"type":"output_text","text":"here you go"}]}}` + "\n")
+	b.WriteString(`{"type":"event_msg","timestamp":"2026-06-05T23:37:09Z","payload":{"type":"image_generation_end","result":` + jsonQuote(generated) + `,"saved_path":"/home/ada/kitten.png"}}` + "\n")
+	return []byte(b.String())
+}
+
+// fakeJPEGBase64 returns base64 that begins with the JPEG SOI marker so the sniffer
+// reads it as image/jpeg, distinct from the PNG used for the generated image.
+func fakeJPEGBase64() string {
+	return base64.StdEncoding.EncodeToString([]byte("\xff\xd8\xff\xe0" + strings.Repeat("jpeg pixels ", 200)))
+}
+
+// dataURIImage wraps raw base64 in the data:<media>;base64, envelope Codex uses for a
+// pasted image_url, so the extractor and reducer exercise the data-URI strip path.
+func dataURIImage(b64 string) string {
+	return "data:image/jpeg;base64," + b64
+}
+
+// TestCodexImageAttachmentLifted is the headline attachment case: a Codex
+// image_generation_end payload is lifted to a binary attachment on both the client
+// extractor and the server reducer, with matching sha, decoded size, and image media,
+// and the inline-decoded bytes equal the base64-decoded source. The filename is
+// recovered from saved_path so the UI can label it.
+func TestCodexImageAttachmentLifted(t *testing.T) {
+	// A focused single-image transcript (just the image_generation_end overflow shape),
+	// kept separate from the shared two-image fixture so the count assertions are exact.
+	img := fakePNGBase64()
+	raw := []byte(
+		`{"type":"response_item","payload":{"role":"user","content":[{"type":"input_text","text":"draw a kitten"}]}}` + "\n" +
+			`{"type":"response_item","payload":{"role":"assistant","content":[{"type":"output_text","text":"here you go"}]}}` + "\n" +
+			`{"type":"event_msg","timestamp":"2026-06-05T23:37:09Z","payload":{"type":"image_generation_end","result":` + jsonQuote(img) + `,"saved_path":"/home/ada/kitten.png"}}` + "\n")
+
+	wantBytes, err := base64.StdEncoding.DecodeString(fakePNGBase64())
+	if err != nil {
+		t.Fatalf("decode source image: %v", err)
+	}
+	wantSHA := HashString(string(wantBytes))
+
+	// Client extractor: the image rides out as one attachment-kind body whose stored
+	// bytes are the decoded image, keyed by its sha, replaced inline by a sentinel.
+	transformed, bodies, err := ExtractBodies(AgentCodex, raw, idEncoder{})
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	if len(bodies) != 1 {
+		t.Fatalf("lifted %d bodies, want 1", len(bodies))
+	}
+	b := bodies[0]
+	if b.Kind != bodyKindAttachment {
+		t.Errorf("body kind = %q, want %q", b.Kind, bodyKindAttachment)
+	}
+	if b.MediaType != "image/png" {
+		t.Errorf("media = %q, want image/png", b.MediaType)
+	}
+	if b.SHA256 != wantSHA || b.Bytes != len(wantBytes) || string(b.Stored) != string(wantBytes) {
+		t.Errorf("lifted body does not match decoded image: sha=%s bytes=%d", b.SHA256, b.Bytes)
+	}
+	if strings.Contains(string(transformed), fakePNGBase64()) {
+		t.Error("transformed transcript still contains the inline base64 image")
+	}
+	if !strings.Contains(string(transformed), `"`+sentinelKey+`":1`) {
+		t.Error("transformed transcript carries no CAS sentinel")
+	}
+
+	// Server reducer, inline path: the original transcript decodes the image to bytes
+	// and records one attachment carrying them, on the assistant turn, named from
+	// saved_path.
+	inline, err := Parse(AgentCodex, raw)
+	if err != nil {
+		t.Fatalf("parse inline: %v", err)
+	}
+	if len(inline.Attachments) != 1 {
+		t.Fatalf("inline parse recorded %d attachments, want 1", len(inline.Attachments))
+	}
+	a := inline.Attachments[0]
+	// The inline path carries the decoded bytes and leaves SHA256 empty: the server keys
+	// the blob it writes (the same discriminator the inline tool-body path uses), so the
+	// stored key is the hash of the content.
+	if a.SHA256 != "" {
+		t.Errorf("inline attachment SHA256 = %q, want empty (server keys the written blob)", a.SHA256)
+	}
+	if HashString(a.Content) != wantSHA || a.Bytes != len(wantBytes) || a.MediaType != "image/png" {
+		t.Errorf("inline attachment meta mismatch: contentSHA=%s bytes=%d media=%s", HashString(a.Content), a.Bytes, a.MediaType)
+	}
+	if a.Content != string(wantBytes) {
+		t.Error("inline attachment content is not the decoded image bytes")
+	}
+	if a.Filename != "kitten.png" {
+		t.Errorf("filename = %q, want kitten.png", a.Filename)
+	}
+	// The image hangs on the assistant turn (ordinal 1: user is 0).
+	if a.MessageOrdinal != 1 {
+		t.Errorf("attachment ordinal = %d, want 1 (the assistant turn)", a.MessageOrdinal)
+	}
+
+	// Server reducer, reference path: parsing the transformed transcript records the
+	// same attachment by reference, with the bytes left in the CAS (Content empty) and
+	// identical sha, size, and media. This is the lift/record lockstep that keeps a
+	// lifted image from being swept as unreferenced.
+	ref, err := Parse(AgentCodex, transformed)
+	if err != nil {
+		t.Fatalf("parse transformed: %v", err)
+	}
+	if len(ref.Attachments) != 1 {
+		t.Fatalf("ref parse recorded %d attachments, want 1", len(ref.Attachments))
+	}
+	ra := ref.Attachments[0]
+	if ra.SHA256 != wantSHA || ra.Bytes != len(wantBytes) || ra.MediaType != "image/png" {
+		t.Errorf("ref attachment meta mismatch: sha=%s bytes=%d media=%s", ra.SHA256, ra.Bytes, ra.MediaType)
+	}
+	if ra.Content != "" {
+		t.Error("ref attachment carries inline content; the client already stored the bytes")
+	}
+	if ra.Filename != "kitten.png" || ra.MessageOrdinal != 1 {
+		t.Errorf("ref attachment filename/ordinal mismatch: %q / %d", ra.Filename, ra.MessageOrdinal)
+	}
 }
 
 // jsonQuote returns a JSON string literal for s, used to embed a large payload in

@@ -70,11 +70,24 @@ func TestLocateClaudeBodies(t *testing.T) {
 // TestLocateCodexBodies checks the codex function_call argument body (a JSON-encoded
 // string) and the function_call_output result body against the oracle.
 func TestLocateCodexBodies(t *testing.T) {
+	img := fakePNGBase64()
 	cases := []string{
 		`{"type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"cmd\":\"ls -la\"}"}}`,
 		`{"type":"response_item","payload":{"type":"function_call_output","output":"total 0\n"}}`,
 		`{"type":"response_item","payload":{"type":"function_call_output","output":{"stdout":"x"}}}`,
 		`{"type":"response_item","payload":{"role":"user","content":[{"type":"input_text","text":"hi"}]}}`,
+		// A custom tool call's plain-string input is lifted like any tool input.
+		`{"type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","call_id":"c1","input":"*** Begin Patch\n+line\n*** End Patch"}}`,
+		// An image_generation_call result is lifted as a base64 attachment.
+		`{"type":"response_item","payload":{"type":"image_generation_call","result":"` + img + `","saved_path":"/tmp/a.png"}}`,
+		// The image_generation_end event mirrors it (the form that overflowed the cap).
+		`{"type":"event_msg","payload":{"type":"image_generation_end","result":"` + img + `","saved_path":"/tmp/a.png"}}`,
+		// A pasted image in a user message rides as a data-URI image_url block. A real
+		// Codex message carries role but no payload.type, so this also pins that the
+		// extractor keys user images on role (not on a type=="message" discriminator).
+		`{"type":"response_item","payload":{"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,` + img + `"}]}}`,
+		// A user_message event carries pasted images as a flat array of data URIs.
+		`{"type":"event_msg","payload":{"type":"user_message","images":["data:image/png;base64,` + img + `"]}}`,
 	}
 	for _, c := range cases {
 		locateParity(t, AgentCodex, c)

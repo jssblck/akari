@@ -204,28 +204,133 @@ func locatePi(s *lineSource, emit func(BodyLocation) error) error {
 	return nil
 }
 
-// locateCodex finds the codex function_call argument body and function_call_output
-// result body. The argument body is a JSON-encoded string whose decoded contents
-// are what the CAS stores, so its kind is BodyJSONString.
+// locateCodex finds every liftable Codex body in source order: tool inputs
+// (function_call arguments, custom_tool_call input), tool results
+// (function_call_output and custom_tool_call_output), and the base64 images Codex
+// inlines (image_generation results, data-URI image_url blocks in a user turn, and the
+// images array of a user_message event). It is the streaming twin of codexBodyFields,
+// so the two agree on which bytes are bodies and how each canonicalizes.
 func locateCodex(s *lineSource, emit func(BodyLocation) error) error {
 	typ, err := s.topType(Key("type"))
 	if err != nil {
 		return err
 	}
-	if typ != "response_item" {
-		return nil
-	}
 	ptype, err := s.unquotedAt([]Step{Key("payload"), Key("type")})
 	if err != nil {
 		return err
 	}
-	switch ptype {
-	case "function_call":
-		return s.locateSingle([]Step{Key("payload"), Key("arguments")}, BodyJSONString, "application/json", emit)
-	case "function_call_output":
-		return s.locateSingleResult([]Step{Key("payload"), Key("output")}, emit)
+	payload := func(k string) []Step { return []Step{Key("payload"), Key(k)} }
+	switch typ {
+	case "response_item":
+		// The discriminators mirror reduceCodex (and codexBodyFields): a tool item is
+		// keyed by payload.type, a user turn by payload.role, since a Codex message has
+		// no payload.type. Reading role only when no tool type matched keeps the common
+		// path to one extra structural lookup.
+		switch {
+		case ptype == "function_call":
+			return s.locateSingle(payload("arguments"), BodyJSONString, "application/json", emit)
+		case ptype == "custom_tool_call":
+			return s.locateSingle(payload("input"), BodyJSONString, "text/plain", emit)
+		case ptype == "function_call_output", ptype == "custom_tool_call_output":
+			return s.locateSingleResult(payload("output"), emit)
+		case ptype == "image_generation_call":
+			return s.locateImage(payload("result"), emit)
+		default:
+			role, err := s.unquotedAt([]Step{Key("payload"), Key("role")})
+			if err != nil {
+				return err
+			}
+			if role == "user" {
+				return s.locateImageBlocks(payload("content"), emit)
+			}
+		}
+	case "event_msg":
+		switch ptype {
+		case "image_generation_end":
+			return s.locateImage(payload("result"), emit)
+		case "user_message":
+			return s.locateImageArray(payload("images"), emit)
+		}
 	}
 	return nil
+}
+
+// locateImage emits the base64 image at a single fixed path as a BodyBase64 body,
+// classifying its media from the value's head. A value that is absent, empty, or not a
+// recognizable base64 image yields nothing (it stays inline).
+func (s *lineSource) locateImage(path []Step, emit func(BodyLocation) error) error {
+	spans, err := s.locate([][]Step{path})
+	if err != nil {
+		return err
+	}
+	sp, ok := spans[0]
+	if !ok {
+		return nil
+	}
+	return s.emitImage(sp, emit)
+}
+
+// locateImageBlocks walks a content array once, emitting each block's base64 image_url
+// as a BodyBase64 body. It keys off the presence of a base64 image_url (not the block
+// type) so it covers any image block kind, matching codexImageBlocks.
+func (s *lineSource) locateImageBlocks(arr []Step, emit func(BodyLocation) error) error {
+	return WalkArrayElements(s.ctx, arr, []Step{Key("image_url")}, s.reader(),
+		func(_ int, _ ValueSpan, subs map[Step]ValueSpan) error {
+			sp, ok := subs[Key("image_url")]
+			if !ok {
+				return nil
+			}
+			return s.emitImage(sp, emit)
+		})
+}
+
+// locateImageArray walks a flat array of image strings once (the images field of a
+// user_message event), emitting each base64 element as a BodyBase64 body.
+func (s *lineSource) locateImageArray(arr []Step, emit func(BodyLocation) error) error {
+	return WalkArrayElements(s.ctx, arr, nil, s.reader(),
+		func(_ int, elem ValueSpan, _ map[Step]ValueSpan) error {
+			return s.emitImage(elem, emit)
+		})
+}
+
+// emitImage classifies a string value's head and emits it as a BodyBase64 body when it
+// is a recognizable base64 image, choosing its media type the same way the buffered
+// imageField does. A non-image or sub-quote-length span is skipped, so a non-image
+// element of a walked array is passed over rather than lifted.
+func (s *lineSource) emitImage(sp ValueSpan, emit func(BodyLocation) error) error {
+	if sp.End-sp.Start < 2 {
+		return nil // too short to be a quoted string value
+	}
+	head, err := s.imageHead(sp)
+	if err != nil {
+		return err
+	}
+	if !looksLikeBase64Image(head) {
+		return nil
+	}
+	return emit(BodyLocation{Span: sp, Kind: BodyBase64, Media: imageMediaType(head)})
+}
+
+// imageHead reads the leading content bytes of a string value (inside the quotes) to
+// classify it as an image and pick its media type. Base64/data-URI content carries no
+// JSON escapes, so the raw bytes are the literal content, matching the buffered
+// imageHead over the decoded string. The read is bounded, so a huge image is never
+// buffered just to classify it.
+func (s *lineSource) imageHead(sp ValueSpan) (string, error) {
+	start := sp.Start + 1 // skip the opening quote
+	end := sp.End - 1     // stop before the closing quote
+	if end <= start {
+		return "", nil
+	}
+	n := end - start
+	if n > int64(imageHeadLen) {
+		n = int64(imageHeadLen)
+	}
+	buf := make([]byte, n)
+	if err := readFull(s.f, buf, s.base+start); err != nil {
+		return "", err
+	}
+	return string(buf), nil
 }
 
 // topType reads a top-level discriminator string (the line `type`).

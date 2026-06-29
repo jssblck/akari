@@ -203,25 +203,30 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 }
 
 // sessionView loads everything the session page (and its live body fragment)
-// needs: detail, transcript, tool metadata grouped by message, and subagents.
-func (s *Server) sessionView(r *http.Request, id int64) (store.SessionDetail, []store.Message, map[int][]store.ToolCallView, []store.SessionSummary, error) {
+// needs: detail, transcript, tool metadata and attachments grouped by message, and
+// subagents.
+func (s *Server) sessionView(r *http.Request, id int64) (store.SessionDetail, []store.Message, map[int][]store.ToolCallView, map[int][]store.AttachmentView, []store.SessionSummary, error) {
 	d, err := s.Store.SessionDetailByID(r.Context(), id)
 	if err != nil {
-		return d, nil, nil, nil, err
+		return d, nil, nil, nil, nil, err
 	}
 	msgs, err := s.Store.Messages(r.Context(), id)
 	if err != nil {
-		return d, nil, nil, nil, err
+		return d, nil, nil, nil, nil, err
 	}
 	tools, err := s.Store.ToolCalls(r.Context(), id)
 	if err != nil {
-		return d, nil, nil, nil, err
+		return d, nil, nil, nil, nil, err
+	}
+	atts, err := s.Store.Attachments(r.Context(), id)
+	if err != nil {
+		return d, nil, nil, nil, nil, err
 	}
 	subs, err := s.Store.Subagents(r.Context(), id)
 	if err != nil {
-		return d, nil, nil, nil, err
+		return d, nil, nil, nil, nil, err
 	}
-	return d, msgs, web.ToolsByOrdinal(tools), subs, nil
+	return d, msgs, web.ToolsByOrdinal(tools), web.AttachmentsByOrdinal(atts), subs, nil
 }
 
 func (s *Server) handleSessionPage(w http.ResponseWriter, r *http.Request) {
@@ -230,7 +235,7 @@ func (s *Server) handleSessionPage(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(r, "Not found"), http.StatusNotFound, "Session not found."))
 		return
 	}
-	d, msgs, tools, subs, err := s.sessionView(r, id)
+	d, msgs, tools, atts, subs, err := s.sessionView(r, id)
 	if errors.Is(err, store.ErrNotFound) {
 		render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(r, "Not found"), http.StatusNotFound, "Session not found."))
 		return
@@ -242,7 +247,7 @@ func (s *Server) handleSessionPage(w http.ResponseWriter, r *http.Request) {
 	title := fmt.Sprintf("Session #%d", d.ID)
 	p, _ := principalFrom(r.Context())
 	owner := p.UserID == d.OwnerID
-	render(w, r, http.StatusOK, web.SessionPage(s.pageForNav(r, title, "sessions"), d, msgs, tools, subs, true, owner))
+	render(w, r, http.StatusOK, web.SessionPage(s.pageForNav(r, title, "sessions"), d, msgs, tools, atts, subs, true, owner))
 }
 
 // handlePublishSession marks the owner's session public and redirects back to it.
@@ -330,6 +335,11 @@ func (s *Server) handlePublicSession(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load session."))
 		return
 	}
+	atts, err := s.Store.Attachments(r.Context(), d.ID)
+	if err != nil {
+		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load session."))
+		return
+	}
 	subs, err := s.Store.Subagents(r.Context(), d.ID)
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load session."))
@@ -343,7 +353,7 @@ func (s *Server) handlePublicSession(w http.ResponseWriter, r *http.Request) {
 			publicSubs = append(publicSubs, sub)
 		}
 	}
-	render(w, r, http.StatusOK, web.PublicSessionPage(d, msgs, web.ToolsByOrdinal(tools), publicSubs))
+	render(w, r, http.StatusOK, web.PublicSessionPage(d, msgs, web.ToolsByOrdinal(tools), web.AttachmentsByOrdinal(atts), publicSubs))
 }
 
 // handleSessionBody serves just the live-updating body fragment, re-fetched by
@@ -354,12 +364,12 @@ func (s *Server) handleSessionBody(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	d, msgs, tools, subs, err := s.sessionView(r, id)
+	d, msgs, tools, atts, subs, err := s.sessionView(r, id)
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
-	render(w, r, http.StatusOK, web.SessionMain(d, msgs, tools, subs))
+	render(w, r, http.StatusOK, web.SessionMain(d, msgs, tools, atts, subs))
 }
 
 // handleSessionEvents is the SSE endpoint that signals a watching browser to

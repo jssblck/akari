@@ -26,7 +26,11 @@ import (
 // version bump: an incremental advance over a still version-1 session would fold a
 // correct delta onto a wrong base. Run `akari-server reparse` to correct the live
 // data.
-const Version = 2
+//
+// Version 3 added Codex custom_tool_call bodies and binary image attachments (image
+// generation results and pasted images) to the projection, so a reparse backfills
+// those rows on already-ingested sessions.
+const Version = 3
 
 // Advance parses any not-yet-parsed bytes of a session and applies them to the
 // projection, looping until the parse cursor catches up to the stored length. It
@@ -120,10 +124,15 @@ func toProjectionDelta(p parser.Delta) store.ProjectionDelta {
 		case t.InputJSON != "":
 			// Carry the parsed input string straight through. gjson aliases the
 			// region, and the blob writer streams it in slices, so the body is never
-			// copied whole into a second buffer on the way to the CAS.
+			// copied whole into a second buffer on the way to the CAS. Most agents'
+			// inputs are JSON; a parser that recorded a different media (a custom tool
+			// call's plain-text input) overrides the default.
 			tc.InputBody = t.InputJSON
 			tc.InputBytes = int64(len(t.InputJSON))
-			tc.InputMediaType = "application/json"
+			tc.InputMediaType = t.InputMediaType
+			if tc.InputMediaType == "" {
+				tc.InputMediaType = "application/json"
+			}
 		}
 		d.ToolCalls = append(d.ToolCalls, tc)
 	}
@@ -136,6 +145,17 @@ func toProjectionDelta(p parser.Delta) store.ProjectionDelta {
 			Bytes:      int64(tr.Bytes),
 			MediaType:  tr.MediaType,
 			Status:     tr.Status,
+		})
+	}
+
+	for _, a := range p.Attachments {
+		d.Attachments = append(d.Attachments, store.AttachmentDelta{
+			MessageOrdinal: a.MessageOrdinal,
+			SHA256:         a.SHA256,
+			Body:           a.Content,
+			Bytes:          int64(a.Bytes),
+			MediaType:      a.MediaType,
+			Filename:       a.Filename,
 		})
 	}
 
