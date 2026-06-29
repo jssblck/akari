@@ -16,6 +16,14 @@
 # concurrency) run on all Go: concurrency bugs in particular are not confined to
 # the hot path, so that gate sees every change.
 #
+# Gate reviewers carry a shared "severity bar": a block halts the author, so it
+# is spent only on a defect the change actually introduces or worsens, that is
+# reachable on akari's real inputs (JSONL from Claude/Codex/pi at realistic
+# sizes), and that the author has not already justified. Anything pre-existing,
+# adversarial-input-only, or speculative is reported as a non-blocking note
+# instead of failing the gate. auth-safety is the deliberate exception: for
+# secrets a regression is dangerous even when unlikely, so it stays strict.
+#
 # Changing this file changes review policy, so CODEOWNERS protects it (see
 # .github/CODEOWNERS) and branch protection requires the aggregate `bastion`
 # check before merge.
@@ -39,6 +47,23 @@ reviewers:
         - A context.Context that is accepted but not honored: not threaded
           through to the calls that take one, or cancellation ignored on a
           long-running operation.
+
+      Severity bar before you block. A block halts the author until they act,
+      so spend it only on a defect this change introduces or materially worsens
+      AND that can happen on akari's real inputs:
+        - Scope to the diff. Do not block on a latent problem in surrounding or
+          unchanged code, or on a pre-existing pattern this change only moves,
+          renames, or sits next to. Raise those as a non-blocking note instead.
+        - Weigh likelihood, not bare possibility. akari ingests JSONL emitted by
+          Claude, Codex, and pi at realistic sizes. Do not block on inputs the
+          system never produces (a multi-megabyte single message, a
+          pathologically large JSON key, a hand-crafted adversarial line); note
+          them at most.
+        - When you cannot show the failure is real and reachable, or the fix
+          likely costs more than the risk it removes, pass the gate and leave a
+          non-blocking note rather than blocking.
+        - Credit stated rationale: if a comment or the PR explains why the
+          pattern is safe here, evaluate that reasoning and, if it holds, pass.
 
       Stay in your lane. Do not comment on naming, formatting, structure, or
       test coverage; other reviewers own those. Cite file and line for every
@@ -78,9 +103,13 @@ reviewers:
         - Goroutines that can leak: started with no way to stop, blocked forever
           on a channel or lock, or never awaited so a failure vanishes. An
           errgroup or WaitGroup that is never waited on.
-        - A context.Context accepted but not honored: not propagated to the
-          calls that take one, or a blocking operation that ignores cancellation
-          so shutdown hangs.
+        - A context.Context accepted but not honored in a way that can hang or
+          leak: not propagated to the calls that take one, or an unbounded or
+          long-blocking operation (a wait on a channel, lock, network, or query)
+          that ignores cancellation so shutdown hangs. A bounded, terminating
+          scan that merely finishes its work before it notices cancellation is
+          not a gate issue: latency-to-cancel on bounded work is not a hang, so
+          note it at most rather than blocking.
         - Unbounded goroutine fan-out (one per item, connection, or chunk) with
           no concurrency limit or lifetime bound.
         - Channel misuse: send on a closed channel, close from the receive side,
@@ -93,6 +122,24 @@ reviewers:
           including the database form: a read-modify-write (read a length or
           row, then update it) with no row lock or surrounding transaction, so
           two concurrent callers clobber each other.
+
+      Severity bar before you block. A block halts the author until they act,
+      so spend it only on a defect this change introduces or materially worsens
+      AND that can happen on akari's real inputs:
+        - Scope to the diff. Do not block on a latent race or leak in
+          surrounding or unchanged code, or on a pre-existing pattern this
+          change only moves, renames, or sits next to. Raise those as a
+          non-blocking note instead.
+        - Weigh likelihood, not bare possibility. akari ingests JSONL emitted by
+          Claude, Codex, and pi at realistic sizes. Do not block on inputs the
+          system never produces (a multi-megabyte single message, a
+          pathologically large JSON key, a hand-crafted adversarial line); note
+          them at most.
+        - When you cannot show the failure is real and reachable, or the fix
+          likely costs more than the risk it removes, pass the gate and leave a
+          non-blocking note rather than blocking.
+        - Credit stated rationale: if a comment or the PR explains why the
+          pattern is safe here, evaluate that reasoning and, if it holds, pass.
 
       For each finding, name the specific accesses that race (or the leak or
       deadlock), and state the fix: guard with a mutex, bound with a semaphore
@@ -172,6 +219,25 @@ reviewers:
       own belongs to the streaming-memory reviewer; raise it here only when it is
       the cause of superlinear time. Cite file and line.
 
+      Severity bar before you block. A block halts the author until they act, so
+      spend it only on superlinear cost this change introduces or materially
+      worsens AND whose triggering growth actually occurs on akari's real data:
+        - The quadratic must be reachable on real sessions. Confirm the value
+          that accumulates is one that genuinely grows with real input. JSONL
+          from Claude, Codex, and pi keeps individual messages small and pushes
+          bulky tool bodies to the CAS, so an accumulator bounded by a single
+          message's text (rather than by whole-session or tool-body bytes) does
+          not reach the size that makes the cost bite. If the quadratic only
+          appears under input the system never produces (a multi-megabyte single
+          message, thousands of fragments in one turn), note it at most.
+        - Scope to the diff, and do not re-raise a quadratic the author or a
+          prior PR already justified; if a comment or the PR explains why the
+          triggering growth cannot occur, or why the linear fix would cost more
+          than it saves (for example, it would break an index or itself be
+          superlinear), evaluate that reasoning and, if it holds, pass.
+        - When you cannot show the cost is real and reachable on real input,
+          pass the gate and leave a non-blocking note rather than blocking.
+
   - name: streaming-memory
     trigger:
       - internal/parser/**/*.go
@@ -215,3 +281,19 @@ reviewers:
       bounded state). Algorithmic complexity itself belongs to the
       incremental-efficiency reviewer; stay on memory and streaming shape. Cite
       file and line.
+
+      Severity bar before you block. A block halts the author until they act, so
+      spend it only on input-sized memory this change introduces or materially
+      worsens AND whose growth is driven by input akari actually receives:
+        - Weigh likelihood, not bare possibility. The allocation must scale with
+          something real sessions grow. A buffer bounded by a structural element
+          that JSONL from Claude, Codex, and pi keeps small (an object key, a
+          field name, the number of blocks in one realistic line) is not
+          input-sized in practice, even if a hand-crafted payload could make it
+          large. Do not block on adversarial inputs the system never produces;
+          note them at most.
+        - Scope to the diff. Do not block on a pre-existing buffer this change
+          only moves, renames, or sits next to. Raise that as a non-blocking
+          note instead.
+        - When you cannot show the growth is real and reachable on real input,
+          pass the gate and leave a non-blocking note rather than blocking.
