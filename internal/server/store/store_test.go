@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/storetest"
@@ -449,6 +451,179 @@ func TestAnnounceKeepsRemoteAttribution(t *testing.T) {
 	}
 	if projectID != localID {
 		t.Fatalf("standalone session landed in project %d, want local %d", projectID, localID)
+	}
+}
+
+func TestAnnounceWithProjectSkipsUnusedLocalDowngradeProject(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	u, err := st.Register(ctx, "grace", "hash", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := st.AnnounceWithProject(ctx, store.AnnounceParams{
+		UserID: u.ID, Agent: "claude", SourceSessionID: "sess-1",
+		Kind: "remote", Cwd: "/home/grace/akari", Machine: "laptop",
+	}, store.ProjectParams{
+		RemoteKey: "github.com/jssblck/akari", Host: "github.com", Owner: "jssblck",
+		Repo: "akari", DisplayName: "akari", Kind: "remote",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunk := []byte("line one\n")
+	if _, err := st.AppendChunk(ctx, first.SessionID, 0, chunk); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := st.AnnounceWithProject(ctx, store.AnnounceParams{
+		UserID: u.ID, Agent: "claude", SourceSessionID: "sess-1",
+		Kind: "orphaned", Cwd: "/home/grace/akari", Machine: "laptop",
+	}, store.ProjectParams{
+		RemoteKey: "local:laptop:/home/grace/akari", Host: "laptop",
+		Repo: "akari", DisplayName: "akari", Kind: "orphaned",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.SessionID != first.SessionID {
+		t.Fatalf("session id changed: %d vs %d", second.SessionID, first.SessionID)
+	}
+	if second.StoredBytes != int64(len(chunk)) {
+		t.Fatalf("sticky downgrade stored bytes = %d, want %d", second.StoredBytes, len(chunk))
+	}
+	if second.PrefixSHA256 != hashHexBytes(chunk) {
+		t.Fatalf("sticky downgrade prefix hash = %q, want %q", second.PrefixSHA256, hashHexBytes(chunk))
+	}
+	var localProjects int
+	if err := st.Pool.QueryRow(ctx,
+		"SELECT count(*) FROM projects WHERE remote_key = 'local:laptop:/home/grace/akari'").Scan(&localProjects); err != nil {
+		t.Fatal(err)
+	}
+	if localProjects != 0 {
+		t.Fatalf("unused local downgrade projects = %d, want 0", localProjects)
+	}
+}
+
+func TestAnnounceWithProjectRollsBackProjectUpsertFailure(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	u, err := st.Register(ctx, "grace", "hash", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.AnnounceWithProject(ctx, store.AnnounceParams{
+		UserID: u.ID, Agent: "claude", SourceSessionID: "sess-invalid",
+		Kind: "remote", Cwd: "/home/grace/bad", Machine: "laptop",
+	}, store.ProjectParams{
+		RemoteKey: "github.com/jssblck/bad", Host: "github.com", Owner: "jssblck",
+		Repo: "bad", DisplayName: "bad", Kind: "invalid-kind",
+	})
+	if err == nil {
+		t.Fatal("announce with invalid project kind succeeded")
+	}
+	if !strings.Contains(err.Error(), "upsert project for announce") {
+		t.Fatalf("error = %q, want project-upsert context", err.Error())
+	}
+	var sessions int
+	if err := st.Pool.QueryRow(ctx,
+		"SELECT count(*) FROM sessions WHERE source_session_id = 'sess-invalid'").Scan(&sessions); err != nil {
+		t.Fatal(err)
+	}
+	if sessions != 0 {
+		t.Fatalf("sessions after failed project upsert = %d, want 0", sessions)
+	}
+}
+
+func TestAnnounceWithProjectSerializesSessionIdentity(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	u, err := st.Register(ctx, "grace", "hash", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := st.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(
+			hashtext(current_database() || ':announce-session'),
+			hashtext($1::bigint::text || chr(31) || $2 || chr(31) || $3)
+		)`,
+		u.ID, "claude", "sess-lock"); err != nil {
+		t.Fatal(err)
+	}
+
+	started := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		close(started)
+		_, err := st.AnnounceWithProject(ctx, store.AnnounceParams{
+			UserID: u.ID, Agent: "claude", SourceSessionID: "sess-lock",
+			Kind: "remote", Cwd: "/home/grace/akari", Machine: "laptop",
+		}, store.ProjectParams{
+			RemoteKey: "github.com/jssblck/akari", Host: "github.com", Owner: "jssblck",
+			Repo: "akari", DisplayName: "akari", Kind: "remote",
+		})
+		done <- err
+	}()
+	<-started
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("announce failed while lock was held: %v", err)
+		}
+		t.Fatal("announce completed while session identity lock was held")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("announce after lock release: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("announce did not finish after releasing session identity lock")
+	}
+}
+
+func TestAnnounceWithProjectRollsBackSessionUpsertFailure(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	_, err := st.AnnounceWithProject(ctx, store.AnnounceParams{
+		UserID: 999_999, Agent: "claude", SourceSessionID: "sess-missing-user",
+		Kind: "remote", Cwd: "/home/grace/missing", Machine: "laptop",
+	}, store.ProjectParams{
+		RemoteKey: "github.com/jssblck/missing", Host: "github.com", Owner: "jssblck",
+		Repo: "missing", DisplayName: "missing", Kind: "remote",
+	})
+	if err == nil {
+		t.Fatal("announce with missing user succeeded")
+	}
+	if !strings.Contains(err.Error(), "upsert session for announce") {
+		t.Fatalf("error = %q, want session-upsert context", err.Error())
+	}
+	var projects int
+	if err := st.Pool.QueryRow(ctx,
+		"SELECT count(*) FROM projects WHERE remote_key = 'github.com/jssblck/missing'").Scan(&projects); err != nil {
+		t.Fatal(err)
+	}
+	if projects != 0 {
+		t.Fatalf("projects after failed session upsert = %d, want 0", projects)
 	}
 }
 
