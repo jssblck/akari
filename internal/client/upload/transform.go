@@ -275,15 +275,19 @@ func (a *chunkAssembler) finish(settled bool, completeEnd int64) ([]transformedC
 	return chunks, nil
 }
 
-// emitUpTo produces chunks covering lines [0, last], cutting a new chunk each time
-// the accumulated bytes reach chunkTarget at a boundary line so no single chunk is
-// unbounded. Any lines past last stay pending. It partitions the bodies and the
-// original span per chunk so each chunk reports exactly the bodies and original
-// length it carries.
+// emitUpTo produces chunks covering lines [0, last], starting a new chunk once the
+// accumulated bytes reach chunkTarget at a boundary so no chunk grows without
+// bound. The size check is applied BEFORE appending the next line, so a large run
+// between boundaries (in the limit, one line near hardCap) always lands in its own
+// chunk rather than being tacked onto a full one: a chunk is at most one
+// boundary-to-boundary run, which keeps it under the server's maxChunk. Lines past
+// last stay pending. Bodies and the original span are partitioned per chunk so each
+// reports exactly what it carries.
 func (a *chunkAssembler) emitUpTo(last int) []transformedChunk {
 	var chunks []transformedChunk
 	var cur transformedChunk
 	var curBytes int
+	curEndsBoundary := false
 
 	flush := func() {
 		if len(cur.Data) == 0 {
@@ -293,19 +297,21 @@ func (a *chunkAssembler) emitUpTo(last int) []transformedChunk {
 		a.consumedOrigEnd += cur.OrigLen
 		cur = transformedChunk{}
 		curBytes = 0
+		curEndsBoundary = false
 	}
 
 	for i := 0; i <= last; i++ {
 		ln := a.lines[i]
+		// Cut before adding the next line, but only where the accumulator already rests
+		// on a boundary, so a turn is never split and a fresh large line starts clean.
+		if curEndsBoundary && curBytes >= chunkTarget {
+			flush()
+		}
 		cur.Data = append(cur.Data, ln.data...)
 		cur.Bodies = append(cur.Bodies, ln.bodies...)
 		cur.OrigLen += ln.origLen
 		curBytes += len(ln.data)
-		// Cut only at a boundary line, so a chunk never splits a Codex turn, and only
-		// once it is large enough to be worth a request.
-		if ln.isBoundary && curBytes >= chunkTarget {
-			flush()
-		}
+		curEndsBoundary = ln.isBoundary
 	}
 	flush()
 
