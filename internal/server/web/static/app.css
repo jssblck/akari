@@ -352,6 +352,8 @@ th.trend, td.trend { width: 108px; }
    gone) reads as an error. */
 .tag.standalone { color: var(--warn); border-color: rgba(240, 197, 146, 0.4); }
 .tag.orphaned { color: var(--err); border-color: rgba(239, 154, 169, 0.4); }
+/* Data-quality caution: the session repeats a tool-call id across rows. */
+.tag.warn { color: var(--warn); border-color: rgba(240, 197, 146, 0.4); cursor: help; }
 
 /* ---- Buttons ---- */
 button, .btn {

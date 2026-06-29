@@ -95,6 +95,16 @@ func ToolsByOrdinal(tools []store.ToolCallView) map[int][]store.ToolCallView {
 	return m
 }
 
+// DuplicateIDsLabel is the chip text for a session that repeats tool-call ids,
+// pluralized for the count. The count itself is a bounded scalar from the store
+// (DuplicateCallUIDCount), not computed over the in-memory tool calls.
+func DuplicateIDsLabel(n int) string {
+	if n == 1 {
+		return "1 duplicate id"
+	}
+	return fmt.Sprintf("%d duplicate ids", n)
+}
+
 // AttachmentsByOrdinal groups attachments by the message ordinal they belong to,
 // so the session view can render a message's images beneath it.
 func AttachmentsByOrdinal(atts []store.AttachmentView) map[int][]store.AttachmentView {

@@ -620,7 +620,7 @@ templ tokenCell(s store.SessionSummary) {
 
 // ============================ Session ============================
 
-templ SessionPage(p Page, d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, subagents []store.SessionSummary, live, owner bool) {
+templ SessionPage(p Page, d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, subagents []store.SessionSummary, dupIDs int, live, owner bool) {
 	@layout(p) {
 		<div class="session-page">
 			<div class="session-head">
@@ -635,6 +635,9 @@ templ SessionPage(p Page, d store.SessionDetail, msgs []store.Message, tools map
 						@kindTag(d.ProjectKind)
 						if d.Visibility == "public" {
 							<span class="tag public">public</span>
+						}
+						if dupIDs > 0 {
+							<span class="tag warn" title="This session repeats a tool-call id across rows (a resumed or compacted transcript replaying earlier turns). Each copy is shown with the same result. A high count across many sessions may signal genuinely malformed ids.">{ DuplicateIDsLabel(dupIDs) }</span>
 						}
 						if d.GitBranch != "" {
 							<span class="muted">{ d.GitBranch }</span>
