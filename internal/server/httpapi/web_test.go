@@ -417,7 +417,7 @@ func TestPublicSessionFlow(t *testing.T) {
 }
 
 // TestOverviewRangeWindow drives the overview through its range query param: the
-// default load marks the 30-day window active, and ?range=90d marks the 90-day
+// default load marks the year window active, and ?range=90d marks the 90-day
 // window instead (and not the default). This exercises handleOverview's ParseRange
 // wiring end to end, the panel only renders its selector once there is usage data.
 func TestOverviewRangeWindow(t *testing.T) {
@@ -456,10 +456,10 @@ func TestOverviewRangeWindow(t *testing.T) {
 		t.Fatalf("login: %v", err)
 	}
 
-	// The default load opens on the 30-day window.
+	// The default load opens on the year window.
 	body := readBody(t, mustGet(t, c, srv.URL+"/"))
-	if !strings.Contains(body, `class="seg active" hx-get="/?range=30d"`) {
-		t.Fatalf("default overview should mark the 30-day window active, got:\n%s", body)
+	if !strings.Contains(body, `class="seg active" hx-get="/?range=year"`) {
+		t.Fatalf("default overview should mark the year window active, got:\n%s", body)
 	}
 
 	// ?range=90d moves the active window and leaves the default unmarked.
@@ -467,7 +467,7 @@ func TestOverviewRangeWindow(t *testing.T) {
 	if !strings.Contains(body, `class="seg active" hx-get="/?range=90d"`) {
 		t.Fatalf("range=90d should mark the 90-day window active, got:\n%s", body)
 	}
-	if strings.Contains(body, `class="seg active" hx-get="/?range=30d"`) {
+	if strings.Contains(body, `class="seg active" hx-get="/?range=year"`) {
 		t.Fatalf("range=90d should not also mark the default window active, got:\n%s", body)
 	}
 }
