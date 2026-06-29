@@ -178,7 +178,8 @@ func TestGlobalFacets(t *testing.T) {
 		t.Errorf("user facet = %+v, want grace=6", f.Users)
 	}
 
-	// Projects: both projects with three sessions each.
+	// Projects: both projects with three sessions each, the git-remote project
+	// ordered ahead of the standalone folder even though their counts tie.
 	if len(f.Projects) != 2 {
 		t.Fatalf("project facet = %+v, want 2", f.Projects)
 	}
@@ -186,5 +187,9 @@ func TestGlobalFacets(t *testing.T) {
 		if p.Count != 3 {
 			t.Errorf("project %q count = %d, want 3", p.Key, p.Count)
 		}
+	}
+	if f.Projects[0].Kind != "remote" {
+		t.Errorf("project facet order = [%q (%s), %q (%s)], want the remote project first",
+			f.Projects[0].Key, f.Projects[0].Kind, f.Projects[1].Key, f.Projects[1].Kind)
 	}
 }

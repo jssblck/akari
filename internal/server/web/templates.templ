@@ -547,45 +547,79 @@ templ activeProjectChip(opts []store.ProjectFacet, sel store.SessionFilter) {
 
 // GlobalSessionList renders the cross-project session feed: one row per session
 // with its project, agent, branch, and figures. It is the htmx-swappable body of
-// the Sessions page and the Overview's recent-activity feed.
+// the Sessions page and the Overview's recent-activity feed. The session id is
+// left off (the whole row links to the session); columns size to their content
+// and the Project column absorbs the slack so the row reads flush on a wide page.
 templ GlobalSessionList(rows []store.SessionRow) {
 	if len(rows) == 0 {
 		<div class="empty">No sessions match these filters.</div>
 	} else {
-		<table class="grid">
+		<table class="grid sessions">
 			<thead>
 				<tr>
-					<th>Session</th>
-					<th>Project</th>
+					<th class="col-grow">Project</th>
+					<th>Tags</th>
 					<th>Agent</th>
 					<th>Branch</th>
 					<th>User</th>
 					<th class="num">Messages</th>
-					<th class="num">Cost</th>
+					<th class="num">Tokens</th>
 					<th>Updated</th>
 				</tr>
 			</thead>
 			<tbody>
 				for _, s := range rows {
 					<tr data-row-href={ SessionPath(s.ID) }>
-						<td>
-							<a href={ SessionHref(s.ID) }>#{ fmt.Sprintf("%d", s.ID) }</a>
-							if s.Visibility == "public" {
-								<span class="tag public">public</span>
-							}
-						</td>
-						<td><a class="proj-link" href={ ProjectHref(s.ProjectID) }>{ SessionRowProject(s) }</a> @kindTag(s.ProjectKind)</td>
+						<td class="col-grow"><a class="proj-link" href={ ProjectHref(s.ProjectID) }>{ SessionRowProject(s) }</a></td>
+						@tagsCell(s.ProjectKind, s.Visibility)
 						<td><span class="tag agent">{ s.Agent }</span></td>
 						<td class="muted mono small">{ s.GitBranch }</td>
 						<td class="muted">{ s.Username }</td>
 						<td class="num">{ fmt.Sprintf("%d", s.MessageCount) }</td>
-						<td class="num">{ FmtCost(s.TotalCostUSD, s.CostIncomplete) }</td>
-						<td class="muted">{ FmtTime(s.UpdatedAt) }</td>
+						@tokenCell(s.SessionSummary)
+						<td class="muted" title={ FmtTime(s.UpdatedAt) }>{ FmtRelTime(s.UpdatedAt) }</td>
 					</tr>
 				}
 			</tbody>
 		</table>
 	}
+}
+
+// tagsCell gathers a row's state chips into one column: the project's
+// standalone/orphaned state (a remote project shows none) and the session's
+// public visibility. It replaces the two awkward separate columns.
+templ tagsCell(kind, visibility string) {
+	<td class="tags">
+		@kindTag(kind)
+		if visibility == "public" {
+			<span class="tag public">public</span>
+		}
+	</td>
+}
+
+// tokenCell renders a session's total token volume with a hover/focus card that
+// breaks it down by class and shows cost, mirroring the overview heatmap's
+// tooltip so the two surfaces read alike.
+templ tokenCell(s store.SessionSummary) {
+	<td class="num tokens">
+		<span class="tok-cell" tabindex="0">
+			<span class="tok-total">{ FmtTokens(RowTokens(s)) }</span>
+			<span class="tok-tip" role="tooltip">
+				<span class="tt-total">{ FmtTokens(RowTokens(s)) } tokens</span>
+				<dl class="tt-grid">
+					<dt>In</dt>
+					<dd>{ FmtTokens(s.TotalInput) }</dd>
+					<dt>Out</dt>
+					<dd>{ FmtTokens(s.TotalOutput) }</dd>
+					<dt>Cache read</dt>
+					<dd>{ FmtTokens(s.TotalCacheRead) }</dd>
+					<dt>Cache write</dt>
+					<dd>{ FmtTokens(s.TotalCacheWrite) }</dd>
+				</dl>
+				<span class="tt-cost">{ FmtCost(s.TotalCostUSD, s.CostIncomplete) }</span>
+			</span>
+		</span>
+	</td>
 }
 
 // ============================ Session ============================

@@ -183,6 +183,45 @@ func FmtTime(t *time.Time) string {
 	return t.UTC().Format("2006-01-02 15:04")
 }
 
+// RowTokens is a session's total token volume across all four classes (input,
+// output, cache read, cache write), matching the overview heatmap's notion of a
+// day's "total tokens" so the figure and its breakdown agree across views.
+func RowTokens(s store.SessionSummary) int64 {
+	return s.TotalInput + s.TotalOutput + s.TotalCacheRead + s.TotalCacheWrite
+}
+
+// FmtRelTime renders a timestamp as a coarse "time ago" for the recent past
+// (today, 1 day ago, ...), falling back to an absolute stamp once it is a week
+// or more old, where a relative phrasing stops being useful. It reads "now" from
+// the wall clock; relTime holds the testable core.
+func FmtRelTime(t *time.Time) string {
+	if t == nil || t.IsZero() {
+		return "-"
+	}
+	return relTime(time.Now(), *t)
+}
+
+// relTime is FmtRelTime's clock-injected core. Day distance is measured between
+// UTC calendar dates (not 24-hour windows), so a session from late last night
+// reads "1 day ago" rather than "today" merely because fewer than 24 hours have
+// passed.
+func relTime(now, t time.Time) string {
+	now, t = now.UTC(), t.UTC()
+	nd := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	td := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+	days := int(nd.Sub(td).Hours() / 24)
+	switch {
+	case days <= 0: // today, or a future stamp from clock skew
+		return "today"
+	case days == 1:
+		return "1 day ago"
+	case days < 7:
+		return fmt.Sprintf("%d days ago", days)
+	default:
+		return t.Format("2006-01-02 15:04")
+	}
+}
+
 // FmtTimeAt renders a non-pointer timestamp, or a dash when zero.
 func FmtTimeAt(t time.Time) string {
 	if t.IsZero() {
