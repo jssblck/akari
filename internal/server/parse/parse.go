@@ -99,14 +99,21 @@ func toProjectionDelta(p parser.Delta) store.ProjectionDelta {
 			ToolName:       t.ToolName,
 			Category:       t.Category,
 			FilePath:       t.FilePath,
-			InputBytes:     int64(len(t.InputJSON)),
 			CallUID:        t.CallUID,
 		}
-		if t.InputJSON != "" {
+		switch {
+		case t.InputSHA256 != "":
+			// The client lifted the input to the CAS; record the reference and its
+			// declared metadata with no inline body for the server to re-store.
+			tc.InputSHA256 = t.InputSHA256
+			tc.InputBytes = int64(t.InputBytes)
+			tc.InputMediaType = t.InputMediaType
+		case t.InputJSON != "":
 			// Carry the parsed input string straight through. gjson aliases the
 			// region, and the blob writer streams it in slices, so the body is never
 			// copied whole into a second buffer on the way to the CAS.
 			tc.InputBody = t.InputJSON
+			tc.InputBytes = int64(len(t.InputJSON))
 			tc.InputMediaType = "application/json"
 		}
 		d.ToolCalls = append(d.ToolCalls, tc)
@@ -114,11 +121,12 @@ func toProjectionDelta(p parser.Delta) store.ProjectionDelta {
 
 	for _, tr := range p.ToolResults {
 		d.ToolResults = append(d.ToolResults, store.ToolResultDelta{
-			CallUID:   tr.CallUID,
-			Body:      tr.Body,
-			Bytes:     int64(tr.Bytes),
-			MediaType: tr.MediaType,
-			Status:    tr.Status,
+			CallUID:    tr.CallUID,
+			Body:       tr.Body,
+			BodySHA256: tr.BodySHA256,
+			Bytes:      int64(tr.Bytes),
+			MediaType:  tr.MediaType,
+			Status:     tr.Status,
 		})
 	}
 

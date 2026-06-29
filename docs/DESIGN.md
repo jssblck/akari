@@ -208,10 +208,13 @@ The parsed projection of a session:
   searchable and rendered directly.
 - **tool_calls**: tool invocations attached to a message (name, category, file
   path, and metadata about the input and result). The bulky parts, the tool
-  input body and the tool result body, are not stored inline: each is written to
-  the content-addressed store and referenced by hash, with its size and media
-  type kept on the row. The UI shows them as metadata first (for example
-  "36 KB json") and fetches the body from the CAS only when the user expands it.
+  input body and the tool result body, are not stored inline: each lives in the
+  content-addressed store and is referenced by hash, with its size and media type
+  kept on the row. The client lifts these bodies out of the transcript and uploads
+  them to the CAS directly (see Ingest protocol), so a giant tool output never
+  travels inline; the server records the reference rather than re-storing the body.
+  The UI shows them as metadata first (for example "36 KB json") and fetches the
+  body from the CAS only when the user expands it.
 - **usage_events**: token accounting rows (input, output, cache-creation a.k.a.
   cache-write, cache-read, reasoning) with computed cost, keyed for dedup.
 
@@ -223,21 +226,61 @@ rebuild them from the stored raw bytes whenever the parser improves.
 ### Responsibilities
 
 1. Ingest raw session bytes over HTTP (resumable, idempotent).
-2. Store raw bytes permanently as the lossless backup and re-parse source.
-3. Parse raw bytes into the queryable projection (messages, tool calls, usage).
+2. Store the transformed transcript permanently as the lossless backup and
+   re-parse source (tool bodies live in the CAS, referenced by sentinels).
+3. Parse the transcript into the queryable projection (messages, tool calls,
+   usage), recording each tool body's CAS reference from its sentinel.
 4. Compute token stats and cost.
-5. Extract binary attachments and bulky tool input/result bodies into the
-   content-addressed large-object store.
+5. Accept content-addressed uploads of tool input/result bodies (and store binary
+   attachments) in the large-object store, deduped by hash.
 6. Serve a server-rendered web UI and a small read API.
 7. Authenticate users and tokens; enforce the internal/public boundary.
 
 ### Ingest protocol
 
 All ingest endpoints require `Authorization: Bearer <token>`. The unit of upload
-is the raw session file, streamed incrementally by byte offset. The cursor is the
-number of bytes the server has stored (`stored_bytes`), and these files only ever
-grow by appending, so the protocol is built around append-only growth with an
+is the session file, but it is not uploaded raw. Before it is sent, the client
+lifts every tool input and result body out of the transcript, uploads those
+bodies to the content-addressed store directly, and rewrites each body inline as a
+compact CAS sentinel. The server stores and parses this **transformed**
+transcript, which stays small however big the tool outputs are. A single 508 MiB
+Codex turn that is almost entirely base64-image tool results becomes a small
+transcript of sentinels plus many image blobs, so it uploads where an inline
+transcript could not (it would exceed the 128 MiB chunk cap).
+
+The transcript is streamed incrementally by byte offset. The cursor is the number
+of TRANSFORMED bytes the server has stored (`stored_bytes`), and these files only
+ever grow by appending, so the protocol is built around append-only growth with an
 explicit divergence check.
+
+**Sentinel format.** Each tool input or result body is replaced inline by a
+single-line JSON object:
+`{"__akari_cas__":1,"sha256":"<hex>","bytes":<n>,"media_type":"<type>"}`. The
+`__akari_cas__` key namespaces it so no real tool body collides. The rewrite
+happens strictly inside the body's JSON value span, so the line keeps its newline
+and a Codex turn-closing user line keeps its shape: the transformed stream has the
+same line and turn boundaries as the original, which is what keeps it resumable and
+turn aligned. The body bytes and media type are exactly what the server used to
+store inline, so the sha256 is identical and the existing hash-addressed blob
+serving keeps working unchanged. The extraction and the sentinel have one
+definition in `internal/parser`, used by both the client (to lift and rewrite) and
+the server reducer (to interpret), so the client-uploaded body set can never drift
+from what the server would have stored.
+
+**Resume model.** The client still resumes by the ORIGINAL on-disk file, because
+that is all it can recompute statelessly (offset plus prefix hash). But the bytes
+the server holds are the transformed transcript, so the announce handshake
+compares the client's TRANSFORMED prefix hash against the server's. The client
+caches, per file, the verified transformed offset, a resumable sha256 of the
+transformed prefix, and the original offset that maps to it; each tick transforms
+only the newly appended original tail, so steady-state work is proportional to the
+appended bytes. A dropped cache (a restart) re-transforms the original file from
+zero once to recover the prefix digest and the offset mapping, the same class of
+cost as the old cold re-hash, and never re-uploads a body. The transform is
+deterministic and line aligned, so the recomputed prefix is byte identical to what
+was uploaded and the stream stays append-only. Server reparse-from-stored-raw
+still works: the stored raw is the transformed transcript, and the parser fills
+each tool body's reference from its sentinel rather than the CAS.
 
 1. **Announce / upsert session.**
    `POST /api/v1/ingest/session`
@@ -281,25 +324,43 @@ explicit divergence check.
    correctness, since the server's `prefix_sha256` remains the sole authority on
    divergence.
 
-2. **Append bytes.**
+2. **Upload tool bodies (CAS).** Before sending a transformed chunk, the client
+   uploads the bodies that chunk references.
+   - `POST /api/v1/ingest/blobs/check` with `{"sha256":[...]}` returns
+     `{"missing":[...]}`, the hashes the CAS does not yet hold. The CAS dedupes
+     globally, so a body any session already stored (this one on an earlier sync,
+     or any other) is reported present and never re-sent. This is what makes a
+     re-sync of an unchanged file upload zero bodies.
+   - `PUT /api/v1/ingest/blob/{sha256}?media_type=<type>` streams one body to the
+     CAS. The server streams it through to the large object in bounded slices and
+     verifies the bytes hash to the path's sha256, so a corrupt or mislabeled
+     upload is rejected rather than poisoning the store. Each upload pins the blob
+     against the sweep for a TTL (see CAS), so a body cannot be reclaimed in the
+     window between uploading it and uploading the transcript that references it.
+
+   Bodies are uploaded before the transcript that references them, so the parse can
+   always resolve a sentinel to a present blob; a sentinel whose body is somehow
+   absent leaves the parse cursor for a retry rather than recording a dangling
+   reference.
+
+3. **Append bytes.**
    `POST /api/v1/ingest/session/{id}/chunk?offset=40960`
-   with the raw bytes from that offset as the body. A chunk ends on a message
+   with the transformed bytes from that offset as the body. A chunk ends on a message
    boundary, never inside a message. For Claude and pi a message is one JSONL
    line, so a chunk ends on the last `\n`. For Codex a message is a folded turn
    (reasoning, tool calls, and the assistant reply), so a chunk ends on a turn
    boundary: the client cuts right after a user line, which is where a turn
    closes. This keeps a turn inside one chunk, and therefore inside one parse
    region, which is what lets the projection write each message exactly once. The
-   client prefers ~1 MiB chunks but grows a chunk to hold one oversized message,
-   up to a 128 MiB cap, so a giant single turn is served alone rather than split.
-   That cap is enforced against the open region before any buffer is allocated: a
-   message that grows past it without closing is refused, so the client never
-   buffers more than the cap. Boundary detection is incremental too. The client
-   caches how far it has scanned a file for the next boundary, so a trailing turn
-   that is still open is not re-scanned from its start each tick; only the newly
-   appended bytes are examined. The final turn of a session has no closing user
-   line, so the client withholds it until the file goes idle (it has not changed
-   for a settle window), then flushes it whole. The server:
+   client prefers ~1 MiB transformed chunks; because each tool body is lifted to
+   the CAS, a transformed line (and so a chunk) stays small even for a turn whose
+   original bytes are enormous. A single transformed line past a 128 MiB cap is
+   refused, but after the bodies are lifted that only happens for a truly
+   pathological line. Boundary detection runs on the transformed bytes, which is
+   sound because the transform is line aligned (it preserves every newline and
+   every Codex turn close). The final turn of a session has no closing user line,
+   so the client withholds it until the file goes idle (it has not changed for a
+   settle window), then flushes it whole. The server:
    - Rejects with the current length if `offset` does not equal `stored_bytes`
      (idempotent: a re-sent chunk whose offset is behind is a no-op that returns
      the truth, so the client simply advances).
@@ -309,18 +370,21 @@ explicit divergence check.
      re-check: a misaligned chunk would at worst render one turn as two messages,
      never corrupt the store.)
    - Appends the chunk as a new raw row and advances the content hash by resuming
-     its stored digest state over only the new bytes. Both are one transaction:
-     once it commits, the upload has succeeded regardless of what parsing does.
+     its stored digest state over only the new (transformed) bytes. Both are one
+     transaction: once it commits, the upload has succeeded regardless of what
+     parsing does.
    - In a second transaction, parses only the bytes past the parse cursor
      (assigning ordinals after the last stored ordinal) and applies them to the
-     projection incrementally. Because every stored byte ends on a line boundary,
+     projection incrementally. Each tool body's sentinel is recorded as a CAS
+     reference (sha256, bytes, media type) with no blob write, since the client
+     already uploaded the body. Because every stored byte ends on a line boundary,
      the parser only ever sees complete lines. Parsing is best effort: a parse
      failure leaves the durable bytes in place and the cursor where it was, for
      the next chunk or a reparse to advance, so client ingest health never
      depends on parser correctness.
    - Returns the new `stored_bytes` and the new message count.
 
-3. **Reset.** `POST /api/v1/ingest/session/{id}/reset` truncates the raw store
+4. **Reset.** `POST /api/v1/ingest/session/{id}/reset` truncates the raw store
    (its chunks, length, and hash), drops the derived rows, rewinds the parse
    cursor, and re-parses from zero on the next chunk. The client calls this when
    the announce divergence check fails.
@@ -611,25 +675,35 @@ Keeping these out of the hot tables keeps those tables small, dedupes content
 that recurs across sessions, and lets the UI defer loading a body until the user
 asks for it.
 
-Writing a blob:
+Tool bodies enter the CAS by client upload, ahead of the transcript that
+references them (see Ingest protocol): the client hashes each body, asks which
+hashes the server lacks, and streams the missing ones to
+`PUT /api/v1/ingest/blob/{sha256}`. The server streams the body to a large object
+in bounded slices, verifies it hashes to the declared key, and inserts the `blobs`
+row under `ON CONFLICT (sha256) DO NOTHING`. Binary attachments are written the
+same way server-side. Writes never touch a count.
 
-- Hash the bytes with sha256.
-- Insert the large object and `blobs` row if the hash is new, otherwise do
-  nothing: create the Postgres large object (`lo_create` / write via the
-  large-object API inside a transaction) and insert the `blobs` row with its
-  `media_type` under `ON CONFLICT (sha256) DO NOTHING`. Writes never touch a
-  count.
-- Point at the hash from the referencing row: an `attachments` row, or the
-  `input_sha256` / `result_sha256` columns on a `tool_calls` row.
+A body uploaded this way is not yet referenced by any row, so a naive sweep would
+reclaim it in the gap before its transcript lands. Each upload therefore records
+(or refreshes) a row in `blob_pins` with an expiry of now + a TTL (one hour). The
+sweep clears expired pins first, then excludes any blob with a live pin from its
+orphan set, so a freshly uploaded body survives the upload-then-reference window
+(and a crash inside it) but a body whose transcript never arrives is eventually
+reclaimable. Once a `tool_calls` row references the body, that reference keeps it
+alive and the pin lapses harmlessly. When the parser records a reference for a body
+the client uploaded, it re-locks the blob `FOR KEY SHARE` in the same transaction,
+the same guard an inline write takes, so a sweep cannot delete the body between the
+check and the referencing insert.
 
 Liveness is not tracked with a refcount; it is computed when needed. Deleting a
 session simply cascades its referencing rows away, and a re-parse drops and
-rewrites them. A sweep then deletes any blob that no referencing row points at
-(`lo_unlink` plus row delete, for blobs where `NOT EXISTS` an `attachments` or
-`tool_calls` reference). This makes ingest cheaper (no counting) and the scheme
-self-healing (a drifted count can never strand or prematurely free a blob). The
-sweep only needs to run after deletions or re-parses, since nothing else can
-orphan a blob.
+rewrites them. A sweep then deletes any blob that no referencing row points at and
+no live pin protects (`lo_unlink` plus row delete, for blobs where `NOT EXISTS` an
+`attachments` or `tool_calls` reference and `NOT EXISTS` an unexpired `blob_pins`
+row). This makes ingest cheaper (no counting) and the scheme self-healing (a
+drifted count can never strand or prematurely free a blob). The sweep needs to run
+after deletions or re-parses (which orphan referenced blobs) and to clear expired
+pins of bodies whose transcripts never arrived.
 
 Conversational text (message content and thinking) stays inline in `messages`, so
 it remains searchable and renders straight from the table, and the raw session

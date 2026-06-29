@@ -48,13 +48,14 @@ func (r *reducer) reducePi(region []byte, base int64) error {
 					case "toolCall":
 						op.HasToolUse = true
 						name := b.Get("name").String()
-						r.d.ToolCalls = append(r.d.ToolCalls, ToolCall{
+						tc := ToolCall{
 							MessageOrdinal: ord, CallIndex: callIndex,
 							ToolName: name, Category: toolCategory(name),
-							FilePath:  b.Get("arguments.file_path").String(),
-							InputJSON: b.Get("arguments").Raw,
-							CallUID:   b.Get("id").String(),
-						})
+							FilePath: b.Get("arguments.file_path").String(),
+							CallUID:  b.Get("id").String(),
+						}
+						setToolInput(&tc, b.Get("arguments"), "application/json")
+						r.d.ToolCalls = append(r.d.ToolCalls, tc)
 						callIndex++
 					}
 				}

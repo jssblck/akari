@@ -61,13 +61,14 @@ func (r *reducer) reduceClaude(region []byte, base int64) error {
 				case "tool_use":
 					op.HasToolUse = true
 					name := b.Get("name").String()
-					r.d.ToolCalls = append(r.d.ToolCalls, ToolCall{
+					tc := ToolCall{
 						MessageOrdinal: ord, CallIndex: callIndex,
 						ToolName: name, Category: toolCategory(name),
-						FilePath:  b.Get("input.file_path").String(),
-						InputJSON: b.Get("input").Raw,
-						CallUID:   b.Get("id").String(),
-					})
+						FilePath: b.Get("input.file_path").String(),
+						CallUID:  b.Get("id").String(),
+					}
+					setToolInput(&tc, b.Get("input"), "application/json")
+					r.d.ToolCalls = append(r.d.ToolCalls, tc)
 					callIndex++
 				}
 			}
@@ -102,14 +103,33 @@ func (r *reducer) applyResult(id string, body gjson.Result, isErr bool) {
 	if id == "" {
 		return // an unkeyed result cannot be matched to a call
 	}
-	content, media := bodyContent(body)
 	status := "ok"
 	if isErr {
 		status = "error"
 	}
-	r.d.ToolResults = append(r.d.ToolResults, ToolResultOp{
-		CallUID: id, Body: content, Bytes: len(content), MediaType: media, Status: status,
-	})
+	op := ToolResultOp{CallUID: id, Status: status}
+	if ref, ok := asCASRef(body); ok {
+		// The client already lifted this body to the CAS; record the reference and
+		// its metadata, but do not carry a body for the server to re-store.
+		op.BodySHA256, op.Bytes, op.MediaType = ref.SHA256, ref.Bytes, ref.MediaType
+	} else {
+		content, media := bodyContent(body)
+		op.Body, op.Bytes, op.MediaType = content, len(content), media
+	}
+	r.d.ToolResults = append(r.d.ToolResults, op)
+}
+
+// setToolInput records a tool call's input, recognizing a CAS sentinel. When the
+// client lifted the input to the CAS, the reference and its metadata are recorded
+// and no inline body is carried; otherwise the raw input JSON travels inline and
+// the server hashes and sizes it. defaultMedia is the media type used for an
+// inline body (every agent's tool input is JSON).
+func setToolInput(tc *ToolCall, input gjson.Result, defaultMedia string) {
+	if ref, ok := asCASRef(input); ok {
+		tc.InputSHA256, tc.InputBytes, tc.InputMediaType = ref.SHA256, ref.Bytes, ref.MediaType
+		return
+	}
+	tc.InputJSON = input.Raw
 }
 
 // bodyContent returns the canonical body bytes and media type for a raw tool

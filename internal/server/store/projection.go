@@ -36,10 +36,14 @@ type MessageDelta struct {
 	Timestamp    time.Time
 }
 
-// ProjToolCall is one tool_calls insert. InputBody holds the bulky input the CAS
-// stores; AdvanceProjection writes it and records the sha256 reference. CallUID
-// is the agent's call id, used to back-patch the result that arrives on a later
-// line (and possibly in a later region, for Claude).
+// ProjToolCall is one tool_calls insert. The input body lives in the CAS, by one
+// of two paths: InputBody holds the bulky input inline and AdvanceProjection
+// writes it and records the sha256; or InputSHA256 is already set because the
+// client lifted the body to the CAS at upload time and left a sentinel, so the
+// reference is recorded with no blob write. Exactly one of InputBody / InputSHA256
+// is set when there is an input. CallUID is the agent's call id, used to
+// back-patch the result that arrives on a later line (and possibly a later
+// region, for Claude).
 type ProjToolCall struct {
 	MessageOrdinal int
 	CallIndex      int
@@ -47,19 +51,23 @@ type ProjToolCall struct {
 	Category       string
 	FilePath       string
 	InputBody      string
+	InputSHA256    string
 	InputBytes     int64
 	InputMediaType string
 	CallUID        string
 }
 
-// ToolResultDelta back-patches a tool call's result, matched by call id. Body is
-// the bulky result the CAS stores (empty when the result carries no body).
+// ToolResultDelta back-patches a tool call's result, matched by call id. The
+// result body reaches the CAS by one of two paths, mirroring ProjToolCall: Body
+// holds it inline for the server to write, or BodySHA256 is the reference the
+// client already uploaded. Both are empty when the result carries no body.
 type ToolResultDelta struct {
-	CallUID   string
-	Body      string
-	Bytes     int64
-	MediaType string
-	Status    string
+	CallUID    string
+	Body       string
+	BodySHA256 string
+	Bytes      int64
+	MediaType  string
+	Status     string
 }
 
 // ProjUsage is one usage_events insert. SourceOffset and SourceIndex make the
@@ -281,7 +289,17 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 
 	for _, t := range d.ToolCalls {
 		var inputSHA, inputMedia any
-		if len(t.InputBody) > 0 {
+		switch {
+		case t.InputSHA256 != "":
+			// The client lifted the input to the CAS and left a sentinel; the blob is
+			// already present (and pinned against the sweep), so record the reference
+			// without re-storing the body. Re-lock it FOR KEY SHARE so a sweep racing
+			// this insert cannot delete the blob between here and the FK check.
+			if err := pinBlobRefTx(ctx, tx, t.InputSHA256); err != nil {
+				return fmt.Errorf("reference tool input blob %s for session %d call %d/%d: %w", t.InputSHA256, sessionID, t.MessageOrdinal, t.CallIndex, err)
+			}
+			inputSHA, inputMedia = t.InputSHA256, t.InputMediaType
+		case len(t.InputBody) > 0:
 			sha, err := writeBlobTx(ctx, tx, t.InputBody, t.InputMediaType)
 			if err != nil {
 				return fmt.Errorf("write tool input blob for session %d call %d/%d: %w", sessionID, t.MessageOrdinal, t.CallIndex, err)
@@ -305,7 +323,13 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 			continue
 		}
 		var resultSHA any
-		if len(tr.Body) > 0 {
+		switch {
+		case tr.BodySHA256 != "":
+			if err := pinBlobRefTx(ctx, tx, tr.BodySHA256); err != nil {
+				return fmt.Errorf("reference tool result blob %s for session %d call %q: %w", tr.BodySHA256, sessionID, tr.CallUID, err)
+			}
+			resultSHA = tr.BodySHA256
+		case len(tr.Body) > 0:
 			sha, err := writeBlobTx(ctx, tx, tr.Body, tr.MediaType)
 			if err != nil {
 				return fmt.Errorf("write tool result blob for session %d call %q: %w", sessionID, tr.CallUID, err)

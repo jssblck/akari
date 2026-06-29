@@ -39,14 +39,22 @@ func (r *reducer) reduceCodex(region []byte, base int64) error {
 				ord := r.ensureAssistant(ts)
 				r.open.HasToolUse = true
 				name := p.Get("name").String()
-				args := p.Get("arguments").String()
+				argsVal := p.Get("arguments")
 				tc := ToolCall{
 					MessageOrdinal: ord, CallIndex: r.openCalls,
 					ToolName: name, Category: toolCategory(name),
-					InputJSON: args, CallUID: p.Get("call_id").String(),
+					CallUID: p.Get("call_id").String(),
 				}
-				if gjson.Valid(args) {
-					tc.FilePath = gjson.Get(args, "file_path").String()
+				if ref, ok := asCASRef(argsVal); ok {
+					tc.InputSHA256, tc.InputBytes, tc.InputMediaType = ref.SHA256, ref.Bytes, ref.MediaType
+				} else {
+					// Codex stores arguments as a JSON-encoded string; the body is the
+					// unquoted string value, matching what the client lifts to the CAS.
+					args := argsVal.String()
+					tc.InputJSON = args
+					if gjson.Valid(args) {
+						tc.FilePath = gjson.Get(args, "file_path").String()
+					}
 				}
 				r.d.ToolCalls = append(r.d.ToolCalls, tc)
 				r.openCalls++
