@@ -162,11 +162,17 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The same trailing window bounds both the usage panel and the session list, so
+	// the two read the same range; the heatmap's selector and the filter form both
+	// carry it on ?range.
+	rng := web.ParseRange(r.URL.Query().Get("range"))
+	since := web.RangeSince(rng, time.Now())
 	filter := store.SessionFilter{
 		ProjectID: id,
 		Agent:     strings.TrimSpace(r.URL.Query().Get("agent")),
 		Machine:   strings.TrimSpace(r.URL.Query().Get("machine")),
 		Username:  strings.TrimSpace(r.URL.Query().Get("user")),
+		Since:     since,
 	}
 	sessions, err := s.Store.ListSessions(r.Context(), filter)
 	if err != nil {
@@ -188,8 +194,7 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load filters."))
 		return
 	}
-	rng := web.ParseRange(r.URL.Query().Get("range"))
-	analytics, err := s.Store.Analytics(r.Context(), id, web.RangeSince(rng, time.Now()))
+	analytics, err := s.Store.Analytics(r.Context(), id, since)
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load analytics."))
 		return

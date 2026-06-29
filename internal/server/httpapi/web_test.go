@@ -507,6 +507,24 @@ func TestProjectPageRangeWindow(t *testing.T) {
 		t.Fatalf("seed usage: %v", err)
 	}
 
+	// A second session last active 60 days ago: outside the default 30-day window,
+	// so it should drop out of the session list under that window and reappear only
+	// when the window widens to all of history.
+	annOld, err := st.Announce(ctx, store.AnnounceParams{
+		UserID: owner.ID, Agent: "claude", SourceSessionID: "sess-old",
+		ProjectID: projectID, Cwd: "/home/grace/akari", Machine: "laptop",
+	})
+	if err != nil {
+		t.Fatalf("announce old: %v", err)
+	}
+	if _, err := st.Pool.Exec(ctx,
+		`UPDATE sessions SET updated_at = now() - make_interval(days => 60) WHERE id = $1`,
+		annOld.SessionID); err != nil {
+		t.Fatalf("age old session: %v", err)
+	}
+	recentPath := fmt.Sprintf("/sessions/%d", ann.SessionID)
+	oldPath := fmt.Sprintf("/sessions/%d", annOld.SessionID)
+
 	if _, err := c.PostForm(srv.URL+"/login", url.Values{
 		"username": {"grace"}, "password": {"hopper-1906"},
 	}); err != nil {
@@ -524,6 +542,14 @@ func TestProjectPageRangeWindow(t *testing.T) {
 	if !strings.Contains(body, `class="seg active" hx-get="`+base+`?range=30d"`) {
 		t.Fatalf("default project page should mark the 30-day window active, got:\n%s", body)
 	}
+	// The session list is windowed too: the recent session shows, the 60-day-old one
+	// is filtered out under the default window.
+	if !strings.Contains(body, recentPath) {
+		t.Fatalf("default window should list the recent session, got:\n%s", body)
+	}
+	if strings.Contains(body, oldPath) {
+		t.Fatalf("default 30-day window should drop the 60-day-old session, got:\n%s", body)
+	}
 
 	// ?range=90d moves the active window and leaves the default unmarked.
 	body = readBody(t, mustGet(t, c, srv.URL+base+"?range=90d"))
@@ -532,6 +558,12 @@ func TestProjectPageRangeWindow(t *testing.T) {
 	}
 	if strings.Contains(body, `class="seg active" hx-get="`+base+`?range=30d"`) {
 		t.Fatalf("range=90d should not also mark the default window active, got:\n%s", body)
+	}
+
+	// Widening the window to all of history brings the old session back into the list.
+	body = readBody(t, mustGet(t, c, srv.URL+base+"?range=all"))
+	if !strings.Contains(body, oldPath) {
+		t.Fatalf("the all-history window should list the 60-day-old session, got:\n%s", body)
 	}
 
 	// An htmx request that targets #usage (the range selector) gets the full panel.
