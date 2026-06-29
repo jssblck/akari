@@ -1,13 +1,18 @@
-package store
+package store_test
 
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
+
+	"github.com/jssblck/akari/internal/server/store"
+	"github.com/jssblck/akari/internal/server/storetest"
 )
 
 func TestPublishUnpublish(t *testing.T) {
-	st := newTestStore(t)
+	t.Parallel()
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 
 	owner, err := st.Register(ctx, "grace", "hash", "")
@@ -22,7 +27,7 @@ func TestPublishUnpublish(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ann, err := st.Announce(ctx, AnnounceParams{
+	ann, err := st.Announce(ctx, store.AnnounceParams{
 		UserID: owner.ID, Agent: "claude", SourceSessionID: "sess-1",
 		ProjectID: projectID, GitBranch: "main", Cwd: "/home/grace/akari", Machine: "laptop",
 	})
@@ -32,7 +37,7 @@ func TestPublishUnpublish(t *testing.T) {
 	sid := ann.SessionID
 
 	// A non-owner cannot publish and the session stays internal.
-	if _, err := st.PublishSession(ctx, sid, other.ID, "cand-x"); !errors.Is(err, ErrNotFound) {
+	if _, err := st.PublishSession(ctx, sid, other.ID, "cand-x"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("non-owner publish err = %v, want ErrNotFound", err)
 	}
 	if d, _ := st.SessionDetailByID(ctx, sid); d.Visibility != "internal" {
@@ -63,7 +68,7 @@ func TestPublishUnpublish(t *testing.T) {
 	}
 
 	// A non-owner cannot unpublish.
-	if err := st.UnpublishSession(ctx, sid, other.ID); !errors.Is(err, ErrNotFound) {
+	if err := st.UnpublishSession(ctx, sid, other.ID); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("non-owner unpublish err = %v, want ErrNotFound", err)
 	}
 
@@ -71,7 +76,7 @@ func TestPublishUnpublish(t *testing.T) {
 	if err := st.UnpublishSession(ctx, sid, owner.ID); err != nil {
 		t.Fatalf("unpublish: %v", err)
 	}
-	if _, err := st.SessionDetailByPublicID(ctx, "cand-1"); !errors.Is(err, ErrNotFound) {
+	if _, err := st.SessionDetailByPublicID(ctx, "cand-1"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("public lookup after unpublish err = %v, want ErrNotFound", err)
 	}
 	if d, _ := st.SessionDetailByID(ctx, sid); d.Visibility != "internal" || d.PublicID != nil {
@@ -80,7 +85,8 @@ func TestPublishUnpublish(t *testing.T) {
 }
 
 func TestDeleteSessionCascadesAndOrphansBlob(t *testing.T) {
-	st := newTestStore(t)
+	t.Parallel()
+	st := storetest.NewStore(t)
 	ctx := context.Background()
 
 	u, err := st.Register(ctx, "grace", "hash", "")
@@ -93,10 +99,10 @@ func TestDeleteSessionCascadesAndOrphansBlob(t *testing.T) {
 	}
 	body := []byte("deleted tool body")
 	sid := seedSession(t, st, u.ID, projectID, "sess-del")
-	proj := ProjectionDelta{
-		Messages:  []MessageDelta{{Ordinal: 0, Role: "assistant", Content: "x", HasToolUse: true}},
-		ToolCalls: []ProjToolCall{{MessageOrdinal: 0, CallIndex: 0, ToolName: "Read", CallUID: "c1"}},
-		ToolResults: []ToolResultDelta{{
+	proj := store.ProjectionDelta{
+		Messages:  []store.MessageDelta{{Ordinal: 0, Role: "assistant", Content: "x", HasToolUse: true}},
+		ToolCalls: []store.ProjToolCall{{MessageOrdinal: 0, CallIndex: 0, ToolName: "Read", CallUID: "c1"}},
+		ToolResults: []store.ToolResultDelta{{
 			CallUID: "c1", Body: string(body), Bytes: int64(len(body)), MediaType: "text/plain", Status: "ok",
 		}},
 	}
@@ -109,7 +115,7 @@ func TestDeleteSessionCascadesAndOrphansBlob(t *testing.T) {
 	}
 
 	// The session and everything keyed to it are gone.
-	if _, err := st.SessionDetailByID(ctx, sid); !errors.Is(err, ErrNotFound) {
+	if _, err := st.SessionDetailByID(ctx, sid); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("session lookup after delete = %v, want ErrNotFound", err)
 	}
 	for _, tbl := range []string{"messages", "tool_calls", "usage_events", "session_raw"} {
@@ -128,16 +134,16 @@ func TestDeleteSessionCascadesAndOrphansBlob(t *testing.T) {
 	}
 
 	// Deleting a missing session is ErrNotFound.
-	if err := st.DeleteSession(ctx, sid); !errors.Is(err, ErrNotFound) {
+	if err := st.DeleteSession(ctx, sid); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("delete missing = %v, want ErrNotFound", err)
 	}
 }
 
 // mintInvite creates a redeemable invite and returns the secret's hash, so a
 // second user can register in tests.
-func mintInvite(t *testing.T, st *Store, adminID int64) string {
+func mintInvite(t *testing.T, st *store.Store, adminID int64) string {
 	t.Helper()
-	hash := hashHex("invite-" + itoa(int(adminID)))
+	hash := hashHex("invite-" + strconv.Itoa(int(adminID)))
 	if _, err := st.CreateInvite(context.Background(), hash, adminID, "test", nil); err != nil {
 		t.Fatalf("create invite: %v", err)
 	}
