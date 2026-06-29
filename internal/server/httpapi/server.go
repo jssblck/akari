@@ -74,7 +74,6 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /sessions/{id}/publish", s.requireFull(s.handlePublishSession))
 	mux.HandleFunc("POST /sessions/{id}/unpublish", s.requireFull(s.handleUnpublishSession))
 	mux.HandleFunc("POST /sessions/{id}/delete", s.requireFull(s.handleDeleteSession))
-	mux.HandleFunc("GET /search", s.requireReadHTML(s.handleSearchPage))
 	mux.HandleFunc("GET /account", s.requireReadHTML(s.handleAccountPage))
 	mux.HandleFunc("POST /account/tokens", s.requireFull(s.handleCreateTokenForm))
 	mux.HandleFunc("POST /account/tokens/{id}/revoke", s.requireFull(s.handleRevokeTokenForm))
