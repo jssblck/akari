@@ -258,6 +258,12 @@ th.trend, td.trend { width: 108px; }
 }
 .stat .label { display: block; margin-bottom: 3px; }
 .stat .value { font-family: var(--mono); font-size: 1.125rem; font-variant-numeric: tabular-nums; color: var(--text); }
+/* The analytics panels (overview, projects, project) fuse their readouts into a
+   single instrument strip: one bordered row split by hairlines, instead of four
+   detached tiles floating above the chart. The session page keeps loose tiles. */
+.analytics .stats { gap: 0; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); overflow: hidden; }
+.analytics .stat { flex: 1; min-width: 0; border: none; border-radius: 0; }
+.analytics .stat + .stat { border-left: 1px solid var(--border); }
 .stats.sticky {
   position: sticky; top: 0; z-index: var(--z-sticky);
   padding: var(--sp-md) 0; margin: 0 0 var(--sp-lg);
@@ -351,6 +357,45 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--l
 .chart.cursor-on .chart-readout { opacity: 1; }
 .chart-readout .ro-key { color: var(--lilac); }
 .chart-empty { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--muted); }
+
+/* ---- Calendar heatmap (overview activity grid) ---- */
+.heatmap-wrap { margin: var(--sp-md) 0 var(--sp-lg); }
+.heatmap-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--sp-sm); }
+.heatmap {
+  position: relative;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md);
+  padding: var(--sp-md);
+}
+.heatmap svg { display: block; width: 100%; height: auto; }
+.heatmap .hm-cell { transition: opacity var(--dur-fast) var(--ease-state); }
+.heatmap .hm-cell:hover { stroke: var(--text); stroke-width: 1; }
+.heatmap .lvl-0 { fill: var(--surface-3); }
+.heatmap .lvl-1 { fill: rgba(198, 168, 242, 0.28); }
+.heatmap .lvl-2 { fill: rgba(198, 168, 242, 0.5); }
+.heatmap .lvl-3 { fill: rgba(198, 168, 242, 0.74); }
+.heatmap .lvl-4 { fill: var(--lilac); }
+.heatmap .hm-month { fill: var(--muted); font: 400 10px var(--mono); }
+.heatmap-tooltip {
+  position: absolute; z-index: 5; min-width: 150px;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-sm);
+  padding: var(--sp-sm); pointer-events: none;
+  opacity: 0; transform: translateY(2px);
+  transition: opacity var(--dur-fast) var(--ease-state), transform var(--dur-fast) var(--ease-state);
+}
+.heatmap-tooltip.on { opacity: 1; transform: none; }
+.heatmap-tooltip .tt-day { color: var(--lilac); font: 500 0.75rem var(--mono); margin-bottom: 4px; }
+.heatmap-tooltip .tt-total { color: var(--text); font: 450 0.8125rem var(--mono); font-variant-numeric: tabular-nums; }
+.heatmap-tooltip .tt-empty { color: var(--muted); font-size: 0.75rem; }
+.heatmap-tooltip .tt-grid {
+  display: grid; grid-template-columns: auto auto; gap: 1px var(--sp-sm);
+  margin: 5px 0 0; font: 450 0.75rem/1.5 var(--mono);
+}
+.heatmap-tooltip .tt-grid dt { color: var(--muted); }
+.heatmap-tooltip .tt-grid dd { margin: 0; color: var(--subtext); text-align: right; font-variant-numeric: tabular-nums; }
+.heatmap-tooltip .tt-cost {
+  margin-top: 5px; padding-top: 5px; border-top: 1px solid var(--border);
+  color: var(--subtext); font: 450 0.75rem var(--mono); font-variant-numeric: tabular-nums;
+}
 
 .breakdowns { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-xl); }
 .breakdown-title { margin-bottom: var(--sp-sm); }
