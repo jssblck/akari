@@ -110,6 +110,10 @@ func TestWebFlow(t *testing.T) {
 	if !strings.Contains(body, "grace") || !strings.Contains(body, "Overview") {
 		t.Fatalf("overview page missing expected content, got:\n%s", body)
 	}
+	// The standalone search page was retired, so the sidebar must not link to it.
+	if strings.Contains(body, `href="/search"`) {
+		t.Fatalf("sidebar still links to the removed search page, got:\n%s", body)
+	}
 
 	// The projects table moved to /projects; with no projects yet it shows its
 	// empty state.
@@ -158,6 +162,17 @@ func TestWebFlow(t *testing.T) {
 	// Admin sees the invite form.
 	if !strings.Contains(body, "Invites") {
 		t.Fatalf("admin account page should show invites, got:\n%s", body)
+	}
+
+	// The /search route was removed with the page; an authenticated request for
+	// it now falls through to a 404 rather than rendering anything.
+	resp, err = c.Get(srv.URL + "/search")
+	if err != nil {
+		t.Fatalf("get /search: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET /search after removal = %d, want 404", resp.StatusCode)
 	}
 
 	// Logout clears the session; the root redirects to login again.
