@@ -27,6 +27,7 @@ type announceRequest struct {
 	SourceSessionID string `json:"source_session_id"`
 	Kind            string `json:"kind"`
 	ProjectRemote   string `json:"project_remote"`
+	LocalRoot       string `json:"local_root"`
 	GitBranch       string `json:"git_branch"`
 	Cwd             string `json:"cwd"`
 	Machine         string `json:"machine"`
@@ -41,6 +42,7 @@ func (s *Server) handleAnnounce(w http.ResponseWriter, r *http.Request) {
 	req.Agent = strings.TrimSpace(req.Agent)
 	req.SourceSessionID = strings.TrimSpace(req.SourceSessionID)
 	req.ProjectRemote = strings.TrimSpace(req.ProjectRemote)
+	req.LocalRoot = strings.TrimSpace(req.LocalRoot)
 	req.Kind = strings.TrimSpace(req.Kind)
 	if req.Kind == "" {
 		req.Kind = "remote" // back-compat: older clients announce only remotes
@@ -70,12 +72,8 @@ func (s *Server) handleAnnounce(w http.ResponseWriter, r *http.Request) {
 		}
 		remoteKey, displayName = req.ProjectRemote, repo
 	} else {
-		remoteKey = localProjectKey(req.Machine, req.Cwd)
+		remoteKey, displayName = localProjectIdentity(req.Machine, req.Cwd, req.LocalRoot)
 		host = req.Machine
-		displayName = lastPathSegment(req.Cwd)
-		if displayName == "" {
-			displayName = "(unknown location)"
-		}
 		repo = displayName
 	}
 
@@ -194,16 +192,39 @@ func (s *Server) ownedSession(w http.ResponseWriter, r *http.Request) (int64, st
 	return id, agent, true
 }
 
+// localProjectIdentity derives the project key and display name for a session
+// with no git remote. A standalone session in a live git worktree reports its
+// localRoot (the main worktree shared by every worktree of the repo), so all of
+// them collapse onto one key and display as the repo folder, the way a canonical
+// remote collapses a remote-backed repo's worktrees. Without a root (a non-git
+// folder, an orphaned session whose worktree is gone, or an older client) it
+// falls back to the per-session cwd, so the folder still groups by its own
+// location. A worktree that is later archived loses its root and so pops out into
+// its own location-keyed project: the live repo group is unaffected, and the
+// archived case is the one with no reliable parent signal anyway.
+func localProjectIdentity(machine, cwd, localRoot string) (key, displayName string) {
+	root := localRoot
+	if root == "" {
+		root = cwd
+	}
+	displayName = lastPathSegment(root)
+	if displayName == "" {
+		displayName = "(unknown location)"
+	}
+	return localProjectKey(machine, root), displayName
+}
+
 // localProjectKey derives the project key for a session with no git remote. It
-// groups by machine and working directory, so every standalone or orphaned
-// session from the same folder on the same machine lands in one project. The
-// "local:" prefix and the colon separators keep it out of the "host/owner/repo"
-// remote namespace: a canonicalized remote key has no empty path segments and is
-// never shaped like this, so a synthetic key can never collide with a real one.
-// Standalone and orphaned share the namespace (the key omits the kind) so a
-// folder that is deleted transitions kind in place rather than forking.
-func localProjectKey(machine, cwd string) string {
-	return "local:" + machine + ":" + cwd
+// groups by machine and a local location (a repo root for a live worktree, else
+// the working directory), so every standalone or orphaned session that shares
+// that location on the same machine lands in one project. The "local:" prefix and
+// the colon separators keep it out of the "host/owner/repo" remote namespace: a
+// canonicalized remote key has no empty path segments and is never shaped like
+// this, so a synthetic key can never collide with a real one. Standalone and
+// orphaned share the namespace (the key omits the kind) so a folder that is
+// deleted transitions kind in place rather than forking.
+func localProjectKey(machine, location string) string {
+	return "local:" + machine + ":" + location
 }
 
 // lastPathSegment returns the final element of a filesystem path, accepting both

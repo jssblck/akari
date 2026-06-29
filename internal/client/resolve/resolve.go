@@ -57,11 +57,19 @@ const (
 // the human-readable detail behind a standalone or orphaned classification (and
 // the failure detail when Skipped). Skipped is true only when the file's header
 // could not be read at all, leaving nothing to upload.
+//
+// LocalRoot is set only for a standalone session whose folder is a live git
+// worktree: it holds the main worktree shared by every worktree of the repo, so
+// the server can collapse a local-only repo's worktrees into one project the same
+// way a canonical remote collapses a remote-backed repo's. It is empty for remote
+// sessions, for orphaned sessions (the worktree is gone, so git cannot report
+// it), and for non-git standalone folders.
 type Result struct {
 	File       discover.File
 	Header     Header
 	Kind       Kind
 	ProjectKey string
+	LocalRoot  string
 	Skipped    bool
 	Reason     string
 }
@@ -83,6 +91,7 @@ type Resolver struct {
 
 type cacheEntry struct {
 	key    string
+	root   string // the local project root for a no-remote worktree; empty otherwise
 	reason string // non-empty means this directory resolves to a skip
 }
 
@@ -127,9 +136,9 @@ func (r *Resolver) Resolve(ctx context.Context, f discover.File) Result {
 		return res
 	}
 
-	key, reason := r.project(ctx, h.Cwd)
+	key, root, reason := r.project(ctx, h.Cwd)
 	if reason != "" {
-		res.Kind, res.Reason = KindStandalone, reason
+		res.Kind, res.Reason, res.LocalRoot = KindStandalone, reason, root
 		return res
 	}
 	res.Kind, res.ProjectKey = KindRemote, key
@@ -138,46 +147,82 @@ func (r *Resolver) Resolve(ctx context.Context, f discover.File) Result {
 
 // project resolves a working directory to a canonical project key, caching both
 // successes and skips. The returned reason is non-empty exactly when the key is
-// empty.
-func (r *Resolver) project(ctx context.Context, cwd string) (key, reason string) {
+// empty; root is the local project root for a no-remote worktree (empty
+// otherwise).
+func (r *Resolver) project(ctx context.Context, cwd string) (key, root, reason string) {
 	r.mu.Lock()
 	if e, ok := r.cache[cwd]; ok {
 		r.mu.Unlock()
-		return e.key, e.reason
+		return e.key, e.root, e.reason
 	}
 	r.mu.Unlock()
 
-	key, reason = r.resolveGit(ctx, cwd)
+	key, root, reason = r.resolveGit(ctx, cwd)
 
 	r.mu.Lock()
-	r.cache[cwd] = cacheEntry{key: key, reason: reason}
+	r.cache[cwd] = cacheEntry{key: key, root: root, reason: reason}
 	r.mu.Unlock()
-	return key, reason
+	return key, root, reason
 }
 
-func (r *Resolver) resolveGit(ctx context.Context, cwd string) (key, reason string) {
+func (r *Resolver) resolveGit(ctx context.Context, cwd string) (key, root, reason string) {
 	ctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
 
 	if _, err := r.git(ctx, cwd, "rev-parse", "--is-inside-work-tree"); err != nil {
-		return "", cwd + " is not a git repository"
+		return "", "", cwd + " is not a git repository"
 	}
 	out, err := r.git(ctx, cwd, "remote", "get-url", "--all", "origin")
 	if err != nil {
-		return "", cwd + " has no origin remote"
+		return "", r.localRoot(ctx, cwd), cwd + " has no origin remote"
 	}
 	urls := nonEmptyLines(out)
 	switch {
 	case len(urls) == 0:
-		return "", cwd + " has no origin remote"
+		return "", r.localRoot(ctx, cwd), cwd + " has no origin remote"
 	case len(urls) > 1:
-		return "", cwd + " origin has multiple URLs"
+		return "", r.localRoot(ctx, cwd), cwd + " origin has multiple URLs"
 	}
 	remote, err := gitremote.Canonicalize(urls[0], r.aliases)
 	if err != nil {
-		return "", cwd + " origin URL is unrecognized: " + err.Error()
+		return "", r.localRoot(ctx, cwd), cwd + " origin URL is unrecognized: " + err.Error()
 	}
-	return remote.Key, ""
+	return remote.Key, "", ""
+}
+
+// localRoot resolves the directory shared by every worktree of a no-remote repo:
+// the main worktree, derived from git's common directory. Keying a standalone
+// project on this (rather than the per-worktree cwd) collapses every live
+// worktree and the main checkout of a local-only repo into one project, the same
+// way a canonical remote collapses the worktrees of a repo that has one.
+//
+// It is best effort: a git too old to report the common dir, or a worktree whose
+// link is already broken, yields "", and the server falls back to keying on the
+// per-session cwd. The lookup runs only on the no-remote path, so a remote
+// session never pays for it.
+func (r *Resolver) localRoot(ctx context.Context, cwd string) string {
+	out, err := r.git(ctx, cwd, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return ""
+	}
+	dir := strings.TrimSpace(out)
+	if dir == "" {
+		return ""
+	}
+	// git reports the common dir relative to cwd from the main worktree and
+	// absolute from a linked worktree; normalize both to one absolute, OS-native
+	// path so every worktree of the repo produces the identical key.
+	if !filepath.IsAbs(dir) {
+		dir = filepath.Join(cwd, dir)
+	}
+	dir = filepath.Clean(dir)
+	// The common dir is "<main-worktree>/.git" for a normal repo, so its parent is
+	// the main worktree: the friendlier key and display root. A bare repo has no
+	// such parent, so its common dir stands as the key.
+	if strings.EqualFold(filepath.Base(dir), ".git") {
+		dir = filepath.Dir(dir)
+	}
+	return dir
 }
 
 // PeekHeader reads only as much of the file as it needs to extract cwd, the git

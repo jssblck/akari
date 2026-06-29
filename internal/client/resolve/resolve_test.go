@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -230,18 +231,31 @@ func TestSourceIDUnchangedForCodexAndPi(t *testing.T) {
 }
 
 // fakeGit returns canned responses keyed by a short name for the git subcommand
-// ("rev-parse" or "remote get-url"), independent of the trailing flags.
+// ("rev-parse", "remote get-url", or "git-common-dir"). The common-dir lookup
+// shares the "rev-parse" verb, so it is matched on its flag.
 func fakeGit(responses map[string]string, errs map[string]error) GitRunner {
 	return func(_ context.Context, _ string, args ...string) (string, error) {
 		key := args[0]
-		if args[0] == "remote" {
+		switch {
+		case args[0] == "remote":
 			key = "remote get-url"
+		case hasArg(args, "--git-common-dir"):
+			key = "git-common-dir"
 		}
 		if err, ok := errs[key]; ok {
 			return "", err
 		}
 		return responses[key], nil
 	}
+}
+
+func hasArg(args []string, want string) bool {
+	for _, a := range args {
+		if a == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestResolveSuccess(t *testing.T) {
@@ -353,6 +367,124 @@ func TestResolveClassifies(t *testing.T) {
 				t.Errorf("reason = %q, want substring %q", res.Reason, c.wantReason)
 			}
 		})
+	}
+}
+
+// TestResolveStandaloneGroupsByCommonDir confirms that a standalone session in a
+// live git worktree (a work tree with no usable origin) reports the main worktree
+// as its LocalRoot, derived from git's common dir. Two different worktrees of the
+// same local-only repo must resolve to the same root so the server can collapse
+// them into one project, the way a canonical remote collapses a repo's worktrees.
+func TestResolveStandaloneGroupsByCommonDir(t *testing.T) {
+	main := t.TempDir()
+	common := filepath.Join(main, ".git")
+	git := fakeGit(map[string]string{
+		"rev-parse":      "true",
+		"git-common-dir": common,
+	}, map[string]error{
+		"remote get-url": fmt.Errorf("no such remote"),
+	})
+
+	for _, wt := range []string{"feature-a", "feature-b"} {
+		dir := t.TempDir()
+		file := writeFile(t, dir, "sess.jsonl",
+			fmt.Sprintf(`{"type":"user","cwd":%q}`+"\n", dir))
+		r := NewWith(git, nil)
+		res := r.Resolve(context.Background(), discover.File{Agent: "claude", Path: file})
+		if res.Kind != KindStandalone {
+			t.Fatalf("%s: kind = %q, want standalone", wt, res.Kind)
+		}
+		if res.LocalRoot != main {
+			t.Errorf("%s: local root = %q, want %q (the shared main worktree)", wt, res.LocalRoot, main)
+		}
+	}
+}
+
+// TestResolveStandaloneNoRootWhenCommonDirUnavailable pins the best-effort
+// fallback: when git cannot report the common dir, the session is still
+// standalone but carries no LocalRoot, so the server keys it on its own cwd.
+func TestResolveStandaloneNoRootWhenCommonDirUnavailable(t *testing.T) {
+	dir := t.TempDir()
+	file := writeFile(t, dir, "sess.jsonl",
+		fmt.Sprintf(`{"type":"user","cwd":%q}`+"\n", dir))
+	r := NewWith(fakeGit(map[string]string{"rev-parse": "true"}, map[string]error{
+		"remote get-url": fmt.Errorf("no such remote"),
+		"git-common-dir": fmt.Errorf("unsupported"),
+	}), nil)
+	res := r.Resolve(context.Background(), discover.File{Agent: "claude", Path: file})
+	if res.Kind != KindStandalone {
+		t.Fatalf("kind = %q, want standalone", res.Kind)
+	}
+	if res.LocalRoot != "" {
+		t.Errorf("local root = %q, want empty", res.LocalRoot)
+	}
+}
+
+// TestResolveRealWorktreeGroupsByCommonDir exercises the real system git against
+// an actual local-only repo with two worktrees. The fakeGit tests cannot catch
+// platform path quirks (git reports forward slashes, an absolute common dir from
+// a linked worktree but a relative one from the main checkout); this proves the
+// normalization in localRoot collapses the main checkout and both worktrees onto
+// one identical LocalRoot. It skips where git is unavailable.
+func TestResolveRealWorktreeGroupsByCommonDir(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	ctx := context.Background()
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=Ada", "GIT_AUTHOR_EMAIL=ada@example.com",
+			"GIT_COMMITTER_NAME=Ada", "GIT_COMMITTER_EMAIL=ada@example.com")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	base := t.TempDir()
+	main := filepath.Join(base, "repo") // a local-only repo: no origin remote
+	if err := os.MkdirAll(main, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run(main, "init", "-b", "main")
+	writeFile(t, main, "READY", "x")
+	run(main, "add", "-A")
+	run(main, "commit", "-m", "init")
+
+	wtA := filepath.Join(base, "wt-a")
+	wtB := filepath.Join(base, "wt-b")
+	run(main, "worktree", "add", "-b", "feature-a", wtA)
+	run(main, "worktree", "add", "-b", "feature-b", wtB)
+
+	// Resolve a session whose cwd is each of the three checkouts.
+	rootFor := func(cwd string) Result {
+		file := writeFile(t, cwd, "sess.jsonl",
+			fmt.Sprintf(`{"type":"user","cwd":%q}`+"\n", cwd))
+		return New().Resolve(ctx, discover.File{Agent: "claude", Path: file})
+	}
+	rMain := rootFor(main)
+	rA := rootFor(wtA)
+	rB := rootFor(wtB)
+
+	for name, res := range map[string]Result{"main": rMain, "wt-a": rA, "wt-b": rB} {
+		if res.Kind != KindStandalone {
+			t.Fatalf("%s: kind = %q, want standalone (no remote)", name, res.Kind)
+		}
+		if res.LocalRoot == "" {
+			t.Fatalf("%s: empty local root", name)
+		}
+	}
+	// The collapse invariant: every checkout of the repo reports the same root.
+	if rMain.LocalRoot != rA.LocalRoot || rA.LocalRoot != rB.LocalRoot {
+		t.Errorf("worktrees did not collapse: main=%q wt-a=%q wt-b=%q",
+			rMain.LocalRoot, rA.LocalRoot, rB.LocalRoot)
+	}
+	// And it is the main worktree, not a per-worktree path or a .git dir.
+	if want, err := filepath.Abs(main); err != nil {
+		t.Fatal(err)
+	} else if filepath.Clean(rMain.LocalRoot) != filepath.Clean(want) {
+		t.Errorf("local root = %q, want the main worktree %q", rMain.LocalRoot, want)
 	}
 }
 
