@@ -384,10 +384,15 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--l
 /* The trailing-window selector sits beside the metric toggle on the grid-head
    row, parted by a hairline; the two segmented controls wrap together when
    narrow. */
-.heatmap-controls { display: flex; align-items: stretch; gap: var(--sp-md); flex-wrap: wrap; justify-content: flex-end; }
-/* Stretch the hairline to the controls' own height (with a small symmetric inset)
-   so it always reads as vertically centered between them, whatever their size. */
-.heatmap-controls .ctrl-sep { width: 1px; align-self: stretch; margin: 3px 0; background: var(--border); flex: none; }
+.heatmap-controls { display: flex; align-items: center; gap: var(--sp-md); flex-wrap: wrap; justify-content: flex-end; }
+/* The metric toolbar's default margin-bottom (it usually sits above a chart) would
+   inflate this flex row past the toolbars' own height, dropping the separator
+   below them; here the toolbars sit side by side, so drop it. */
+.heatmap-controls .chart-toolbar { margin-bottom: 0; }
+/* A fixed-height hairline, centered, a touch shorter than the toolbars so it reads
+   as a divider inset a few px top and bottom. Fixed (not stretched) so it never
+   inflates the flex line. */
+.heatmap-controls .ctrl-sep { width: 1px; height: 18px; align-self: center; background: var(--border); flex: none; }
 .heatmap {
   position: relative;
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md);
