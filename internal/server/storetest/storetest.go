@@ -157,10 +157,16 @@ func uniqueDBName(t *testing.T) string {
 	if _, err := rand.Read(b[:]); err != nil {
 		t.Fatalf("read random: %v", err)
 	}
-	suffix := hex.EncodeToString(b[:])
+	return dbName(t.Name(), hex.EncodeToString(b[:]))
+}
 
+// dbName composes a bounded, lower-case Postgres identifier from a test name and
+// a random suffix: a fixed prefix, the slugified name, then the suffix. The slug
+// is truncated so the whole identifier stays within Postgres's 63-byte limit, and
+// the suffix is always kept so uniqueness survives the truncation.
+func dbName(testName, suffix string) string {
 	const prefix = "akari_test_"
-	slug := slugify(t.Name())
+	slug := slugify(testName)
 	if max := 63 - len(prefix) - 1 - len(suffix); len(slug) > max {
 		slug = slug[:max]
 	}
