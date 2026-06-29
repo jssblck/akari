@@ -1,0 +1,52 @@
+{
+  "Messages": [
+    {
+      "Ordinal": 0,
+      "Role": "assistant",
+      "Content": "Two files.",
+      "ThinkingText": "Plan the shell command.",
+      "Model": "gpt-5-codex",
+      "HasThinking": true,
+      "HasToolUse": true,
+      "Timestamp": "2024-01-01T10:00:01Z"
+    },
+    {
+      "Ordinal": 1,
+      "Role": "user",
+      "Content": "thanks",
+      "ThinkingText": "",
+      "Model": "",
+      "HasThinking": false,
+      "HasToolUse": false,
+      "Timestamp": "2024-01-01T10:00:05Z"
+    }
+  ],
+  "ToolCalls": [
+    {
+      "MessageOrdinal": 0,
+      "CallIndex": 0,
+      "ToolName": "shell_command",
+      "Category": "bash",
+      "FilePath": "",
+      "InputBody": "{\"command\":\"ls\"}",
+      "InputSHA256": "",
+      "InputBytes": 16,
+      "InputMediaType": "application/json",
+      "CallUID": "call_1"
+    }
+  ],
+  "ToolResults": [
+    {
+      "CallUID": "call_1",
+      "Body": "auth.go\nmain.go",
+      "BodySHA256": "",
+      "Bytes": 15,
+      "MediaType": "text/plain",
+      "Status": "ok"
+    }
+  ],
+  "Usage": null,
+  "Attachments": null,
+  "Started": "2024-01-01T10:00:00Z",
+  "Ended": "2024-01-01T10:00:05Z"
+}

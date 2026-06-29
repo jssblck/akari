@@ -6,11 +6,12 @@ import (
 	"github.com/jssblck/akari/internal/server/store"
 )
 
-templ AccountPage(p Page, tokens []store.APIToken, newToken, newInvite string) {
+templ AccountPage(p Page, tokens []store.APIToken, newToken, newInvite string, rp ReparseView) {
 	@layout(p) {
 		<div class="page-head">
 			<h1>Account</h1>
 		</div>
+		@accountReparse(p, rp)
 		if newToken != "" {
 			<div class="card reveal">
 				<strong>New token (shown once):</strong> <code>{ newToken }</code>

@@ -443,7 +443,9 @@ func (s *Server) handleAccountPage(w http.ResponseWriter, r *http.Request) {
 	// cleared, so a page reload does not keep showing them.
 	newToken := readFlash(w, r, "akari_new_token")
 	newInvite := readFlash(w, r, "akari_new_invite")
-	render(w, r, http.StatusOK, web.AccountPage(s.pageForNav(r, "Account", "account"), tokens, newToken, newInvite))
+	st := s.reparser.Status()
+	rp := web.ReparseView{InProgress: st.InProgress, Done: st.Done, Total: st.Total, Failed: st.Failed}
+	render(w, r, http.StatusOK, web.AccountPage(s.pageForNav(r, "Account", "account"), tokens, newToken, newInvite, rp))
 }
 
 // Login and register, form (HTML) variants. These mirror the JSON handlers but

@@ -1,0 +1,91 @@
+{
+  "Messages": [
+    {
+      "Ordinal": 0,
+      "Role": "user",
+      "Content": "Fix the auth bug",
+      "ThinkingText": "",
+      "Model": "",
+      "HasThinking": false,
+      "HasToolUse": false,
+      "Timestamp": "2024-01-01T10:00:00Z"
+    },
+    {
+      "Ordinal": 1,
+      "Role": "assistant",
+      "Content": "Looking now.",
+      "ThinkingText": "",
+      "Model": "claude-sonnet-4-20250514",
+      "HasThinking": false,
+      "HasToolUse": true,
+      "Timestamp": "2024-01-01T10:00:05Z"
+    },
+    {
+      "Ordinal": 2,
+      "Role": "assistant",
+      "Content": "Patched it.",
+      "ThinkingText": "",
+      "Model": "claude-sonnet-4-20250514",
+      "HasThinking": false,
+      "HasToolUse": false,
+      "Timestamp": "2024-01-01T10:00:09Z"
+    }
+  ],
+  "ToolCalls": [
+    {
+      "MessageOrdinal": 1,
+      "CallIndex": 0,
+      "ToolName": "Read",
+      "Category": "read",
+      "FilePath": "auth.go",
+      "InputBody": "{\"file_path\":\"auth.go\"}",
+      "InputSHA256": "",
+      "InputBytes": 23,
+      "InputMediaType": "application/json",
+      "CallUID": "toolu_1"
+    }
+  ],
+  "ToolResults": [
+    {
+      "CallUID": "toolu_1",
+      "Body": "package auth",
+      "BodySHA256": "",
+      "Bytes": 12,
+      "MediaType": "text/plain",
+      "Status": "ok"
+    }
+  ],
+  "Usage": [
+    {
+      "MessageOrdinal": 1,
+      "Model": "claude-sonnet-4-20250514",
+      "Input": 1200,
+      "Output": 340,
+      "CacheWrite": 800,
+      "CacheRead": 4096,
+      "Reasoning": 0,
+      "CostUSD": 0.012928799999999999,
+      "OccurredAt": "2024-01-01T10:00:05Z",
+      "DedupKey": "msg_1",
+      "SourceOffset": 137,
+      "SourceIndex": 0
+    },
+    {
+      "MessageOrdinal": 2,
+      "Model": "claude-sonnet-4-20250514",
+      "Input": 1500,
+      "Output": 120,
+      "CacheWrite": 0,
+      "CacheRead": 6000,
+      "Reasoning": 0,
+      "CostUSD": 0.0081,
+      "OccurredAt": "2024-01-01T10:00:09Z",
+      "DedupKey": "msg_2",
+      "SourceOffset": 663,
+      "SourceIndex": 0
+    }
+  ],
+  "Attachments": null,
+  "Started": "2024-01-01T10:00:00Z",
+  "Ended": "2024-01-01T10:00:09Z"
+}
