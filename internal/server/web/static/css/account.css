@@ -1,0 +1,20 @@
+/* The account page: API tokens and (for admins) invites. It builds on the shared
+   table, card, and form primitives in base.css; the one page-specific touch is
+   the "shown once" reveal card for a freshly minted token or invite, which fades
+   in via the shared @keyframes fadein (base.css). */
+
+.reveal { animation: fadein var(--dur-slow) var(--ease-settle); }
+
+/* ---- Reparse progress ---- */
+/* The reparse status surfaces on the account page and as full-page/public
+   stand-ins while a reparse runs (see reparse.templ); the progress bar reuses
+   the shared .bar-track/.bar-fill from overview.css. */
+.reparse { max-width: 560px; }
+.reparse-head { display: flex; justify-content: space-between; align-items: baseline; gap: var(--sp-md); margin-bottom: var(--sp-sm); }
+.reparse-title { font-weight: 600; }
+.reparse-count { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.reparse-track { height: 8px; margin: var(--sp-sm) 0; }
+.reparse-foot { margin-top: var(--sp-sm); }
+.reparse-idle { padding: var(--sp-md) 0; }
+.reparse-form { margin-top: var(--sp-md); }
+.reparse-public-track { max-width: 360px; margin: var(--sp-lg) auto; }

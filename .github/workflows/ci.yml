@@ -49,6 +49,15 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Generate templ
+        # The web package's templ templates compile to Go through `templ
+        # generate`, and the generated *_templ.go files are gitignored (the
+        # .templ files are the sole source of truth). They must be regenerated
+        # before anything compiles, since gofmt, vet, and the tests all read
+        # them. templ is pinned as a Go tool in go.mod, so `go generate ./...`
+        # runs the matching version with no separate install step.
+        run: go generate ./...
+
       - name: Check formatting
         run: |
           # gofmt -l prints files that are not formatted; any output is a failure.

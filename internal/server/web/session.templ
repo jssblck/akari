@@ -1,0 +1,331 @@
+package web
+
+import (
+	"fmt"
+
+	"github.com/jssblck/akari/internal/server/store"
+)
+
+templ SessionPage(p Page, d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, subagents []store.SessionSummary, dupIDs int, live, owner bool) {
+	@layout(p) {
+		<div class="session-page">
+			<div class="session-head">
+				<div class="session-title">
+					<h1>
+						<a href={ ProjectHref(d.ProjectID) }>{ SessionProjectLabel(d) }</a>
+						<span class="sep">/</span>
+						<span class="muted">session #{ fmt.Sprintf("%d", d.ID) }</span>
+					</h1>
+					<div class="session-meta">
+						<span class="tag agent">{ d.Agent }</span>
+						@kindTag(d.ProjectKind)
+						if d.Visibility == "public" {
+							<span class="tag public">public</span>
+						}
+						if dupIDs > 0 {
+							<span class="tag warn" title="This session repeats a tool-call id across rows (a resumed or compacted transcript replaying earlier turns). Each copy is shown with the same result. A high count across many sessions may signal genuinely malformed ids.">{ DuplicateIDsLabel(dupIDs) }</span>
+						}
+						if d.GitBranch != "" {
+							<span class="muted">{ d.GitBranch }</span>
+						}
+						<span class="muted">{ d.Username }</span>
+						<span class="muted">{ d.Machine }</span>
+					</div>
+				</div>
+				if owner || p.IsAdmin {
+					@sessionActions(d, owner)
+				}
+			</div>
+			<div class="session-grid">
+				<aside class="outline-rail" aria-label="Outline">
+					@Outline(msgs, tools, SessionBlobBase(d.ID))
+				</aside>
+				if live {
+					<div id="session-body" class="session-main" data-sse={ SSEPath(d.ID) } data-body={ BodyPath(d.ID) }>
+						@SessionMain(d, msgs, tools, attachments, subagents)
+					</div>
+				} else {
+					<div id="session-body" class="session-main">
+						@SessionMain(d, msgs, tools, attachments, subagents)
+					</div>
+				}
+			</div>
+		</div>
+		@inspectorModal()
+	}
+}
+
+// sessionActions is the compact owner/admin control cluster pinned to the right
+// of the session header: the publish state and its toggle for an owner, and the
+// delete control for an owner or admin. It replaces the two full-width banners
+// that used to sit under the header, so the controls cost one header line rather
+// than two stacked rows.
+templ sessionActions(d store.SessionDetail, owner bool) {
+	<div class="session-actions">
+		if owner {
+			if d.Visibility == "public" && d.PublicID != nil {
+				<a class="share-link muted small" href={ PublicHref(*d.PublicID) } title="Public share link">{ PublicPath(*d.PublicID) }</a>
+				<form method="post" action={ templ.SafeURL(fmt.Sprintf("/sessions/%d/unpublish", d.ID)) } class="inline">
+					<button class="secondary small" type="submit">Unpublish</button>
+				</form>
+			} else {
+				<form method="post" action={ templ.SafeURL(fmt.Sprintf("/sessions/%d/publish", d.ID)) } class="inline">
+					<button class="small" type="submit" title="This session is internal: visible to logged-in users only. Publish to share a public link.">Publish</button>
+				</form>
+			}
+		}
+		<form method="post" action={ templ.SafeURL(fmt.Sprintf("/sessions/%d/delete", d.ID)) } class="inline" onsubmit="return confirm('Delete this session and its transcript permanently?')">
+			if owner {
+				<button class="danger small" type="submit" title="Deleting removes this session and its transcript permanently.">Delete</button>
+			} else {
+				<button class="danger small" type="submit" title="Admin: deleting removes this session and its transcript permanently.">Delete</button>
+			}
+		</form>
+	</div>
+}
+
+// SessionMain is the live region of the session view: the stat header, any
+// subagents, and the transcript. Only this fragment is re-fetched and swapped on
+// a live SSE update, so the outline and inspector (its siblings in the grid)
+// persist across updates and are not re-rendered per refresh.
+templ SessionMain(d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, subagents []store.SessionSummary) {
+	@sessionStats(d)
+	if len(subagents) > 0 {
+		<h2>Subagents</h2>
+		<div class="subagents">
+			@SessionList(subagents)
+		</div>
+	}
+	<h2>Transcript</h2>
+	@Transcript(msgs, tools, attachments, SessionBlobBase(d.ID))
+}
+
+// Outline is the left pane of the session view: one entry per turn, with its
+// tool steps nested beneath. It renders straight from the transcript messages
+// and tool metadata the page already holds, so no second session-sized structure
+// is built. A turn links to its message; a step with a stored body opens that
+// body in the inspector pane (carrying the blob URLs so the inspector needs no
+// extra round trip to know what to fetch).
+templ Outline(msgs []store.Message, tools map[int][]store.ToolCallView, blobBase string) {
+	<div class="outline" aria-label="Session outline">
+		<div class="label outline-head">Outline</div>
+		for _, m := range msgs {
+			{{ steps := tools[m.Ordinal] }}
+			{{ title := OutlineTitle(m) }}
+			<div class="ol-group">
+				<a class={ OutlineTurnClass(m.Role, steps) } id={ fmt.Sprintf("ol-%d", m.Ordinal) } href={ templ.SafeURL(fmt.Sprintf("#msg-%d", m.Ordinal)) } data-ord={ fmt.Sprintf("%d", m.Ordinal) }>
+					<span class="ol-dot"></span>
+					<span class="ol-title">
+						if title != "" {
+							{ title }
+						} else {
+							<span class="ol-role">{ m.Role }</span>
+						}
+					</span>
+					if len(steps) > 0 {
+						<span class="ol-count">{ fmt.Sprintf("%d", len(steps)) }</span>
+					}
+				</a>
+				if len(steps) > 0 {
+					<div class="ol-steps">
+						for _, s := range steps {
+							if OutlineStepHasBody(s) {
+								<a
+									class={ OutlineStepClass(s) + " inspect-open" }
+									href={ templ.SafeURL(fmt.Sprintf("#msg-%d", m.Ordinal)) }
+									data-tool={ s.ToolName }
+									data-file={ s.FilePath }
+									data-status={ s.ResultStatus }
+									if DiffTool(s.ToolName) {
+										data-diff="1"
+									}
+									if s.InputSHA != "" {
+										data-input-url={ BlobURL(blobBase, s.InputSHA) }
+									}
+									if s.ResultSHA != "" {
+										data-result-url={ BlobURL(blobBase, s.ResultSHA) }
+									}
+								>
+									<span class="ol-tn">{ s.ToolName }</span>
+									if s.FilePath != "" {
+										<span class="ol-file">{ BaseName(s.FilePath) }</span>
+									}
+								</a>
+							} else {
+								<a class={ OutlineStepClass(s) } href={ templ.SafeURL(fmt.Sprintf("#msg-%d", m.Ordinal)) }>
+									<span class="ol-tn">{ s.ToolName }</span>
+								</a>
+							}
+						}
+					</div>
+				}
+			</div>
+		}
+	</div>
+}
+
+// inspectorModal is the overlay host where a selected tool call's body opens as a
+// large dialog, so reading a body never competes with the transcript for width.
+// It starts hidden and empty; app.js fills #session-inspector and reveals the
+// overlay when a tool chip or outline step is clicked, then clears it on close.
+templ inspectorModal() {
+	<div class="modal-overlay" id="session-modal" hidden>
+		<div class="modal-dialog" id="session-inspector" role="dialog" aria-modal="true" aria-label="Tool call body"></div>
+	</div>
+}
+
+// sessionStats is the instrument header: stat tiles that stick to the top of the
+// transcript column and flash (needle-settle) when a live update changes a value.
+templ sessionStats(d store.SessionDetail) {
+	<div class="stats sticky" id="session-stats">
+		@stat("Messages", fmt.Sprintf("%d", d.MessageCount), "messages")
+		@stat("User msgs", fmt.Sprintf("%d", d.UserMessageCount), "user")
+		@tokenStat(d)
+		@stat("Duration", FmtDuration(d.StartedAt, d.EndedAt), "dur")
+	</div>
+}
+
+// tokenStat folds the five token-and-cost readouts (input, output, cache read,
+// cache write, cost) into one Tokens tile: the total reads at a glance, and the
+// per-class breakdown plus cost reveal on hover or keyboard focus, the same detail
+// the overview heatmap surfaces for a day.
+templ tokenStat(d store.SessionDetail) {
+	<div class="stat tokens-stat" tabindex="0">
+		<div class="label">Tokens</div>
+		<div class="value tokens-value" data-stat-key="tokens">{ FmtTokens(d.TotalInput + d.TotalOutput + d.TotalCacheRead + d.TotalCacheWrite) }</div>
+		<div class="stat-tip" role="tooltip">
+			<dl class="tt-grid">
+				<dt>Input</dt>
+				<dd>{ FmtTokens(d.TotalInput) }</dd>
+				<dt>Output</dt>
+				<dd>{ FmtTokens(d.TotalOutput) }</dd>
+				<dt>Cache read</dt>
+				<dd>{ FmtTokens(d.TotalCacheRead) }</dd>
+				<dt>Cache write</dt>
+				<dd>{ FmtTokens(d.TotalCacheWrite) }</dd>
+			</dl>
+			<div class="tt-cost">{ FmtCost(d.TotalCostUSD, d.CostIncomplete) }</div>
+		</div>
+	</div>
+}
+
+templ stat(label, value, key string) {
+	<div class="stat">
+		<div class="label">{ label }</div>
+		if key != "" {
+			<div class="value" data-stat-key={ key }>{ value }</div>
+		} else {
+			<div class="value">{ value }</div>
+		}
+	</div>
+}
+
+templ Transcript(msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, blobBase string) {
+	if len(msgs) == 0 {
+		<div class="empty">No messages parsed yet.</div>
+	} else {
+		<div class="transcript">
+			for _, m := range msgs {
+				<div class={ "msg " + RoleClass(m.Role) } id={ fmt.Sprintf("msg-%d", m.Ordinal) } data-ordinal={ fmt.Sprintf("%d", m.Ordinal) }>
+					<div class="meta">
+						<span class="role">{ m.Role }</span>
+						if m.Model != "" {
+							<span class="tag model">{ m.Model }</span>
+						}
+						<span class="spacer"></span>
+						<span class="muted small">{ FmtTime(m.Timestamp) }</span>
+					</div>
+					if m.HasThinking && m.ThinkingText != "" {
+						<details class="thinking">
+							<summary>Thinking</summary>
+							<div class="thinking-body">{ m.ThinkingText }</div>
+						</details>
+					}
+					if m.Content != "" {
+						<div class="content">{ m.Content }</div>
+					}
+					if as := attachments[m.Ordinal]; len(as) > 0 {
+						<div class="attachments">
+							for _, a := range as {
+								@AttachmentTile(a, blobBase)
+							}
+						</div>
+					}
+					if tc := tools[m.Ordinal]; len(tc) > 0 {
+						<div class="tools">
+							for _, t := range tc {
+								@ToolChip(t, blobBase)
+							}
+						</div>
+					}
+				</div>
+			}
+		</div>
+	}
+}
+
+// AttachmentTile renders one binary attachment. An image is shown inline from its
+// CAS blob (the same URL the inspector would fetch), captioned with its filename
+// and size; a non-image is a labelled link so it can still be opened.
+templ AttachmentTile(a store.AttachmentView, blobBase string) {
+	if IsImageMedia(a.MediaType) {
+		<figure class="attachment image">
+			<a href={ BlobURL(blobBase, a.SHA256) } target="_blank" rel="noopener">
+				<img src={ BlobURL(blobBase, a.SHA256) } alt={ AttachmentAlt(a) } loading="lazy"/>
+			</a>
+			<figcaption class="muted small">
+				if a.Filename != "" {
+					{ a.Filename + " · " }
+				}
+				{ ChipLabel(a.MediaType, a.ByteLen) }
+			</figcaption>
+		</figure>
+	} else {
+		<a class="attachment file stamp" href={ BlobURL(blobBase, a.SHA256) } target="_blank" rel="noopener">
+			if a.Filename != "" {
+				{ a.Filename + " · " }
+			}
+			{ ChipLabel(a.MediaType, a.ByteLen) }
+		</a>
+	}
+}
+
+// ToolChip renders one tool call's metadata. A body that lives in the CAS is a
+// clickable chip carrying its blob URL plus the tool name and slot, so app.js can
+// expand an editing tool's input as an inline diff rather than raw JSON.
+templ ToolChip(t store.ToolCallView, blobBase string) {
+	<div class="tool-chip">
+		<span class="tname">{ t.ToolName }</span>
+		if t.FilePath != "" {
+			<span class="tpath muted">{ t.FilePath }</span>
+		}
+		if t.InputSHA != "" {
+			<button
+				type="button"
+				class="stamp body-toggle"
+				data-blob-url={ BlobURL(blobBase, t.InputSHA) }
+				data-tool={ t.ToolName }
+				data-slot="input"
+				if DiffTool(t.ToolName) {
+					data-diff="1"
+				}
+			>in: { ChipLabel(t.InputMediaType, t.InputBytes) }</button>
+		} else if t.InputBytes > 0 {
+			<span class="stamp">in: { ChipLabel(t.InputMediaType, t.InputBytes) }</span>
+		}
+		if t.ResultStatus != "" {
+			<span class={ "tstatus " + StatusClass(t.ResultStatus) }>{ t.ResultStatus }</span>
+			if t.ResultSHA != "" {
+				<button
+					type="button"
+					class="stamp body-toggle"
+					data-blob-url={ BlobURL(blobBase, t.ResultSHA) }
+					data-tool={ t.ToolName }
+					data-slot="result"
+				>out: { ChipLabel(t.ResultMediaType, t.ResultBytes) }</button>
+			} else if t.ResultBytes > 0 {
+				<span class="stamp">out: { ChipLabel(t.ResultMediaType, t.ResultBytes) }</span>
+			}
+		}
+	</div>
+}

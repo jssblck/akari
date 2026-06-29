@@ -1,0 +1,13 @@
+package web
+
+import "fmt"
+
+templ ErrorPage(p Page, code int, message string) {
+	@layout(p) {
+		<div class="empty big">
+			<h1>{ fmt.Sprintf("%d", code) }</h1>
+			<p>{ message }</p>
+			<p><a href="/">Back to projects</a></p>
+		</div>
+	}
+}

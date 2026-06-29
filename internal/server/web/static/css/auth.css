@@ -1,0 +1,6 @@
+/* Login and register pages: a narrow centered card with a stacked form. */
+
+/* ---- Auth ---- */
+.auth-wrap { max-width: 360px; margin: 64px auto; }
+.auth-wrap form { display: flex; flex-direction: column; gap: var(--sp-md); }
+.error { color: var(--err); margin: var(--sp-sm) 0; }
