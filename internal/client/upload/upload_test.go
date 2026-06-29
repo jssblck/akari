@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jssblck/akari/internal/casenc"
 	"github.com/jssblck/akari/internal/parser"
@@ -35,6 +36,20 @@ type fakeServer struct {
 	blobMedia map[string]string // sha256 -> declared semantic media_type
 	puts      int               // count of accepted blob uploads, for dedup assertions
 
+	// Instrumentation for the batched/parallel upload tests. checkBatchSizes records the
+	// hash count of every existence-check request, so a test can assert no request
+	// exceeds the per-request cap. maxConcurrentChecks / maxConcurrentPuts record the
+	// peak in-flight requests of each kind, so a test can assert the client actually
+	// parallelizes. checkDelay / putDelay, when set, make that endpoint sleep so
+	// concurrent requests overlap long enough for the peak to be observed.
+	checkBatchSizes     []int
+	curChecks           int
+	maxConcurrentChecks int
+	curPuts             int
+	maxConcurrentPuts   int
+	checkDelay          time.Duration
+	putDelay            time.Duration
+
 	// conflictOnce, when set, makes the next chunk POST return 409 after first
 	// appending injectBytes, simulating another writer advancing the cursor.
 	conflictOnce bool
@@ -42,6 +57,11 @@ type fakeServer struct {
 
 	// alwaysConflict makes every chunk POST return 409, to exercise the retry cap.
 	alwaysConflict bool
+
+	// failCheckStatus / failPutStatus, when non-zero, make the blob-check or blob-upload
+	// endpoint return that HTTP status, to drive the client's error paths.
+	failCheckStatus int
+	failPutStatus   int
 }
 
 func (s *fakeServer) handler() http.Handler {
@@ -102,7 +122,28 @@ func (s *fakeServer) handler() http.Handler {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		s.mu.Lock()
+		if s.failCheckStatus != 0 {
+			status := s.failCheckStatus
+			s.mu.Unlock()
+			w.WriteHeader(status)
+			writeJSON(w, map[string]any{"error": "check failed"})
+			return
+		}
+		s.checkBatchSizes = append(s.checkBatchSizes, len(req.SHA256))
+		s.curChecks++
+		if s.curChecks > s.maxConcurrentChecks {
+			s.maxConcurrentChecks = s.curChecks
+		}
+		delay := s.checkDelay
+		s.mu.Unlock()
+		// Sleep outside the lock so concurrent checks actually overlap and the peak
+		// concurrency is observable.
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+		s.mu.Lock()
 		defer s.mu.Unlock()
+		s.curChecks--
 		missing := []string{}
 		for _, sha := range req.SHA256 {
 			if _, ok := s.blobs[sha]; !ok {
@@ -114,6 +155,14 @@ func (s *fakeServer) handler() http.Handler {
 	mux.HandleFunc("PUT /api/v1/ingest/blob/{sha256}", func(w http.ResponseWriter, r *http.Request) {
 		sha := r.PathValue("sha256")
 		body := readAll(r)
+		s.mu.Lock()
+		failPut := s.failPutStatus
+		s.mu.Unlock()
+		if failPut != 0 {
+			w.WriteHeader(failPut)
+			writeJSON(w, map[string]any{"error": "upload failed"})
+			return
+		}
 		sum := sha256.Sum256(body)
 		if hex.EncodeToString(sum[:]) != sha {
 			w.WriteHeader(http.StatusBadRequest)
@@ -121,7 +170,18 @@ func (s *fakeServer) handler() http.Handler {
 			return
 		}
 		s.mu.Lock()
+		s.curPuts++
+		if s.curPuts > s.maxConcurrentPuts {
+			s.maxConcurrentPuts = s.curPuts
+		}
+		delay := s.putDelay
+		s.mu.Unlock()
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+		s.mu.Lock()
 		defer s.mu.Unlock()
+		s.curPuts--
 		s.blobs[sha] = body
 		s.blobCT[sha] = r.URL.Query().Get("content_type")
 		s.blobMedia[sha] = r.URL.Query().Get("media_type")

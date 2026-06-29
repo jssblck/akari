@@ -16,24 +16,27 @@ import (
 // chunkSink consumes the transform's output as it is produced. The transform never
 // holds more than one chunk's worth of transcript bytes in memory: as soon as a
 // boundary-aligned, size-bounded chunk is ready it is handed here, uploaded, and
-// dropped. emitBody streams one tool body to the CAS during the transform of a big
-// line, so a hundreds-of-MiB body never lands in a chunk buffer; the chunk carries
-// only the small literal regions and the sentinels that replace the bodies.
+// dropped. A big body is never buffered into a chunk: it is referenced by a cheap file
+// span the sink re-streams, so the chunk carries only the small literal regions and the
+// sentinels that replace the bodies.
 //
 // emitBody is called for every body the transform lifts, before the chunk that
-// references it is emitted, so the transcript can never land referencing a body the
-// CAS does not yet hold. It returns the deduped body descriptor (sha, length,
-// media) the sentinel is built from.
+// references it is emitted, and returns the body descriptor (sha, length, media) the
+// sentinel is built from. The sink need not upload inline: it may queue the body and
+// ensure it is present when emitChunk flushes, but every body a chunk references must be
+// in the CAS before that chunk lands, so the transcript can never reference a body the
+// CAS lacks.
 type chunkSink interface {
-	// emitBody uploads one located body's stored (possibly compressed) bytes to the
-	// CAS, skipping the upload when the server already holds the key, and returns the
-	// descriptor the sentinel is built from (key, raw byte length, media type). A
-	// small-line ref carries the stored bytes already encoded by RewriteLine; a
-	// big-line ref carries a file span the sink streams through the encoder.
+	// emitBody registers one located body for upload and returns the descriptor the
+	// sentinel is built from (key, raw byte length, media type). A small-line ref
+	// carries the stored bytes already encoded by RewriteLine; a big-line ref carries a
+	// file span the sink streams through the encoder. The sink may defer the existence
+	// check and upload to a batch, but must complete them before the referencing chunk.
 	emitBody(ctx context.Context, ref bodyRef) (parser.Body, error)
-	// emitChunk uploads one boundary-aligned transformed chunk and reports how far
-	// the original cursor advanced. It returns conflicted=true when the server's
-	// cursor moved, which unwinds the whole transform.
+	// emitChunk ensures every body the chunk references is in the CAS, then uploads one
+	// boundary-aligned transformed chunk and reports how far the original cursor
+	// advanced. It returns conflicted=true when the server's cursor moved, which unwinds
+	// the whole transform.
 	emitChunk(ctx context.Context, data []byte, origLen int64) (conflicted bool, err error)
 }
 

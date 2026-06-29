@@ -41,6 +41,7 @@ import (
 
 	"github.com/jssblck/akari/internal/parser"
 	"github.com/klauspost/compress/zstd"
+	"golang.org/x/sync/semaphore"
 )
 
 // Threshold is the raw-body size at or above which a body is zstd-compressed. Below
@@ -59,12 +60,51 @@ var Threshold = 1024
 // bodies under new keys, never corrupts anything.
 var Level = zstd.SpeedDefault
 
-// Encoder encodes bodies with one fixed configuration. It carries no state and is
-// safe for concurrent use; a Client holds a single shared instance.
-type Encoder struct{}
+// Encoder encodes bodies with one fixed configuration. It is safe for concurrent
+// use; a Client holds a single shared instance, so many files lifting bodies at once
+// share one Encoder.
+//
+// compSem, when set, bounds how many zstd compression passes run at once across every
+// goroutine sharing the Encoder, so building CAS keys for many bodies in parallel (a
+// fleet of files syncing, or batched uploads) cannot oversubscribe the CPUs. It guards
+// only the compression branches that produce a key (EncodeBody and HashStream); the
+// cheap raw-hash path needs no bound. The upload re-compression in StreamAs is left to
+// the caller's upload-concurrency limiter instead, so a slow network upload never holds
+// a CPU permit while it waits on the wire. A nil compSem means unbounded, the default
+// for direct use and tests.
+type Encoder struct {
+	compSem *semaphore.Weighted
+}
 
-// New builds an Encoder.
+// New builds an Encoder with no compression-concurrency bound.
 func New() *Encoder { return &Encoder{} }
+
+// NewLimited builds an Encoder that lets at most maxConcurrency zstd compression
+// passes run at once across all goroutines that share it. A non-positive bound is
+// treated as unbounded, matching New.
+func NewLimited(maxConcurrency int) *Encoder {
+	if maxConcurrency <= 0 {
+		return &Encoder{}
+	}
+	return &Encoder{compSem: semaphore.NewWeighted(int64(maxConcurrency))}
+}
+
+// acquireComp blocks until a compression permit is free (or never, when unbounded),
+// returning a release func. ctx bounds the wait so a canceled sync stops waiting for a
+// permit; a nil ctx (the no-ctx EncodeBody path) waits uninterruptibly, which is safe
+// because the permitted work is a short CPU pass, not a network call.
+func (e Encoder) acquireComp(ctx context.Context) (release func(), err error) {
+	if e.compSem == nil {
+		return func() {}, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := e.compSem.Acquire(ctx, 1); err != nil {
+		return nil, err
+	}
+	return func() { e.compSem.Release(1) }, nil
+}
 
 // copyChunk bounds how much is moved per read while streaming a body through the
 // encoder, so a huge body is processed in fixed slices and cancellation is checked
@@ -89,11 +129,16 @@ func newZstd(dst io.Writer) (*zstd.Encoder, error) {
 // A body shorter than Threshold is stored verbatim and keyed by its raw hash. The
 // returned Stored slice for that case aliases raw (no copy): RewriteLine has already
 // copied the line out of the scan buffer, so the bytes are stable for the upload.
-func (Encoder) EncodeBody(raw []byte) (sha string, stored []byte, contentType string) {
+func (e Encoder) EncodeBody(raw []byte) (sha string, stored []byte, contentType string) {
 	if len(raw) < Threshold {
 		sum := sha256.Sum256(raw)
 		return hex.EncodeToString(sum[:]), raw, parser.ContentRaw
 	}
+	// Bound concurrent compression to keep many bodies hashing at once off all CPUs.
+	// EncodeBody has no context (it satisfies parser.BodyEncoder), so the wait is
+	// uninterruptible; the work it gates is a short, fully in-memory pass.
+	release, _ := e.acquireComp(nil)
+	defer release()
 	var buf bytes.Buffer
 	// A compressed body is at least somewhat smaller than its input; preallocating a
 	// fraction avoids a few grow-copies without overcommitting.
@@ -130,7 +175,14 @@ func (e Encoder) HashStream(ctx context.Context, r io.Reader) (sha, contentType 
 	}
 
 	// Larger than Threshold: compress head + the rest through one writer, hashing the
-	// compressed output and counting the raw bytes consumed.
+	// compressed output and counting the raw bytes consumed. Bound concurrent
+	// compression so a batch of big bodies hashing at once does not oversubscribe the
+	// CPUs; the wait honors ctx so a canceled sync stops waiting for a permit.
+	release, err := e.acquireComp(ctx)
+	if err != nil {
+		return "", "", 0, err
+	}
+	defer release()
 	zw, _ := newZstd(h)
 	if _, err := zw.Write(head); err != nil {
 		_ = zw.Close()
