@@ -273,6 +273,68 @@ func TestSyncAllDeadlineDuringSlotWaitStartsNoNewFile(t *testing.T) {
 	}
 }
 
+// TestSyncAllCancellingLastFileReportsInterrupted nails the subtle case where the
+// deadline fires while the final file is waiting for a slot. The file must not run
+// (no new work after cancellation) and the run must still report interrupted, so
+// the file is neither processed nor silently dropped from the accounting.
+func TestSyncAllCancellingLastFileReportsInterrupted(t *testing.T) {
+	files := []discover.File{{Path: "hopper"}, {Path: "lovelace"}}
+
+	deadlineCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var started int32
+	held := make(chan struct{})
+	release := make(chan struct{})
+	run := func(_ context.Context, f discover.File) outcome {
+		atomic.AddInt32(&started, 1)
+		held <- struct{}{} // the lone slot is now taken
+		<-release
+		return outcome{sync: &syncer.Result{File: f, Action: upload.ActionUpToDate}}
+	}
+
+	go func() {
+		<-held   // the first file holds the only slot
+		cancel() // deadline fires while the last file waits for a slot
+		close(release)
+	}()
+
+	sum, interrupted := syncAll(context.Background(), deadlineCtx, files, 1, run)
+	if !interrupted {
+		t.Fatal("cancelling while the last file waits for a slot must report interrupted")
+	}
+	if got := atomic.LoadInt32(&started); got != 1 {
+		t.Fatalf("started %d files, want 1: the last file must not run after cancellation", got)
+	}
+	if sum.upToDate != 1 {
+		t.Fatalf("folded %d up-to-date, want 1", sum.upToDate)
+	}
+}
+
+// TestSyncAllRoutesDryRunOutcomes exercises the fold dispatcher through the
+// concurrent driver: a regression in routing outcome.resolve to the dry-run fold
+// path would be caught here, not just in the direct foldResolve test.
+func TestSyncAllRoutesDryRunOutcomes(t *testing.T) {
+	files := []discover.File{{Path: "lovelace"}, {Path: "clarke"}}
+	run := func(_ context.Context, f discover.File) outcome {
+		if f.Path == "clarke" {
+			return outcome{resolve: &resolve.Result{File: f, Skipped: true, Reason: "could not read header"}}
+		}
+		return outcome{resolve: &resolve.Result{File: f, Kind: resolve.KindStandalone, Header: resolve.Header{Cwd: "/home/ada"}}}
+	}
+
+	sum, interrupted := syncAll(context.Background(), context.Background(), files, 4, run)
+	if interrupted {
+		t.Fatal("syncAll reported interrupted with a live deadline")
+	}
+	if sum.skipped != 1 || sum.standalone != 1 {
+		t.Fatalf("dry-run routing: skipped=%d standalone=%d, want 1 and 1", sum.skipped, sum.standalone)
+	}
+	if sum.uploaded != 0 {
+		t.Fatalf("a dry run uploads nothing, but uploaded=%d", sum.uploaded)
+	}
+}
+
 // TestFoldResolve covers the dry-run fold branches end to end: a skip tallies its
 // reason and goes to stderr, and each resolvable kind reports the destination a
 // real run would have uploaded to, on stdout.

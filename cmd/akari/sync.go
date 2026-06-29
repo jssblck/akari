@@ -8,9 +8,8 @@ import (
 	"os"
 	"runtime"
 	"sort"
+	"sync"
 	"time"
-
-	"golang.org/x/sync/errgroup"
 
 	"github.com/jssblck/akari/internal/client/discover"
 	"github.com/jssblck/akari/internal/client/resolve"
@@ -230,10 +229,11 @@ func (s *summary) foldSync(r syncer.Result) (line string, stderr bool) {
 // It stops scheduling new files as soon as deadline is cancelled (a first Ctrl-C
 // or an elapsed time limit), but lets files already in flight finish on the
 // detached work context: those run with no cancellation, exactly as the sequential
-// loop let the single in-flight file finish. The cancellation is honored even
-// while a launch is blocked waiting for a concurrency slot (see the re-check
-// below), so a deadline that fires mid-wait never starts a fresh file. It returns
-// the folded summary and whether it stopped early.
+// loop let the single in-flight file finish. Slot acquisition is itself
+// cancellation-aware, so a deadline that fires while a launch waits for a free
+// slot stops the loop and is reported, rather than letting a fresh file start or
+// dropping that file silently. It returns the folded summary and whether it
+// stopped early.
 //
 // The file-level cap is intentionally modest. Each file already fans its own body
 // uploads out under the client's shared adaptive limiter and CPU-bounded encoder,
@@ -262,30 +262,44 @@ func syncAll(work, deadline context.Context, files []discover.File, concurrency 
 		}
 	}()
 
-	var g errgroup.Group
-	g.SetLimit(concurrency)
+	// sem bounds how many files run at once. Acquiring a slot can block: a slot
+	// frees only when an in-flight file finishes, which may be deep into a slow
+	// upload. The deadline can fire during that wait, so acquisition has to watch
+	// for it rather than block obliviously.
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
 	interrupted := false
 	for _, f := range files {
 		if deadline.Err() != nil {
 			interrupted = true
 			break
 		}
-		g.Go(func() error {
-			// SetLimit makes g.Go block here until a concurrency slot frees, and that
-			// wait can outlast the deadline: a slot frees only when an in-flight file
-			// finishes, which may be seconds into a slow upload. Re-check before
-			// starting any work so a deadline that fired during the wait does not let a
-			// fresh file begin. That keeps the contract that cancellation stops new
-			// files and only lets already-running ones finish; the loop's top-of-loop
-			// check then breaks and reports interrupted on the next iteration.
-			if deadline.Err() != nil {
-				return nil
-			}
+		// Wait for a free slot, but stop the moment the deadline fires: cancellation
+		// must neither start a new file nor leave one unaccounted for.
+		select {
+		case sem <- struct{}{}:
+		case <-deadline.Done():
+			interrupted = true
+		}
+		if interrupted {
+			break
+		}
+		// A slot can free in the same instant the deadline fires, and the send above
+		// may win that race; re-check and hand the slot back rather than start a file
+		// after cancellation has begun.
+		if deadline.Err() != nil {
+			<-sem
+			interrupted = true
+			break
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
 			results <- run(work, f)
-			return nil
-		})
+		}()
 	}
-	_ = g.Wait() // run never returns an error; failures travel in the outcome
+	wg.Wait()
 	close(results)
 	<-done
 	return sum, interrupted
