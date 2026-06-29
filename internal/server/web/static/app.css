@@ -307,9 +307,13 @@ table.grid.projects td.num { overflow: visible; }
 .stat .value { font-family: var(--mono); font-size: 1.125rem; font-variant-numeric: tabular-nums; color: var(--text); }
 /* The analytics panels (overview, projects, project) fuse their readouts into a
    single instrument strip: one bordered row split by hairlines, instead of four
-   detached tiles floating above the chart. */
-.analytics .stats { gap: 0; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); overflow: hidden; }
+   detached tiles floating above the chart. The strip stays overflow-visible so the
+   Tokens readout's hover tooltip can drop clear of it rather than being clipped;
+   the fused rounded ends come from the first/last tile instead of a clip. */
+.analytics .stats { gap: 0; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); overflow: visible; }
 .analytics .stat { flex: 1; min-width: 0; border: none; border-radius: 0; }
+.analytics .stat:first-child { border-top-left-radius: var(--r-md); border-bottom-left-radius: var(--r-md); }
+.analytics .stat:last-child { border-top-right-radius: var(--r-md); border-bottom-right-radius: var(--r-md); }
 .analytics .stat + .stat { border-left: 1px solid var(--border); }
 /* The session header fuses its readouts into the same instrument strip, sticky to
    the top of the transcript. One bordered row split by hairlines reads as a single
@@ -439,7 +443,19 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--l
 
 /* ---- Calendar heatmap (overview activity grid) ---- */
 .heatmap-wrap { margin: var(--sp-md) 0 var(--sp-lg); }
-.heatmap-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--sp-sm); }
+.heatmap-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-md); flex-wrap: wrap; margin-bottom: var(--sp-sm); }
+/* The trailing-window selector sits beside the metric toggle on the grid-head
+   row, parted by a hairline; the two segmented controls wrap together when
+   narrow. */
+.heatmap-controls { display: flex; align-items: center; gap: var(--sp-md); flex-wrap: wrap; justify-content: flex-end; }
+/* The metric toolbar's default margin-bottom (it usually sits above a chart) would
+   inflate this flex row past the toolbars' own height, dropping the separator
+   below them; here the toolbars sit side by side, so drop it. */
+.heatmap-controls .chart-toolbar { margin-bottom: 0; }
+/* A fixed-height hairline, centered, a touch shorter than the toolbars so it reads
+   as a divider inset a few px top and bottom. Fixed (not stretched) so it never
+   inflates the flex line. */
+.heatmap-controls .ctrl-sep { width: 1px; height: 18px; align-self: center; background: var(--border); flex: none; }
 .heatmap {
   position: relative;
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md);
@@ -468,9 +484,13 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--l
 .heatmap-tooltip .tt-day { color: var(--lilac); font: 500 0.75rem var(--mono); margin-bottom: 4px; }
 .heatmap-tooltip .tt-total, .tok-tip .tt-total { color: var(--text); font: 450 0.8125rem var(--mono); font-variant-numeric: tabular-nums; }
 .heatmap-tooltip .tt-empty { color: var(--muted); font-size: 0.75rem; }
+/* The overview and session-header Tokens readouts render their own in/out/cache
+   breakdown through the .stat-tip tooltip styling above; this grid is the heatmap
+   cell tooltip and the Sessions table's token card (.tok-tip). */
 .heatmap-tooltip .tt-grid, .tok-tip .tt-grid {
   display: grid; grid-template-columns: auto auto; gap: 1px var(--sp-sm);
-  margin: 5px 0 0; font: 450 0.75rem/1.5 var(--mono);
+  margin: 0; font: 450 0.75rem/1.5 var(--mono);
+  margin-top: 5px;
 }
 .heatmap-tooltip .tt-grid dt, .tok-tip .tt-grid dt { color: var(--muted); }
 .heatmap-tooltip .tt-grid dd, .tok-tip .tt-grid dd { margin: 0; color: var(--subtext); text-align: right; font-variant-numeric: tabular-nums; }

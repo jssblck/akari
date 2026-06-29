@@ -2,7 +2,9 @@ package store_test
 
 import (
 	"context"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/storetest"
@@ -35,6 +37,47 @@ func seedUsage(t *testing.T, st *store.Store, sessionID int64, model string, cos
 	}
 }
 
+// seedUsageCache is seedUsage with the two cache-token classes set, so the cache
+// totals the overview's Tokens tooltip surfaces can be asserted against known
+// inputs.
+func seedUsageCache(t *testing.T, st *store.Store, sessionID int64, model string, cost float64, in, out, cacheRead, cacheWrite int64, daysAgo int, dedup string) {
+	t.Helper()
+	_, err := st.Pool.Exec(context.Background(),
+		`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, occurred_at, dedup_key)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7, now() - make_interval(days => $8), $9)`,
+		sessionID, model, in, out, cacheRead, cacheWrite, cost, daysAgo, dedup)
+	if err != nil {
+		t.Fatalf("seed usage cache: %v", err)
+	}
+}
+
+// seedUsageAt inserts a usage event at an explicit occurred_at, so the window's
+// inclusive lower bound (`occurred_at >= since`) can be pinned to the exact
+// instant rather than a clearly-inside or clearly-outside day.
+func seedUsageAt(t *testing.T, st *store.Store, sessionID int64, model string, cost float64, in, out int64, at time.Time, dedup string) {
+	t.Helper()
+	_, err := st.Pool.Exec(context.Background(),
+		`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cost_usd, occurred_at, dedup_key)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+		sessionID, model, in, out, cost, at, dedup)
+	if err != nil {
+		t.Fatalf("seed usage at: %v", err)
+	}
+}
+
+// TotalTokens sums the four token classes; it is the figure the overview's Tokens
+// readout shows. Pure, so it runs without a database.
+func TestAnalyticsTotalTokens(t *testing.T) {
+	t.Parallel()
+	a := store.Analytics{TotalIn: 100, TotalOut: 50, TotalCacheRead: 30, TotalCacheWrite: 7}
+	if got := a.TotalTokens(); got != 187 {
+		t.Errorf("TotalTokens = %d, want 187 (100+50+30+7)", got)
+	}
+	if got := (store.Analytics{}).TotalTokens(); got != 0 {
+		t.Errorf("empty TotalTokens = %d, want 0", got)
+	}
+}
+
 func TestAnalyticsRollups(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -57,7 +100,7 @@ func TestAnalyticsRollups(t *testing.T) {
 	seedUsage(t, st, s1, "claude-opus-4-8", 1.5, 500, 100, 1, "u2")
 	seedUsage(t, st, s2, "gpt-5.5", 1.0, 400, 80, 2, "u3")
 
-	a, err := st.Analytics(ctx, proj)
+	a, err := st.Analytics(ctx, proj, time.Time{})
 	if err != nil {
 		t.Fatalf("analytics: %v", err)
 	}
@@ -89,12 +132,238 @@ func TestAnalyticsRollups(t *testing.T) {
 	}
 
 	// Global scope (projectID 0) sees the same single project.
-	g, err := st.Analytics(ctx, 0)
+	g, err := st.Analytics(ctx, 0, time.Time{})
 	if err != nil {
 		t.Fatalf("global analytics: %v", err)
 	}
 	if g.Sessions != 2 || len(g.Series) != 3 {
 		t.Errorf("global rollup mismatch: %+v", g)
+	}
+}
+
+// A non-zero `since` bounds every rollup to the trailing window, slicing usage by
+// event time. Only events at or after the bound count toward the series, the
+// breakdowns, the totals, and the distinct-session count.
+func TestAnalyticsTimeWindow(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	admin, err := st.Register(ctx, "grace", "h", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	proj, err := st.UpsertProject(ctx, "github.com/ada/engine", "github.com", "ada", "engine", "engine", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+
+	// s1 is active inside the window; s2 only has activity well before it.
+	s1 := seedSessionWithStats(t, st, admin.ID, proj, "claude", "s1", 2.0, 600, 120)
+	s2 := seedSessionWithStats(t, st, admin.ID, proj, "codex", "s2", 9.0, 400, 80)
+	seedUsage(t, st, s1, "claude-opus-4-8", 1.0, 300, 60, 0, "in1")
+	seedUsage(t, st, s1, "claude-opus-4-8", 1.0, 300, 60, 3, "in2")
+	seedUsage(t, st, s2, "gpt-5.5", 9.0, 400, 80, 40, "old")
+
+	// A 7-day window keeps only s1's two recent events.
+	since := time.Now().AddDate(0, 0, -7)
+	a, err := st.Analytics(ctx, 0, since)
+	if err != nil {
+		t.Fatalf("windowed analytics: %v", err)
+	}
+	if len(a.Series) != 2 {
+		t.Errorf("want 2 in-window daily points, got %d", len(a.Series))
+	}
+	if a.TotalCost < 1.99 || a.TotalCost > 2.01 {
+		t.Errorf("windowed cost should sum only in-window events (~2.0), got %.2f", a.TotalCost)
+	}
+	if a.Sessions != 1 {
+		t.Errorf("only s1 is active in-window, want 1 session, got %d", a.Sessions)
+	}
+	if a.TotalIn != 600 || a.TotalOut != 120 {
+		t.Errorf("windowed token totals wrong: in=%d out=%d", a.TotalIn, a.TotalOut)
+	}
+	if len(a.Models) != 1 || a.Models[0].Label != "claude-opus-4-8" {
+		t.Errorf("windowed models should hold only the in-window model: %+v", a.Models)
+	}
+	if len(a.Agents) != 1 || a.Agents[0].Label != "claude" {
+		t.Errorf("windowed agents should hold only the in-window agent: %+v", a.Agents)
+	}
+
+	// The unbounded view still sees both sessions and the older spend.
+	full, err := st.Analytics(ctx, 0, time.Time{})
+	if err != nil {
+		t.Fatalf("full analytics: %v", err)
+	}
+	if full.Sessions != 2 {
+		t.Errorf("unbounded view should see both sessions, got %d", full.Sessions)
+	}
+	if full.TotalCost < 10.99 || full.TotalCost > 11.01 {
+		t.Errorf("unbounded cost from session rollups should be ~11.0, got %.2f", full.TotalCost)
+	}
+}
+
+// A project scope and a time bound apply together: the placeholders are numbered
+// in order ($1 project, $2 since), so the analytics isolate one project's
+// in-window usage and exclude both another project and out-of-window events. This
+// also exercises the cache-token totals the unscoped window test leaves at zero.
+func TestAnalyticsScopedWindowWithCacheTotals(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	admin, err := st.Register(ctx, "grace", "h", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	projA, err := st.UpsertProject(ctx, "github.com/ada/a", "github.com", "ada", "a", "a", "remote")
+	if err != nil {
+		t.Fatalf("project a: %v", err)
+	}
+	projB, err := st.UpsertProject(ctx, "github.com/ada/b", "github.com", "ada", "b", "b", "remote")
+	if err != nil {
+		t.Fatalf("project b: %v", err)
+	}
+
+	sA := seedSessionWithStats(t, st, admin.ID, projA, "claude", "sa", 1.0, 100, 50)
+	sB := seedSessionWithStats(t, st, admin.ID, projB, "codex", "sb", 9.0, 999, 999)
+
+	// Project A, in window: the only events that should count.
+	seedUsageCache(t, st, sA, "claude-opus-4-8", 1.0, 100, 50, 30, 7, 1, "a-recent")
+	// Project A, out of a 7-day window: excluded by the time bound.
+	seedUsageCache(t, st, sA, "claude-opus-4-8", 4.0, 400, 80, 200, 20, 40, "a-old")
+	// Project B, in window: excluded by the project scope.
+	seedUsageCache(t, st, sB, "gpt-5.5", 9.0, 999, 999, 999, 999, 1, "b-recent")
+
+	since := time.Now().AddDate(0, 0, -7)
+	a, err := st.Analytics(ctx, projA, since)
+	if err != nil {
+		t.Fatalf("scoped windowed analytics: %v", err)
+	}
+	if a.TotalIn != 100 || a.TotalOut != 50 {
+		t.Errorf("scoped window in/out wrong: in=%d out=%d, want 100/50", a.TotalIn, a.TotalOut)
+	}
+	if a.TotalCacheRead != 30 || a.TotalCacheWrite != 7 {
+		t.Errorf("scoped window cache totals wrong: read=%d write=%d, want 30/7", a.TotalCacheRead, a.TotalCacheWrite)
+	}
+	if got := a.TotalTokens(); got != 187 {
+		t.Errorf("scoped window combined tokens = %d, want 187 (100+50+30+7)", got)
+	}
+	if a.TotalCost < 0.99 || a.TotalCost > 1.01 {
+		t.Errorf("scoped window cost should be the one in-window event (~1.0), got %.2f", a.TotalCost)
+	}
+	if a.Sessions != 1 {
+		t.Errorf("scoped window should see only project A's in-window session, got %d", a.Sessions)
+	}
+	if len(a.Models) != 1 || a.Models[0].Label != "claude-opus-4-8" {
+		t.Errorf("scoped window should hold only project A's in-window model: %+v", a.Models)
+	}
+	if len(a.Agents) != 1 || a.Agents[0].Label != "claude" {
+		t.Errorf("scoped window should hold only project A's agent: %+v", a.Agents)
+	}
+}
+
+// The unbounded (all-time) path derives its headline token totals from the daily
+// series, which carries all four token classes. TestAnalyticsRollups leaves cache
+// tokens at zero, so this pins the all-time cache and combined-token aggregation
+// that the overview's Tokens readout and its tooltip surface.
+func TestAnalyticsAllTimeTokenTotals(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	admin, err := st.Register(ctx, "grace", "h", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	proj, err := st.UpsertProject(ctx, "github.com/ada/engine", "github.com", "ada", "engine", "engine", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+
+	s1 := seedSessionWithStats(t, st, admin.ID, proj, "claude", "s1", 2.0, 0, 0)
+	// Two dated events on different days, both carrying cache tokens.
+	seedUsageCache(t, st, s1, "claude-opus-4-8", 1.0, 100, 20, 30, 7, 0, "c1")
+	seedUsageCache(t, st, s1, "claude-opus-4-8", 1.0, 200, 40, 60, 14, 3, "c2")
+
+	a, err := st.Analytics(ctx, proj, time.Time{})
+	if err != nil {
+		t.Fatalf("all-time analytics: %v", err)
+	}
+	if a.TotalIn != 300 || a.TotalOut != 60 {
+		t.Errorf("all-time in/out wrong: in=%d out=%d, want 300/60", a.TotalIn, a.TotalOut)
+	}
+	if a.TotalCacheRead != 90 || a.TotalCacheWrite != 21 {
+		t.Errorf("all-time cache totals wrong: read=%d write=%d, want 90/21", a.TotalCacheRead, a.TotalCacheWrite)
+	}
+	if got := a.TotalTokens(); got != 471 {
+		t.Errorf("all-time combined tokens = %d, want 471 (300+60+90+21)", got)
+	}
+}
+
+// The window's lower bound is inclusive: an event whose occurred_at is exactly
+// `since` counts, while one a single instant earlier does not. The other store
+// tests only use clearly inside/outside dates, leaving this edge unpinned.
+func TestAnalyticsWindowLowerBoundInclusive(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	admin, err := st.Register(ctx, "grace", "h", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	proj, err := st.UpsertProject(ctx, "github.com/ada/engine", "github.com", "ada", "engine", "engine", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+
+	s1 := seedSessionWithStats(t, st, admin.ID, proj, "claude", "s1", 0, 0, 0)
+	// Postgres timestamps are microsecond-resolution, so truncate to the same grid
+	// and step by one microsecond to straddle the bound exactly.
+	bound := time.Now().Add(-24 * time.Hour).Truncate(time.Microsecond)
+	seedUsageAt(t, st, s1, "claude-opus-4-8", 1.0, 100, 20, bound, "at-bound")
+	seedUsageAt(t, st, s1, "claude-opus-4-8", 5.0, 500, 90, bound.Add(-time.Microsecond), "below-bound")
+
+	a, err := st.Analytics(ctx, proj, bound)
+	if err != nil {
+		t.Fatalf("boundary analytics: %v", err)
+	}
+	if len(a.Series) != 1 {
+		t.Errorf("only the at-bound event should land in the series, got %d points", len(a.Series))
+	}
+	if a.TotalCost < 0.99 || a.TotalCost > 1.01 {
+		t.Errorf("inclusive bound should keep the at-bound event and drop the one below it (~1.0), got %.2f", a.TotalCost)
+	}
+	if a.TotalIn != 100 || a.TotalOut != 20 {
+		t.Errorf("boundary token totals wrong: in=%d out=%d, want 100/20", a.TotalIn, a.TotalOut)
+	}
+}
+
+// The windowed overview rollups bound usage by ue.occurred_at, so they need a
+// supporting index or each bounded request seq-scans all accumulated history. This
+// pins the partial index's presence (migration 0012): drop it and the windowed
+// series, by-model, and by-agent rollups silently regress to full-table scans.
+func TestUsageEventsOccurredAtIndex(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	var indexdef string
+	err := st.Pool.QueryRow(ctx,
+		`SELECT indexdef FROM pg_indexes
+		  WHERE tablename = 'usage_events' AND indexname = 'idx_usage_events_occurred_at'`).
+		Scan(&indexdef)
+	if err != nil {
+		t.Fatalf("the occurred_at index should exist to keep windowed rollups window-bound: %v", err)
+	}
+	// It must be the partial index on occurred_at, not some unrelated index that
+	// happens to share the name: the lower bound seeks on occurred_at, and the
+	// NULL-excluding predicate keeps undated events (never in any window) out.
+	for _, want := range []string{"occurred_at", "WHERE", "IS NOT NULL"} {
+		if !strings.Contains(indexdef, want) {
+			t.Errorf("index def %q should mention %q (partial index on occurred_at)", indexdef, want)
+		}
 	}
 }
 

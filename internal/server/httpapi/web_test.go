@@ -416,6 +416,62 @@ func TestPublicSessionFlow(t *testing.T) {
 	resp.Body.Close()
 }
 
+// TestOverviewRangeWindow drives the overview through its range query param: the
+// default load marks the 30-day window active, and ?range=90d marks the 90-day
+// window instead (and not the default). This exercises handleOverview's ParseRange
+// wiring end to end, the panel only renders its selector once there is usage data.
+func TestOverviewRangeWindow(t *testing.T) {
+	t.Parallel()
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+	c := newClient(t)
+
+	// Seed an owner, a project, a session, and one in-window usage event so the
+	// overview has data and renders the usage panel (and thus the range selector).
+	owner, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	ann, err := st.Announce(ctx, store.AnnounceParams{
+		UserID: owner.ID, Agent: "claude", SourceSessionID: "sess-1",
+		ProjectID: projectID, Cwd: "/home/grace/akari", Machine: "laptop",
+	})
+	if err != nil {
+		t.Fatalf("announce: %v", err)
+	}
+	if _, err := st.Pool.Exec(ctx,
+		`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cost_usd, occurred_at, dedup_key)
+		 VALUES ($1, 'claude-opus-4-8', 100, 50, 1.0, now() - make_interval(days => 1), 'u1')`,
+		ann.SessionID); err != nil {
+		t.Fatalf("seed usage: %v", err)
+	}
+
+	if _, err := c.PostForm(srv.URL+"/login", url.Values{
+		"username": {"grace"}, "password": {"hopper-1906"},
+	}); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+
+	// The default load opens on the 30-day window.
+	body := readBody(t, mustGet(t, c, srv.URL+"/"))
+	if !strings.Contains(body, `class="seg active" hx-get="/?range=30d"`) {
+		t.Fatalf("default overview should mark the 30-day window active, got:\n%s", body)
+	}
+
+	// ?range=90d moves the active window and leaves the default unmarked.
+	body = readBody(t, mustGet(t, c, srv.URL+"/?range=90d"))
+	if !strings.Contains(body, `class="seg active" hx-get="/?range=90d"`) {
+		t.Fatalf("range=90d should mark the 90-day window active, got:\n%s", body)
+	}
+	if strings.Contains(body, `class="seg active" hx-get="/?range=30d"`) {
+		t.Fatalf("range=90d should not also mark the default window active, got:\n%s", body)
+	}
+}
+
 // TestSessionPageDuplicateIDChip drives the real session page over HTTP and confirms
 // the duplicate-id chip renders from store data: a session whose transcript repeated
 // a tool_use id shows the warning, computed by handleSessionPage through
@@ -490,6 +546,15 @@ func TestSafeNext(t *testing.T) {
 			t.Errorf("safeNext(%q) = %q, want %q", in, got, want)
 		}
 	}
+}
+
+func mustGet(t *testing.T, c *http.Client, url string) *http.Response {
+	t.Helper()
+	resp, err := c.Get(url)
+	if err != nil {
+		t.Fatalf("get %s: %v", url, err)
+	}
+	return resp
 }
 
 func readBody(t *testing.T, resp *http.Response) string {

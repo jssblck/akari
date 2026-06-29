@@ -66,24 +66,22 @@ func render(w http.ResponseWriter, r *http.Request, status int, c templ.Componen
 	}
 }
 
-// handleOverview is the landing surface at /: fleet-wide usage plus a feed of the
-// most recent sessions across every project.
+// handleOverview is the landing surface at /: fleet-wide usage bounded to the
+// selected trailing window. The range selector refetches this same handler and
+// swaps the usage panel (hx-select="#usage"), so a plain load and an htmx swap
+// render from one path; the window also rides the URL via ?range=.
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		render(w, r, http.StatusNotFound, web.ErrorPage(s.pageForNav(r, "Not found", ""), http.StatusNotFound, "Page not found."))
 		return
 	}
-	analytics, err := s.Store.Analytics(r.Context(), 0)
+	rng := web.ParseRange(r.URL.Query().Get("range"))
+	analytics, err := s.Store.Analytics(r.Context(), 0, web.RangeSince(rng, time.Now()))
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "overview"), http.StatusInternalServerError, "Could not load analytics."))
 		return
 	}
-	recent, err := s.Store.ListAllSessions(r.Context(), store.SessionFilter{Limit: 15})
-	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "overview"), http.StatusInternalServerError, "Could not load sessions."))
-		return
-	}
-	render(w, r, http.StatusOK, web.OverviewPage(s.pageForNav(r, "Overview", "overview"), analytics, recent))
+	render(w, r, http.StatusOK, web.OverviewPage(s.pageForNav(r, "Overview", "overview"), analytics, rng))
 }
 
 // handleProjectsIndex is the projects table (moved off the root to /projects when
@@ -187,7 +185,7 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load filters."))
 		return
 	}
-	analytics, err := s.Store.Analytics(r.Context(), id)
+	analytics, err := s.Store.Analytics(r.Context(), id, time.Time{})
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load analytics."))
 		return
