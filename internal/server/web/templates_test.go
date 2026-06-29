@@ -58,20 +58,33 @@ func TestOverviewPageRendersHeatmap(t *testing.T) {
 	}
 }
 
-// The projects index keeps the line chart and the titled Usage panel: the page
-// head says "Projects", so "Usage / Across all projects" is not a repeat.
-func TestProjectsPageKeepsLineChart(t *testing.T) {
+// The projects index is now just the table: no usage panel (the Overview owns
+// fleet usage), no page heading (the sidebar marks the section), and no
+// local-folder list. The token columns collapse to one "Tokens" total whose
+// figure is the sum across all four classes, and the row carries a hover card
+// breaking that total back out.
+func TestProjectsPageIsBareTable(t *testing.T) {
 	p := Page{Title: "Projects", LoggedIn: true, Active: "projects", Username: "Ada Lovelace"}
-	projects := []store.ProjectSummary{{ID: 1, RemoteKey: "hopper/akari", Kind: "remote", SessionCount: 3}}
-	html := renderComponent(t, ProjectsPage(p, projects, nil, analyticsWithData(), nil))
+	projects := []store.ProjectSummary{{
+		ID: 1, RemoteKey: "hopper/akari", Kind: "remote", SessionCount: 3,
+		TotalInput: 100, TotalOutput: 50, TotalCacheRead: 30, TotalCacheWrite: 20,
+	}}
+	html := renderComponent(t, ProjectsPage(p, projects, nil))
 
-	for _, want := range []string{`data-chart`, `data-chart-target="chart-global"`, `<h2>Usage</h2>`} {
-		if !strings.Contains(html, want) {
-			t.Errorf("projects index should render the line chart; missing %q", want)
+	for _, gone := range []string{`data-chart`, `data-heatmap`, `<h2>Usage</h2>`, `<h1>Projects</h1>`} {
+		if strings.Contains(html, gone) {
+			t.Errorf("projects index should be a bare table; found stripped markup %q", gone)
 		}
 	}
-	if strings.Contains(html, `data-heatmap`) {
-		t.Error("projects index should not render the heatmap")
+	// The merged column shows the grand total (100+50+30+20 = 200) with thousands
+	// separators, plus the per-class breakdown in the hover card.
+	for _, want := range []string{`<th class="num">Tokens</th>`, `class="tok-total">200<`, `<dt>Cache read</dt>`, `<dd>30</dd>`} {
+		if !strings.Contains(html, want) {
+			t.Errorf("projects tokens cell missing %q", want)
+		}
+	}
+	if strings.Contains(html, `<th class="num">Input</th>`) {
+		t.Error("projects index should fold Input/Output/Cost into one Tokens column, not list Input")
 	}
 }
 

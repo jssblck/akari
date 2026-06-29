@@ -242,6 +242,41 @@ table.grid tbody tr:hover td { background: var(--surface-2); }
 td.num, th.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
 th.trend, td.trend { width: 108px; }
 .sparkline { width: 96px; height: 24px; display: block; }
+.nowrap { white-space: nowrap; }
+
+/* ---- Projects index: a full-bleed table whose columns grow to their content ---- */
+/* The projects index is the page's only surface, so it drops the centered
+   max-width and runs the table the full content width. */
+main.page-projects { max-width: none; }
+/* Every figure column sizes to its content (no wrapping); the project-name
+   column takes width:100% so it absorbs the slack, letting names show in full
+   instead of clipping while the table still fills the available width. */
+table.grid.projects th, table.grid.projects td { white-space: nowrap; }
+table.grid.projects th.proj-name, table.grid.projects td.proj-name { width: 100%; }
+
+/* Tokens cell: the headline total with a pure-CSS hover card that breaks it into
+   the four token classes, styled to match the overview heatmap tooltip. No JS, so
+   it works in the server-rendered table without hydration. */
+.tok { position: relative; display: inline-block; }
+/* Opens downward from the cell: the table sits near the top of the page, so an
+   upward card would clip above the viewport on the first rows, and the page
+   scrolls vertically to reveal a card that runs past the last row. */
+.tok-tip {
+  position: absolute; z-index: 5; right: 0; top: calc(100% + 6px);
+  min-width: 152px; text-align: left;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-sm);
+  padding: var(--sp-sm); pointer-events: none;
+  opacity: 0; transform: translateY(2px);
+  transition: opacity var(--dur-fast) var(--ease-state), transform var(--dur-fast) var(--ease-state);
+}
+.tok:hover .tok-tip, .tok:focus-within .tok-tip { opacity: 1; transform: none; }
+.tok-tip .tt-total { display: block; color: var(--text); font: 450 0.8125rem var(--mono); font-variant-numeric: tabular-nums; }
+.tok-tip .tt-grid {
+  display: grid; grid-template-columns: auto auto; gap: 1px var(--sp-sm);
+  margin: 5px 0 0; font: 450 0.75rem/1.5 var(--mono);
+}
+.tok-tip .tt-grid dt { color: var(--muted); }
+.tok-tip .tt-grid dd { margin: 0; color: var(--subtext); text-align: right; font-variant-numeric: tabular-nums; }
 
 /* ---- Cards ---- */
 .card {

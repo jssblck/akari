@@ -94,27 +94,21 @@ func (s *Server) handleProjectsIndex(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "projects"), http.StatusInternalServerError, "Could not load projects."))
 		return
 	}
-	// Git-remote projects and local (standalone/orphaned) folders render in
-	// separate sections; split here so the template stays declarative.
-	var remotes, locals []store.ProjectSummary
+	// The index lists git-remote projects only. Local (standalone/orphaned)
+	// folders reach the reader through the Sessions filter rail, so they are kept
+	// off this surface rather than crowding it with a second table.
+	var remotes []store.ProjectSummary
 	for _, pr := range projects {
-		if web.IsLocalKind(pr.Kind) {
-			locals = append(locals, pr)
-		} else {
+		if !web.IsLocalKind(pr.Kind) {
 			remotes = append(remotes, pr)
 		}
-	}
-	analytics, err := s.Store.Analytics(r.Context(), 0)
-	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "projects"), http.StatusInternalServerError, "Could not load analytics."))
-		return
 	}
 	spark, err := s.Store.ProjectSparklines(r.Context(), 30)
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "projects"), http.StatusInternalServerError, "Could not load analytics."))
 		return
 	}
-	render(w, r, http.StatusOK, web.ProjectsPage(s.pageForNav(r, "Projects", "projects"), remotes, locals, analytics, spark))
+	render(w, r, http.StatusOK, web.ProjectsPage(s.pageForNav(r, "Projects", "projects"), remotes, spark))
 }
 
 // handleSessions is the global, faceted session list across every project. An

@@ -183,6 +183,38 @@ func FmtTime(t *time.Time) string {
 	return t.UTC().Format("2006-01-02 15:04")
 }
 
+// FmtRelTime renders a timestamp as a coarse relative phrase for recent activity
+// ("today", "1 day ago", "5 days ago") and falls back to the absolute stamp once
+// it is more than a week old, where the exact date carries more than a vague "N
+// days ago". It is the projects-index "Updated" column; absent times show a dash.
+func FmtRelTime(t *time.Time) string {
+	if t == nil || t.IsZero() {
+		return "-"
+	}
+	return relTimeFrom(*t, time.Now())
+}
+
+// relTimeFrom is FmtRelTime's testable core: the phrase for t as seen from now.
+// Buckets are whole calendar days in UTC, so a timestamp from earlier today reads
+// "today" regardless of the clock and the day count never drifts by sub-day spans.
+func relTimeFrom(t, now time.Time) string {
+	tu, nu := t.UTC(), now.UTC()
+	today := time.Date(nu.Year(), nu.Month(), nu.Day(), 0, 0, 0, 0, time.UTC)
+	that := time.Date(tu.Year(), tu.Month(), tu.Day(), 0, 0, 0, 0, time.UTC)
+	days := int(today.Sub(that).Hours() / 24)
+	switch {
+	case days <= 0:
+		// Future stamps are clock skew, not a real "in N days"; read them as now.
+		return "today"
+	case days == 1:
+		return "1 day ago"
+	case days <= 7:
+		return fmt.Sprintf("%d days ago", days)
+	default:
+		return tu.Format("2006-01-02 15:04")
+	}
+}
+
 // FmtTimeAt renders a non-pointer timestamp, or a dash when zero.
 func FmtTimeAt(t time.Time) string {
 	if t.IsZero() {
