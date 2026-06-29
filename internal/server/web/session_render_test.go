@@ -58,7 +58,7 @@ func sessionFixture() (store.SessionDetail, []store.Message, map[int][]store.Too
 func TestSessionPageCompactHeaderAndModal(t *testing.T) {
 	p := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "jessoteric"}
 	d, msgs, tools := sessionFixture()
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, false, true))
+	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, 0, false, true))
 
 	for _, want := range []string{
 		`class="session-page"`,    // full-width wrapper drives main:has(> .session-page)
@@ -93,7 +93,7 @@ func TestSessionPageCompactHeaderAndModal(t *testing.T) {
 func TestSessionStatsFoldTokensAndDropLive(t *testing.T) {
 	p := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "jessoteric"}
 	d, msgs, tools := sessionFixture()
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, true, true))
+	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, 0, true, true))
 
 	// The tile must show the aggregate of all four token classes, and the tooltip
 	// must carry each class value plus the cost, run through the same formatters
@@ -130,7 +130,7 @@ func TestSessionPagePublicShowsUnpublish(t *testing.T) {
 	pub := "k3y"
 	d.Visibility = "public"
 	d.PublicID = &pub
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, false, true))
+	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, 0, false, true))
 
 	for _, want := range []string{`>Unpublish</button>`, `class="share-link`, PublicPath(pub)} {
 		if !strings.Contains(html, want) {
@@ -148,7 +148,7 @@ func TestSessionPageActionsGating(t *testing.T) {
 	d, msgs, tools := sessionFixture()
 
 	admin := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "ada", IsAdmin: true}
-	adminHTML := renderComponent(t, SessionPage(admin, d, msgs, tools, nil, nil, false, false))
+	adminHTML := renderComponent(t, SessionPage(admin, d, msgs, tools, nil, nil, 0, false, false))
 	if !strings.Contains(adminHTML, `>Delete</button>`) {
 		t.Error("admin should be able to delete a session they do not own")
 	}
@@ -157,7 +157,7 @@ func TestSessionPageActionsGating(t *testing.T) {
 	}
 
 	viewer := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "anna"}
-	viewerHTML := renderComponent(t, SessionPage(viewer, d, msgs, tools, nil, nil, false, false))
+	viewerHTML := renderComponent(t, SessionPage(viewer, d, msgs, tools, nil, nil, 0, false, false))
 	if strings.Contains(viewerHTML, `class="session-actions"`) {
 		t.Error("a plain viewer should see no actions cluster")
 	}

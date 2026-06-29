@@ -580,6 +580,27 @@ func (s *Store) ToolCalls(ctx context.Context, sessionID int64) ([]ToolCallView,
 	return out, rows.Err()
 }
 
+// DuplicateCallUIDCount returns how many of a session's tool-call ids appear on more
+// than one row. The GROUP BY runs in the database against the (session_id, call_uid)
+// index, so the result is a bounded scalar and the session view can flag a repeated
+// id without loading or grouping the calls in process memory. It is normally zero; a
+// non-zero count means the transcript replayed a turn (a resumed or compacted Claude
+// session repeats a tool_use id), which the view surfaces as a chip so a genuinely
+// malformed id reuse is visible rather than silent.
+func (s *Store) DuplicateCallUIDCount(ctx context.Context, sessionID int64) (int, error) {
+	var n int
+	err := s.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM (
+		   SELECT 1 FROM tool_calls
+		    WHERE session_id = $1 AND call_uid IS NOT NULL
+		    GROUP BY call_uid HAVING count(*) > 1
+		 ) dups`, sessionID).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count duplicate call ids for session %d: %w", sessionID, err)
+	}
+	return n, nil
+}
+
 // AttachmentView is one attachment (today a lifted image) rendered under its
 // message: the blob key plus enough metadata to show or link the image without
 // fetching it. The bytes are served on demand through the session-scoped blob route.

@@ -406,6 +406,66 @@ func TestPublicSessionFlow(t *testing.T) {
 	resp.Body.Close()
 }
 
+// TestSessionPageDuplicateIDChip drives the real session page over HTTP and confirms
+// the duplicate-id chip renders from store data: a session whose transcript repeated
+// a tool_use id shows the warning, computed by handleSessionPage through
+// DuplicateCallUIDCount rather than from hand-built view models.
+func TestSessionPageDuplicateIDChip(t *testing.T) {
+	t.Parallel()
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+	c := newClient(t)
+
+	owner, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	ann, err := st.Announce(ctx, store.AnnounceParams{
+		UserID: owner.ID, Agent: "claude", SourceSessionID: "sess-dup",
+		ProjectID: projectID, GitBranch: "main", Cwd: "/home/grace/akari", Machine: "laptop",
+	})
+	if err != nil {
+		t.Fatalf("announce: %v", err)
+	}
+	sid := ann.SessionID
+
+	// Two assistant turns whose tool calls share id "toolu_dup": the replayed turn.
+	if err := st.ApplyProjectionDelta(ctx, sid, store.ProjectionDelta{
+		Messages: []store.MessageDelta{
+			{Ordinal: 0, Role: "assistant", Content: "first", HasToolUse: true},
+			{Ordinal: 1, Role: "assistant", Content: "replay", HasToolUse: true},
+		},
+		ToolCalls: []store.ProjToolCall{
+			{MessageOrdinal: 0, CallIndex: 0, ToolName: "Read", CallUID: "toolu_dup"},
+			{MessageOrdinal: 1, CallIndex: 0, ToolName: "Read", CallUID: "toolu_dup"},
+		},
+	}); err != nil {
+		t.Fatalf("apply projection: %v", err)
+	}
+
+	if _, err := c.PostForm(srv.URL+"/login", url.Values{
+		"username": {"grace"}, "password": {"hopper-1906"},
+	}); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+
+	resp, err := c.Get(srv.URL + fmt.Sprintf("/sessions/%d", sid))
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	body := readBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("session page status = %d, want 200", resp.StatusCode)
+	}
+	if !strings.Contains(body, "1 duplicate id") {
+		t.Fatalf("session page should show the duplicate-id chip, got:\n%s", body)
+	}
+}
+
 func TestSafeNext(t *testing.T) {
 	cases := map[string]string{
 		"":                  "/",
