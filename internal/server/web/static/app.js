@@ -1,28 +1,10 @@
-// akari UI behavior: live session updates, inline tool-body expansion with diff
-// rendering for editing tools, transcript density, the timeline-rail scroll spy,
-// and the instrument needle-settle on live stat changes. Kept dependency-free and
-// static so the binary stays self-contained. Bodies are always inserted with
-// textContent, never innerHTML, so a stored tool body can never inject markup.
+// akari UI behavior: live session updates, the tool-body modal with diff rendering
+// for editing tools, the timeline-rail scroll spy, and the instrument needle-settle
+// on live stat changes. Kept dependency-free and static so the binary stays
+// self-contained. Bodies are always inserted with textContent, never innerHTML, so
+// a stored tool body can never inject markup.
 (function () {
   "use strict";
-
-  // ---------------- Density ----------------
-  function markDensity(mode) {
-    document.body.classList.toggle("density-compact", mode === "compact");
-    Array.prototype.slice.call(document.querySelectorAll(".seg[data-density]")).forEach(function (b) {
-      b.classList.toggle("active", b.getAttribute("data-density") === mode);
-    });
-  }
-  function currentDensity() {
-    try { return localStorage.getItem("akari-density") || "comfortable"; } catch (e) { return "comfortable"; }
-  }
-  document.addEventListener("click", function (ev) {
-    var seg = ev.target.closest ? ev.target.closest(".seg[data-density]") : null;
-    if (!seg) return;
-    var mode = seg.getAttribute("data-density");
-    try { localStorage.setItem("akari-density", mode); } catch (e) {}
-    markDensity(mode);
-  });
 
   // ---------------- Breakdown bars ----------------
   // Fill from 0 to the server-computed percentage so the bars grow in on load.
@@ -192,25 +174,31 @@
     return patchElement(text);
   }
 
-  // ---------------- Inspector pane ----------------
-  // A selected tool call's bodies open in the right-hand inspector instead of
-  // inline, so reading the transcript and inspecting a body never fight for the
-  // same column. Triggers are the chip stamps (.body-toggle) and the outline
-  // steps (.inspect-open); both resolve to the same view descriptor.
+  // ---------------- Tool-body modal ----------------
+  // A selected tool call's bodies open in a large centered dialog instead of a
+  // docked column, so reading a body has real room and the transcript keeps the
+  // full width when nothing is open. Triggers are the chip stamps (.body-toggle)
+  // and the outline steps (.inspect-open); both resolve to the same view
+  // descriptor. The overlay starts hidden; #session-inspector is the dialog whose
+  // contents are built per open and cleared on close.
+  function overlayEl() { return document.getElementById("session-modal"); }
   function inspectorEl() { return document.getElementById("session-inspector"); }
 
-  var inspectorEmptyHTML = "";
-
-  function emptyInspector(insp) {
-    if (inspectorEmptyHTML) { insp.innerHTML = inspectorEmptyHTML; }
-    clearInspectSelection();
+  function openModal() {
+    var ov = overlayEl();
+    if (!ov) return;
+    ov.hidden = false;
+    document.body.classList.add("modal-open");
   }
-  function resetInspector() {
+  function closeModal() {
+    var ov = overlayEl();
+    if (!ov) return;
+    ov.hidden = true;
+    document.body.classList.remove("modal-open");
     var insp = inspectorEl();
-    if (!insp) return;
-    if (!inspectorEmptyHTML) inspectorEmptyHTML = insp.innerHTML; // capture the server-rendered empty state once
-    lastBody = { url: "", res: null }; // drop any retained body on (re)load
-    emptyInspector(insp);
+    if (insp) insp.innerHTML = "";
+    lastBody = { url: "", res: null }; // drop the retained body so it is refetched next open
+    clearInspectSelection();
   }
   var selectedEl = null;
   function clearInspectSelection() {
@@ -251,7 +239,7 @@
     var views = [];
     if (inputUrl && inputDiff) views.push({ key: "diff", label: "Diff", url: inputUrl, render: "diff" });
     if (inputUrl) views.push({ key: "input", label: "Input", url: inputUrl, render: "text" });
-    if (resultUrl) views.push({ key: "result", label: "Result", url: resultUrl, render: "text" });
+    if (resultUrl) views.push({ key: "result", label: "Output", url: resultUrl, render: "text" });
     return views;
   }
 
@@ -342,18 +330,17 @@
     var head = el("div", "insp-head");
     head.appendChild(el("span", "insp-tn", desc.tool));
     if (desc.file) head.appendChild(el("span", "insp-file mono", desc.file));
+    head.appendChild(el("span", "insp-spacer"));
+    // The status reads in the header rather than on its own row: a small signal
+    // word (Sage ok, Rose error) sat beside the close control.
+    if (desc.status) {
+      head.appendChild(el("span", "insp-status tstatus " + (desc.status === "error" ? "err" : "ok"), desc.status));
+    }
     var close = el("button", "insp-close", "✕");
-    close.setAttribute("aria-label", "Close inspector");
-    close.addEventListener("click", function () { emptyInspector(insp); });
+    close.setAttribute("aria-label", "Close");
+    close.addEventListener("click", closeModal);
     head.appendChild(close);
     insp.appendChild(head);
-
-    if (desc.status) {
-      var meta = el("div", "insp-meta");
-      var st = el("span", "tstatus " + (desc.status === "error" ? "err" : "ok"), desc.status);
-      meta.appendChild(st);
-      insp.appendChild(meta);
-    }
 
     var body = el("div", "insp-body");
     var views = el("div", "seg-group insp-views");
@@ -376,18 +363,18 @@
 
   function openInspector(trigger) {
     var insp = inspectorEl();
-    if (!insp) return false; // no pane on this page → caller falls back to inline
-    if (!inspectorEmptyHTML) inspectorEmptyHTML = insp.innerHTML;
+    if (!insp) return false; // no modal on this page → caller falls back to inline
     var desc = describe(trigger);
     if (!desc) return false;
     renderInspector(insp, desc);
+    openModal();
     clearInspectSelection();
     selectedEl = trigger.closest(".tool-chip") || trigger;
     selectedEl.classList.add("inspect-selected");
     return true;
   }
 
-  // Inline fallback for pages without an inspector pane (kept minimal).
+  // Inline fallback for pages without a modal (kept minimal).
   function expandInline(btn) {
     if (btn._bodyEl) { btn._bodyEl.remove(); btn._bodyEl = null; btn.classList.remove("open"); return; }
     var url = btn.getAttribute("data-blob-url");
@@ -421,6 +408,18 @@
     if (trigger.classList.contains("body-toggle")) expandInline(trigger);
   });
 
+  // Dismiss the modal on a backdrop click (the overlay itself, not the dialog) or
+  // Escape. Both no-op when the overlay is already hidden.
+  document.addEventListener("click", function (ev) {
+    if (ev.target === overlayEl()) closeModal();
+  });
+  document.addEventListener("keydown", function (ev) {
+    if (ev.key === "Escape") {
+      var ov = overlayEl();
+      if (ov && !ov.hidden) closeModal();
+    }
+  });
+
   // ---------------- Whole-row navigation ----------------
   // A table row carrying data-row-href navigates as a unit, so the whole cell is
   // the hit target (see DESIGN.md: "the whole row is the hit target"). A click
@@ -450,10 +449,8 @@
 
   // ---------------- Init ----------------
   function init() {
-    markDensity(currentDensity());
     animateBars();
     initOutlineSpy();   // once; the spy reads the live DOM and survives swaps
-    resetInspector();   // once; the inspector persists across live updates
     initLive();
   }
   if (document.readyState === "loading") {
