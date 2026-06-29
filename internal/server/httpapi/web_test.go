@@ -14,6 +14,7 @@ import (
 
 	"github.com/jssblck/akari/internal/config"
 	"github.com/jssblck/akari/internal/server/auth"
+	"github.com/jssblck/akari/internal/server/reparse"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/storetest"
 )
@@ -34,10 +35,19 @@ func mustHash(t *testing.T, password string) string {
 // parallel; it is skipped unless AKARI_TEST_DATABASE_URL is set.
 func newTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 	t.Helper()
-	st := storetest.NewStore(t)
-	srv := httptest.NewServer(New(st, config.Server{}).Routes())
-	t.Cleanup(srv.Close)
+	srv, st, _ := newTestServerWithReparse(t)
 	return srv, st
+}
+
+// newTestServerWithReparse is newTestServer that also returns the reparse service
+// wired into the server, so a test can force its status to exercise the UI gating.
+func newTestServerWithReparse(t *testing.T) (*httptest.Server, *store.Store, *reparse.Service) {
+	t.Helper()
+	st := storetest.NewStore(t)
+	rp := reparse.New(context.Background(), st)
+	srv := httptest.NewServer(New(st, config.Server{}, rp).Routes())
+	t.Cleanup(srv.Close)
+	return srv, st, rp
 }
 
 // newClient returns an http.Client that follows redirects and keeps cookies, so

@@ -508,6 +508,17 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--l
 .bar-track { height: 6px; background: var(--surface-2); border-radius: 999px; overflow: hidden; margin: 4px 0 3px; }
 .bar-fill { height: 100%; width: 0; border-radius: 999px; background: var(--lilac); transition: width 700ms var(--ease-settle); }
 
+/* ---- Reparse progress ---- */
+.reparse { max-width: 560px; }
+.reparse-head { display: flex; justify-content: space-between; align-items: baseline; gap: var(--sp-md); margin-bottom: var(--sp-sm); }
+.reparse-title { font-weight: 600; }
+.reparse-count { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.reparse-track { height: 8px; margin: var(--sp-sm) 0; }
+.reparse-foot { margin-top: var(--sp-sm); }
+.reparse-idle { padding: var(--sp-md) 0; }
+.reparse-form { margin-top: var(--sp-md); }
+.reparse-public-track { max-width: 360px; margin: var(--sp-lg) auto; }
+
 /* The session view is the one page that takes the full content width: its outline,
    stat strip, tool chips, and diffs all earn the room, while prose inside a message
    stays capped at a readable measure (see .msg .content). Every other page keeps

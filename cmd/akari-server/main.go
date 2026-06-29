@@ -12,6 +12,8 @@ import (
 
 	"github.com/jssblck/akari/internal/config"
 	"github.com/jssblck/akari/internal/server/httpapi"
+	"github.com/jssblck/akari/internal/server/parse"
+	"github.com/jssblck/akari/internal/server/reparse"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/shutdown"
 	"github.com/jssblck/akari/internal/version"
@@ -80,6 +82,25 @@ func run() error {
 	}
 	log.Printf("migrations applied")
 
+	// Self-healing reparse. Parser behavior lives in the binary, so a parser change
+	// reaches already-ingested data only by replaying the stored raw bytes through
+	// the new reducer. The signal is parse.Epoch (a compiled-in constant) compared
+	// against the epoch the corpus was last reparsed under: when they differ, a fresh
+	// binary rebuilds the projection in the background, with no manual CLI step and no
+	// schema migration required (parser changes often ship without one). The service
+	// is shared by the startup auto-run here, the admin Reparse button, and the CLI,
+	// and an advisory lock keeps multiple instances from reparsing at once. Wait for
+	// any in-flight reparse to wind down on shutdown, before the pool closes; it is
+	// registered after the deferred st.Close so it runs first (LIFO).
+	reparser := reparse.New(rootCtx, st)
+	defer reparser.Wait()
+	if epoch, err := st.ReparsedEpoch(rootCtx); err != nil {
+		log.Printf("reparse: could not read epoch, skipping auto-reparse: %v", err)
+	} else if epoch != parse.Epoch {
+		log.Printf("reparse: parser epoch %d != stored %d, reparsing in the background", parse.Epoch, epoch)
+		reparser.Trigger(reparse.Options{})
+	}
+
 	// Reclaim orphaned CAS blobs in the background. Deleting a session or
 	// re-parsing can leave blobs unreferenced; a periodic sweep keeps the store
 	// from accumulating them without any per-write bookkeeping. sweepDone lets
@@ -104,7 +125,7 @@ func run() error {
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           httpapi.New(st, cfg).Routes(),
+		Handler:           httpapi.New(st, cfg, reparser).Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 		// ReadTimeout is generous enough for a bounded (64 MiB) chunk upload on a
 		// slow link while still capping slow-loris body reads.
