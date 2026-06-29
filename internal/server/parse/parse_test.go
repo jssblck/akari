@@ -2,39 +2,28 @@ package parse
 
 import (
 	"context"
-	"os"
 	"testing"
 
 	"github.com/jssblck/akari/internal/server/store"
+	"github.com/jssblck/akari/internal/server/storetest"
 	"github.com/jssblck/akari/migrations"
 )
 
-// newTestStore mirrors the store package's harness: it connects to
-// AKARI_TEST_DATABASE_URL, resets the schema, and applies migrations. Tests are
-// skipped when the env var is unset.
+// newTestStore opens a Store on its own isolated, freshly migrated database, the
+// same harness the store package uses. The database is created and force-dropped
+// by the storetest package, so tests run safely in parallel; the test is skipped
+// when AKARI_TEST_DATABASE_URL is unset.
 func newTestStore(t *testing.T) *store.Store {
 	t.Helper()
-	url := os.Getenv("AKARI_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("set AKARI_TEST_DATABASE_URL to run parse integration tests")
-	}
 	ctx := context.Background()
-	if err := store.EnsureDatabase(ctx, url); err != nil {
-		t.Fatalf("ensure database: %v", err)
-	}
-	st, err := store.Open(ctx, url)
+	st, err := store.Open(ctx, storetest.URL(t))
 	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	for _, q := range []string{"DROP SCHEMA public CASCADE", "CREATE SCHEMA public"} {
-		if _, err := st.Pool.Exec(ctx, q); err != nil {
-			t.Fatalf("reset schema (%s): %v", q, err)
-		}
-	}
-	if err := st.Migrate(ctx, migrations.FS); err != nil {
-		t.Fatalf("migrate: %v", err)
+		t.Fatalf("open test store: %v", err)
 	}
 	t.Cleanup(st.Close)
+	if err := st.Migrate(ctx, migrations.FS); err != nil {
+		t.Fatalf("migrate test store: %v", err)
+	}
 	return st
 }
 
@@ -99,6 +88,7 @@ func uploadAndParse(t *testing.T, st *store.Store, sessionID int64, pieces ...st
 }
 
 func TestAdvanceSingleChunk(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	ctx := context.Background()
 	sid := seedSession(t, st, "single")
@@ -126,6 +116,7 @@ func TestAdvanceSingleChunk(t *testing.T) {
 // tool result is back-patched in a later chunk than its call, and confirms the
 // projection is identical to the single-shot upload.
 func TestAdvanceChunkedMatchesSingle(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	sid := seedSession(t, st, "chunked")
 
@@ -212,6 +203,7 @@ func assertClaudeProjection(t *testing.T, st *store.Store, sid int64) {
 // protocol guarantees. The run of items folds into a single assistant message,
 // closed by the following user turn, with its tool use recorded.
 func TestCodexTurnFoldedInOneChunk(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	ctx := context.Background()
 
@@ -274,6 +266,7 @@ func TestCodexTurnFoldedInOneChunk(t *testing.T) {
 // flushes it whole in the last chunk, and the reducer emits the open turn at the
 // region's end rather than carrying it.
 func TestCodexTrailingTurnFlushedWhole(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	ctx := context.Background()
 
@@ -316,6 +309,7 @@ func TestCodexTrailingTurnFlushedWhole(t *testing.T) {
 // TestCostIncompleteForUnknownModel confirms an unpriced model flips the
 // session's cost_incomplete flag while still recording token totals.
 func TestCostIncompleteForUnknownModel(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	ctx := context.Background()
 	sid := seedSession(t, st, "unpriced")
@@ -356,6 +350,7 @@ func TestCostIncompleteForUnknownModel(t *testing.T) {
 // sum(usage_events.*) rather than a multiple of it, and message_count matches the
 // count of messages rows.
 func TestClaudeDuplicateUsageCountedOnce(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	ctx := context.Background()
 	sid := seedSession(t, st, "claude-dup-usage")

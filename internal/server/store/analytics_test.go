@@ -33,6 +33,7 @@ func seedUsage(t *testing.T, st *Store, sessionID int64, model string, cost floa
 }
 
 func TestAnalyticsRollups(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	ctx := context.Background()
 
@@ -95,6 +96,7 @@ func TestAnalyticsRollups(t *testing.T) {
 }
 
 func TestProjectSparklines(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	ctx := context.Background()
 	admin, _ := st.Register(ctx, "grace", "h", "")

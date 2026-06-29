@@ -5,41 +5,31 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"os"
 	"testing"
 
+	"github.com/jssblck/akari/internal/server/storetest"
 	"github.com/jssblck/akari/migrations"
 )
 
-// newTestStore connects to AKARI_TEST_DATABASE_URL, resets the schema, and
-// applies migrations. Tests are skipped when the env var is unset.
+// newTestStore opens a Store on its own isolated, freshly migrated database. The
+// database is created and force-dropped by the storetest package, so tests run
+// safely in parallel; the test is skipped when AKARI_TEST_DATABASE_URL is unset.
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
-	url := os.Getenv("AKARI_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("set AKARI_TEST_DATABASE_URL to run store integration tests")
-	}
 	ctx := context.Background()
-	if err := EnsureDatabase(ctx, url); err != nil {
-		t.Fatalf("ensure database: %v", err)
-	}
-	st, err := Open(ctx, url)
+	st, err := Open(ctx, storetest.URL(t))
 	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	for _, q := range []string{"DROP SCHEMA public CASCADE", "CREATE SCHEMA public"} {
-		if _, err := st.Pool.Exec(ctx, q); err != nil {
-			t.Fatalf("reset schema (%s): %v", q, err)
-		}
-	}
-	if err := st.Migrate(ctx, migrations.FS); err != nil {
-		t.Fatalf("migrate: %v", err)
+		t.Fatalf("open test store: %v", err)
 	}
 	t.Cleanup(st.Close)
+	if err := st.Migrate(ctx, migrations.FS); err != nil {
+		t.Fatalf("migrate test store: %v", err)
+	}
 	return st
 }
 
 func TestRegisterFirstAdminThenInvite(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	ctx := context.Background()
 
@@ -76,6 +66,7 @@ func TestRegisterFirstAdminThenInvite(t *testing.T) {
 }
 
 func TestTokenAuth(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	ctx := context.Background()
 
@@ -106,6 +97,7 @@ func TestTokenAuth(t *testing.T) {
 }
 
 func TestIngestFlow(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	ctx := context.Background()
 
@@ -202,6 +194,7 @@ func TestIngestFlow(t *testing.T) {
 // and folds the delta into the aggregates, a caught-up session is a no-op, and a
 // session partially parsed by one version refuses to continue under another.
 func TestAdvanceProjectionCursorAndVersionGate(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	ctx := context.Background()
 
@@ -284,6 +277,10 @@ func TestAdvanceProjectionCursorAndVersionGate(t *testing.T) {
 // confirms catch-up advances in bounded steps, parsing each chunk's bytes exactly
 // once and contiguously (the readRawRegion SQL bound, not a client-side rescan of
 // the whole tail).
+//
+// This test is deliberately not parallel: it overrides the package-global
+// parseBatchBytes. A non-parallel test runs to completion (restoring the global)
+// before any t.Parallel test resumes, so the override never races a reader.
 func TestAdvanceProjectionBatching(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
@@ -369,6 +366,7 @@ func TestAdvanceProjectionBatching(t *testing.T) {
 // TestUpsertProjectKindTransition confirms a standalone folder that is later
 // deleted transitions to orphaned in place: same key, same row, updated kind.
 func TestUpsertProjectKindTransition(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	ctx := context.Background()
 
@@ -398,6 +396,7 @@ func TestUpsertProjectKindTransition(t *testing.T) {
 // longer find one (its folder was deleted), and an upgrade in the other
 // direction (gaining a remote) does re-home the session.
 func TestAnnounceKeepsRemoteAttribution(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	ctx := context.Background()
 

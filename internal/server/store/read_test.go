@@ -50,6 +50,7 @@ func seedGlobalCorpus(t *testing.T, st *Store) (userID, remoteID, localID int64)
 }
 
 func TestListAllSessions(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	ctx := context.Background()
 	_, remoteID, _ := seedGlobalCorpus(t, st)
@@ -97,6 +98,7 @@ func TestListAllSessions(t *testing.T) {
 // up, a re-attribution (project change) shifts the count, and a delete counts
 // down and drops the emptied value.
 func TestSessionFacetTrigger(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	ctx := context.Background()
 	u, err := st.Register(ctx, "grace", "hash", "")
@@ -146,6 +148,7 @@ func TestSessionFacetTrigger(t *testing.T) {
 }
 
 func TestGlobalFacets(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	ctx := context.Background()
 	seedGlobalCorpus(t, st)

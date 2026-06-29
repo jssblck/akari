@@ -20,6 +20,7 @@ func seedSession(t *testing.T, st *Store, userID, projectID int64, source string
 }
 
 func TestCASWriteDedupReadSweep(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	ctx := context.Background()
 
@@ -115,6 +116,7 @@ func TestCASWriteDedupReadSweep(t *testing.T) {
 // reclaimed by a concurrent sweep, even though it is unreferenced in committed
 // state.
 func TestSweepSkipsBlobLockedByWriter(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	ctx := context.Background()
 

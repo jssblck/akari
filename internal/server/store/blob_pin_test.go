@@ -12,6 +12,7 @@ import (
 // references it, must survive the sweep. The pin protects it; only after the pin
 // is forced to expire and the body is still unreferenced does the sweep reclaim it.
 func TestPutBlobPinsAgainstSweep(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	ctx := context.Background()
 
@@ -66,6 +67,7 @@ func TestPutBlobPinsAgainstSweep(t *testing.T) {
 // content type defaults to application/octet-stream (a raw body); a zstd label is kept
 // verbatim, since the server stores the bytes opaquely and never inspects them.
 func TestPutBlobPersistsContentType(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	ctx := context.Background()
 
@@ -106,6 +108,7 @@ func TestPutBlobPersistsContentType(t *testing.T) {
 // declared hash is refused, so a corrupt upload cannot enter the CAS under a name
 // a later transcript would serve.
 func TestPutBlobRejectsHashMismatch(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	ctx := context.Background()
 
@@ -125,6 +128,7 @@ func TestPutBlobRejectsHashMismatch(t *testing.T) {
 // race: a present, unreferenced body would otherwise be reclaimable between the
 // check and the transcript append.
 func TestMissingBlobsReportsAbsentAndPinsPresent(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	ctx := context.Background()
 
@@ -161,6 +165,7 @@ func TestMissingBlobsReportsAbsentAndPinsPresent(t *testing.T) {
 // TestMissingBlobsEmpty confirms the no-candidates case returns an empty set
 // without a query.
 func TestMissingBlobsEmpty(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	missing, err := st.MissingBlobs(context.Background(), nil)
 	if err != nil {
@@ -175,6 +180,7 @@ func TestMissingBlobsEmpty(t *testing.T) {
 // reference (no blob write) when the client already uploaded the body, and that
 // the reference plus the body survive a sweep together.
 func TestApplyDeltaReferencesUploadedBlob(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	ctx := context.Background()
 
@@ -246,6 +252,7 @@ func TestApplyDeltaReferencesUploadedBlob(t *testing.T) {
 // TestApplyDeltaMissingUploadedBlobFails confirms a transcript referencing a body
 // the CAS does not hold is refused rather than recording a dangling reference.
 func TestApplyDeltaMissingUploadedBlobFails(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	ctx := context.Background()
 

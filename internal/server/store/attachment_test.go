@@ -13,6 +13,7 @@ import (
 // the session is reset. The client-lifted reference path and the reparse pin are covered
 // by TestAttachmentReferencePathAndReparsePin.
 func TestAttachmentProjectionWriteReadSweep(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	ctx := context.Background()
 
@@ -141,6 +142,7 @@ func TestAttachmentProjectionWriteReadSweep(t *testing.T) {
 // first, so a sweep racing in the window between the clear and the rebuild keeps it
 // instead of reclaiming a live image.
 func TestAttachmentReferencePathAndReparsePin(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	ctx := context.Background()
 

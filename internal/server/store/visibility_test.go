@@ -7,6 +7,7 @@ import (
 )
 
 func TestPublishUnpublish(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	ctx := context.Background()
 
@@ -80,6 +81,7 @@ func TestPublishUnpublish(t *testing.T) {
 }
 
 func TestDeleteSessionCascadesAndOrphansBlob(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	ctx := context.Background()
 

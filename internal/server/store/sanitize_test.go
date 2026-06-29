@@ -41,6 +41,7 @@ func TestSanitizeText(t *testing.T) {
 // with the offending bytes shown as U+FFFD, proving the seam covers every text
 // column rather than only the one that first tripped.
 func TestApplyDeltaSanitizesText(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	ctx := context.Background()
 
