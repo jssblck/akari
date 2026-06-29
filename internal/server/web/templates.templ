@@ -252,7 +252,7 @@ templ ProjectsPage(p Page, projects, locals []store.ProjectSummary, a store.Anal
 					</thead>
 					<tbody>
 						for _, pr := range projects {
-							<tr>
+							<tr data-row-href={ ProjectPath(pr.ID) }>
 								<td><a href={ ProjectHref(pr.ID) }>{ pr.RemoteKey }</a></td>
 								<td class="trend">@templ.Raw(Sparkline(spark[pr.ID]))</td>
 								<td class="num">{ fmt.Sprintf("%d", pr.SessionCount) }</td>
@@ -287,7 +287,7 @@ templ ProjectsPage(p Page, projects, locals []store.ProjectSummary, a store.Anal
 					</thead>
 					<tbody>
 						for _, pr := range locals {
-							<tr>
+							<tr data-row-href={ ProjectPath(pr.ID) }>
 								<td>
 									<a href={ ProjectHref(pr.ID) }>{ pr.DisplayName }</a>
 									<div class="muted small mono">{ LocalPath(pr) }</div>
@@ -369,7 +369,7 @@ templ SessionList(sessions []store.SessionSummary) {
 			</thead>
 			<tbody>
 				for _, s := range sessions {
-					<tr>
+					<tr data-row-href={ SessionPath(s.ID) }>
 						<td>
 							<a href={ SessionHref(s.ID) }>#{ fmt.Sprintf("%d", s.ID) }</a>
 							if s.Visibility == "public" {
@@ -536,7 +536,7 @@ templ GlobalSessionList(rows []store.SessionRow) {
 			</thead>
 			<tbody>
 				for _, s := range rows {
-					<tr>
+					<tr data-row-href={ SessionPath(s.ID) }>
 						<td>
 							<a href={ SessionHref(s.ID) }>#{ fmt.Sprintf("%d", s.ID) }</a>
 							if s.Visibility == "public" {
@@ -930,7 +930,7 @@ templ PublicSessionPage(d store.SessionDetail, msgs []store.Message, tools map[i
 								<tbody>
 									for _, sub := range publicSubs {
 										if sub.PublicID != nil {
-											<tr>
+											<tr data-row-href={ PublicPath(*sub.PublicID) }>
 												<td><a href={ PublicHref(*sub.PublicID) }>{ sub.Agent } subagent</a></td>
 												<td class="num">{ fmt.Sprintf("%d", sub.MessageCount) } messages</td>
 											</tr>

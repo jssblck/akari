@@ -92,6 +92,22 @@ body {
   text-rendering: optimizeLegibility;
 }
 
+/* ---- Native-app feel ----
+   A single arrow cursor app-wide (no link/button pointer, no stray I-beam) and
+   no text selection over chrome. The I-beam and selection return only on genuine
+   text surfaces: form fields, code and tool bodies, and reading content. Author
+   `*` overrides the user-agent's link/text cursors; the text surfaces below have
+   higher specificity, so they win the I-beam back. */
+* { cursor: default; }
+body { -webkit-user-select: none; user-select: none; }
+input, textarea,
+.content, .thinking-body,
+pre, code, .tool-body, .diff, .diff-body,
+.hit .content {
+  -webkit-user-select: text; user-select: text; cursor: text;
+}
+::selection { background: rgba(198, 168, 242, 0.30); color: var(--text); }
+
 a { color: var(--lilac); text-decoration: none; }
 a:hover { text-decoration: underline; text-underline-offset: 2px; }
 
@@ -273,7 +289,7 @@ th.trend, td.trend { width: 108px; }
 button, .btn {
   font: 500 0.875rem/1 var(--sans);
   background: var(--lilac); color: var(--ink);
-  border: none; border-radius: var(--r-sm); padding: 8px 14px; cursor: pointer;
+  border: none; border-radius: var(--r-sm); padding: 8px 14px;
   transition: background var(--dur-fast) var(--ease-state), transform var(--dur-fast) var(--ease-state);
 }
 button:hover, .btn:hover { background: var(--lilac-strong); }
@@ -290,7 +306,7 @@ button.danger:hover { background: var(--err); color: var(--ink); border-color: v
 .seg {
   background: var(--surface); color: var(--muted);
   border: none; border-radius: 0; padding: 6px 12px; font-weight: 500; font-size: 0.8125rem;
-  cursor: pointer; transition: background var(--dur-fast) var(--ease-state), color var(--dur-fast) var(--ease-state);
+  transition: background var(--dur-fast) var(--ease-state), color var(--dur-fast) var(--ease-state);
 }
 .seg + .seg { border-left: 1px solid var(--border); }
 .seg:hover { background: var(--surface-2); color: var(--subtext); }
@@ -398,7 +414,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--l
 .msg .meta .role { color: var(--subtext); font-weight: 500; letter-spacing: 0.04em; text-transform: uppercase; font-size: 0.6875rem; }
 .msg .content { white-space: pre-wrap; word-break: break-word; max-width: 78ch; }
 .thinking { margin-bottom: var(--sp-sm); }
-.thinking summary { color: var(--muted); font-size: 0.75rem; cursor: pointer; user-select: none; letter-spacing: 0.04em; text-transform: uppercase; }
+.thinking summary { color: var(--muted); font-size: 0.75rem; user-select: none; letter-spacing: 0.04em; text-transform: uppercase; }
 .thinking summary::marker { color: var(--faint); }
 .thinking-body { color: var(--muted); font-style: italic; white-space: pre-wrap; border-left: 1px solid var(--border); padding-left: var(--sp-md); margin-top: var(--sp-sm); }
 
@@ -417,7 +433,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--l
   font: inherit; background: var(--surface-2); color: var(--subtext);
   border: 1px solid var(--border); border-radius: var(--r-sm); padding: 1px 7px;
 }
-button.stamp { cursor: pointer; transition: background var(--dur-fast) var(--ease-state), color var(--dur-fast) var(--ease-state), border-color var(--dur-fast) var(--ease-state); }
+button.stamp { transition: background var(--dur-fast) var(--ease-state), color var(--dur-fast) var(--ease-state), border-color var(--dur-fast) var(--ease-state); }
 button.stamp:hover { background: var(--lilac); color: var(--ink); border-color: var(--lilac); }
 button.stamp.open { background: var(--lilac); color: var(--ink); border-color: var(--lilac); }
 button.stamp.loading { opacity: 0.6; }

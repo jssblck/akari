@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -264,7 +265,10 @@ func scanSessionRow(rows pgx.Rows) (SessionRow, error) {
 		&r.TotalCostUSD, &r.CostIncomplete, &r.Visibility, &r.PublicID,
 		&r.StartedAt, &r.EndedAt, &r.UpdatedAt,
 		&r.ProjectID, &r.ProjectKey, &r.ProjectName, &r.ProjectKind)
-	return r, err
+	if err != nil {
+		return r, fmt.Errorf("scan global session row: %w", err)
+	}
+	return r, nil
 }
 
 // ListAllSessions returns sessions across every project matching the filter,
@@ -309,7 +313,7 @@ func (s *Store) ListAllSessions(ctx context.Context, f SessionFilter) ([]Session
 
 	rows, err := s.Pool.Query(ctx, q, args...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("query global sessions: %w", err)
 	}
 	defer rows.Close()
 	var out []SessionRow
@@ -320,7 +324,10 @@ func (s *Store) ListAllSessions(ctx context.Context, f SessionFilter) ([]Session
 		}
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate global sessions: %w", err)
+	}
+	return out, nil
 }
 
 // FacetCount is one filter value and how many sessions carry it, for a faceted
@@ -349,28 +356,36 @@ type GlobalFacetValues struct {
 	Projects []ProjectFacet
 }
 
-// GlobalFacets returns the distinct agents, machines, usernames, and projects
-// present across all sessions, each with its session count, ordered by count
-// then name. It backs the global Sessions view's faceted filter rail.
+// facetLimit caps each facet category to its busiest values, so the rail (and
+// the memory backing it) stays a fixed top-N rather than growing with the total
+// distinct agents, machines, users, or projects ever ingested.
+const facetLimit = 50
+
+// GlobalFacets returns the busiest agents, machines, usernames, and projects
+// across all sessions, each with its session count, ordered by count then name.
+// Every category is bounded to facetLimit so the result set is a fixed size
+// regardless of corpus growth. It backs the global Sessions view's filter rail.
 func (s *Store) GlobalFacets(ctx context.Context) (GlobalFacetValues, error) {
 	var f GlobalFacetValues
 
+	// Each category is its own bounded subquery, so one busy category cannot
+	// crowd out another and the overall row count is fixed at 3*facetLimit.
 	rows, err := s.Pool.Query(ctx,
-		`SELECT 'agent' AS kind, s.agent AS val, count(*) FROM sessions s WHERE s.agent <> '' GROUP BY s.agent
+		`(SELECT 'agent' AS kind, s.agent AS val, count(*) AS n FROM sessions s WHERE s.agent <> '' GROUP BY s.agent ORDER BY n DESC, s.agent LIMIT $1)
 		 UNION ALL
-		 SELECT 'machine', s.machine, count(*) FROM sessions s WHERE s.machine <> '' GROUP BY s.machine
+		 (SELECT 'machine', s.machine, count(*) FROM sessions s WHERE s.machine <> '' GROUP BY s.machine ORDER BY count(*) DESC, s.machine LIMIT $1)
 		 UNION ALL
-		 SELECT 'user', u.username, count(*) FROM sessions s JOIN users u ON u.id = s.user_id GROUP BY u.username
-		 ORDER BY 1, 3 DESC, 2`)
+		 (SELECT 'user', u.username, count(*) FROM sessions s JOIN users u ON u.id = s.user_id GROUP BY u.username ORDER BY count(*) DESC, u.username LIMIT $1)`,
+		facetLimit)
 	if err != nil {
-		return f, err
+		return f, fmt.Errorf("query session facets: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var kind, val string
 		var n int
 		if err := rows.Scan(&kind, &val, &n); err != nil {
-			return f, err
+			return f, fmt.Errorf("scan session facet row: %w", err)
 		}
 		fc := FacetCount{Value: val, Count: n}
 		switch kind {
@@ -383,26 +398,43 @@ func (s *Store) GlobalFacets(ctx context.Context) (GlobalFacetValues, error) {
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return f, err
+		return f, fmt.Errorf("iterate session facets: %w", err)
 	}
+	// UNION ALL does not guarantee the final emission order, so re-establish the
+	// busiest-first contract per category here rather than trusting the scan order.
+	sortFacets := func(fs []FacetCount) {
+		sort.Slice(fs, func(i, j int) bool {
+			if fs[i].Count != fs[j].Count {
+				return fs[i].Count > fs[j].Count
+			}
+			return fs[i].Value < fs[j].Value
+		})
+	}
+	sortFacets(f.Agents)
+	sortFacets(f.Machines)
+	sortFacets(f.Users)
 
 	prows, err := s.Pool.Query(ctx,
 		`SELECT p.id, p.remote_key, p.display_name, p.kind, count(s.id) AS n
 		   FROM projects p JOIN sessions s ON s.project_id = p.id
 		  GROUP BY p.id
-		  ORDER BY n DESC, p.remote_key`)
+		  ORDER BY n DESC, p.remote_key
+		  LIMIT $1`, facetLimit)
 	if err != nil {
-		return f, err
+		return f, fmt.Errorf("query project facets: %w", err)
 	}
 	defer prows.Close()
 	for prows.Next() {
 		var pf ProjectFacet
 		if err := prows.Scan(&pf.ID, &pf.Key, &pf.Name, &pf.Kind, &pf.Count); err != nil {
-			return f, err
+			return f, fmt.Errorf("scan project facet row: %w", err)
 		}
 		f.Projects = append(f.Projects, pf)
 	}
-	return f, prows.Err()
+	if err := prows.Err(); err != nil {
+		return f, fmt.Errorf("iterate project facets: %w", err)
+	}
+	return f, nil
 }
 
 // scanDetail loads one session with its project, by an arbitrary WHERE clause.

@@ -211,6 +211,33 @@
       .finally(function () { btn.classList.remove("loading"); });
   });
 
+  // ---------------- Whole-row navigation ----------------
+  // A table row carrying data-row-href navigates as a unit, so the whole cell is
+  // the hit target (see DESIGN.md: "the whole row is the hit target"). A click
+  // that lands on a real control inside the row (a nested link, a button, a
+  // field) falls through to that control instead of the row's destination.
+  function rowHrefFrom(target) {
+    if (!target || !target.closest) return null;
+    var tr = target.closest("tr[data-row-href]");
+    if (!tr) return null;
+    if (target.closest("a, button, input, select, textarea, label, summary")) return null;
+    return tr.getAttribute("data-row-href");
+  }
+  document.addEventListener("click", function (ev) {
+    if (ev.defaultPrevented || ev.button !== 0) return;
+    var href = rowHrefFrom(ev.target);
+    if (!href) return;
+    // Honor the usual open-in-new-tab modifiers.
+    if (ev.metaKey || ev.ctrlKey || ev.shiftKey) { window.open(href, "_blank"); return; }
+    window.location.assign(href);
+  });
+  document.addEventListener("auxclick", function (ev) {
+    if (ev.button !== 1) return; // middle click opens a new tab
+    var href = rowHrefFrom(ev.target);
+    if (!href) return;
+    window.open(href, "_blank");
+  });
+
   // ---------------- Init ----------------
   function init() {
     markDensity(currentDensity());

@@ -20,6 +20,10 @@ func PublicHref(publicID string) templ.SafeURL {
 // not URL-sanitized like href).
 func ProjectPath(id int64) string { return fmt.Sprintf("/projects/%d", id) }
 
+// SessionPath is the plain-string session path, used for the row-navigation data
+// attribute that makes a whole table row a click target.
+func SessionPath(id int64) string { return fmt.Sprintf("/sessions/%d", id) }
+
 // SessionsBasePath is the global (cross-project) session list.
 const SessionsBasePath = "/sessions"
 

@@ -127,7 +127,14 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		Machine:  strings.TrimSpace(q.Get("machine")),
 		Username: strings.TrimSpace(q.Get("user")),
 	}
-	if pid, err := strconv.ParseInt(q.Get("project"), 10, 64); err == nil {
+	// A present-but-malformed project filter is a bad request, not a silent
+	// fall-through to the unfiltered list (which would mislead the caller).
+	if v := strings.TrimSpace(q.Get("project")); v != "" {
+		pid, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			render(w, r, http.StatusBadRequest, web.ErrorPage(s.pageForNav(r, "Bad request", "sessions"), http.StatusBadRequest, "Invalid project filter."))
+			return
+		}
 		filter.ProjectID = pid
 	}
 	rows, err := s.Store.ListAllSessions(r.Context(), filter)
