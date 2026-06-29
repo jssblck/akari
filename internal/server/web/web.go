@@ -104,6 +104,40 @@ func ToolsByOrdinal(tools []store.ToolCallView) map[int][]store.ToolCallView {
 	return m
 }
 
+// DuplicateToolCallIDs counts the agent call ids that appear on more than one tool
+// call in the session. It is normally zero; a non-zero count means the transcript
+// repeated a tool_use id across rows, which a resumed or compacted Claude session
+// does when it replays prior turns verbatim. The session view shows it as a chip so
+// a genuinely malformed id reuse (the one case where back-patching every copy with
+// the same result would be wrong) is visible rather than silent. It takes the
+// already-grouped map the page holds, so it adds no query.
+func DuplicateToolCallIDs(tools map[int][]store.ToolCallView) int {
+	counts := map[string]int{}
+	for _, group := range tools {
+		for _, t := range group {
+			if t.CallUID != "" {
+				counts[t.CallUID]++
+			}
+		}
+	}
+	dups := 0
+	for _, n := range counts {
+		if n > 1 {
+			dups++
+		}
+	}
+	return dups
+}
+
+// DuplicateIDsLabel is the chip text for a session that repeats tool-call ids,
+// pluralized for the count.
+func DuplicateIDsLabel(n int) string {
+	if n == 1 {
+		return "1 duplicate id"
+	}
+	return fmt.Sprintf("%d duplicate ids", n)
+}
+
 // AttachmentsByOrdinal groups attachments by the message ordinal they belong to,
 // so the session view can render a message's images beneath it.
 func AttachmentsByOrdinal(atts []store.AttachmentView) map[int][]store.AttachmentView {

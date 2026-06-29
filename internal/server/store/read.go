@@ -76,7 +76,9 @@ type Message struct {
 }
 
 // ToolCallView is one tool call rendered as metadata (the body lives in the CAS,
-// fetched on demand by its sha256).
+// fetched on demand by its sha256). CallUID is the agent's tool_use id, carried so
+// the view can flag a session whose transcript repeated an id across rows (a replay
+// of a resumed or compacted Claude session).
 type ToolCallView struct {
 	MessageOrdinal  int
 	CallIndex       int
@@ -90,6 +92,7 @@ type ToolCallView struct {
 	ResultBytes     int64
 	ResultMediaType string
 	ResultStatus    string
+	CallUID         string
 }
 
 // SearchHit is one message matching a search, with its session context.
@@ -534,7 +537,8 @@ func (s *Store) ToolCalls(ctx context.Context, sessionID int64) ([]ToolCallView,
 	rows, err := s.Pool.Query(ctx,
 		`SELECT message_ordinal, call_index, tool_name, coalesce(category,''), coalesce(file_path,''),
 		        coalesce(input_sha256,''), coalesce(input_bytes,0), coalesce(input_media_type,''),
-		        coalesce(result_sha256,''), coalesce(result_bytes,0), coalesce(result_media_type,''), coalesce(result_status,'')
+		        coalesce(result_sha256,''), coalesce(result_bytes,0), coalesce(result_media_type,''), coalesce(result_status,''),
+		        coalesce(call_uid,'')
 		   FROM tool_calls WHERE session_id = $1 ORDER BY message_ordinal, call_index`, sessionID)
 	if err != nil {
 		return nil, err
@@ -545,7 +549,7 @@ func (s *Store) ToolCalls(ctx context.Context, sessionID int64) ([]ToolCallView,
 		var t ToolCallView
 		if err := rows.Scan(&t.MessageOrdinal, &t.CallIndex, &t.ToolName, &t.Category, &t.FilePath,
 			&t.InputSHA, &t.InputBytes, &t.InputMediaType,
-			&t.ResultSHA, &t.ResultBytes, &t.ResultMediaType, &t.ResultStatus); err != nil {
+			&t.ResultSHA, &t.ResultBytes, &t.ResultMediaType, &t.ResultStatus, &t.CallUID); err != nil {
 			return nil, err
 		}
 		out = append(out, t)

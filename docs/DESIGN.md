@@ -674,15 +674,15 @@ CREATE TABLE tool_calls (
   call_uid          TEXT,                  -- agent's call id; back-patches the result by UPDATE
   PRIMARY KEY (session_id, message_ordinal, call_index)
 );
--- Unique per session: a call id is unique within a session, so back-patching a
--- result touches exactly one row in constant time. A duplicate id is possible (a
--- resumed or compacted Claude transcript replays prior assistant turns, so the same
--- tool_use id can ride two rows), so the projection writer nulls the colliding id
--- rather than letting it abort the parse. The first row keeps the id and the later
--- one is stored with call_uid NULL, so the back-patch still names one call and the
--- duplicate is left unpatched. That keeps parse and reparse total over a malformed
--- session instead of rolling it back.
-CREATE UNIQUE INDEX idx_tool_calls_call_uid ON tool_calls(session_id, call_uid)
+-- Indexed per session for the result back-patch (UPDATE ... WHERE call_uid = $1),
+-- not unique. A call id is usually unique within a session, but a resumed or
+-- compacted Claude transcript replays prior assistant turns verbatim, so the same
+-- tool_use id can ride more than one row. A unique index turned that into a parse
+-- abort (the second insert rolled back the whole transaction); see migration 0010.
+-- With it non-unique, every replayed copy keeps its id and the back-patch stamps the
+-- same result onto each, and the session view flags any session that carries a
+-- duplicate id so a genuinely malformed reuse is visible rather than silent.
+CREATE INDEX idx_tool_calls_call_uid ON tool_calls(session_id, call_uid)
   WHERE call_uid IS NOT NULL;
 
 CREATE TABLE usage_events (

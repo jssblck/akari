@@ -360,31 +360,23 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 			}
 			inputSHA, inputMedia = sha, t.InputMediaType
 		}
-		// call_uid is the agent's own call id, and idx_tool_calls_call_uid relies on it
-		// being unique within a session so a tool result back-patches exactly one row. A
-		// Claude transcript can violate that: when a session is resumed or compacted the
-		// prior assistant turns are replayed verbatim, so the same tool_use id rides two
-		// distinct (message_ordinal, call_index) rows. The ON CONFLICT below guards only
-		// the ordinal/index key, so without this the second row would trip the unique
-		// index and abort the whole transaction, which is what kept four sessions from
-		// reparsing. Null the id on the later row instead. The first row keeps the
-		// back-patchable id; the duplicate is stored with call_uid NULL, since a result
-		// keyed on that id cannot say which of the two calls it meant, so it must not
-		// back-patch either. The CASE catches a colliding id whether it was committed by
-		// an earlier region or claimed by an earlier row in this same transaction, so the
-		// dedup holds within a batch and across regions. The winner is always the lowest
-		// ordinal, so incremental advance and a from-scratch reparse converge on the same
-		// rows.
+		// call_uid is the agent's own tool_use id, and the tool-result back-patch keys
+		// on it. The (session_id, call_uid) index is deliberately non-unique (migration
+		// 0010): a resumed or compacted Claude transcript replays prior assistant turns
+		// verbatim, so the same id legitimately rides more than one row, and under a
+		// unique index the second insert tripped the constraint and rolled back the whole
+		// parse (the reparse failure on four sessions). Storing the id on every row lets
+		// the back-patch UPDATE ... WHERE call_uid = $1 stamp the same result onto each
+		// replayed copy, which is what a reader expects to see. The ON CONFLICT still
+		// guards the (message_ordinal, call_index) key against a region replay. A session
+		// that carries a duplicate id is surfaced in the UI (DuplicateToolCallIDs), so a
+		// genuinely malformed id reuse, the only case where stamping both rows is wrong,
+		// is visible rather than silent.
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO tool_calls
 			   (session_id, message_ordinal, call_index, tool_name, category, file_path,
 			    input_sha256, input_bytes, input_media_type, call_uid)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,
-			   CASE
-			     WHEN $10::text IS NULL THEN NULL
-			     WHEN EXISTS (SELECT 1 FROM tool_calls WHERE session_id = $1 AND call_uid = $10) THEN NULL
-			     ELSE $10
-			   END)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
 			 ON CONFLICT (session_id, message_ordinal, call_index) DO NOTHING`,
 			sessionID, t.MessageOrdinal, t.CallIndex, t.ToolName, t.Category, nullString(t.FilePath),
 			inputSHA, t.InputBytes, inputMedia, nullString(t.CallUID)); err != nil {
@@ -414,6 +406,10 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 		if media == "" {
 			media = "text/plain"
 		}
+		// Touches one row in the common case and every replayed copy when a transcript
+		// repeated the call's id (the index is non-unique by design), so each visible
+		// copy of a duplicated turn carries the same result rather than one looking
+		// pending.
 		if _, err := tx.Exec(ctx,
 			`UPDATE tool_calls
 			    SET result_sha256 = $3, result_bytes = $4, result_media_type = $5, result_status = $6

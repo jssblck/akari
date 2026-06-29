@@ -5,17 +5,15 @@ import (
 	"testing"
 )
 
-// TestApplyDeltaDeduplicatesCallUIDWithinTransaction exercises the call_uid CASE
-// in applyDelta against a collision that lands inside one delta (one
-// transaction), which the cross-region parse test cannot reach: there the first
-// occurrence is already committed when the duplicate arrives, here both rows are
-// inserted under the same ApplyProjectionDelta. It pins three branches of the
-// CASE: a fresh id is kept, a second row with that same id (seen as a sibling
-// inserted earlier in this transaction) is stored with call_uid NULL, and a row
-// that carries no id is NULL outright. The result then back-patches the one row
-// that still owns the id, and the nulled duplicate is left unpatched, the honest
-// state for an id that can no longer name a single call.
-func TestApplyDeltaDeduplicatesCallUIDWithinTransaction(t *testing.T) {
+// TestApplyDeltaDuplicateCallUIDBackPatchesEveryCopy exercises a call_uid collision
+// that lands inside one delta (one transaction), which the cross-region parse test
+// cannot reach: there the first occurrence is already committed when the duplicate
+// arrives, here both rows insert under the same ApplyProjectionDelta. With the
+// (session_id, call_uid) index non-unique (migration 0010) both rows keep the id and
+// the back-patch UPDATE ... WHERE call_uid = $1 stamps the result onto each, so every
+// visible copy of a replayed turn carries its result. A third call carries no id at
+// all, which stays NULL and unpatched.
+func TestApplyDeltaDuplicateCallUIDBackPatchesEveryCopy(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 
@@ -38,7 +36,7 @@ func TestApplyDeltaDeduplicatesCallUIDWithinTransaction(t *testing.T) {
 		},
 		ToolCalls: []ProjToolCall{
 			// Two calls share id "dup": the second is the replayed turn. A third call
-			// carries no id at all, exercising the NULL-input branch of the CASE.
+			// carries no id at all, exercising the NULL call_uid path.
 			{MessageOrdinal: 0, CallIndex: 0, ToolName: "Read", CallUID: "dup"},
 			{MessageOrdinal: 1, CallIndex: 0, ToolName: "Read", CallUID: "dup"},
 			{MessageOrdinal: 2, CallIndex: 0, ToolName: "Bash", CallUID: ""},
@@ -47,53 +45,52 @@ func TestApplyDeltaDeduplicatesCallUIDWithinTransaction(t *testing.T) {
 			{CallUID: "dup", Body: string(body), Bytes: int64(len(body)), MediaType: "text/plain", Status: "ok"},
 		},
 	}
-	// The whole delta applies in one transaction, so the duplicate is deduped
-	// against its sibling rather than aborting on the unique index.
+	// The whole delta applies in one transaction; the duplicate id no longer aborts
+	// on the index.
 	if err := st.ApplyProjectionDelta(ctx, sid, delta); err != nil {
 		t.Fatalf("apply delta: %v", err)
 	}
 
-	// All three calls persist; exactly one owns the id (the first writer), the other
-	// two carry call_uid NULL (the replay and the unkeyed call).
-	var total, withUID int
+	// All three calls persist; both "dup" rows keep the id, the unkeyed call is NULL.
+	var total, withUID, nulls int
 	if err := st.Pool.QueryRow(ctx,
-		`SELECT count(*), count(*) FILTER (WHERE call_uid IS NOT NULL)
-		   FROM tool_calls WHERE session_id=$1`, sid).Scan(&total, &withUID); err != nil {
+		`SELECT count(*),
+		        count(*) FILTER (WHERE call_uid = 'dup'),
+		        count(*) FILTER (WHERE call_uid IS NULL)
+		   FROM tool_calls WHERE session_id=$1`, sid).Scan(&total, &withUID, &nulls); err != nil {
 		t.Fatal(err)
 	}
 	if total != 3 {
 		t.Fatalf("tool_calls rows = %d, want 3", total)
 	}
-	if withUID != 1 {
-		t.Fatalf("rows owning call_uid = %d, want 1 (first writer only)", withUID)
+	if withUID != 2 || nulls != 1 {
+		t.Fatalf("call_uid split = (dup %d, null %d), want (2, 1)", withUID, nulls)
 	}
 
-	// First writer wins: the lower ordinal keeps the id, so the result lands on it.
-	var winnerOrd int
-	var status string
-	var bytes int64
+	// Both replayed copies of the call carry the same back-patched result.
+	var patched int
+	var minBytes int64
 	if err := st.Pool.QueryRow(ctx,
-		`SELECT message_ordinal, coalesce(result_status,''), coalesce(result_bytes,0)
+		`SELECT count(*) FILTER (WHERE result_status='ok'), coalesce(min(result_bytes),0)
 		   FROM tool_calls WHERE session_id=$1 AND call_uid='dup'`, sid).
-		Scan(&winnerOrd, &status, &bytes); err != nil {
+		Scan(&patched, &minBytes); err != nil {
 		t.Fatal(err)
 	}
-	if winnerOrd != 0 {
-		t.Fatalf("id kept by ordinal %d, want 0 (first writer)", winnerOrd)
+	if patched != 2 {
+		t.Fatalf("dup rows with a result = %d, want 2 (back-patch stamps every copy)", patched)
 	}
-	if status != "ok" || bytes != int64(len(body)) {
-		t.Fatalf("back-patch on id-owning row: status=%q bytes=%d", status, bytes)
+	if minBytes != int64(len(body)) {
+		t.Fatalf("result_bytes = %d on a dup row, want %d", minBytes, len(body))
 	}
 
-	// The nulled duplicate stays unpatched: its id was surrendered, so the result
-	// keyed on that id cannot reach it.
-	var dupOrdResult string
+	// The unkeyed call has no id to match, so it stays pending.
+	var unkeyedStatus string
 	if err := st.Pool.QueryRow(ctx,
 		`SELECT coalesce(result_status,'') FROM tool_calls
-		   WHERE session_id=$1 AND message_ordinal=1`, sid).Scan(&dupOrdResult); err != nil {
+		   WHERE session_id=$1 AND call_uid IS NULL`, sid).Scan(&unkeyedStatus); err != nil {
 		t.Fatal(err)
 	}
-	if dupOrdResult != "" {
-		t.Fatalf("replayed duplicate should be unpatched, got result_status=%q", dupOrdResult)
+	if unkeyedStatus != "" {
+		t.Fatalf("unkeyed call should be unpatched, got result_status=%q", unkeyedStatus)
 	}
 }
