@@ -412,11 +412,12 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 		// Patches one row in the common case and every still-pending copy when a
 		// transcript repeated the call's id (the index is non-unique by design), so each
 		// visible copy of a duplicated turn carries the same result rather than one
-		// looking pending. The result_status IS NULL guard keeps this linear: a row is
-		// patched once and then skipped, so a replayed turn that delivers its tool_result
-		// K times does not rewrite the K accumulated copies on each delivery (which would
-		// be O(K^2)). A freshly inserted tool_call has result_status NULL until its result
-		// arrives, so the guard matches exactly the copies that have not been resolved.
+		// looking pending. The result_status IS NULL predicate both makes the write
+		// once-per-row and lets the pending-only partial index (idx_tool_calls_pending_result,
+		// migration 0011) serve the lookup: a row leaves that index when its result lands,
+		// so a replayed turn that delivers its tool_result K times probes only the copies
+		// still pending rather than re-scanning all K accumulated rows each time. That
+		// keeps the back-patch linear in the number of rows instead of O(K^2).
 		if _, err := tx.Exec(ctx,
 			`UPDATE tool_calls
 			    SET result_sha256 = $3, result_bytes = $4, result_media_type = $5, result_status = $6

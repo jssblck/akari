@@ -105,9 +105,9 @@ func TestApplyDeltaDuplicateCallUIDBackPatchesEveryCopy(t *testing.T) {
 	}
 }
 
-// TestDuplicateCallUIDCountZeroWhenUnique confirms the chip scalar is zero for a
-// session whose call ids are all distinct, so the warning never shows on clean data.
-func TestDuplicateCallUIDCountZeroWhenUnique(t *testing.T) {
+// TestDuplicateCallUIDCountGroups confirms the chip scalar counts colliding ids, not
+// rows: zero when every id is distinct, and one per duplicated id otherwise.
+func TestDuplicateCallUIDCountGroups(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 
@@ -119,23 +119,114 @@ func TestDuplicateCallUIDCountZeroWhenUnique(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sid := seedSession(t, st, u.ID, projectID, "sess-calluid-unique")
 
-	delta := ProjectionDelta{
+	unique := seedSession(t, st, u.ID, projectID, "sess-calluid-unique")
+	if err := st.ApplyProjectionDelta(ctx, unique, ProjectionDelta{
 		Messages: []MessageDelta{{Ordinal: 0, Role: "assistant", HasToolUse: true}},
 		ToolCalls: []ProjToolCall{
 			{MessageOrdinal: 0, CallIndex: 0, ToolName: "Read", CallUID: "a"},
 			{MessageOrdinal: 0, CallIndex: 1, ToolName: "Bash", CallUID: "b"},
 		},
+	}); err != nil {
+		t.Fatalf("apply unique delta: %v", err)
 	}
-	if err := st.ApplyProjectionDelta(ctx, sid, delta); err != nil {
-		t.Fatalf("apply delta: %v", err)
+	if dups, err := st.DuplicateCallUIDCount(ctx, unique); err != nil || dups != 0 {
+		t.Fatalf("DuplicateCallUIDCount(unique) = %d, err=%v; want 0", dups, err)
 	}
-	dups, err := st.DuplicateCallUIDCount(ctx, sid)
+
+	// Two ids each repeated, one distinct, plus an unkeyed call: the count is the two
+	// colliding ids, not the row total and not the distinct call.
+	multi := seedSession(t, st, u.ID, projectID, "sess-calluid-multi")
+	if err := st.ApplyProjectionDelta(ctx, multi, ProjectionDelta{
+		Messages: []MessageDelta{
+			{Ordinal: 0, Role: "assistant", HasToolUse: true},
+			{Ordinal: 1, Role: "assistant", HasToolUse: true},
+		},
+		ToolCalls: []ProjToolCall{
+			{MessageOrdinal: 0, CallIndex: 0, ToolName: "Read", CallUID: "x"},
+			{MessageOrdinal: 0, CallIndex: 1, ToolName: "Read", CallUID: "y"},
+			{MessageOrdinal: 0, CallIndex: 2, ToolName: "Grep", CallUID: "z"},
+			{MessageOrdinal: 1, CallIndex: 0, ToolName: "Read", CallUID: "x"},
+			{MessageOrdinal: 1, CallIndex: 1, ToolName: "Read", CallUID: "y"},
+			{MessageOrdinal: 1, CallIndex: 2, ToolName: "Bash", CallUID: ""},
+		},
+	}); err != nil {
+		t.Fatalf("apply multi delta: %v", err)
+	}
+	if dups, err := st.DuplicateCallUIDCount(ctx, multi); err != nil || dups != 2 {
+		t.Fatalf("DuplicateCallUIDCount(multi) = %d, err=%v; want 2", dups, err)
+	}
+}
+
+// TestBackPatchSkipsAlreadyResolvedCopies confirms the result_status IS NULL guard:
+// once a duplicated call's copies carry a result, a second tool_result for the same
+// id (a replay re-delivering it) does not overwrite them. A copy that is still
+// pending when the replay arrives is the only thing the second result resolves.
+func TestBackPatchSkipsAlreadyResolvedCopies(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	u, err := st.Register(ctx, "grace", "hash", "")
 	if err != nil {
-		t.Fatalf("duplicate count: %v", err)
+		t.Fatal(err)
 	}
-	if dups != 0 {
-		t.Fatalf("DuplicateCallUIDCount = %d, want 0 for unique ids", dups)
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid := seedSession(t, st, u.ID, projectID, "sess-calluid-replay")
+
+	first := []byte("first result")
+	// Region 1: two copies of call "dup" and its result. Both resolve to "first".
+	if err := st.ApplyProjectionDelta(ctx, sid, ProjectionDelta{
+		Messages: []MessageDelta{
+			{Ordinal: 0, Role: "assistant", HasToolUse: true},
+			{Ordinal: 1, Role: "assistant", HasToolUse: true},
+		},
+		ToolCalls: []ProjToolCall{
+			{MessageOrdinal: 0, CallIndex: 0, ToolName: "Read", CallUID: "dup"},
+			{MessageOrdinal: 1, CallIndex: 0, ToolName: "Read", CallUID: "dup"},
+		},
+		ToolResults: []ToolResultDelta{
+			{CallUID: "dup", Body: string(first), Bytes: int64(len(first)), MediaType: "text/plain", Status: "ok"},
+		},
+	}); err != nil {
+		t.Fatalf("apply region 1: %v", err)
+	}
+
+	// Region 2: the replay re-delivers the same id with a different body and a third,
+	// still-pending copy. The guard must skip the two resolved rows (keeping "first")
+	// and resolve only the new pending copy.
+	second := []byte("second result, longer")
+	if err := st.ApplyProjectionDelta(ctx, sid, ProjectionDelta{
+		Messages: []MessageDelta{{Ordinal: 2, Role: "assistant", HasToolUse: true}},
+		ToolCalls: []ProjToolCall{
+			{MessageOrdinal: 2, CallIndex: 0, ToolName: "Read", CallUID: "dup"},
+		},
+		ToolResults: []ToolResultDelta{
+			{CallUID: "dup", Body: string(second), Bytes: int64(len(second)), MediaType: "text/plain", Status: "ok"},
+		},
+	}); err != nil {
+		t.Fatalf("apply region 2: %v", err)
+	}
+
+	// The two original copies keep "first"; the new copy resolves to "second".
+	var keptFirst int
+	if err := st.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM tool_calls
+		   WHERE session_id=$1 AND result_bytes=$2`, sid, int64(len(first))).Scan(&keptFirst); err != nil {
+		t.Fatal(err)
+	}
+	if keptFirst != 2 {
+		t.Fatalf("rows still carrying the first result = %d, want 2 (replay must not overwrite resolved rows)", keptFirst)
+	}
+	var newOrd int
+	if err := st.Pool.QueryRow(ctx,
+		`SELECT message_ordinal FROM tool_calls
+		   WHERE session_id=$1 AND result_bytes=$2`, sid, int64(len(second))).Scan(&newOrd); err != nil {
+		t.Fatal(err)
+	}
+	if newOrd != 2 {
+		t.Fatalf("the second result landed on ordinal %d, want 2 (the only pending copy)", newOrd)
 	}
 }

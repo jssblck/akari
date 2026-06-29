@@ -684,6 +684,12 @@ CREATE TABLE tool_calls (
 -- duplicate id so a genuinely malformed reuse is visible rather than silent.
 CREATE INDEX idx_tool_calls_call_uid ON tool_calls(session_id, call_uid)
   WHERE call_uid IS NOT NULL;
+-- Pending-only companion for the back-patch (UPDATE ... WHERE call_uid = $1 AND
+-- result_status IS NULL). A row leaves this index once its result lands, so a
+-- repeated id is back-patched by probing only the copies still pending, keeping the
+-- work linear instead of re-scanning every accumulated copy on each replayed result.
+CREATE INDEX idx_tool_calls_pending_result ON tool_calls(session_id, call_uid)
+  WHERE call_uid IS NOT NULL AND result_status IS NULL;
 
 CREATE TABLE usage_events (
   id                    BIGSERIAL PRIMARY KEY,
