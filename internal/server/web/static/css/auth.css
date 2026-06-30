@@ -4,3 +4,7 @@
 .auth-wrap { max-width: 360px; margin: 64px auto; }
 .auth-wrap form { display: flex; flex-direction: column; gap: var(--sp-md); }
 .error { color: var(--err); margin: var(--sp-sm) 0; }
+
+/* OAuth consent: Approve and Decline sit side by side, Approve leading. */
+.consent-actions { display: flex; gap: var(--sp-md); }
+.consent-actions button { flex: 1; }

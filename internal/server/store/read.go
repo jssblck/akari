@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"time"
@@ -617,6 +618,93 @@ func (s *Store) ListAllSessions(ctx context.Context, f SessionFilter) ([]Session
 	return out, nil
 }
 
+// SessionFeedCursor marks a position in the session feed: the id of the last row a
+// page returned. The feed pages on the session id, which is immutable, rather than on
+// updated_at. That matters for a client paging the whole feed across separate
+// requests: a session re-activated mid-walk (its updated_at bumped by ingest or a
+// re-parse) keeps the same id, so it never jumps past the cursor and drops out of a
+// later page the way an updated_at keyset would silently skip it. Paging stays O(N),
+// not the O(N^2) an OFFSET scan would cost.
+type SessionFeedCursor struct {
+	ID int64
+}
+
+// SessionFeed returns one page of the cross-project feed (newest session first) and
+// the cursor for the page after it (nil when this page is the last). It applies the
+// same filters as ListAllSessions but pages by keyset on the immutable session id
+// descending rather than OFFSET: each page resumes from the prior page's last id and
+// reads only the next `limit` rows, so a client paging the whole feed never re-skips
+// the rows it already saw and a concurrent updated_at bump cannot drop a row from the
+// walk. Each row still carries its updated_at, so a caller can order by recency within
+// a page. limit is clamped to [1, 500] (default 100).
+func (s *Store) SessionFeed(ctx context.Context, f SessionFilter, limit int, cursor *SessionFeedCursor) ([]SessionRow, *SessionFeedCursor, error) {
+	var conds []string
+	var args []any
+	add := func(cond string, val any) {
+		args = append(args, val)
+		conds = append(conds, cond+" $"+itoa(len(args)))
+	}
+	if f.ProjectID != 0 {
+		add("s.project_id =", f.ProjectID)
+	}
+	if f.Agent != "" {
+		add("s.agent =", f.Agent)
+	}
+	if f.Machine != "" {
+		add("s.machine =", f.Machine)
+	}
+	if f.Username != "" {
+		add("u.username =", f.Username)
+	}
+	if !f.Since.IsZero() {
+		add("s.updated_at >=", f.Since)
+	}
+	if cursor != nil {
+		// The next page is everything below the cursor in id-descending order. id is the
+		// primary key, so Postgres walks the PK index straight to the resume point rather
+		// than sorting or skipping, and the bound is on an immutable column so no row can
+		// slip past it between pages.
+		args = append(args, cursor.ID)
+		conds = append(conds, "s.id < $"+itoa(len(args)))
+	}
+
+	q := globalSessionSelect
+	if len(conds) > 0 {
+		q += " WHERE " + strings.Join(conds, " AND ")
+	}
+	q += " ORDER BY s.id DESC"
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	// Fetch one extra row to learn whether a further page exists without a COUNT.
+	args = append(args, limit+1)
+	q += " LIMIT $" + itoa(len(args))
+
+	rows, err := s.Pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("query session feed: %w", err)
+	}
+	defer rows.Close()
+	var out []SessionRow
+	for rows.Next() {
+		r, err := scanSessionRow(rows)
+		if err != nil {
+			return nil, nil, err
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("iterate session feed: %w", err)
+	}
+
+	var next *SessionFeedCursor
+	if len(out) > limit {
+		out = out[:limit]
+		next = &SessionFeedCursor{ID: out[limit-1].ID}
+	}
+	return out, next, nil
+}
+
 // FacetCount is one filter value and how many sessions carry it, for a faceted
 // filter rail that shows counts beside each option.
 type FacetCount struct {
@@ -807,11 +895,40 @@ func (s *Store) MessageCount(ctx context.Context, sessionID int64) (int, error) 
 	return n, nil
 }
 
-// Messages returns a session's transcript in order.
+// Messages returns a session's whole transcript in order. The web renderer wants
+// the full session in one pass; bounded readers (the MCP transcript window) use
+// MessagesPage instead so peak memory does not scale with session size.
 func (s *Store) Messages(ctx context.Context, sessionID int64) ([]Message, error) {
-	rows, err := s.Pool.Query(ctx,
+	return s.scanMessages(ctx,
 		`SELECT ordinal, role, content, thinking_text, model, has_thinking, has_tool_use, timestamp
 		   FROM messages WHERE session_id = $1 ORDER BY ordinal`, sessionID)
+}
+
+// MessagesAfter returns the next window of a session's transcript ordered by
+// ordinal, starting strictly after the given ordinal (after == nil for the first
+// window). It pages by keyset on ordinal rather than OFFSET: each call walks the
+// messages primary key (session_id, ordinal) straight to the resume point and reads
+// only the next `limit` rows, so reading a whole session window by window costs
+// O(N), not the O(N^2/limit) an OFFSET walk would (Postgres re-skips the already
+// returned prefix on every page). limit is clamped to [1, 2000].
+func (s *Store) MessagesAfter(ctx context.Context, sessionID int64, after *int, limit int) ([]Message, error) {
+	if limit <= 0 || limit > 2000 {
+		limit = 2000
+	}
+	if after == nil {
+		return s.scanMessages(ctx,
+			`SELECT ordinal, role, content, thinking_text, model, has_thinking, has_tool_use, timestamp
+			   FROM messages WHERE session_id = $1 ORDER BY ordinal LIMIT $2`,
+			sessionID, limit)
+	}
+	return s.scanMessages(ctx,
+		`SELECT ordinal, role, content, thinking_text, model, has_thinking, has_tool_use, timestamp
+		   FROM messages WHERE session_id = $1 AND ordinal > $2 ORDER BY ordinal LIMIT $3`,
+		sessionID, *after, limit)
+}
+
+func (s *Store) scanMessages(ctx context.Context, query string, args ...any) ([]Message, error) {
+	rows, err := s.Pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -828,13 +945,30 @@ func (s *Store) Messages(ctx context.Context, sessionID int64) ([]Message, error
 	return out, rows.Err()
 }
 
-// ToolCalls returns a session's tool calls as metadata.
+// ToolCalls returns all of a session's tool calls as metadata, for the web
+// renderer. Bounded readers pass a message-ordinal range to ToolCallsInRange.
 func (s *Store) ToolCalls(ctx context.Context, sessionID int64) ([]ToolCallView, error) {
-	rows, err := s.Pool.Query(ctx,
+	return s.scanToolCalls(ctx,
 		`SELECT message_ordinal, call_index, tool_name, coalesce(category,''), coalesce(file_path,''),
 		        coalesce(input_sha256,''), coalesce(input_bytes,0), coalesce(input_media_type,''),
 		        coalesce(result_sha256,''), coalesce(result_bytes,0), coalesce(result_media_type,''), coalesce(result_status,'')
 		   FROM tool_calls WHERE session_id = $1 ORDER BY message_ordinal, call_index`, sessionID)
+}
+
+// ToolCallsInRange returns the tool calls hanging on messages in the inclusive
+// ordinal window [minOrdinal, maxOrdinal], so a bounded transcript read fetches
+// only the calls for the messages it returned rather than the whole session.
+func (s *Store) ToolCallsInRange(ctx context.Context, sessionID int64, minOrdinal, maxOrdinal int) ([]ToolCallView, error) {
+	return s.scanToolCalls(ctx,
+		`SELECT message_ordinal, call_index, tool_name, coalesce(category,''), coalesce(file_path,''),
+		        coalesce(input_sha256,''), coalesce(input_bytes,0), coalesce(input_media_type,''),
+		        coalesce(result_sha256,''), coalesce(result_bytes,0), coalesce(result_media_type,''), coalesce(result_status,'')
+		   FROM tool_calls WHERE session_id = $1 AND message_ordinal BETWEEN $2 AND $3
+		   ORDER BY message_ordinal, call_index`, sessionID, minOrdinal, maxOrdinal)
+}
+
+func (s *Store) scanToolCalls(ctx context.Context, query string, args ...any) ([]ToolCallView, error) {
+	rows, err := s.Pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -884,27 +1018,113 @@ type AttachmentView struct {
 	Filename       string
 }
 
-// Attachments returns a session's attachments, ordered by the message they hang on.
+// Attachments returns all of a session's attachments, ordered by the message they
+// hang on, for the web renderer. Bounded readers pass an ordinal range to
+// AttachmentsInRange.
 func (s *Store) Attachments(ctx context.Context, sessionID int64) ([]AttachmentView, error) {
-	rows, err := s.Pool.Query(ctx,
+	return s.scanAttachments(ctx,
 		`SELECT coalesce(message_ordinal, 0), sha256, coalesce(media_type,''), coalesce(byte_len,0), coalesce(filename,'')
 		   FROM attachments WHERE session_id = $1 ORDER BY message_ordinal, id`, sessionID)
+}
+
+// AttachmentsInRange returns the attachments hanging on messages in the inclusive
+// ordinal window [minOrdinal, maxOrdinal], so a bounded transcript read fetches
+// only the attachments for the messages it returned.
+func (s *Store) AttachmentsInRange(ctx context.Context, sessionID int64, minOrdinal, maxOrdinal int) ([]AttachmentView, error) {
+	return s.scanAttachments(ctx,
+		`SELECT coalesce(message_ordinal, 0), sha256, coalesce(media_type,''), coalesce(byte_len,0), coalesce(filename,'')
+		   FROM attachments WHERE session_id = $1 AND message_ordinal BETWEEN $2 AND $3
+		   ORDER BY message_ordinal, id`, sessionID, minOrdinal, maxOrdinal)
+}
+
+func (s *Store) scanAttachments(ctx context.Context, query string, args ...any) ([]AttachmentView, error) {
+	rows, err := s.Pool.Query(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("query attachments for session %d: %w", sessionID, err)
+		return nil, fmt.Errorf("query attachments: %w", err)
 	}
 	defer rows.Close()
 	var out []AttachmentView
 	for rows.Next() {
 		var a AttachmentView
 		if err := rows.Scan(&a.MessageOrdinal, &a.SHA256, &a.MediaType, &a.ByteLen, &a.Filename); err != nil {
-			return nil, fmt.Errorf("scan attachment row for session %d: %w", sessionID, err)
+			return nil, fmt.Errorf("scan attachment row: %w", err)
 		}
 		out = append(out, a)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate attachments for session %d: %w", sessionID, err)
+		return nil, fmt.Errorf("iterate attachments: %w", err)
 	}
 	return out, nil
+}
+
+// SessionRawTo streams a session's raw uploaded bytes (the lossless JSONL the
+// client sent, the source every projection is rebuilt from) to w in upload order,
+// writing at most limit bytes. It returns the number of bytes written, whether the
+// session held more than was written (so the caller can flag a truncated read), and
+// the session's full raw length. A limit of zero or less means no cap. This is the
+// raw underlying data behind the parsed transcript, exposed so an agent can inspect
+// exactly what was ingested rather than only the projection. A missing session
+// returns ErrNotFound.
+func (s *Store) SessionRawTo(ctx context.Context, w io.Writer, sessionID, limit int64) (written int64, truncated bool, total int64, err error) {
+	// total and the streamed content must come from one snapshot: an AppendChunk or
+	// ResetRaw committing between the length read and the chunk stream would otherwise
+	// let total_bytes describe one version of the raw while content is another. A
+	// repeatable-read, read-only transaction pins both reads to the same MVCC snapshot,
+	// so a concurrent writer is simply invisible to this reader rather than half-seen.
+	txErr := pgx.BeginTxFunc(ctx, s.Pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly},
+		func(tx pgx.Tx) error {
+			// total is session_raw.byte_len, the running length AppendChunk and ResetRaw
+			// maintain in the same transaction that writes the chunk rows (so the invariant
+			// byte_len == sum(length(content)) holds at every committed state, pinned by
+			// TestSessionRawByteLenMatchesChunks). Reading it is O(1) rather than scanning the
+			// whole growing raw, and reading it inside this snapshot keeps it exactly
+			// consistent with the chunks streamed below. A missing session_raw row (no upload
+			// yet) is ErrNotFound.
+			if err := tx.QueryRow(ctx,
+				`SELECT byte_len FROM session_raw WHERE session_id = $1`, sessionID).Scan(&total); err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return ErrNotFound
+				}
+				return fmt.Errorf("read raw length for session %d: %w", sessionID, err)
+			}
+
+			rows, err := tx.Query(ctx,
+				`SELECT byte_offset, byte_len, content
+				   FROM session_raw_chunks WHERE session_id = $1 ORDER BY byte_offset`, sessionID)
+			if err != nil {
+				return fmt.Errorf("read raw chunks for session %d: %w", sessionID, err)
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var off, length int64
+				var content []byte
+				if err := rows.Scan(&off, &length, &content); err != nil {
+					return fmt.Errorf("scan raw chunk for session %d: %w", sessionID, err)
+				}
+				if limit > 0 && written+int64(len(content)) > limit {
+					content = content[:limit-written]
+					if _, err := w.Write(content); err != nil {
+						return err
+					}
+					written += int64(len(content))
+					truncated = true
+					return nil
+				}
+				if _, err := w.Write(content); err != nil {
+					return err
+				}
+				written += int64(len(content))
+			}
+			if err := rows.Err(); err != nil {
+				return fmt.Errorf("iterate raw chunks for session %d: %w", sessionID, err)
+			}
+			truncated = written < total
+			return nil
+		})
+	if txErr != nil {
+		return written, truncated, total, txErr
+	}
+	return written, truncated, total, nil
 }
 
 // Subagents returns sessions whose parent is the given session.

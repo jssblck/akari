@@ -18,6 +18,10 @@ const (
 	sessionTTL  = 30 * 24 * time.Hour
 	scopeIngest = "ingest"
 	scopeFull   = "full"
+	// scopeRead is a read-only credential: it sees everything a logged-in user sees
+	// but cannot publish, delete, or mint tokens. It is the scope every MCP token
+	// carries, and the only non-full scope that may reach the MCP endpoint.
+	scopeRead = "read"
 )
 
 type principal struct {
@@ -58,12 +62,18 @@ func (s *Server) withPrincipal(r *http.Request, p principal) *http.Request {
 	return r.WithContext(context.WithValue(r.Context(), principalKey, p))
 }
 
-// requireIngest accepts any valid credential (ingest or full scope).
+// requireIngest accepts a push credential: an ingest- or full-scope token, or a
+// browser session (full). A read-scope token is rejected: read is for the MCP
+// surface, not for uploading sessions.
 func (s *Server) requireIngest(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		p, ok := s.resolve(r)
 		if !ok {
 			writeError(w, http.StatusUnauthorized, "authentication required")
+			return
+		}
+		if p.Scope != scopeIngest && p.Scope != scopeFull {
+			writeError(w, http.StatusForbidden, "ingest- or full-scope credential required")
 			return
 		}
 		next(w, s.withPrincipal(r, p))
@@ -234,8 +244,8 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 	if req.Scope == "" {
 		req.Scope = scopeIngest
 	}
-	if req.Scope != scopeIngest && req.Scope != scopeFull {
-		writeError(w, http.StatusBadRequest, "scope must be 'ingest' or 'full'")
+	if req.Scope != scopeIngest && req.Scope != scopeFull && req.Scope != scopeRead {
+		writeError(w, http.StatusBadRequest, "scope must be 'ingest', 'read', or 'full'")
 		return
 	}
 	if strings.TrimSpace(req.Name) == "" {
