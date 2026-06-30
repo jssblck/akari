@@ -67,6 +67,22 @@ var table = map[string]Rate{
 	"claude-3-5-haiku": {Input: 0.80, Output: 4, CacheWrite: 1, CacheRead: 0.08},
 
 	// OpenAI GPT-5 family, current generation (June 2026).
+	//
+	// CacheWrite is deliberately left unset (zero) for every OpenAI model, and that
+	// is not a missing rate: OpenAI does not bill cache creation as its own line.
+	// Caching there is automatic and free to write, so a token newly cached is
+	// charged once at the standard input rate, and only re-reads of it are
+	// discounted (CacheRead). The Codex parser reflects this by reporting the whole
+	// uncached remainder (total prompt minus cached) as Input and only the cached
+	// hits as CacheRead, so those cache-write tokens are already priced at Input.
+	// Adding a nonzero CacheWrite here would double-count them: OpenAI never reports
+	// a separate cache-write count for it to multiply, so it must stay zero.
+	//
+	// The -pro tiers carry no CacheRead on purpose: OpenAI disables prompt-cache
+	// retention for them, so a repeated prefix is re-billed at full input ($30/M)
+	// with no discounted cached read to price. Their cached-input column on the
+	// pricing page reads "not available", not a number. Leave CacheRead unset; a
+	// cached read never reaches a -pro model.
 	"gpt-5.5":       {Input: 5, Output: 30, CacheRead: 0.50},
 	"gpt-5.5-pro":   {Input: 30, Output: 180},
 	"gpt-5.4":       {Input: 2.50, Output: 15, CacheRead: 0.25},

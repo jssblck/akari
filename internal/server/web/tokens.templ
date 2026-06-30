@@ -1,0 +1,25 @@
+package web
+
+// tokenCard is the hover/focus breakdown shared by every inline token figure: the
+// four-class split (in, out, cache read, cache write) and the cost line. The
+// caller supplies the surrounding .tok-cell wrapper and the visible headline
+// figure; this renders only the card. Routing every figure through one component
+// is what makes a token total read identically across the overview breakdowns,
+// the sessions feed, and the projects index, and guarantees the hover card is
+// never missing from one of them.
+templ tokenCard(total, in, out, cacheRead, cacheWrite int64, cost float64, incomplete bool) {
+	<span class="tok-tip" role="tooltip">
+		<span class="tt-total">{ FmtTokens(total) } tokens</span>
+		<dl class="tt-grid">
+			<dt>In</dt>
+			<dd>{ FmtTokens(in) }</dd>
+			<dt>Out</dt>
+			<dd>{ FmtTokens(out) }</dd>
+			<dt>Cache read</dt>
+			<dd>{ FmtTokens(cacheRead) }</dd>
+			<dt>Cache write</dt>
+			<dd>{ FmtTokens(cacheWrite) }</dd>
+		</dl>
+		<span class="tt-cost">{ FmtCost(cost, incomplete) }</span>
+	</span>
+}

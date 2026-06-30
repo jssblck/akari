@@ -51,6 +51,21 @@ func seedUsageCache(t *testing.T, st *store.Store, sessionID int64, model string
 	}
 }
 
+// seedUsageUndated inserts a usage event with a NULL occurred_at, the shape a
+// transcript line with no timestamp produces. It has no place on the time axis, so
+// the overview excludes it everywhere (headline, breakdowns, series, and the
+// windowed view alike) to keep the headline equal to the chart.
+func seedUsageUndated(t *testing.T, st *store.Store, sessionID int64, model string, cost float64, in, out int64, dedup string) {
+	t.Helper()
+	_, err := st.Pool.Exec(context.Background(),
+		`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cost_usd, dedup_key)
+		 VALUES ($1,$2,$3,$4,$5,$6)`,
+		sessionID, model, in, out, cost, dedup)
+	if err != nil {
+		t.Fatalf("seed undated usage: %v", err)
+	}
+}
+
 // seedUsageAt inserts a usage event at an explicit occurred_at, so the window's
 // inclusive lower bound (`occurred_at >= since`) can be pinned to the exact
 // instant rather than a clearly-inside or clearly-outside day.
@@ -114,9 +129,9 @@ func TestAnalyticsRollups(t *testing.T) {
 	if seriesCost < 3.99 || seriesCost > 4.01 {
 		t.Errorf("series cost should sum the usage events (~4.0), got %.2f", seriesCost)
 	}
-	// Totals come from the session rollups: 3.0 + 1.0.
+	// Totals sum the usage events the breakdowns roll up: 3.0 + 1.0.
 	if a.TotalCost < 3.99 || a.TotalCost > 4.01 {
-		t.Errorf("total cost from session rollups should be ~4.0, got %.2f", a.TotalCost)
+		t.Errorf("total cost should sum the usage events to ~4.0, got %.2f", a.TotalCost)
 	}
 	if a.Sessions != 2 {
 		t.Errorf("want 2 sessions, got %d", a.Sessions)
@@ -143,8 +158,8 @@ func TestAnalyticsRollups(t *testing.T) {
 
 // A non-empty userIDs scopes every rollup to the named users' sessions, leaving
 // other users' usage out of the series, the breakdowns, and the totals. It
-// exercises both the unbounded by-agent path (reads the session rollups) and the
-// windowed path (slices usage_events), and confirms an empty selection is the
+// exercises both the unbounded and the windowed views (the same usage_events
+// base, with and without a time bound), and confirms an empty selection is the
 // unscoped "all users" view.
 func TestAnalyticsUserFilter(t *testing.T) {
 	t.Parallel()
@@ -173,7 +188,7 @@ func TestAnalyticsUserFilter(t *testing.T) {
 		t.Errorf("grace scope should see only her session, got %d", g.Sessions)
 	}
 	if g.TotalCost < 2.99 || g.TotalCost > 3.01 {
-		t.Errorf("grace scope cost should be ~3.0 from session rollups, got %.2f", g.TotalCost)
+		t.Errorf("grace scope cost should sum her usage to ~3.0, got %.2f", g.TotalCost)
 	}
 	if len(g.Agents) != 1 || g.Agents[0].Label != "claude" {
 		t.Errorf("grace scope agents should hold only claude: %+v", g.Agents)
@@ -263,7 +278,7 @@ func TestAnalyticsProjectAndUserScope(t *testing.T) {
 		t.Errorf("windowed combined token totals wrong: in=%d out=%d, want 200/40", w.TotalIn, w.TotalOut)
 	}
 
-	// Unbounded path (session rollups): project A AND grace.
+	// Unbounded view (no time bound): project A AND grace.
 	all, err := st.Analytics(ctx, projA, time.Time{}, []int64{graceID})
 	if err != nil {
 		t.Fatalf("all-time combined analytics: %v", err)
@@ -314,6 +329,118 @@ func seedUser(t *testing.T, st *store.Store, username string) int64 {
 		t.Fatalf("seed user %q: %v", username, err)
 	}
 	return id
+}
+
+// The headline equals the sum of the rows beneath it, in every shape: the
+// by-model split, the by-agent split, and the daily series all add up to the
+// headline. This is the property the whole single-source design exists to hold,
+// with no figure adding up to a different number than the chart or the bars under
+// it. The mix is chosen to break a naive implementation: an unpriced event with
+// an empty model id (the old by-model query dropped every empty-model row), an
+// undated event (which has no day to plot, so it must drop from the headline too,
+// not just the chart), and cache tokens that dwarf in/out (the gap that started
+// this).
+func TestAnalyticsHeadlineMatchesBreakdowns(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	admin, err := st.Register(ctx, "grace", "h", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	proj, err := st.UpsertProject(ctx, "github.com/ada/engine", "github.com", "ada", "engine", "engine", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+
+	sClaude := seedSessionWithStats(t, st, admin.ID, proj, "claude", "scl", 0, 0, 0)
+	sCodex := seedSessionWithStats(t, st, admin.ID, proj, "codex", "scx", 0, 0, 0)
+
+	// Cache-dominant priced usage on both agents, in-window.
+	seedUsageCache(t, st, sClaude, "claude-opus-4-8", 2.0, 1000, 200, 5000, 300, 1, "lc1")
+	seedUsageCache(t, st, sCodex, "gpt-5.5", 3.0, 800, 400, 9000, 0, 2, "lx1")
+	// An unpriced event with no model id: it must still land in the totals and fold
+	// into the by-model split rather than vanish.
+	seedUsage(t, st, sCodex, "", 0, 200, 20, 1, "lx2")
+	// An undated event: with no day to plot it cannot sit in the daily series, so
+	// to keep the headline equal to the chart it must drop from every overview view.
+	seedUsageUndated(t, st, sClaude, "claude-opus-4-8", 0.5, 100, 50, "lc2")
+
+	sumBreakdown := func(bs []store.Breakdown) (tokens int64, cost float64) {
+		for _, b := range bs {
+			tokens += b.Tokens()
+			cost += b.CostUSD
+		}
+		return
+	}
+	sumSeries := func(ps []store.DayPoint) (tokens int64, cost float64) {
+		for _, p := range ps {
+			tokens += p.Input + p.Output + p.CacheRead + p.CacheWrite
+			cost += p.CostUSD
+		}
+		return
+	}
+	assertLinesUp := func(label string, a store.Analytics) {
+		t.Helper()
+		mTok, mCost := sumBreakdown(a.Models)
+		gTok, gCost := sumBreakdown(a.Agents)
+		sTok, sCost := sumSeries(a.Series)
+		for _, c := range []struct {
+			name string
+			tok  int64
+			cost float64
+		}{{"by-model", mTok, mCost}, {"by-agent", gTok, gCost}, {"daily series", sTok, sCost}} {
+			if a.TotalTokens() != c.tok {
+				t.Errorf("%s: headline tokens %d != sum of %s %d", label, a.TotalTokens(), c.name, c.tok)
+			}
+			if !costsEqual(a.TotalCost, c.cost) {
+				t.Errorf("%s: headline cost %.4f != sum of %s %.4f", label, a.TotalCost, c.name, c.cost)
+			}
+		}
+	}
+
+	// All-time: every dated event counts, including the unpriced one; the undated
+	// event does not, so the headline still equals the chart.
+	all, err := st.Analytics(ctx, proj, time.Time{}, nil)
+	if err != nil {
+		t.Fatalf("all-time analytics: %v", err)
+	}
+	assertLinesUp("all-time", all)
+	// Pin the absolute totals so a sign or class error cannot pass by merely being
+	// self-consistent: 1000+800+200 in, 200+400+20 out, 5000+9000 cache read, 300
+	// cache write. The undated 150 tokens / $0.50 are excluded.
+	if all.TotalTokens() != 16920 {
+		t.Errorf("all-time total tokens = %d, want 16920 (the undated 150 excluded)", all.TotalTokens())
+	}
+	if !costsEqual(all.TotalCost, 5.0) {
+		t.Errorf("all-time total cost = %.4f, want 5.0 (the undated 0.50 excluded)", all.TotalCost)
+	}
+
+	// Windowed: all dated events fall inside a 7-day window, so the window sees the
+	// same dated set and reconciles identically.
+	since := time.Now().AddDate(0, 0, -7)
+	win, err := st.Analytics(ctx, proj, since, nil)
+	if err != nil {
+		t.Fatalf("windowed analytics: %v", err)
+	}
+	assertLinesUp("windowed", win)
+	if win.TotalTokens() != 16920 {
+		t.Errorf("windowed total tokens = %d, want 16920", win.TotalTokens())
+	}
+	if !costsEqual(win.TotalCost, 5.0) {
+		t.Errorf("windowed total cost = %.4f, want 5.0", win.TotalCost)
+	}
+}
+
+// costsEqual reports whether two USD sums are within a hundredth of a cent, the slack a
+// float sum of priced events needs.
+func costsEqual(a, b float64) bool {
+	d := a - b
+	if d < 0 {
+		d = -d
+	}
+	return d < 0.0001
 }
 
 // A non-zero `since` bounds every rollup to the trailing window, slicing usage by
@@ -374,7 +501,7 @@ func TestAnalyticsTimeWindow(t *testing.T) {
 		t.Errorf("unbounded view should see both sessions, got %d", full.Sessions)
 	}
 	if full.TotalCost < 10.99 || full.TotalCost > 11.01 {
-		t.Errorf("unbounded cost from session rollups should be ~11.0, got %.2f", full.TotalCost)
+		t.Errorf("unbounded cost should sum all usage to ~11.0, got %.2f", full.TotalCost)
 	}
 }
 
@@ -438,10 +565,12 @@ func TestAnalyticsScopedWindowWithCacheTotals(t *testing.T) {
 	}
 }
 
-// The unbounded (all-time) path derives its headline token totals from the daily
-// series, which carries all four token classes. TestAnalyticsRollups leaves cache
-// tokens at zero, so this pins the all-time cache and combined-token aggregation
-// that the overview's Tokens readout and its tooltip surface.
+// The all-time headline token totals sum the by-agent split over usage_events and
+// carry all four token classes. The session rollup here is seeded at zero tokens
+// on purpose: the totals must come from the usage events, not the rollup column,
+// so a stale or unbacked rollup cannot skew the readout. TestAnalyticsRollups
+// leaves cache tokens at zero, so this pins the all-time cache and combined-token
+// aggregation that the overview's Tokens readout and its tooltip surface.
 func TestAnalyticsAllTimeTokenTotals(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)

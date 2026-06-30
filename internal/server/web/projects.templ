@@ -64,20 +64,7 @@ templ ProjectsPage(p Page, projects []store.ProjectSummary, spark map[int64][]fl
 templ tokensCell(pr store.ProjectSummary) {
 	<span class="tok-cell" tabindex="0">
 		<span class="tok-total">{ FmtTokens(pr.TotalTokens()) }</span>
-		<span class="tok-tip" role="tooltip">
-			<span class="tt-total">{ FmtTokens(pr.TotalTokens()) } tokens</span>
-			<dl class="tt-grid">
-				<dt>In</dt>
-				<dd>{ FmtTokens(pr.TotalInput) }</dd>
-				<dt>Out</dt>
-				<dd>{ FmtTokens(pr.TotalOutput) }</dd>
-				<dt>Cache read</dt>
-				<dd>{ FmtTokens(pr.TotalCacheRead) }</dd>
-				<dt>Cache write</dt>
-				<dd>{ FmtTokens(pr.TotalCacheWrite) }</dd>
-			</dl>
-			<span class="tt-cost">{ FmtCost(pr.TotalCostUSD, false) }</span>
-		</span>
+		@tokenCard(pr.TotalTokens(), pr.TotalInput, pr.TotalOutput, pr.TotalCacheRead, pr.TotalCacheWrite, pr.TotalCostUSD, false)
 	</span>
 }
 

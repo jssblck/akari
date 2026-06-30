@@ -216,7 +216,13 @@ templ breakdownList(title string, rows []BreakdownRow) {
 								data-color={ row.Color }
 							></div>
 						</div>
-						<div class="bar-sub muted small">{ row.Tokens } tok &middot; { fmt.Sprintf("%d", row.Sessions) } sessions</div>
+						<div class="bar-sub muted small">
+							<span class="tok-cell" tabindex="0">
+								<span class="tok-total">{ FmtTokens(row.Tokens) }</span>
+								@tokenCard(row.Tokens, row.Input, row.Output, row.CacheRead, row.CacheWrite, row.CostUSD, false)
+							</span>
+							{ " tok " }&middot;{ fmt.Sprintf(" %d sessions", row.Sessions) }
+						</div>
 					</li>
 				}
 			</ul>
