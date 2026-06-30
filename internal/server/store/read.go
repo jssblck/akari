@@ -145,13 +145,22 @@ const DefaultSort = "updated"
 // mapping the key that arrives on the query string to its ORDER BY expression.
 // The map is the trust boundary: a key absent here never reaches the SQL, so the
 // expression can be interpolated without risking injection.
+//
+// agent, branch, messages, and tokens are session-local and index-walked (see
+// migration 0014): each has a (col, id) btree that, paired with the direction-
+// following id tiebreak in orderClause, satisfies the ORDER BY ... LIMIT with an
+// index scan rather than sorting the whole history. tokens reads the stored
+// generated total_tokens column for the same reason. project and user sort on
+// joined tables (the projects CASE, users.username), which a session index cannot
+// walk; they rank the working set, cheap when a facet filter narrows it and a full
+// sort only on the unfiltered whole-history case.
 var sessionSortColumns = map[string]string{
 	"project":  "CASE WHEN p.kind IN ('standalone', 'orphaned') THEN p.display_name ELSE p.remote_key END",
 	"agent":    "s.agent",
 	"branch":   "s.git_branch",
 	"user":     "u.username",
 	"messages": "s.message_count",
-	"tokens":   "(s.total_input_tokens + s.total_output_tokens + s.total_cache_read_tokens + s.total_cache_write_tokens)",
+	"tokens":   "s.total_tokens",
 	"updated":  "s.updated_at",
 }
 
@@ -167,19 +176,36 @@ func IsSortKey(key string) bool {
 // Sort and Desc. An empty or unknown Sort is the default order, most recent
 // first: callers that pass a bare filter (the overview feed, the project page)
 // expect newest-first, and a bool Desc cannot distinguish "explicitly ascending"
-// from its zero value, so the default is not routed through Desc at all. The
-// session id is always the tiebreaker so ties order deterministically and
-// pagination stays stable across requests.
+// from its zero value, so the default is forced descending rather than routed
+// through Desc.
+//
+// The session id is always the tiebreaker, so ties order deterministically and
+// pagination stays stable for a given sort and direction. The tiebreak follows
+// the column's direction (id ASC under an ascending sort, id DESC under a
+// descending one) so a single (col, id) btree serves both orders: a forward scan
+// satisfies "col ASC, id ASC" and a backward scan "col DESC, id DESC". A fixed
+// id DESC tiebreak would leave the ascending case unable to walk the index and
+// force a sort. The default order is descending, so its tiebreak stays id DESC,
+// matching the feed indexes (0004, 0006) exactly.
+//
+// No NULLS LAST: every sortable expression is NOT NULL (the session columns, the
+// generated total_tokens, the username join, and the project CASE over two NOT
+// NULL columns all are), so a nulls placement would never change a result. It
+// would, however, defeat the index: Postgres only matches an ORDER BY to a btree
+// when the nulls placement agrees, and a DESC btree defaults to NULLS FIRST, so a
+// "DESC NULLS LAST" clause forces a full sort instead of an index scan. Omitting
+// it lets the (col, id) and feed indexes satisfy the order directly.
 func (f SessionFilter) orderClause() string {
 	expr, ok := sessionSortColumns[f.Sort]
+	desc := f.Desc
 	if !ok {
-		return fmt.Sprintf(" ORDER BY %s DESC NULLS LAST, s.id DESC", sessionSortColumns[DefaultSort])
+		expr, desc = sessionSortColumns[DefaultSort], true
 	}
 	dir := "ASC"
-	if f.Desc {
+	if desc {
 		dir = "DESC"
 	}
-	return fmt.Sprintf(" ORDER BY %s %s NULLS LAST, s.id DESC", expr, dir)
+	return fmt.Sprintf(" ORDER BY %s %s, s.id %s", expr, dir, dir)
 }
 
 // SessionRow is one row of the global (cross-project) session list: a session
@@ -287,7 +313,10 @@ func (s *Store) ListSessions(ctx context.Context, f SessionFilter) ([]SessionSum
 	if len(conds) > 0 {
 		q += " WHERE " + strings.Join(conds, " AND ")
 	}
-	q += " ORDER BY s.updated_at DESC NULLS LAST, s.id DESC"
+	// No NULLS LAST: updated_at is NOT NULL, so it cannot change the result, but it
+	// would stop Postgres from matching this order to the feed indexes (0004, 0006)
+	// and force a full sort instead of an index walk to the LIMIT. See orderClause.
+	q += " ORDER BY s.updated_at DESC, s.id DESC"
 	limit := f.Limit
 	if limit <= 0 || limit > 500 {
 		limit = 100
@@ -777,7 +806,7 @@ func (s *Store) Search(ctx context.Context, query string, projectID int64, limit
 		   JOIN projects p ON p.id = s.project_id
 		   JOIN users u ON u.id = s.user_id
 		  WHERE m.content ILIKE '%' || $1 || '%'`+scope+`
-		  ORDER BY s.updated_at DESC NULLS LAST
+		  ORDER BY s.updated_at DESC
 		  LIMIT $`+itoa(len(args)), args...)
 	if err != nil {
 		return nil, err
