@@ -206,23 +206,6 @@ func RowTokens(s store.SessionSummary) int64 {
 	return s.TotalInput + s.TotalOutput + s.TotalCacheRead + s.TotalCacheWrite
 }
 
-// SessionRemainder is the windowed usage the project page's capped session table
-// leaves unshown: the sessions, tokens, and cost beyond the visible rows. The table
-// renders it as a footer so the shown rows plus this line reproduce the usage
-// panel's headline, keeping the two projections of the same scope reconciled even
-// when more sessions match than the table caps at. Has reports whether there is
-// anything to show, so the footer stays absent when every windowed session fits.
-type SessionRemainder struct {
-	Sessions       int
-	Tokens         int64
-	CostUSD        float64
-	CostIncomplete bool
-}
-
-// Has reports whether any windowed sessions fell outside the capped table, so the
-// view shows the reconciling footer only when rows were actually withheld.
-func (r SessionRemainder) Has() bool { return r.Sessions > 0 }
-
 // plural returns the "s" suffix for a count, so a label reads "1 session" but
 // "2 sessions" without each call site repeating the conditional.
 func plural(n int) string {
@@ -230,38 +213,6 @@ func plural(n int) string {
 		return ""
 	}
 	return "s"
-}
-
-// ProjectSessionRemainder is the difference between the usage panel's windowed
-// totals and the rows the capped session table actually shows. Both derive from the
-// same dated-usage base (Analytics sums it whole; WindowSessions groups it per
-// session up to its cap), so subtracting the shown rows from the panel yields the
-// hidden tail exactly: shown rows + remainder == headline. It clamps at zero so a
-// table that already shows every windowed session reports no remainder rather than a
-// spurious negative from float rounding on cost. CostIncomplete carries when the
-// panel's cost is a lower bound, since the hidden tail can hold the unpriced usage
-// that set it.
-func ProjectSessionRemainder(a store.Analytics, shown []store.SessionSummary) SessionRemainder {
-	r := SessionRemainder{
-		Sessions:       a.Sessions - len(shown),
-		Tokens:         a.TotalTokens(),
-		CostUSD:        a.TotalCost,
-		CostIncomplete: a.CostIncomplete,
-	}
-	for _, s := range shown {
-		r.Tokens -= RowTokens(s)
-		r.CostUSD -= s.TotalCostUSD
-	}
-	if r.Sessions <= 0 {
-		return SessionRemainder{}
-	}
-	if r.Tokens < 0 {
-		r.Tokens = 0
-	}
-	if r.CostUSD < 0 {
-		r.CostUSD = 0
-	}
-	return r
 }
 
 // FmtRelTime renders a timestamp as a coarse "time ago" for the recent past

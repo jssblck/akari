@@ -286,7 +286,7 @@ func TestProjectPageRendersHeatmap(t *testing.T) {
 	p := Page{Title: "akari", LoggedIn: true, Active: "projects", Username: "Anna Winlock"}
 	proj := store.ProjectSummary{ID: 7, RemoteKey: "hopper/akari", Kind: "remote", SessionCount: 1}
 	sel := store.SessionFilter{ProjectID: 7, Agent: "claude"}
-	html := renderComponent(t, ProjectPage(p, proj, nil, Facets{}, sel, analyticsWithData(), "90d"))
+	html := renderComponent(t, ProjectPage(p, proj, nil, store.SessionRemainder{}, Facets{}, sel, analyticsWithData(), "90d"))
 
 	for _, want := range []string{
 		`data-heatmap`, `data-heatmap-target="chart-project"`, `>Tokens</button>`, `>Dollars</button>`,

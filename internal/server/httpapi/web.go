@@ -189,11 +189,12 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 		Username:  strings.TrimSpace(r.URL.Query().Get("user")),
 		Since:     since,
 	}
-	// The table draws from the same windowed usage base as the panel (WindowSessions,
+	// The table draws from the same windowed usage base as the panel (WindowSessionPage,
 	// not the lifetime-rollup ListSessions), so each row's tokens and cost are its
 	// in-window share and the visible rows sum to the panel headline rather than
-	// overcounting sessions whose usage predates the window.
-	sessions, err := s.Store.WindowSessions(r.Context(), filter)
+	// overcounting sessions whose usage predates the window. Past the row cap the page
+	// carries a remainder aggregate so the table still reconciles with the headline.
+	page, err := s.Store.WindowSessionPage(r.Context(), filter)
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load sessions."))
 		return
@@ -218,7 +219,7 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	wf := web.Facets{Agents: facets.Agents, Machines: facets.Machines, Users: facets.Users}
-	render(w, r, http.StatusOK, web.ProjectPage(s.pageForNav(r, proj.RemoteKey, "projects"), proj, sessions, wf, filter, analytics, rng))
+	render(w, r, http.StatusOK, web.ProjectPage(s.pageForNav(r, proj.RemoteKey, "projects"), proj, page.Sessions, page.Remainder, wf, filter, analytics, rng))
 }
 
 // sessionView loads everything the session page (and its live body fragment)

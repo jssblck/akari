@@ -68,7 +68,7 @@ templ tokensCell(pr store.ProjectSummary) {
 	</span>
 }
 
-templ ProjectPage(p Page, proj store.ProjectSummary, sessions []store.SessionSummary, facets Facets, sel store.SessionFilter, a store.Analytics, rng string) {
+templ ProjectPage(p Page, proj store.ProjectSummary, sessions []store.SessionSummary, remainder store.SessionRemainder, facets Facets, sel store.SessionFilter, a store.Analytics, rng string) {
 	@layout(p) {
 		<div class="page-head">
 			<h1>{ ProjectTitle(proj) }</h1>
@@ -89,7 +89,7 @@ templ ProjectPage(p Page, proj store.ProjectSummary, sessions []store.SessionSum
 				</div>
 				@projectSessionToolbar(proj.ID, facets, sel, rng)
 				<div id="session-list">
-					@ProjectSessionList(sessions, ProjectSessionRemainder(a, sessions))
+					@ProjectSessionList(sessions, remainder)
 				</div>
 			</section>
 		</div>
@@ -139,7 +139,7 @@ templ projectSessionToolbar(projectID int64, facets Facets, sel store.SessionFil
 // hidden tail and the table closes with a remainder footer, so the visible rows plus
 // that line sum to the usage panel headline above rather than appearing to fall short
 // of it. The footer reuses the token cell so its breakdown reads like every row's.
-templ ProjectSessionList(sessions []store.SessionSummary, rem SessionRemainder) {
+templ ProjectSessionList(sessions []store.SessionSummary, rem store.SessionRemainder) {
 	if len(sessions) == 0 {
 		<div class="empty">No sessions match these filters.</div>
 	} else {
@@ -181,9 +181,7 @@ templ ProjectSessionList(sessions []store.SessionSummary, rem SessionRemainder) 
 				<tfoot>
 					<tr class="remainder" title="Older sessions in this range, beyond the rows shown">
 						<td colspan="6">{ fmt.Sprintf("+%d more session%s in this range", rem.Sessions, plural(rem.Sessions)) }</td>
-						<td class="num">
-							<span class="tok-total">{ FmtTokens(rem.Tokens) }</span>
-						</td>
+						<td class="num">@remainderTokensCell(rem)</td>
 						<td class="num">{ FmtCost(rem.CostUSD, rem.CostIncomplete) }</td>
 						<td></td>
 					</tr>
@@ -200,6 +198,17 @@ templ sessionTokensCell(s store.SessionSummary) {
 	<span class="tok-cell" tabindex="0">
 		<span class="tok-total">{ FmtTokens(RowTokens(s)) }</span>
 		@tokenCard(RowTokens(s), s.TotalInput, s.TotalOutput, s.TotalCacheRead, s.TotalCacheWrite, s.TotalCostUSD, s.CostIncomplete)
+	</span>
+}
+
+// remainderTokensCell renders the session table's remainder footer through the same
+// token card every other figure uses, so the hidden tail's total carries its four
+// token classes and cost behind the hover rather than reading as a bare number. The
+// remainder already holds the per-class sums, so it feeds the card directly.
+templ remainderTokensCell(rem store.SessionRemainder) {
+	<span class="tok-cell" tabindex="0">
+		<span class="tok-total">{ FmtTokens(rem.Tokens()) }</span>
+		@tokenCard(rem.Tokens(), rem.Input, rem.Output, rem.CacheRead, rem.CacheWrite, rem.CostUSD, rem.CostIncomplete)
 	</span>
 }
 

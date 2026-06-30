@@ -295,7 +295,7 @@ func TestAnalyticsFiltersByAgentAndMachine(t *testing.T) {
 }
 
 // TestWindowSessionsPartitionPanel pins the project page's row/panel reconciliation:
-// WindowSessions returns each session's in-window token share, so the visible rows
+// WindowSessionPage returns each session's in-window token share, so the visible rows
 // are a partition of the usage panel (they sum to its headline and match its session
 // tally) even under a narrow window, where the lifetime rollups would overcount a
 // session whose usage predates the window.
@@ -326,10 +326,11 @@ func TestWindowSessionsPartitionPanel(t *testing.T) {
 	seedUsageAt(t, st, sB, "claude-opus-4-8", 2.0, 200, 100, old, "b-old")
 
 	since := now.Add(-30 * 24 * time.Hour)
-	win, err := st.WindowSessions(ctx, store.SessionFilter{ProjectID: proj, Since: since})
+	page, err := st.WindowSessionPage(ctx, store.SessionFilter{ProjectID: proj, Since: since})
 	if err != nil {
 		t.Fatalf("window sessions: %v", err)
 	}
+	win := page.Sessions
 	a, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: proj, Since: since})
 	if err != nil {
 		t.Fatalf("analytics: %v", err)
@@ -353,13 +354,18 @@ func TestWindowSessionsPartitionPanel(t *testing.T) {
 	if len(win) != a.Sessions {
 		t.Errorf("row count %d != panel session tally %d", len(win), a.Sessions)
 	}
+	// Well under the cap, so no tail is withheld and the footer stays empty.
+	if page.Remainder.Has() {
+		t.Errorf("remainder should be empty under the cap, got %+v", page.Remainder)
+	}
 
 	// Widening to all of history brings B in and restores A's older usage; the rows
 	// still partition the panel.
-	full, err := st.WindowSessions(ctx, store.SessionFilter{ProjectID: proj})
+	fullPage, err := st.WindowSessionPage(ctx, store.SessionFilter{ProjectID: proj})
 	if err != nil {
 		t.Fatalf("window all: %v", err)
 	}
+	full := fullPage.Sessions
 	fa, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: proj})
 	if err != nil {
 		t.Fatalf("analytics all: %v", err)
@@ -373,13 +379,15 @@ func TestWindowSessionsPartitionPanel(t *testing.T) {
 	}
 }
 
-// TestWindowSessionsCapEngages pins the gate finding the cap exists to answer: with
-// more matching sessions than the default LIMIT, WindowSessions returns exactly the
-// cap while Analytics still sums the whole windowed base. So the rows alone fall
-// short of the headline by a real tail (here one session), which is precisely the
-// gap the project page closes with its remainder footer. Were the cap ever dropped
-// or the handler to stop passing a zero Limit, this row count would change and catch
-// it. Newest-active first means the capped-out session is the oldest by updated_at.
+// TestWindowSessionsCapEngages pins the cap and the remainder that closes the gap it
+// opens. With more matching sessions than the cap, WindowSessionPage returns exactly
+// the cap of rows while Analytics still sums the whole windowed base, so the rows
+// alone fall short of the headline by a real tail. The remainder must reconcile that
+// tail exactly: per token class and cost, the shown rows plus the remainder reproduce
+// the panel. It also pins the projection-consistency counterexample: when a visible
+// row is the unpriced one and the hidden tail is fully priced, the panel is correctly
+// cost-incomplete but the remainder must not be, because its flag is a bool_or over
+// the hidden sessions alone, not a copy of the panel's.
 func TestWindowSessionsCapEngages(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -394,17 +402,30 @@ func TestWindowSessionsCapEngages(t *testing.T) {
 		t.Fatalf("project: %v", err)
 	}
 
-	// 101 sessions, each one recent dated usage event, so all fall inside the window
-	// and the default cap of 100 must withhold exactly one.
+	// 101 sessions, all with recent dated usage so they fall inside the window and the
+	// cap of 100 withholds exactly one: the first inserted (lowest id, oldest
+	// updated_at), which the newest-active ordering pushes past the cap. Every session
+	// is priced except a visible one (the last inserted), so the panel reads
+	// cost-incomplete from a row that shows, while the hidden tail is fully priced.
 	const total = 101
 	now := time.Now()
+	var hiddenID int64
 	for i := 0; i < total; i++ {
 		sid := seedSessionWithStats(t, st, user.ID, proj, "claude", fmt.Sprintf("s%d", i), 0, 0, 0)
-		seedUsageAt(t, st, sid, "claude-opus-4-8", 1.0, 10, 5, now.Add(-time.Duration(i)*time.Hour), fmt.Sprintf("u%d", i))
+		if i == 0 {
+			hiddenID = sid
+		}
+		if i == total-1 {
+			// The newest session shows, and it carries the unpriced usage, so the panel
+			// flag comes from a visible row, not the hidden tail.
+			seedUsageUnpriced(t, st, sid, "mystery-model", 10, 5, fmt.Sprintf("u%d", i))
+			continue
+		}
+		seedUsageAt(t, st, sid, "claude-opus-4-8", 1.0, 10, 5, now.Add(-time.Duration(i+1)*time.Hour), fmt.Sprintf("u%d", i))
 	}
 
 	since := now.Add(-30 * 24 * time.Hour)
-	win, err := st.WindowSessions(ctx, store.SessionFilter{ProjectID: proj, Since: since})
+	page, err := st.WindowSessionPage(ctx, store.SessionFilter{ProjectID: proj, Since: since})
 	if err != nil {
 		t.Fatalf("window sessions: %v", err)
 	}
@@ -413,20 +434,103 @@ func TestWindowSessionsCapEngages(t *testing.T) {
 		t.Fatalf("analytics: %v", err)
 	}
 
-	if len(win) != 100 {
-		t.Fatalf("windowed rows = %d, want the default cap of 100", len(win))
+	if len(page.Sessions) != 100 {
+		t.Fatalf("windowed rows = %d, want the cap of 100", len(page.Sessions))
 	}
 	if a.Sessions != total {
 		t.Fatalf("panel session tally = %d, want all %d", a.Sessions, total)
 	}
-	// The shown rows undercount the headline by exactly the capped-out session, the
-	// tail the remainder footer accounts for.
-	var shownIn int64
-	for _, s := range win {
-		shownIn += s.TotalInput
+	for _, s := range page.Sessions {
+		if s.ID == hiddenID {
+			t.Fatalf("session %d should have been withheld past the cap but is shown", hiddenID)
+		}
 	}
-	if shownIn != a.TotalIn-10 {
-		t.Errorf("shown input %d, want headline %d minus one withheld session's 10", shownIn, a.TotalIn)
+
+	// The remainder is exactly the one withheld session.
+	rem := page.Remainder
+	if rem.Sessions != 1 {
+		t.Fatalf("remainder sessions = %d, want 1", rem.Sessions)
+	}
+
+	// Shown rows plus the remainder reproduce the panel, per token class and cost.
+	var shownIn, shownOut, shownCR, shownCW int64
+	var shownCost float64
+	for _, s := range page.Sessions {
+		shownIn += s.TotalInput
+		shownOut += s.TotalOutput
+		shownCR += s.TotalCacheRead
+		shownCW += s.TotalCacheWrite
+		shownCost += s.TotalCostUSD
+	}
+	if shownIn+rem.Input != a.TotalIn || shownOut+rem.Output != a.TotalOut ||
+		shownCR+rem.CacheRead != a.TotalCacheRead || shownCW+rem.CacheWrite != a.TotalCacheWrite {
+		t.Errorf("shown+remainder tokens (%d/%d/%d/%d + %d/%d/%d/%d) != panel (%d/%d/%d/%d)",
+			shownIn, shownOut, shownCR, shownCW, rem.Input, rem.Output, rem.CacheRead, rem.CacheWrite,
+			a.TotalIn, a.TotalOut, a.TotalCacheRead, a.TotalCacheWrite)
+	}
+	if shownCost+rem.CostUSD != a.TotalCost {
+		t.Errorf("shown+remainder cost %.2f != panel %.2f", shownCost+rem.CostUSD, a.TotalCost)
+	}
+
+	// The panel is cost-incomplete (a visible row is unpriced), but the hidden tail is
+	// fully priced, so the footer must not inherit the panel's marker.
+	if !a.CostIncomplete {
+		t.Error("panel should be cost-incomplete: a shown session carries unpriced usage")
+	}
+	if rem.CostIncomplete {
+		t.Error("remainder must not be cost-incomplete: the hidden session is fully priced")
+	}
+}
+
+// TestWindowSessionRemainderFlagsHiddenTail is the other direction of the bool_or: a
+// hidden session carries the unpriced usage while every shown row is priced. The
+// remainder must flag itself cost-incomplete so the footer marks its hidden cost a
+// lower bound, proving the marker tracks the hidden sessions rather than copying the
+// panel (which here happens to agree, but for the right reason).
+func TestWindowSessionRemainderFlagsHiddenTail(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	user, err := st.Register(ctx, "ada", "h", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	proj, err := st.UpsertProject(ctx, "github.com/ada/tail", "github.com", "ada", "tail", "tail", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+
+	const total = 101
+	now := time.Now()
+	for i := 0; i < total; i++ {
+		sid := seedSessionWithStats(t, st, user.ID, proj, "claude", fmt.Sprintf("s%d", i), 0, 0, 0)
+		if i == 0 {
+			// The first inserted is the one withheld past the cap; give it the only
+			// unpriced usage so the incompleteness lives entirely in the hidden tail.
+			seedUsageUnpriced(t, st, sid, "mystery-model", 10, 5, fmt.Sprintf("u%d", i))
+			continue
+		}
+		seedUsageAt(t, st, sid, "claude-opus-4-8", 1.0, 10, 5, now.Add(-time.Duration(i+1)*time.Hour), fmt.Sprintf("u%d", i))
+	}
+
+	since := now.Add(-30 * 24 * time.Hour)
+	page, err := st.WindowSessionPage(ctx, store.SessionFilter{ProjectID: proj, Since: since})
+	if err != nil {
+		t.Fatalf("window sessions: %v", err)
+	}
+	if page.Remainder.Sessions != 1 {
+		t.Fatalf("remainder sessions = %d, want 1 withheld", page.Remainder.Sessions)
+	}
+	if !page.Remainder.CostIncomplete {
+		t.Error("remainder must be cost-incomplete: the hidden session carries unpriced usage")
+	}
+	// No shown row is unpriced, so the table's own rows read exact; the footer is the
+	// only place the lower-bound marker appears.
+	for _, s := range page.Sessions {
+		if s.CostIncomplete {
+			t.Errorf("shown session %d should be fully priced", s.ID)
+		}
 	}
 }
 

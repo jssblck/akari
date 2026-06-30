@@ -346,25 +346,53 @@ func (s *Store) ListSessions(ctx context.Context, f SessionFilter) ([]SessionSum
 	return out, rows.Err()
 }
 
-// WindowSessions lists the sessions that contributed dated usage inside the
-// filter's window, each carrying its in-window token and cost sums rather than its
-// all-time rollup. It shares the analytics base exactly: the same dated
-// usage_events under the same project, window, agent, user, and machine scoping,
-// just grouped per session instead of summed whole. That base sharing is what lets
-// the project page's session rows be a partition of the usage panel's headline,
-// where the lifetime rollups ListSessions returns would overcount a session whose
-// usage predates the window. Newest-active first.
-//
-// The rows are capped (see the limit below) so a project with thousands of windowed
-// sessions does not render an unbounded table. The cap means the visible rows alone
-// need not sum to the headline, so the project handler reconciles the difference
-// into an explicit remainder footer (see ProjectSessionRemainder): the shown rows
-// plus that footer reproduce the panel totals exactly, because both derive from this
-// same base. A session with no dated usage in the window contributes nothing to the
-// panel and is absent here too. cost_incomplete is the in-window per-session flag,
-// the same expression the analytics slices use, so a row's "$X+" marker matches the
-// headline's.
-func (s *Store) WindowSessions(ctx context.Context, f SessionFilter) ([]SessionSummary, error) {
+// windowSessionLimit is the cap on how many session rows the project page renders.
+// Past it the table would grow with a project's whole windowed history, so the rows
+// stop here and SessionPage.Remainder accounts for the rest.
+const windowSessionLimit = 100
+
+// SessionPage is a project's windowed session table: the capped rows the page shows,
+// newest-active first, plus the aggregate of every windowed session that did not fit
+// (Remainder). Shown rows plus Remainder reproduce the usage panel's headline, since
+// both the rows and the remainder derive from the one dated-usage base the panel sums.
+type SessionPage struct {
+	Sessions  []SessionSummary
+	Remainder SessionRemainder
+}
+
+// SessionRemainder is the aggregate of the windowed sessions the capped table did not
+// show: how many, their per-class token volume, their summed cost, and whether any of
+// them carried unpriced usage. The project page renders it as a footer so the visible
+// rows plus this line reconcile with the usage panel headline even when more sessions
+// match than the table caps at. It carries all four token classes (not just a total)
+// so the footer can show the same breakdown card every other token figure does, and
+// its CostIncomplete is a bool_or over the hidden sessions alone, so the footer flags
+// "$X+" only when a hidden session is the unpriced one, never because a visible row was.
+type SessionRemainder struct {
+	Sessions       int
+	Input          int64
+	Output         int64
+	CacheRead      int64
+	CacheWrite     int64
+	CostUSD        float64
+	CostIncomplete bool
+}
+
+// Has reports whether any windowed sessions fell outside the capped table, so the
+// project page shows the reconciling footer only when rows were actually withheld.
+func (r SessionRemainder) Has() bool { return r.Sessions > 0 }
+
+// Tokens is the hidden tail's all-class token volume, the figure the footer's total
+// shows with the per-class split behind its card, matching every other token readout.
+func (r SessionRemainder) Tokens() int64 {
+	return r.Input + r.Output + r.CacheRead + r.CacheWrite
+}
+
+// windowSessionConds builds the shared WHERE additions for the windowed-session
+// queries (the capped rows and the remainder aggregate), so both narrow by the exact
+// same project, window, agent, user, and machine scope the usage panel does. The
+// placeholders start at $1; the caller appends its own (limit, offset) after.
+func windowSessionConds(f SessionFilter) ([]string, []any) {
 	var conds []string
 	var args []any
 	add := func(cond string, val any) {
@@ -386,6 +414,31 @@ func (s *Store) WindowSessions(ctx context.Context, f SessionFilter) ([]SessionS
 	if !f.Since.IsZero() {
 		add("ue.occurred_at >=", f.Since)
 	}
+	return conds, args
+}
+
+// WindowSessionPage returns the project page's session table: the capped rows that
+// contributed dated usage inside the filter's window, each carrying its in-window
+// token and cost sums rather than its all-time rollup, plus the aggregate of the
+// windowed sessions beyond the cap. It shares the analytics base exactly (the same
+// dated usage_events under the same project, window, agent, user, and machine scope,
+// grouped per session instead of summed whole), which is what lets the rows be a
+// partition of the usage panel's headline where the lifetime rollups ListSessions
+// returns would overcount a session whose usage predates the window.
+//
+// The cap keeps a project with thousands of windowed sessions from rendering an
+// unbounded table. So the visible rows alone need not sum to the headline; the
+// remainder closes the gap. It is queried, not subtracted from the panel: a boolean
+// OR like cost_incomplete cannot be undone by subtraction (a visible unpriced row
+// would wrongly mark the priced tail incomplete), so the tail is aggregated directly
+// over the hidden sessions, carrying its own per-class sums, cost, and bool_or flag.
+// The remainder query runs only when the cap actually engaged.
+func (s *Store) WindowSessionPage(ctx context.Context, f SessionFilter) (SessionPage, error) {
+	conds, args := windowSessionConds(f)
+	where := "ue.occurred_at IS NOT NULL"
+	if len(conds) > 0 {
+		where += " AND " + strings.Join(conds, " AND ")
+	}
 
 	q := `
 		SELECT s.id, s.agent, s.machine, s.git_branch, u.username,
@@ -397,29 +450,15 @@ func (s *Store) WindowSessions(ctx context.Context, f SessionFilter) ([]SessionS
 		  FROM usage_events ue
 		  JOIN sessions s ON s.id = ue.session_id
 		  JOIN users u ON u.id = s.user_id
-		 WHERE ue.occurred_at IS NOT NULL`
-	if len(conds) > 0 {
-		q += " AND " + strings.Join(conds, " AND ")
-	}
-	// Group by the session (its primary key carries every s.* column functionally,
-	// so they need no explicit grouping); u.username crosses the join, so it does.
-	q += `
+		 WHERE ` + where + `
 		 GROUP BY s.id, u.username
-		 ORDER BY s.updated_at DESC, s.id DESC`
-	limit := f.Limit
-	if limit <= 0 || limit > 500 {
-		limit = 100
-	}
-	args = append(args, limit)
-	q += " LIMIT $" + itoa(len(args))
-	if f.Offset > 0 {
-		args = append(args, f.Offset)
-		q += " OFFSET $" + itoa(len(args))
-	}
+		 ORDER BY s.updated_at DESC, s.id DESC
+		 LIMIT $` + itoa(len(args)+1)
+	rowArgs := append(append([]any{}, args...), windowSessionLimit)
 
-	rows, err := s.Pool.Query(ctx, q, args...)
+	rows, err := s.Pool.Query(ctx, q, rowArgs...)
 	if err != nil {
-		return nil, fmt.Errorf("query window sessions: %w", err)
+		return SessionPage{}, fmt.Errorf("query window sessions: %w", err)
 	}
 	defer rows.Close()
 	var out []SessionSummary
@@ -430,14 +469,61 @@ func (s *Store) WindowSessions(ctx context.Context, f SessionFilter) ([]SessionS
 			&sm.TotalInput, &sm.TotalOutput, &sm.TotalCacheWrite, &sm.TotalCacheRead,
 			&sm.TotalCostUSD, &sm.CostIncomplete, &sm.Visibility, &sm.PublicID,
 			&sm.StartedAt, &sm.EndedAt, &sm.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("scan window session: %w", err)
+			return SessionPage{}, fmt.Errorf("scan window session: %w", err)
 		}
 		out = append(out, sm)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate window sessions: %w", err)
+		return SessionPage{}, fmt.Errorf("iterate window sessions: %w", err)
 	}
-	return out, nil
+
+	page := SessionPage{Sessions: out}
+	// The remainder exists only when the table filled to its cap; below it, every
+	// windowed session already shows and the footer would be empty.
+	if len(out) == windowSessionLimit {
+		rem, err := s.windowSessionRemainder(ctx, where, args)
+		if err != nil {
+			return SessionPage{}, err
+		}
+		page.Remainder = rem
+	}
+	return page, nil
+}
+
+// windowSessionRemainder aggregates the windowed sessions past the cap into the
+// footer's totals. It re-derives the same per-session grouping WindowSessionPage
+// shows, orders it identically, skips the rows already shown (OFFSET the cap), and
+// sums what is left: per-class tokens, cost, the count, and a bool_or over those
+// sessions' own incompleteness so the marker reflects the hidden tail, not the panel.
+func (s *Store) windowSessionRemainder(ctx context.Context, where string, args []any) (SessionRemainder, error) {
+	q := `
+		SELECT coalesce(count(*), 0),
+		       coalesce(sum(t.input), 0), coalesce(sum(t.output), 0),
+		       coalesce(sum(t.cache_read), 0), coalesce(sum(t.cache_write), 0),
+		       coalesce(sum(t.cost), 0), coalesce(bool_or(t.incomplete), false)
+		  FROM (
+		       SELECT coalesce(sum(ue.input_tokens), 0) AS input,
+		              coalesce(sum(ue.output_tokens), 0) AS output,
+		              coalesce(sum(ue.cache_read_tokens), 0) AS cache_read,
+		              coalesce(sum(ue.cache_write_tokens), 0) AS cache_write,
+		              coalesce(sum(ue.cost_usd), 0) AS cost,
+		              ` + costIncompleteExpr + ` AS incomplete
+		         FROM usage_events ue
+		         JOIN sessions s ON s.id = ue.session_id
+		         JOIN users u ON u.id = s.user_id
+		        WHERE ` + where + `
+		        GROUP BY s.id
+		        ORDER BY s.updated_at DESC, s.id DESC
+		        OFFSET $` + itoa(len(args)+1) + `
+		  ) t`
+	remArgs := append(append([]any{}, args...), windowSessionLimit)
+	var r SessionRemainder
+	if err := s.Pool.QueryRow(ctx, q, remArgs...).Scan(
+		&r.Sessions, &r.Input, &r.Output, &r.CacheRead, &r.CacheWrite, &r.CostUSD, &r.CostIncomplete,
+	); err != nil {
+		return SessionRemainder{}, fmt.Errorf("aggregate window session remainder: %w", err)
+	}
+	return r, nil
 }
 
 // globalSessionSelect is the column list and joins for cross-project session

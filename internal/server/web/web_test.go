@@ -53,72 +53,54 @@ func TestRowTokens(t *testing.T) {
 	}
 }
 
-// TestProjectSessionRemainder is the arithmetic that keeps the capped session table
-// reconciled with the usage panel: the shown rows plus the remainder reproduce the
-// panel totals exactly. It pins the three cases the project page relies on: a real
-// withheld tail, a table that already shows everything (no footer), and cost
-// rounding that must not surface as a negative remainder.
-func TestProjectSessionRemainder(t *testing.T) {
-	// Panel covers four sessions; the table shows two, so the footer carries the
-	// other two and the difference of every figure.
-	a := store.Analytics{Sessions: 4, TotalIn: 1000, TotalOut: 400, TotalCacheRead: 200, TotalCacheWrite: 100, TotalCost: 12.50}
-	shown := []store.SessionSummary{
-		{TotalInput: 300, TotalOutput: 100, TotalCacheRead: 50, TotalCacheWrite: 25, TotalCostUSD: 4.00},
-		{TotalInput: 200, TotalOutput: 100, TotalCacheRead: 50, TotalCacheWrite: 25, TotalCostUSD: 3.00},
+// plural switches a count's suffix so the remainder footer reads "1 session" but
+// "2 sessions" without each call site repeating the conditional.
+func TestPlural(t *testing.T) {
+	if got := plural(1); got != "" {
+		t.Errorf("plural(1) = %q, want empty", got)
 	}
-	rem := ProjectSessionRemainder(a, shown)
-	if !rem.Has() {
-		t.Fatal("remainder should report a withheld tail when fewer rows show than the panel counts")
-	}
-	if rem.Sessions != 2 {
-		t.Errorf("remainder sessions = %d, want 2", rem.Sessions)
-	}
-	// Headline tokens 1700 minus the shown 475 + 375 leaves 850; cost 12.50 minus
-	// 7.00 leaves 5.50. Shown rows plus the footer reproduce the headline.
-	if rem.Tokens != 850 {
-		t.Errorf("remainder tokens = %d, want 850", rem.Tokens)
-	}
-	if rem.CostUSD != 5.50 {
-		t.Errorf("remainder cost = %.2f, want 5.50", rem.CostUSD)
-	}
-
-	// When the table already shows every session, there is nothing to reconcile and
-	// the footer stays absent.
-	full := ProjectSessionRemainder(store.Analytics{Sessions: 2, TotalIn: 500, TotalCost: 4.0}, shown)
-	if full.Has() {
-		t.Errorf("remainder should be empty when all sessions show, got %+v", full)
-	}
-
-	// Float subtraction on cost must not leave a spurious negative once the session
-	// count says nothing is withheld; the clamp keeps the footer honest.
-	clamped := ProjectSessionRemainder(store.Analytics{Sessions: 2, TotalCost: 6.99}, shown)
-	if clamped.Has() || clamped.CostUSD < 0 {
-		t.Errorf("fully-shown table must report no remainder, got %+v", clamped)
+	for _, n := range []int{0, 2, 5} {
+		if got := plural(n); got != "s" {
+			t.Errorf("plural(%d) = %q, want \"s\"", n, got)
+		}
 	}
 }
 
 // TestProjectSessionListRemainderFooter renders the per-project table with and
 // without a withheld tail and confirms the reconciling footer appears only when
-// sessions were capped out, carrying the remainder count, tokens, and cost so the
-// visible rows plus the footer read as the panel headline.
+// sessions were capped out. Crucially it renders the hidden tail's token volume
+// through the shared token card (the same four-class breakdown every other token
+// figure carries), not a bare number, so the footer reads consistently and the
+// reader can see what the hidden sessions spent.
 func TestProjectSessionListRemainderFooter(t *testing.T) {
 	rows := []store.SessionSummary{{ID: 1, Agent: "claude", TotalInput: 300, TotalOutput: 100, TotalCostUSD: 4.00}}
 
-	withTail := renderComponent(t, ProjectSessionList(rows, SessionRemainder{Sessions: 5, Tokens: 750, CostUSD: 5.50}))
+	rem := store.SessionRemainder{
+		Sessions: 5, Input: 400, Output: 200, CacheRead: 100, CacheWrite: 50, CostUSD: 5.50,
+	}
+	withTail := renderComponent(t, ProjectSessionList(rows, rem))
 	if !strings.Contains(withTail, "+5 more sessions in this range") {
 		t.Error("footer should summarize the withheld sessions when a remainder exists")
 	}
 	if !strings.Contains(withTail, "<tfoot>") {
 		t.Error("remainder should render as a table footer")
 	}
+	// The footer token figure goes through the shared card: a tok-cell wrapping the
+	// per-class breakdown, the same treatment every other token figure gets.
+	foot := withTail[strings.Index(withTail, "<tfoot>"):]
+	for _, want := range []string{`class="tok-cell"`, "tok-tip", "<dt>Cache read</dt>", "750 tokens"} {
+		if !strings.Contains(foot, want) {
+			t.Errorf("remainder footer should carry the shared token card, missing %q", want)
+		}
+	}
 
-	none := renderComponent(t, ProjectSessionList(rows, SessionRemainder{}))
+	none := renderComponent(t, ProjectSessionList(rows, store.SessionRemainder{}))
 	if strings.Contains(none, "<tfoot>") || strings.Contains(none, "more session") {
 		t.Error("no footer should render when every windowed session is shown")
 	}
 
 	// A single withheld session reads in the singular.
-	one := renderComponent(t, ProjectSessionList(rows, SessionRemainder{Sessions: 1, Tokens: 10}))
+	one := renderComponent(t, ProjectSessionList(rows, store.SessionRemainder{Sessions: 1, Input: 10}))
 	if !strings.Contains(one, "+1 more session in this range") {
 		t.Errorf("single withheld session should read in the singular, got footer text mismatch")
 	}
