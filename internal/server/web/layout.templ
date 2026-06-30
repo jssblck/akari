@@ -46,6 +46,7 @@ templ stylesheets() {
 	<link rel="stylesheet" href="/static/css/layout.css"/>
 	<link rel="stylesheet" href="/static/css/auth.css"/>
 	<link rel="stylesheet" href="/static/css/overview.css"/>
+	<link rel="stylesheet" href="/static/css/insights.css"/>
 	<link rel="stylesheet" href="/static/css/projects.css"/>
 	<link rel="stylesheet" href="/static/css/sessions.css"/>
 	<link rel="stylesheet" href="/static/css/session.css"/>
@@ -74,6 +75,7 @@ templ sidebar(p Page) {
 		<a class="brand" href="/">@brandMark()</a>
 		<nav class="navgroup" aria-label="Primary">
 			@navItem("/", "overview", "Overview", p.Active)
+			@navItem("/insights", "insights", "Insights", p.Active)
 			@navItem("/projects", "projects", "Projects", p.Active)
 			@navItem("/sessions", "sessions", "Sessions", p.Active)
 			@navItem("/account", "account", "Account", p.Active)
@@ -97,6 +99,12 @@ templ navIcon(key string) {
 				<rect x="9.5" y="1.5" width="5" height="5" rx="1"></rect>
 				<rect x="1.5" y="9.5" width="5" height="5" rx="1"></rect>
 				<rect x="9.5" y="9.5" width="5" height="5" rx="1"></rect>
+			case "insights":
+				<path d="M2 14V2"></path>
+				<path d="M2 14h12"></path>
+				<rect x="4" y="9" width="2.4" height="3.5" rx="0.5"></rect>
+				<rect x="7.8" y="6" width="2.4" height="6.5" rx="0.5"></rect>
+				<rect x="11.6" y="3.5" width="2.4" height="9" rx="0.5"></rect>
 			case "sessions":
 				<path d="M2 4h12M2 8h12M2 12h8"></path>
 			case "projects":

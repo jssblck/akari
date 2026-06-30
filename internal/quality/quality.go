@@ -162,6 +162,68 @@ func Score(s Signals) (score int, grade string, scored bool) {
 	return score, gradeFor(score), true
 }
 
+// Archetype is a coarse shape-of-session label, the kind agentsview surfaces to let a
+// reader see at a glance whether their fleet is mostly quick lookups, standard work, or
+// long marathons. It is inferred from cheap session facts (how many human turns, how
+// many messages, how long it ran), not from the quality signals, so it answers "what
+// kind of session was this" rather than "how did it go".
+type Archetype string
+
+const (
+	// ArchetypeAutomation: no human turn at all, a subagent or scripted run. Checked
+	// first so an automated job never reads as a "quick" human session.
+	ArchetypeAutomation Archetype = "automation"
+	// ArchetypeQuick: a short exchange, a question or a one-step fix.
+	ArchetypeQuick Archetype = "quick"
+	// ArchetypeStandard: an ordinary working session.
+	ArchetypeStandard Archetype = "standard"
+	// ArchetypeDeep: a long, involved session.
+	ArchetypeDeep Archetype = "deep"
+	// ArchetypeMarathon: an exceptionally long-running or message-heavy session.
+	ArchetypeMarathon Archetype = "marathon"
+)
+
+// Archetype thresholds. A session lands in the heaviest band whose duration OR message
+// count it reaches, so a long-but-quiet session and a short-but-chatty one both read as
+// substantial. The store builds the same banding in SQL from these constants (one
+// numeric source), and ClassifyArchetype is the tested reference.
+const (
+	MarathonMinutes  = 120
+	MarathonMessages = 200
+	DeepMinutes      = 30
+	DeepMessages     = 60
+	StandardMinutes  = 5
+	StandardMessages = 15
+)
+
+// ArchetypeFacts are the cheap session facts archetype classification reads: the human
+// turn count (zero means automation), the total message count, and the wall-clock
+// duration in minutes (0 when the session carries no start/end span).
+type ArchetypeFacts struct {
+	UserMessages int
+	Messages     int
+	DurationMin  float64
+}
+
+// ClassifyArchetype buckets a session by its shape. Automation wins first (no human
+// turn). Otherwise the session takes the heaviest band whose duration or message count
+// it reaches, so neither a long idle session nor a short burst is undersold.
+func ClassifyArchetype(f ArchetypeFacts) Archetype {
+	if f.UserMessages == 0 {
+		return ArchetypeAutomation
+	}
+	switch {
+	case f.DurationMin >= MarathonMinutes || f.Messages >= MarathonMessages:
+		return ArchetypeMarathon
+	case f.DurationMin >= DeepMinutes || f.Messages >= DeepMessages:
+		return ArchetypeDeep
+	case f.DurationMin >= StandardMinutes || f.Messages >= StandardMessages:
+		return ArchetypeStandard
+	default:
+		return ArchetypeQuick
+	}
+}
+
 // gradeFor maps a 0-100 score to its letter on the standard banding.
 func gradeFor(score int) string {
 	switch {

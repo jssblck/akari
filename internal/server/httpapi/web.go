@@ -91,6 +91,22 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	render(w, r, http.StatusOK, web.OverviewPage(s.pageForNav(r, "Overview", "overview"), analytics, rng, users, selected))
 }
 
+// handleInsights is the cross-cutting analytics surface at /insights: the quality and
+// archetype distributions over the selected trailing window. Like the overview, the
+// range selector refetches this same handler and swaps the insights section
+// (hx-select="#insights"), so a plain load and an htmx swap render from one path; the
+// window rides the URL via ?range=.
+func (s *Server) handleInsights(w http.ResponseWriter, r *http.Request) {
+	rng := web.ParseRange(r.URL.Query().Get("range"))
+	ins, err := s.Store.Insights(r.Context(), store.AnalyticsFilter{Since: web.RangeSince(rng, time.Now())})
+	if err != nil {
+		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "insights"), http.StatusInternalServerError, "Could not load insights."))
+		return
+	}
+	ranges := web.RangeOptions("/insights", nil, rng)
+	render(w, r, http.StatusOK, web.InsightsPage(s.pageForNav(r, "Insights", "insights"), ins, rng, ranges))
+}
+
 // handleProjectsIndex is the projects table (moved off the root to /projects when
 // Overview became the landing surface).
 func (s *Server) handleProjectsIndex(w http.ResponseWriter, r *http.Request) {

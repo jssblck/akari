@@ -183,11 +183,24 @@ func (s *Store) Analytics(ctx context.Context, f AnalyticsFilter) (Analytics, er
 
 // clause builds the conjunctive WHERE additions for a usage_events query joined to
 // sessions as `s`: the optional project, user-set, agent, and machine scopes, plus
-// the optional trailing time bound. Agent and machine read the verbatim session
-// columns the session list filters on, so the panel and the table narrow by the
-// same values. Placeholders are numbered so it can follow an existing WHERE clause
-// that already opened the predicate.
+// the optional trailing time bound on ue.occurred_at. Agent and machine read the
+// verbatim session columns the session list filters on, so the panel and the table
+// narrow by the same values. Placeholders are numbered so it can follow an existing
+// WHERE clause that already opened the predicate.
 func (f AnalyticsFilter) clause() (string, []any) {
+	return f.clauseFor("ue.occurred_at")
+}
+
+// clauseFor is clause with the trailing-window bound applied to an arbitrary
+// timestamp expression rather than ue.occurred_at, so a query over a session-derived
+// table (session_signals, or sessions alone, which carry no usage_events to date) can
+// reuse the identical project / user / agent / machine scoping with its own time
+// column. Only the Since column differs; every other predicate is the same, so the
+// Insights distributions narrow by the same filter the usage panel does. A session
+// whose time column is NULL falls outside a Since bound (the comparison is NULL, so
+// not true), which is the right call: an undated session has no place on a windowed
+// view, the same reasoning the usage base applies to undated usage.
+func (f AnalyticsFilter) clauseFor(timeExpr string) (string, []any) {
 	var clauses string
 	var args []any
 	if f.ProjectID != 0 {
@@ -216,7 +229,7 @@ func (f AnalyticsFilter) clause() (string, []any) {
 	}
 	if !f.Since.IsZero() {
 		args = append(args, f.Since)
-		clauses += fmt.Sprintf(" AND ue.occurred_at >= $%d", len(args))
+		clauses += fmt.Sprintf(" AND %s >= $%d", timeExpr, len(args))
 	}
 	return clauses, args
 }

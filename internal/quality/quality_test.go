@@ -157,6 +157,34 @@ func TestScore(t *testing.T) {
 	}
 }
 
+// TestClassifyArchetype pins the archetype banding: automation wins on no human turn,
+// and otherwise the session takes the heaviest band reached by either its duration or
+// its message count.
+func TestClassifyArchetype(t *testing.T) {
+	cases := []struct {
+		name  string
+		facts ArchetypeFacts
+		want  Archetype
+	}{
+		{"no human turn is automation", ArchetypeFacts{UserMessages: 0, Messages: 500, DurationMin: 300}, ArchetypeAutomation},
+		{"tiny exchange is quick", ArchetypeFacts{UserMessages: 1, Messages: 4, DurationMin: 1}, ArchetypeQuick},
+		{"reaches standard by messages alone", ArchetypeFacts{UserMessages: 2, Messages: 20, DurationMin: 1}, ArchetypeStandard},
+		{"reaches standard by duration alone", ArchetypeFacts{UserMessages: 2, Messages: 6, DurationMin: 10}, ArchetypeStandard},
+		{"reaches deep by duration", ArchetypeFacts{UserMessages: 3, Messages: 20, DurationMin: 45}, ArchetypeDeep},
+		{"reaches deep by messages", ArchetypeFacts{UserMessages: 3, Messages: 80, DurationMin: 2}, ArchetypeDeep},
+		{"marathon by duration", ArchetypeFacts{UserMessages: 4, Messages: 30, DurationMin: 180}, ArchetypeMarathon},
+		{"marathon by messages", ArchetypeFacts{UserMessages: 4, Messages: 250, DurationMin: 10}, ArchetypeMarathon},
+		{"the heavier of two bands wins", ArchetypeFacts{UserMessages: 2, Messages: 16, DurationMin: 200}, ArchetypeMarathon},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := ClassifyArchetype(c.facts); got != c.want {
+				t.Errorf("ClassifyArchetype(%+v) = %s, want %s", c.facts, got, c.want)
+			}
+		})
+	}
+}
+
 // TestGradeForBoundaries pins each banding edge, so a one-point shift in a
 // threshold cannot slip through unnoticed.
 func TestGradeForBoundaries(t *testing.T) {

@@ -1,0 +1,65 @@
+package web
+
+import (
+	"fmt"
+
+	"github.com/jssblck/akari/internal/server/store"
+)
+
+// InsightsPage is the cross-cutting analytics surface at /insights: how the fleet's
+// sessions distribute across quality grades, outcomes, and archetypes, bounded to the
+// selected trailing window. Like the overview it carries no heading (the sidebar marks
+// the section); the toolbar holds the window selector and a session count for context.
+// The whole section carries id="insights" so the selector can swap it in one shot, the
+// same pattern the usage panel uses.
+templ InsightsPage(p Page, ins store.Insights, rng string, ranges []RangeOption) {
+	@layout(p) {
+		<section class="insights" id="insights">
+			<div class="ins-toolbar">
+				<div class="ins-summary">
+					<span class="label">Insights</span>
+					<span class="muted small">{ fmt.Sprintf("%d session%s in window", ins.Quality.Sessions, plural(ins.Quality.Sessions)) }</span>
+				</div>
+				@rangeSelector(ranges, "#insights")
+			</div>
+			if !ins.HasData() {
+				<div class="empty">No sessions in this window yet.</div>
+			} else {
+				<div class="ins-grid">
+					@distributionPanel("Grades", "the quality score banded A to F, unscored for an ungraded session", GradeBars(ins.Quality.Grades))
+					@distributionPanel("Outcomes", "how each session ended", OutcomeBars(ins.Quality.Outcomes))
+					@distributionPanel("Archetypes", "session shape by length and turns", ArchetypeBars(ins.Archetypes))
+				</div>
+			}
+		</section>
+	}
+}
+
+// distributionPanel renders one labeled set of horizontal bars: a title, a one-line
+// caption, and a bar per bucket sized to the largest in the set. It reuses the
+// breakdown bars' markup (.bars / .bar-row / .bar-fill[data-pct][data-color]), so the
+// shared animateBars handler grows the fills in on load and after an htmx swap, and the
+// existing bar styling applies without new chart code.
+templ distributionPanel(title, caption string, rows []DistRow) {
+	<div class="ins-panel">
+		<div class="ins-panel-head">
+			<span class="label">{ title }</span>
+			if caption != "" {
+				<span class="muted small ins-caption">{ caption }</span>
+			}
+		</div>
+		<ul class="bars dist-bars">
+			for _, r := range rows {
+				<li class="bar-row">
+					<div class="bar-head">
+						<span class="bar-label">{ r.Label }</span>
+						<span class="bar-val">{ fmt.Sprintf("%d", r.Count) }</span>
+					</div>
+					<div class="bar-track">
+						<div class="bar-fill" data-pct={ fmt.Sprintf("%.2f", r.Pct) } data-color={ r.Color }></div>
+					</div>
+				</li>
+			}
+		</ul>
+	</div>
+}
