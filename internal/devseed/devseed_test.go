@@ -4,13 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"math/rand"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jssblck/akari/internal/config"
 	"github.com/jssblck/akari/internal/server/auth"
+	"github.com/jssblck/akari/internal/server/httpapi"
+	"github.com/jssblck/akari/internal/server/reparse"
 	"github.com/jssblck/akari/internal/server/storetest"
 )
 
@@ -219,16 +223,18 @@ func isolateDiscoveryRoots(t *testing.T) string {
 
 func TestIngestNoFiles(t *testing.T) {
 	isolateDiscoveryRoots(t)
-	stats, err := ingest(context.Background(), Options{
-		ServerURL:   "http://127.0.0.1:1", // never contacted: there is nothing to upload
-		TimeLimit:   5 * time.Second,
-		Concurrency: 2,
-	}, "tok")
-	if err != nil {
-		t.Fatalf("ingest with no files should not error: %v", err)
-	}
-	if stats.discovered != 0 {
-		t.Fatalf("discovered = %d, want 0", stats.discovered)
+	for _, limit := range []time.Duration{5 * time.Second, 0} { // exercise both the deadline and no-deadline branches
+		stats, err := ingest(context.Background(), Options{
+			ServerURL:   "http://127.0.0.1:1", // never contacted: there is nothing to upload
+			TimeLimit:   limit,
+			Concurrency: 2,
+		}, "tok")
+		if err != nil {
+			t.Fatalf("ingest with no files (limit %s) should not error: %v", limit, err)
+		}
+		if stats.discovered != 0 {
+			t.Fatalf("discovered = %d, want 0 (limit %s)", stats.discovered, limit)
+		}
 	}
 }
 
@@ -260,5 +266,117 @@ func TestIngestSystemicFailureErrors(t *testing.T) {
 	}
 	if stats.failed == 0 {
 		t.Errorf("failed = %d, want at least 1", stats.failed)
+	}
+}
+
+func TestRunRejectsEmptyServerURL(t *testing.T) {
+	st := storetest.NewStore(t)
+	if err := Run(context.Background(), st, Options{ServerURL: ""}); err == nil {
+		t.Fatal("Run with an empty ServerURL should return an error")
+	}
+}
+
+// plantClaudeSession writes a minimal, valid claude session file under root, with
+// cwd recorded in its header so it resolves (rather than being skipped) and a body
+// the server accepts (newline-terminated JSON lines).
+func plantClaudeSession(t *testing.T, root, name, cwd string) {
+	t.Helper()
+	lines := []map[string]any{
+		{"type": "user", "cwd": cwd, "gitBranch": "main", "message": map[string]any{"content": "hello"}},
+		{"type": "assistant", "message": map[string]any{"content": "hi there"}},
+	}
+	var buf []byte
+	for _, l := range lines {
+		b, err := json.Marshal(l)
+		if err != nil {
+			t.Fatalf("marshal line: %v", err)
+		}
+		buf = append(buf, b...)
+		buf = append(buf, '\n')
+	}
+	if err := os.WriteFile(filepath.Join(root, name), buf, 0o644); err != nil {
+		t.Fatalf("write session: %v", err)
+	}
+}
+
+// TestRunEndToEnd drives the whole orchestration against an in-process server:
+// ensure accounts, ingest planted local sessions through the real upload/parse
+// pipeline, and reassign them. It then asserts the idempotent skip and the
+// --force clean-slate re-seed.
+func TestRunEndToEnd(t *testing.T) {
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	rp := reparse.New(ctx, st)
+	srv := httptest.NewServer(httpapi.New(st, config.Server{}, rp).Routes())
+	t.Cleanup(srv.Close)
+
+	claude := isolateDiscoveryRoots(t)
+	cwd := t.TempDir() // a real directory so sessions resolve as standalone, not orphaned
+	const planted = 12
+	for i := 0; i < planted; i++ {
+		plantClaudeSession(t, claude, srcName(i)+".jsonl", cwd)
+	}
+
+	opts := Options{ServerURL: srv.URL, NumUsers: 3, Password: "pw", TimeLimit: 30 * time.Second, Concurrency: 4}
+	if err := Run(ctx, st, opts); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// All planted sessions ingested and spread only across the demo accounts.
+	users, err := ensureUsers(ctx, st.Pool, 3, "pw")
+	if err != nil {
+		t.Fatalf("ensureUsers: %v", err)
+	}
+	valid := map[int64]bool{}
+	for _, u := range users {
+		valid[u.ID] = true
+	}
+	n, err := countSessions(ctx, st.Pool)
+	if err != nil {
+		t.Fatalf("countSessions: %v", err)
+	}
+	if n != planted {
+		t.Fatalf("ingested %d sessions, want %d", n, planted)
+	}
+	assertOwnedBy(t, st.Pool, valid)
+
+	// Idempotent: a second run with sessions present and Force unset must not
+	// ingest again or change the session set.
+	if err := Run(ctx, st, opts); err != nil {
+		t.Fatalf("Run (idempotent): %v", err)
+	}
+	if n2, _ := countSessions(ctx, st.Pool); n2 != planted {
+		t.Fatalf("idempotent run changed session count: %d, want %d", n2, planted)
+	}
+
+	// --force clears and re-seeds from a clean slate, yielding the same count with
+	// no duplicate-key collision.
+	force := opts
+	force.Force = true
+	if err := Run(ctx, st, force); err != nil {
+		t.Fatalf("Run (force): %v", err)
+	}
+	if n3, _ := countSessions(ctx, st.Pool); n3 != planted {
+		t.Fatalf("force run session count: %d, want %d", n3, planted)
+	}
+	assertOwnedBy(t, st.Pool, valid)
+}
+
+func assertOwnedBy(t *testing.T, pool *pgxpool.Pool, valid map[int64]bool) {
+	t.Helper()
+	rows, err := pool.Query(context.Background(), `SELECT user_id FROM sessions`)
+	if err != nil {
+		t.Fatalf("query owners: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var uid int64
+		if err := rows.Scan(&uid); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if !valid[uid] {
+			t.Errorf("session owned by unexpected user %d", uid)
+		}
 	}
 }
