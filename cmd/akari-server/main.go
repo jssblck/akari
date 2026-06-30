@@ -51,12 +51,6 @@ func main() {
 		}
 		return
 	}
-	if len(os.Args) > 1 && os.Args[1] == "dev-launch" {
-		if err := runDevLaunch(os.Args[2:]); err != nil {
-			log.Fatalf("akari-server dev-launch: %v", err)
-		}
-		return
-	}
 	if err := run(); err != nil {
 		log.Fatalf("akari-server: %v", err)
 	}

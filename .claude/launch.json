@@ -3,8 +3,8 @@
   "configurations": [
     {
       "name": "akari",
-      "runtimeExecutable": "go",
-      "runtimeArgs": ["run", "./cmd/akari-server", "dev-launch"],
+      "runtimeExecutable": "eph",
+      "runtimeArgs": ["dev"],
       "port": 8080,
       "autoPort": true
     }
