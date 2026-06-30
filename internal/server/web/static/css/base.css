@@ -113,6 +113,24 @@ pre, code, .tool-body, .diff, .diff-body {
 }
 ::selection { background: rgba(198, 168, 242, 0.30); color: var(--text); }
 
+/* ---- Scrollbars ----
+   The OS default scrollbar is a wide grey slab that reads as foreign chrome on a
+   dark instrument panel, most visibly on the session outline rail. Recast it as a
+   thin track-less bar in the panel's own steel: the thumb sits low-contrast at
+   rest and brightens on hover, so the rail stays quiet until the eye is on it.
+   Firefox takes the two-keyword form; Chromium and Safari take the ::-webkit
+   pseudo-elements. */
+* { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong); border-radius: 99px;
+  border: 2px solid transparent; background-clip: padding-box;
+  transition: background var(--dur-fast) var(--ease-state);
+}
+::-webkit-scrollbar-thumb:hover { background: var(--faint); background-clip: padding-box; }
+::-webkit-scrollbar-corner { background: transparent; }
+
 a { color: var(--lilac); text-decoration: none; }
 a:hover { text-decoration: underline; text-underline-offset: 2px; }
 
