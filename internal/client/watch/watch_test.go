@@ -92,13 +92,15 @@ func TestWatchDetectsNewFile(t *testing.T) {
 func TestWatchHonorsExcludes(t *testing.T) {
 	dir := t.TempDir()
 	keep := filepath.Join(dir, "proj", "keep.jsonl")
-	excluded := filepath.Join(dir, "proj", "tmp", "drop.jsonl")
+	excluded := filepath.Join(dir, "proj", "dropme", "drop.jsonl")
 	writeSession(t, keep)
 	writeSession(t, excluded)
 
 	fn, ch := recorder()
 	opt := fastOptions()
-	opt.Excludes = []string{"**/tmp/**"}
+	// "dropme", not "tmp": t.TempDir() is under /tmp on Linux, so **/tmp/** would
+	// exclude the kept file too and the test would pass for the wrong reason.
+	opt.Excludes = []string{"**/dropme/**"}
 	w := New([]discover.Root{{Agent: "claude", Dir: dir}}, fn, opt)
 
 	ctx, cancel := context.WithCancel(context.Background())

@@ -95,10 +95,11 @@ func TestExcluderMatches(t *testing.T) {
 			t.Errorf("Excluded(%q) = %v, want %v", c.path, got, c.want)
 		}
 	}
-	// Backslash paths normalize to forward slashes before matching, so a Windows
-	// path is excluded by the same forward-slash pattern.
-	if !ex.Excluded(`C:\Users\grace\proj\tmp\d.jsonl`) {
-		t.Error("backslash path under tmp should be excluded")
+	// An OS-native path normalizes to forward slashes before matching, so the same
+	// forward-slash pattern excludes it on either OS: FromSlash yields a backslash
+	// path on Windows (which ToSlash must convert back) and a no-op on Unix.
+	if !ex.Excluded(filepath.FromSlash("/home/grace/proj/tmp/d.jsonl")) {
+		t.Error("OS-native path under tmp should be excluded")
 	}
 	// The zero Excluder excludes nothing.
 	if (Excluder{}).Excluded("/anything/at/all/tmp/x.jsonl") {
@@ -126,12 +127,15 @@ func TestDiscoverExcludes(t *testing.T) {
 	dir := t.TempDir()
 	claudeDir := filepath.Join(dir, "claude")
 	write(t, filepath.Join(claudeDir, "proj-a", "keep.jsonl"))
-	write(t, filepath.Join(claudeDir, "proj-a", "tmp", "drop.jsonl"))    // under a subtree-excluded dir
+	write(t, filepath.Join(claudeDir, "proj-a", "dropme", "drop.jsonl")) // under a subtree-excluded dir
 	write(t, filepath.Join(claudeDir, "proj-b", "secret.private.jsonl")) // excluded by suffix
 	write(t, filepath.Join(claudeDir, "private", "inside.jsonl"))        // under an exact-name excluded dir
 
+	// The excluded segment is "dropme", not "tmp": t.TempDir() lives under /tmp on
+	// Linux, so a **/tmp/** pattern would match the fixtures' own path and exclude
+	// everything, masking what this test checks.
 	roots := []Root{{"claude", claudeDir}}
-	files, err := Discover(roots, NewExcluder([]string{"**/tmp/**", "*.private.jsonl", "**/private"}))
+	files, err := Discover(roots, NewExcluder([]string{"**/dropme/**", "*.private.jsonl", "**/private"}))
 	if err != nil {
 		t.Fatal(err)
 	}
