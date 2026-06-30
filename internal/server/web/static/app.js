@@ -504,6 +504,20 @@
     window.open(href, "_blank");
   });
 
+  // ---------------- Auto-submitting filter selects ----------------
+  // The Sessions toolbar is a GET form whose selects carry data-autosubmit: picking
+  // a value submits the form (a full navigation), so the toolbar, the active-filter
+  // chips, and the feed all re-render in agreement. A no-script Apply button covers
+  // the case where this never runs.
+  document.addEventListener("change", function (e) {
+    var el = e.target;
+    if (!el || !el.matches || !el.matches("select[data-autosubmit]")) return;
+    var form = el.form;
+    if (!form) return;
+    if (form.requestSubmit) form.requestSubmit();
+    else form.submit();
+  });
+
   // ---------------- Init ----------------
   function init() {
     animateBars();

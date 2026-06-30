@@ -170,65 +170,6 @@ func isDefaultOrder(f store.SessionFilter) bool {
 	return f.Sort == "" || (f.Sort == store.DefaultSort && f.Desc)
 }
 
-// sortDefaultDesc is the direction a first click on a column selects: counts and
-// timestamps read most-useful biggest/newest first, text columns alphabetically.
-func sortDefaultDesc(key string) bool {
-	switch key {
-	case "messages", "tokens", "updated":
-		return true
-	default:
-		return false
-	}
-}
-
-// SortHref is the link for a global session list column header, preserving the
-// active facet selection. Clicking the column already sorted flips its direction;
-// clicking another column selects it in its natural default direction.
-func SortHref(f store.SessionFilter, key string) templ.SafeURL {
-	if effSort(f) == key {
-		f.Desc = !f.Desc
-	} else {
-		f.Desc = sortDefaultDesc(key)
-	}
-	f.Sort = key
-	return SessionsHref(f)
-}
-
-// sortThClass builds a header cell's classes: the sortable marker, any column
-// extra (col-grow / num), and the active-sort state with its direction, which
-// the stylesheet reads to light the correct glyph.
-func sortThClass(key, extra string, f store.SessionFilter) string {
-	cls := "sortable"
-	if extra != "" {
-		cls += " " + extra
-	}
-	if effSort(f) == key {
-		if f.Desc {
-			cls += " sorted desc"
-		} else {
-			cls += " sorted asc"
-		}
-	}
-	return cls
-}
-
-// sortIsActive reports whether key is the column the list is currently sorted by,
-// so the header can render the directional glyph rather than the idle one.
-func sortIsActive(key string, f store.SessionFilter) bool { return effSort(f) == key }
-
-// ariaSort is the WAI-ARIA sort state for a column header: "ascending" or
-// "descending" on the active column, "none" on the rest, so assistive tech
-// announces the order the same way the glyph shows it.
-func ariaSort(key string, f store.SessionFilter) string {
-	if effSort(f) != key {
-		return "none"
-	}
-	if f.Desc {
-		return "descending"
-	}
-	return "ascending"
-}
-
 // SessionsPath is the full global session-list path for the current selection,
 // used as the htmx swap target so a facet click updates the URL coherently.
 func SessionsPath(f store.SessionFilter) string {
@@ -301,33 +242,6 @@ func facetHref(field, value string, f store.SessionFilter) templ.SafeURL {
 		return MachineFacetHref(f, value)
 	}
 	return SessionsHref(f)
-}
-
-// facetOptClass marks a text facet option active when it is the current
-// selection for its field.
-func facetOptClass(field, value string, f store.SessionFilter) string {
-	active := (field == "agent" && f.Agent == value) ||
-		(field == "user" && f.Username == value) ||
-		(field == "machine" && f.Machine == value)
-	if active {
-		return "opt active"
-	}
-	return "opt"
-}
-
-// projectOptClass marks the selected project option active.
-func projectOptClass(id int64, f store.SessionFilter) string {
-	if f.ProjectID == id {
-		return "opt active"
-	}
-	return "opt"
-}
-
-// swatchClass maps a categorical index to its viz-ramp swatch class (viz-0..7),
-// matching VizColor's ordering so a project's rail swatch and any chart series
-// agree.
-func swatchClass(i int) string {
-	return fmt.Sprintf("swatch viz-%d", i%8)
 }
 
 // projectLabelByID finds a project facet's display label by id, for the active

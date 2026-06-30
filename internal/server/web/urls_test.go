@@ -46,50 +46,12 @@ func TestFacetToggleHrefs(t *testing.T) {
 	}
 }
 
-func TestSortHref(t *testing.T) {
-	// Selecting a fresh column uses its natural default direction: text ascending,
-	// figures and time descending. The default column (updated desc) stays a bare
-	// URL.
-	cases := []struct {
-		name string
-		f    store.SessionFilter
-		key  string
-		want string
-	}{
-		{"text column defaults ascending", store.SessionFilter{Sort: "updated", Desc: true}, "agent", "/sessions?dir=asc&sort=agent"},
-		{"count column defaults descending", store.SessionFilter{Sort: "updated", Desc: true}, "messages", "/sessions?dir=desc&sort=messages"},
-		{"flip active column to ascending", store.SessionFilter{Sort: "updated", Desc: true}, "updated", "/sessions?dir=asc&sort=updated"},
-		{"flip active column back to default is bare", store.SessionFilter{Sort: "updated", Desc: false}, "updated", "/sessions"},
-		{"sort preserves active facets", store.SessionFilter{Agent: "claude", Sort: "updated", Desc: true}, "user", "/sessions?agent=claude&dir=asc&sort=user"},
-		{"flip active text column to descending", store.SessionFilter{Sort: "agent", Desc: false}, "agent", "/sessions?dir=desc&sort=agent"},
-	}
-	for _, c := range cases {
-		if got := string(SortHref(c.f, c.key)); got != c.want {
-			t.Errorf("SortHref(%s) = %q, want %q", c.name, got, c.want)
-		}
-	}
-}
-
 func TestFacetHrefPreservesSort(t *testing.T) {
 	// A facet toggle holds the active sort so filtering does not silently reset the
 	// reader's chosen order.
 	f := store.SessionFilter{Sort: "tokens", Desc: true}
 	if got := string(AgentFacetHref(f, "claude")); got != "/sessions?agent=claude&dir=desc&sort=tokens" {
 		t.Errorf("facet toggle should preserve sort, got %q", got)
-	}
-}
-
-func TestAriaSort(t *testing.T) {
-	desc := store.SessionFilter{Sort: "agent", Desc: true}
-	if got := ariaSort("agent", desc); got != "descending" {
-		t.Errorf("active descending aria-sort = %q", got)
-	}
-	if got := ariaSort("user", desc); got != "none" {
-		t.Errorf("inactive aria-sort = %q", got)
-	}
-	asc := store.SessionFilter{Sort: "agent", Desc: false}
-	if got := ariaSort("agent", asc); got != "ascending" {
-		t.Errorf("active ascending aria-sort = %q", got)
 	}
 }
 
