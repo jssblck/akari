@@ -28,6 +28,13 @@ type Page struct {
 	// "sessions", "projects", "account"), so the shell can mark the
 	// current section. Empty leaves no item active.
 	Active string
+	// OverviewPublic reports whether the signed-in user has published their own
+	// usage overview, which drives the account page's Publicity controls and the
+	// "Public" badge on the signed-in overview. The share link is /u/<username>, so
+	// Username (already on the page) is all the badge and account section need to
+	// build it. This is populated from the same UserByID lookup that fills Username,
+	// so reading it costs no extra query.
+	OverviewPublic bool
 }
 
 // IsLocalKind reports whether a project kind is one of the non-remote kinds
