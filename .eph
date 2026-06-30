@@ -53,3 +53,10 @@ env.AKARI_LISTEN=:${server.port}
 # real health endpoint rather than eph's brief default readiness pause.
 healthcheck=curl -sf http://localhost:${server.port}/healthz
 ready-timeout=120
+# Seed example data for local development once the server is healthy. dev-seed
+# creates a few demo accounts, ingests this machine's real agent sessions through
+# the normal upload/parse pipeline (bounded to 30s), then spreads them across the
+# accounts. It reads AKARI_DATABASE_URL and AKARI_URL from the injected env, is
+# idempotent (a no-op once sessions exist; pass --force to re-seed), and is
+# best-effort (it logs and exits 0 on failure, so it never blocks `eph up`).
+post-start=go run ./cmd/akari-server dev-seed
