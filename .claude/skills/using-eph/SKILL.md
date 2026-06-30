@@ -169,6 +169,39 @@ of eph's injected variables, piping, or globbing. `eph run` exits with the
 command's own exit code. Use it for repeatable operations (seeding, resets,
 ad-hoc queries) -- unlike `post-start`, it runs every time you invoke it.
 
+## Claude Desktop preview servers: `eph dev`
+
+`eph dev` runs the whole stack in the foreground for a Claude Desktop preview
+server (`.claude/launch.json`), which launches one command and watches its port
+but has no setup or teardown hook. `eph dev` fills both: it brings every service
+up and runs `post-start` (seeding), foregrounds a `run=` app with eph's own
+stdin, stdout, and stderr wired through to it, and on stop tears the stack down
+-- `eph down` by default, or `eph clean` with `--clean`.
+
+```jsonc
+// .claude/launch.json -- point the preview server at eph dev
+{
+  "version": "0.0.1",
+  "configurations": [
+    { "name": "web", "runtimeExecutable": "eph", "runtimeArgs": ["dev"], "port": 3000, "autoPort": true }
+  ]
+}
+```
+
+- Model the app as a `run=` service with `port=auto`. `eph dev` binds it to the
+  `$PORT` the preview server injects (its `autoPort`), so the preview connects to
+  the right port. Do not also give the app a fixed port.
+- With no SERVICE the sole `run=` service is foregrounded; `eph dev <service>`
+  picks one when the `.eph` defines several.
+- Teardown defaults to `eph down` (keeps data for a fast relaunch, since Claude
+  restarts the server during a session). Use `eph dev --clean` (`runtimeArgs:
+  ["dev", "--clean"]`) for a pristine reset on every launch.
+- A hard kill (not a normal stop) skips teardown and leaves services up,
+  recoverable with `eph down`. If the app crashes on its own, `eph dev` leaves
+  services up for inspection (`eph logs <service>`) and exits non-zero.
+- `eph` must be on the app's PATH; the desktop app may not inherit your shell
+  PATH, so use an absolute path in `runtimeExecutable` if it cannot find `eph`.
+
 ## Inspecting logs: `eph logs`
 
 ```sh
