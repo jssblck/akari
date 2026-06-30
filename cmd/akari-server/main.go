@@ -45,6 +45,12 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "dev-seed" {
+		if err := runDevSeed(os.Args[2:]); err != nil {
+			log.Fatalf("akari-server dev-seed: %v", err)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		log.Fatalf("akari-server: %v", err)
 	}

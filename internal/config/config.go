@@ -32,7 +32,7 @@ type Server struct {
 func LoadServer() (Server, error) {
 	s := Server{
 		DatabaseURL:  os.Getenv("AKARI_DATABASE_URL"),
-		Listen:       envOr("AKARI_LISTEN", ":8080"),
+		Listen:       listenAddr(),
 		CookieSecure: !truthy(os.Getenv("AKARI_COOKIE_INSECURE")),
 	}
 	if s.DatabaseURL == "" {
@@ -61,6 +61,20 @@ func parseDuration(v string, fallback time.Duration) (time.Duration, error) {
 		return 0, fmt.Errorf("must not be negative")
 	}
 	return d, nil
+}
+
+// listenAddr resolves the HTTP bind address. AKARI_LISTEN wins when set. Failing
+// that it honors PORT (the convention many process supervisors and dev tools,
+// including this repo's preview launcher, use to hand a process its assigned
+// port), binding all interfaces on that port. The final fallback is :8080.
+func listenAddr() string {
+	if v := os.Getenv("AKARI_LISTEN"); v != "" {
+		return v
+	}
+	if p := os.Getenv("PORT"); p != "" {
+		return ":" + p
+	}
+	return ":8080"
 }
 
 func envOr(key, fallback string) string {
