@@ -2,8 +2,12 @@ package devseed
 
 import (
 	"context"
+	"encoding/json"
 	"math/rand"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jssblck/akari/internal/server/auth"
@@ -181,4 +185,80 @@ func TestReassignSessions(t *testing.T) {
 
 func srcName(i int) string {
 	return "src-" + string(rune('a'+i/26)) + string(rune('a'+i%26))
+}
+
+func TestEnsureUsersClampsLowerBound(t *testing.T) {
+	st := storetest.NewStore(t)
+	users, err := ensureUsers(context.Background(), st.Pool, 0, "pw")
+	if err != nil {
+		t.Fatalf("ensureUsers: %v", err)
+	}
+	if len(users) != 1 {
+		t.Fatalf("n=0 should clamp to 1 account, got %d", len(users))
+	}
+}
+
+func TestReassignSessionsRejectsNoUsers(t *testing.T) {
+	st := storetest.NewStore(t)
+	if _, err := reassignSessions(context.Background(), st.Pool, nil, rand.New(rand.NewSource(1))); err == nil {
+		t.Fatal("reassignSessions with no users should return an error")
+	}
+}
+
+// isolateDiscoveryRoots points all three agents' discovery roots at fresh, empty
+// temp dirs via their documented env overrides, so a test sees only the files it
+// plants and never this machine's real session logs. It returns the claude root.
+func isolateDiscoveryRoots(t *testing.T) string {
+	t.Helper()
+	claude := t.TempDir()
+	t.Setenv("CLAUDE_PROJECTS_DIR", claude)
+	t.Setenv("CODEX_SESSIONS_DIR", t.TempDir())
+	t.Setenv("PI_DIR", t.TempDir())
+	return claude
+}
+
+func TestIngestNoFiles(t *testing.T) {
+	isolateDiscoveryRoots(t)
+	stats, err := ingest(context.Background(), Options{
+		ServerURL:   "http://127.0.0.1:1", // never contacted: there is nothing to upload
+		TimeLimit:   5 * time.Second,
+		Concurrency: 2,
+	}, "tok")
+	if err != nil {
+		t.Fatalf("ingest with no files should not error: %v", err)
+	}
+	if stats.discovered != 0 {
+		t.Fatalf("discovered = %d, want 0", stats.discovered)
+	}
+}
+
+func TestIngestSystemicFailureErrors(t *testing.T) {
+	claude := isolateDiscoveryRoots(t)
+
+	// Plant one discoverable claude session whose cwd exists, so it resolves and is
+	// uploaded rather than skipped. The header only needs cwd.
+	header, err := json.Marshal(map[string]string{"cwd": t.TempDir(), "gitBranch": "main"})
+	if err != nil {
+		t.Fatalf("marshal header: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(claude, "session.jsonl"), append(header, '\n'), 0o644); err != nil {
+		t.Fatalf("write session file: %v", err)
+	}
+
+	// Point at a closed port so every upload fails at announce. With nothing
+	// ingested, ingest must surface a contextual error rather than report success.
+	stats, err := ingest(context.Background(), Options{
+		ServerURL:   "http://127.0.0.1:1",
+		TimeLimit:   10 * time.Second,
+		Concurrency: 2,
+	}, "tok")
+	if err == nil {
+		t.Fatalf("ingest with all uploads failing should error; stats=%+v", stats)
+	}
+	if stats.uploaded != 0 {
+		t.Errorf("uploaded = %d, want 0", stats.uploaded)
+	}
+	if stats.failed == 0 {
+		t.Errorf("failed = %d, want at least 1", stats.failed)
+	}
 }

@@ -265,7 +265,10 @@ func ingest(ctx context.Context, opts Options, token string) (ingestStats, error
 		defer cancel()
 	}
 
-	var mu sync.Mutex
+	var (
+		mu       sync.Mutex
+		firstErr error // a sample real upload failure, for a contextual error below
+	)
 	sem := make(chan struct{}, opts.Concurrency)
 	var wg sync.WaitGroup
 	for _, f := range files {
@@ -296,6 +299,9 @@ func ingest(ctx context.Context, opts Options, token string) (ingestStats, error
 				stats.incomplete++
 			case r.Err != nil:
 				stats.failed++
+				if firstErr == nil {
+					firstErr = r.Err
+				}
 			case r.Action == upload.ActionUploaded, r.Action == upload.ActionReset:
 				stats.uploaded++
 			case r.Action == upload.ActionUpToDate:
@@ -304,6 +310,16 @@ func ingest(ctx context.Context, opts Options, token string) (ingestStats, error
 		}(f)
 	}
 	wg.Wait()
+
+	// A handful of bad session files among many good ones is tolerable: the seed
+	// still produced data, so the failures are reported in the stats and the run
+	// proceeds. But failures with nothing uploaded at all signal a systemic
+	// problem the caller must hear about (a wrong server URL, a server not
+	// accepting connections, an invalid token, or 5xx), so --strict can fail and
+	// the best-effort path can log it rather than silently "succeed" with no data.
+	if stats.uploaded == 0 && stats.failed > 0 {
+		return stats, fmt.Errorf("all %d upload attempt(s) failed with nothing ingested; first error: %w", stats.failed, firstErr)
+	}
 	return stats, nil
 }
 
