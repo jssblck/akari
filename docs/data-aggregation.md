@@ -1,0 +1,101 @@
+# Token and cost aggregation: bases and invariants
+
+This is the inventory the audit in issue #41 asked for: every place akari
+aggregates token or cost data, which base each reads, and the invariant that keeps
+the bases agreeing. It exists because overlapping views that each derive "the same"
+number from a different query have nothing forcing them to agree, and #40 was the
+bug that shape produced (the overview headline diverging from the rows beneath it
+by an order of magnitude).
+
+This is the token/cost instance of a general pattern: any maintained projection of
+the same underlying data (a denormalized rollup, a counter, a facet, a cache, a
+running hash) can drift from its source unless something forces it equal. The
+`projection-consistency` bastion reviewer enforces the general rule across the
+codebase; this document is the worked example, the one cluster written out in full.
+
+The rule the codebase follows now:
+
+> When several views present the same underlying datum, build them off one
+> canonical aggregate; where two bases must coexist (a cheap rollup for a long
+> index, the granular ledger for a chart), pin the invariant that keeps them equal
+> with a test, so they reconcile by construction rather than by luck.
+
+## The two bases
+
+Token and cost data is aggregated from exactly two places.
+
+1. **The ledger: `usage_events`.** The granular, per-event record. One row per
+   priced (or unpriced) usage event, carrying the four token classes (input,
+   output, cache read, cache write), a cost, an `occurred_at`, and the dedup keys
+   that make a replayed line idempotent. Summing it is the source of truth.
+
+2. **The rollups: `sessions.total_*`.** Per-session running totals
+   (`total_input_tokens`, `total_output_tokens`, `total_cache_read_tokens`,
+   `total_cache_write_tokens`, `total_cost_usd`, plus `message_count` and the
+   generated `total_tokens`). They are maintained incrementally at write time so a
+   long list or index never has to scan the ledger.
+
+## The load-bearing invariant
+
+The rollups are folded from exactly the usage rows that survive their `ON CONFLICT`
+dedup. `applyDelta` counts only the rows that actually insert (`RowsAffected() > 0`)
+and `applyAggregates` adds those to `sessions.total_*`; a reparse zeroes the rollups
+(`resetSessionAggregates`) and replays the identical fold. So, for every session:
+
+> `sessions.total_<class> == sum(usage_events.<class>_tokens)` for each of the four
+> classes, `sessions.total_cost_usd == sum(usage_events.cost_usd)`, and
+> `sessions.message_count == count(messages)`.
+
+This holds by construction, but nothing in the schema enforces it, so it is exactly
+the kind of thing that rots. It is pinned directly by
+`TestSessionRollupMatchesLedger` (after the live ingest path and after a reparse,
+across multiple agents, models, cache tokens, duplicate usage, undated usage, and
+unpriced usage) and, for the specific Claude duplicate-usage case, by
+`TestClaudeDuplicateUsageCountedOnce` in the parse package.
+
+## The one legitimate gap
+
+The analytics surfaces filter `occurred_at IS NOT NULL`: an undated event has no day
+to plot, so counting it in a headline but not in the daily chart would make the total
+exceed the sum of the chart (the exact drift #40 fixed). The rollups carry no such
+filter; they count every surviving event. So the rollup base and the ledger-analytics
+base differ by exactly the undated usage, and by nothing else. In practice that is
+zero (Claude, Codex, and pi all stamp the turn a usage line belongs to, so a NULL
+`occurred_at` is a malformed transcript to fix at ingest, not usage to scatter across
+the dashboard), but it is a real difference and is pinned to exactly the undated
+amount by `TestUndatedUsageIsTheOnlyRollupAnalyticsGap`.
+
+## Where each view reads, and how it reconciles
+
+| View | Function | Base | Reconciliation |
+| --- | --- | --- | --- |
+| Overview usage panel (totals, daily grid, by-model, by-agent) | `Store.Analytics(0, …)` | ledger | One base grouped three ways; headline summed from the by-agent split, so `sum(by-model) == sum(by-agent) == headline` by construction (#40). |
+| Project usage panel | `Store.Analytics(projectID, …)` | ledger | Same function, scoped to one project. The project header shows no rollup figure of its own (`Store.Project` loads identity only), so nothing on the page contradicts the panel. |
+| Project sparklines (30d trend on the projects index) | `Store.ProjectSparklines` | ledger | Per-project daily cost over a trailing window; a trend, not a lifetime total, so it is not expected to equal the index's lifetime columns. |
+| Projects index (tokens, cost columns) | `Store.ListProjects` | rollups | Lifetime per-project totals. Must equal the project usage panel's all-time figure (same datum, two pages). Pinned by `TestProjectsIndexReconcilesWithAnalytics`. |
+| Global session list / project session list / subagents | `Store.ListAllSessions` / `Store.ListSessions` / `Store.Subagents` | rollups | Per-session rollups; the `tokens` sort walks the generated `total_tokens` column. |
+| Session detail header (Tokens tile, cost) | `Store.SessionDetailByID` | rollups | Per-session rollups. The session page shows no ledger-derived figure beside them, so the invariant alone keeps them honest. |
+
+### Why the index stays on rollups
+
+Converging the projects index onto the ledger would mean a `GROUP BY` over
+`usage_events` for every project on a list that should be a cheap rollup read. That
+is the case issue #41 explicitly carves out: where a view genuinely needs the cheaper
+rollup and another needs the ledger, keep both and pin the invariant with a test
+rather than forcing one base. That is what `TestProjectsIndexReconcilesWithAnalytics`
+does.
+
+## When you add a view
+
+If you add a surface that shows a token or cost figure:
+
+1. Read from the base the table above uses for that cluster. Do not introduce a third
+   query that sums the same datum a new way.
+2. If your view genuinely needs the other base (a cheap index that should not scan the
+   ledger, say), add or extend a reconciliation test so the two bases are pinned equal,
+   the way `TestProjectsIndexReconcilesWithAnalytics` pins the index against the panel.
+3. If you add a fifth token class or a new usage column, thread it through every fold
+   (`applyDelta`, `applyAggregates`, `resetSessionAggregates`) and every aggregate
+   query, and extend the invariant test. Dropping a class from one side is the
+   regression these tests and the `projection-consistency` bastion reviewer exist to
+   catch.
