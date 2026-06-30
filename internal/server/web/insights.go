@@ -2,7 +2,9 @@ package web
 
 import (
 	"fmt"
+	"math"
 	"strings"
+	"time"
 
 	"github.com/jssblck/akari/internal/server/store"
 )
@@ -20,6 +22,54 @@ func ConcurrencyBusiest(c store.ConcurrencyStats) string {
 // reads as a rate ("1.4 concurrent") without implying false precision.
 func FmtAvgConcurrent(v float64) string {
 	return fmt.Sprintf("%.1f", v)
+}
+
+// FmtRate renders a per-minute throughput to one decimal, the same granularity as the
+// concurrency average so the velocity and concurrency figures read in one register.
+func FmtRate(v float64) string {
+	return fmt.Sprintf("%.1f", v)
+}
+
+// VelocityMsgsRate and VelocityToolsRate format the throughput figures, dashing them when
+// the scope had no active time to divide by (see VelocityStats.HasThroughput): a 0.0 over
+// an undefined denominator would read as a real "no work happened" rate rather than "no
+// rate to show".
+func VelocityMsgsRate(v store.VelocityStats) string {
+	if !v.HasThroughput() {
+		return "-"
+	}
+	return FmtRate(v.MsgsPerActiveMin)
+}
+
+func VelocityToolsRate(v store.VelocityStats) string {
+	if !v.HasThroughput() {
+		return "-"
+	}
+	return FmtRate(v.ToolsPerActiveMin)
+}
+
+// FmtLatency renders a turn-cycle latency at the coarsest unit that still reads honestly:
+// seconds under a minute, minutes and seconds under an hour, hours and minutes beyond. A
+// zero or negative duration (no measured turn) shows a dash rather than "0s", so an absent
+// figure never reads as an instantaneous reply. The value rounds to whole seconds before
+// the unit split, so 59.6s reads as "1m 0s" rather than a misleading "60s".
+func FmtLatency(d time.Duration) string {
+	secs := d.Seconds()
+	if secs <= 0 {
+		return "-"
+	}
+	if secs < 1 {
+		return "<1s"
+	}
+	whole := int(math.Round(secs))
+	switch {
+	case whole < 60:
+		return fmt.Sprintf("%ds", whole)
+	case whole < 3600:
+		return fmt.Sprintf("%dm %ds", whole/60, whole%60)
+	default:
+		return fmt.Sprintf("%dh %dm", whole/3600, (whole%3600)/60)
+	}
 }
 
 // Distribution bar colours, drawn from the data-viz ramp and the status palette so the

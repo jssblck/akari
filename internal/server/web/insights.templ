@@ -6,12 +6,13 @@ import (
 	"github.com/jssblck/akari/internal/server/store"
 )
 
-// InsightsPage is the cross-cutting analytics surface at /insights: how the fleet's
-// sessions distribute across quality grades, outcomes, and archetypes, bounded to the
-// selected trailing window. Like the overview it carries no heading (the sidebar marks
-// the section); the toolbar holds the window selector and a session count for context.
-// The whole section carries id="insights" so the selector can swap it in one shot, the
-// same pattern the usage panel uses.
+// InsightsPage is the cross-cutting analytics surface at /insights: two headline bands of
+// measured rates (concurrency and velocity) over the fleet, then how the window's sessions
+// distribute across quality grades, outcomes, and archetypes. Everything is bounded to the
+// selected trailing window. Like the overview it carries no heading (the sidebar marks the
+// section); the toolbar holds the window selector and a session count for context. The
+// whole section carries id="insights" so the selector can swap it in one shot, the same
+// pattern the usage panel uses.
 templ InsightsPage(p Page, ins store.Insights, rng string, ranges []RangeOption) {
 	@layout(p) {
 		<section class="insights" id="insights">
@@ -27,6 +28,7 @@ templ InsightsPage(p Page, ins store.Insights, rng string, ranges []RangeOption)
 			} else {
 				<div class="ins-headline">
 					@concurrencyPanel(ins.Concurrency)
+					@velocityPanel(ins.Velocity)
 				</div>
 				<div class="ins-grid">
 					@distributionPanel("Grades", "the quality score banded A to F, unscored for an ungraded session", GradeBars(ins.Quality.Grades))
@@ -38,7 +40,7 @@ templ InsightsPage(p Page, ins store.Insights, rng string, ranges []RangeOption)
 	}
 }
 
-// concurrencyPanel is the headline band: how many sessions overlapped at the fleet's
+// concurrencyPanel is one headline band: how many sessions overlapped at the fleet's
 // peak (and when), which single user ran the most at once, and the average concurrency
 // across the span the sessions cover. Three figures read left to right, the same
 // instrument tone as the overview stat tiles, since concurrency is a measured rate
@@ -52,21 +54,61 @@ templ concurrencyPanel(c store.ConcurrencyStats) {
 		if !c.HasData() {
 			<div class="muted small">No sessions with a measured start and end in this window.</div>
 		} else {
-			<div class="conc-figs">
-				<div class="conc-fig">
-					<div class="conc-v">{ fmt.Sprintf("%d", c.FleetPeak) }</div>
-					<div class="conc-k">peak at once</div>
+			<div class="ins-figs">
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ fmt.Sprintf("%d", c.FleetPeak) }</div>
+					<div class="ins-fig-k">peak at once</div>
 					if !c.FleetPeakAt.IsZero() {
-						<div class="conc-sub muted small">{ FmtTimeAt(c.FleetPeakAt) }</div>
+						<div class="ins-fig-sub muted small">{ FmtTimeAt(c.FleetPeakAt) }</div>
 					}
 				</div>
-				<div class="conc-fig">
-					<div class="conc-v">{ ConcurrencyBusiest(c) }</div>
-					<div class="conc-k">busiest user</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ ConcurrencyBusiest(c) }</div>
+					<div class="ins-fig-k">busiest user</div>
 				</div>
-				<div class="conc-fig">
-					<div class="conc-v">{ FmtAvgConcurrent(c.AvgConcurrent) }</div>
-					<div class="conc-k">average concurrent</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ FmtAvgConcurrent(c.AvgConcurrent) }</div>
+					<div class="ins-fig-k">average concurrent</div>
+				</div>
+			</div>
+		}
+	</div>
+}
+
+// velocityPanel is the other headline band: how fast the agent starts replying after a
+// prompt (the turn-cycle latency at the median and the slow tail), how slow the opening
+// reply runs on its own, and how densely messages and tool calls land per active minute.
+// It reuses the same figure row as concurrency, since velocity is the same kind of
+// measured rate rather than a bucketed distribution.
+templ velocityPanel(v store.VelocityStats) {
+	<div class="ins-panel ins-velocity">
+		<div class="ins-panel-head">
+			<span class="label">Velocity</span>
+			<span class="muted small ins-caption">how fast turns cycle and work moves</span>
+		</div>
+		if !v.HasData() {
+			<div class="muted small">No timed turns in this window.</div>
+		} else {
+			<div class="ins-figs">
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ FmtLatency(v.ResponseP50) }</div>
+					<div class="ins-fig-k">response p50</div>
+				</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ FmtLatency(v.ResponseP90) }</div>
+					<div class="ins-fig-k">response p90</div>
+				</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ FmtLatency(v.FirstResponseP50) }</div>
+					<div class="ins-fig-k">opening p50</div>
+				</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ VelocityMsgsRate(v) }</div>
+					<div class="ins-fig-k">msgs / active min</div>
+				</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ VelocityToolsRate(v) }</div>
+					<div class="ins-fig-k">tools / active min</div>
 				</div>
 			</div>
 		}

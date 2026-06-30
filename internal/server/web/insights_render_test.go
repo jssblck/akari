@@ -18,6 +18,16 @@ func sampleInsights() store.Insights {
 			AvgConcurrent:   1.7,
 			Sessions:        15,
 		},
+		Velocity: store.VelocityStats{
+			ResponseP50:       25 * time.Second,
+			ResponseP90:       90 * time.Second,
+			FirstResponseP50:  8 * time.Second,
+			MsgsPerActiveMin:  4.2,
+			ToolsPerActiveMin: 2.5,
+			ActiveSeconds:     600,
+			Turns:             12,
+			Sessions:          15,
+		},
 		Quality: store.QualityDistribution{
 			Grades: []store.LabeledCount{
 				{Key: "A", Count: 5}, {Key: "B", Count: 3}, {Key: "C", Count: 2},
@@ -53,6 +63,12 @@ func TestInsightsPageRendersDistributions(t *testing.T) {
 		`>peak at once<`,           // its label
 		`ada (3)`,                  // the busiest user and their peak
 		`>1.7</div>`,               // average concurrent, one decimal
+		`>Velocity<`,               // the other headline band
+		`>25s</div>`,               // response p50, formatted seconds
+		`>response p50<`,           // its label
+		`>1m 30s</div>`,            // response p90, formatted minutes and seconds
+		`>4.2</div>`,               // messages per active minute, one decimal
+		`>msgs / active min<`,      // its label
 		`>Unscored<`,               // the empty grade key reads as a word, not a blank
 		`>Completed<`,              // outcome label, title-cased
 		`>Quick<`,                  // archetype label, title-cased
@@ -86,6 +102,24 @@ func TestInsightsPageConcurrencyNoSpans(t *testing.T) {
 	}
 	if !strings.Contains(html, `>Grades<`) {
 		t.Error("the distribution grid should still render alongside the concurrency note")
+	}
+}
+
+// When the window has sessions but none carry a timed turn, the velocity band falls back
+// to a note instead of a row of dashes and zeros that would read as a real measurement.
+func TestInsightsPageVelocityNoTurns(t *testing.T) {
+	p := Page{Title: "Insights", LoggedIn: true, Active: "insights", Username: "ada"}
+	ranges := RangeOptions("/insights", nil, "30d")
+	ins := sampleInsights()
+	ins.Velocity = store.VelocityStats{} // no measured turns
+
+	html := renderComponent(t, InsightsPage(p, ins, "30d", ranges))
+
+	if !strings.Contains(html, "No timed turns in this window.") {
+		t.Error("velocity band should note the missing turns")
+	}
+	if !strings.Contains(html, `>Velocity<`) {
+		t.Error("the velocity band heading should still render")
 	}
 }
 

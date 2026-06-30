@@ -207,6 +207,211 @@ func TestArchetypeDistributionBoundaries(t *testing.T) {
 	}
 }
 
+// TestVelocityStats pins the cadence figures against a hand-computed timeline: two clean
+// turns and one with a long idle gap give known prompt-to-reply latencies, a capped active
+// span, and message and tool counts, so the percentiles, the first-response figure, and
+// the per-active-minute rates are all exact. It also confirms the window and per-user
+// scoping narrow the same way the rest of the Insights page does.
+func TestVelocityStats(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	ada := seedUser(t, st, "ada")
+	grace := seedUser(t, st, "grace")
+	pid, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recent := time.Now().Add(-1 * time.Hour)
+	old := time.Now().Add(-400 * 24 * time.Hour)
+
+	// Session one (Ada): two turns. Turn one replies 10s after the prompt (also the
+	// opening reply); turn two replies 30s after its prompt. Gaps 10, 10, 40, 30 are all
+	// under the active cap, so the active span is 90s; five messages, two tool calls.
+	b1 := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	s1 := seedSession(t, st, ada, pid, "v1")
+	if err := st.ApplyProjectionDelta(ctx, s1, store.ProjectionDelta{
+		Messages: []store.MessageDelta{
+			{Ordinal: 0, Role: "user", Content: "go", Timestamp: b1},
+			{Ordinal: 1, Role: "assistant", Content: "on it", HasToolUse: true, Timestamp: b1.Add(10 * time.Second)},
+			{Ordinal: 2, Role: "assistant", Content: "more", Timestamp: b1.Add(20 * time.Second)},
+			{Ordinal: 3, Role: "user", Content: "next", Timestamp: b1.Add(60 * time.Second)},
+			{Ordinal: 4, Role: "assistant", Content: "done", Timestamp: b1.Add(90 * time.Second)},
+		},
+		ToolCalls: []store.ProjToolCall{
+			{MessageOrdinal: 1, CallIndex: 0, ToolName: "Read", Category: "read", CallUID: "a"},
+			{MessageOrdinal: 1, CallIndex: 1, ToolName: "Edit", Category: "edit", FilePath: "x.go", CallUID: "b"},
+		},
+	}); err != nil {
+		t.Fatalf("apply s1: %v", err)
+	}
+	setSessionShape(t, st, ctx, s1, recent, recent.Add(2*time.Minute), 5, 2)
+
+	// Session two (Ada): turn one replies 20s after the prompt (the opening reply); then a
+	// one-hour idle gap before turn two, whose reply lands 50s after its prompt. The idle
+	// gap is over the cap and drops out, so the active span is 20+50 = 70s; four messages,
+	// one tool call.
+	b2 := time.Date(2026, 6, 1, 11, 0, 0, 0, time.UTC)
+	s2 := seedSession(t, st, ada, pid, "v2")
+	if err := st.ApplyProjectionDelta(ctx, s2, store.ProjectionDelta{
+		Messages: []store.MessageDelta{
+			{Ordinal: 0, Role: "user", Content: "start", Timestamp: b2},
+			{Ordinal: 1, Role: "assistant", Content: "reply", HasToolUse: true, Timestamp: b2.Add(20 * time.Second)},
+			{Ordinal: 2, Role: "user", Content: "back", Timestamp: b2.Add(3600 * time.Second)},
+			{Ordinal: 3, Role: "assistant", Content: "ok", Timestamp: b2.Add(3650 * time.Second)},
+		},
+		ToolCalls: []store.ProjToolCall{
+			{MessageOrdinal: 1, CallIndex: 0, ToolName: "Bash", Category: "bash", CallUID: "c"},
+		},
+	}); err != nil {
+		t.Fatalf("apply s2: %v", err)
+	}
+	setSessionShape(t, st, ctx, s2, recent, recent.Add(70*time.Minute), 4, 2)
+
+	// Session three (Grace): a single 100s turn, started long ago so a trailing window
+	// drops it. It is the only non-Ada session, so per-user scoping drops it too.
+	b3 := time.Date(2026, 6, 1, 13, 0, 0, 0, time.UTC)
+	s3 := seedSession(t, st, grace, pid, "v3")
+	if err := st.ApplyProjectionDelta(ctx, s3, store.ProjectionDelta{
+		Messages: []store.MessageDelta{
+			{Ordinal: 0, Role: "user", Content: "hello", Timestamp: b3},
+			{Ordinal: 1, Role: "assistant", Content: "hi", Timestamp: b3.Add(100 * time.Second)},
+		},
+	}); err != nil {
+		t.Fatalf("apply s3: %v", err)
+	}
+	setSessionShape(t, st, ctx, s3, old, old.Add(2*time.Minute), 2, 1)
+
+	// Ada only: latencies are [10, 30, 20, 50]. percentile_cont gives p50 = 25s, p90 = 44s;
+	// the opening replies are [10, 20] so their median is 15s. Active span 90+70 = 160s =
+	// 2.6667 min over 9 messages and 3 tool calls.
+	ada1 := store.AnalyticsFilter{Username: "ada"}
+	v, err := st.VelocityStats(ctx, ada1)
+	if err != nil {
+		t.Fatalf("velocity (ada): %v", err)
+	}
+	if v.Turns != 4 || v.Sessions != 2 {
+		t.Errorf("ada turns/sessions = %d/%d, want 4/2", v.Turns, v.Sessions)
+	}
+	if v.ResponseP50 != 25*time.Second {
+		t.Errorf("ResponseP50 = %s, want 25s", v.ResponseP50)
+	}
+	if v.ResponseP90 != 44*time.Second {
+		t.Errorf("ResponseP90 = %s, want 44s", v.ResponseP90)
+	}
+	if v.FirstResponseP50 != 15*time.Second {
+		t.Errorf("FirstResponseP50 = %s, want 15s", v.FirstResponseP50)
+	}
+	if math.Abs(v.ActiveSeconds-160) > 0.001 {
+		t.Errorf("ActiveSeconds = %.3f, want 160", v.ActiveSeconds)
+	}
+	if wantMsgs := 9.0 / (160.0 / 60.0); math.Abs(v.MsgsPerActiveMin-wantMsgs) > 0.001 {
+		t.Errorf("MsgsPerActiveMin = %.4f, want %.4f", v.MsgsPerActiveMin, wantMsgs)
+	}
+	if wantTools := 3.0 / (160.0 / 60.0); math.Abs(v.ToolsPerActiveMin-wantTools) > 0.001 {
+		t.Errorf("ToolsPerActiveMin = %.4f, want %.4f", v.ToolsPerActiveMin, wantTools)
+	}
+
+	// Unscoped over all time: Grace's session joins, so five turns across three sessions.
+	all, err := st.VelocityStats(ctx, store.AnalyticsFilter{})
+	if err != nil {
+		t.Fatalf("velocity (all): %v", err)
+	}
+	if all.Turns != 5 || all.Sessions != 3 {
+		t.Errorf("all turns/sessions = %d/%d, want 5/3", all.Turns, all.Sessions)
+	}
+
+	// A trailing window keyed on started_at drops Grace's old session, leaving Ada's two.
+	windowed, err := st.VelocityStats(ctx, store.AnalyticsFilter{Since: time.Now().Add(-90 * 24 * time.Hour)})
+	if err != nil {
+		t.Fatalf("velocity (windowed): %v", err)
+	}
+	if windowed.Turns != 4 || windowed.Sessions != 2 {
+		t.Errorf("windowed turns/sessions = %d/%d, want 4/2", windowed.Turns, windowed.Sessions)
+	}
+}
+
+// TestVelocityStatsEdges pins the turn model at the cases the SQL is most likely to get
+// wrong: consecutive prompts before a reply, a reply whose clock drifted before its
+// prompt, an undated prompt that must not lend its reply to the previous turn, and a
+// session that opens with assistant preamble. Each case is its own user so a per-user
+// scope isolates it.
+func TestVelocityStatsEdges(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	pid, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 6, 1, 9, 0, 0, 0, time.UTC)
+	at := func(sec int) time.Time { return base.Add(time.Duration(sec) * time.Second) }
+
+	apply := func(user, src string, msgs []store.MessageDelta) store.AnalyticsFilter {
+		uid := seedUser(t, st, user)
+		sid := seedSession(t, st, uid, pid, src)
+		if err := st.ApplyProjectionDelta(ctx, sid, store.ProjectionDelta{Messages: msgs}); err != nil {
+			t.Fatalf("apply %s: %v", src, err)
+		}
+		return store.AnalyticsFilter{Username: user}
+	}
+
+	// Consecutive prompts: turn one (the first prompt) draws no reply, so it is not
+	// measured; turn two replies 5s later. The opening-reply figure stays empty because the
+	// session's first turn never got a reply.
+	consec := apply("consec", "e-consec", []store.MessageDelta{
+		{Ordinal: 0, Role: "user", Content: "first", Timestamp: at(0)},
+		{Ordinal: 1, Role: "user", Content: "second", Timestamp: at(10)},
+		{Ordinal: 2, Role: "assistant", Content: "reply", Timestamp: at(15)},
+	})
+	if v, err := st.VelocityStats(ctx, consec); err != nil {
+		t.Fatalf("consec velocity: %v", err)
+	} else if v.Turns != 1 || v.ResponseP50 != 5*time.Second || v.FirstResponseP50 != 0 {
+		t.Errorf("consec = {turns %d, p50 %s, opening %s}, want {1, 5s, 0}", v.Turns, v.ResponseP50, v.FirstResponseP50)
+	}
+
+	// Clock skew: the reply timestamp precedes the prompt, so the turn is rejected rather
+	// than counted as a negative latency.
+	skew := apply("skew", "e-skew", []store.MessageDelta{
+		{Ordinal: 0, Role: "user", Content: "go", Timestamp: at(20)},
+		{Ordinal: 1, Role: "assistant", Content: "early", Timestamp: at(10)},
+	})
+	if v, err := st.VelocityStats(ctx, skew); err != nil {
+		t.Fatalf("skew velocity: %v", err)
+	} else if v.Turns != 0 {
+		t.Errorf("skew turns = %d, want 0 (a reply before its prompt is not a latency)", v.Turns)
+	}
+
+	// Undated prompt: the first prompt got no reply, and a second, undated prompt drew the
+	// only reply. The reply must attach to the undated turn (which has no measurable
+	// latency), NOT to the first prompt as a false 50s latency. So nothing is measured, but
+	// the two timestamped messages still register active time.
+	nullreply := apply("nullreply", "e-nullreply", []store.MessageDelta{
+		{Ordinal: 0, Role: "user", Content: "first", Timestamp: at(0)},
+		{Ordinal: 1, Role: "user", Content: "undated"},
+		{Ordinal: 2, Role: "assistant", Content: "reply", Timestamp: at(50)},
+	})
+	if v, err := st.VelocityStats(ctx, nullreply); err != nil {
+		t.Fatalf("nullreply velocity: %v", err)
+	} else if v.Turns != 0 || v.ActiveSeconds != 50 {
+		t.Errorf("nullreply = {turns %d, active %.0f}, want {0, 50} (no false latency, gap still active)", v.Turns, v.ActiveSeconds)
+	}
+
+	// Assistant preamble: the session opens with an assistant message (turn zero, before
+	// any prompt), which is skipped; the first human turn replies 7s later and is both the
+	// only turn and the opening reply.
+	asstFirst := apply("asstfirst", "e-asstfirst", []store.MessageDelta{
+		{Ordinal: 0, Role: "assistant", Content: "preamble", Timestamp: at(0)},
+		{Ordinal: 1, Role: "user", Content: "go", Timestamp: at(5)},
+		{Ordinal: 2, Role: "assistant", Content: "done", Timestamp: at(12)},
+	})
+	if v, err := st.VelocityStats(ctx, asstFirst); err != nil {
+		t.Fatalf("asstfirst velocity: %v", err)
+	} else if v.Turns != 1 || v.ResponseP50 != 7*time.Second || v.FirstResponseP50 != 7*time.Second {
+		t.Errorf("asstfirst = {turns %d, p50 %s, opening %s}, want {1, 7s, 7s}", v.Turns, v.ResponseP50, v.FirstResponseP50)
+	}
+}
+
 // TestConcurrencyStats builds four overlapping spans with a known three-way peak and
 // pins the sweep-line result: the fleet peak and when it is reached, the busiest single
 // user's own peak, and the average concurrency over the covered span. It also confirms
