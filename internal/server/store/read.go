@@ -350,15 +350,20 @@ func (s *Store) ListSessions(ctx context.Context, f SessionFilter) ([]SessionSum
 // filter's window, each carrying its in-window token and cost sums rather than its
 // all-time rollup. It shares the analytics base exactly: the same dated
 // usage_events under the same project, window, agent, user, and machine scoping,
-// just grouped per session instead of summed whole. That is what lets the project
-// page's session rows be a true partition of the usage panel's headline, summing to
-// it even under a narrow window, where the lifetime rollups ListSessions returns
-// would overcount a session whose usage predates the window. Newest-active first.
+// just grouped per session instead of summed whole. That base sharing is what lets
+// the project page's session rows be a partition of the usage panel's headline,
+// where the lifetime rollups ListSessions returns would overcount a session whose
+// usage predates the window. Newest-active first.
 //
-// A session with no dated usage in the window contributes nothing to the panel, so
-// it is absent here too, which keeps the row count equal to the panel's session
-// tally. cost_incomplete is the in-window per-session flag, the same expression the
-// analytics slices use, so a row's "$X+" marker matches the headline's.
+// The rows are capped (see the limit below) so a project with thousands of windowed
+// sessions does not render an unbounded table. The cap means the visible rows alone
+// need not sum to the headline, so the project handler reconciles the difference
+// into an explicit remainder footer (see ProjectSessionRemainder): the shown rows
+// plus that footer reproduce the panel totals exactly, because both derive from this
+// same base. A session with no dated usage in the window contributes nothing to the
+// panel and is absent here too. cost_incomplete is the in-window per-session flag,
+// the same expression the analytics slices use, so a row's "$X+" marker matches the
+// headline's.
 func (s *Store) WindowSessions(ctx context.Context, f SessionFilter) ([]SessionSummary, error) {
 	var conds []string
 	var args []any
@@ -414,7 +419,7 @@ func (s *Store) WindowSessions(ctx context.Context, f SessionFilter) ([]SessionS
 
 	rows, err := s.Pool.Query(ctx, q, args...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("query window sessions: %w", err)
 	}
 	defer rows.Close()
 	var out []SessionSummary
@@ -425,11 +430,14 @@ func (s *Store) WindowSessions(ctx context.Context, f SessionFilter) ([]SessionS
 			&sm.TotalInput, &sm.TotalOutput, &sm.TotalCacheWrite, &sm.TotalCacheRead,
 			&sm.TotalCostUSD, &sm.CostIncomplete, &sm.Visibility, &sm.PublicID,
 			&sm.StartedAt, &sm.EndedAt, &sm.UpdatedAt); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scan window session: %w", err)
 		}
 		out = append(out, sm)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate window sessions: %w", err)
+	}
+	return out, nil
 }
 
 // globalSessionSelect is the column list and joins for cross-project session

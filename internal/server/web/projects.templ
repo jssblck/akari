@@ -89,7 +89,7 @@ templ ProjectPage(p Page, proj store.ProjectSummary, sessions []store.SessionSum
 				</div>
 				@projectSessionToolbar(proj.ID, facets, sel, rng)
 				<div id="session-list">
-					@ProjectSessionList(sessions)
+					@ProjectSessionList(sessions, ProjectSessionRemainder(a, sessions))
 				</div>
 			</section>
 		</div>
@@ -134,7 +134,12 @@ templ projectSessionToolbar(projectID int64, facets Facets, sel store.SessionFil
 // overview use, and shows "Updated" as a relative time with the exact stamp on
 // hover, so a session's token magnitude and last-activity read identically wherever
 // it appears. The whole row is the click target (data-row-href, wired in app.js).
-templ ProjectSessionList(sessions []store.SessionSummary) {
+//
+// When the window holds more sessions than the table caps at, rem carries the
+// hidden tail and the table closes with a remainder footer, so the visible rows plus
+// that line sum to the usage panel headline above rather than appearing to fall short
+// of it. The footer reuses the token cell so its breakdown reads like every row's.
+templ ProjectSessionList(sessions []store.SessionSummary, rem SessionRemainder) {
 	if len(sessions) == 0 {
 		<div class="empty">No sessions match these filters.</div>
 	} else {
@@ -172,6 +177,18 @@ templ ProjectSessionList(sessions []store.SessionSummary) {
 					</tr>
 				}
 			</tbody>
+			if rem.Has() {
+				<tfoot>
+					<tr class="remainder" title="Older sessions in this range, beyond the rows shown">
+						<td colspan="6">{ fmt.Sprintf("+%d more session%s in this range", rem.Sessions, plural(rem.Sessions)) }</td>
+						<td class="num">
+							<span class="tok-total">{ FmtTokens(rem.Tokens) }</span>
+						</td>
+						<td class="num">{ FmtCost(rem.CostUSD, rem.CostIncomplete) }</td>
+						<td></td>
+					</tr>
+				</tfoot>
+			}
 		</table>
 	}
 }

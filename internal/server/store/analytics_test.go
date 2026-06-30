@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -369,6 +370,63 @@ func TestWindowSessionsPartitionPanel(t *testing.T) {
 	}
 	if len(full) != 2 || fullIn != fa.TotalIn || fullIn != 1300 {
 		t.Errorf("all-history rows = %d sumIn %d (panel %d), want 2 rows summing to 1300", len(full), fullIn, fa.TotalIn)
+	}
+}
+
+// TestWindowSessionsCapEngages pins the gate finding the cap exists to answer: with
+// more matching sessions than the default LIMIT, WindowSessions returns exactly the
+// cap while Analytics still sums the whole windowed base. So the rows alone fall
+// short of the headline by a real tail (here one session), which is precisely the
+// gap the project page closes with its remainder footer. Were the cap ever dropped
+// or the handler to stop passing a zero Limit, this row count would change and catch
+// it. Newest-active first means the capped-out session is the oldest by updated_at.
+func TestWindowSessionsCapEngages(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	user, err := st.Register(ctx, "ada", "h", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	proj, err := st.UpsertProject(ctx, "github.com/ada/cap", "github.com", "ada", "cap", "cap", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+
+	// 101 sessions, each one recent dated usage event, so all fall inside the window
+	// and the default cap of 100 must withhold exactly one.
+	const total = 101
+	now := time.Now()
+	for i := 0; i < total; i++ {
+		sid := seedSessionWithStats(t, st, user.ID, proj, "claude", fmt.Sprintf("s%d", i), 0, 0, 0)
+		seedUsageAt(t, st, sid, "claude-opus-4-8", 1.0, 10, 5, now.Add(-time.Duration(i)*time.Hour), fmt.Sprintf("u%d", i))
+	}
+
+	since := now.Add(-30 * 24 * time.Hour)
+	win, err := st.WindowSessions(ctx, store.SessionFilter{ProjectID: proj, Since: since})
+	if err != nil {
+		t.Fatalf("window sessions: %v", err)
+	}
+	a, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: proj, Since: since})
+	if err != nil {
+		t.Fatalf("analytics: %v", err)
+	}
+
+	if len(win) != 100 {
+		t.Fatalf("windowed rows = %d, want the default cap of 100", len(win))
+	}
+	if a.Sessions != total {
+		t.Fatalf("panel session tally = %d, want all %d", a.Sessions, total)
+	}
+	// The shown rows undercount the headline by exactly the capped-out session, the
+	// tail the remainder footer accounts for.
+	var shownIn int64
+	for _, s := range win {
+		shownIn += s.TotalInput
+	}
+	if shownIn != a.TotalIn-10 {
+		t.Errorf("shown input %d, want headline %d minus one withheld session's 10", shownIn, a.TotalIn)
 	}
 }
 
