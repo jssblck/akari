@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -20,12 +19,27 @@ type DayPoint struct {
 }
 
 // Breakdown is one slice of a by-model or by-agent split: a label with its rolled
-// cost, its total non-cache tokens, and how many sessions it touched.
+// cost, its token volume broken out by class, and how many sessions it touched.
+// The per-class split lets a slice both size its bar on the full token volume and
+// reproduce the same hover card every other token figure carries.
 type Breakdown struct {
-	Label    string
-	CostUSD  float64
-	Tokens   int64
-	Sessions int
+	Label      string
+	CostUSD    float64
+	Input      int64
+	Output     int64
+	CacheRead  int64
+	CacheWrite int64
+	Sessions   int
+}
+
+// Tokens is the all-class token volume (input, output, cache read, cache write)
+// for the slice. The breakdown bars size and label on this, so a model's share
+// reflects everything it was billed for. Sizing on uncached in/out alone (the old
+// behavior) made cache-heavy models like Claude read as mispriced: a bar a third
+// the width of its cost, because the cache tokens that drove the cost were absent
+// from the figure beside it.
+func (b Breakdown) Tokens() int64 {
+	return b.Input + b.Output + b.CacheRead + b.CacheWrite
 }
 
 // Analytics is everything the inline charts render from, scoped either to one
@@ -60,14 +74,23 @@ func (a Analytics) TotalTokens() int64 {
 // instance; a non-zero id scopes every query to that project. A non-zero `since`
 // bounds every rollup to events at or after that instant; the zero time means
 // all of history. A non-empty userIDs scopes every rollup to sessions owned by
-// those users; nil or empty means every user. It runs three rollups (daily
-// series, by-model, by-agent) and derives the headline totals from them.
+// those users; nil or empty means every user.
 //
-// With no time bound the by-agent split and its totals come from the
-// authoritative session rollups, so unpriced or undated usage still counts. A
-// time bound has to slice usage by event time, which only the usage_events have,
-// so the bounded path derives every figure from those events (undated events,
-// having no place on the time axis, fall out of the bounded view).
+// Every figure derives from one base set, the scoped usage_events, so the
+// headline totals, the by-model split, and the by-agent split reconcile by
+// construction: sum the by-model tokens or the by-agent tokens and you get the
+// headline tokens, every time. This is deliberate. The figures used to come from
+// three different sources (tokens from the daily series, cost from the session
+// rollups, the by-model split from a separate usage_events query that dropped
+// unnamed models), so the headline and the rows beneath it could disagree by an
+// order of magnitude. They are the same query now, grouped three ways.
+//
+// The headline totals are summed from the by-agent split rather than queried
+// again: a session has exactly one agent, so the per-agent rows partition the
+// usage cleanly and their sum is the grand total with no double counting. The
+// daily series is the lone exception, used only to draw the chart: it keeps the
+// occurred_at filter a time axis needs, so undated usage (real, but with no day
+// to plot) sits in the headline and the breakdowns but not on the chart line.
 func (s *Store) Analytics(ctx context.Context, projectID int64, since time.Time, userIDs []int64) (Analytics, error) {
 	var a Analytics
 
@@ -89,18 +112,18 @@ func (s *Store) Analytics(ctx context.Context, projectID int64, since time.Time,
 	}
 	a.Agents = agents
 
-	// Cost and session counts come from the agent breakdown (each session maps to
-	// one agent, so distinct counts sum cleanly); token totals come from the daily
-	// series, which carries the per-class split the Tokens tooltip needs.
+	// Sum the headline from the by-agent split so the total and the rows beneath it
+	// are the same arithmetic. Agents partition sessions one-to-one, so the session
+	// count sums without overlap; the by-model split shares the same grand total but
+	// its per-model session counts can overlap (a session spanning two models is in
+	// both rows), which is why the count comes from agents, not models.
 	for _, ag := range agents {
 		a.TotalCost += ag.CostUSD
 		a.Sessions += ag.Sessions
-	}
-	for _, p := range series {
-		a.TotalIn += p.Input
-		a.TotalOut += p.Output
-		a.TotalCacheRead += p.CacheRead
-		a.TotalCacheWrite += p.CacheWrite
+		a.TotalIn += ag.Input
+		a.TotalOut += ag.Output
+		a.TotalCacheRead += ag.CacheRead
+		a.TotalCacheWrite += ag.CacheWrite
 	}
 	return a, nil
 }
@@ -125,28 +148,6 @@ func usageFilter(projectID int64, since time.Time, userIDs []int64) (string, []a
 		clauses += fmt.Sprintf(" AND ue.occurred_at >= $%d", len(args))
 	}
 	return clauses, args
-}
-
-// sessionScope builds the optional WHERE predicates for a query that reads the
-// sessions table aliased `s` directly (no usage_events join, so no prior WHERE to
-// append to): the project scope and the set-of-users scope, either or both
-// optional. It opens its own WHERE clause and returns an empty string when nothing
-// is scoped.
-func sessionScope(projectID int64, userIDs []int64) (string, []any) {
-	var preds []string
-	var args []any
-	if projectID != 0 {
-		args = append(args, projectID)
-		preds = append(preds, fmt.Sprintf("s.project_id = $%d", len(args)))
-	}
-	if len(userIDs) > 0 {
-		args = append(args, userIDs)
-		preds = append(preds, fmt.Sprintf("s.user_id = ANY($%d)", len(args)))
-	}
-	if len(preds) == 0 {
-		return "", nil
-	}
-	return " WHERE " + strings.Join(preds, " AND "), args
 }
 
 func (s *Store) analyticsSeries(ctx context.Context, projectID int64, since time.Time, userIDs []int64) ([]DayPoint, error) {
@@ -183,16 +184,23 @@ func (s *Store) analyticsSeries(ctx context.Context, projectID int64, since time
 
 func (s *Store) analyticsByModel(ctx context.Context, projectID int64, since time.Time, userIDs []int64) ([]Breakdown, error) {
 	filter, args := usageFilter(projectID, since, userIDs)
+	// No model <> '' filter: usage that carries no model id still has to be in the
+	// split, or the by-model rows would sum to less than the headline. An unnamed
+	// model groups into its own row and FoldUnknownModels collapses it (with every
+	// other unpriced model) into "Other", so it counts without leaking a blank row.
 	rows, err := s.Pool.Query(ctx,
 		`SELECT ue.model,
 		        coalesce(sum(ue.cost_usd), 0),
-		        coalesce(sum(ue.input_tokens + ue.output_tokens), 0),
+		        coalesce(sum(ue.input_tokens), 0),
+		        coalesce(sum(ue.output_tokens), 0),
+		        coalesce(sum(ue.cache_read_tokens), 0),
+		        coalesce(sum(ue.cache_write_tokens), 0),
 		        count(DISTINCT ue.session_id)
 		   FROM usage_events ue
 		   JOIN sessions s ON s.id = ue.session_id
-		  WHERE ue.model <> ''`+filter+`
+		  WHERE TRUE`+filter+`
 		  GROUP BY ue.model
-		  ORDER BY 2 DESC, 3 DESC`, args...)
+		  ORDER BY 2 DESC, coalesce(sum(ue.input_tokens + ue.output_tokens + ue.cache_read_tokens + ue.cache_write_tokens), 0) DESC`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query analytics by model: %w", err)
 	}
@@ -205,40 +213,27 @@ func (s *Store) analyticsByModel(ctx context.Context, projectID int64, since tim
 }
 
 func (s *Store) analyticsByAgent(ctx context.Context, projectID int64, since time.Time, userIDs []int64) ([]Breakdown, error) {
-	// Bounded to a window, the split has to slice usage by event time, which lives
-	// on usage_events; the unbounded view reads the authoritative session rollups.
-	if !since.IsZero() {
-		filter, args := usageFilter(projectID, since, userIDs)
-		rows, err := s.Pool.Query(ctx,
-			`SELECT s.agent,
-			        coalesce(sum(ue.cost_usd), 0),
-			        coalesce(sum(ue.input_tokens + ue.output_tokens), 0),
-			        count(DISTINCT ue.session_id)
-			   FROM usage_events ue
-			   JOIN sessions s ON s.id = ue.session_id
-			  WHERE ue.occurred_at IS NOT NULL`+filter+`
-			  GROUP BY s.agent
-			  ORDER BY 2 DESC, 4 DESC`, args...)
-		if err != nil {
-			return nil, fmt.Errorf("query windowed analytics by agent: %w", err)
-		}
-		defer rows.Close()
-		out, err := scanBreakdowns(rows)
-		if err != nil {
-			return nil, fmt.Errorf("scan windowed analytics by agent: %w", err)
-		}
-		return out, nil
-	}
-
-	where, args := sessionScope(projectID, userIDs)
+	// One path, the same usage_events base as the by-model split and the headline,
+	// so the three reconcile. There is no occurred_at IS NOT NULL guard: in the
+	// all-time view (no since) undated usage must still count, and a time bound
+	// already excludes a NULL occurred_at through its `>= since` comparison. The
+	// rollups equal this sum by construction (sessions.total_* == sum over a
+	// session's usage_events), so reading the ledger here loses nothing the old
+	// session-rollup path carried.
+	filter, args := usageFilter(projectID, since, userIDs)
 	rows, err := s.Pool.Query(ctx,
 		`SELECT s.agent,
-		        coalesce(sum(s.total_cost_usd), 0),
-		        coalesce(sum(s.total_input_tokens + s.total_output_tokens), 0),
-		        count(*)
-		   FROM sessions s`+where+`
+		        coalesce(sum(ue.cost_usd), 0),
+		        coalesce(sum(ue.input_tokens), 0),
+		        coalesce(sum(ue.output_tokens), 0),
+		        coalesce(sum(ue.cache_read_tokens), 0),
+		        coalesce(sum(ue.cache_write_tokens), 0),
+		        count(DISTINCT ue.session_id)
+		   FROM usage_events ue
+		   JOIN sessions s ON s.id = ue.session_id
+		  WHERE TRUE`+filter+`
 		  GROUP BY s.agent
-		  ORDER BY 2 DESC, 4 DESC`, args...)
+		  ORDER BY 2 DESC, count(DISTINCT ue.session_id) DESC`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query analytics by agent: %w", err)
 	}
@@ -258,7 +253,7 @@ func scanBreakdowns(rows interface {
 	var out []Breakdown
 	for rows.Next() {
 		var b Breakdown
-		if err := rows.Scan(&b.Label, &b.CostUSD, &b.Tokens, &b.Sessions); err != nil {
+		if err := rows.Scan(&b.Label, &b.CostUSD, &b.Input, &b.Output, &b.CacheRead, &b.CacheWrite, &b.Sessions); err != nil {
 			return nil, err
 		}
 		out = append(out, b)

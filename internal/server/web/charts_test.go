@@ -13,8 +13,8 @@ func TestBuildBreakdownTokenWidths(t *testing.T) {
 	// Bar width tracks token volume, not cost: the cheaper-per-token model can
 	// still draw the longer bar when it ran more tokens.
 	rows := BuildBreakdown([]store.Breakdown{
-		{Label: "claude-opus-4-8", CostUSD: 4, Tokens: 100, Sessions: 2},
-		{Label: "gpt-5.5", CostUSD: 1, Tokens: 25, Sessions: 1},
+		{Label: "claude-opus-4-8", CostUSD: 4, Input: 100, Sessions: 2},
+		{Label: "gpt-5.5", CostUSD: 1, Input: 25, Sessions: 1},
 	})
 	if len(rows) != 2 {
 		t.Fatalf("want 2 rows, got %d", len(rows))
@@ -36,8 +36,8 @@ func TestBuildBreakdownTokenWidths(t *testing.T) {
 func TestBuildBreakdownTokensIgnoreCost(t *testing.T) {
 	// A high-cost slice with few tokens stays short; width is token-driven only.
 	rows := BuildBreakdown([]store.Breakdown{
-		{Label: "pricey", CostUSD: 100, Tokens: 10},
-		{Label: "chatty", CostUSD: 1, Tokens: 100},
+		{Label: "pricey", CostUSD: 100, Input: 10},
+		{Label: "chatty", CostUSD: 1, Input: 100},
 	})
 	if rows[0].Pct != 10 {
 		t.Errorf("cost should not widen the bar, got %.2f", rows[0].Pct)
@@ -47,12 +47,65 @@ func TestBuildBreakdownTokensIgnoreCost(t *testing.T) {
 	}
 }
 
+func TestBuildBreakdownCountsCacheTokens(t *testing.T) {
+	// The bar sizes on the all-class volume, not just uncached in/out. This is the
+	// fix for the dashboard reading as mispriced: a Claude slice whose volume is
+	// almost all cache must out-width a slice with more in/out but no cache, and the
+	// row must carry the four-class split so the hover card can break it back out.
+	rows := BuildBreakdown([]store.Breakdown{
+		{Label: "claude-opus-4-8", CostUSD: 942, Input: 1_000_000, Output: 500_000, CacheRead: 80_000_000, CacheWrite: 12_000_000},
+		{Label: "gpt-5.5", CostUSD: 57, Input: 4_000_000, Output: 2_500_000},
+	})
+	claude, gpt := rows[0], rows[1]
+	if claude.Tokens <= gpt.Tokens {
+		t.Fatalf("cache-heavy slice should carry the larger volume: claude=%d gpt=%d", claude.Tokens, gpt.Tokens)
+	}
+	if claude.Tokens != 93_500_000 {
+		t.Errorf("total should sum all four classes, got %d", claude.Tokens)
+	}
+	if claude.Pct != 100 || gpt.Pct >= 100 {
+		t.Errorf("the cache-heavy slice should be full width and lead: claude=%.2f gpt=%.2f", claude.Pct, gpt.Pct)
+	}
+	if claude.CacheRead != 80_000_000 || claude.CacheWrite != 12_000_000 {
+		t.Errorf("row must keep the cache split for the tooltip: read=%d write=%d", claude.CacheRead, claude.CacheWrite)
+	}
+}
+
+// The breakdown bar renders its token figure as the all-class total carrying the
+// same hover card every other token figure has: hovering the number must surface
+// the four-class split and the cost, not leave a bare in+out figure beside an
+// unexplained cost. This is the rendered half of the cache-token fix.
+func TestBreakdownListTokenTooltip(t *testing.T) {
+	rows := BuildBreakdown([]store.Breakdown{
+		{Label: "claude-opus-4-8", CostUSD: 942.08, Input: 1_000_000, Output: 500_000, CacheRead: 80_000_000, CacheWrite: 12_000_000, Sessions: 67},
+	})
+	html := renderComponent(t, breakdownList("By model", rows))
+
+	for _, want := range []string{
+		`class="tok-cell"`, // the hover container wraps the figure
+		`class="tok-total">` + FmtTokens(93_500_000) + `<`, // headline is the all-class total
+		`class="tok-tip"`, // the breakdown card
+		`<dt>Cache read</dt><dd>` + FmtTokens(80_000_000) + `</dd>`,
+		`<dt>Cache write</dt><dd>` + FmtTokens(12_000_000) + `</dd>`,
+		`class="tt-cost">$942.08</span>`, // the cost the volume actually bought
+		`67 sessions`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("breakdown bar missing %q", want)
+		}
+	}
+	// The old bare "input+output tok" figure (1,500,000) must not be what's shown.
+	if strings.Contains(html, `class="tok-total">`+FmtTokens(1_500_000)+`<`) {
+		t.Error("breakdown still showing the uncached in+out figure as the headline")
+	}
+}
+
 func TestBuildBreakdownZeroTokens(t *testing.T) {
 	// Width is token-driven with no cost fallback: when no slice has tokens, every
 	// bar stays at 0% even though cost is present.
 	rows := BuildBreakdown([]store.Breakdown{
-		{Label: "a", CostUSD: 5, Tokens: 0},
-		{Label: "b", CostUSD: 1, Tokens: 0},
+		{Label: "a", CostUSD: 5},
+		{Label: "b", CostUSD: 1},
 	})
 	if rows[0].Pct != 0 || rows[1].Pct != 0 {
 		t.Errorf("zero-token bars should stay at 0%%, got %.2f, %.2f", rows[0].Pct, rows[1].Pct)
@@ -61,8 +114,8 @@ func TestBuildBreakdownZeroTokens(t *testing.T) {
 
 func TestBuildBreakdownTinySliver(t *testing.T) {
 	rows := BuildBreakdown([]store.Breakdown{
-		{Label: "big", Tokens: 10000},
-		{Label: "tiny", Tokens: 1},
+		{Label: "big", Input: 10000},
+		{Label: "tiny", Input: 1},
 	})
 	if rows[1].Pct < 2 {
 		t.Errorf("a non-zero slice should keep a visible sliver, got %.2f", rows[1].Pct)
@@ -73,10 +126,10 @@ func TestFoldUnknownModels(t *testing.T) {
 	// Priced models keep their identity and order; everything unpriced (including
 	// a codenamed pre-release) collapses into a single trailing "Other" row.
 	folded := FoldUnknownModels([]store.Breakdown{
-		{Label: "claude-opus-4-8", CostUSD: 4, Tokens: 100, Sessions: 2},
-		{Label: "skunkworks-preview", CostUSD: 0, Tokens: 30, Sessions: 1},
-		{Label: "gpt-5.5", CostUSD: 1, Tokens: 50, Sessions: 1},
-		{Label: "internal-codename-x", CostUSD: 0, Tokens: 20, Sessions: 2},
+		{Label: "claude-opus-4-8", CostUSD: 4, Input: 100, Sessions: 2},
+		{Label: "skunkworks-preview", CostUSD: 0, Input: 30, Sessions: 1},
+		{Label: "gpt-5.5", CostUSD: 1, Input: 50, Sessions: 1},
+		{Label: "internal-codename-x", CostUSD: 0, Input: 20, Sessions: 2},
 	})
 	if len(folded) != 3 {
 		t.Fatalf("want 3 rows (two priced + Other), got %d: %+v", len(folded), folded)
@@ -93,8 +146,8 @@ func TestFoldUnknownModels(t *testing.T) {
 			t.Errorf("an unpriced model name leaked into the overview: %q", row.Label)
 		}
 	}
-	if other.Tokens != 50 || other.Sessions != 3 {
-		t.Errorf("Other should sum the unpriced tail: tokens=%d sessions=%d", other.Tokens, other.Sessions)
+	if other.Tokens() != 50 || other.Sessions != 3 {
+		t.Errorf("Other should sum the unpriced tail: tokens=%d sessions=%d", other.Tokens(), other.Sessions)
 	}
 }
 
