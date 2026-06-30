@@ -906,20 +906,27 @@ func (s *Store) Messages(ctx context.Context, sessionID int64) ([]Message, error
 		   FROM messages WHERE session_id = $1 ORDER BY ordinal`, sessionID)
 }
 
-// MessagesPage returns a contiguous window of a session's transcript, ordered by
-// ordinal, so a caller can read an arbitrarily large session in bounded chunks
-// rather than materializing the whole thing. limit is clamped to [1, 2000].
-func (s *Store) MessagesPage(ctx context.Context, sessionID int64, offset, limit int) ([]Message, error) {
-	if offset < 0 {
-		offset = 0
-	}
+// MessagesAfter returns the next window of a session's transcript ordered by
+// ordinal, starting strictly after the given ordinal (after == nil for the first
+// window). It pages by keyset on ordinal rather than OFFSET: each call walks the
+// messages primary key (session_id, ordinal) straight to the resume point and reads
+// only the next `limit` rows, so reading a whole session window by window costs
+// O(N), not the O(N^2/limit) an OFFSET walk would (Postgres re-skips the already
+// returned prefix on every page). limit is clamped to [1, 2000].
+func (s *Store) MessagesAfter(ctx context.Context, sessionID int64, after *int, limit int) ([]Message, error) {
 	if limit <= 0 || limit > 2000 {
 		limit = 2000
 	}
+	if after == nil {
+		return s.scanMessages(ctx,
+			`SELECT ordinal, role, content, thinking_text, model, has_thinking, has_tool_use, timestamp
+			   FROM messages WHERE session_id = $1 ORDER BY ordinal LIMIT $2`,
+			sessionID, limit)
+	}
 	return s.scanMessages(ctx,
 		`SELECT ordinal, role, content, thinking_text, model, has_thinking, has_tool_use, timestamp
-		   FROM messages WHERE session_id = $1 ORDER BY ordinal LIMIT $2 OFFSET $3`,
-		sessionID, limit, offset)
+		   FROM messages WHERE session_id = $1 AND ordinal > $2 ORDER BY ordinal LIMIT $3`,
+		sessionID, *after, limit)
 }
 
 func (s *Store) scanMessages(ctx context.Context, query string, args ...any) ([]Message, error) {
@@ -1061,12 +1068,23 @@ func (s *Store) scanAttachments(ctx context.Context, query string, args ...any) 
 // exactly what was ingested rather than only the projection. A missing session
 // returns ErrNotFound.
 func (s *Store) SessionRawTo(ctx context.Context, w io.Writer, sessionID, limit int64) (written int64, truncated bool, total int64, err error) {
+	// A session_raw row is the existence gate, but its byte_len is not the basis for
+	// total: that comes from the same chunk stream this reader serves. Pinning total to
+	// sum(length(content)) over session_raw_chunks keeps total_bytes and the streamed
+	// content from diverging if a chunk write ever left byte_len stale. A missing
+	// session_raw row (no upload yet) is ErrNotFound.
+	var exists bool
 	if err := s.Pool.QueryRow(ctx,
-		`SELECT byte_len FROM session_raw WHERE session_id = $1`, sessionID).Scan(&total); err != nil {
+		`SELECT true FROM session_raw WHERE session_id = $1`, sessionID).Scan(&exists); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return 0, false, 0, ErrNotFound
 		}
 		return 0, false, 0, fmt.Errorf("read raw length for session %d: %w", sessionID, err)
+	}
+	if err := s.Pool.QueryRow(ctx,
+		`SELECT coalesce(sum(length(content)), 0) FROM session_raw_chunks WHERE session_id = $1`,
+		sessionID).Scan(&total); err != nil {
+		return 0, false, 0, fmt.Errorf("sum raw chunk length for session %d: %w", sessionID, err)
 	}
 
 	rows, err := s.Pool.Query(ctx,

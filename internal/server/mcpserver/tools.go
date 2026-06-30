@@ -17,8 +17,13 @@ import (
 
 // defaultTranscriptLimit bounds how many messages get_session returns when the
 // caller does not ask for a specific window, so a single call never materializes an
-// arbitrarily large session. Callers page further with transcript_offset.
+// arbitrarily large session. Callers page further with transcript_after.
 const defaultTranscriptLimit = 200
+
+// maxTranscriptWindow caps a single transcript window regardless of the requested
+// limit, so one get_session call cannot pull an unbounded slice into a response. It
+// sits below the store's own clamp so the has_more peek (limit+1) never trips it.
+const maxTranscriptWindow = 1000
 
 // bodyCeiling bounds how many bytes a single body-reading tool will return,
 // whatever max_bytes a caller asks for. It keeps one tool result from pulling an
@@ -139,7 +144,7 @@ func registerTools(s *mcp.Server, st *store.Store) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "get_session",
-		Description: "One session: its header (project, agent, user, machine, branch, working directory, token and cost totals, timing) and subagents, plus, unless include_transcript is false, a bounded window of the transcript (messages with thinking and model, the tool-call metadata and attachments hanging on them). Tool bodies live in the CAS; fetch them with read_tool_body. The window is transcript_limit messages from transcript_offset; page with transcript_offset until transcript.has_more is false.",
+		Description: "One session: its header (project, agent, user, machine, branch, working directory, token and cost totals, timing) and subagents, plus, unless include_transcript is false, a bounded window of the transcript (messages with thinking and model, the tool-call metadata and attachments hanging on them). Tool bodies live in the CAS; fetch them with read_tool_body. The window is up to transcript_limit messages; page by passing the prior window's transcript.next_after as transcript_after until transcript.has_more is false.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in getSessionInput) (*mcp.CallToolResult, sessionDetailDTO, error) {
 		d, err := st.SessionDetailByID(ctx, in.SessionID)
 		if err != nil {
@@ -147,11 +152,19 @@ func registerTools(s *mcp.Server, st *store.Store) {
 		}
 		out := sessionDetailToDTO(d)
 
-		dup, err := st.DuplicateCallUIDCount(ctx, in.SessionID)
-		if err != nil {
-			return nil, sessionDetailDTO{}, err
+		includeTranscript := in.IncludeTranscript == nil || *in.IncludeTranscript
+
+		// The duplicate-id count is a session-wide aggregate (a GROUP BY over every
+		// tool_call), so computing it on each transcript page would make a full paged
+		// read superlinear. Compute it only on the first view: a header-only call, or the
+		// first transcript window (transcript_after unset). Later pages omit it.
+		if !includeTranscript || in.TranscriptAfter == nil {
+			dup, err := st.DuplicateCallUIDCount(ctx, in.SessionID)
+			if err != nil {
+				return nil, sessionDetailDTO{}, err
+			}
+			out.DuplicateToolCallIDs = &dup
 		}
-		out.DuplicateToolCallIDs = dup
 
 		subs, err := st.Subagents(ctx, in.SessionID)
 		if err != nil {
@@ -161,8 +174,8 @@ func registerTools(s *mcp.Server, st *store.Store) {
 			out.Subagents = append(out.Subagents, sessionSummaryToDTO(sub))
 		}
 
-		if in.IncludeTranscript == nil || *in.IncludeTranscript {
-			tr, err := loadTranscript(ctx, st, in.SessionID, in.TranscriptOffset, in.TranscriptLimit, d.MessageCount)
+		if includeTranscript {
+			tr, err := loadTranscript(ctx, st, in.SessionID, in.TranscriptAfter, in.TranscriptLimit, d.MessageCount)
 			if err != nil {
 				return nil, sessionDetailDTO{}, err
 			}
@@ -223,28 +236,33 @@ func registerTools(s *mcp.Server, st *store.Store) {
 }
 
 // loadTranscript reads one bounded window of a session's transcript: the messages
-// in [offset, offset+limit), and exactly the tool calls and attachments hanging on
-// those messages. It keeps peak memory proportional to the window rather than the
-// whole session, so a single get_session call cannot materialize an arbitrarily
-// large transcript. total is the session's full message count, used to report
-// has_more.
-func loadTranscript(ctx context.Context, st *store.Store, sessionID int64, offset, limit, total int) (*transcriptDTO, error) {
-	if offset < 0 {
-		offset = 0
-	}
+// whose ordinal is greater than after (nil for the first window), and exactly the
+// tool calls and attachments hanging on those messages. It pages by keyset on
+// ordinal, so peak memory stays proportional to the window and reading a whole
+// session window by window is linear, not quadratic. total is the session's full
+// message count, reported for context. has_more is exact: the read peeks one row past
+// the window rather than counting.
+func loadTranscript(ctx context.Context, st *store.Store, sessionID int64, after *int, limit, total int) (*transcriptDTO, error) {
 	if limit <= 0 {
 		limit = defaultTranscriptLimit
 	}
-	msgs, err := st.MessagesPage(ctx, sessionID, offset, limit)
+	if limit > maxTranscriptWindow {
+		limit = maxTranscriptWindow
+	}
+	// Fetch one extra row to learn whether a further window exists without a count.
+	msgs, err := st.MessagesAfter(ctx, sessionID, after, limit+1)
 	if err != nil {
 		return nil, err
 	}
+	hasMore := len(msgs) > limit
+	if hasMore {
+		msgs = msgs[:limit]
+	}
 	tr := &transcriptDTO{
-		Offset:        offset,
 		Limit:         limit,
 		Returned:      len(msgs),
 		TotalMessages: total,
-		HasMore:       offset+len(msgs) < total,
+		HasMore:       hasMore,
 		Messages:      make([]messageDTO, 0, len(msgs)),
 		ToolCalls:     []toolCallDTO{},
 		Attachments:   []attachmentDTO{},
@@ -259,6 +277,11 @@ func loadTranscript(ctx context.Context, st *store.Store, sessionID int64, offse
 	// The returned messages are ordered by ordinal, so their span is the closed
 	// range [first, last]; fetch only the calls and attachments inside it.
 	minOrd, maxOrd := msgs[0].Ordinal, msgs[len(msgs)-1].Ordinal
+	if hasMore {
+		// The next window resumes strictly after the last ordinal in this one.
+		next := maxOrd
+		tr.NextAfter = &next
+	}
 	calls, err := st.ToolCallsInRange(ctx, sessionID, minOrd, maxOrd)
 	if err != nil {
 		return nil, err

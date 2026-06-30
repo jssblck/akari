@@ -300,8 +300,8 @@ func facetCounts(fs []store.FacetCount) []facetCountDTO {
 type getSessionInput struct {
 	SessionID         int64 `json:"session_id" jsonschema:"the session id, from list_sessions"`
 	IncludeTranscript *bool `json:"include_transcript,omitempty" jsonschema:"include the transcript window (default true); set false for just the header, counts, and subagents"`
-	TranscriptOffset  int   `json:"transcript_offset,omitempty" jsonschema:"first message ordinal to return (default 0), for paging a long transcript"`
-	TranscriptLimit   int   `json:"transcript_limit,omitempty" jsonschema:"max messages to return in this window, up to 2000 (default 200)"`
+	TranscriptAfter   *int  `json:"transcript_after,omitempty" jsonschema:"return messages with an ordinal strictly greater than this; omit for the first window, then pass the prior window's next_after to page forward"`
+	TranscriptLimit   int   `json:"transcript_limit,omitempty" jsonschema:"max messages to return in this window, up to 1000 (default 200)"`
 }
 
 type sessionDetailDTO struct {
@@ -311,23 +311,26 @@ type sessionDetailDTO struct {
 	ParentID      *int64 `json:"parent_session_id,omitempty"`
 	ParserVersion int    `json:"parser_version"`
 	// DuplicateToolCallIDs counts tool-call ids that appear on more than one row, a
-	// sign the transcript replayed a turn (a resumed or compacted run); normally 0.
-	DuplicateToolCallIDs int            `json:"duplicate_tool_call_ids"`
+	// sign the transcript replayed a turn (a resumed or compacted run); normally 0. It
+	// is a session-wide aggregate, returned only on the first view (the header-only call
+	// or the first transcript window) and omitted on later pages so paging a long
+	// session does not recompute it per page.
+	DuplicateToolCallIDs *int           `json:"duplicate_tool_call_ids,omitempty"`
 	Subagents            []sessionDTO   `json:"subagents,omitempty"`
 	Transcript           *transcriptDTO `json:"transcript,omitempty"`
 }
 
-// transcriptDTO is one bounded window of a session's transcript. Messages are the
-// window [offset, offset+returned); the tool calls and attachments are exactly
-// those hanging on the returned messages, so the whole object is bounded by the
-// requested limit rather than the session size. Page with transcript_offset until
-// has_more is false.
+// transcriptDTO is one bounded window of a session's transcript. The tool calls and
+// attachments are exactly those hanging on the returned messages, so the whole object
+// is bounded by the requested limit rather than the session size. When has_more is
+// true, next_after is the ordinal to pass back as transcript_after for the next
+// window; paging stops when has_more is false.
 type transcriptDTO struct {
-	Offset        int             `json:"offset"`
 	Limit         int             `json:"limit"`
 	Returned      int             `json:"returned"`
 	TotalMessages int             `json:"total_messages"`
 	HasMore       bool            `json:"has_more"`
+	NextAfter     *int            `json:"next_after,omitempty"`
 	Messages      []messageDTO    `json:"messages"`
 	ToolCalls     []toolCallDTO   `json:"tool_calls"`
 	Attachments   []attachmentDTO `json:"attachments"`

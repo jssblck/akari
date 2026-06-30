@@ -622,7 +622,13 @@ func (s *Server) handleRevokeConnectionForm(w http.ResponseWriter, r *http.Reque
 	p, _ := principalFrom(r.Context())
 	clientID := r.PathValue("client_id")
 	if clientID != "" {
-		_ = s.Store.RevokeOAuthGrant(r.Context(), p.UserID, clientID)
+		// Surface a revocation failure instead of redirecting as if it worked: a
+		// silent redirect would tell the user the app is disconnected while its
+		// tokens stay live.
+		if err := s.Store.RevokeOAuthGrant(r.Context(), p.UserID, clientID); err != nil {
+			render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not disconnect the app. Try again."))
+			return
+		}
 	}
 	http.Redirect(w, r, "/account", http.StatusSeeOther)
 }

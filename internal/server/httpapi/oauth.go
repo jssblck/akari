@@ -243,7 +243,14 @@ func (s *Server) handleOAuthDecision(w http.ResponseWriter, r *http.Request) {
 	state := r.PostFormValue("state")
 
 	client, err := s.Store.OAuthClient(r.Context(), clientID)
-	if err != nil || !redirectRegistered(client, redirectURI) {
+	if errors.Is(err, store.ErrNotFound) {
+		s.renderOAuthErrorPage(w, r, http.StatusBadRequest, "Unknown client or unregistered redirect URI.")
+		return
+	} else if err != nil {
+		s.renderOAuthErrorPage(w, r, http.StatusInternalServerError, "Could not load the OAuth client.")
+		return
+	}
+	if !redirectRegistered(client, redirectURI) {
 		s.renderOAuthErrorPage(w, r, http.StatusBadRequest, "Unknown client or unregistered redirect URI.")
 		return
 	}
@@ -301,8 +308,11 @@ func (s *Server) tokenFromCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ac, err := s.Store.ConsumeAuthCode(r.Context(), auth.HashToken(code))
-	if err != nil {
+	if errors.Is(err, store.ErrInvalidGrant) {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "authorization code is invalid, expired, or already used")
+		return
+	} else if err != nil {
+		writeOAuthError(w, http.StatusInternalServerError, "server_error", "could not redeem the authorization code")
 		return
 	}
 	if ac.ClientID != r.PostFormValue("client_id") {
@@ -351,8 +361,11 @@ func (s *Server) tokenFromRefresh(w http.ResponseWriter, r *http.Request) {
 		AccessExpiresAt:  time.Now().Add(oauthAccessTTL),
 		RefreshExpiresAt: &refreshExpiry,
 	})
-	if err != nil {
+	if errors.Is(err, store.ErrInvalidGrant) {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "refresh token is invalid, expired, or revoked")
+		return
+	} else if err != nil {
+		writeOAuthError(w, http.StatusInternalServerError, "server_error", "could not rotate the refresh token")
 		return
 	}
 	writeTokenResponse(w, access, refresh, scope)

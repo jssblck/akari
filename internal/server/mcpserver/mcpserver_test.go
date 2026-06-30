@@ -280,26 +280,44 @@ func TestGetSessionTranscriptWindowPaging(t *testing.T) {
 	sess := connect(t, st)
 
 	first := callJSON(t, sess, "get_session", map[string]any{
-		"session_id": fx.sessionID, "transcript_offset": 0, "transcript_limit": 1,
+		"session_id": fx.sessionID, "transcript_limit": 1,
 	})
 	tr := first["transcript"].(map[string]any)
 	if int(tr["returned"].(float64)) != 1 || tr["has_more"] != true {
 		t.Fatalf("first window: %+v", tr)
 	}
+	// The first view carries the session-wide duplicate-id aggregate.
+	if _, present := first["duplicate_tool_call_ids"]; !present {
+		t.Fatalf("first view should carry duplicate_tool_call_ids: %+v", first)
+	}
+	nextAfter, ok := tr["next_after"].(float64)
+	if !ok {
+		t.Fatalf("first window missing next_after: %+v", tr)
+	}
 
 	second := callJSON(t, sess, "get_session", map[string]any{
-		"session_id": fx.sessionID, "transcript_offset": 1, "transcript_limit": 1,
+		"session_id": fx.sessionID, "transcript_after": int(nextAfter), "transcript_limit": 1,
 	})
 	tr2 := second["transcript"].(map[string]any)
 	if int(tr2["returned"].(float64)) != 1 || tr2["has_more"] != false {
 		t.Fatalf("second window: %+v", tr2)
 	}
+	if _, present := tr2["next_after"]; present {
+		t.Fatalf("last window should omit next_after: %+v", tr2)
+	}
+	// A later page omits the per-session aggregate so paging does not recompute it.
+	if _, present := second["duplicate_tool_call_ids"]; present {
+		t.Fatalf("paged view should omit duplicate_tool_call_ids: %+v", second)
+	}
 
-	// include_transcript=false omits the window entirely.
+	// include_transcript=false omits the window entirely but still reports the aggregate.
 	off := false
 	none := callJSON(t, sess, "get_session", map[string]any{"session_id": fx.sessionID, "include_transcript": off})
 	if _, present := none["transcript"]; present {
 		t.Fatalf("include_transcript=false should omit transcript: %+v", none)
+	}
+	if _, present := none["duplicate_tool_call_ids"]; !present {
+		t.Fatalf("header-only view should carry duplicate_tool_call_ids: %+v", none)
 	}
 }
 

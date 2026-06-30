@@ -2,12 +2,15 @@ package httpapi
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/jssblck/akari/internal/server/auth"
 	"github.com/jssblck/akari/internal/server/mcpserver"
+	"github.com/jssblck/akari/internal/server/store"
 	mcpauth "github.com/modelcontextprotocol/go-sdk/auth"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -52,14 +55,35 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 // reads.
 func (s *Server) verifyMCPToken(ctx context.Context, token string, _ *http.Request) (*mcpauth.TokenInfo, error) {
 	hash := auth.HashToken(token)
-	if uid, scope, expiresAt, err := s.Store.OAuthAccessAuth(ctx, hash); err == nil {
+
+	// An OAuth access token minted through the consent flow. Only a clean miss
+	// (ErrNotFound: not an OAuth token, or expired/revoked) falls through to the API
+	// token check; a database or context failure is a real backend error and must not
+	// masquerade as an invalid token, so it is wrapped and surfaces as 500.
+	uid, scope, expiresAt, err := s.Store.OAuthAccessAuth(ctx, hash)
+	switch {
+	case err == nil:
 		return &mcpauth.TokenInfo{UserID: strconv.FormatInt(uid, 10), Scopes: []string{scope}, Expiration: expiresAt}, nil
+	case !errors.Is(err, store.ErrNotFound):
+		return nil, fmt.Errorf("resolve oauth access token: %w", err)
 	}
-	if uid, scope, err := s.Store.TokenAuth(ctx, hash); err == nil && (scope == scopeRead || scope == scopeFull) {
+
+	// A manually created read- or full-scope API token (so a non-browser harness can
+	// use a token from the account page directly). Ingest-only tokens are rejected:
+	// ingest is push, not read.
+	uid, scope, err = s.Store.TokenAuth(ctx, hash)
+	switch {
+	case err == nil:
+		if scope != scopeRead && scope != scopeFull {
+			return nil, mcpauth.ErrInvalidToken
+		}
 		// An API token does not expire; the bearer middleware requires a non-zero
 		// expiration, so present a rolling one. Revocation still takes effect at once
 		// because this verifier hits the database on every request.
 		return &mcpauth.TokenInfo{UserID: strconv.FormatInt(uid, 10), Scopes: []string{scope}, Expiration: time.Now().Add(sessionTTL)}, nil
+	case errors.Is(err, store.ErrNotFound):
+		return nil, mcpauth.ErrInvalidToken
+	default:
+		return nil, fmt.Errorf("resolve api token: %w", err)
 	}
-	return nil, mcpauth.ErrInvalidToken
 }
