@@ -892,6 +892,38 @@ func TestPublicOverviewFlow(t *testing.T) {
 	resp.Body.Close()
 }
 
+// TestPublicOverviewPublishRequiresAuth confirms the publicity toggles are gated:
+// a logged-out client cannot publish or unpublish another account's overview, so
+// the public page is opt-in by its owner alone and not flippable by anyone who
+// finds the route.
+func TestPublicOverviewPublishRequiresAuth(t *testing.T) {
+	t.Parallel()
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+
+	owner, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	// No credential: the full-scope guard rejects the POST and nothing toggles.
+	anon := newClient(t)
+	anon.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	for _, path := range []string{"/account/overview/publish", "/account/overview/unpublish"} {
+		resp, err := anon.PostForm(srv.URL+path, url.Values{})
+		if err != nil {
+			t.Fatalf("anon post %s: %v", path, err)
+		}
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("anon POST %s = %d, want 401", path, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+	if u, _ := st.UserByID(ctx, owner.ID); u.OverviewPublic {
+		t.Fatalf("overview public after rejected anon publish, want still private")
+	}
+}
+
 func TestSafeNext(t *testing.T) {
 	cases := map[string]string{
 		"":                  "/",

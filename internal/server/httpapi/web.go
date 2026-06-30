@@ -327,12 +327,17 @@ func (s *Server) handleUnpublishOverview(w http.ResponseWriter, r *http.Request)
 // viewers at /u/<username>. Every figure is scoped to that one account (UserIDs),
 // so the page exposes neither another user's usage nor any session: it is the same
 // aggregate panel the owner sees, with the per-user filter and session links
-// absent. An unknown or unpublished username is a 404.
+// absent. An unknown or unpublished username is a 404; a backend failure is a 500,
+// not a "link expired", so a database hiccup is not misreported as a private page.
 func (s *Server) handlePublicOverview(w http.ResponseWriter, r *http.Request) {
 	username := r.PathValue("username")
 	u, err := s.Store.PublicOverviewUser(r.Context(), username)
-	if err != nil {
+	if errors.Is(err, store.ErrNotFound) {
 		render(w, r, http.StatusNotFound, web.PublicErrorPage(http.StatusNotFound, "This overview is not published, or the link has expired."))
+		return
+	}
+	if err != nil {
+		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load overview."))
 		return
 	}
 	rng := web.ParseRange(r.URL.Query().Get("range"))

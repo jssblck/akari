@@ -129,6 +129,16 @@ func TestPublishUnpublishOverview(t *testing.T) {
 	if u, err := st.PublicOverviewUser(ctx, "grace"); err != nil || u.ID != owner.ID {
 		t.Fatalf("lookup after re-publish: u.ID=%d err=%v", u.ID, err)
 	}
+
+	// Toggling a user that does not exist touches no row and is ErrNotFound rather
+	// than a silent no-op, so a caller cannot mistake "nothing happened" for success.
+	missing := owner.ID + 9999
+	if err := st.PublishOverview(ctx, missing); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("publish missing user = %v, want ErrNotFound", err)
+	}
+	if err := st.UnpublishOverview(ctx, missing); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("unpublish missing user = %v, want ErrNotFound", err)
+	}
 }
 
 func TestDeleteSessionCascadesAndOrphansBlob(t *testing.T) {
