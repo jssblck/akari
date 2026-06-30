@@ -57,15 +57,22 @@ func AnalyticsJSON(a store.Analytics) string {
 }
 
 // BreakdownRow is one bar in a by-model or by-agent breakdown: the label, its
-// formatted figures, a fill width as a percentage of the largest cost in the
-// set, and its categorical color.
+// formatted cost, the raw token volume (total plus the four-class split that
+// feeds the hover card), a fill width as a percentage of the largest token volume
+// in the set, and its categorical color. The token fields stay raw int64s so the
+// template runs them through the same FmtTokens the rest of the app uses.
 type BreakdownRow struct {
-	Label    string
-	Cost     string
-	Tokens   string
-	Sessions int
-	Pct      float64
-	Color    string
+	Label      string
+	Cost       string
+	CostUSD    float64
+	Tokens     int64
+	Input      int64
+	Output     int64
+	CacheRead  int64
+	CacheWrite int64
+	Sessions   int
+	Pct        float64
+	Color      string
 }
 
 // OtherModelLabel is the bucket name for the model breakdown's long tail: every
@@ -93,7 +100,10 @@ func FoldUnknownModels(bs []store.Breakdown) []store.Breakdown {
 			continue
 		}
 		other.CostUSD += b.CostUSD
-		other.Tokens += b.Tokens
+		other.Input += b.Input
+		other.Output += b.Output
+		other.CacheRead += b.CacheRead
+		other.CacheWrite += b.CacheWrite
 		other.Sessions += b.Sessions
 		folded = true
 	}
@@ -110,27 +120,32 @@ func FoldUnknownModels(bs []store.Breakdown) []store.Breakdown {
 func BuildBreakdown(bs []store.Breakdown) []BreakdownRow {
 	var maxTok int64
 	for _, b := range bs {
-		if b.Tokens > maxTok {
-			maxTok = b.Tokens
+		if b.Tokens() > maxTok {
+			maxTok = b.Tokens()
 		}
 	}
 	rows := make([]BreakdownRow, 0, len(bs))
 	for i, b := range bs {
 		pct := 0.0
 		if maxTok > 0 {
-			pct = float64(b.Tokens) / float64(maxTok) * 100
+			pct = float64(b.Tokens()) / float64(maxTok) * 100
 		}
 		// A non-zero slice always shows a sliver, so it never reads as empty.
 		if pct > 0 && pct < 2 {
 			pct = 2
 		}
 		rows = append(rows, BreakdownRow{
-			Label:    b.Label,
-			Cost:     FmtCost(b.CostUSD, false),
-			Tokens:   FmtTokens(b.Tokens),
-			Sessions: b.Sessions,
-			Pct:      pct,
-			Color:    VizColor(i),
+			Label:      b.Label,
+			Cost:       FmtCost(b.CostUSD, false),
+			CostUSD:    b.CostUSD,
+			Tokens:     b.Tokens(),
+			Input:      b.Input,
+			Output:     b.Output,
+			CacheRead:  b.CacheRead,
+			CacheWrite: b.CacheWrite,
+			Sessions:   b.Sessions,
+			Pct:        pct,
+			Color:      VizColor(i),
 		})
 	}
 	return rows
