@@ -9,8 +9,11 @@ templ LoginPage(p Page, next, errMsg string) {
 			}
 			<form method="post" action="/login">
 				<input type="hidden" name="next" value={ next }/>
-				<input name="username" placeholder="username" autofocus/>
-				<input name="password" type="password" placeholder="password"/>
+				// aria-label gives each field a persistent accessible name (the placeholder
+				// vanishes on input and is not a label), and autocomplete lets a password
+				// manager and the browser fill the sign-in form.
+				<input name="username" placeholder="username" aria-label="Username" autocomplete="username" autofocus/>
+				<input name="password" type="password" placeholder="password" aria-label="Password" autocomplete="current-password"/>
 				<button type="submit">Log in</button>
 			</form>
 			<p class="muted">Have an invite? <a href="/register">Register</a>.</p>
@@ -26,9 +29,9 @@ templ RegisterPage(p Page, errMsg string) {
 				<div class="error">{ errMsg }</div>
 			}
 			<form method="post" action="/register">
-				<input name="username" placeholder="username" autofocus/>
-				<input name="password" type="password" placeholder="password"/>
-				<input name="invite_token" placeholder="invite token"/>
+				<input name="username" placeholder="username" aria-label="Username" autocomplete="username" autofocus/>
+				<input name="password" type="password" placeholder="password" aria-label="Password" autocomplete="new-password"/>
+				<input name="invite_token" placeholder="invite token" aria-label="Invite token" autocomplete="off"/>
 				<button type="submit">Register</button>
 			</form>
 			<p class="muted">The first account needs no invite and becomes admin. <a href="/login">Log in</a>.</p>

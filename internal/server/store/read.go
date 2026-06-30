@@ -30,7 +30,21 @@ type ProjectSummary struct {
 	// four classes the overview heatmap surfaces per day).
 	TotalCacheRead  int64
 	TotalCacheWrite int64
-	LastActivity    *time.Time
+	// CostIncomplete is true when any session folded into this project's totals
+	// carries an unpriced usage event, so the rolled-up cost is a lower bound. It
+	// is the OR of the per-session cost_incomplete flags, letting the index render
+	// the same "$X+" marker the per-session rows show instead of an exact figure
+	// that silently understates an aggregate built from incomplete sessions.
+	//
+	// Like every other figure on this index, it is rollup-scoped (every surviving
+	// usage row), so it can read true for a project whose only unpriced usage is
+	// undated while the all-time analytics panel, which drops undated rows off its
+	// time axis, reads exact. That is the one documented rollup-vs-analytics gap,
+	// the same one the token and cost totals carry (see, in package store's tests,
+	// TestUndatedUsageIsTheOnlyRollupAnalyticsGap): the flag tracks each surface's
+	// own displayed total rather than diverging from it.
+	CostIncomplete bool
+	LastActivity   *time.Time
 }
 
 // TotalTokens is the sum of every token class for a project: input, output, and
@@ -102,19 +116,6 @@ type ToolCallView struct {
 	ResultBytes     int64
 	ResultMediaType string
 	ResultStatus    string
-}
-
-// SearchHit is one message matching a search, with its session context.
-type SearchHit struct {
-	SessionID   int64
-	ProjectKey  string
-	ProjectName string
-	ProjectKind string
-	Agent       string
-	Username    string
-	Ordinal     int
-	Role        string
-	Snippet     string
 }
 
 // SessionFilter narrows a session list. Empty fields are ignored.
@@ -230,6 +231,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]ProjectSummary, error) {
 		        coalesce(sum(s.total_output_tokens), 0),
 		        coalesce(sum(s.total_cache_read_tokens), 0),
 		        coalesce(sum(s.total_cache_write_tokens), 0),
+		        coalesce(bool_or(s.cost_incomplete), false),
 		        max(s.updated_at)
 		   FROM projects p
 		   LEFT JOIN sessions s ON s.project_id = p.id
@@ -244,7 +246,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]ProjectSummary, error) {
 		var p ProjectSummary
 		if err := rows.Scan(&p.ID, &p.RemoteKey, &p.Host, &p.Owner, &p.Repo, &p.DisplayName, &p.Kind,
 			&p.SessionCount, &p.TotalCostUSD, &p.TotalInput, &p.TotalOutput,
-			&p.TotalCacheRead, &p.TotalCacheWrite, &p.LastActivity); err != nil {
+			&p.TotalCacheRead, &p.TotalCacheWrite, &p.CostIncomplete, &p.LastActivity); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -342,6 +344,186 @@ func (s *Store) ListSessions(ctx context.Context, f SessionFilter) ([]SessionSum
 		out = append(out, sm)
 	}
 	return out, rows.Err()
+}
+
+// windowSessionLimit is the cap on how many session rows the project page renders.
+// Past it the table would grow with a project's whole windowed history, so the rows
+// stop here and SessionPage.Remainder accounts for the rest.
+const windowSessionLimit = 100
+
+// SessionPage is a project's windowed session table: the capped rows the page shows,
+// newest-active first, plus the aggregate of every windowed session that did not fit
+// (Remainder). Shown rows plus Remainder reproduce the usage panel's headline, since
+// both the rows and the remainder derive from the one dated-usage base the panel sums.
+type SessionPage struct {
+	Sessions  []SessionSummary
+	Remainder SessionRemainder
+}
+
+// SessionRemainder is the aggregate of the windowed sessions the capped table did not
+// show: how many, their per-class token volume, their summed cost, and whether any of
+// them carried unpriced usage. The project page renders it as a footer so the visible
+// rows plus this line reconcile with the usage panel headline even when more sessions
+// match than the table caps at. It carries all four token classes (not just a total)
+// so the footer can show the same breakdown card every other token figure does, and
+// its CostIncomplete is a bool_or over the hidden sessions alone, so the footer flags
+// "$X+" only when a hidden session is the unpriced one, never because a visible row was.
+type SessionRemainder struct {
+	Sessions       int
+	Input          int64
+	Output         int64
+	CacheRead      int64
+	CacheWrite     int64
+	CostUSD        float64
+	CostIncomplete bool
+}
+
+// Has reports whether any windowed sessions fell outside the capped table, so the
+// project page shows the reconciling footer only when rows were actually withheld.
+func (r SessionRemainder) Has() bool { return r.Sessions > 0 }
+
+// Tokens is the hidden tail's all-class token volume, the figure the footer's total
+// shows with the per-class split behind its card, matching every other token readout.
+func (r SessionRemainder) Tokens() int64 {
+	return r.Input + r.Output + r.CacheRead + r.CacheWrite
+}
+
+// windowSessionConds builds the shared WHERE additions for the windowed-session
+// queries (the capped rows and the remainder aggregate), so both narrow by the exact
+// same project, window, agent, user, and machine scope the usage panel does. The
+// placeholders start at $1; the caller appends its own (limit, offset) after.
+func windowSessionConds(f SessionFilter) ([]string, []any) {
+	var conds []string
+	var args []any
+	add := func(cond string, val any) {
+		args = append(args, val)
+		conds = append(conds, cond+" $"+itoa(len(args)))
+	}
+	if f.ProjectID != 0 {
+		add("s.project_id =", f.ProjectID)
+	}
+	if f.Agent != "" {
+		add("s.agent =", f.Agent)
+	}
+	if f.Machine != "" {
+		add("s.machine =", f.Machine)
+	}
+	if f.Username != "" {
+		add("u.username =", f.Username)
+	}
+	if !f.Since.IsZero() {
+		add("ue.occurred_at >=", f.Since)
+	}
+	return conds, args
+}
+
+// WindowSessionPage returns the project page's session table: the capped rows that
+// contributed dated usage inside the filter's window, each carrying its in-window
+// token and cost sums rather than its all-time rollup, plus the aggregate of the
+// windowed sessions beyond the cap. It shares the analytics base exactly (the same
+// dated usage_events under the same project, window, agent, user, and machine scope,
+// grouped per session instead of summed whole), which is what lets the rows be a
+// partition of the usage panel's headline where the lifetime rollups ListSessions
+// returns would overcount a session whose usage predates the window.
+//
+// The cap keeps a project with thousands of windowed sessions from rendering an
+// unbounded table. So the visible rows alone need not sum to the headline; the
+// remainder closes the gap. It is queried, not subtracted from the panel: a boolean
+// OR like cost_incomplete cannot be undone by subtraction (a visible unpriced row
+// would wrongly mark the priced tail incomplete), so the tail is aggregated directly
+// over the hidden sessions, carrying its own per-class sums, cost, and bool_or flag.
+// The remainder query runs only when the cap actually engaged.
+func (s *Store) WindowSessionPage(ctx context.Context, f SessionFilter) (SessionPage, error) {
+	conds, args := windowSessionConds(f)
+	where := "ue.occurred_at IS NOT NULL"
+	if len(conds) > 0 {
+		where += " AND " + strings.Join(conds, " AND ")
+	}
+
+	q := `
+		SELECT s.id, s.agent, s.machine, s.git_branch, u.username,
+		       s.message_count, s.user_message_count,
+		       coalesce(sum(ue.input_tokens), 0), coalesce(sum(ue.output_tokens), 0),
+		       coalesce(sum(ue.cache_write_tokens), 0), coalesce(sum(ue.cache_read_tokens), 0),
+		       coalesce(sum(ue.cost_usd), 0), ` + costIncompleteExpr + `,
+		       s.visibility, s.public_id, s.started_at, s.ended_at, s.updated_at
+		  FROM usage_events ue
+		  JOIN sessions s ON s.id = ue.session_id
+		  JOIN users u ON u.id = s.user_id
+		 WHERE ` + where + `
+		 GROUP BY s.id, u.username
+		 ORDER BY s.updated_at DESC, s.id DESC
+		 LIMIT $` + itoa(len(args)+1)
+	rowArgs := append(append([]any{}, args...), windowSessionLimit)
+
+	rows, err := s.Pool.Query(ctx, q, rowArgs...)
+	if err != nil {
+		return SessionPage{}, fmt.Errorf("query window sessions: %w", err)
+	}
+	defer rows.Close()
+	var out []SessionSummary
+	for rows.Next() {
+		var sm SessionSummary
+		if err := rows.Scan(&sm.ID, &sm.Agent, &sm.Machine, &sm.GitBranch, &sm.Username,
+			&sm.MessageCount, &sm.UserMessageCount,
+			&sm.TotalInput, &sm.TotalOutput, &sm.TotalCacheWrite, &sm.TotalCacheRead,
+			&sm.TotalCostUSD, &sm.CostIncomplete, &sm.Visibility, &sm.PublicID,
+			&sm.StartedAt, &sm.EndedAt, &sm.UpdatedAt); err != nil {
+			return SessionPage{}, fmt.Errorf("scan window session: %w", err)
+		}
+		out = append(out, sm)
+	}
+	if err := rows.Err(); err != nil {
+		return SessionPage{}, fmt.Errorf("iterate window sessions: %w", err)
+	}
+
+	page := SessionPage{Sessions: out}
+	// The remainder exists only when the table filled to its cap; below it, every
+	// windowed session already shows and the footer would be empty.
+	if len(out) == windowSessionLimit {
+		rem, err := s.windowSessionRemainder(ctx, where, args)
+		if err != nil {
+			return SessionPage{}, err
+		}
+		page.Remainder = rem
+	}
+	return page, nil
+}
+
+// windowSessionRemainder aggregates the windowed sessions past the cap into the
+// footer's totals. It re-derives the same per-session grouping WindowSessionPage
+// shows, orders it identically, skips the rows already shown (OFFSET the cap), and
+// sums what is left: per-class tokens, cost, the count, and a bool_or over those
+// sessions' own incompleteness so the marker reflects the hidden tail, not the panel.
+func (s *Store) windowSessionRemainder(ctx context.Context, where string, args []any) (SessionRemainder, error) {
+	q := `
+		SELECT coalesce(count(*), 0),
+		       coalesce(sum(t.input), 0), coalesce(sum(t.output), 0),
+		       coalesce(sum(t.cache_read), 0), coalesce(sum(t.cache_write), 0),
+		       coalesce(sum(t.cost), 0), coalesce(bool_or(t.incomplete), false)
+		  FROM (
+		       SELECT coalesce(sum(ue.input_tokens), 0) AS input,
+		              coalesce(sum(ue.output_tokens), 0) AS output,
+		              coalesce(sum(ue.cache_read_tokens), 0) AS cache_read,
+		              coalesce(sum(ue.cache_write_tokens), 0) AS cache_write,
+		              coalesce(sum(ue.cost_usd), 0) AS cost,
+		              ` + costIncompleteExpr + ` AS incomplete
+		         FROM usage_events ue
+		         JOIN sessions s ON s.id = ue.session_id
+		         JOIN users u ON u.id = s.user_id
+		        WHERE ` + where + `
+		        GROUP BY s.id
+		        ORDER BY s.updated_at DESC, s.id DESC
+		        OFFSET $` + itoa(len(args)+1) + `
+		  ) t`
+	remArgs := append(append([]any{}, args...), windowSessionLimit)
+	var r SessionRemainder
+	if err := s.Pool.QueryRow(ctx, q, remArgs...).Scan(
+		&r.Sessions, &r.Input, &r.Output, &r.CacheRead, &r.CacheWrite, &r.CostUSD, &r.CostIncomplete,
+	); err != nil {
+		return SessionRemainder{}, fmt.Errorf("aggregate window session remainder: %w", err)
+	}
+	return r, nil
 }
 
 // globalSessionSelect is the column list and joins for cross-project session
@@ -781,46 +963,6 @@ func (s *Store) SessionFacets(ctx context.Context, projectID int64) (FacetValues
 		}
 	}
 	return f, rows.Err()
-}
-
-// Search finds messages whose content matches the query (trigram-accelerated
-// substring match), optionally scoped to one project. The standalone search
-// page was retired; this stays as the query layer for search folded into other
-// views, backed by the pg_trgm index on messages.content.
-func (s *Store) Search(ctx context.Context, query string, projectID int64, limit int) ([]SearchHit, error) {
-	if limit <= 0 || limit > 200 {
-		limit = 50
-	}
-	args := []any{query}
-	scope := ""
-	if projectID != 0 {
-		args = append(args, projectID)
-		scope = " AND s.project_id = $2"
-	}
-	args = append(args, limit)
-	rows, err := s.Pool.Query(ctx,
-		`SELECT m.session_id, p.remote_key, p.display_name, p.kind, s.agent, u.username, m.ordinal, m.role,
-		        left(m.content, 240)
-		   FROM messages m
-		   JOIN sessions s ON s.id = m.session_id
-		   JOIN projects p ON p.id = s.project_id
-		   JOIN users u ON u.id = s.user_id
-		  WHERE m.content ILIKE '%' || $1 || '%'`+scope+`
-		  ORDER BY s.updated_at DESC
-		  LIMIT $`+itoa(len(args)), args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []SearchHit
-	for rows.Next() {
-		var h SearchHit
-		if err := rows.Scan(&h.SessionID, &h.ProjectKey, &h.ProjectName, &h.ProjectKind, &h.Agent, &h.Username, &h.Ordinal, &h.Role, &h.Snippet); err != nil {
-			return nil, err
-		}
-		out = append(out, h)
-	}
-	return out, rows.Err()
 }
 
 // itoa avoids strconv noise in query building.

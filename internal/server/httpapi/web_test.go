@@ -507,15 +507,23 @@ func TestProjectPageRangeWindow(t *testing.T) {
 		t.Fatalf("seed usage: %v", err)
 	}
 
-	// A second session last active 60 days ago: outside the default 30-day window,
-	// so it should drop out of the session list under that window and reappear only
-	// when the window widens to all of history.
+	// A second session whose usage landed 60 days ago: outside the default 30-day
+	// window, so it should drop out of the session list under that window and
+	// reappear only when the window widens to all of history. The table is windowed
+	// by usage date (it shares the panel's base), so the old session needs a dated
+	// usage event in that window, not just an aged updated_at.
 	annOld, err := st.Announce(ctx, store.AnnounceParams{
 		UserID: owner.ID, Agent: "claude", SourceSessionID: "sess-old",
 		ProjectID: projectID, Cwd: "/home/grace/akari", Machine: "laptop",
 	})
 	if err != nil {
 		t.Fatalf("announce old: %v", err)
+	}
+	if _, err := st.Pool.Exec(ctx,
+		`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cost_usd, occurred_at, dedup_key)
+		 VALUES ($1, 'claude-opus-4-8', 200, 100, 2.0, now() - make_interval(days => 60), 'u-old')`,
+		annOld.SessionID); err != nil {
+		t.Fatalf("seed old usage: %v", err)
 	}
 	if _, err := st.Pool.Exec(ctx,
 		`UPDATE sessions SET updated_at = now() - make_interval(days => 60) WHERE id = $1`,
@@ -568,20 +576,22 @@ func TestProjectPageRangeWindow(t *testing.T) {
 		t.Fatalf("the all-history window should list the 60-day-old session, got:\n%s", body)
 	}
 
-	// An htmx request that targets #usage (the range selector) gets the full panel.
-	reqUsage, _ := http.NewRequest(http.MethodGet, srv.URL+base+"?range=90d", nil)
-	reqUsage.Header.Set("HX-Request", "true")
-	reqUsage.Header.Set("HX-Target", "usage")
-	if body = readBody(t, mustDo(t, c, reqUsage)); !strings.Contains(body, "data-heatmap") {
-		t.Fatalf("an htmx request targeting #usage should render the usage panel, got:\n%s", body)
+	// The range selector and filter form both swap the whole #project-view, so the
+	// usage panel and the session table re-scope together rather than drifting apart
+	// (the panel narrowing with the rows under a filter is the point). The controls
+	// target that region, and a swap of it carries both the panel and the list.
+	if !strings.Contains(body, `id="project-view"`) {
+		t.Fatalf("project page should wrap the panel and table in #project-view, got:\n%s", body)
 	}
-
-	// An htmx request that targets #session-list (the filter form) gets only the list.
-	reqList, _ := http.NewRequest(http.MethodGet, srv.URL+base, nil)
-	reqList.Header.Set("HX-Request", "true")
-	reqList.Header.Set("HX-Target", "session-list")
-	if body = readBody(t, mustDo(t, c, reqList)); strings.Contains(body, "data-heatmap") {
-		t.Fatalf("a session-list htmx request should not include the usage panel, got:\n%s", body)
+	if !strings.Contains(body, `hx-target="#project-view"`) || !strings.Contains(body, `hx-select="#project-view"`) {
+		t.Fatalf("project controls should target #project-view, got:\n%s", body)
+	}
+	reqView, _ := http.NewRequest(http.MethodGet, srv.URL+base+"?range=all", nil)
+	reqView.Header.Set("HX-Request", "true")
+	reqView.Header.Set("HX-Target", "project-view")
+	body = readBody(t, mustDo(t, c, reqView))
+	if !strings.Contains(body, "data-heatmap") || !strings.Contains(body, `id="session-list"`) {
+		t.Fatalf("a #project-view swap should carry both the usage panel and the session list, got:\n%s", body)
 	}
 }
 

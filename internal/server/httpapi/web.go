@@ -82,7 +82,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	selected := web.SelectedUserIDs(r.URL.Query()["user"], users)
-	analytics, err := s.Store.Analytics(r.Context(), 0, web.RangeSince(rng, time.Now()), selected)
+	analytics, err := s.Store.Analytics(r.Context(), store.AnalyticsFilter{Since: web.RangeSince(rng, time.Now()), UserIDs: selected})
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "overview"), http.StatusInternalServerError, "Could not load analytics."))
 		return
@@ -189,18 +189,14 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 		Username:  strings.TrimSpace(r.URL.Query().Get("user")),
 		Since:     since,
 	}
-	sessions, err := s.Store.ListSessions(r.Context(), filter)
+	// The table draws from the same windowed usage base as the panel (WindowSessionPage,
+	// not the lifetime-rollup ListSessions), so each row's tokens and cost are its
+	// in-window share and the visible rows sum to the panel headline rather than
+	// overcounting sessions whose usage predates the window. Past the row cap the page
+	// carries a remainder aggregate so the table still reconciles with the headline.
+	page, err := s.Store.WindowSessionPage(r.Context(), filter)
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load sessions."))
-		return
-	}
-
-	// The session filter form swaps only the session list (it targets #session-list);
-	// the usage panel's range selector also refetches this handler but targets #usage
-	// and selects the full panel out of a complete page render, so only a session-list
-	// request short-circuits to the list fragment.
-	if r.Header.Get("HX-Request") == "true" && r.Header.Get("HX-Target") == "session-list" {
-		render(w, r, http.StatusOK, web.SessionList(sessions))
 		return
 	}
 
@@ -209,15 +205,21 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load filters."))
 		return
 	}
-	// The project page has no per-user filter, so user scope is nil; the window is
-	// the same `since` the session list above is bounded to.
-	analytics, err := s.Store.Analytics(r.Context(), id, since, nil)
+	// The usage panel scopes to the same agent/user/machine the session table does, so
+	// the headline and the rows reconcile under a filter rather than the panel staying
+	// project-wide while the rows narrow. The same filter values feed both: the panel
+	// matches the username through the analytics base (an unknown name scopes to
+	// nothing, matching the empty table) rather than a separate lookup whose error
+	// would have to be invented away.
+	analytics, err := s.Store.Analytics(r.Context(), store.AnalyticsFilter{
+		ProjectID: id, Since: since, Username: filter.Username, Agent: filter.Agent, Machine: filter.Machine,
+	})
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load analytics."))
 		return
 	}
 	wf := web.Facets{Agents: facets.Agents, Machines: facets.Machines, Users: facets.Users}
-	render(w, r, http.StatusOK, web.ProjectPage(s.pageForNav(r, proj.RemoteKey, "projects"), proj, sessions, wf, filter, analytics, rng))
+	render(w, r, http.StatusOK, web.ProjectPage(s.pageForNav(r, proj.RemoteKey, "projects"), proj, page.Sessions, page.Remainder, wf, filter, analytics, rng))
 }
 
 // sessionView loads everything the session page (and its live body fragment)
@@ -390,8 +392,14 @@ func (s *Server) handleSessionBody(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d, msgs, tools, atts, subs, err := s.sessionView(r, id)
-	if err != nil {
+	if errors.Is(err, store.ErrNotFound) {
 		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		// A transient backend failure is a 500, not a "session not found": the live
+		// body fragment must not report a database hiccup as a missing session.
+		http.Error(w, "Could not load session.", http.StatusInternalServerError)
 		return
 	}
 	render(w, r, http.StatusOK, web.SessionMain(d, msgs, tools, atts, subs))

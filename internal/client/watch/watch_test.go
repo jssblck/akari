@@ -50,7 +50,11 @@ func waitFor(t *testing.T, ch chan string, want string) {
 }
 
 func fastOptions() Options {
-	return Options{Debounce: 20 * time.Millisecond, Poll: 50 * time.Millisecond, Rescan: time.Hour}
+	// Discover is the fallback that finds newly created files when no fsnotify
+	// Create event is delivered (a freshly created subdirectory races the watch
+	// add); keep it fast here so the new-file test exercises that fallback
+	// deterministically rather than depending on the event race.
+	return Options{Debounce: 20 * time.Millisecond, Poll: 50 * time.Millisecond, Discover: 50 * time.Millisecond, Rescan: time.Hour}
 }
 
 func TestWatchInitialPass(t *testing.T) {
@@ -83,6 +87,46 @@ func TestWatchDetectsNewFile(t *testing.T) {
 	writeSession(t, path)
 
 	waitFor(t, ch, path)
+}
+
+func TestWatchHonorsExcludes(t *testing.T) {
+	dir := t.TempDir()
+	keep := filepath.Join(dir, "proj", "keep.jsonl")
+	excluded := filepath.Join(dir, "proj", "dropme", "drop.jsonl")
+	writeSession(t, keep)
+	writeSession(t, excluded)
+
+	fn, ch := recorder()
+	opt := fastOptions()
+	// "dropme", not "tmp": t.TempDir() is under /tmp on Linux, so **/tmp/** would
+	// exclude the kept file too and the test would pass for the wrong reason.
+	opt.Excludes = []string{"**/dropme/**"}
+	w := New([]discover.Root{{Agent: "claude", Dir: dir}}, fn, opt)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go w.Run(ctx)
+
+	// The kept file must sync; the excluded one must never appear. Drain for a
+	// window long enough for the initial pass and a few discover/poll ticks.
+	sawKeep := false
+	deadline := time.After(1 * time.Second)
+	for {
+		select {
+		case got := <-ch:
+			if got == excluded {
+				t.Fatalf("excluded file was synced: %s", got)
+			}
+			if got == keep {
+				sawKeep = true
+			}
+		case <-deadline:
+			if !sawKeep {
+				t.Fatal("kept file was never synced")
+			}
+			return
+		}
+	}
 }
 
 func TestWatchIgnoresNonSessionFiles(t *testing.T) {

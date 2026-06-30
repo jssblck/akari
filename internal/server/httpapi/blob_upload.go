@@ -70,7 +70,10 @@ func (s *Server) handleBlobUpload(w http.ResponseWriter, r *http.Request) {
 
 	body := http.MaxBytesReader(w, r.Body, maxBlobUpload)
 	defer body.Close()
-	if err := s.Store.PutBlob(r.Context(), sha, mediaType, contentType, body); err != nil {
+	// A 2 GiB blob can take longer than the server-wide ReadTimeout to receive on
+	// a slow link; refresh the read deadline as bytes arrive so an actively
+	// progressing upload is not aborted mid-stream (see deadlines.go).
+	if err := s.Store.PutBlob(r.Context(), sha, mediaType, contentType, idleReadDeadline(w, body)); err != nil {
 		// A hash mismatch is the client's error (the bytes do not match the declared
 		// key); everything else is a server fault.
 		if errors.Is(err, store.ErrBlobHashMismatch) {

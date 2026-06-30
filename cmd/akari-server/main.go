@@ -133,8 +133,12 @@ func run() error {
 		Addr:              cfg.Listen,
 		Handler:           httpapi.New(st, cfg, reparser).Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
-		// ReadTimeout is generous enough for a bounded (64 MiB) chunk upload on a
-		// slow link while still capping slow-loris body reads.
+		// These are absolute deadlines sized for the small, fast requests that make
+		// up almost all traffic. The two large-body routes (chunk uploads up to
+		// 128 MiB, CAS blobs up to 2 GiB) would be truncated mid-stream by these
+		// caps on a slow link, so they manage their own idle deadlines via
+		// http.NewResponseController instead (see internal/server/httpapi/deadlines.go);
+		// the SSE stream does the same for its long-lived writes.
 		ReadTimeout:  120 * time.Second,
 		WriteTimeout: 60 * time.Second,
 		IdleTimeout:  120 * time.Second,

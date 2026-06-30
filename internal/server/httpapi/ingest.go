@@ -114,7 +114,10 @@ func (s *Server) handleChunk(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "offset query parameter is required")
 		return
 	}
-	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxChunk))
+	// Refresh the read deadline as the chunk arrives so a large (up to 128 MiB)
+	// chunk on a slow link is not cut off by the server-wide ReadTimeout, while a
+	// stalled client still trips the idle deadline (see deadlines.go).
+	data, err := io.ReadAll(idleReadDeadline(w, http.MaxBytesReader(w, r.Body, maxChunk)))
 	if err != nil {
 		writeError(w, http.StatusRequestEntityTooLarge, "chunk too large or read error")
 		return

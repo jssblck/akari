@@ -25,8 +25,12 @@ type SyncFunc func(ctx context.Context, f discover.File) syncer.Result
 // Options tune the watch timers. Zero values fall back to defaults.
 type Options struct {
 	Debounce time.Duration // quiet period before uploading a changed file
-	Poll     time.Duration // mtime/size diff interval for the polling fallback
+	Poll     time.Duration // mtime/size re-stat interval for the polling fallback
+	Discover time.Duration // interval to re-walk the roots for newly created files
 	Rescan   time.Duration // full rediscover-and-sync safety net interval
+	// Excludes are glob patterns of paths to skip (see discover.Excluder). They
+	// keep an ignored location out of discovery, the poll, and event handling.
+	Excludes []string
 	Logf     func(string, ...any)
 }
 
@@ -36,6 +40,9 @@ func (o Options) withDefaults() Options {
 	}
 	if o.Poll <= 0 {
 		o.Poll = 3 * time.Second
+	}
+	if o.Discover <= 0 {
+		o.Discover = 30 * time.Second
 	}
 	if o.Rescan <= 0 {
 		o.Rescan = 15 * time.Minute
@@ -51,11 +58,13 @@ type Watcher struct {
 	roots []discover.Root
 	sync  SyncFunc
 	opt   Options
+	ex    discover.Excluder
 }
 
 // New builds a Watcher.
 func New(roots []discover.Root, sync SyncFunc, opt Options) *Watcher {
-	return &Watcher{roots: roots, sync: sync, opt: opt.withDefaults()}
+	o := opt.withDefaults()
+	return &Watcher{roots: roots, sync: sync, opt: o, ex: discover.NewExcluder(o.Excludes)}
 }
 
 type fileMeta struct {
@@ -88,11 +97,13 @@ func (w *Watcher) Run(ctx context.Context) error {
 		close(done)
 	}()
 
-	// Initial pass: discover everything, seed the poll baseline, and sync all.
-	known := map[string]fileMeta{}
+	// Initial pass: discover everything, seed the poll baseline, and sync all. The
+	// baseline is keyed by File so the poll can re-stat the known set directly and
+	// has the File in hand to queue a changed one, without re-walking the tree.
+	known := map[discover.File]fileMeta{}
 	for _, f := range w.discover() {
 		if m, ok := statMeta(f.Path); ok {
-			known[f.Path] = m
+			known[f] = m
 		}
 		rs.mark(f)
 	}
@@ -100,9 +111,11 @@ func (w *Watcher) Run(ctx context.Context) error {
 	pending := map[discover.File]time.Time{}
 	flush := time.NewTicker(flushInterval(w.opt.Debounce))
 	poll := time.NewTicker(w.opt.Poll)
+	disco := time.NewTicker(w.opt.Discover)
 	rescan := time.NewTicker(w.opt.Rescan)
 	defer flush.Stop()
 	defer poll.Stop()
+	defer disco.Stop()
 	defer rescan.Stop()
 
 	for {
@@ -115,7 +128,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 			if !ok {
 				continue
 			}
-			w.handleEvent(fsw, watched, ev, pending)
+			w.handleEvent(fsw, watched, ev, known, pending)
 
 		case err, ok := <-fsw.Errors:
 			if ok && err != nil {
@@ -131,16 +144,38 @@ func (w *Watcher) Run(ctx context.Context) error {
 			}
 
 		case <-poll.C:
-			// Fallback: stat every discovered file and queue the changed ones.
-			for _, f := range w.discover() {
+			// Fallback for changes the OS watcher missed: re-stat only the files we
+			// already know about (no tree walk) and queue the changed ones. Finding
+			// newly created files is the discover ticker's job below, so the frequent
+			// poll stays O(known files) of stat syscalls rather than re-walking and
+			// re-sorting the whole session tree every few seconds.
+			for f, prev := range known {
 				m, ok := statMeta(f.Path)
 				if !ok {
+					delete(known, f) // gone from disk; stop tracking it
 					continue
 				}
-				if known[f.Path] != m {
-					known[f.Path] = m
+				if m != prev {
+					known[f] = m
 					pending[f] = time.Now().Add(w.opt.Debounce)
 				}
+			}
+
+		case <-disco.C:
+			// Catch files created on a root the OS watcher cannot cover (a network
+			// filesystem, or one past the watch limit), where no Create event fires.
+			// This walks the tree, but on a slower cadence than the poll, so a brand
+			// new file there appears within this interval rather than every poll
+			// paying for a walk. A file fsnotify did see is already syncing via its
+			// Create event; this only adds the ones missing from the baseline.
+			for _, f := range w.discover() {
+				if _, ok := known[f]; ok {
+					continue
+				}
+				if m, ok := statMeta(f.Path); ok {
+					known[f] = m
+				}
+				rs.mark(f)
 			}
 
 		case <-rescan.C:
@@ -150,7 +185,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 			}
 			for _, f := range w.discover() {
 				if m, ok := statMeta(f.Path); ok {
-					known[f.Path] = m
+					known[f] = m
 				}
 				rs.mark(f)
 			}
@@ -227,8 +262,11 @@ func (r *runState) worker(ctx context.Context) {
 }
 
 // handleEvent reacts to one filesystem event: new directories are watched
-// recursively, and changed session files are scheduled after the debounce.
-func (w *Watcher) handleEvent(fsw *fsnotify.Watcher, watched map[string]bool, ev fsnotify.Event, pending map[discover.File]time.Time) {
+// recursively, and changed session files are scheduled after the debounce. An
+// accepted file also enters the poll's known set, so the fast poll covers a Write
+// the OS watcher may later miss on that file rather than leaving it uncovered until
+// the slower discover ticker folds it in.
+func (w *Watcher) handleEvent(fsw *fsnotify.Watcher, watched map[string]bool, ev fsnotify.Event, known map[discover.File]fileMeta, pending map[discover.File]time.Time) {
 	if ev.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Rename) == 0 {
 		return
 	}
@@ -238,12 +276,20 @@ func (w *Watcher) handleEvent(fsw *fsnotify.Watcher, watched map[string]bool, ev
 	}
 	if f, ok := w.fileFor(ev.Name); ok {
 		pending[f] = time.Now().Add(w.opt.Debounce)
+		if _, tracked := known[f]; !tracked {
+			if m, ok := statMeta(f.Path); ok {
+				known[f] = m
+			}
+		}
 	}
 }
 
 // fileFor classifies an event path: the root whose directory contains it gives
 // the agent, and the agent's filename pattern confirms it is a session file.
 func (w *Watcher) fileFor(path string) (discover.File, bool) {
+	if w.ex.Excluded(path) {
+		return discover.File{}, false
+	}
 	base := filepath.Base(path)
 	for _, r := range w.roots {
 		if within(r.Dir, path) && discover.Matches(r.Agent, base) {
@@ -254,14 +300,16 @@ func (w *Watcher) fileFor(path string) (discover.File, bool) {
 }
 
 func (w *Watcher) discover() []discover.File {
-	files, err := discover.Discover(w.roots)
+	files, err := discover.Discover(w.roots, w.ex)
 	if err != nil {
 		w.opt.Logf("discover: %v", err)
 	}
 	return files
 }
 
-// addRecursive adds dir and all of its subdirectories to the watcher.
+// addRecursive adds dir and all of its subdirectories to the watcher, skipping any
+// excluded subtree so the watch never spends an fsnotify slot on a directory whose
+// files would be filtered out anyway.
 func (w *Watcher) addRecursive(fsw *fsnotify.Watcher, watched map[string]bool, dir string) {
 	if dir == "" {
 		return
@@ -270,7 +318,13 @@ func (w *Watcher) addRecursive(fsw *fsnotify.Watcher, watched map[string]bool, d
 		if err != nil {
 			return nil
 		}
-		if d.IsDir() && !watched[p] {
+		if !d.IsDir() {
+			return nil
+		}
+		if p != dir && w.ex.ExcludedDir(p) {
+			return filepath.SkipDir
+		}
+		if !watched[p] {
 			if addErr := fsw.Add(p); addErr == nil {
 				watched[p] = true
 			}

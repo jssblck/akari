@@ -37,7 +37,7 @@ func TestDiscover(t *testing.T) {
 	write(t, filepath.Join(piDir, "encoded-cwd", "sessX.jsonl"))
 
 	roots := []Root{{"claude", claudeDir}, {"codex", codexDir}, {"pi", piDir}, {"pi", filepath.Join(dir, "missing")}}
-	files, err := Discover(roots)
+	files, err := Discover(roots, Excluder{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,6 +75,78 @@ func TestDiscover(t *testing.T) {
 		if fileRoot[name] != dir {
 			t.Errorf("%s: root %q, want %q", name, fileRoot[name], dir)
 		}
+	}
+}
+
+func TestExcluderMatches(t *testing.T) {
+	ex := NewExcluder([]string{"**/tmp/**", "*.private.jsonl", "  ", ""})
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"/home/grace/.claude/projects/tmp/a.jsonl", true}, // tmp segment
+		{"/home/grace/proj/tmp/sub/b.jsonl", true},         // tmp segment, deeper
+		{"/home/grace/proj/keep/c.jsonl", false},           // no tmp segment
+		{"/home/grace/proj/notes.private.jsonl", true},     // suffix anywhere
+		{"/home/grace/proj/notes.jsonl", false},            // not private
+	}
+	for _, c := range cases {
+		if got := ex.Excluded(c.path); got != c.want {
+			t.Errorf("Excluded(%q) = %v, want %v", c.path, got, c.want)
+		}
+	}
+	// An OS-native path normalizes to forward slashes before matching, so the same
+	// forward-slash pattern excludes it on either OS: FromSlash yields a backslash
+	// path on Windows (which ToSlash must convert back) and a no-op on Unix.
+	if !ex.Excluded(filepath.FromSlash("/home/grace/proj/tmp/d.jsonl")) {
+		t.Error("OS-native path under tmp should be excluded")
+	}
+	// The zero Excluder excludes nothing.
+	if (Excluder{}).Excluded("/anything/at/all/tmp/x.jsonl") {
+		t.Error("zero Excluder should exclude nothing")
+	}
+}
+
+func TestExcludedDir(t *testing.T) {
+	// ExcludedDir prunes a directory under either pattern style: a subtree glob
+	// (whose trailing ** needs the slash) and an exact directory name (which the
+	// bare path catches). A dir matching no pattern must not be pruned.
+	ex := NewExcluder([]string{"**/tmp/**", "**/private"})
+	if !ex.ExcludedDir("/home/grace/proj/tmp") {
+		t.Error("subtree pattern **/tmp/** should prune the tmp dir itself")
+	}
+	if !ex.ExcludedDir("/home/grace/.claude/projects/private") {
+		t.Error("exact pattern **/private should prune the private dir")
+	}
+	if ex.ExcludedDir("/home/grace/proj/keep") {
+		t.Error("dir matching no pattern should not be pruned")
+	}
+}
+
+func TestDiscoverExcludes(t *testing.T) {
+	dir := t.TempDir()
+	claudeDir := filepath.Join(dir, "claude")
+	write(t, filepath.Join(claudeDir, "proj-a", "keep.jsonl"))
+	write(t, filepath.Join(claudeDir, "proj-a", "dropme", "drop.jsonl")) // under a subtree-excluded dir
+	write(t, filepath.Join(claudeDir, "proj-b", "secret.private.jsonl")) // excluded by suffix
+	write(t, filepath.Join(claudeDir, "private", "inside.jsonl"))        // under an exact-name excluded dir
+
+	// The excluded segment is "dropme", not "tmp": t.TempDir() lives under /tmp on
+	// Linux, so a **/tmp/** pattern would match the fixtures' own path and exclude
+	// everything, masking what this test checks.
+	roots := []Root{{"claude", claudeDir}}
+	files, err := Discover(roots, NewExcluder([]string{"**/dropme/**", "*.private.jsonl", "**/private"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		base := filepath.Base(f.Path)
+		if base != "keep.jsonl" {
+			t.Errorf("excluded file surfaced: %s", f.Path)
+		}
+	}
+	if len(files) != 1 {
+		t.Fatalf("discovered %d files, want 1 (keep.jsonl)", len(files))
 	}
 }
 

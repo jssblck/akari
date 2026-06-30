@@ -170,6 +170,11 @@ table.grid th {
 }
 table.grid td { transition: background var(--dur-fast) var(--ease-state); }
 table.grid tbody tr:hover td { background: var(--surface-2); }
+/* The remainder footer summarizes windowed sessions beyond the capped rows, so it
+   reads as a quiet summary line, not a clickable data row: muted, no hover, and a
+   firmer top rule to set it off from the rows it totals. */
+table.grid tfoot tr.remainder td { color: var(--muted); border-top: 2px solid var(--border); border-bottom: none; }
+table.grid tfoot tr.remainder:hover td { background: none; }
 td.num, th.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .nowrap { white-space: nowrap; }
 

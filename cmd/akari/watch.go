@@ -53,7 +53,7 @@ func runWatch(ctx context.Context, args []string) error {
 	client := upload.New(&http.Client{Timeout: 60 * time.Second}, cfg.ServerURL, cfg.Token)
 	sync := syncer.New(resolver, client, machine)
 
-	w := watch.New(roots, sync.SyncOne, watch.Options{Logf: log.Printf})
+	w := watch.New(roots, sync.SyncOne, watch.Options{Excludes: cfg.Excludes, Logf: log.Printf})
 	log.Printf("akari watch: watching %d root(s); press Ctrl-C to stop", len(roots))
 
 	if err := w.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {

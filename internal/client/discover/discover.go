@@ -11,7 +11,58 @@ import (
 	"strings"
 
 	"github.com/jssblck/akari/internal/config"
+	"github.com/tidwall/match"
 )
+
+// Excluder skips discovered paths that match any of a set of glob patterns,
+// backing the config's `excludes` knob (config.Client.Excludes) so a user can
+// keep a sensitive or noisy session directory from being discovered, watched, and
+// uploaded. Patterns match against the full path with forward slashes, and `*`
+// (or `**`) spans separators, so `**/tmp/**` excludes any path with a `tmp`
+// segment and `*.private.jsonl` excludes by suffix anywhere. A zero Excluder (no
+// patterns) excludes nothing, so callers that do not filter pass the zero value.
+type Excluder struct {
+	patterns []string
+}
+
+// NewExcluder compiles a set of exclude globs. Blank patterns are dropped and
+// every pattern is normalized to forward slashes so a config written on one OS
+// matches paths discovered on another.
+func NewExcluder(globs []string) Excluder {
+	patterns := make([]string, 0, len(globs))
+	for _, g := range globs {
+		g = strings.TrimSpace(g)
+		if g == "" {
+			continue
+		}
+		patterns = append(patterns, filepath.ToSlash(g))
+	}
+	return Excluder{patterns: patterns}
+}
+
+// Excluded reports whether path matches any exclude pattern. The path is
+// normalized to forward slashes before matching so the patterns are OS-agnostic.
+func (e Excluder) Excluded(path string) bool {
+	if len(e.patterns) == 0 {
+		return false
+	}
+	p := filepath.ToSlash(path)
+	for _, pat := range e.patterns {
+		if match.Match(p, pat) {
+			return true
+		}
+	}
+	return false
+}
+
+// ExcludedDir reports whether a directory should be pruned. A directory is matched
+// both bare and with a trailing slash so either pattern style prunes it: the bare
+// form catches an exact pattern like `**/private`, and the trailing-slash form
+// catches a subtree pattern like `**/tmp/**` (whose trailing `**` needs the slash
+// to match the directory node itself, not just files under it).
+func (e Excluder) ExcludedDir(path string) bool {
+	return e.Excluded(path) || e.Excluded(path+"/")
+}
 
 // File is one discovered session file. Root is the discovery directory the file
 // was found under: it is what lets resolution compute a stable, unique id from
@@ -79,8 +130,11 @@ func Matches(agent, name string) bool {
 
 // Discover walks every root and returns the session files it finds, de-duplicated
 // by path and sorted for stable output. A missing root is not an error: agents a
-// user does not run simply contribute nothing.
-func Discover(roots []Root) ([]File, error) {
+// user does not run simply contribute nothing. ex drops paths the user configured
+// to exclude (pass the zero Excluder to keep everything): an excluded directory is
+// pruned from the walk, and an excluded file is skipped, so an ignored location is
+// never discovered, watched, or uploaded.
+func Discover(roots []Root, ex Excluder) ([]File, error) {
 	seen := map[string]bool{}
 	var out []File
 	for _, root := range roots {
@@ -94,7 +148,18 @@ func Discover(roots []Root) ([]File, error) {
 			if err != nil {
 				return nil // skip unreadable entries rather than aborting the walk
 			}
-			if d.IsDir() || !Matches(root.Agent, d.Name()) {
+			if d.IsDir() {
+				// Prune an excluded directory so its whole subtree is skipped rather
+				// than walked and filtered file by file.
+				if path != root.Dir && ex.ExcludedDir(path) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !Matches(root.Agent, d.Name()) {
+				return nil
+			}
+			if ex.Excluded(path) {
 				return nil
 			}
 			if seen[path] {

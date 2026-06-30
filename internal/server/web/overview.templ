@@ -15,7 +15,7 @@ import (
 // already marks this section as Overview, so the usage panel is the whole surface.
 templ OverviewPage(p Page, a store.Analytics, rng string, users []store.User, selected []int64) {
 	@layout(p) {
-		@analyticsPanel(a, "chart-global", RangeOptions("/", userValues(selected), rng), rng, users, selected)
+		@analyticsPanel(a, "chart-global", RangeOptions("/", userValues(selected), rng), rng, users, selected, "#usage")
 	}
 }
 
@@ -29,7 +29,7 @@ templ OverviewPage(p Page, a store.Analytics, rng string, users []store.User, se
 // breakdowns all reflect the window) in one shot. ranges is the prebuilt selector;
 // rng marks the active window, and users/selected drive the per-user filter, which
 // renders only when users is non-empty (the project page passes nil).
-templ analyticsPanel(a store.Analytics, chartID string, ranges []RangeOption, rng string, users []store.User, selected []int64) {
+templ analyticsPanel(a store.Analytics, chartID string, ranges []RangeOption, rng string, users []store.User, selected []int64, swap string) {
 	<section class="analytics" id="usage">
 		if !a.HasData() {
 			<div class="empty">No usage recorded yet.</div>
@@ -42,11 +42,11 @@ templ analyticsPanel(a store.Analytics, chartID string, ranges []RangeOption, rn
 			// centered Overview the cap matches the content box, so it changes nothing.
 			<div class="usage-lead">
 				<div class="stats">
-					@stat("Cost", FmtCost(a.TotalCost, false), "")
+					@stat("Cost", FmtCost(a.TotalCost, a.CostIncomplete), "")
 					@statTokens(a)
 					@stat("Sessions", fmt.Sprintf("%d", a.Sessions), "")
 				</div>
-				@heatmapBlock(a, chartID, ranges, rng, users, selected)
+				@heatmapBlock(a, chartID, ranges, rng, users, selected, swap)
 			</div>
 			<div class="breakdowns">
 				@breakdownList("By model", BuildBreakdown(FoldUnknownModels(a.Models)))
@@ -86,15 +86,15 @@ templ statTokens(a store.Analytics) {
 // by token volume or by dollars spent. Hovering a cell surfaces the day's total
 // and its token breakdown (in, out, cache read, cache write). On the overview the
 // head also carries the per-user filter, rendered only when users is non-empty.
-templ heatmapBlock(a store.Analytics, chartID string, ranges []RangeOption, rng string, users []store.User, selected []int64) {
+templ heatmapBlock(a store.Analytics, chartID string, ranges []RangeOption, rng string, users []store.User, selected []int64, swap string) {
 	<div class="heatmap-wrap">
 		<div class="heatmap-head">
 			<span class="label">Daily activity</span>
 			<div class="heatmap-controls">
-				@rangeSelector(ranges)
+				@rangeSelector(ranges, swap)
 				if len(users) > 0 {
 					<span class="ctrl-sep" aria-hidden="true"></span>
-					@userFilter(users, selected, rng)
+					@userFilter(users, selected, rng, swap)
 				}
 				<span class="ctrl-sep" aria-hidden="true"></span>
 				<div class="chart-toolbar" role="group" aria-label="Metric">
@@ -113,15 +113,15 @@ templ heatmapBlock(a store.Analytics, chartID string, ranges []RangeOption, rng 
 // (hx-select="#usage"), so the stats, grid intensity, and breakdowns all move
 // together; hx-push-url keeps the window (and any preserved filters, like the
 // overview's user selection) in the address bar across reloads.
-templ rangeSelector(ranges []RangeOption) {
+templ rangeSelector(ranges []RangeOption, swap string) {
 	<div class="chart-toolbar" role="group" aria-label="Date range">
 		for _, o := range ranges {
 			<button
 				type="button"
 				class={ rangeSegClass(o.Active) }
 				hx-get={ o.Href }
-				hx-target="#usage"
-				hx-select="#usage"
+				hx-target={ swap }
+				hx-select={ swap }
 				hx-swap="outerHTML"
 				hx-push-url="true"
 			>{ o.Label }</button>
@@ -138,7 +138,7 @@ templ rangeSelector(ranges []RangeOption) {
 // the active range. The whole control re-renders inside the #usage swap, so its
 // checked state always reflects the URL; app.js reapplies the open state across
 // that swap so a multi-select stays open.
-templ userFilter(users []store.User, selected []int64, rng string) {
+templ userFilter(users []store.User, selected []int64, rng string, swap string) {
 	{{ sel := selectedSet(selected) }}
 	<details class="userfilter">
 		<summary class="userfilter-summary">
@@ -161,8 +161,8 @@ templ userFilter(users []store.User, selected []int64, rng string) {
 				type="button"
 				class="userfilter-opt userfilter-reset"
 				hx-get={ OverviewPath(rng, nil) }
-				hx-target="#usage"
-				hx-select="#usage"
+				hx-target={ swap }
+				hx-select={ swap }
 				hx-swap="outerHTML"
 				hx-push-url="true"
 			>
@@ -183,8 +183,8 @@ templ userFilter(users []store.User, selected []int64, rng string) {
 						checked?={ sel[u.ID] }
 						hx-get="/"
 						hx-include="closest .userfilter-menu"
-						hx-target="#usage"
-						hx-select="#usage"
+						hx-target={ swap }
+						hx-select={ swap }
 						hx-swap="outerHTML"
 						hx-push-url="true"
 						hx-trigger="change"
@@ -219,7 +219,7 @@ templ breakdownList(title string, rows []BreakdownRow) {
 						<div class="bar-sub muted small">
 							<span class="tok-cell" tabindex="0">
 								<span class="tok-total">{ FmtTokens(row.Tokens) }</span>
-								@tokenCard(row.Tokens, row.Input, row.Output, row.CacheRead, row.CacheWrite, row.CostUSD, false)
+								@tokenCard(row.Tokens, row.Input, row.Output, row.CacheRead, row.CacheWrite, row.CostUSD, row.Incomplete)
 							</span>
 							{ " tok " }&middot;{ fmt.Sprintf(" %d sessions", row.Sessions) }
 						</div>

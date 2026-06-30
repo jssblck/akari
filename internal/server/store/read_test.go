@@ -337,10 +337,11 @@ func cmpOrd(a, b int64) int {
 	}
 }
 
-// TestListSessionsSince bounds a project's session list to a trailing window: a
-// session last active inside the window shows, one older than the window does not,
-// and a zero Since lists both. This is the filter the project page applies so its
-// session list and usage panel cover the same range.
+// TestListSessionsSince bounds a project's session list to a trailing window by
+// last activity: a session active inside the window shows, one older does not, and a
+// zero Since lists both. (The project page itself now windows by usage date through
+// WindowSessions, so its table partitions the usage panel; ListSessions remains the
+// recency-windowed project query and the global feed shares its Since handling.)
 func TestListSessionsSince(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)

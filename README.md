@@ -136,6 +136,8 @@ It creates a few demo accounts (all sharing the password `akari-dev`), then runs
 the akari client in-process for 30 seconds to ingest *this machine's* real agent
 sessions through the normal upload and parse pipeline, and finally reassigns those
 sessions randomly across the accounts so the UI looks like a small team's history.
+Sign in to the local UI as `grace` (the first roster account, which is the admin),
+or as one of the other default handles `ada`, `anna`, or `katherine`.
 
 It is idempotent: once the store holds sessions it is a no-op, so later `eph up`
 runs cost nothing. The ingest is bounded by `--time-limit` (default 30s): when the

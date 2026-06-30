@@ -53,6 +53,59 @@ func TestRowTokens(t *testing.T) {
 	}
 }
 
+// plural switches a count's suffix so the remainder footer reads "1 session" but
+// "2 sessions" without each call site repeating the conditional.
+func TestPlural(t *testing.T) {
+	if got := plural(1); got != "" {
+		t.Errorf("plural(1) = %q, want empty", got)
+	}
+	for _, n := range []int{0, 2, 5} {
+		if got := plural(n); got != "s" {
+			t.Errorf("plural(%d) = %q, want \"s\"", n, got)
+		}
+	}
+}
+
+// TestProjectSessionListRemainderFooter renders the per-project table with and
+// without a withheld tail and confirms the reconciling footer appears only when
+// sessions were capped out. Crucially it renders the hidden tail's token volume
+// through the shared token card (the same four-class breakdown every other token
+// figure carries), not a bare number, so the footer reads consistently and the
+// reader can see what the hidden sessions spent.
+func TestProjectSessionListRemainderFooter(t *testing.T) {
+	rows := []store.SessionSummary{{ID: 1, Agent: "claude", TotalInput: 300, TotalOutput: 100, TotalCostUSD: 4.00}}
+
+	rem := store.SessionRemainder{
+		Sessions: 5, Input: 400, Output: 200, CacheRead: 100, CacheWrite: 50, CostUSD: 5.50,
+	}
+	withTail := renderComponent(t, ProjectSessionList(rows, rem))
+	if !strings.Contains(withTail, "+5 more sessions in this range") {
+		t.Error("footer should summarize the withheld sessions when a remainder exists")
+	}
+	if !strings.Contains(withTail, "<tfoot>") {
+		t.Error("remainder should render as a table footer")
+	}
+	// The footer token figure goes through the shared card: a tok-cell wrapping the
+	// per-class breakdown, the same treatment every other token figure gets.
+	foot := withTail[strings.Index(withTail, "<tfoot>"):]
+	for _, want := range []string{`class="tok-cell"`, "tok-tip", "<dt>Cache read</dt>", "750 tokens"} {
+		if !strings.Contains(foot, want) {
+			t.Errorf("remainder footer should carry the shared token card, missing %q", want)
+		}
+	}
+
+	none := renderComponent(t, ProjectSessionList(rows, store.SessionRemainder{}))
+	if strings.Contains(none, "<tfoot>") || strings.Contains(none, "more session") {
+		t.Error("no footer should render when every windowed session is shown")
+	}
+
+	// A single withheld session reads in the singular.
+	one := renderComponent(t, ProjectSessionList(rows, store.SessionRemainder{Sessions: 1, Input: 10}))
+	if !strings.Contains(one, "+1 more session in this range") {
+		t.Errorf("single withheld session should read in the singular, got footer text mismatch")
+	}
+}
+
 // relTime buckets the recent past into coarse phrases and falls back to an
 // absolute stamp once a relative one stops being useful.
 func TestRelTime(t *testing.T) {
