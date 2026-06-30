@@ -257,6 +257,15 @@ func FmtTimeAt(t time.Time) string {
 	return t.UTC().Format("2006-01-02 15:04")
 }
 
+// grantName renders a connected app's display name, falling back to a generic
+// label when the client registered without one.
+func grantName(name string) string {
+	if strings.TrimSpace(name) == "" {
+		return "Unnamed MCP client"
+	}
+	return name
+}
+
 // FmtDuration renders the span between start and end, or a dash.
 func FmtDuration(start, end *time.Time) string {
 	if start == nil || end == nil || start.IsZero() || end.IsZero() {

@@ -473,13 +473,18 @@ func (s *Server) handleAccountPage(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load tokens."))
 		return
 	}
+	grants, err := s.Store.ListOAuthGrants(r.Context(), p.UserID)
+	if err != nil {
+		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load connected apps."))
+		return
+	}
 	// Freshly minted secrets are passed once via short-lived flash cookies, then
 	// cleared, so a page reload does not keep showing them.
 	newToken := readFlash(w, r, "akari_new_token")
 	newInvite := readFlash(w, r, "akari_new_invite")
 	st := s.reparser.Status()
 	rp := web.ReparseView{InProgress: st.InProgress, Done: st.Done, Total: st.Total, Failed: st.Failed}
-	render(w, r, http.StatusOK, web.AccountPage(s.pageForNav(r, "Account", "account"), tokens, newToken, newInvite, rp))
+	render(w, r, http.StatusOK, web.AccountPage(s.pageForNav(r, "Account", "account"), tokens, grants, newToken, newInvite, rp))
 }
 
 // Login and register, form (HTML) variants. These mirror the JSON handlers but
@@ -582,7 +587,7 @@ func (s *Server) handleCreateTokenForm(w http.ResponseWriter, r *http.Request) {
 	}
 	name := strings.TrimSpace(r.PostFormValue("name"))
 	scope := r.PostFormValue("scope")
-	if scope != scopeIngest && scope != scopeFull {
+	if scope != scopeIngest && scope != scopeFull && scope != scopeRead {
 		scope = scopeIngest
 	}
 	if name == "" {
@@ -606,6 +611,18 @@ func (s *Server) handleRevokeTokenForm(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err == nil {
 		_ = s.Store.RevokeAPIToken(r.Context(), p.UserID, id)
+	}
+	http.Redirect(w, r, "/account", http.StatusSeeOther)
+}
+
+// handleRevokeConnectionForm disconnects an OAuth client from the account, revoking
+// every token the grant holds. It is scoped to the signed-in user, so it can only
+// disconnect the user's own connections.
+func (s *Server) handleRevokeConnectionForm(w http.ResponseWriter, r *http.Request) {
+	p, _ := principalFrom(r.Context())
+	clientID := r.PathValue("client_id")
+	if clientID != "" {
+		_ = s.Store.RevokeOAuthGrant(r.Context(), p.UserID, clientID)
 	}
 	http.Redirect(w, r, "/account", http.StatusSeeOther)
 }

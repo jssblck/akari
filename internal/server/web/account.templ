@@ -9,7 +9,7 @@ import (
 // AccountPage is the signed-in user's settings surface: reparse status, API
 // tokens, and invites. It carries no heading: the sidebar already marks this
 // section as Account, so the content starts at the top.
-templ AccountPage(p Page, tokens []store.APIToken, newToken, newInvite string, rp ReparseView) {
+templ AccountPage(p Page, tokens []store.APIToken, grants []store.OAuthGrant, newToken, newInvite string, rp ReparseView) {
 	@layout(p) {
 		@accountReparse(p, rp)
 		if newToken != "" {
@@ -23,6 +23,7 @@ templ AccountPage(p Page, tokens []store.APIToken, newToken, newInvite string, r
 				<input name="name" placeholder="token name"/>
 				<select name="scope">
 					<option value="ingest">ingest (push only)</option>
+					<option value="read">read (MCP, read only)</option>
 					<option value="full">full (push and read)</option>
 				</select>
 				<button type="submit">Create token</button>
@@ -49,6 +50,37 @@ templ AccountPage(p Page, tokens []store.APIToken, newToken, newInvite string, r
 											<button class="secondary" type="submit">Revoke</button>
 										</form>
 									}
+								</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			}
+		</section>
+		<section>
+			<div class="panel-head"><h2>Connected apps</h2></div>
+			<p class="muted">
+				MCP clients you have connected through the browser sign-in flow. Each has
+				read-only access as you. Disconnect one to revoke its tokens immediately.
+			</p>
+			if len(grants) == 0 {
+				<div class="empty">No connected apps. Add akari as a remote MCP server in your agent to connect one.</div>
+			} else {
+				<table class="grid">
+					<thead>
+						<tr><th>App</th><th>Access</th><th>Connected</th><th>Last token</th><th></th></tr>
+					</thead>
+					<tbody>
+						for _, g := range grants {
+							<tr>
+								<td>{ grantName(g.ClientName) }</td>
+								<td><span class="tag">{ g.Scope }</span></td>
+								<td class="muted">{ FmtTimeAt(g.ConnectedAt) }</td>
+								<td class="muted">{ FmtTimeAt(g.LastUsedAt) }</td>
+								<td>
+									<form method="post" action={ templ.SafeURL(fmt.Sprintf("/account/connections/%s/revoke", g.ClientID)) } class="inline">
+										<button class="secondary" type="submit">Disconnect</button>
+									</form>
 								</td>
 							</tr>
 						}

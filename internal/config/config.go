@@ -21,6 +21,16 @@ type Server struct {
 	// CookieSecure marks session cookies Secure. Defaults true; set
 	// AKARI_COOKIE_INSECURE=1 for plain-HTTP local development.
 	CookieSecure bool
+	// PublicURL is the externally reachable base URL of the server (scheme and
+	// host, no trailing slash), e.g. "https://akari.example.com". It is the OAuth
+	// issuer and the base of every absolute URL the MCP authorization flow
+	// advertises (the discovery documents, the authorize and token endpoints, the
+	// MCP resource identifier). Read from AKARI_PUBLIC_URL, falling back to
+	// AKARI_URL (which eph already exports for the dev stack). When neither is set,
+	// it is empty and the OAuth handlers derive the base from each request's scheme
+	// and Host header, which is correct for a single-origin deployment behind a
+	// well-behaved proxy.
+	PublicURL string
 	// SweepInterval is how often the server reclaims orphaned CAS blobs
 	// (AKARI_SWEEP_INTERVAL, a Go duration like "1h"). Defaults to 1h; set "0" to
 	// disable the background sweep (for example to run it only via the subcommand).
@@ -34,6 +44,7 @@ func LoadServer() (Server, error) {
 		DatabaseURL:  os.Getenv("AKARI_DATABASE_URL"),
 		Listen:       listenAddr(),
 		CookieSecure: !truthy(os.Getenv("AKARI_COOKIE_INSECURE")),
+		PublicURL:    publicURL(),
 	}
 	if s.DatabaseURL == "" {
 		return Server{}, fmt.Errorf("AKARI_DATABASE_URL is required")
@@ -75,6 +86,20 @@ func listenAddr() string {
 		return ":" + p
 	}
 	return ":8080"
+}
+
+// publicURL resolves the server's externally reachable base URL. AKARI_PUBLIC_URL
+// wins; failing that it honors AKARI_URL, the variable eph exports pointing at the
+// running dev server, so the OAuth flow works out of the box under eph. The result
+// is trimmed of any trailing slash so callers can join paths with a leading slash
+// without doubling it. An empty result tells the OAuth handlers to derive the base
+// from the request instead.
+func publicURL() string {
+	v := strings.TrimSpace(os.Getenv("AKARI_PUBLIC_URL"))
+	if v == "" {
+		v = strings.TrimSpace(os.Getenv("AKARI_URL"))
+	}
+	return strings.TrimRight(v, "/")
 }
 
 func truthy(v string) bool {

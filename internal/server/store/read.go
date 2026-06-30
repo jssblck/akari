@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"time"
@@ -905,6 +906,55 @@ func (s *Store) Attachments(ctx context.Context, sessionID int64) ([]AttachmentV
 		return nil, fmt.Errorf("iterate attachments for session %d: %w", sessionID, err)
 	}
 	return out, nil
+}
+
+// SessionRawTo streams a session's raw uploaded bytes (the lossless JSONL the
+// client sent, the source every projection is rebuilt from) to w in upload order,
+// writing at most limit bytes. It returns the number of bytes written, whether the
+// session held more than was written (so the caller can flag a truncated read), and
+// the session's full raw length. A limit of zero or less means no cap. This is the
+// raw underlying data behind the parsed transcript, exposed so an agent can inspect
+// exactly what was ingested rather than only the projection. A missing session
+// returns ErrNotFound.
+func (s *Store) SessionRawTo(ctx context.Context, w io.Writer, sessionID, limit int64) (written int64, truncated bool, total int64, err error) {
+	if err := s.Pool.QueryRow(ctx,
+		`SELECT byte_len FROM session_raw WHERE session_id = $1`, sessionID).Scan(&total); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, false, 0, ErrNotFound
+		}
+		return 0, false, 0, fmt.Errorf("read raw length for session %d: %w", sessionID, err)
+	}
+
+	rows, err := s.Pool.Query(ctx,
+		`SELECT byte_offset, byte_len, content
+		   FROM session_raw_chunks WHERE session_id = $1 ORDER BY byte_offset`, sessionID)
+	if err != nil {
+		return 0, false, total, fmt.Errorf("read raw chunks for session %d: %w", sessionID, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var off, length int64
+		var content []byte
+		if err := rows.Scan(&off, &length, &content); err != nil {
+			return written, false, total, fmt.Errorf("scan raw chunk for session %d: %w", sessionID, err)
+		}
+		if limit > 0 && written+int64(len(content)) > limit {
+			content = content[:limit-written]
+			if _, err := w.Write(content); err != nil {
+				return written, true, total, err
+			}
+			written += int64(len(content))
+			return written, true, total, nil
+		}
+		if _, err := w.Write(content); err != nil {
+			return written, false, total, err
+		}
+		written += int64(len(content))
+	}
+	if err := rows.Err(); err != nil {
+		return written, false, total, fmt.Errorf("iterate raw chunks for session %d: %w", sessionID, err)
+	}
+	return written, written < total, total, nil
 }
 
 // Subagents returns sessions whose parent is the given session.
