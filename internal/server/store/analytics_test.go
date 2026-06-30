@@ -53,8 +53,8 @@ func seedUsageCache(t *testing.T, st *store.Store, sessionID int64, model string
 
 // seedUsageUndated inserts a usage event with a NULL occurred_at, the shape a
 // transcript line with no timestamp produces. It has no place on the time axis, so
-// it should sit in the all-time headline and breakdowns but never in the windowed
-// view or the daily series.
+// the overview excludes it everywhere (headline, breakdowns, series, and the
+// windowed view alike) to keep the headline equal to the chart.
 func seedUsageUndated(t *testing.T, st *store.Store, sessionID int64, model string, cost float64, in, out int64, dedup string) {
 	t.Helper()
 	_, err := st.Pool.Exec(context.Background(),
@@ -331,14 +331,15 @@ func seedUser(t *testing.T, st *store.Store, username string) int64 {
 	return id
 }
 
-// The headline equals the sum of the rows beneath it. This is the property the
-// whole single-source design exists to hold: total tokens and total cost each
-// reconcile with both the by-model and the by-agent split, with no figure left
-// adding up to a different number than the bar chart under it. The mix is chosen
-// to break a naive implementation: an unpriced event with an empty model id (the
-// old by-model query dropped it with `model <> ”`), an undated event (the old
-// headline took tokens from the dated series but cost from the rollups), and cache
-// tokens that dwarf in/out (the gap that started this).
+// The headline equals the sum of the rows beneath it, in every shape: the
+// by-model split, the by-agent split, and the daily series all add up to the
+// headline. This is the property the whole single-source design exists to hold,
+// with no figure adding up to a different number than the chart or the bars under
+// it. The mix is chosen to break a naive implementation: an unpriced event with
+// an empty model id (the old by-model query dropped every empty-model row), an
+// undated event (which has no day to plot, so it must drop from the headline too,
+// not just the chart), and cache tokens that dwarf in/out (the gap that started
+// this).
 func TestAnalyticsHeadlineMatchesBreakdowns(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -362,7 +363,8 @@ func TestAnalyticsHeadlineMatchesBreakdowns(t *testing.T) {
 	// An unpriced event with no model id: it must still land in the totals and fold
 	// into the by-model split rather than vanish.
 	seedUsage(t, st, sCodex, "", 0, 200, 20, 1, "lx2")
-	// An undated event: counts all-time, drops from the window.
+	// An undated event: with no day to plot it cannot sit in the daily series, so
+	// to keep the headline equal to the chart it must drop from every overview view.
 	seedUsageUndated(t, st, sClaude, "claude-opus-4-8", 0.5, 100, 50, "lc2")
 
 	sumBreakdown := func(bs []store.Breakdown) (tokens int64, cost float64) {
@@ -372,41 +374,51 @@ func TestAnalyticsHeadlineMatchesBreakdowns(t *testing.T) {
 		}
 		return
 	}
+	sumSeries := func(ps []store.DayPoint) (tokens int64, cost float64) {
+		for _, p := range ps {
+			tokens += p.Input + p.Output + p.CacheRead + p.CacheWrite
+			cost += p.CostUSD
+		}
+		return
+	}
 	assertLinesUp := func(label string, a store.Analytics) {
 		t.Helper()
 		mTok, mCost := sumBreakdown(a.Models)
 		gTok, gCost := sumBreakdown(a.Agents)
-		if a.TotalTokens() != mTok {
-			t.Errorf("%s: headline tokens %d != sum of by-model rows %d", label, a.TotalTokens(), mTok)
-		}
-		if a.TotalTokens() != gTok {
-			t.Errorf("%s: headline tokens %d != sum of by-agent rows %d", label, a.TotalTokens(), gTok)
-		}
-		if !costsEqual(a.TotalCost, mCost) {
-			t.Errorf("%s: headline cost %.4f != sum of by-model rows %.4f", label, a.TotalCost, mCost)
-		}
-		if !costsEqual(a.TotalCost, gCost) {
-			t.Errorf("%s: headline cost %.4f != sum of by-agent rows %.4f", label, a.TotalCost, gCost)
+		sTok, sCost := sumSeries(a.Series)
+		for _, c := range []struct {
+			name string
+			tok  int64
+			cost float64
+		}{{"by-model", mTok, mCost}, {"by-agent", gTok, gCost}, {"daily series", sTok, sCost}} {
+			if a.TotalTokens() != c.tok {
+				t.Errorf("%s: headline tokens %d != sum of %s %d", label, a.TotalTokens(), c.name, c.tok)
+			}
+			if !costsEqual(a.TotalCost, c.cost) {
+				t.Errorf("%s: headline cost %.4f != sum of %s %.4f", label, a.TotalCost, c.name, c.cost)
+			}
 		}
 	}
 
-	// All-time: every event counts, including the undated and the unpriced one.
+	// All-time: every dated event counts, including the unpriced one; the undated
+	// event does not, so the headline still equals the chart.
 	all, err := st.Analytics(ctx, proj, time.Time{}, nil)
 	if err != nil {
 		t.Fatalf("all-time analytics: %v", err)
 	}
 	assertLinesUp("all-time", all)
-	// Pin the absolute all-time totals so a sign or class error cannot pass by
-	// merely being self-consistent: 1000+100+800+200 in, 200+50+400+20 out,
-	// 5000+9000 cache read, 300 cache write.
-	if all.TotalTokens() != 17070 {
-		t.Errorf("all-time total tokens = %d, want 17070", all.TotalTokens())
+	// Pin the absolute totals so a sign or class error cannot pass by merely being
+	// self-consistent: 1000+800+200 in, 200+400+20 out, 5000+9000 cache read, 300
+	// cache write. The undated 150 tokens / $0.50 are excluded.
+	if all.TotalTokens() != 16920 {
+		t.Errorf("all-time total tokens = %d, want 16920 (the undated 150 excluded)", all.TotalTokens())
 	}
-	if !costsEqual(all.TotalCost, 5.5) {
-		t.Errorf("all-time total cost = %.4f, want 5.5", all.TotalCost)
+	if !costsEqual(all.TotalCost, 5.0) {
+		t.Errorf("all-time total cost = %.4f, want 5.0 (the undated 0.50 excluded)", all.TotalCost)
 	}
 
-	// Windowed: the undated event drops, the rest still reconciles.
+	// Windowed: all dated events fall inside a 7-day window, so the window sees the
+	// same dated set and reconciles identically.
 	since := time.Now().AddDate(0, 0, -7)
 	win, err := st.Analytics(ctx, proj, since, nil)
 	if err != nil {
@@ -414,10 +426,10 @@ func TestAnalyticsHeadlineMatchesBreakdowns(t *testing.T) {
 	}
 	assertLinesUp("windowed", win)
 	if win.TotalTokens() != 16920 {
-		t.Errorf("windowed total tokens = %d, want 16920 (all-time minus the undated 150)", win.TotalTokens())
+		t.Errorf("windowed total tokens = %d, want 16920", win.TotalTokens())
 	}
 	if !costsEqual(win.TotalCost, 5.0) {
-		t.Errorf("windowed total cost = %.4f, want 5.0 (all-time minus the undated 0.5)", win.TotalCost)
+		t.Errorf("windowed total cost = %.4f, want 5.0", win.TotalCost)
 	}
 }
 

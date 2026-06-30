@@ -76,21 +76,28 @@ func (a Analytics) TotalTokens() int64 {
 // all of history. A non-empty userIDs scopes every rollup to sessions owned by
 // those users; nil or empty means every user.
 //
-// Every figure derives from one base set, the scoped usage_events, so the
-// headline totals, the by-model split, and the by-agent split reconcile by
-// construction: sum the by-model tokens or the by-agent tokens and you get the
-// headline tokens, every time. This is deliberate. The figures used to come from
-// three different sources (tokens from the daily series, cost from the session
-// rollups, the by-model split from a separate usage_events query that dropped
-// unnamed models), so the headline and the rows beneath it could disagree by an
-// order of magnitude. They are the same query now, grouped three ways.
+// Every figure derives from one base set, the scoped dated usage_events, so the
+// headline totals, the daily series, the by-model split, and the by-agent split
+// all reconcile by construction: sum the per-day cells, or the by-model tokens,
+// or the by-agent tokens, and you get the headline tokens, every time. This is
+// deliberate. The figures used to come from three different sources (tokens from
+// the daily series, cost from the session rollups, the by-model split from a
+// separate usage_events query that dropped unnamed models), so the headline and
+// the rows beneath it could disagree by an order of magnitude. They are the same
+// base now, grouped three ways (by day, by model, by agent), with the headline
+// summed from one of them.
+//
+// Every base shares the one filter the time axis forces: occurred_at IS NOT NULL.
+// An undated usage event has no day to plot, so counting it in the headline but
+// not in the daily cells would make the total exceed the sum of the chart, the
+// exact drift this view exists to avoid. So the overview counts dated usage
+// only, uniformly. In practice that excludes nothing: Claude, Codex, and pi all
+// stamp the turn a usage line belongs to, so a NULL occurred_at is a malformed
+// transcript to fix at ingest, not usage to scatter across the dashboard.
 //
 // The headline totals are summed from the by-agent split rather than queried
 // again: a session has exactly one agent, so the per-agent rows partition the
-// usage cleanly and their sum is the grand total with no double counting. The
-// daily series is the lone exception, used only to draw the chart: it keeps the
-// occurred_at filter a time axis needs, so undated usage (real, but with no day
-// to plot) sits in the headline and the breakdowns but not on the chart line.
+// usage cleanly and their sum is the grand total with no double counting.
 func (s *Store) Analytics(ctx context.Context, projectID int64, since time.Time, userIDs []int64) (Analytics, error) {
 	var a Analytics
 
@@ -184,10 +191,12 @@ func (s *Store) analyticsSeries(ctx context.Context, projectID int64, since time
 
 func (s *Store) analyticsByModel(ctx context.Context, projectID int64, since time.Time, userIDs []int64) ([]Breakdown, error) {
 	filter, args := usageFilter(projectID, since, userIDs)
-	// No model <> '' filter: usage that carries no model id still has to be in the
-	// split, or the by-model rows would sum to less than the headline. An unnamed
-	// model groups into its own row and FoldUnknownModels collapses it (with every
-	// other unpriced model) into "Other", so it counts without leaking a blank row.
+	// occurred_at IS NOT NULL matches the series and the by-agent split, so the
+	// three reconcile; see Analytics. No model <> '' filter though: usage that
+	// carries no model id still has to be in the split, or the by-model rows would
+	// sum to less than the headline. An unnamed model groups into its own row and
+	// FoldUnknownModels collapses it (with every other unpriced model) into
+	// "Other", so it counts without leaking a blank row.
 	rows, err := s.Pool.Query(ctx,
 		`SELECT ue.model,
 		        coalesce(sum(ue.cost_usd), 0),
@@ -198,7 +207,7 @@ func (s *Store) analyticsByModel(ctx context.Context, projectID int64, since tim
 		        count(DISTINCT ue.session_id)
 		   FROM usage_events ue
 		   JOIN sessions s ON s.id = ue.session_id
-		  WHERE TRUE`+filter+`
+		  WHERE ue.occurred_at IS NOT NULL`+filter+`
 		  GROUP BY ue.model
 		  ORDER BY 2 DESC, coalesce(sum(ue.input_tokens + ue.output_tokens + ue.cache_read_tokens + ue.cache_write_tokens), 0) DESC`, args...)
 	if err != nil {
@@ -213,13 +222,12 @@ func (s *Store) analyticsByModel(ctx context.Context, projectID int64, since tim
 }
 
 func (s *Store) analyticsByAgent(ctx context.Context, projectID int64, since time.Time, userIDs []int64) ([]Breakdown, error) {
-	// One path, the same usage_events base as the by-model split and the headline,
-	// so the three reconcile. There is no occurred_at IS NOT NULL guard: in the
-	// all-time view (no since) undated usage must still count, and a time bound
-	// already excludes a NULL occurred_at through its `>= since` comparison. The
-	// rollups equal this sum by construction (sessions.total_* == sum over a
-	// session's usage_events), so reading the ledger here loses nothing the old
-	// session-rollup path carried.
+	// One path, the same dated usage_events base as the by-model split and the
+	// series, so all of them reconcile with the headline (see Analytics for why the
+	// occurred_at IS NOT NULL guard is uniform). The headline is summed from these
+	// rows, so this query defines the totals; the rollups equal this sum by
+	// construction (sessions.total_* == sum over a session's usage_events), so
+	// reading the ledger here loses nothing the old session-rollup path carried.
 	filter, args := usageFilter(projectID, since, userIDs)
 	rows, err := s.Pool.Query(ctx,
 		`SELECT s.agent,
@@ -231,7 +239,7 @@ func (s *Store) analyticsByAgent(ctx context.Context, projectID int64, since tim
 		        count(DISTINCT ue.session_id)
 		   FROM usage_events ue
 		   JOIN sessions s ON s.id = ue.session_id
-		  WHERE TRUE`+filter+`
+		  WHERE ue.occurred_at IS NOT NULL`+filter+`
 		  GROUP BY s.agent
 		  ORDER BY 2 DESC, count(DISTINCT ue.session_id) DESC`, args...)
 	if err != nil {
