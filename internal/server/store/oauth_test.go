@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -12,6 +13,57 @@ import (
 
 // seedUser is defined in analytics_test.go: it inserts an account directly and
 // returns its id, which these tests reuse to own grants and tokens.
+
+func TestSessionFeedKeysetPaging(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	uid := seedUser(t, st, "grace")
+	pid, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	// Seven sessions, distinct recency so the feed order is total.
+	for i := 0; i < 7; i++ {
+		if _, err := st.Pool.Exec(ctx,
+			`INSERT INTO sessions (user_id, project_id, agent, source_session_id, machine, updated_at)
+			 VALUES ($1,$2,'claude',$3,'box', now() - make_interval(mins => $4))`,
+			uid, pid, "s"+strconv.Itoa(i), i); err != nil {
+			t.Fatalf("insert session %d: %v", i, err)
+		}
+	}
+
+	var rows []store.SessionRow
+	seen := map[int64]bool{}
+	var cursor *store.SessionFeedCursor
+	for page := 0; page < 10; page++ {
+		batch, next, err := st.SessionFeed(ctx, store.SessionFilter{}, 3, cursor)
+		if err != nil {
+			t.Fatalf("feed page %d: %v", page, err)
+		}
+		for _, r := range batch {
+			if seen[r.ID] {
+				t.Fatalf("session %d returned on two pages", r.ID)
+			}
+			seen[r.ID] = true
+			rows = append(rows, r)
+		}
+		if next == nil {
+			break
+		}
+		cursor = next
+	}
+	if len(rows) != 7 {
+		t.Fatalf("feed returned %d sessions, want 7", len(rows))
+	}
+	// Newest active first: updated_at never increases across the concatenated pages,
+	// so keyset paging reproduces the single-query order without gaps or repeats.
+	for i := 1; i < len(rows); i++ {
+		if rows[i].UpdatedAt.After(*rows[i-1].UpdatedAt) {
+			t.Fatalf("feed order broken at %d: %v after %v", i, rows[i].UpdatedAt, rows[i-1].UpdatedAt)
+		}
+	}
+}
 
 func TestOAuthClientRoundTrip(t *testing.T) {
 	t.Parallel()

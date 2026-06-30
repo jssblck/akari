@@ -6,12 +6,19 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// defaultTranscriptLimit bounds how many messages get_session returns when the
+// caller does not ask for a specific window, so a single call never materializes an
+// arbitrarily large session. Callers page further with transcript_offset.
+const defaultTranscriptLimit = 200
 
 // bodyCeiling bounds how many bytes a single body-reading tool will return,
 // whatever max_bytes a caller asks for. It keeps one tool result from pulling an
@@ -92,7 +99,7 @@ func registerTools(s *mcp.Server, st *store.Store) {
 			return nil, projectDetailDTO{}, err
 		}
 		out := projectDetailDTO{
-			Project:   projectToDTO(p),
+			Project:   projectIdentity(p),
 			Window:    windowLabel(in.Days),
 			Analytics: analyticsToDTO(a),
 			Facets:    facetValuesDTO{Agents: f.Agents, Machines: f.Machines, Users: f.Users},
@@ -102,12 +109,16 @@ func registerTools(s *mcp.Server, st *store.Store) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "list_sessions",
-		Description: "The cross-project session feed, newest activity first, with optional filters (project_id, agent, username, machine, and a trailing-day window) and sortable columns. Returns the facet rail too: the busiest agents, users, machines, and projects with counts, whose values are the exact strings to pass back as filters. Up to 500 rows; page with limit and offset.",
+		Description: "The cross-project session feed, newest activity first, with optional filters (project_id, agent, username, machine, and a trailing-day window). Returns the facet rail too: the busiest agents, users, machines, and projects with counts, whose values are the exact strings to pass back as filters. Up to 500 rows per page; page forward with the returned next_cursor.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in listSessionsInput) (*mcp.CallToolResult, sessionsDTO, error) {
-		rows, err := st.ListAllSessions(ctx, store.SessionFilter{
+		cursor, err := decodeCursor(in.Cursor)
+		if err != nil {
+			return nil, sessionsDTO{}, err
+		}
+		rows, next, err := st.SessionFeed(ctx, store.SessionFilter{
 			ProjectID: in.ProjectID, Agent: in.Agent, Machine: in.Machine, Username: in.Username,
-			Since: sinceFromDays(in.Days), Sort: in.Sort, Desc: in.Desc, Limit: in.Limit, Offset: in.Offset,
-		})
+			Since: sinceFromDays(in.Days),
+		}, in.Limit, cursor)
 		if err != nil {
 			return nil, sessionsDTO{}, err
 		}
@@ -115,7 +126,11 @@ func registerTools(s *mcp.Server, st *store.Store) {
 		if err != nil {
 			return nil, sessionsDTO{}, err
 		}
-		out := sessionsDTO{Sessions: make([]sessionDTO, 0, len(rows)), Facets: globalFacetsToDTO(facets)}
+		out := sessionsDTO{
+			Sessions:   make([]sessionDTO, 0, len(rows)),
+			NextCursor: encodeCursor(next),
+			Facets:     globalFacetsToDTO(facets),
+		}
 		for _, r := range rows {
 			out.Sessions = append(out.Sessions, sessionRowToDTO(r))
 		}
@@ -124,7 +139,7 @@ func registerTools(s *mcp.Server, st *store.Store) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "get_session",
-		Description: "One session in full: its header (project, agent, user, machine, branch, working directory, token and cost totals, timing), and, unless include_transcript is false, the whole transcript: messages with thinking text and model, tool-call metadata (the bodies live in the CAS, fetch them with read_tool_body), attachments, and any subagent sessions it spawned.",
+		Description: "One session: its header (project, agent, user, machine, branch, working directory, token and cost totals, timing) and subagents, plus, unless include_transcript is false, a bounded window of the transcript (messages with thinking and model, the tool-call metadata and attachments hanging on them). Tool bodies live in the CAS; fetch them with read_tool_body. The window is transcript_limit messages from transcript_offset; page with transcript_offset until transcript.has_more is false.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in getSessionInput) (*mcp.CallToolResult, sessionDetailDTO, error) {
 		d, err := st.SessionDetailByID(ctx, in.SessionID)
 		if err != nil {
@@ -147,27 +162,11 @@ func registerTools(s *mcp.Server, st *store.Store) {
 		}
 
 		if in.IncludeTranscript == nil || *in.IncludeTranscript {
-			msgs, err := st.Messages(ctx, in.SessionID)
+			tr, err := loadTranscript(ctx, st, in.SessionID, in.TranscriptOffset, in.TranscriptLimit, d.MessageCount)
 			if err != nil {
 				return nil, sessionDetailDTO{}, err
 			}
-			for _, m := range msgs {
-				out.Messages = append(out.Messages, messageToDTO(m))
-			}
-			calls, err := st.ToolCalls(ctx, in.SessionID)
-			if err != nil {
-				return nil, sessionDetailDTO{}, err
-			}
-			for _, c := range calls {
-				out.ToolCalls = append(out.ToolCalls, toolCallToDTO(c))
-			}
-			atts, err := st.Attachments(ctx, in.SessionID)
-			if err != nil {
-				return nil, sessionDetailDTO{}, err
-			}
-			for _, a := range atts {
-				out.Attachments = append(out.Attachments, attachmentToDTO(a))
-			}
+			out.Transcript = tr
 		}
 		return jsonResult(out)
 	})
@@ -221,6 +220,91 @@ func registerTools(s *mcp.Server, st *store.Store) {
 		encodeRaw(&out, buf.Bytes())
 		return jsonResult(out)
 	})
+}
+
+// loadTranscript reads one bounded window of a session's transcript: the messages
+// in [offset, offset+limit), and exactly the tool calls and attachments hanging on
+// those messages. It keeps peak memory proportional to the window rather than the
+// whole session, so a single get_session call cannot materialize an arbitrarily
+// large transcript. total is the session's full message count, used to report
+// has_more.
+func loadTranscript(ctx context.Context, st *store.Store, sessionID int64, offset, limit, total int) (*transcriptDTO, error) {
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 {
+		limit = defaultTranscriptLimit
+	}
+	msgs, err := st.MessagesPage(ctx, sessionID, offset, limit)
+	if err != nil {
+		return nil, err
+	}
+	tr := &transcriptDTO{
+		Offset:        offset,
+		Limit:         limit,
+		Returned:      len(msgs),
+		TotalMessages: total,
+		HasMore:       offset+len(msgs) < total,
+		Messages:      make([]messageDTO, 0, len(msgs)),
+		ToolCalls:     []toolCallDTO{},
+		Attachments:   []attachmentDTO{},
+	}
+	for _, m := range msgs {
+		tr.Messages = append(tr.Messages, messageToDTO(m))
+	}
+	if len(msgs) == 0 {
+		return tr, nil
+	}
+
+	// The returned messages are ordered by ordinal, so their span is the closed
+	// range [first, last]; fetch only the calls and attachments inside it.
+	minOrd, maxOrd := msgs[0].Ordinal, msgs[len(msgs)-1].Ordinal
+	calls, err := st.ToolCallsInRange(ctx, sessionID, minOrd, maxOrd)
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range calls {
+		tr.ToolCalls = append(tr.ToolCalls, toolCallToDTO(c))
+	}
+	atts, err := st.AttachmentsInRange(ctx, sessionID, minOrd, maxOrd)
+	if err != nil {
+		return nil, err
+	}
+	for _, a := range atts {
+		tr.Attachments = append(tr.Attachments, attachmentToDTO(a))
+	}
+	return tr, nil
+}
+
+// encodeCursor renders a feed cursor as an opaque, URL-safe token. nil (the last
+// page) renders to the empty string.
+func encodeCursor(c *store.SessionFeedCursor) string {
+	if c == nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf("%d:%d", c.UpdatedAt.UnixNano(), c.ID)))
+}
+
+// decodeCursor parses a cursor produced by encodeCursor. An empty string is the
+// first page (nil cursor); anything malformed is a caller error.
+func decodeCursor(s string) (*store.SessionFeedCursor, error) {
+	if s == "" {
+		return nil, nil
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(s)
+	if err != nil {
+		return nil, errors.New("invalid cursor")
+	}
+	parts := strings.SplitN(string(raw), ":", 2)
+	if len(parts) != 2 {
+		return nil, errors.New("invalid cursor")
+	}
+	nanos, err1 := strconv.ParseInt(parts[0], 10, 64)
+	id, err2 := strconv.ParseInt(parts[1], 10, 64)
+	if err1 != nil || err2 != nil {
+		return nil, errors.New("invalid cursor")
+	}
+	return &store.SessionFeedCursor{UpdatedAt: time.Unix(0, nanos).UTC(), ID: id}, nil
 }
 
 // sinceFromDays converts a trailing-day window into the lower time bound the store

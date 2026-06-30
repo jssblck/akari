@@ -160,11 +160,32 @@ type getProjectInput struct {
 	Machine   string `json:"machine,omitempty" jsonschema:"narrow the analytics to one machine"`
 }
 
+// projectIdentityDTO is a project without rollups. get_project pairs it with the
+// windowed analytics block, which is the source of every token and cost figure in
+// that response; carrying the rollup columns here too (which Store.Project leaves
+// zero) would print a summary that disagreed with the analytics beside it.
+type projectIdentityDTO struct {
+	ID          int64  `json:"id"`
+	RemoteKey   string `json:"remote_key"`
+	Host        string `json:"host,omitempty"`
+	Owner       string `json:"owner,omitempty"`
+	Repo        string `json:"repo,omitempty"`
+	DisplayName string `json:"display_name"`
+	Kind        string `json:"kind"`
+}
+
+func projectIdentity(p store.ProjectSummary) projectIdentityDTO {
+	return projectIdentityDTO{
+		ID: p.ID, RemoteKey: p.RemoteKey, Host: p.Host, Owner: p.Owner, Repo: p.Repo,
+		DisplayName: p.DisplayName, Kind: p.Kind,
+	}
+}
+
 type projectDetailDTO struct {
-	Project   projectDTO     `json:"project"`
-	Window    string         `json:"window"`
-	Analytics analyticsDTO   `json:"analytics"`
-	Facets    facetValuesDTO `json:"facets"`
+	Project   projectIdentityDTO `json:"project"`
+	Window    string             `json:"window"`
+	Analytics analyticsDTO       `json:"analytics"`
+	Facets    facetValuesDTO     `json:"facets"`
 }
 
 type facetValuesDTO struct {
@@ -181,15 +202,17 @@ type listSessionsInput struct {
 	Username  string `json:"username,omitempty" jsonschema:"restrict to one account name"`
 	Machine   string `json:"machine,omitempty" jsonschema:"restrict to one machine"`
 	Days      int    `json:"days,omitempty" jsonschema:"restrict to sessions active within this many trailing days; 0 or omitted means all of history"`
-	Sort      string `json:"sort,omitempty" jsonschema:"sort column: project, agent, branch, user, messages, tokens, or updated (default updated)"`
-	Desc      bool   `json:"desc,omitempty" jsonschema:"sort descending"`
 	Limit     int    `json:"limit,omitempty" jsonschema:"max rows, up to 500 (default 100)"`
-	Offset    int    `json:"offset,omitempty" jsonschema:"rows to skip, for paging"`
+	Cursor    string `json:"cursor,omitempty" jsonschema:"opaque page cursor: pass the next_cursor a prior call returned to read the following page"`
 }
 
 type sessionsDTO struct {
-	Sessions []sessionDTO    `json:"sessions"`
-	Facets   globalFacetsDTO `json:"facets"`
+	Sessions []sessionDTO `json:"sessions"`
+	// NextCursor pages forward: pass it back as `cursor` to read the next page.
+	// Empty when this page is the last. The feed is always newest-active first and
+	// pages by keyset, so reading the whole history stays linear.
+	NextCursor string          `json:"next_cursor,omitempty"`
+	Facets     globalFacetsDTO `json:"facets"`
 }
 
 type sessionDTO struct {
@@ -276,7 +299,9 @@ func facetCounts(fs []store.FacetCount) []facetCountDTO {
 
 type getSessionInput struct {
 	SessionID         int64 `json:"session_id" jsonschema:"the session id, from list_sessions"`
-	IncludeTranscript *bool `json:"include_transcript,omitempty" jsonschema:"include messages, tool calls, and attachments (default true); set false for just the header and counts"`
+	IncludeTranscript *bool `json:"include_transcript,omitempty" jsonschema:"include the transcript window (default true); set false for just the header, counts, and subagents"`
+	TranscriptOffset  int   `json:"transcript_offset,omitempty" jsonschema:"first message ordinal to return (default 0), for paging a long transcript"`
+	TranscriptLimit   int   `json:"transcript_limit,omitempty" jsonschema:"max messages to return in this window, up to 2000 (default 200)"`
 }
 
 type sessionDetailDTO struct {
@@ -287,11 +312,25 @@ type sessionDetailDTO struct {
 	ParserVersion int    `json:"parser_version"`
 	// DuplicateToolCallIDs counts tool-call ids that appear on more than one row, a
 	// sign the transcript replayed a turn (a resumed or compacted run); normally 0.
-	DuplicateToolCallIDs int             `json:"duplicate_tool_call_ids"`
-	Messages             []messageDTO    `json:"messages,omitempty"`
-	ToolCalls            []toolCallDTO   `json:"tool_calls,omitempty"`
-	Attachments          []attachmentDTO `json:"attachments,omitempty"`
-	Subagents            []sessionDTO    `json:"subagents,omitempty"`
+	DuplicateToolCallIDs int            `json:"duplicate_tool_call_ids"`
+	Subagents            []sessionDTO   `json:"subagents,omitempty"`
+	Transcript           *transcriptDTO `json:"transcript,omitempty"`
+}
+
+// transcriptDTO is one bounded window of a session's transcript. Messages are the
+// window [offset, offset+returned); the tool calls and attachments are exactly
+// those hanging on the returned messages, so the whole object is bounded by the
+// requested limit rather than the session size. Page with transcript_offset until
+// has_more is false.
+type transcriptDTO struct {
+	Offset        int             `json:"offset"`
+	Limit         int             `json:"limit"`
+	Returned      int             `json:"returned"`
+	TotalMessages int             `json:"total_messages"`
+	HasMore       bool            `json:"has_more"`
+	Messages      []messageDTO    `json:"messages"`
+	ToolCalls     []toolCallDTO   `json:"tool_calls"`
+	Attachments   []attachmentDTO `json:"attachments"`
 }
 
 func sessionDetailToDTO(d store.SessionDetail) sessionDetailDTO {

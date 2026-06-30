@@ -12,12 +12,23 @@ import (
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// mcpSessionTimeout reaps an idle MCP session. The Streamable-HTTP transport keeps
+// a ServerSession (and its read-loop goroutine and map entry) per initialized
+// client until a clean DELETE or close. A coding-agent process that crashes or
+// loses the network never sends that, so without a timeout the session, goroutine,
+// and map entry would be retained for the life of the server. The timeout closes
+// idle sessions; a client that returns simply re-initializes.
+const mcpSessionTimeout = 30 * time.Minute
+
 // newMCPHandler builds the Streamable-HTTP handler for the remote MCP server. One
 // MCP server instance, holding the read tools, serves every session; the calling
 // user is carried per request on the bearer token, not on the server.
 func newMCPHandler(s *Server) http.Handler {
 	srv := mcpserver.New(s.Store)
-	return mcpsdk.NewStreamableHTTPHandler(func(*http.Request) *mcpsdk.Server { return srv }, nil)
+	return mcpsdk.NewStreamableHTTPHandler(
+		func(*http.Request) *mcpsdk.Server { return srv },
+		&mcpsdk.StreamableHTTPOptions{SessionTimeout: mcpSessionTimeout},
+	)
 }
 
 // handleMCP serves the MCP endpoint behind a bearer check. The check is built per

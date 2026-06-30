@@ -3,6 +3,7 @@ package mcpserver_test
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -140,21 +141,22 @@ func TestToolsReturnSeededData(t *testing.T) {
 		t.Fatalf("project row wrong: %+v", p0)
 	}
 
-	// get_session returns the transcript with the tool call and its input hash.
+	// get_session returns the transcript window with the tool call and its input hash.
 	sessionDetail := callJSON(t, sess, "get_session", map[string]any{"session_id": fx.sessionID})
-	msgs, _ := sessionDetail["messages"].([]any)
-	if len(msgs) != 2 {
-		t.Fatalf("get_session messages: want 2, got %d", len(msgs))
-	}
-	calls, _ := sessionDetail["tool_calls"].([]any)
-	if len(calls) != 1 {
-		t.Fatalf("get_session tool_calls: want 1, got %d", len(calls))
-	}
-	if calls[0].(map[string]any)["input_sha256"] != fx.inputSHA {
-		t.Fatalf("tool call input hash mismatch: %+v", calls[0])
-	}
 	if sessionDetail["cwd"] != "/home/grace/akari" {
 		t.Fatalf("get_session cwd = %v", sessionDetail["cwd"])
+	}
+	tr, _ := sessionDetail["transcript"].(map[string]any)
+	if tr == nil {
+		t.Fatalf("get_session returned no transcript: %+v", sessionDetail)
+	}
+	msgs, _ := tr["messages"].([]any)
+	if len(msgs) != 2 || tr["has_more"] != false || int(tr["total_messages"].(float64)) != 2 {
+		t.Fatalf("transcript window wrong: %+v", tr)
+	}
+	calls, _ := tr["tool_calls"].([]any)
+	if len(calls) != 1 || calls[0].(map[string]any)["input_sha256"] != fx.inputSHA {
+		t.Fatalf("transcript tool_calls wrong: %+v", calls)
 	}
 
 	// read_tool_body returns the CAS body as text, gated by the referencing session.
@@ -181,6 +183,123 @@ func TestToolsReturnSeededData(t *testing.T) {
 	}
 	if rawOut["truncated"] != false {
 		t.Fatalf("get_session_raw should not be truncated: %+v", rawOut)
+	}
+}
+
+func TestGetProjectOmitsZeroRollups(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	fx := seedSession(t, st)
+	sess := connect(t, st)
+
+	out := callJSON(t, sess, "get_project", map[string]any{"project_id": fx.projectID})
+	proj, _ := out["project"].(map[string]any)
+	if proj == nil || proj["display_name"] != "akari" {
+		t.Fatalf("get_project project wrong: %+v", out["project"])
+	}
+	// The project block is identity only: token and cost totals would be zero here
+	// (Store.Project does not roll them up) and so must not appear beside analytics,
+	// which is the single source of those figures in this response.
+	for _, k := range []string{"tokens", "cost_usd", "session_count"} {
+		if _, present := proj[k]; present {
+			t.Fatalf("get_project project must not carry rollup field %q: %+v", k, proj)
+		}
+	}
+	if _, ok := out["analytics"].(map[string]any); !ok {
+		t.Fatalf("get_project missing analytics: %+v", out)
+	}
+}
+
+// insertSession adds a session with an explicit age (minutes in the past) so feed
+// ordering is deterministic. A larger ageMin is a less recently active session.
+func insertSession(t *testing.T, st *store.Store, userID, projectID int64, src string, ageMin int) int64 {
+	t.Helper()
+	var id int64
+	if err := st.Pool.QueryRow(context.Background(),
+		`INSERT INTO sessions (user_id, project_id, agent, source_session_id, machine, updated_at)
+		 VALUES ($1,$2,'claude',$3,'box', now() - make_interval(mins => $4)) RETURNING id`,
+		userID, projectID, src, ageMin).Scan(&id); err != nil {
+		t.Fatalf("insert session: %v", err)
+	}
+	return id
+}
+
+func TestListSessionsCursorPaging(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	u, err := st.Register(ctx, "grace", "hash", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	pid, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	for i := 0; i < 5; i++ {
+		insertSession(t, st, u.ID, pid, "s"+strconv.Itoa(i), i) // ages 0..4: id order matches recency
+	}
+	sess := connect(t, st)
+
+	seen := map[float64]bool{}
+	cursor := ""
+	pages := 0
+	for {
+		args := map[string]any{"limit": 2}
+		if cursor != "" {
+			args["cursor"] = cursor
+		}
+		out := callJSON(t, sess, "list_sessions", args)
+		rows, _ := out["sessions"].([]any)
+		for _, r := range rows {
+			id := r.(map[string]any)["id"].(float64)
+			if seen[id] {
+				t.Fatalf("session %v returned twice across pages", id)
+			}
+			seen[id] = true
+		}
+		pages++
+		next, _ := out["next_cursor"].(string)
+		if next == "" {
+			break
+		}
+		cursor = next
+		if pages > 10 {
+			t.Fatal("paging did not terminate")
+		}
+	}
+	if len(seen) != 5 {
+		t.Fatalf("cursor paging saw %d sessions, want 5", len(seen))
+	}
+}
+
+func TestGetSessionTranscriptWindowPaging(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	fx := seedSession(t, st) // 2 messages
+	sess := connect(t, st)
+
+	first := callJSON(t, sess, "get_session", map[string]any{
+		"session_id": fx.sessionID, "transcript_offset": 0, "transcript_limit": 1,
+	})
+	tr := first["transcript"].(map[string]any)
+	if int(tr["returned"].(float64)) != 1 || tr["has_more"] != true {
+		t.Fatalf("first window: %+v", tr)
+	}
+
+	second := callJSON(t, sess, "get_session", map[string]any{
+		"session_id": fx.sessionID, "transcript_offset": 1, "transcript_limit": 1,
+	})
+	tr2 := second["transcript"].(map[string]any)
+	if int(tr2["returned"].(float64)) != 1 || tr2["has_more"] != false {
+		t.Fatalf("second window: %+v", tr2)
+	}
+
+	// include_transcript=false omits the window entirely.
+	off := false
+	none := callJSON(t, sess, "get_session", map[string]any{"session_id": fx.sessionID, "include_transcript": off})
+	if _, present := none["transcript"]; present {
+		t.Fatalf("include_transcript=false should omit transcript: %+v", none)
 	}
 }
 

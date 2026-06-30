@@ -618,6 +618,95 @@ func (s *Store) ListAllSessions(ctx context.Context, f SessionFilter) ([]Session
 	return out, nil
 }
 
+// SessionFeedCursor marks a position in the newest-first session feed: the
+// updated_at and id of the last row a page returned. It is the keyset the next page
+// resumes from, so paging the whole history stays O(N) instead of the O(N^2) an
+// OFFSET scan would cost a client reading every page.
+type SessionFeedCursor struct {
+	UpdatedAt time.Time
+	ID        int64
+}
+
+// SessionFeed returns one page of the newest-first cross-project feed and the
+// cursor for the page after it (nil when this page is the last). It applies the
+// same filters as ListAllSessions but pages by keyset on (updated_at, id)
+// descending rather than OFFSET: each page resumes from the prior page's last row
+// and reads only the next `limit` rows, so a client paging the whole feed never
+// re-skips the rows it already saw. limit is clamped to [1, 500] (default 100).
+func (s *Store) SessionFeed(ctx context.Context, f SessionFilter, limit int, cursor *SessionFeedCursor) ([]SessionRow, *SessionFeedCursor, error) {
+	var conds []string
+	var args []any
+	add := func(cond string, val any) {
+		args = append(args, val)
+		conds = append(conds, cond+" $"+itoa(len(args)))
+	}
+	if f.ProjectID != 0 {
+		add("s.project_id =", f.ProjectID)
+	}
+	if f.Agent != "" {
+		add("s.agent =", f.Agent)
+	}
+	if f.Machine != "" {
+		add("s.machine =", f.Machine)
+	}
+	if f.Username != "" {
+		add("u.username =", f.Username)
+	}
+	if !f.Since.IsZero() {
+		add("s.updated_at >=", f.Since)
+	}
+	if cursor != nil {
+		// The next page is strictly "older" than the cursor in the feed's
+		// (updated_at, id) DESC order. The row-value comparison expresses exactly that
+		// and matches the feed indexes (0004, 0006), so Postgres walks the index to the
+		// resume point rather than sorting or skipping.
+		args = append(args, cursor.UpdatedAt)
+		ts := "$" + itoa(len(args))
+		args = append(args, cursor.ID)
+		id := "$" + itoa(len(args))
+		conds = append(conds, "(s.updated_at, s.id) < ("+ts+", "+id+")")
+	}
+
+	q := globalSessionSelect
+	if len(conds) > 0 {
+		q += " WHERE " + strings.Join(conds, " AND ")
+	}
+	q += " ORDER BY s.updated_at DESC, s.id DESC"
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	// Fetch one extra row to learn whether a further page exists without a COUNT.
+	args = append(args, limit+1)
+	q += " LIMIT $" + itoa(len(args))
+
+	rows, err := s.Pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("query session feed: %w", err)
+	}
+	defer rows.Close()
+	var out []SessionRow
+	for rows.Next() {
+		r, err := scanSessionRow(rows)
+		if err != nil {
+			return nil, nil, err
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("iterate session feed: %w", err)
+	}
+
+	var next *SessionFeedCursor
+	if len(out) > limit {
+		out = out[:limit]
+		last := out[limit-1]
+		if last.UpdatedAt != nil {
+			next = &SessionFeedCursor{UpdatedAt: *last.UpdatedAt, ID: last.ID}
+		}
+	}
+	return out, next, nil
+}
+
 // FacetCount is one filter value and how many sessions carry it, for a faceted
 // filter rail that shows counts beside each option.
 type FacetCount struct {
@@ -808,11 +897,33 @@ func (s *Store) MessageCount(ctx context.Context, sessionID int64) (int, error) 
 	return n, nil
 }
 
-// Messages returns a session's transcript in order.
+// Messages returns a session's whole transcript in order. The web renderer wants
+// the full session in one pass; bounded readers (the MCP transcript window) use
+// MessagesPage instead so peak memory does not scale with session size.
 func (s *Store) Messages(ctx context.Context, sessionID int64) ([]Message, error) {
-	rows, err := s.Pool.Query(ctx,
+	return s.scanMessages(ctx,
 		`SELECT ordinal, role, content, thinking_text, model, has_thinking, has_tool_use, timestamp
 		   FROM messages WHERE session_id = $1 ORDER BY ordinal`, sessionID)
+}
+
+// MessagesPage returns a contiguous window of a session's transcript, ordered by
+// ordinal, so a caller can read an arbitrarily large session in bounded chunks
+// rather than materializing the whole thing. limit is clamped to [1, 2000].
+func (s *Store) MessagesPage(ctx context.Context, sessionID int64, offset, limit int) ([]Message, error) {
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 || limit > 2000 {
+		limit = 2000
+	}
+	return s.scanMessages(ctx,
+		`SELECT ordinal, role, content, thinking_text, model, has_thinking, has_tool_use, timestamp
+		   FROM messages WHERE session_id = $1 ORDER BY ordinal LIMIT $2 OFFSET $3`,
+		sessionID, limit, offset)
+}
+
+func (s *Store) scanMessages(ctx context.Context, query string, args ...any) ([]Message, error) {
+	rows, err := s.Pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -829,13 +940,30 @@ func (s *Store) Messages(ctx context.Context, sessionID int64) ([]Message, error
 	return out, rows.Err()
 }
 
-// ToolCalls returns a session's tool calls as metadata.
+// ToolCalls returns all of a session's tool calls as metadata, for the web
+// renderer. Bounded readers pass a message-ordinal range to ToolCallsInRange.
 func (s *Store) ToolCalls(ctx context.Context, sessionID int64) ([]ToolCallView, error) {
-	rows, err := s.Pool.Query(ctx,
+	return s.scanToolCalls(ctx,
 		`SELECT message_ordinal, call_index, tool_name, coalesce(category,''), coalesce(file_path,''),
 		        coalesce(input_sha256,''), coalesce(input_bytes,0), coalesce(input_media_type,''),
 		        coalesce(result_sha256,''), coalesce(result_bytes,0), coalesce(result_media_type,''), coalesce(result_status,'')
 		   FROM tool_calls WHERE session_id = $1 ORDER BY message_ordinal, call_index`, sessionID)
+}
+
+// ToolCallsInRange returns the tool calls hanging on messages in the inclusive
+// ordinal window [minOrdinal, maxOrdinal], so a bounded transcript read fetches
+// only the calls for the messages it returned rather than the whole session.
+func (s *Store) ToolCallsInRange(ctx context.Context, sessionID int64, minOrdinal, maxOrdinal int) ([]ToolCallView, error) {
+	return s.scanToolCalls(ctx,
+		`SELECT message_ordinal, call_index, tool_name, coalesce(category,''), coalesce(file_path,''),
+		        coalesce(input_sha256,''), coalesce(input_bytes,0), coalesce(input_media_type,''),
+		        coalesce(result_sha256,''), coalesce(result_bytes,0), coalesce(result_media_type,''), coalesce(result_status,'')
+		   FROM tool_calls WHERE session_id = $1 AND message_ordinal BETWEEN $2 AND $3
+		   ORDER BY message_ordinal, call_index`, sessionID, minOrdinal, maxOrdinal)
+}
+
+func (s *Store) scanToolCalls(ctx context.Context, query string, args ...any) ([]ToolCallView, error) {
+	rows, err := s.Pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -885,25 +1013,41 @@ type AttachmentView struct {
 	Filename       string
 }
 
-// Attachments returns a session's attachments, ordered by the message they hang on.
+// Attachments returns all of a session's attachments, ordered by the message they
+// hang on, for the web renderer. Bounded readers pass an ordinal range to
+// AttachmentsInRange.
 func (s *Store) Attachments(ctx context.Context, sessionID int64) ([]AttachmentView, error) {
-	rows, err := s.Pool.Query(ctx,
+	return s.scanAttachments(ctx,
 		`SELECT coalesce(message_ordinal, 0), sha256, coalesce(media_type,''), coalesce(byte_len,0), coalesce(filename,'')
 		   FROM attachments WHERE session_id = $1 ORDER BY message_ordinal, id`, sessionID)
+}
+
+// AttachmentsInRange returns the attachments hanging on messages in the inclusive
+// ordinal window [minOrdinal, maxOrdinal], so a bounded transcript read fetches
+// only the attachments for the messages it returned.
+func (s *Store) AttachmentsInRange(ctx context.Context, sessionID int64, minOrdinal, maxOrdinal int) ([]AttachmentView, error) {
+	return s.scanAttachments(ctx,
+		`SELECT coalesce(message_ordinal, 0), sha256, coalesce(media_type,''), coalesce(byte_len,0), coalesce(filename,'')
+		   FROM attachments WHERE session_id = $1 AND message_ordinal BETWEEN $2 AND $3
+		   ORDER BY message_ordinal, id`, sessionID, minOrdinal, maxOrdinal)
+}
+
+func (s *Store) scanAttachments(ctx context.Context, query string, args ...any) ([]AttachmentView, error) {
+	rows, err := s.Pool.Query(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("query attachments for session %d: %w", sessionID, err)
+		return nil, fmt.Errorf("query attachments: %w", err)
 	}
 	defer rows.Close()
 	var out []AttachmentView
 	for rows.Next() {
 		var a AttachmentView
 		if err := rows.Scan(&a.MessageOrdinal, &a.SHA256, &a.MediaType, &a.ByteLen, &a.Filename); err != nil {
-			return nil, fmt.Errorf("scan attachment row for session %d: %w", sessionID, err)
+			return nil, fmt.Errorf("scan attachment row: %w", err)
 		}
 		out = append(out, a)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate attachments for session %d: %w", sessionID, err)
+		return nil, fmt.Errorf("iterate attachments: %w", err)
 	}
 	return out, nil
 }
