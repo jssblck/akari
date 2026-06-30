@@ -14,7 +14,9 @@
 # streaming-memory) concentrate on the ingest and parse hot path, where akari's
 # worst footguns live. The broad reviewers (error-handling, test-coverage,
 # concurrency) run on all Go: concurrency bugs in particular are not confined to
-# the hot path, so that gate sees every change.
+# the hot path, so that gate sees every change. The token-consistency reviewer
+# owns the usage overview UI, where a token figure must show every class, carry
+# its per-class breakdown, and reconcile with the cost and the rows beside it.
 #
 # Gate reviewers carry a shared "severity bar": a block halts the author, so it
 # is spent only on a defect the change actually introduces or worsens, that is
@@ -244,6 +246,74 @@ reviewers:
           gate issue unless it is egregious: superlinear in the size of one
           session, or it makes a sync cost grow with total history rather than the
           appended tail. Note lesser client-side waste at most.
+
+  - name: token-consistency
+    trigger:
+      - internal/server/web/**/*.templ
+      - internal/server/web/**/*.go
+      - internal/server/store/analytics.go
+    mode: gate
+    backend: codex
+    prompt: |
+      Review one concern only: token-count display consistency in the usage UI.
+      A token figure is one of akari's most-read numbers, and the failure mode is
+      a figure that is internally inconsistent: it counts the wrong tokens, hides
+      what it is made of, or disagrees with the cost and the rows shown beside it.
+      Reason about three properties, all of which a reader relies on.
+
+      Block when the change introduces any of these:
+        - A single token number rendered in the UI with no per-class detail
+          attached. Every place a token count is shown as one figure must carry
+          the shared hover/focus breakdown card (the component that splits the
+          total into input, output, cache read, cache write, and the cost), so a
+          reader can always see what the number is made of. A new figure that
+          prints a count without that card is the regression. In this codebase the
+          card is the shared tokenCard component (the .tok-tip / .stat-tip
+          markup); a count rendered outside it, or a new figure that hand-rolls a
+          partial card, is the finding. The principle is general, not tied to one
+          template: any standalone token number needs its breakdown.
+        - A token counter that sums only some of the classes instead of all of
+          them. A displayed "tokens" total, and any helper that produces one, must
+          be the all-class sum (input + output + cache read + cache write).
+          Counting only uncached input and output is the canonical bug: it makes
+          cache-heavy usage read as a small fraction of its real volume and stops
+          the figure ever reconciling with the cost beside it. Block a sum, a
+          query, or a helper that drops a class, in the display layer or in the
+          aggregate it reads from.
+        - A headline or summary token total that is sourced or filtered
+          differently from the per-row breakdown shown in the same view, so the
+          total no longer equals the sum of its rows. The overview total and the
+          rows beneath it (by model, by agent, per day) must derive from one base
+          and reconcile: summing the visible rows must reproduce the headline, for
+          tokens and for cost. Block a change that reintroduces a divergent source
+          (the total from one query, the rows from another), or a filter that
+          drops a group from one side but not the other (an excluded unnamed or
+          empty bucket, a dated-only total set against an all-time row set), or any
+          edit that otherwise breaks total == sum(rows).
+
+      Severity bar before you block. A block halts the author until they act, so
+      spend it only on an inconsistency this change introduces or materially
+      worsens:
+        - Scope to the diff. Do not block on a pre-existing figure or aggregate
+          this change only moves, renames, or sits next to; raise that as a
+          non-blocking note instead.
+        - These are deterministic rendering and aggregation properties, so a
+          reachable counterexample is a concrete figure or view, not a rare input.
+          If you cannot point to the specific number that misleads, the class that
+          is dropped, or the total that no longer sums, pass and leave a note.
+        - Credit stated rationale. If a comment or the PR explains why a figure
+          intentionally shows a single class (a column explicitly labeled "output
+          tokens", say, not a general "tokens" total) or why a view is exempt,
+          evaluate that reasoning and, if it holds, pass. A figure that is
+          deliberately and clearly one class is not a violation of the all-class
+          rule; the rule governs general "tokens" totals.
+
+      Stay in your lane. Do not comment on layout, spacing, color, naming, copy,
+      accessibility, or general correctness; other reviewers and the author own
+      those. Cite file and line, name which of the three properties is broken, and
+      give the fix (attach the breakdown card, sum every class, or source the
+      total and the rows from the one aggregate). If the changed token display is
+      consistent on all three, pass.
 
   - name: streaming-memory
     trigger:
