@@ -12,6 +12,7 @@ import (
 templ AccountPage(p Page, tokens []store.APIToken, grants []store.OAuthGrant, newToken, newInvite string, rp ReparseView) {
 	@layout(p) {
 		@accountReparse(p, rp)
+		@accountPublicity(p)
 		if newToken != "" {
 			<div class="card reveal">
 				<strong>New token (shown once):</strong> <code>{ newToken }</code>
@@ -102,4 +103,41 @@ templ AccountPage(p Page, tokens []store.APIToken, grants []store.OAuthGrant, ne
 			</section>
 		}
 	}
+}
+
+// accountPublicity is the Publicity section: the control that publishes the
+// signed-in user's own usage overview to a logged-out page at /u/<username>. It
+// makes the setting discoverable from the account surface (the badge on the
+// overview is the second entry point). Only the overview is shared, and only this
+// user's: sessions stay private and other accounts' usage never appears, since the
+// public page is the aggregate panel scoped to this account. The toggle's state
+// reads from the page's OverviewPublic flag, populated by the same lookup that
+// fills the username, so the section needs no extra query. When public, the
+// /u/<username> link is shown alongside a View link and the make-private control;
+// anyone can reach a published overview by username, so this is a public page, not
+// a secret one. Making it private hides the page but the URL is the username, so
+// publishing again brings the same link back.
+templ accountPublicity(p Page) {
+	<section id="publicity">
+		<div class="panel-head"><h2>Publicity</h2></div>
+		<p class="muted small publicity-lede">
+			Publish your usage overview to a public page at /u/{ p.Username }: the totals, activity grid, and
+			model and agent breakdowns you see on Overview, scoped to your account. Only the overview
+			is shared. Your sessions stay private, and no one else's usage appears.
+		</p>
+		if p.OverviewPublic {
+			<div class="publicity-live">
+				<span class="tag public">public</span>
+				<a class="share-link" href={ PublicOverviewHref(p.Username) } title="Public overview link">{ PublicOverviewPath(p.Username) }</a>
+				<a class="ghost small" href={ PublicOverviewHref(p.Username) } target="_blank" rel="noopener">View</a>
+				<form method="post" action="/account/overview/unpublish" class="inline">
+					<button class="secondary small" type="submit" title="Hide the public page. The URL is your username, so making it public again brings the same link back.">Make private</button>
+				</form>
+			</div>
+		} else {
+			<form method="post" action="/account/overview/publish" class="inline">
+				<button type="submit" title="Anyone can read your usage overview by username while it is public.">Make overview public</button>
+			</form>
+		}
+	</section>
 }

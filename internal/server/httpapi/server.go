@@ -100,6 +100,10 @@ func (s *Server) Routes() http.Handler {
 	// Server-rendered UI: public, logged-out pages. The public session view shows
 	// parsed data, so it is gated while a reparse rebuilds the projection.
 	mux.HandleFunc("GET /s/{public_id}", s.gatePublicParsed(s.handlePublicSession))
+	// A user's published usage overview at /u/<username>: aggregate, scoped to that
+	// one account, and gated during a reparse like the public session view (it shows
+	// parsed data).
+	mux.HandleFunc("GET /u/{username}", s.gatePublicParsed(s.handlePublicOverview))
 	mux.HandleFunc("GET /login", s.handleLoginPage)
 	mux.HandleFunc("POST /login", s.handleLoginForm)
 	mux.HandleFunc("GET /register", s.handleRegisterPage)
@@ -131,6 +135,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /account/connections/{client_id}/revoke", s.requireFull(s.handleRevokeConnectionForm))
 	mux.HandleFunc("POST /account/invites", s.requireAdmin(s.handleCreateInviteForm))
 	mux.HandleFunc("POST /account/reparse", s.requireAdmin(s.handleReparseForm))
+	mux.HandleFunc("POST /account/overview/publish", s.requireFull(s.handlePublishOverview))
+	mux.HandleFunc("POST /account/overview/unpublish", s.requireFull(s.handleUnpublishOverview))
 
 	return mux
 }

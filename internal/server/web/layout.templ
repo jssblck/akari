@@ -132,6 +132,12 @@ templ publicLayout(title string) {
 			<link rel="preload" href="/static/fonts/Geist-Regular.woff2" as="font" type="font/woff2" crossorigin/>
 			<link rel="preload" href="/static/fonts/GeistMono-Regular.woff2" as="font" type="font/woff2" crossorigin/>
 			@stylesheets()
+			// The public layout carries the same script set as the signed-in shell: the
+			// public overview hydrates its activity heatmap from charts.js and switches
+			// its window through htmx, so both must load here, not only on the authed
+			// pages. The public session view loads them too at a negligible cost.
+			<script src="/static/htmx.min.js" defer></script>
+			<script src="/static/charts.js" defer></script>
 			<script src="/static/app.js" defer></script>
 		</head>
 		<body>
