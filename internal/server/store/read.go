@@ -126,9 +126,60 @@ type SessionFilter struct {
 	// Since bounds the list to sessions last active at or after this instant,
 	// matching the analytics window so a project page's session list and its usage
 	// panel cover the same range. The zero time means no lower bound.
-	Since  time.Time
+	Since time.Time
+	// Sort names the column the global session list is ordered by (see
+	// sessionSortColumns). The empty string means DefaultSort. Desc selects
+	// descending order. Together they back the click-to-sort table headers; an
+	// unknown Sort falls back to DefaultSort in the query builder.
+	Sort   string
+	Desc   bool
 	Limit  int
 	Offset int
+}
+
+// DefaultSort is the global session list's order when none is requested: most
+// recently active first, matching the feed's "find a recent run" purpose.
+const DefaultSort = "updated"
+
+// sessionSortColumns whitelists each sortable column of the global session list,
+// mapping the key that arrives on the query string to its ORDER BY expression.
+// The map is the trust boundary: a key absent here never reaches the SQL, so the
+// expression can be interpolated without risking injection.
+var sessionSortColumns = map[string]string{
+	"project":  "CASE WHEN p.kind IN ('standalone', 'orphaned') THEN p.display_name ELSE p.remote_key END",
+	"agent":    "s.agent",
+	"branch":   "s.git_branch",
+	"user":     "u.username",
+	"messages": "s.message_count",
+	"tokens":   "(s.total_input_tokens + s.total_output_tokens + s.total_cache_read_tokens + s.total_cache_write_tokens)",
+	"updated":  "s.updated_at",
+}
+
+// IsSortKey reports whether key names a sortable column of the global session
+// list, so the handler can reject an unknown or tampered sort param before it
+// reaches the query builder.
+func IsSortKey(key string) bool {
+	_, ok := sessionSortColumns[key]
+	return ok
+}
+
+// orderClause builds the ORDER BY for the global session list from the filter's
+// Sort and Desc. An empty or unknown Sort is the default order, most recent
+// first: callers that pass a bare filter (the overview feed, the project page)
+// expect newest-first, and a bool Desc cannot distinguish "explicitly ascending"
+// from its zero value, so the default is not routed through Desc at all. The
+// session id is always the tiebreaker so ties order deterministically and
+// pagination stays stable across requests.
+func (f SessionFilter) orderClause() string {
+	expr, ok := sessionSortColumns[f.Sort]
+	if !ok {
+		return fmt.Sprintf(" ORDER BY %s DESC NULLS LAST, s.id DESC", sessionSortColumns[DefaultSort])
+	}
+	dir := "ASC"
+	if f.Desc {
+		dir = "DESC"
+	}
+	return fmt.Sprintf(" ORDER BY %s %s NULLS LAST, s.id DESC", expr, dir)
 }
 
 // SessionRow is one row of the global (cross-project) session list: a session
@@ -324,7 +375,7 @@ func (s *Store) ListAllSessions(ctx context.Context, f SessionFilter) ([]Session
 	if len(conds) > 0 {
 		q += " WHERE " + strings.Join(conds, " AND ")
 	}
-	q += " ORDER BY s.updated_at DESC NULLS LAST, s.id DESC"
+	q += f.orderClause()
 	limit := f.Limit
 	if limit <= 0 || limit > 500 {
 		limit = 100

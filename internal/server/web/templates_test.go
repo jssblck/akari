@@ -225,7 +225,9 @@ func TestGlobalSessionListColumns(t *testing.T) {
 		},
 		ProjectID: 4, ProjectKey: "scratch", ProjectName: "scratch", ProjectKind: "standalone",
 	}}
-	html := renderComponent(t, GlobalSessionList(rows))
+	// Render in the default order (most recent first): Updated is the active sort,
+	// descending.
+	html := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Sort: "updated", Desc: true}))
 
 	// Tags column carries both the local-kind chip and the public chip.
 	for _, want := range []string{`>Tags</th>`, `class="tag standalone"`, `class="tag public"`, `>public</span>`} {
@@ -233,8 +235,9 @@ func TestGlobalSessionListColumns(t *testing.T) {
 			t.Errorf("tags column missing %q", want)
 		}
 	}
-	// Tokens cell: the total, the breakdown rows, and the cost, replacing Cost.
-	for _, want := range []string{`>Tokens</th>`, "160 tokens", "<dt>In</dt>", "<dt>Out</dt>", "<dt>Cache read</dt>", "<dt>Cache write</dt>", "$1.25"} {
+	// Tokens cell: the total, the breakdown rows, and the cost, replacing Cost. The
+	// Tokens header is now a sort control, so its label rides a span.
+	for _, want := range []string{`>Tokens</span>`, "160 tokens", "<dt>In</dt>", "<dt>Out</dt>", "<dt>Cache read</dt>", "<dt>Cache write</dt>", "$1.25"} {
 		if !strings.Contains(html, want) {
 			t.Errorf("tokens cell missing %q", want)
 		}
@@ -252,6 +255,51 @@ func TestGlobalSessionListColumns(t *testing.T) {
 	// The session-id column is gone: no "#7" label and no Session header.
 	if strings.Contains(html, "#7") || strings.Contains(html, `>Session</th>`) {
 		t.Error("session-id column should be dropped")
+	}
+}
+
+// The global session list's column headers are click-to-sort controls: each
+// (but Tags) links to toggle its column, the active column carries the sorted
+// state and its direction for the glyph, and clicking the active column flips the
+// direction in the link.
+func TestGlobalSessionListSortHeaders(t *testing.T) {
+	ts := time.Now().UTC()
+	rows := []store.SessionRow{{
+		SessionSummary: store.SessionSummary{ID: 1, Agent: "claude", Username: "ada", UpdatedAt: &ts},
+		ProjectID:      1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote",
+	}}
+
+	// Sorted by messages descending: that header is active and its link flips to
+	// ascending, while another column links in its own default direction.
+	html := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Sort: "messages", Desc: true}))
+	for _, want := range []string{
+		`class="sortable num sorted desc"`,
+		`aria-sort="descending"`,
+		// The active column's link flips direction on the next click.
+		`href="/sessions?dir=asc&amp;sort=messages"`,
+		// A non-active text column links in its natural ascending default.
+		`href="/sessions?dir=asc&amp;sort=agent"`,
+		// Inactive columns advertise their aria state as none.
+		`aria-sort="none"`,
+		`class="sort-link"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("sort headers missing %q", want)
+		}
+	}
+	// Tags stays a plain header, never a sort control.
+	if strings.Contains(html, `class="sort-link" href="/sessions?dir=asc&amp;sort=tags"`) {
+		t.Error("Tags column should not be sortable")
+	}
+
+	// The default order (updated, descending) leaves the bare path on the active
+	// column's flip-to-ascending link and marks Updated active.
+	def := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Sort: "updated", Desc: true}))
+	if !strings.Contains(def, `href="/sessions?dir=asc&amp;sort=updated"`) {
+		t.Error("default order should let the Updated header flip to ascending")
+	}
+	if !strings.Contains(def, `aria-sort="descending"`) {
+		t.Error("default order should mark Updated descending")
 	}
 }
 

@@ -163,6 +163,66 @@ func TestListAllSessions(t *testing.T) {
 	}
 }
 
+// TestListAllSessionsSort exercises the click-to-sort ordering: the chosen column
+// drives the order, Desc flips it, and an unknown key falls back to the default
+// (most recent / id first). Agent is a convenient text column whose values
+// ("claude" < "codex") give a deterministic order independent of the seed ids.
+func TestListAllSessionsSort(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	seedGlobalCorpus(t, st)
+
+	agentsOf := func(f store.SessionFilter) []string {
+		rows, err := st.ListAllSessions(ctx, f)
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		out := make([]string, len(rows))
+		for i, r := range rows {
+			out[i] = r.Agent
+		}
+		return out
+	}
+
+	// Ascending by agent groups the four claude rows ahead of the two codex rows.
+	asc := agentsOf(store.SessionFilter{Sort: "agent", Desc: false})
+	for i, a := range asc {
+		want := "claude"
+		if i >= 4 {
+			want = "codex"
+		}
+		if a != want {
+			t.Fatalf("agent asc[%d] = %q, want %q (full: %v)", i, a, want, asc)
+		}
+	}
+
+	// Descending flips it: codex rows lead.
+	desc := agentsOf(store.SessionFilter{Sort: "agent", Desc: true})
+	if desc[0] != "codex" || desc[len(desc)-1] != "claude" {
+		t.Fatalf("agent desc not flipped: %v", desc)
+	}
+
+	// An unknown sort key falls back to the default order (newest id first), the
+	// same as the zero-value filter.
+	bogus, err := st.ListAllSessions(ctx, store.SessionFilter{Sort: "; drop table sessions"})
+	if err != nil {
+		t.Fatalf("bogus sort should fall back, not error: %v", err)
+	}
+	def, err := st.ListAllSessions(ctx, store.SessionFilter{})
+	if err != nil {
+		t.Fatalf("default list: %v", err)
+	}
+	if len(bogus) != len(def) {
+		t.Fatalf("bogus sort len=%d, default len=%d", len(bogus), len(def))
+	}
+	for i := range def {
+		if bogus[i].ID != def[i].ID {
+			t.Fatalf("bogus sort did not fall back to default order at %d: %d vs %d", i, bogus[i].ID, def[i].ID)
+		}
+	}
+}
+
 // TestListSessionsSince bounds a project's session list to a trailing window: a
 // session last active inside the window shows, one older than the window does not,
 // and a zero Since lists both. This is the filter the project page applies so its

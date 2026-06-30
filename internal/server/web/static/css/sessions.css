@@ -17,6 +17,23 @@
 main:has(.sessions-layout) { max-width: none; }
 .sessions-layout { display: grid; grid-template-columns: minmax(196px, max-content) minmax(0, 1fr); gap: var(--sp-xl); align-items: start; }
 .facets { display: flex; flex-direction: column; gap: var(--sp-lg); position: sticky; top: var(--sp-md); }
+
+/* Independent scroll: on the wide two-column layout the view is capped to the
+   viewport so the filter rail and the session feed each own their scrollbar and
+   scroll past each other, rather than the whole page scrolling as one. The page
+   head stays pinned above both. Below the two-column breakpoint the view returns
+   to normal document flow (one scroll), which reads better when stacked. */
+@media (min-width: 861px) {
+  main:has(.sessions-layout) {
+    height: 100vh; display: flex; flex-direction: column; overflow: hidden;
+  }
+  .sessions-layout { flex: 1; min-height: 0; grid-template-rows: minmax(0, 1fr); align-items: stretch; }
+  /* The panes own the scroll, so the rail no longer sticks; each caps to the row
+     track and scrolls its overflow. The rail keeps a little gutter so its
+     scrollbar does not crowd the labels. */
+  .facets { position: static; top: auto; min-height: 0; max-height: 100%; overflow-y: auto; padding-right: var(--sp-xs); }
+  .sessions-main { min-height: 0; max-height: 100%; overflow-y: auto; }
+}
 .facet-title { margin-bottom: var(--sp-sm); }
 .facets .opts { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
 .facets .opt {
@@ -52,6 +69,36 @@ main:has(.sessions-layout) { max-width: none; }
 table.sessions th, table.sessions td { white-space: nowrap; }
 table.sessions .col-grow { width: 100%; }
 table.sessions td.tags .tag + .tag { margin-left: 4px; }
+
+/* Sticky header: the column row pins to the top of the scrolling feed so the
+   labels stay put as rows scroll under. An opaque page-colored background hides
+   the rows passing beneath, and an inset hairline keeps the divider (a collapsed
+   border-bottom would scroll away with the cells). */
+table.sessions thead th {
+  position: sticky; top: 0; z-index: var(--z-sticky);
+  background: var(--bg); box-shadow: inset 0 -1px 0 var(--border);
+}
+
+/* Click-to-sort headers: the whole cell is the hit target (the link fills the
+   th's padding box) and carries a direction glyph. The active column lights its
+   chevron in lilac; the others reveal a faint up/down pair on hover to hint they
+   sort too. */
+table.sessions th.sortable { padding: 0; }
+table.sessions .sort-link {
+  display: flex; align-items: center; gap: 6px;
+  padding: var(--sp-sm) var(--sp-md);
+  color: inherit; font: inherit; letter-spacing: inherit; text-transform: inherit;
+  transition: background var(--dur-fast) var(--ease-state), color var(--dur-fast) var(--ease-state);
+}
+table.sessions th.num .sort-link { justify-content: flex-end; }
+table.sessions .sort-link:hover { background: var(--surface-2); color: var(--subtext); text-decoration: none; }
+table.sessions th.sorted .sort-link { color: var(--text); }
+.sessions .sort-ico { flex: none; color: var(--lilac); }
+.sessions .sort-ico-idle {
+  color: var(--faint); opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-state);
+}
+table.sessions th.sortable:hover .sort-ico-idle, .sessions .sort-link:focus-visible .sort-ico-idle { opacity: 1; }
 
 /* Tokens column: the figure carries a hover/focus card that breaks it down by
    class and cost, reusing the heatmap tooltip's inner styles. The cell lifts its

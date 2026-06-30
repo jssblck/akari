@@ -6,11 +6,11 @@ import (
 	"github.com/jssblck/akari/internal/server/store"
 )
 
+// AccountPage is the signed-in user's settings surface: reparse status, API
+// tokens, and invites. It carries no heading: the sidebar already marks this
+// section as Account, so the content starts at the top.
 templ AccountPage(p Page, tokens []store.APIToken, newToken, newInvite string, rp ReparseView) {
 	@layout(p) {
-		<div class="page-head">
-			<h1>Account</h1>
-		</div>
 		@accountReparse(p, rp)
 		if newToken != "" {
 			<div class="card reveal">

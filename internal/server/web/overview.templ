@@ -11,12 +11,10 @@ import (
 // trailing window and the selected users. rng is the active range key and
 // selected the chosen user ids, both already applied to a by the store; users is
 // the full account list the per-user filter offers, and the panel's controls mark
-// the active range and selection.
+// the active range and selection. The page carries no heading: the sidebar
+// already marks this section as Overview, so the usage panel is the whole surface.
 templ OverviewPage(p Page, a store.Analytics, rng string, users []store.User, selected []int64) {
 	@layout(p) {
-		<div class="page-head">
-			<h1>Overview</h1>
-		</div>
 		@analyticsPanel(a, "chart-global", RangeOptions("/", userValues(selected), rng), rng, users, selected)
 	}
 }
