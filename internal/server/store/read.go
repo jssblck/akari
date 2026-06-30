@@ -1068,55 +1068,69 @@ func (s *Store) scanAttachments(ctx context.Context, query string, args ...any) 
 // exactly what was ingested rather than only the projection. A missing session
 // returns ErrNotFound.
 func (s *Store) SessionRawTo(ctx context.Context, w io.Writer, sessionID, limit int64) (written int64, truncated bool, total int64, err error) {
-	// A session_raw row is the existence gate, but its byte_len is not the basis for
-	// total: that comes from the same chunk stream this reader serves. Pinning total to
-	// sum(length(content)) over session_raw_chunks keeps total_bytes and the streamed
-	// content from diverging if a chunk write ever left byte_len stale. A missing
-	// session_raw row (no upload yet) is ErrNotFound.
-	var exists bool
-	if err := s.Pool.QueryRow(ctx,
-		`SELECT true FROM session_raw WHERE session_id = $1`, sessionID).Scan(&exists); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return 0, false, 0, ErrNotFound
-		}
-		return 0, false, 0, fmt.Errorf("read raw length for session %d: %w", sessionID, err)
-	}
-	if err := s.Pool.QueryRow(ctx,
-		`SELECT coalesce(sum(length(content)), 0) FROM session_raw_chunks WHERE session_id = $1`,
-		sessionID).Scan(&total); err != nil {
-		return 0, false, 0, fmt.Errorf("sum raw chunk length for session %d: %w", sessionID, err)
-	}
-
-	rows, err := s.Pool.Query(ctx,
-		`SELECT byte_offset, byte_len, content
-		   FROM session_raw_chunks WHERE session_id = $1 ORDER BY byte_offset`, sessionID)
-	if err != nil {
-		return 0, false, total, fmt.Errorf("read raw chunks for session %d: %w", sessionID, err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var off, length int64
-		var content []byte
-		if err := rows.Scan(&off, &length, &content); err != nil {
-			return written, false, total, fmt.Errorf("scan raw chunk for session %d: %w", sessionID, err)
-		}
-		if limit > 0 && written+int64(len(content)) > limit {
-			content = content[:limit-written]
-			if _, err := w.Write(content); err != nil {
-				return written, true, total, err
+	// total and the streamed content must come from one snapshot: an AppendChunk or
+	// ResetRaw committing between the length sum and the chunk stream would otherwise
+	// let total_bytes describe one version of the raw while content is another. A
+	// repeatable-read, read-only transaction pins all three reads (existence, length,
+	// stream) to the same MVCC snapshot, so a concurrent writer is simply invisible to
+	// this reader rather than half-seen.
+	txErr := pgx.BeginTxFunc(ctx, s.Pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly},
+		func(tx pgx.Tx) error {
+			// A session_raw row is the existence gate; its byte_len is not the basis for
+			// total. total is sum(length(content)) over the same chunks this reader serves,
+			// so total_bytes can never disagree with the bytes streamed. A missing session_raw
+			// row (no upload yet) is ErrNotFound.
+			var exists bool
+			if err := tx.QueryRow(ctx,
+				`SELECT true FROM session_raw WHERE session_id = $1`, sessionID).Scan(&exists); err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return ErrNotFound
+				}
+				return fmt.Errorf("read raw length for session %d: %w", sessionID, err)
 			}
-			written += int64(len(content))
-			return written, true, total, nil
-		}
-		if _, err := w.Write(content); err != nil {
-			return written, false, total, err
-		}
-		written += int64(len(content))
+			if err := tx.QueryRow(ctx,
+				`SELECT coalesce(sum(length(content)), 0) FROM session_raw_chunks WHERE session_id = $1`,
+				sessionID).Scan(&total); err != nil {
+				return fmt.Errorf("sum raw chunk length for session %d: %w", sessionID, err)
+			}
+
+			rows, err := tx.Query(ctx,
+				`SELECT byte_offset, byte_len, content
+				   FROM session_raw_chunks WHERE session_id = $1 ORDER BY byte_offset`, sessionID)
+			if err != nil {
+				return fmt.Errorf("read raw chunks for session %d: %w", sessionID, err)
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var off, length int64
+				var content []byte
+				if err := rows.Scan(&off, &length, &content); err != nil {
+					return fmt.Errorf("scan raw chunk for session %d: %w", sessionID, err)
+				}
+				if limit > 0 && written+int64(len(content)) > limit {
+					content = content[:limit-written]
+					if _, err := w.Write(content); err != nil {
+						return err
+					}
+					written += int64(len(content))
+					truncated = true
+					return nil
+				}
+				if _, err := w.Write(content); err != nil {
+					return err
+				}
+				written += int64(len(content))
+			}
+			if err := rows.Err(); err != nil {
+				return fmt.Errorf("iterate raw chunks for session %d: %w", sessionID, err)
+			}
+			truncated = written < total
+			return nil
+		})
+	if txErr != nil {
+		return written, truncated, total, txErr
 	}
-	if err := rows.Err(); err != nil {
-		return written, false, total, fmt.Errorf("iterate raw chunks for session %d: %w", sessionID, err)
-	}
-	return written, written < total, total, nil
+	return written, truncated, total, nil
 }
 
 // Subagents returns sessions whose parent is the given session.
