@@ -346,6 +346,92 @@ func (s *Store) ListSessions(ctx context.Context, f SessionFilter) ([]SessionSum
 	return out, rows.Err()
 }
 
+// WindowSessions lists the sessions that contributed dated usage inside the
+// filter's window, each carrying its in-window token and cost sums rather than its
+// all-time rollup. It shares the analytics base exactly: the same dated
+// usage_events under the same project, window, agent, user, and machine scoping,
+// just grouped per session instead of summed whole. That is what lets the project
+// page's session rows be a true partition of the usage panel's headline, summing to
+// it even under a narrow window, where the lifetime rollups ListSessions returns
+// would overcount a session whose usage predates the window. Newest-active first.
+//
+// A session with no dated usage in the window contributes nothing to the panel, so
+// it is absent here too, which keeps the row count equal to the panel's session
+// tally. cost_incomplete is the in-window per-session flag, the same expression the
+// analytics slices use, so a row's "$X+" marker matches the headline's.
+func (s *Store) WindowSessions(ctx context.Context, f SessionFilter) ([]SessionSummary, error) {
+	var conds []string
+	var args []any
+	add := func(cond string, val any) {
+		args = append(args, val)
+		conds = append(conds, cond+" $"+itoa(len(args)))
+	}
+	if f.ProjectID != 0 {
+		add("s.project_id =", f.ProjectID)
+	}
+	if f.Agent != "" {
+		add("s.agent =", f.Agent)
+	}
+	if f.Machine != "" {
+		add("s.machine =", f.Machine)
+	}
+	if f.Username != "" {
+		add("u.username =", f.Username)
+	}
+	if !f.Since.IsZero() {
+		add("ue.occurred_at >=", f.Since)
+	}
+
+	q := `
+		SELECT s.id, s.agent, s.machine, s.git_branch, u.username,
+		       s.message_count, s.user_message_count,
+		       coalesce(sum(ue.input_tokens), 0), coalesce(sum(ue.output_tokens), 0),
+		       coalesce(sum(ue.cache_write_tokens), 0), coalesce(sum(ue.cache_read_tokens), 0),
+		       coalesce(sum(ue.cost_usd), 0), ` + costIncompleteExpr + `,
+		       s.visibility, s.public_id, s.started_at, s.ended_at, s.updated_at
+		  FROM usage_events ue
+		  JOIN sessions s ON s.id = ue.session_id
+		  JOIN users u ON u.id = s.user_id
+		 WHERE ue.occurred_at IS NOT NULL`
+	if len(conds) > 0 {
+		q += " AND " + strings.Join(conds, " AND ")
+	}
+	// Group by the session (its primary key carries every s.* column functionally,
+	// so they need no explicit grouping); u.username crosses the join, so it does.
+	q += `
+		 GROUP BY s.id, u.username
+		 ORDER BY s.updated_at DESC, s.id DESC`
+	limit := f.Limit
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	args = append(args, limit)
+	q += " LIMIT $" + itoa(len(args))
+	if f.Offset > 0 {
+		args = append(args, f.Offset)
+		q += " OFFSET $" + itoa(len(args))
+	}
+
+	rows, err := s.Pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SessionSummary
+	for rows.Next() {
+		var sm SessionSummary
+		if err := rows.Scan(&sm.ID, &sm.Agent, &sm.Machine, &sm.GitBranch, &sm.Username,
+			&sm.MessageCount, &sm.UserMessageCount,
+			&sm.TotalInput, &sm.TotalOutput, &sm.TotalCacheWrite, &sm.TotalCacheRead,
+			&sm.TotalCostUSD, &sm.CostIncomplete, &sm.Visibility, &sm.PublicID,
+			&sm.StartedAt, &sm.EndedAt, &sm.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, sm)
+	}
+	return out, rows.Err()
+}
+
 // globalSessionSelect is the column list and joins for cross-project session
 // rows: the same session columns as sessionSelect, plus the owning project's
 // identity so the list can show and link a project per row.

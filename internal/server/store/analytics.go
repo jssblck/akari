@@ -79,8 +79,15 @@ type AnalyticsFilter struct {
 	ProjectID int64
 	Since     time.Time
 	UserIDs   []int64
-	Agent     string
-	Machine   string
+	// Username scopes by a single account name, the form the project page's filter
+	// carries. It is independent of UserIDs (the overview's multi-select by id): an
+	// unknown name resolves to no session, the same empty result the session list's
+	// u.username = $ predicate gives, so the panel and the table stay in lockstep
+	// even for a stale or mistyped user rather than the panel falling back to every
+	// user while the table shows nothing.
+	Username string
+	Agent    string
+	Machine  string
 }
 
 // HasData reports whether there is anything worth charting, so the view can show
@@ -176,6 +183,14 @@ func (f AnalyticsFilter) clause() (string, []any) {
 	if len(f.UserIDs) > 0 {
 		args = append(args, f.UserIDs)
 		clauses += fmt.Sprintf(" AND s.user_id = ANY($%d)", len(args))
+	}
+	if f.Username != "" {
+		// Scope by name through a scalar subquery rather than a pre-resolved id, so
+		// an unknown name yields a NULL the equality never matches (an empty result),
+		// exactly as the session list's u.username = $ filter does. No separate
+		// lookup means no error path to swallow into a silent all-user fallback.
+		args = append(args, f.Username)
+		clauses += fmt.Sprintf(" AND s.user_id = (SELECT id FROM users WHERE username = $%d)", len(args))
 	}
 	if f.Agent != "" {
 		args = append(args, f.Agent)

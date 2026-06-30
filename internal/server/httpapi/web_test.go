@@ -507,15 +507,23 @@ func TestProjectPageRangeWindow(t *testing.T) {
 		t.Fatalf("seed usage: %v", err)
 	}
 
-	// A second session last active 60 days ago: outside the default 30-day window,
-	// so it should drop out of the session list under that window and reappear only
-	// when the window widens to all of history.
+	// A second session whose usage landed 60 days ago: outside the default 30-day
+	// window, so it should drop out of the session list under that window and
+	// reappear only when the window widens to all of history. The table is windowed
+	// by usage date (it shares the panel's base), so the old session needs a dated
+	// usage event in that window, not just an aged updated_at.
 	annOld, err := st.Announce(ctx, store.AnnounceParams{
 		UserID: owner.ID, Agent: "claude", SourceSessionID: "sess-old",
 		ProjectID: projectID, Cwd: "/home/grace/akari", Machine: "laptop",
 	})
 	if err != nil {
 		t.Fatalf("announce old: %v", err)
+	}
+	if _, err := st.Pool.Exec(ctx,
+		`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cost_usd, occurred_at, dedup_key)
+		 VALUES ($1, 'claude-opus-4-8', 200, 100, 2.0, now() - make_interval(days => 60), 'u-old')`,
+		annOld.SessionID); err != nil {
+		t.Fatalf("seed old usage: %v", err)
 	}
 	if _, err := st.Pool.Exec(ctx,
 		`UPDATE sessions SET updated_at = now() - make_interval(days => 60) WHERE id = $1`,

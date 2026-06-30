@@ -189,7 +189,11 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 		Username:  strings.TrimSpace(r.URL.Query().Get("user")),
 		Since:     since,
 	}
-	sessions, err := s.Store.ListSessions(r.Context(), filter)
+	// The table draws from the same windowed usage base as the panel (WindowSessions,
+	// not the lifetime-rollup ListSessions), so each row's tokens and cost are its
+	// in-window share and the visible rows sum to the panel headline rather than
+	// overcounting sessions whose usage predates the window.
+	sessions, err := s.Store.WindowSessions(r.Context(), filter)
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load sessions."))
 		return
@@ -202,16 +206,13 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 	}
 	// The usage panel scopes to the same agent/user/machine the session table does, so
 	// the headline and the rows reconcile under a filter rather than the panel staying
-	// project-wide while the rows narrow. The username resolves to a user id (the
-	// analytics base scopes by id); an unknown name yields no scope, which combined
-	// with an empty session list reads as "no such user here" consistently.
-	af := store.AnalyticsFilter{ProjectID: id, Since: since, Agent: filter.Agent, Machine: filter.Machine}
-	if filter.Username != "" {
-		if u, err := s.Store.UserByUsername(r.Context(), filter.Username); err == nil {
-			af.UserIDs = []int64{u.ID}
-		}
-	}
-	analytics, err := s.Store.Analytics(r.Context(), af)
+	// project-wide while the rows narrow. The same filter values feed both: the panel
+	// matches the username through the analytics base (an unknown name scopes to
+	// nothing, matching the empty table) rather than a separate lookup whose error
+	// would have to be invented away.
+	analytics, err := s.Store.Analytics(r.Context(), store.AnalyticsFilter{
+		ProjectID: id, Since: since, Username: filter.Username, Agent: filter.Agent, Machine: filter.Machine,
+	})
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load analytics."))
 		return

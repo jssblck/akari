@@ -273,6 +273,103 @@ func TestAnalyticsFiltersByAgentAndMachine(t *testing.T) {
 	if lap.TotalIn != 500 || lap.Sessions != 1 {
 		t.Errorf("machine=laptop = in %d sessions %d, want 500/1", lap.TotalIn, lap.Sessions)
 	}
+
+	// Username scopes by account name, the form the project page's filter carries.
+	grace, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: proj, Username: "grace"})
+	if err != nil {
+		t.Fatalf("analytics username: %v", err)
+	}
+	if grace.Sessions != 2 || grace.TotalIn != 1300 {
+		t.Errorf("user=grace = in %d sessions %d, want 1300/2", grace.TotalIn, grace.Sessions)
+	}
+	// An unknown name must scope to nothing, not fall back to every user: that empty
+	// result is what keeps the panel in lockstep with the session list's empty table.
+	none, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: proj, Username: "ghost"})
+	if err != nil {
+		t.Fatalf("analytics unknown username: %v", err)
+	}
+	if none.Sessions != 0 || none.TotalIn != 0 || none.HasData() {
+		t.Errorf("user=ghost should scope to nothing, got in %d sessions %d", none.TotalIn, none.Sessions)
+	}
+}
+
+// TestWindowSessionsPartitionPanel pins the project page's row/panel reconciliation:
+// WindowSessions returns each session's in-window token share, so the visible rows
+// are a partition of the usage panel (they sum to its headline and match its session
+// tally) even under a narrow window, where the lifetime rollups would overcount a
+// session whose usage predates the window.
+func TestWindowSessionsPartitionPanel(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	user, err := st.Register(ctx, "grace", "h", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	proj, err := st.UpsertProject(ctx, "github.com/ada/window", "github.com", "ada", "window", "window", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+
+	now := time.Now()
+	recent := now.Add(-24 * time.Hour)
+	old := now.Add(-40 * 24 * time.Hour)
+
+	// Session A spans the window boundary: 100/50 recent, 1000/500 well before it.
+	sA := seedSessionWithStats(t, st, user.ID, proj, "claude", "a1", 0, 0, 0)
+	seedUsageAt(t, st, sA, "claude-opus-4-8", 1.0, 100, 50, recent, "a-recent")
+	seedUsageAt(t, st, sA, "claude-opus-4-8", 5.0, 1000, 500, old, "a-old")
+	// Session B is entirely before the window.
+	sB := seedSessionWithStats(t, st, user.ID, proj, "claude", "b1", 0, 0, 0)
+	seedUsageAt(t, st, sB, "claude-opus-4-8", 2.0, 200, 100, old, "b-old")
+
+	since := now.Add(-30 * 24 * time.Hour)
+	win, err := st.WindowSessions(ctx, store.SessionFilter{ProjectID: proj, Since: since})
+	if err != nil {
+		t.Fatalf("window sessions: %v", err)
+	}
+	a, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: proj, Since: since})
+	if err != nil {
+		t.Fatalf("analytics: %v", err)
+	}
+
+	// Under the 30-day window only A's recent usage qualifies: one row, its tokens
+	// the in-window share (100/50), not the 1100/550 lifetime sum.
+	if len(win) != 1 || win[0].ID != sA {
+		t.Fatalf("window rows = %d, want exactly session A", len(win))
+	}
+	if win[0].TotalInput != 100 || win[0].TotalOutput != 50 {
+		t.Errorf("windowed row tokens = in %d out %d, want in-window 100/50", win[0].TotalInput, win[0].TotalOutput)
+	}
+	var sumIn int64
+	for _, s := range win {
+		sumIn += s.TotalInput
+	}
+	if sumIn != a.TotalIn {
+		t.Errorf("sum of row input %d != panel headline input %d", sumIn, a.TotalIn)
+	}
+	if len(win) != a.Sessions {
+		t.Errorf("row count %d != panel session tally %d", len(win), a.Sessions)
+	}
+
+	// Widening to all of history brings B in and restores A's older usage; the rows
+	// still partition the panel.
+	full, err := st.WindowSessions(ctx, store.SessionFilter{ProjectID: proj})
+	if err != nil {
+		t.Fatalf("window all: %v", err)
+	}
+	fa, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: proj})
+	if err != nil {
+		t.Fatalf("analytics all: %v", err)
+	}
+	var fullIn int64
+	for _, s := range full {
+		fullIn += s.TotalInput
+	}
+	if len(full) != 2 || fullIn != fa.TotalIn || fullIn != 1300 {
+		t.Errorf("all-history rows = %d sumIn %d (panel %d), want 2 rows summing to 1300", len(full), fullIn, fa.TotalIn)
+	}
 }
 
 // TotalTokens sums the four token classes; it is the figure the overview's Tokens
