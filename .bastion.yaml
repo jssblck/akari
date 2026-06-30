@@ -13,10 +13,14 @@
 # files it actually owns. The data-path reviewers (incremental-efficiency,
 # streaming-memory) concentrate on the ingest and parse hot path, where akari's
 # worst footguns live. The broad reviewers (error-handling, test-coverage,
-# concurrency) run on all Go: concurrency bugs in particular are not confined to
-# the hot path, so that gate sees every change. The token-consistency reviewer
-# owns the usage overview UI, where a token figure must show every class, carry
-# its per-class breakdown, and reconcile with the cost and the rows beside it.
+# concurrency, token-consistency) run on all Go: concurrency bugs in particular
+# are not confined to the hot path, so that gate sees every change, and tokens are
+# integral enough that any operation on the four token classes is worth checking
+# wherever it lands. The token-consistency reviewer owns token handling end to
+# end: any operation on the four classes (parse, roll up, persist, reset, price,
+# aggregate) must carry all four, and any token figure in the UI must show its
+# breakdown and reconcile with the cost and rows beside it. It also triggers on
+# the web templates, where the figures render.
 #
 # Gate reviewers carry a shared "severity bar": a block halts the author, so it
 # is spent only on a defect the change actually introduces or worsens, that is
@@ -249,19 +253,31 @@ reviewers:
 
   - name: token-consistency
     trigger:
+      - cmd/**/*.go
+      - internal/**/*.go
       - internal/server/web/**/*.templ
-      - internal/server/web/**/*.go
-      - internal/server/store/analytics.go
     mode: gate
     backend: codex
     prompt: |
-      Review one concern only: token-count display consistency in the usage UI.
-      A token figure is one of akari's most-read numbers, and the failure mode is
-      a figure that is internally inconsistent: it counts the wrong tokens, hides
-      what it is made of, or disagrees with the cost and the rows shown beside it.
-      Reason about three properties, all of which a reader relies on.
+      Review one concern only: token-class completeness and display consistency.
+      akari accounts for four token classes (input, output, cache read, cache
+      write), and the failure mode is code that silently forgets one of them: an
+      operation that handles three of four, or a displayed figure that counts the
+      wrong tokens, hides what it is made of, or disagrees with the cost and the
+      rows shown beside it. Reason about three properties.
 
       Block when the change introduces any of these:
+        - A token operation that handles only some of the four classes. Anywhere
+          code parses, sums, rolls up, persists, resets, copies into a delta,
+          prices, or otherwise operates on tokens, it must carry all four classes
+          together. Dropping one is the bug whether it is a display total, a SQL
+          aggregate that sums three columns, a rollup UPDATE that forgets a
+          column, a reset that zeroes a subset, a delta struct that accumulates
+          three of four, or a cost computation that prices only some. When new
+          token handling lands, check that every one of the four classes is
+          threaded through it; when an existing class is added or a fifth appears,
+          check that every operation that should fold it in does. This is the
+          general rule; the two below are its specific shapes in the UI.
         - A single token number rendered in the UI with no per-class detail
           attached. Every place a token count is shown as one figure must carry
           the shared hover/focus breakdown card (the component that splits the
@@ -272,14 +288,6 @@ reviewers:
           markup); a count rendered outside it, or a new figure that hand-rolls a
           partial card, is the finding. The principle is general, not tied to one
           template: any standalone token number needs its breakdown.
-        - A token counter that sums only some of the classes instead of all of
-          them. A displayed "tokens" total, and any helper that produces one, must
-          be the all-class sum (input + output + cache read + cache write).
-          Counting only uncached input and output is the canonical bug: it makes
-          cache-heavy usage read as a small fraction of its real volume and stops
-          the figure ever reconciling with the cost beside it. Block a sum, a
-          query, or a helper that drops a class, in the display layer or in the
-          aggregate it reads from.
         - A headline or summary token total that is sourced or filtered
           differently from the per-row breakdown shown in the same view, so the
           total no longer equals the sum of its rows. The overview total and the
@@ -297,23 +305,27 @@ reviewers:
         - Scope to the diff. Do not block on a pre-existing figure or aggregate
           this change only moves, renames, or sits next to; raise that as a
           non-blocking note instead.
-        - These are deterministic rendering and aggregation properties, so a
-          reachable counterexample is a concrete figure or view, not a rare input.
-          If you cannot point to the specific number that misleads, the class that
-          is dropped, or the total that no longer sums, pass and leave a note.
-        - Credit stated rationale. If a comment or the PR explains why a figure
-          intentionally shows a single class (a column explicitly labeled "output
-          tokens", say, not a general "tokens" total) or why a view is exempt,
-          evaluate that reasoning and, if it holds, pass. A figure that is
-          deliberately and clearly one class is not a violation of the all-class
-          rule; the rule governs general "tokens" totals.
+        - These are deterministic data and rendering properties, so a reachable
+          counterexample is a concrete operation, figure, or view, not a rare
+          input. If you cannot point to the class that is dropped, the specific
+          number that misleads, or the total that no longer sums, pass and leave a
+          note.
+        - Credit stated rationale. If a comment or the PR explains why an
+          operation or figure intentionally handles a single class (a column
+          explicitly labeled "output tokens", say, or a metric defined as output
+          only, not a general "tokens" total) or why a path is exempt, evaluate
+          that reasoning and, if it holds, pass. Code that is deliberately and
+          clearly scoped to one class is not a violation of the all-class rule;
+          the rule governs operations and totals meant to cover tokens as a whole.
 
-      Stay in your lane. Do not comment on layout, spacing, color, naming, copy,
-      accessibility, or general correctness; other reviewers and the author own
-      those. Cite file and line, name which of the three properties is broken, and
-      give the fix (attach the breakdown card, sum every class, or source the
-      total and the rows from the one aggregate). If the changed token display is
-      consistent on all three, pass.
+      Stay in your lane. You own one concern: that every token operation carries
+      all four classes, and that token figures show their breakdown and reconcile.
+      Do not comment on layout, spacing, color, naming, copy, accessibility, or
+      correctness unrelated to token-class handling; other reviewers and the
+      author own those. Cite file and line, name which of the three properties is
+      broken, and give the fix (thread every class through the operation, attach
+      the breakdown card, or source the total and the rows from the one
+      aggregate). If the changed token handling holds on all three, pass.
 
   - name: streaming-memory
     trigger:
