@@ -40,6 +40,24 @@
    inflates the flex line. */
 .heatmap-controls .ctrl-sep { width: 1px; height: 18px; align-self: center; background: var(--border); flex: none; }
 
+/* In-flight feedback for the panel swap. A range or per-user change refetches and
+   replaces the whole #usage panel (hx-swap="outerHTML"); htmx marks the issuing
+   control with .htmx-request while that request is outstanding. Dim the readouts
+   and grid and pulse the busy control so the change reads as "updating" instead of
+   an unexplained freeze before the panel jumps in. The metric toggle is a local
+   redraw (no swap), so it never enters this state. The fresh panel that replaces
+   #usage carries no .htmx-request, so the state clears on its own. */
+#usage:has(.heatmap-controls .htmx-request) .stats,
+#usage:has(.heatmap-controls .htmx-request) .heatmap,
+#usage:has(.heatmap-controls .htmx-request) .breakdowns {
+  opacity: 0.5; pointer-events: none;
+  transition: opacity var(--dur-base) var(--ease-state);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .heatmap-controls .htmx-request { animation: ctrl-busy 0.9s var(--ease-state) infinite; }
+  @keyframes ctrl-busy { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+}
+
 /* ---- Per-user activity filter (overview) ---- */
 /* A skinned disclosure in the controls row, parted from the range selector and the
    metric toggle by the same hairline. Collapsed, it reads as one control sized to

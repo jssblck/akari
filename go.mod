@@ -10,6 +10,7 @@ require (
 	github.com/klauspost/compress v1.18.6
 	github.com/platinummonkey/go-concurrency-limits v1.0.0
 	github.com/tidwall/gjson v1.19.0
+	github.com/tidwall/match v1.1.1
 	golang.org/x/crypto v0.53.0
 	golang.org/x/mod v0.37.0
 	golang.org/x/sync v0.21.0
@@ -28,7 +29,6 @@ require (
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/natefinch/atomic v1.0.1 // indirect
-	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.0 // indirect
 	golang.org/x/net v0.55.0 // indirect
 	golang.org/x/text v0.38.0 // indirect

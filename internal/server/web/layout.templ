@@ -55,7 +55,12 @@ templ stylesheets() {
 // navItem is one sidebar link. It carries its own icon as a child and marks
 // itself active when its key matches the page's active section.
 templ navItem(href, key, label, active string) {
-	<a class={ navClass(key, active) } href={ templ.SafeURL(href) }>
+	// aria-label and title carry the name independently of the visible span, which
+	// the responsive layout hides below 980px (layout.css). Without them a collapsed
+	// nav link would have no accessible name at all (the icon is aria-hidden), so a
+	// screen reader would announce four empty links and a sighted user would have
+	// only the glyph; the title also gives the collapsed strip a hover tooltip.
+	<a class={ navClass(key, active) } href={ templ.SafeURL(href) } aria-label={ label } title={ label }>
 		@navIcon(key)
 		<span class="nav-label">{ label }</span>
 	</a>

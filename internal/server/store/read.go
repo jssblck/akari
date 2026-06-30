@@ -30,7 +30,13 @@ type ProjectSummary struct {
 	// four classes the overview heatmap surfaces per day).
 	TotalCacheRead  int64
 	TotalCacheWrite int64
-	LastActivity    *time.Time
+	// CostIncomplete is true when any session folded into this project's totals
+	// carries an unpriced usage event, so the rolled-up cost is a lower bound. It
+	// is the OR of the per-session cost_incomplete flags, letting the index render
+	// the same "$X+" marker the per-session rows show instead of an exact figure
+	// that silently understates an aggregate built from incomplete sessions.
+	CostIncomplete bool
+	LastActivity   *time.Time
 }
 
 // TotalTokens is the sum of every token class for a project: input, output, and
@@ -102,19 +108,6 @@ type ToolCallView struct {
 	ResultBytes     int64
 	ResultMediaType string
 	ResultStatus    string
-}
-
-// SearchHit is one message matching a search, with its session context.
-type SearchHit struct {
-	SessionID   int64
-	ProjectKey  string
-	ProjectName string
-	ProjectKind string
-	Agent       string
-	Username    string
-	Ordinal     int
-	Role        string
-	Snippet     string
 }
 
 // SessionFilter narrows a session list. Empty fields are ignored.
@@ -230,6 +223,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]ProjectSummary, error) {
 		        coalesce(sum(s.total_output_tokens), 0),
 		        coalesce(sum(s.total_cache_read_tokens), 0),
 		        coalesce(sum(s.total_cache_write_tokens), 0),
+		        coalesce(bool_or(s.cost_incomplete), false),
 		        max(s.updated_at)
 		   FROM projects p
 		   LEFT JOIN sessions s ON s.project_id = p.id
@@ -244,7 +238,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]ProjectSummary, error) {
 		var p ProjectSummary
 		if err := rows.Scan(&p.ID, &p.RemoteKey, &p.Host, &p.Owner, &p.Repo, &p.DisplayName, &p.Kind,
 			&p.SessionCount, &p.TotalCostUSD, &p.TotalInput, &p.TotalOutput,
-			&p.TotalCacheRead, &p.TotalCacheWrite, &p.LastActivity); err != nil {
+			&p.TotalCacheRead, &p.TotalCacheWrite, &p.CostIncomplete, &p.LastActivity); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -781,46 +775,6 @@ func (s *Store) SessionFacets(ctx context.Context, projectID int64) (FacetValues
 		}
 	}
 	return f, rows.Err()
-}
-
-// Search finds messages whose content matches the query (trigram-accelerated
-// substring match), optionally scoped to one project. The standalone search
-// page was retired; this stays as the query layer for search folded into other
-// views, backed by the pg_trgm index on messages.content.
-func (s *Store) Search(ctx context.Context, query string, projectID int64, limit int) ([]SearchHit, error) {
-	if limit <= 0 || limit > 200 {
-		limit = 50
-	}
-	args := []any{query}
-	scope := ""
-	if projectID != 0 {
-		args = append(args, projectID)
-		scope = " AND s.project_id = $2"
-	}
-	args = append(args, limit)
-	rows, err := s.Pool.Query(ctx,
-		`SELECT m.session_id, p.remote_key, p.display_name, p.kind, s.agent, u.username, m.ordinal, m.role,
-		        left(m.content, 240)
-		   FROM messages m
-		   JOIN sessions s ON s.id = m.session_id
-		   JOIN projects p ON p.id = s.project_id
-		   JOIN users u ON u.id = s.user_id
-		  WHERE m.content ILIKE '%' || $1 || '%'`+scope+`
-		  ORDER BY s.updated_at DESC
-		  LIMIT $`+itoa(len(args)), args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []SearchHit
-	for rows.Next() {
-		var h SearchHit
-		if err := rows.Scan(&h.SessionID, &h.ProjectKey, &h.ProjectName, &h.ProjectKind, &h.Agent, &h.Username, &h.Ordinal, &h.Role, &h.Snippet); err != nil {
-			return nil, err
-		}
-		out = append(out, h)
-	}
-	return out, rows.Err()
 }
 
 // itoa avoids strconv noise in query building.

@@ -427,6 +427,101 @@ func TestBlobServeContentEncoding(t *testing.T) {
 	}
 }
 
+// TestBlobETagConditional is the caching contract for a content-addressed blob: it
+// serves with a strong ETag (the sha) and immutable caching, and a conditional GET
+// carrying that ETag in If-None-Match gets a 304 with no body rather than a full
+// re-transfer. This is what keeps a transcript reload from re-downloading large
+// lifted images once the browser holds them.
+func TestBlobETagConditional(t *testing.T) {
+	t.Parallel()
+	srv, st := newTestServer(t)
+	c, ownerID := ingestClient(t, srv.URL, st)
+	ctx := context.Background()
+
+	input := `{"file_path":"src/auth.ts"}`
+	content := `{"type":"user","message":{"content":"go"}}` + "\n" +
+		`{"type":"assistant","message":{"id":"m1","model":"claude-sonnet-4-20250514","content":[{"type":"tool_use","id":"t1","name":"Read","input":` + input + `}]}}` + "\n"
+	if _, err := c.SyncFile(ctx, casTarget(writeSession(t, content))); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	sid := sessionID(t, st, ownerID)
+	var inputSHA string
+	if err := st.Pool.QueryRow(ctx,
+		"SELECT input_sha256 FROM tool_calls WHERE session_id=$1", sid).Scan(&inputSHA); err != nil {
+		t.Fatal(err)
+	}
+
+	web := newClient(t)
+	if _, err := web.PostForm(srv.URL+"/login", url.Values{
+		"username": {"grace"}, "password": {"hopper-1906"},
+	}); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	blobURL := fmt.Sprintf("%s/api/v1/session/%d/blob/%s", srv.URL, sid, inputSHA)
+
+	// First fetch: 200 with a strong ETag naming the sha and an immutable cache
+	// directive, plus the body.
+	resp, err := web.Get(blobURL)
+	if err != nil {
+		t.Fatalf("get blob: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("first fetch status = %d, want 200", resp.StatusCode)
+	}
+	etag := resp.Header.Get("ETag")
+	if etag != `"`+inputSHA+`"` {
+		t.Fatalf("ETag = %q, want %q", etag, `"`+inputSHA+`"`)
+	}
+	if cc := resp.Header.Get("Cache-Control"); !strings.Contains(cc, "immutable") || !strings.Contains(cc, "private") {
+		t.Fatalf("Cache-Control = %q, want private + immutable", cc)
+	}
+	if string(body) != input {
+		t.Fatalf("first fetch body = %q, want %q", body, input)
+	}
+
+	// Conditional fetch with the ETag: 304 and an empty body, no re-transfer.
+	req, err := http.NewRequest(http.MethodGet, blobURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("If-None-Match", etag)
+	resp2, err := web.Do(req)
+	if err != nil {
+		t.Fatalf("conditional get: %v", err)
+	}
+	body2, _ := io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusNotModified {
+		t.Fatalf("conditional status = %d, want 304", resp2.StatusCode)
+	}
+	if len(body2) != 0 {
+		t.Fatalf("304 carried a %d-byte body, want none", len(body2))
+	}
+
+	// A weak validator must also 304: RFC 7232 mandates weak comparison for
+	// If-None-Match, so W/"<sha>" matches the strong "<sha>" we serve.
+	req, err = http.NewRequest(http.MethodGet, blobURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("If-None-Match", "W/"+etag)
+	resp3, err := web.Do(req)
+	if err != nil {
+		t.Fatalf("conditional get (weak): %v", err)
+	}
+	body3, _ := io.ReadAll(resp3.Body)
+	resp3.Body.Close()
+	if resp3.StatusCode != http.StatusNotModified {
+		t.Fatalf("weak conditional status = %d, want 304", resp3.StatusCode)
+	}
+	if len(body3) != 0 {
+		t.Fatalf("weak 304 carried a %d-byte body, want none", len(body3))
+	}
+}
+
 // jsonStringLiteral renders s as a JSON string literal for embedding a large body in
 // a transcript fixture line.
 func jsonStringLiteral(s string) string {

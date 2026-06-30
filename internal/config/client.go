@@ -19,8 +19,11 @@ type Client struct {
 	// ExtraRoots are additional session directories to discover beyond each
 	// agent's standard roots.
 	ExtraRoots []ExtraRoot `toml:"extra_roots"`
-	// Excludes are glob patterns of paths to ignore while watching (used in watch
-	// mode). Empty means watch everything discovered.
+	// Excludes are glob patterns of paths to skip during discovery, applied to
+	// both `akari sync` and `akari watch`. Patterns match the full path with
+	// forward slashes and `*`/`**` span separators (see discover.Excluder), so
+	// `**/tmp/**` ignores any path with a `tmp` segment. Empty means discover
+	// everything.
 	Excludes []string `toml:"excludes"`
 }
 

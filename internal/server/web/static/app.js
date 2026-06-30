@@ -87,13 +87,29 @@
     var body = el.getAttribute("data-body");
     if (!sse || !body || !window.EventSource) return;
     var es = new EventSource(sse);
-    es.addEventListener("update", function () {
+    // Serialize body refreshes: an SSE burst (several "update" events while a fetch
+    // is in flight) must not start overlapping htmx.ajax calls, whose swaps could
+    // land out of order and leave the transcript showing a stale snapshot. Run at
+    // most one refresh at a time and collapse any events that arrive mid-flight
+    // into a single trailing refresh, so the final swap always reflects the latest
+    // state without a swap-per-event pile-up.
+    var fetching = false;
+    var pending = false;
+    function refresh() {
       if (!window.htmx) return;
+      if (fetching) { pending = true; return; }
+      fetching = true;
       var before = snapshotStats();
+      var done = function () {
+        fetching = false;
+        rehydrate();
+        flashChangedStats(before);
+        if (pending) { pending = false; refresh(); }
+      };
       var p = window.htmx.ajax("GET", body, { target: "#session-body", swap: "innerHTML" });
-      var after = function () { rehydrate(); flashChangedStats(before); };
-      if (p && typeof p.then === "function") { p.then(after); } else { setTimeout(after, 60); }
-    });
+      if (p && typeof p.then === "function") { p.then(done, done); } else { setTimeout(done, 60); }
+    }
+    es.addEventListener("update", refresh);
   }
 
   // ---------------- Reparse progress ----------------
@@ -241,11 +257,48 @@
   function overlayEl() { return document.getElementById("session-modal"); }
   function inspectorEl() { return document.getElementById("session-inspector"); }
 
+  // The dialog declares aria-modal, which promises assistive tech that focus is
+  // constrained to it. Honor that: remember what had focus, move focus into the
+  // dialog on open, keep Tab cycling inside it, and restore focus to the trigger
+  // on close. focusables lists the dialog's tabbable controls in DOM order.
+  var lastFocused = null;
+  function focusables() {
+    var insp = inspectorEl();
+    if (!insp) return [];
+    return Array.prototype.slice.call(
+      insp.querySelectorAll('a[href], button, [tabindex]:not([tabindex="-1"])')
+    ).filter(function (el) { return !el.disabled && el.offsetParent !== null; });
+  }
+  function trapTab(ev) {
+    if (ev.key !== "Tab") return;
+    var ov = overlayEl();
+    if (!ov || ov.hidden) return;
+    var f = focusables();
+    if (!f.length) { ev.preventDefault(); return; }
+    var first = f[0], last = f[f.length - 1];
+    // The dialog container itself carries tabindex -1 and is not in the tabbable
+    // list, so when it holds focus (right after open) indexOf is -1. Treat that as
+    // the top edge: Shift+Tab there wraps to the last control instead of falling out
+    // of the dialog to the page behind it, and Tab there enters at the first.
+    var idx = f.indexOf(document.activeElement);
+    if (ev.shiftKey && idx <= 0) {
+      ev.preventDefault(); last.focus();
+    } else if (!ev.shiftKey && (idx === -1 || idx === f.length - 1)) {
+      ev.preventDefault(); first.focus();
+    }
+  }
+
   function openModal() {
     var ov = overlayEl();
     if (!ov) return;
+    lastFocused = document.activeElement;
     ov.hidden = false;
     document.body.classList.add("modal-open");
+    // Move focus into the dialog so the keyboard and screen-reader user lands in
+    // the opened body rather than staying behind it. The dialog itself takes focus
+    // (tabindex -1) so its aria-label is announced; Tab then reaches the controls.
+    var insp = inspectorEl();
+    if (insp) { insp.setAttribute("tabindex", "-1"); insp.focus(); }
   }
   function closeModal() {
     var ov = overlayEl();
@@ -256,6 +309,10 @@
     if (insp) insp.innerHTML = "";
     lastBody = { url: "", res: null }; // drop the retained body so it is refetched next open
     clearInspectSelection();
+    // Return focus to the element that opened the modal, if it is still in the DOM,
+    // so keyboard focus is not dumped at the top of the document.
+    if (lastFocused && lastFocused.focus && lastFocused.isConnected) lastFocused.focus();
+    lastFocused = null;
   }
   var selectedEl = null;
   function clearInspectSelection() {
@@ -474,7 +531,9 @@
     if (ev.key === "Escape") {
       var ov = overlayEl();
       if (ov && !ov.hidden) closeModal();
+      return;
     }
+    trapTab(ev);
   });
 
   // ---------------- Whole-row navigation ----------------

@@ -46,7 +46,7 @@ templ ProjectsPage(p Page, projects []store.ProjectSummary, spark map[int64][]fl
 							<td class="trend">@templ.Raw(Sparkline(spark[pr.ID]))</td>
 							<td class="num">{ fmt.Sprintf("%d", pr.SessionCount) }</td>
 							<td class="num">@tokensCell(pr)</td>
-							<td class="num">{ FmtCost(pr.TotalCostUSD, false) }</td>
+							<td class="num">{ FmtCost(pr.TotalCostUSD, pr.CostIncomplete) }</td>
 							<td class="muted nowrap">{ FmtRelTime(pr.LastActivity) }</td>
 						</tr>
 					}
@@ -64,7 +64,7 @@ templ ProjectsPage(p Page, projects []store.ProjectSummary, spark map[int64][]fl
 templ tokensCell(pr store.ProjectSummary) {
 	<span class="tok-cell" tabindex="0">
 		<span class="tok-total">{ FmtTokens(pr.TotalTokens()) }</span>
-		@tokenCard(pr.TotalTokens(), pr.TotalInput, pr.TotalOutput, pr.TotalCacheRead, pr.TotalCacheWrite, pr.TotalCostUSD, false)
+		@tokenCard(pr.TotalTokens(), pr.TotalInput, pr.TotalOutput, pr.TotalCacheRead, pr.TotalCacheWrite, pr.TotalCostUSD, pr.CostIncomplete)
 	</span>
 }
 
@@ -82,37 +82,108 @@ templ ProjectPage(p Page, proj store.ProjectSummary, sessions []store.SessionSum
 			<div class="panel-head">
 				<h2>Sessions</h2>
 			</div>
-			<form class="filters" method="get" hx-get={ ProjectPath(proj.ID) } hx-target="#session-list" hx-push-url="true">
-				// The window rides with a filter submit so changing the session filter
-				// does not reset the usage panel's range on the next full load.
-				<input type="hidden" name="range" value={ rng }/>
-				<select name="agent">
-					<option value="">all agents</option>
-					for _, ag := range facets.Agents {
-						<option value={ ag } selected?={ sel.Agent == ag }>{ ag }</option>
-					}
-				</select>
-				<select name="user">
-					<option value="">all users</option>
-					for _, u := range facets.Users {
-						<option value={ u } selected?={ sel.Username == u }>{ u }</option>
-					}
-				</select>
-				<select name="machine">
-					<option value="">all machines</option>
-					for _, m := range facets.Machines {
-						<option value={ m } selected?={ sel.Machine == m }>{ m }</option>
-					}
-				</select>
-				<button type="submit">Filter</button>
-			</form>
+			@projectSessionToolbar(proj.ID, facets, sel, rng)
 			<div id="session-list">
-				@SessionList(sessions)
+				@ProjectSessionList(sessions)
 			</div>
 		</section>
 	}
 }
 
+// projectSessionToolbar is the project page's session filter, rendered through the
+// same labeled, auto-submitting tbSelect controls as the global Sessions toolbar so
+// the two surfaces filter the same way: picking a value submits on change (app.js)
+// rather than waiting on a separate button, with a no-script Apply fallback. Unlike
+// the global toolbar it submits over htmx (it swaps only #session-list) and always
+// shows all three facets, since a single project's facet space is small. The hidden
+// range rides along so a filter change does not reset the usage panel's window.
+templ projectSessionToolbar(projectID int64, facets Facets, sel store.SessionFilter, rng string) {
+	<form class="toolbar" method="get" hx-get={ ProjectPath(projectID) } hx-target="#session-list" hx-push-url="true">
+		<input type="hidden" name="range" value={ rng }/>
+		@tbSelect("Agent", "agent") {
+			<option value="" selected?={ sel.Agent == "" }>All agents</option>
+			for _, ag := range facets.Agents {
+				<option value={ ag } selected?={ sel.Agent == ag }>{ ag }</option>
+			}
+		}
+		@tbSelect("User", "user") {
+			<option value="" selected?={ sel.Username == "" }>All users</option>
+			for _, u := range facets.Users {
+				<option value={ u } selected?={ sel.Username == u }>{ u }</option>
+			}
+		}
+		@tbSelect("Machine", "machine") {
+			<option value="" selected?={ sel.Machine == "" }>All machines</option>
+			for _, m := range facets.Machines {
+				<option value={ m } selected?={ sel.Machine == m }>{ m }</option>
+			}
+		}
+		<noscript><button type="submit">Apply</button></noscript>
+	</form>
+}
+
+// ProjectSessionList is the per-project session table. It carries the project-scoped
+// columns the global feed omits (session id, user, machine), but renders the token
+// volume through the same tok-cell + tokenCard the feed, projects index, and
+// overview use, and shows "Updated" as a relative time with the exact stamp on
+// hover, so a session's token magnitude and last-activity read identically wherever
+// it appears. The whole row is the click target (data-row-href, wired in app.js).
+templ ProjectSessionList(sessions []store.SessionSummary) {
+	if len(sessions) == 0 {
+		<div class="empty">No sessions match these filters.</div>
+	} else {
+		<table class="grid">
+			<thead>
+				<tr>
+					<th>Session</th>
+					<th>Agent</th>
+					<th>User</th>
+					<th>Machine</th>
+					<th>Branch</th>
+					<th class="num">Messages</th>
+					<th class="num">Tokens</th>
+					<th class="num">Cost</th>
+					<th>Updated</th>
+				</tr>
+			</thead>
+			<tbody>
+				for _, s := range sessions {
+					<tr data-row-href={ SessionPath(s.ID) }>
+						<td>
+							<a href={ SessionHref(s.ID) }>#{ fmt.Sprintf("%d", s.ID) }</a>
+							if s.Visibility == "public" {
+								<span class="tag public">public</span>
+							}
+						</td>
+						<td><span class="tag agent">{ s.Agent }</span></td>
+						<td>{ s.Username }</td>
+						<td class="muted">{ s.Machine }</td>
+						<td class="muted">{ s.GitBranch }</td>
+						<td class="num">{ fmt.Sprintf("%d", s.MessageCount) }</td>
+						<td class="num">@sessionTokensCell(s)</td>
+						<td class="num">{ FmtCost(s.TotalCostUSD, s.CostIncomplete) }</td>
+						<td class="muted nowrap" title={ FmtTime(s.UpdatedAt) }>{ FmtRelTime(s.UpdatedAt) }</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+	}
+}
+
+// sessionTokensCell renders a session row's token volume with the shared hover card,
+// so the per-project table reads the same as the feed, the projects index, and the
+// overview breakdowns.
+templ sessionTokensCell(s store.SessionSummary) {
+	<span class="tok-cell" tabindex="0">
+		<span class="tok-total">{ FmtTokens(RowTokens(s)) }</span>
+		@tokenCard(RowTokens(s), s.TotalInput, s.TotalOutput, s.TotalCacheRead, s.TotalCacheWrite, s.TotalCostUSD, s.CostIncomplete)
+	</span>
+}
+
+// SessionList is the compact session table reused for a session's subagents (see
+// session.templ). It stays a minimal id/agent/cost table: subagents are a short
+// nested list under a parent run, not the primary session-browsing surface, so they
+// do not carry the token cell or relative-time treatment the project table does.
 templ SessionList(sessions []store.SessionSummary) {
 	if len(sessions) == 0 {
 		<div class="empty">No sessions match these filters.</div>

@@ -73,6 +73,9 @@ type BreakdownRow struct {
 	Sessions   int
 	Pct        float64
 	Color      string
+	// Incomplete marks a slice whose cost folded in an unpriced usage event, so the
+	// row shows the same "$X+" lower-bound marker the per-session figures use.
+	Incomplete bool
 }
 
 // OtherModelLabel is the bucket name for the model breakdown's long tail: every
@@ -105,6 +108,7 @@ func FoldUnknownModels(bs []store.Breakdown) []store.Breakdown {
 		other.CacheRead += b.CacheRead
 		other.CacheWrite += b.CacheWrite
 		other.Sessions += b.Sessions
+		other.CostIncomplete = other.CostIncomplete || b.CostIncomplete
 		folded = true
 	}
 	if folded {
@@ -136,7 +140,7 @@ func BuildBreakdown(bs []store.Breakdown) []BreakdownRow {
 		}
 		rows = append(rows, BreakdownRow{
 			Label:      b.Label,
-			Cost:       FmtCost(b.CostUSD, false),
+			Cost:       FmtCost(b.CostUSD, b.CostIncomplete),
 			CostUSD:    b.CostUSD,
 			Tokens:     b.Tokens(),
 			Input:      b.Input,
@@ -146,6 +150,7 @@ func BuildBreakdown(bs []store.Breakdown) []BreakdownRow {
 			Sessions:   b.Sessions,
 			Pct:        pct,
 			Color:      VizColor(i),
+			Incomplete: b.CostIncomplete,
 		})
 	}
 	return rows
@@ -202,7 +207,7 @@ func Sparkline(vals []float64) string {
 
 // OutlineTitle is a compact one-line label for an outline turn, drawn from the
 // start of the message content. It collapses runs of whitespace and emits at
-// most 48 runes, and it never scans more than scanCap runes of input — so even a
+// most 48 runes, and it never scans more than scanCap runes of input, so even a
 // whitespace-heavy message costs a fixed amount, independent of message size.
 func OutlineTitle(m store.Message) string {
 	const max = 48      // emitted label length

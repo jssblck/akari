@@ -193,6 +193,14 @@
     var id = container.id;
 
     function draw() { renderHeatmap(container, index, metric); }
+    // Stash the redraw on the element so the single module-level resize handler
+    // (registered once, below) can find every live grid by querying the DOM,
+    // rather than each initHeatmap adding its own window listener. The usage panel
+    // is swapped whole on a range/user change, so a per-call listener would stack
+    // one leaked closure (pinning a detached SVG) on every swap; keeping the
+    // handler global and resolving live grids by query avoids that, matching the
+    // single-handler convention initOutlineSpy uses in app.js.
+    container._redraw = draw;
     draw();
 
     Array.prototype.slice.call(document.querySelectorAll('.seg[data-heatmap-target="' + id + '"]')).forEach(function (btn) {
@@ -202,13 +210,21 @@
         draw();
       });
     });
-
-    var raf = 0;
-    window.addEventListener("resize", function () {
-      if (raf) cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(draw);
-    });
   }
+
+  // One resize handler for the whole document: on resize it redraws each grid
+  // currently in the DOM via the _redraw stashed on it. A grid detached by an
+  // htmx swap is no longer found, so its closure is not retained and never
+  // redrawn; the fresh grid that replaced it carries its own _redraw.
+  var resizeRaf = 0;
+  window.addEventListener("resize", function () {
+    if (resizeRaf) cancelAnimationFrame(resizeRaf);
+    resizeRaf = requestAnimationFrame(function () {
+      Array.prototype.slice.call(document.querySelectorAll("[data-heatmap]")).forEach(function (el) {
+        if (typeof el._redraw === "function") el._redraw();
+      });
+    });
+  });
 
   function init() {
     Array.prototype.slice.call(document.querySelectorAll("[data-heatmap]")).forEach(initHeatmap);

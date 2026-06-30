@@ -30,6 +30,11 @@ type Breakdown struct {
 	CacheRead  int64
 	CacheWrite int64
 	Sessions   int
+	// CostIncomplete is true when this slice folded in a usage event that carried
+	// real token volume but no price (an unpriced model), so the slice's cost is a
+	// lower bound. It lets a by-model or by-agent row show the same "$X+" marker the
+	// per-session figures use rather than an exact cost that understates the slice.
+	CostIncomplete bool
 }
 
 // Tokens is the all-class token volume (input, output, cache read, cache write)
@@ -55,6 +60,12 @@ type Analytics struct {
 	TotalCacheRead  int64
 	TotalCacheWrite int64
 	Sessions        int
+	// CostIncomplete is true when any usage event in the window carried token
+	// volume but no price, so TotalCost is a lower bound. The headline Cost tile
+	// shows the "$X+" marker when set, matching how a single session flags an
+	// incomplete cost. It is the OR of the by-agent slices, the same rows the
+	// headline totals are summed from.
+	CostIncomplete bool
 }
 
 // HasData reports whether there is anything worth charting, so the view can show
@@ -131,6 +142,7 @@ func (s *Store) Analytics(ctx context.Context, projectID int64, since time.Time,
 		a.TotalOut += ag.Output
 		a.TotalCacheRead += ag.CacheRead
 		a.TotalCacheWrite += ag.CacheWrite
+		a.CostIncomplete = a.CostIncomplete || ag.CostIncomplete
 	}
 	return a, nil
 }
@@ -189,6 +201,15 @@ func (s *Store) analyticsSeries(ctx context.Context, projectID int64, since time
 	return out, nil
 }
 
+// costIncompleteExpr is the per-slice incompleteness aggregate shared by the
+// by-model and by-agent splits: true when the slice folded in a usage event that
+// carried real token volume but no price, so its summed cost is a lower bound. The
+// token sum mirrors projection.go exactly (input + output + cache read + cache
+// write + reasoning), so a reasoning-only unpriced row flags the breakdown the same
+// way it already flags the session rollup; kept here as one expression so both
+// splits agree.
+const costIncompleteExpr = `bool_or(ue.cost_usd IS NULL AND (ue.input_tokens + ue.output_tokens + ue.cache_read_tokens + ue.cache_write_tokens + ue.reasoning_tokens) > 0)`
+
 func (s *Store) analyticsByModel(ctx context.Context, projectID int64, since time.Time, userIDs []int64) ([]Breakdown, error) {
 	filter, args := usageFilter(projectID, since, userIDs)
 	// occurred_at IS NOT NULL matches the series and the by-agent split, so the
@@ -204,7 +225,8 @@ func (s *Store) analyticsByModel(ctx context.Context, projectID int64, since tim
 		        coalesce(sum(ue.output_tokens), 0),
 		        coalesce(sum(ue.cache_read_tokens), 0),
 		        coalesce(sum(ue.cache_write_tokens), 0),
-		        count(DISTINCT ue.session_id)
+		        count(DISTINCT ue.session_id),
+		        coalesce(`+costIncompleteExpr+`, false)
 		   FROM usage_events ue
 		   JOIN sessions s ON s.id = ue.session_id
 		  WHERE ue.occurred_at IS NOT NULL`+filter+`
@@ -236,7 +258,8 @@ func (s *Store) analyticsByAgent(ctx context.Context, projectID int64, since tim
 		        coalesce(sum(ue.output_tokens), 0),
 		        coalesce(sum(ue.cache_read_tokens), 0),
 		        coalesce(sum(ue.cache_write_tokens), 0),
-		        count(DISTINCT ue.session_id)
+		        count(DISTINCT ue.session_id),
+		        coalesce(`+costIncompleteExpr+`, false)
 		   FROM usage_events ue
 		   JOIN sessions s ON s.id = ue.session_id
 		  WHERE ue.occurred_at IS NOT NULL`+filter+`
@@ -261,7 +284,7 @@ func scanBreakdowns(rows interface {
 	var out []Breakdown
 	for rows.Next() {
 		var b Breakdown
-		if err := rows.Scan(&b.Label, &b.CostUSD, &b.Input, &b.Output, &b.CacheRead, &b.CacheWrite, &b.Sessions); err != nil {
+		if err := rows.Scan(&b.Label, &b.CostUSD, &b.Input, &b.Output, &b.CacheRead, &b.CacheWrite, &b.Sessions, &b.CostIncomplete); err != nil {
 			return nil, err
 		}
 		out = append(out, b)

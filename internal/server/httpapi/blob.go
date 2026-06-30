@@ -79,11 +79,50 @@ func (s *Server) serveBlobForSession(w http.ResponseWriter, r *http.Request, ses
 	}
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Disposition", "inline")
-	w.Header().Set("Cache-Control", "private, max-age=300")
-	if _, err := s.Store.WriteBlobTo(r.Context(), w, sha); err != nil {
+	// The URL is content-addressed by sha256, so the bytes behind it can never
+	// change: the sha is a free, perfect strong validator. Serve it immutable with
+	// a far-future max-age and offer the sha as an ETag so a client that already
+	// holds the body revalidates with a 304 instead of re-transferring it (the
+	// large lifted images on a transcript reload are the case that matters). The
+	// gating above is per-session, so the cache stays private: a shared cache must
+	// not serve one session's body to a viewer who never referenced the hash.
+	etag := `"` + sha + `"`
+	w.Header().Set("ETag", etag)
+	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
+	if ifNoneMatchHas(r.Header.Get("If-None-Match"), etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	// Refresh the write deadline as the body streams so a large blob to a slow
+	// client is not truncated by the server-wide WriteTimeout; see deadlines.go.
+	if _, err := s.Store.WriteBlobTo(r.Context(), idleWriteDeadline(w), sha); err != nil {
 		// Headers are already committed; nothing left but to drop the connection.
 		return
 	}
+}
+
+// ifNoneMatchHas reports whether an If-None-Match header names the given quoted
+// ETag. The header is a comma-separated list and may be "*", so it is parsed as a
+// list rather than compared whole. RFC 7232 requires the weak comparison function
+// for If-None-Match, so a W/ prefix on either side is stripped before comparing
+// opaque-tags: a client that revalidates with W/"<sha>" still gets a 304 against
+// our strong "<sha>". Weak comparison is exactly right here anyway, since the bytes
+// behind a content-addressed URL never change.
+func ifNoneMatchHas(header, etag string) bool {
+	header = strings.TrimSpace(header)
+	if header == "" {
+		return false
+	}
+	if header == "*" {
+		return true
+	}
+	want := strings.TrimPrefix(etag, "W/")
+	for _, part := range strings.Split(header, ",") {
+		if strings.TrimPrefix(strings.TrimSpace(part), "W/") == want {
+			return true
+		}
+	}
+	return false
 }
 
 // safeBlobContentType maps a stored media type to one safe to serve inline. The CAS

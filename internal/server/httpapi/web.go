@@ -200,7 +200,7 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 	// and selects the full panel out of a complete page render, so only a session-list
 	// request short-circuits to the list fragment.
 	if r.Header.Get("HX-Request") == "true" && r.Header.Get("HX-Target") == "session-list" {
-		render(w, r, http.StatusOK, web.SessionList(sessions))
+		render(w, r, http.StatusOK, web.ProjectSessionList(sessions))
 		return
 	}
 
@@ -390,8 +390,14 @@ func (s *Server) handleSessionBody(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d, msgs, tools, atts, subs, err := s.sessionView(r, id)
-	if err != nil {
+	if errors.Is(err, store.ErrNotFound) {
 		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		// A transient backend failure is a 500, not a "session not found": the live
+		// body fragment must not report a database hiccup as a missing session.
+		http.Error(w, "Could not load session.", http.StatusInternalServerError)
 		return
 	}
 	render(w, r, http.StatusOK, web.SessionMain(d, msgs, tools, atts, subs))

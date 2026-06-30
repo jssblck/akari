@@ -82,7 +82,7 @@ func runSync(ctx context.Context, args []string) error {
 	}
 	machine, _ := os.Hostname()
 
-	files, err := discover.Discover(discover.Roots(cfg, os.Getenv, home))
+	files, err := discover.Discover(discover.Roots(cfg, os.Getenv, home), discover.NewExcluder(cfg.Excludes))
 	if err != nil {
 		return fmt.Errorf("discover sessions: %w", err)
 	}

@@ -80,6 +80,144 @@ func seedUsageAt(t *testing.T, st *store.Store, sessionID int64, model string, c
 	}
 }
 
+// seedUsageUnpriced inserts a dated usage event that carries real token volume but
+// a NULL cost, the shape an unpriced model produces. Its tokens count toward the
+// totals while its cost does not, which is exactly what should flag an aggregate as
+// cost-incomplete.
+func seedUsageUnpriced(t *testing.T, st *store.Store, sessionID int64, model string, in, out int64, dedup string) {
+	t.Helper()
+	_, err := st.Pool.Exec(context.Background(),
+		`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cost_usd, occurred_at, dedup_key)
+		 VALUES ($1,$2,$3,$4, NULL, now(), $5)`,
+		sessionID, model, in, out, dedup)
+	if err != nil {
+		t.Fatalf("seed unpriced usage: %v", err)
+	}
+}
+
+// TestCostIncompleteRollsUp pins that an unpriced usage event (tokens, no cost)
+// propagates the "cost is a lower bound" marker into both aggregate paths the UI
+// reads: the analytics headline and breakdowns, and the projects-index rollup.
+// Without this, a project built partly from unpriced sessions would read an exact
+// "$X" while its own session rows show "$X+".
+func TestCostIncompleteRollsUp(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	admin, err := st.Register(ctx, "grace", "h", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	projA, err := st.UpsertProject(ctx, "github.com/ada/incomplete", "github.com", "ada", "incomplete", "incomplete", "remote")
+	if err != nil {
+		t.Fatalf("project A: %v", err)
+	}
+	projB, err := st.UpsertProject(ctx, "github.com/ada/priced", "github.com", "ada", "priced", "priced", "remote")
+	if err != nil {
+		t.Fatalf("project B: %v", err)
+	}
+
+	// Project A: one session whose usage mixes a priced event with an unpriced one.
+	sA := seedSessionWithStats(t, st, admin.ID, projA, "claude", "a1", 1.0, 600, 120)
+	seedUsage(t, st, sA, "claude-opus-4-8", 1.0, 500, 100, 0, "a-priced")
+	seedUsageUnpriced(t, st, sA, "secret-model", 100, 20, "a-unpriced")
+
+	// Project B: one session, fully priced.
+	sB := seedSessionWithStats(t, st, admin.ID, projB, "claude", "b1", 2.0, 800, 160)
+	seedUsage(t, st, sB, "claude-opus-4-8", 2.0, 800, 160, 0, "b-priced")
+
+	// Analytics flags A's window as incomplete and at least one of its breakdown
+	// rows; B's window is exact.
+	aA, err := st.Analytics(ctx, projA, time.Time{}, nil)
+	if err != nil {
+		t.Fatalf("analytics A: %v", err)
+	}
+	if !aA.CostIncomplete {
+		t.Error("project A analytics should be cost-incomplete (an unpriced usage event)")
+	}
+	var anyModelIncomplete bool
+	for _, m := range aA.Models {
+		if m.CostIncomplete {
+			anyModelIncomplete = true
+		}
+	}
+	if !anyModelIncomplete {
+		t.Error("a by-model breakdown row should carry the incomplete marker")
+	}
+	aB, err := st.Analytics(ctx, projB, time.Time{}, nil)
+	if err != nil {
+		t.Fatalf("analytics B: %v", err)
+	}
+	if aB.CostIncomplete {
+		t.Error("project B analytics is fully priced; should not be cost-incomplete")
+	}
+
+	// The projects index rolls bool_or(cost_incomplete) per project. Set A's session
+	// flag the way projection would for an unpriced turn; leave B's clear.
+	if _, err := st.Pool.Exec(ctx, "UPDATE sessions SET cost_incomplete = TRUE WHERE id = $1", sA); err != nil {
+		t.Fatalf("flag session: %v", err)
+	}
+	projects, err := st.ListProjects(ctx)
+	if err != nil {
+		t.Fatalf("list projects: %v", err)
+	}
+	seen := map[int64]bool{}
+	for _, p := range projects {
+		seen[p.ID] = true
+		switch p.ID {
+		case projA:
+			if !p.CostIncomplete {
+				t.Error("project A index row should be cost-incomplete")
+			}
+		case projB:
+			if p.CostIncomplete {
+				t.Error("project B index row should not be cost-incomplete")
+			}
+		}
+	}
+	if !seen[projA] || !seen[projB] {
+		t.Fatalf("both projects should appear in the index: %v", seen)
+	}
+}
+
+// TestCostIncompleteReasoningOnly pins that reasoning tokens alone count as "real
+// volume": a usage event with only reasoning_tokens and a NULL cost flags the
+// analytics window incomplete, matching projection.go, which already folds
+// reasoning into the session's cost_incomplete. Without reasoning in the analytics
+// expression, a reasoning-only unpriced turn would read exact in the breakdown
+// while the session rollup said otherwise.
+func TestCostIncompleteReasoningOnly(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	admin, err := st.Register(ctx, "grace", "h", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	proj, err := st.UpsertProject(ctx, "github.com/ada/reasoning", "github.com", "ada", "reasoning", "reasoning", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	s := seedSessionWithStats(t, st, admin.ID, proj, "claude", "r1", 0, 0, 0)
+	// Only reasoning tokens, no cost: the other four classes are zero.
+	if _, err := st.Pool.Exec(ctx,
+		`INSERT INTO usage_events (session_id, model, reasoning_tokens, cost_usd, occurred_at, dedup_key)
+		 VALUES ($1,$2,$3, NULL, now(), $4)`,
+		s, "secret-model", 500, "r-unpriced"); err != nil {
+		t.Fatalf("seed reasoning-only usage: %v", err)
+	}
+
+	a, err := st.Analytics(ctx, proj, time.Time{}, nil)
+	if err != nil {
+		t.Fatalf("analytics: %v", err)
+	}
+	if !a.CostIncomplete {
+		t.Error("a reasoning-only unpriced usage event should flag the window cost-incomplete")
+	}
+}
+
 // TotalTokens sums the four token classes; it is the figure the overview's Tokens
 // readout shows. Pure, so it runs without a database.
 func TestAnalyticsTotalTokens(t *testing.T) {

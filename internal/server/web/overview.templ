@@ -42,7 +42,7 @@ templ analyticsPanel(a store.Analytics, chartID string, ranges []RangeOption, rn
 			// centered Overview the cap matches the content box, so it changes nothing.
 			<div class="usage-lead">
 				<div class="stats">
-					@stat("Cost", FmtCost(a.TotalCost, false), "")
+					@stat("Cost", FmtCost(a.TotalCost, a.CostIncomplete), "")
 					@statTokens(a)
 					@stat("Sessions", fmt.Sprintf("%d", a.Sessions), "")
 				</div>
@@ -219,7 +219,7 @@ templ breakdownList(title string, rows []BreakdownRow) {
 						<div class="bar-sub muted small">
 							<span class="tok-cell" tabindex="0">
 								<span class="tok-total">{ FmtTokens(row.Tokens) }</span>
-								@tokenCard(row.Tokens, row.Input, row.Output, row.CacheRead, row.CacheWrite, row.CostUSD, false)
+								@tokenCard(row.Tokens, row.Input, row.Output, row.CacheRead, row.CacheWrite, row.CostUSD, row.Incomplete)
 							</span>
 							{ " tok " }&middot;{ fmt.Sprintf(" %d sessions", row.Sessions) }
 						</div>
