@@ -77,20 +77,21 @@ func (s *Server) handleAnnounce(w http.ResponseWriter, r *http.Request) {
 		repo = displayName
 	}
 
-	projectID, err := s.Store.UpsertProject(r.Context(), remoteKey, host, owner, repo, displayName, req.Kind)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "upsert project")
-		return
-	}
-	res, err := s.Store.Announce(r.Context(), store.AnnounceParams{
+	res, err := s.Store.AnnounceWithProject(r.Context(), store.AnnounceParams{
 		UserID:          p.UserID,
 		Agent:           req.Agent,
 		SourceSessionID: req.SourceSessionID,
-		ProjectID:       projectID,
 		Kind:            req.Kind,
 		GitBranch:       req.GitBranch,
 		Cwd:             req.Cwd,
 		Machine:         req.Machine,
+	}, store.ProjectParams{
+		RemoteKey:   remoteKey,
+		Host:        host,
+		Owner:       owner,
+		Repo:        repo,
+		DisplayName: displayName,
+		Kind:        req.Kind,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "announce session")

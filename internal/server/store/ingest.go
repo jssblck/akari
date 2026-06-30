@@ -25,6 +25,19 @@ type AnnounceParams struct {
 	Machine         string
 }
 
+// ProjectParams is the project identity carried by an announce request before
+// the server knows the row id. Keeping this with Announce lets the downgrade
+// guard run before a local project is inserted, so an old client cannot recreate
+// an unused orphaned project row for a session already stuck to a remote.
+type ProjectParams struct {
+	RemoteKey   string
+	Host        string
+	Owner       string
+	Repo        string
+	DisplayName string
+	Kind        string
+}
+
 // AnnounceResult is the server's authoritative view of a session's raw store.
 type AnnounceResult struct {
 	SessionID    int64
@@ -51,8 +64,16 @@ func (e OffsetMismatchError) Error() string {
 // orphaned in place (its key, machine + path, is unchanged), and one that gains a
 // remote is never re-resolved here: a remote session carries its own remote key.
 func (s *Store) UpsertProject(ctx context.Context, remoteKey, host, owner, repo, displayName, kind string) (int64, error) {
+	return upsertProjectTx(ctx, s.Pool, remoteKey, host, owner, repo, displayName, kind)
+}
+
+type projectUpserter interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+func upsertProjectTx(ctx context.Context, q projectUpserter, remoteKey, host, owner, repo, displayName, kind string) (int64, error) {
 	var id int64
-	err := s.Pool.QueryRow(ctx,
+	err := q.QueryRow(ctx,
 		`INSERT INTO projects (remote_key, host, owner, repo, display_name, kind)
 		 VALUES ($1, $2, $3, $4, $5, $6)
 		 ON CONFLICT (remote_key) DO UPDATE SET last_seen = now(), kind = EXCLUDED.kind
@@ -73,54 +94,122 @@ func (s *Store) UpsertProject(ctx context.Context, remoteKey, host, owner, repo,
 func (s *Store) Announce(ctx context.Context, p AnnounceParams) (AnnounceResult, error) {
 	var r AnnounceResult
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-		if p.Kind != "" && p.Kind != "remote" {
-			var existingID int64
-			var existingKind string
-			err := tx.QueryRow(ctx,
-				`SELECT s.id, pr.kind
-				   FROM sessions s JOIN projects pr ON pr.id = s.project_id
-				  WHERE s.user_id = $1 AND s.agent = $2 AND s.source_session_id = $3`,
-				p.UserID, p.Agent, p.SourceSessionID).Scan(&existingID, &existingKind)
-			switch {
-			case err == nil && existingKind == "remote":
-				// Keep the remote attribution untouched; report the current cursor.
-				r.SessionID = existingID
-				if _, err := tx.Exec(ctx,
-					`INSERT INTO session_raw (session_id) VALUES ($1) ON CONFLICT DO NOTHING`, existingID); err != nil {
-					return err
-				}
-				return tx.QueryRow(ctx,
-					`SELECT byte_len, content_sha256 FROM session_raw WHERE session_id = $1`, existingID).
-					Scan(&r.StoredBytes, &r.PrefixSHA256)
-			case err != nil && !errors.Is(err, pgx.ErrNoRows):
-				return err
-			}
-		}
-		if err := tx.QueryRow(ctx,
-			`INSERT INTO sessions (user_id, project_id, agent, source_session_id, machine, cwd, git_branch)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7)
-			 ON CONFLICT (user_id, agent, source_session_id) DO UPDATE
-			   SET project_id = EXCLUDED.project_id,
-			       machine    = EXCLUDED.machine,
-			       cwd        = EXCLUDED.cwd,
-			       git_branch = EXCLUDED.git_branch,
-			       updated_at = now()
-			 RETURNING id`,
-			p.UserID, p.ProjectID, p.Agent, p.SourceSessionID, p.Machine, p.Cwd, p.GitBranch).Scan(&r.SessionID); err != nil {
+		if err := lockAnnounceIdentityTx(ctx, tx, p); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO session_raw (session_id) VALUES ($1) ON CONFLICT DO NOTHING`, r.SessionID); err != nil {
+		var kept bool
+		var err error
+		r, kept, err = keepRemoteAttributionTx(ctx, tx, p)
+		if err != nil || kept {
 			return err
 		}
-		return tx.QueryRow(ctx,
-			`SELECT byte_len, content_sha256 FROM session_raw WHERE session_id = $1`, r.SessionID).
-			Scan(&r.StoredBytes, &r.PrefixSHA256)
+		r, err = announceIntoProjectTx(ctx, tx, p)
+		return err
 	})
 	if err == nil && r.StoredBytes == 0 {
 		r.PrefixSHA256 = emptySHA256
 	}
 	return r, err
+}
+
+// AnnounceWithProject upserts the project and the session in one transaction.
+// For non-remote announces it first applies the sticky remote guard; when the
+// guard wins, the local project is never inserted. The HTTP ingest path uses
+// this form because it receives a project identity rather than a project id.
+func (s *Store) AnnounceWithProject(ctx context.Context, p AnnounceParams, project ProjectParams) (AnnounceResult, error) {
+	var r AnnounceResult
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		if err := lockAnnounceIdentityTx(ctx, tx, p); err != nil {
+			return err
+		}
+		var kept bool
+		var err error
+		r, kept, err = keepRemoteAttributionTx(ctx, tx, p)
+		if err != nil || kept {
+			return err
+		}
+		p.ProjectID, err = upsertProjectTx(ctx, tx, project.RemoteKey, project.Host, project.Owner, project.Repo, project.DisplayName, project.Kind)
+		if err != nil {
+			return fmt.Errorf("upsert project for announce: %w", err)
+		}
+		r, err = announceIntoProjectTx(ctx, tx, p)
+		return err
+	})
+	if err == nil && r.StoredBytes == 0 {
+		r.PrefixSHA256 = emptySHA256
+	}
+	return r, err
+}
+
+// lockAnnounceIdentityTx serializes announces for one logical client session.
+// The remote-attribution guard is read-before-write, so a local announce that
+// started before a concurrent remote announce must wait and re-read the settled
+// project before deciding whether to keep or move attribution.
+func lockAnnounceIdentityTx(ctx context.Context, tx pgx.Tx, p AnnounceParams) error {
+	_, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(
+			hashtext(current_database() || ':announce-session'),
+			hashtext($1::bigint::text || chr(31) || $2 || chr(31) || $3)
+		)`,
+		p.UserID, p.Agent, p.SourceSessionID)
+	if err != nil {
+		return fmt.Errorf("lock announce session identity: %w", err)
+	}
+	return nil
+}
+
+func keepRemoteAttributionTx(ctx context.Context, tx pgx.Tx, p AnnounceParams) (AnnounceResult, bool, error) {
+	var r AnnounceResult
+	if p.Kind == "" || p.Kind == "remote" {
+		return r, false, nil
+	}
+	var existingID int64
+	var existingKind string
+	err := tx.QueryRow(ctx,
+		`SELECT s.id, pr.kind
+		   FROM sessions s JOIN projects pr ON pr.id = s.project_id
+		  WHERE s.user_id = $1 AND s.agent = $2 AND s.source_session_id = $3`,
+		p.UserID, p.Agent, p.SourceSessionID).Scan(&existingID, &existingKind)
+	switch {
+	case err == nil && existingKind == "remote":
+		r.SessionID = existingID
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO session_raw (session_id) VALUES ($1) ON CONFLICT DO NOTHING`, existingID); err != nil {
+			return AnnounceResult{}, false, err
+		}
+		err := tx.QueryRow(ctx,
+			`SELECT byte_len, content_sha256 FROM session_raw WHERE session_id = $1`, existingID).
+			Scan(&r.StoredBytes, &r.PrefixSHA256)
+		return r, true, err
+	case err != nil && !errors.Is(err, pgx.ErrNoRows):
+		return AnnounceResult{}, false, err
+	default:
+		return AnnounceResult{}, false, nil
+	}
+}
+
+func announceIntoProjectTx(ctx context.Context, tx pgx.Tx, p AnnounceParams) (AnnounceResult, error) {
+	var r AnnounceResult
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO sessions (user_id, project_id, agent, source_session_id, machine, cwd, git_branch)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)
+		 ON CONFLICT (user_id, agent, source_session_id) DO UPDATE
+		   SET project_id = EXCLUDED.project_id,
+		       machine    = EXCLUDED.machine,
+		       cwd        = EXCLUDED.cwd,
+		       git_branch = EXCLUDED.git_branch,
+		       updated_at = now()
+		 RETURNING id`,
+		p.UserID, p.ProjectID, p.Agent, p.SourceSessionID, p.Machine, p.Cwd, p.GitBranch).Scan(&r.SessionID); err != nil {
+		return AnnounceResult{}, fmt.Errorf("upsert session for announce: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO session_raw (session_id) VALUES ($1) ON CONFLICT DO NOTHING`, r.SessionID); err != nil {
+		return AnnounceResult{}, err
+	}
+	return r, tx.QueryRow(ctx,
+		`SELECT byte_len, content_sha256 FROM session_raw WHERE session_id = $1`, r.SessionID).
+		Scan(&r.StoredBytes, &r.PrefixSHA256)
 }
 
 // SessionMeta returns the owning user and agent of a session, or ErrNotFound.

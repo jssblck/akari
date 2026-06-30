@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/storetest"
@@ -159,6 +160,66 @@ func TestListAllSessions(t *testing.T) {
 	capped, err := st.ListAllSessions(ctx, store.SessionFilter{Limit: 2})
 	if err != nil || len(capped) != 2 {
 		t.Fatalf("limit: len=%d err=%v, want 2", len(capped), err)
+	}
+}
+
+// TestListSessionsSince bounds a project's session list to a trailing window: a
+// session last active inside the window shows, one older than the window does not,
+// and a zero Since lists both. This is the filter the project page applies so its
+// session list and usage panel cover the same range.
+func TestListSessionsSince(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	u, err := st.Register(ctx, "grace", "hash", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	recent := seedSess(t, st, u.ID, projectID, "claude", "box", "recent")
+	old := seedSess(t, st, u.ID, projectID, "claude", "box", "old")
+	age := func(id int64, days int) {
+		if _, err := st.Pool.Exec(ctx,
+			`UPDATE sessions SET updated_at = now() - make_interval(days => $2) WHERE id = $1`,
+			id, days); err != nil {
+			t.Fatalf("age session %d: %v", id, err)
+		}
+	}
+	age(recent, 1)
+	age(old, 40)
+
+	// No bound lists both sessions.
+	all, err := st.ListSessions(ctx, store.SessionFilter{ProjectID: projectID})
+	if err != nil || len(all) != 2 {
+		t.Fatalf("unbounded: len=%d err=%v, want 2", len(all), err)
+	}
+
+	// A 30-day window keeps only the recently active session.
+	win, err := st.ListSessions(ctx, store.SessionFilter{
+		ProjectID: projectID, Since: time.Now().AddDate(0, 0, -30),
+	})
+	if err != nil {
+		t.Fatalf("windowed: %v", err)
+	}
+	if len(win) != 1 || win[0].ID != recent {
+		t.Fatalf("windowed list = %+v, want only the recent session %d", win, recent)
+	}
+
+	// The cross-project query honors Since the same way: unbounded lists both, a
+	// 30-day window drops the 40-day-old session.
+	allRows, err := st.ListAllSessions(ctx, store.SessionFilter{})
+	if err != nil || len(allRows) != 2 {
+		t.Fatalf("global unbounded: len=%d err=%v, want 2", len(allRows), err)
+	}
+	winRows, err := st.ListAllSessions(ctx, store.SessionFilter{Since: time.Now().AddDate(0, 0, -30)})
+	if err != nil {
+		t.Fatalf("global windowed: %v", err)
+	}
+	if len(winRows) != 1 || winRows[0].ID != recent {
+		t.Fatalf("global windowed list = %+v, want only the recent session %d", winRows, recent)
 	}
 }
 

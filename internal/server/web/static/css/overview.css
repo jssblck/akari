@@ -1,8 +1,8 @@
-/* The analytics surface: the usage panel shared by the Overview, the projects
-   index, and a single project page. The Overview renders it as a calendar
-   heatmap; the project pages render the time-series line chart. The breakdown
-   tooltip's inner grid is shared with the Sessions/Projects token card (.tok-tip,
-   defined in sessions.css), so a token total reads the same across surfaces. */
+/* The analytics surface: the usage panel shared by the Overview and a single
+   project page. Both render it as a calendar heatmap, so the project view reads
+   exactly like the Overview, scoped to one project. The breakdown tooltip's inner
+   grid is shared with the Sessions/Projects token card (.tok-tip, defined in
+   sessions.css), so a token total reads the same across surfaces. */
 
 /* ---- KPI tiles (Overview) ---- */
 .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--sp-md); margin-bottom: var(--sp-lg); }
@@ -12,30 +12,16 @@
 
 /* ---- Analytics ---- */
 .analytics { margin-top: var(--sp-md); }
-.chart-wrap { margin: var(--sp-md) 0 var(--sp-lg); }
+/* The panel's lead (totals strip + activity grid) holds a centered reading column
+   capped to the content box width the Overview's centered main provides (--maxw
+   less main's horizontal padding). On the Overview this equals the content box, so
+   it is a no-op; on the project page, whose main runs full-bleed for the session
+   table, it keeps the calendar grid at the Overview's width instead of stretching
+   it across the screen. The breakdowns and the session list below stay full width. */
+.usage-lead { max-width: calc(var(--maxw) - 2 * var(--sp-xl)); margin-inline: auto; }
+/* The metric toggle and the window selector share this segmented-control row; it
+   sits above the activity grid (and, for the window selector, in the grid head). */
 .chart-toolbar { margin-bottom: var(--sp-sm); }
-.chart {
-  position: relative; width: 100%; height: 240px;
-  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md);
-  padding: var(--sp-sm);
-}
-.chart svg { display: block; width: 100%; height: 100%; overflow: visible; }
-.chart .grid-line { stroke: var(--border); stroke-width: 1; }
-.chart .axis-label { fill: var(--muted); font: 400 10px var(--mono); }
-.chart .series-line { fill: none; stroke-width: 1.75; stroke-linejoin: round; stroke-linecap: round; }
-.chart .series-area { opacity: 0.16; }
-.chart .crosshair { stroke: var(--lilac); stroke-width: 1; stroke-dasharray: 3 3; opacity: 0; }
-.chart .cursor-dot { fill: var(--lilac); opacity: 0; }
-.chart.cursor-on .crosshair, .chart.cursor-on .cursor-dot { opacity: 1; }
-.chart-readout {
-  position: absolute; top: var(--sp-sm); right: var(--sp-sm);
-  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-sm);
-  padding: 4px 8px; font: 450 0.75rem/1.4 var(--mono); color: var(--subtext);
-  pointer-events: none; opacity: 0; transition: opacity var(--dur-fast) var(--ease-state);
-  white-space: nowrap;
-}
-.chart.cursor-on .chart-readout { opacity: 1; }
-.chart-readout .ro-key { color: var(--lilac); }
 .chart-empty { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--muted); }
 
 /* ---- Calendar heatmap (overview activity grid) ---- */
@@ -53,6 +39,70 @@
    as a divider inset a few px top and bottom. Fixed (not stretched) so it never
    inflates the flex line. */
 .heatmap-controls .ctrl-sep { width: 1px; height: 18px; align-self: center; background: var(--border); flex: none; }
+
+/* ---- Per-user activity filter (overview) ---- */
+/* A skinned disclosure in the controls row, parted from the range selector and the
+   metric toggle by the same hairline. Collapsed, it reads as one control sized to
+   match the segmented buttons; open, it drops an absolutely-positioned checkbox
+   menu so it never reflows the row or the grid below. */
+/* Stretch to the controls row's height (set by the taller segmented controls) so
+   the summary can fill it and read as the same height as its neighbours. */
+.userfilter { position: relative; display: inline-flex; align-self: stretch; }
+.userfilter-summary {
+  display: inline-flex; align-items: center; gap: var(--sp-sm);
+  max-width: 240px; height: 100%; padding: 0 10px;
+  border: 1px solid var(--border); border-radius: var(--r-sm);
+  background: var(--surface); color: var(--subtext);
+  font-size: 0.8125rem; line-height: 1; cursor: pointer; list-style: none; user-select: none;
+  transition: background var(--dur-fast) var(--ease-state), border-color var(--dur-fast) var(--ease-state);
+}
+.userfilter-summary::-webkit-details-marker { display: none; }
+.userfilter-summary:hover { background: var(--surface-2); }
+.userfilter[open] .userfilter-summary { border-color: var(--border-strong); }
+/* Pills lay out in a single non-wrapping row, clipped at the control's edge with a
+   soft right-edge fade so an overflowing selection trails off rather than spilling
+   past the control or growing the row to a second line. */
+.userfilter-pills {
+  display: flex; flex-wrap: nowrap; gap: 4px; min-width: 0; overflow: hidden;
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 16px), transparent);
+          mask-image: linear-gradient(to right, #000 calc(100% - 16px), transparent);
+}
+.userfilter-all { color: var(--muted); white-space: nowrap; }
+.userfilter-pill {
+  flex: none; white-space: nowrap;
+  background: var(--surface-3); color: var(--lilac);
+  border-radius: 999px; padding: 1px 8px; font-size: 0.75rem;
+}
+.userfilter-caret { flex: none; color: var(--muted); transition: transform var(--dur-fast) var(--ease-state); }
+.userfilter[open] .userfilter-caret { transform: rotate(180deg); }
+
+/* The dropdown menu floats over the grid; capping its height keeps a long roster
+   scrollable rather than letting the menu run off the viewport. */
+.userfilter-menu {
+  position: absolute; z-index: var(--z-overlay); top: calc(100% + 4px); right: 0;
+  min-width: 200px; max-height: 280px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 1px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--r-md); padding: var(--sp-sm); box-shadow: var(--shadow-overlay);
+}
+.userfilter[open] .userfilter-menu { animation: userfilter-pop var(--dur-fast) var(--ease-state); }
+@keyframes userfilter-pop { from { opacity: 0; transform: translateY(-2px); } to { opacity: 1; transform: none; } }
+.userfilter-opt, .userfilter-reset {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; padding: 5px 8px; border: none; border-radius: var(--r-sm);
+  background: none; color: var(--subtext); font-size: 0.8125rem; text-align: left; cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-state);
+}
+.userfilter-opt:hover, .userfilter-reset:hover { background: var(--surface-3); }
+/* The "All Users" reset reads as the head of the list, parted from the accounts by
+   the same hairline the menu uses elsewhere. */
+.userfilter-reset { border-bottom: 1px solid var(--border); border-radius: 0; padding-bottom: 7px; margin-bottom: 2px; }
+/* Real native checkboxes, themed to the signal lilac: standard look and behaviour,
+   no hand-drawn box. The reset's box is decorative (the button is the control), so
+   clicks fall through to the button rather than toggling it. */
+.userfilter-box { flex: none; width: 14px; height: 14px; margin: 0; accent-color: var(--lilac); cursor: pointer; }
+.userfilter-reset .userfilter-box { pointer-events: none; }
+.userfilter-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .heatmap {
   position: relative;
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md);
