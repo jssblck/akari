@@ -56,12 +56,76 @@ func TestSessionFeedKeysetPaging(t *testing.T) {
 	if len(rows) != 7 {
 		t.Fatalf("feed returned %d sessions, want 7", len(rows))
 	}
-	// Newest active first: updated_at never increases across the concatenated pages,
-	// so keyset paging reproduces the single-query order without gaps or repeats.
+	// The feed pages on the immutable id, descending, so the concatenated pages are
+	// strictly id-descending with no gaps or repeats across the page seams.
 	for i := 1; i < len(rows); i++ {
-		if rows[i].UpdatedAt.After(*rows[i-1].UpdatedAt) {
-			t.Fatalf("feed order broken at %d: %v after %v", i, rows[i].UpdatedAt, rows[i-1].UpdatedAt)
+		if rows[i].ID >= rows[i-1].ID {
+			t.Fatalf("feed not strictly id-descending at %d: %d after %d", i, rows[i].ID, rows[i-1].ID)
 		}
+	}
+}
+
+// TestSessionFeedCompleteUnderUpdate is the property the id keyset exists for: a
+// session re-activated mid-walk (its updated_at bumped after the first page) still
+// appears exactly once in the walk. An updated_at keyset would skip it, because the
+// bump moves it above the cursor in updated_at order; paging on the immutable id is
+// immune.
+func TestSessionFeedCompleteUnderUpdate(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	uid := seedUser(t, st, "grace")
+	pid, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	var ids []int64
+	for i := 0; i < 6; i++ {
+		var id int64
+		if err := st.Pool.QueryRow(ctx,
+			`INSERT INTO sessions (user_id, project_id, agent, source_session_id, machine, updated_at)
+			 VALUES ($1,$2,'claude',$3,'box', now() - make_interval(mins => $4)) RETURNING id`,
+			uid, pid, "s"+strconv.Itoa(i), i+1).Scan(&id); err != nil {
+			t.Fatalf("insert session %d: %v", i, err)
+		}
+		ids = append(ids, id)
+	}
+
+	seen := map[int64]bool{}
+	page1, cursor, err := st.SessionFeed(ctx, store.SessionFilter{}, 2, nil)
+	if err != nil {
+		t.Fatalf("page 1: %v", err)
+	}
+	for _, r := range page1 {
+		seen[r.ID] = true
+	}
+
+	// Bump the oldest session (smallest id, not yet returned) to the most recent
+	// activity, mid-walk. An updated_at keyset would now skip it.
+	bumped := ids[0]
+	if _, err := st.Pool.Exec(ctx, `UPDATE sessions SET updated_at = now() WHERE id = $1`, bumped); err != nil {
+		t.Fatalf("bump: %v", err)
+	}
+
+	for cursor != nil {
+		batch, next, err := st.SessionFeed(ctx, store.SessionFilter{}, 2, cursor)
+		if err != nil {
+			t.Fatalf("page: %v", err)
+		}
+		for _, r := range batch {
+			if seen[r.ID] {
+				t.Fatalf("session %d returned twice", r.ID)
+			}
+			seen[r.ID] = true
+		}
+		cursor = next
+	}
+
+	if len(seen) != 6 {
+		t.Fatalf("walk saw %d sessions, want all 6 despite the mid-walk update", len(seen))
+	}
+	if !seen[bumped] {
+		t.Fatalf("the re-activated session %d was dropped from the walk", bumped)
 	}
 }
 

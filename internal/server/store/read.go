@@ -618,21 +618,25 @@ func (s *Store) ListAllSessions(ctx context.Context, f SessionFilter) ([]Session
 	return out, nil
 }
 
-// SessionFeedCursor marks a position in the newest-first session feed: the
-// updated_at and id of the last row a page returned. It is the keyset the next page
-// resumes from, so paging the whole history stays O(N) instead of the O(N^2) an
-// OFFSET scan would cost a client reading every page.
+// SessionFeedCursor marks a position in the session feed: the id of the last row a
+// page returned. The feed pages on the session id, which is immutable, rather than on
+// updated_at. That matters for a client paging the whole feed across separate
+// requests: a session re-activated mid-walk (its updated_at bumped by ingest or a
+// re-parse) keeps the same id, so it never jumps past the cursor and drops out of a
+// later page the way an updated_at keyset would silently skip it. Paging stays O(N),
+// not the O(N^2) an OFFSET scan would cost.
 type SessionFeedCursor struct {
-	UpdatedAt time.Time
-	ID        int64
+	ID int64
 }
 
-// SessionFeed returns one page of the newest-first cross-project feed and the
-// cursor for the page after it (nil when this page is the last). It applies the
-// same filters as ListAllSessions but pages by keyset on (updated_at, id)
-// descending rather than OFFSET: each page resumes from the prior page's last row
-// and reads only the next `limit` rows, so a client paging the whole feed never
-// re-skips the rows it already saw. limit is clamped to [1, 500] (default 100).
+// SessionFeed returns one page of the cross-project feed (newest session first) and
+// the cursor for the page after it (nil when this page is the last). It applies the
+// same filters as ListAllSessions but pages by keyset on the immutable session id
+// descending rather than OFFSET: each page resumes from the prior page's last id and
+// reads only the next `limit` rows, so a client paging the whole feed never re-skips
+// the rows it already saw and a concurrent updated_at bump cannot drop a row from the
+// walk. Each row still carries its updated_at, so a caller can order by recency within
+// a page. limit is clamped to [1, 500] (default 100).
 func (s *Store) SessionFeed(ctx context.Context, f SessionFilter, limit int, cursor *SessionFeedCursor) ([]SessionRow, *SessionFeedCursor, error) {
 	var conds []string
 	var args []any
@@ -656,22 +660,19 @@ func (s *Store) SessionFeed(ctx context.Context, f SessionFilter, limit int, cur
 		add("s.updated_at >=", f.Since)
 	}
 	if cursor != nil {
-		// The next page is strictly "older" than the cursor in the feed's
-		// (updated_at, id) DESC order. The row-value comparison expresses exactly that
-		// and matches the feed indexes (0004, 0006), so Postgres walks the index to the
-		// resume point rather than sorting or skipping.
-		args = append(args, cursor.UpdatedAt)
-		ts := "$" + itoa(len(args))
+		// The next page is everything below the cursor in id-descending order. id is the
+		// primary key, so Postgres walks the PK index straight to the resume point rather
+		// than sorting or skipping, and the bound is on an immutable column so no row can
+		// slip past it between pages.
 		args = append(args, cursor.ID)
-		id := "$" + itoa(len(args))
-		conds = append(conds, "(s.updated_at, s.id) < ("+ts+", "+id+")")
+		conds = append(conds, "s.id < $"+itoa(len(args)))
 	}
 
 	q := globalSessionSelect
 	if len(conds) > 0 {
 		q += " WHERE " + strings.Join(conds, " AND ")
 	}
-	q += " ORDER BY s.updated_at DESC, s.id DESC"
+	q += " ORDER BY s.id DESC"
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
@@ -699,10 +700,7 @@ func (s *Store) SessionFeed(ctx context.Context, f SessionFilter, limit int, cur
 	var next *SessionFeedCursor
 	if len(out) > limit {
 		out = out[:limit]
-		last := out[limit-1]
-		if last.UpdatedAt != nil {
-			next = &SessionFeedCursor{UpdatedAt: *last.UpdatedAt, ID: last.ID}
-		}
+		next = &SessionFeedCursor{ID: out[limit-1].ID}
 	}
 	return out, next, nil
 }

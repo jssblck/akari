@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -114,7 +113,7 @@ func registerTools(s *mcp.Server, st *store.Store) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "list_sessions",
-		Description: "The cross-project session feed, newest activity first, with optional filters (project_id, agent, username, machine, and a trailing-day window). Returns the facet rail too: the busiest agents, users, machines, and projects with counts, whose values are the exact strings to pass back as filters. Up to 500 rows per page; page forward with the returned next_cursor.",
+		Description: "The cross-project session feed, newest session first, with optional filters (project_id, agent, username, machine, and a trailing-day window). Each row carries its last-activity time (updated_at) so you can order a page by recency. Returns the facet rail too: the busiest agents, users, machines, and projects with counts, whose values are the exact strings to pass back as filters. Up to 500 rows per page; page forward with the returned next_cursor (a stable id keyset, so paging the whole feed is complete even as sessions are re-activated mid-walk).",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in listSessionsInput) (*mcp.CallToolResult, sessionsDTO, error) {
 		cursor, err := decodeCursor(in.Cursor)
 		if err != nil {
@@ -300,12 +299,13 @@ func loadTranscript(ctx context.Context, st *store.Store, sessionID int64, after
 }
 
 // encodeCursor renders a feed cursor as an opaque, URL-safe token. nil (the last
-// page) renders to the empty string.
+// page) renders to the empty string. The cursor is the last row's immutable id, so a
+// resumed walk cannot skip rows that were re-activated since the prior page.
 func encodeCursor(c *store.SessionFeedCursor) string {
 	if c == nil {
 		return ""
 	}
-	return base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf("%d:%d", c.UpdatedAt.UnixNano(), c.ID)))
+	return base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(c.ID, 10)))
 }
 
 // decodeCursor parses a cursor produced by encodeCursor. An empty string is the
@@ -318,16 +318,11 @@ func decodeCursor(s string) (*store.SessionFeedCursor, error) {
 	if err != nil {
 		return nil, errors.New("invalid cursor")
 	}
-	parts := strings.SplitN(string(raw), ":", 2)
-	if len(parts) != 2 {
+	id, err := strconv.ParseInt(string(raw), 10, 64)
+	if err != nil {
 		return nil, errors.New("invalid cursor")
 	}
-	nanos, err1 := strconv.ParseInt(parts[0], 10, 64)
-	id, err2 := strconv.ParseInt(parts[1], 10, 64)
-	if err1 != nil || err2 != nil {
-		return nil, errors.New("invalid cursor")
-	}
-	return &store.SessionFeedCursor{UpdatedAt: time.Unix(0, nanos).UTC(), ID: id}, nil
+	return &store.SessionFeedCursor{ID: id}, nil
 }
 
 // sinceFromDays converts a trailing-day window into the lower time bound the store
