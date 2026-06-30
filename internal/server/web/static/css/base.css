@@ -220,11 +220,13 @@ td.num, th.num { text-align: right; font-family: var(--mono); font-variant-numer
 }
 .stats.sticky .stat:first-child { border-left: 0; }
 /* The Tokens tile folds input, output, cache read, cache write, and cost into one
-   gauge. The per-class breakdown and cost reveal on hover or keyboard focus, the
-   same detail the overview heatmap surfaces for a day. */
-.tokens-stat { position: relative; outline: none; }
-.tokens-value { text-decoration: underline dotted var(--faint); text-underline-offset: 3px; }
-.tokens-stat:hover, .tokens-stat:focus-visible { background: var(--surface-2); }
+   gauge; the Cache tile folds hit rate, the dollars saved, and the prompt-token split
+   into another. Both reveal their breakdown on hover or keyboard focus through the one
+   .stat-tip system, the same detail the overview heatmap surfaces for a day. */
+.tokens-stat, .cache-stat { position: relative; outline: none; }
+.tokens-value, .cache-value { text-decoration: underline dotted var(--faint); text-underline-offset: 3px; }
+.tokens-stat:hover, .tokens-stat:focus-visible,
+.cache-stat:hover, .cache-stat:focus-visible { background: var(--surface-2); }
 .stat-tip {
   position: absolute; top: calc(100% + 6px); left: 0; z-index: 20;
   min-width: 190px; padding: var(--sp-sm) var(--sp-md);
@@ -233,7 +235,8 @@ td.num, th.num { text-align: right; font-family: var(--mono); font-variant-numer
   opacity: 0; visibility: hidden; transform: translateY(-3px); pointer-events: none;
   transition: opacity var(--dur-fast) var(--ease-state), transform var(--dur-fast) var(--ease-state), visibility 0s linear var(--dur-fast);
 }
-.tokens-stat:hover .stat-tip, .tokens-stat:focus-within .stat-tip {
+.tokens-stat:hover .stat-tip, .tokens-stat:focus-within .stat-tip,
+.cache-stat:hover .stat-tip, .cache-stat:focus-within .stat-tip {
   opacity: 1; visibility: visible; transform: none; transition-delay: 0s;
 }
 .stat-tip .tt-grid { display: grid; grid-template-columns: auto auto; gap: 1px var(--sp-md); margin: 0; font: 450 0.75rem/1.6 var(--mono); }

@@ -132,3 +132,33 @@ func Cost(model string, input, output, cacheWrite, cacheRead int) (float64, bool
 		float64(cacheRead)/million*r.CacheRead
 	return cost, true
 }
+
+// CacheSavings returns the USD that prompt caching saved versus paying the full
+// uncached input rate for the same prompt tokens, and whether the model was priced.
+//
+// Caching changes only the prompt side. A token served from cache (cacheRead) would
+// otherwise be billed at the input rate; a token written to cache (cacheWrite) would
+// otherwise be a plain input token too. So the saving is the rate gap on each, summed:
+// cacheRead*(Input-CacheRead) + cacheWrite*(Input-CacheWrite).
+//
+// For Claude the cacheWrite term is negative: cache creation is priced above input
+// (the premium paid up front to make later reads cheap), so netting it in keeps the
+// figure honest rather than advertising only the read discount. For OpenAI the Codex
+// parser reports cache creation as ordinary input (CacheWrite is unset and cacheWrite
+// tokens are nil), so the write term vanishes and the saving is the read discount
+// alone. The result can be negative in principle (cache written but never re-read) and
+// is returned unfloored, so a caller can surface that caching cost more than it saved.
+//
+// Counts are int64, not the int that Cost takes: this is the one pricing entry point
+// fed rolled, fleet-wide aggregates, whose cache-read sum over a long window can run
+// past a 32-bit range, where Cost only ever sees a single session's tokens.
+func CacheSavings(model string, cacheRead, cacheWrite int64) (float64, bool) {
+	r, ok := Lookup(model)
+	if !ok {
+		return 0, false
+	}
+	const million = 1_000_000.0
+	saving := float64(cacheRead)/million*(r.Input-r.CacheRead) +
+		float64(cacheWrite)/million*(r.Input-r.CacheWrite)
+	return saving, true
+}

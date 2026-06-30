@@ -154,3 +154,38 @@ func TestCost(t *testing.T) {
 		t.Error("unknown model cost should report known=false")
 	}
 }
+
+func TestCacheSavings(t *testing.T) {
+	// Opus 4.8: Input 5, CacheRead 0.50, CacheWrite 6.25 per million.
+	// A cache read saves the full input-minus-read gap; a cache write costs the
+	// write-minus-input premium (negative saving), the price paid to make reads cheap.
+	cases := []struct {
+		name             string
+		model            string
+		read, write      int64
+		wantSaving       float64
+		wantKnown        bool
+	}{
+		// 1M read alone: 1 * (5 - 0.50) = 4.50.
+		{"read only", "claude-opus-4-8", 1_000_000, 0, 4.50, true},
+		// 1M write alone: 1 * (5 - 6.25) = -1.25, caching costs more than it saved.
+		{"write only is negative", "claude-opus-4-8", 0, 1_000_000, -1.25, true},
+		// Both: 4.50 - 1.25 = 3.25.
+		{"read and write net", "claude-opus-4-8", 1_000_000, 1_000_000, 3.25, true},
+		// OpenAI bills no separate cache write (CacheWrite rate is 0), so a read saves
+		// the input-minus-read gap and the parser reports no write tokens to charge.
+		{"openai read", "gpt-5.5", 1_000_000, 0, 4.50, true},
+		// An unlisted model cannot be priced, so the saving is unknown, not zero.
+		{"unknown model", "secret-model", 1_000_000, 0, 0, false},
+	}
+	for _, c := range cases {
+		saving, known := CacheSavings(c.model, c.read, c.write)
+		if known != c.wantKnown {
+			t.Errorf("%s: known = %v, want %v", c.name, known, c.wantKnown)
+			continue
+		}
+		if known && math.Abs(saving-c.wantSaving) > 1e-9 {
+			t.Errorf("%s: saving = %v, want %v", c.name, saving, c.wantSaving)
+		}
+	}
+}

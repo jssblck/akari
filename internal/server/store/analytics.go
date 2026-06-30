@@ -66,6 +66,11 @@ type Analytics struct {
 	// incomplete cost. It is the OR of the by-agent slices, the same rows the
 	// headline totals are summed from.
 	CostIncomplete bool
+	// Cache is the prompt-cache effectiveness over the same scope: hit rate, the
+	// dollars caching saved, and the prompt-token split. It reads from the same dated
+	// usage_events base as the totals (see CacheStats), so the Cache tile reconciles
+	// with the Tokens tile beside it rather than counting usage the panel drops.
+	Cache CacheStats
 }
 
 // AnalyticsFilter scopes an Analytics query. The zero value is the whole instance,
@@ -164,6 +169,15 @@ func (s *Store) Analytics(ctx context.Context, f AnalyticsFilter) (Analytics, er
 		a.TotalCacheWrite += ag.CacheWrite
 		a.CostIncomplete = a.CostIncomplete || ag.CostIncomplete
 	}
+
+	// Cache effectiveness shares the same scoped dated-usage base, so its prompt
+	// totals reconcile with the headline token classes above (its Input/CacheRead/
+	// CacheWrite are the same sums, regrouped by model to price the saving).
+	cache, err := s.CacheStats(ctx, f)
+	if err != nil {
+		return a, err
+	}
+	a.Cache = cache
 	return a, nil
 }
 

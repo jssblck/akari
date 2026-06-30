@@ -160,6 +160,41 @@ func FmtCost(usd float64, incomplete bool) string {
 	return s
 }
 
+// FmtPercent renders a 0..1 fraction as a whole-number percent, for the cache hit
+// rate. A real but tiny rate (under 1%) rounds up to 1% rather than 0%, so a scope
+// that did hit the cache never reads as a total miss; a true zero stays 0%.
+func FmtPercent(f float64) string {
+	if f <= 0 {
+		return "0%"
+	}
+	p := f * 100
+	if p < 1 {
+		return "1%"
+	}
+	return fmt.Sprintf("%.0f%%", p)
+}
+
+// FmtSavings renders a cache saving for the Cache tile. A non-negative saving reads as
+// "saved $X"; the rare negative, where cache was written but never re-read enough to
+// repay the creation premium, reads as "cost $X" on its magnitude, so the figure stays
+// honest without printing a minus sign into a "saved" label.
+//
+// An incomplete saving reads "... partial", NOT the "$X+" lower-bound marker the cost
+// figures use. A saving omitted for an unpriced model can be negative (a Claude cache
+// write is priced above input), so the true figure could be lower OR higher than shown:
+// "partial" says it is incomplete without implying a direction the data cannot support.
+func FmtSavings(usd float64, incomplete bool) string {
+	verb := "saved "
+	if usd < 0 {
+		verb, usd = "cost ", -usd
+	}
+	s := verb + FmtCost(usd, false)
+	if incomplete {
+		s += " partial"
+	}
+	return s
+}
+
 // FmtTokens renders a token count with thousands separators.
 func FmtTokens(n int64) string {
 	if n < 1000 {

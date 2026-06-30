@@ -44,6 +44,7 @@ templ analyticsPanel(a store.Analytics, chartID string, ranges []RangeOption, rn
 				<div class="stats">
 					@stat("Cost", FmtCost(a.TotalCost, a.CostIncomplete), "")
 					@statTokens(a)
+					@statCache(a.Cache)
 					@stat("Sessions", fmt.Sprintf("%d", a.Sessions), "")
 				</div>
 				@heatmapBlock(a, chartID, ranges, rng, users, selected, swap)
@@ -76,6 +77,33 @@ templ statTokens(a store.Analytics) {
 				<dt>Cache write</dt>
 				<dd>{ FmtTokens(a.TotalCacheWrite) }</dd>
 			</dl>
+		</div>
+	</div>
+}
+
+// statCache is the prompt-cache effectiveness readout: the hit rate reads at a glance,
+// and the dollars caching saved plus the prompt-token split (uncached input, cache
+// read, cache write) reveal on hover or keyboard focus, through the same tooltip system
+// the Tokens tile uses. The saving carries the "$X+" lower-bound marker when cached
+// volume rode an unpriced model, matching how every other cost figure flags a partial
+// sum. It renders nothing useful on an empty scope, but the panel only draws when there
+// is usage, so the tile always has prompt tokens to rate.
+templ statCache(c store.CacheStats) {
+	<div class="stat cache-stat" tabindex="0">
+		<div class="label">Cache</div>
+		<div class="value cache-value">{ FmtPercent(c.HitRate()) }</div>
+		<div class="stat-tip" role="tooltip">
+			<dl class="tt-grid">
+				<dt>Hit rate</dt>
+				<dd>{ FmtPercent(c.HitRate()) }</dd>
+				<dt>Cache read</dt>
+				<dd>{ FmtTokens(c.CacheRead) }</dd>
+				<dt>Cache write</dt>
+				<dd>{ FmtTokens(c.CacheWrite) }</dd>
+				<dt>Uncached in</dt>
+				<dd>{ FmtTokens(c.Input) }</dd>
+			</dl>
+			<div class="tt-cost">{ FmtSavings(c.SavingsUSD, c.SavingsIncomplete) }</div>
 		</div>
 	</div>
 }

@@ -271,10 +271,15 @@ func (s *Server) handleSessionPage(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load session."))
 		return
 	}
+	cache, err := s.Store.SessionCacheStats(r.Context(), id)
+	if err != nil {
+		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load session."))
+		return
+	}
 	title := fmt.Sprintf("Session #%d", d.ID)
 	p, _ := principalFrom(r.Context())
 	owner := p.UserID == d.OwnerID
-	render(w, r, http.StatusOK, web.SessionPage(s.pageForNav(r, title, "sessions"), d, msgs, tools, atts, subs, dupIDs, true, owner))
+	render(w, r, http.StatusOK, web.SessionPage(s.pageForNav(r, title, "sessions"), d, msgs, tools, atts, subs, cache, dupIDs, true, owner))
 }
 
 // handlePublishSession marks the owner's session public and redirects back to it.
@@ -380,7 +385,12 @@ func (s *Server) handlePublicSession(w http.ResponseWriter, r *http.Request) {
 			publicSubs = append(publicSubs, sub)
 		}
 	}
-	render(w, r, http.StatusOK, web.PublicSessionPage(d, msgs, web.ToolsByOrdinal(tools), web.AttachmentsByOrdinal(atts), publicSubs))
+	cache, err := s.Store.SessionCacheStats(r.Context(), d.ID)
+	if err != nil {
+		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load session."))
+		return
+	}
+	render(w, r, http.StatusOK, web.PublicSessionPage(d, msgs, web.ToolsByOrdinal(tools), web.AttachmentsByOrdinal(atts), publicSubs, cache))
 }
 
 // handleSessionBody serves just the live-updating body fragment, re-fetched by
@@ -402,7 +412,15 @@ func (s *Server) handleSessionBody(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Could not load session.", http.StatusInternalServerError)
 		return
 	}
-	render(w, r, http.StatusOK, web.SessionMain(d, msgs, tools, atts, subs))
+	// The live fragment re-renders the stat header on every SSE update, so the Cache
+	// tile re-reads here too and tracks the session's growing usage in step with the
+	// Tokens tile beside it.
+	cache, err := s.Store.SessionCacheStats(r.Context(), id)
+	if err != nil {
+		http.Error(w, "Could not load session.", http.StatusInternalServerError)
+		return
+	}
+	render(w, r, http.StatusOK, web.SessionMain(d, msgs, tools, atts, subs, cache))
 }
 
 // handleSessionEvents is the SSE endpoint that signals a watching browser to
