@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,6 +24,29 @@ func seedSess(t *testing.T, st *store.Store, userID, projectID int64, agent, mac
 		userID, projectID, agent, src, machine).Scan(&id)
 	if err != nil {
 		t.Fatalf("seed session: %v", err)
+	}
+	return id
+}
+
+// seedSortSess inserts a session with full control over every sortable column, so
+// the click-to-sort ordering can be asserted against known values rather than the
+// zeros seedSess leaves. ageMin places updated_at that many minutes in the past, so
+// a larger ageMin reads as a less recently active session. Returns the new id;
+// sessions seeded later carry larger ids, which the direction-following tiebreak
+// orders within ties.
+func seedSortSess(t *testing.T, st *store.Store, userID, projectID int64, agent, branch, src string, msgs int, in, out, cr, cw int64, ageMin int) int64 {
+	t.Helper()
+	var id int64
+	err := st.Pool.QueryRow(context.Background(),
+		`INSERT INTO sessions (user_id, project_id, agent, source_session_id, machine,
+		   git_branch, message_count,
+		   total_input_tokens, total_output_tokens, total_cache_read_tokens, total_cache_write_tokens,
+		   updated_at)
+		 VALUES ($1,$2,$3,$4,'box',$5,$6,$7,$8,$9,$10, now() - make_interval(mins => $11))
+		 RETURNING id`,
+		userID, projectID, agent, src, branch, msgs, in, out, cr, cw, ageMin).Scan(&id)
+	if err != nil {
+		t.Fatalf("seed sort session: %v", err)
 	}
 	return id
 }
@@ -163,48 +187,126 @@ func TestListAllSessions(t *testing.T) {
 	}
 }
 
-// TestListAllSessionsSort exercises the click-to-sort ordering: the chosen column
-// drives the order, Desc flips it, and an unknown key falls back to the default
-// (most recent / id first). Agent is a convenient text column whose values
-// ("claude" < "codex") give a deterministic order independent of the seed ids.
+// TestListAllSessionsSort exercises the click-to-sort ordering across every
+// sortable column, in both directions, including the keys that sort on joined or
+// computed values: project (a CASE over the projects table) and tokens (the sum of
+// the four token classes, now read from the generated total_tokens column). Each
+// column must order its rows by that column's value, the direction flag must flip
+// it, and ties must break by id in the same direction the column sorts (the
+// property that lets one (col, id) index serve both directions). An unknown key
+// falls back to the default, most-recent-first order.
 func TestListAllSessionsSort(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
 	ctx := context.Background()
-	seedGlobalCorpus(t, st)
 
-	agentsOf := func(f store.SessionFilter) []string {
-		rows, err := st.ListAllSessions(ctx, f)
+	// Two users to exercise the user sort. They go in directly (the invite-gated
+	// Register flow is covered elsewhere) so the test controls both usernames.
+	seedUser := func(name string) int64 {
+		t.Helper()
+		var id int64
+		if err := st.Pool.QueryRow(ctx,
+			`INSERT INTO users (username, password_hash, is_admin) VALUES ($1, 'x', FALSE) RETURNING id`,
+			name).Scan(&id); err != nil {
+			t.Fatalf("seed user %q: %v", name, err)
+		}
+		return id
+	}
+	adaID := seedUser("ada")
+	graceID := seedUser("grace")
+	remoteID, err := st.UpsertProject(ctx, "github.com/ada-lovelace/engine", "github.com", "ada-lovelace", "engine", "engine", "remote")
+	if err != nil {
+		t.Fatalf("remote project: %v", err)
+	}
+	localID, err := st.UpsertProject(ctx, "local:rig:/home/grace/scratch", "rig", "", "scratch", "scratch", "standalone")
+	if err != nil {
+		t.Fatalf("local project: %v", err)
+	}
+
+	// Five sessions whose sortable columns are deliberately varied: branch, tokens,
+	// and updated are all-distinct, while agent, user, project, and messages carry
+	// ties so the direction-following id tiebreak is exercised too.
+	//                  user      project   agent     branch   src   msgs   in   out   cr   cw  ageMin
+	seedSortSess(t, st, adaID, remoteID, "claude", "main", "s1", 10, 10, 10, 10, 10, 5)
+	seedSortSess(t, st, adaID, remoteID, "claude", "dev", "s2", 30, 100, 0, 0, 0, 1)
+	seedSortSess(t, st, graceID, localID, "codex", "alpha", "s3", 5, 0, 0, 0, 5, 9)
+	seedSortSess(t, st, graceID, localID, "pi", "zeta", "s4", 20, 50, 50, 50, 50, 3)
+	seedSortSess(t, st, adaID, remoteID, "codex", "beta", "s5", 5, 7, 8, 9, 10, 7)
+	// token sums: s1=40, s2=100, s3=5, s4=200, s5=34 (all distinct)
+
+	// projectSortKey mirrors the project sort's CASE: local kinds sort by display
+	// name, remotes by remote key.
+	projectSortKey := func(r store.SessionRow) string {
+		if r.ProjectKind == "standalone" || r.ProjectKind == "orphaned" {
+			return r.ProjectName
+		}
+		return r.ProjectKey
+	}
+	tokenSum := func(r store.SessionRow) int64 {
+		return r.TotalInput + r.TotalOutput + r.TotalCacheRead + r.TotalCacheWrite
+	}
+	cmpInt := func(a, b int) int { return cmpOrd(int64(a), int64(b)) }
+
+	// cmp returns the sign of a-b by the column the key sorts on, ignoring the id
+	// tiebreak, so a tie (0) lets the assertion check the id ordering separately.
+	cases := []struct {
+		key string
+		cmp func(a, b store.SessionRow) int
+	}{
+		{"agent", func(a, b store.SessionRow) int { return strings.Compare(a.Agent, b.Agent) }},
+		{"branch", func(a, b store.SessionRow) int { return strings.Compare(a.GitBranch, b.GitBranch) }},
+		{"user", func(a, b store.SessionRow) int { return strings.Compare(a.Username, b.Username) }},
+		{"project", func(a, b store.SessionRow) int { return strings.Compare(projectSortKey(a), projectSortKey(b)) }},
+		{"messages", func(a, b store.SessionRow) int { return cmpInt(a.MessageCount, b.MessageCount) }},
+		{"tokens", func(a, b store.SessionRow) int { return cmpOrd(tokenSum(a), tokenSum(b)) }},
+		{"updated", func(a, b store.SessionRow) int {
+			switch {
+			case a.UpdatedAt.Before(*b.UpdatedAt):
+				return -1
+			case a.UpdatedAt.After(*b.UpdatedAt):
+				return 1
+			default:
+				return 0
+			}
+		}},
+	}
+
+	assertOrdered := func(t *testing.T, key string, cmp func(a, b store.SessionRow) int, desc bool) {
+		t.Helper()
+		rows, err := st.ListAllSessions(ctx, store.SessionFilter{Sort: key, Desc: desc})
 		if err != nil {
-			t.Fatalf("list: %v", err)
+			t.Fatalf("sort %s desc=%v: %v", key, desc, err)
 		}
-		out := make([]string, len(rows))
-		for i, r := range rows {
-			out[i] = r.Agent
+		if len(rows) != 5 {
+			t.Fatalf("sort %s desc=%v: got %d rows, want 5", key, desc, len(rows))
 		}
-		return out
+		for i := 1; i < len(rows); i++ {
+			prev, cur := rows[i-1], rows[i]
+			c := cmp(prev, cur)
+			if desc {
+				c = -c
+			}
+			if c > 0 {
+				t.Fatalf("sort %s desc=%v: rows out of column order at %d (ids %d then %d)", key, desc, i, prev.ID, cur.ID)
+			}
+			if c == 0 { // a tie: the id tiebreak must follow the sort direction
+				if !desc && prev.ID > cur.ID {
+					t.Fatalf("sort %s asc: tie not broken by ascending id at %d (%d then %d)", key, i, prev.ID, cur.ID)
+				}
+				if desc && prev.ID < cur.ID {
+					t.Fatalf("sort %s desc: tie not broken by descending id at %d (%d then %d)", key, i, prev.ID, cur.ID)
+				}
+			}
+		}
 	}
 
-	// Ascending by agent groups the four claude rows ahead of the two codex rows.
-	asc := agentsOf(store.SessionFilter{Sort: "agent", Desc: false})
-	for i, a := range asc {
-		want := "claude"
-		if i >= 4 {
-			want = "codex"
-		}
-		if a != want {
-			t.Fatalf("agent asc[%d] = %q, want %q (full: %v)", i, a, want, asc)
-		}
+	for _, tc := range cases {
+		assertOrdered(t, tc.key, tc.cmp, false)
+		assertOrdered(t, tc.key, tc.cmp, true)
 	}
 
-	// Descending flips it: codex rows lead.
-	desc := agentsOf(store.SessionFilter{Sort: "agent", Desc: true})
-	if desc[0] != "codex" || desc[len(desc)-1] != "claude" {
-		t.Fatalf("agent desc not flipped: %v", desc)
-	}
-
-	// An unknown sort key falls back to the default order (newest id first), the
-	// same as the zero-value filter.
+	// An unknown sort key falls back to the default order (most recent first, id
+	// descending on ties), identical to the zero-value filter.
 	bogus, err := st.ListAllSessions(ctx, store.SessionFilter{Sort: "; drop table sessions"})
 	if err != nil {
 		t.Fatalf("bogus sort should fall back, not error: %v", err)
@@ -220,6 +322,18 @@ func TestListAllSessionsSort(t *testing.T) {
 		if bogus[i].ID != def[i].ID {
 			t.Fatalf("bogus sort did not fall back to default order at %d: %d vs %d", i, bogus[i].ID, def[i].ID)
 		}
+	}
+}
+
+// cmpOrd returns the sign of a-b, for asserting numeric column orderings.
+func cmpOrd(a, b int64) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	default:
+		return 0
 	}
 }
 
