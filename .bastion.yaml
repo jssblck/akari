@@ -13,14 +13,29 @@
 # files it actually owns. The data-path reviewers (incremental-efficiency,
 # streaming-memory) concentrate on the ingest and parse hot path, where akari's
 # worst footguns live. The broad reviewers (error-handling, test-coverage,
-# concurrency, token-consistency) run on all Go: concurrency bugs in particular
-# are not confined to the hot path, so that gate sees every change, and tokens are
-# integral enough that any operation on the four token classes is worth checking
-# wherever it lands. The token-consistency reviewer owns token handling end to
-# end: any operation on the four classes (parse, roll up, persist, reset, price,
-# aggregate) must carry all four, and any token figure in the UI must show its
-# breakdown and reconcile with the cost and rows beside it. It also triggers on
-# the web templates, where the figures render.
+# concurrency, token-consistency, projection-consistency) run on all Go:
+# concurrency bugs in particular are not confined to the hot path, so that gate
+# sees every change; tokens are integral enough that any operation on the four
+# token classes is worth checking wherever it lands; and a projection can drift from
+# its source in any package that maintains one. The token-consistency reviewer owns
+# token handling end to end: any operation on the four classes (parse, roll up,
+# persist, reset, price, aggregate) must carry all four, and any token figure in the
+# UI must show its breakdown and reconcile with the cost and rows beside it. It also
+# triggers on the web templates, where the figures render.
+#
+# The projection-consistency reviewer owns the general shape behind that: any time
+# the code keeps more than one representation of the same fact (a denormalized rollup
+# beside the rows it summarizes, a maintained counter beside what it counts, a facet
+# or cache beside its source, a running hash or cursor beside the bytes it covers, or
+# two queries that compute one figure two ways), nothing in the schema forces the
+# representations to agree, so a missed update path or a partial rebuild lets them
+# drift silently. It gates that any such projection is built off one canonical source
+# or has a test pinning it equal, and that the fold/maintain/reset/rebuild that keeps
+# a derived value equal to its source is not broken. The token/cost rollups are one
+# instance, not the scope; it also triggers on migrations (where triggers and
+# generated columns maintain derived data) and the web templates (where two figures
+# can render side by side). docs/data-aggregation.md is the worked example, the token
+# instance written out in full.
 #
 # Gate reviewers carry a shared "severity bar": a block halts the author, so it
 # is spent only on a defect the change actually introduces or worsens, that is
@@ -395,3 +410,89 @@ reviewers:
           that scales with total input rather than a fixed processing window. A
           client doing more work by design, within bounded memory, is not a
           finding.
+
+  - name: projection-consistency
+    trigger:
+      - cmd/**/*.go
+      - internal/**/*.go
+      - internal/server/web/**/*.templ
+      - migrations/**/*.sql
+    mode: gate
+    backend: codex
+    prompt: |
+      Review one concern only: drift between multiple projections of the same data.
+      Any time the code keeps more than one representation of a fact, the
+      representations can disagree, because nothing in the schema forces them equal.
+      They agree only while an unstated invariant holds, and a new code path, a missed
+      update, or a partial rebuild breaks it silently, leaving two numbers for one
+      truth and no way to tell which is right. The shapes to watch, all the same bug:
+        - A denormalized rollup or aggregate column beside the rows it summarizes
+          (akari: sessions.total_* and message_count/user_message_count, folded from
+          usage_events and messages; project totals summed from session rollups).
+        - A maintained counter, facet, or index beside what it counts (akari: the
+          session_facets rollup kept by a trigger, read instead of a GROUP BY over
+          sessions; any precomputed top-N or count).
+        - A cache, generated column, running hash, or cursor beside its source (akari:
+          the total_tokens generated column; session_raw.content_sha256 / sha256_state
+          / byte_len / parsed_byte_len tracking the raw chunk bytes).
+        - Two queries, or a query and the write path, that compute one figure two
+          different ways (akari: the usage_events ledger summed by the analytics
+          panels vs the sessions.total_* rollups read by the projects index and the
+          session views; the same project's lifetime cost can appear on two pages from
+          two bases). docs/data-aggregation.md writes this token/cost instance out in
+          full as the worked example.
+
+      Block when the change introduces any of these:
+        - A new projection (a query, a denormalized column, a counter, a cache, a
+          materialized list) that derives a datum some existing representation already
+          holds, at the same scope, with nothing forcing the two equal: no shared
+          canonical source and no test pinning them. The sharpest case is the same
+          figure shown for the same scope on two surfaces from two different bases.
+          Either build the new view off the source its cluster already uses, or add a
+          reconciliation test the way TestProjectsIndexReconcilesWithAnalytics pins the
+          projects index against the analytics panel.
+        - A change that breaks the fold, trigger, reset, or rebuild that keeps an
+          existing derived value equal to its source. Examples of the failure: an
+          incremental update that folds only some of the fields it should (the
+          token-class subset bug, but also any partial update), or that counts
+          pre-dedup rows instead of the rows that actually persist; a database trigger
+          or maintained rollup that misses an operation which changes the underlying
+          set (an INSERT/UPDATE/DELETE path that does not adjust the counter); a reset
+          that fails to zero a field; a reparse or rebuild that does not reproduce the
+          same derived value as the live path; a counter incremented on one path but
+          not decremented on the reverse one. An aggregate query that reads a subset of
+          the columns it should is the same bug on the read side.
+        - A filter or scope applied to one projection but not the matching one, so two
+          representations that should reconcile no longer do, beyond a gap that is
+          documented and pinned. In akari the analytics surfaces filter occurred_at IS
+          NOT NULL while the rollups count every event; that difference is exactly the
+          undated usage and nothing else, pinned by
+          TestUndatedUsageIsTheOnlyRollupAnalyticsGap. A new filter that drops a group
+          from one side but not the other, or that widens a reconciled gap, is the
+          finding.
+
+      Severity bar before you block. A block halts the author until they act, so
+      spend it only on a divergence this change introduces or materially worsens:
+        - Scope to the diff. Do not block on a pre-existing projection this change only
+          moves, renames, or sits next to; raise that as a non-blocking note instead.
+        - These are deterministic data properties, so a reachable counterexample is
+          concrete: a pair of representations that can hold different values, a field
+          dropped from one fold, or an update path that touches the source but not the
+          derived copy. If you cannot name the two representations that drift or the
+          maintain path that is broken, pass and leave a note.
+        - Credit stated rationale. If a comment, the PR, or a reconciliation test
+          explains why a second representation is safe here (a cheap rollup that must
+          not scan the source, with a test pinning it equal), or why two figures need
+          not reconcile (a trailing-window trend beside a lifetime total, a deliberately
+          approximate cache), evaluate that reasoning and, if it holds, pass.
+
+      Stay in your lane. token-consistency owns the token-specific properties (every
+      operation carries all four classes; a headline equals the sum of the rows beside
+      it within one view; a token figure shows its breakdown card). You own the general
+      property for any derived data, token or not: that a projection stays equal to its
+      source and that overlapping projections reconcile. Do not comment on layout,
+      naming, error handling, or concurrency; other reviewers own those. Cite file and
+      line, name the two representations that can drift (or the broken maintain path),
+      and give the fix: read the canonical source, thread every field through the fold
+      or trigger, or add the test that pins the invariant. If the change keeps its
+      projections consistent, pass.
