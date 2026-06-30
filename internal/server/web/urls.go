@@ -137,10 +137,96 @@ func sessionsQuery(f store.SessionFilter) string {
 	if f.ProjectID != 0 {
 		q.Set("project", fmt.Sprintf("%d", f.ProjectID))
 	}
+	// The default order (most recent first) is the bare URL; any other column or
+	// direction is encoded so the sort link round-trips and survives a reload.
+	if !isDefaultOrder(f) {
+		q.Set("sort", effSort(f))
+		if f.Desc {
+			q.Set("dir", "desc")
+		} else {
+			q.Set("dir", "asc")
+		}
+	}
 	if s := q.Encode(); s != "" {
 		return "?" + s
 	}
 	return ""
+}
+
+// effSort resolves a filter's effective sort column, treating the empty string
+// as the default so the templates can read one canonical key.
+func effSort(f store.SessionFilter) string {
+	if f.Sort == "" {
+		return store.DefaultSort
+	}
+	return f.Sort
+}
+
+// isDefaultOrder reports whether a filter carries the global list's default order
+// (most recent first), which the URL omits. A zero-value filter counts as the
+// default: its empty Sort has never been narrowed, so the bare /sessions path is
+// the natural form even though its Desc is the zero false.
+func isDefaultOrder(f store.SessionFilter) bool {
+	return f.Sort == "" || (f.Sort == store.DefaultSort && f.Desc)
+}
+
+// sortDefaultDesc is the direction a first click on a column selects: counts and
+// timestamps read most-useful biggest/newest first, text columns alphabetically.
+func sortDefaultDesc(key string) bool {
+	switch key {
+	case "messages", "tokens", "updated":
+		return true
+	default:
+		return false
+	}
+}
+
+// SortHref is the link for a global session list column header, preserving the
+// active facet selection. Clicking the column already sorted flips its direction;
+// clicking another column selects it in its natural default direction.
+func SortHref(f store.SessionFilter, key string) templ.SafeURL {
+	if effSort(f) == key {
+		f.Desc = !f.Desc
+	} else {
+		f.Desc = sortDefaultDesc(key)
+	}
+	f.Sort = key
+	return SessionsHref(f)
+}
+
+// sortThClass builds a header cell's classes: the sortable marker, any column
+// extra (col-grow / num), and the active-sort state with its direction, which
+// the stylesheet reads to light the correct glyph.
+func sortThClass(key, extra string, f store.SessionFilter) string {
+	cls := "sortable"
+	if extra != "" {
+		cls += " " + extra
+	}
+	if effSort(f) == key {
+		if f.Desc {
+			cls += " sorted desc"
+		} else {
+			cls += " sorted asc"
+		}
+	}
+	return cls
+}
+
+// sortIsActive reports whether key is the column the list is currently sorted by,
+// so the header can render the directional glyph rather than the idle one.
+func sortIsActive(key string, f store.SessionFilter) bool { return effSort(f) == key }
+
+// ariaSort is the WAI-ARIA sort state for a column header: "ascending" or
+// "descending" on the active column, "none" on the rest, so assistive tech
+// announces the order the same way the glyph shows it.
+func ariaSort(key string, f store.SessionFilter) string {
+	if effSort(f) != key {
+		return "none"
+	}
+	if f.Desc {
+		return "descending"
+	}
+	return "ascending"
 }
 
 // SessionsPath is the full global session-list path for the current selection,

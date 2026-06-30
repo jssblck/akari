@@ -135,13 +135,22 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		}
 		filter.ProjectID = pid
 	}
+	// Click-to-sort: an unknown sort key falls back to the default order rather
+	// than erroring, so a stale or tampered link still renders the feed. The
+	// direction defaults to descending; the header links always carry an explicit
+	// dir, so this only catches hand-edited URLs.
+	filter.Sort = store.DefaultSort
+	if v := strings.TrimSpace(q.Get("sort")); store.IsSortKey(v) {
+		filter.Sort = v
+	}
+	filter.Desc = q.Get("dir") != "asc"
 	rows, err := s.Store.ListAllSessions(r.Context(), filter)
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "sessions"), http.StatusInternalServerError, "Could not load sessions."))
 		return
 	}
 	if r.Header.Get("HX-Request") == "true" {
-		render(w, r, http.StatusOK, web.GlobalSessionList(rows))
+		render(w, r, http.StatusOK, web.GlobalSessionList(rows, filter))
 		return
 	}
 	facets, err := s.Store.GlobalFacets(r.Context())

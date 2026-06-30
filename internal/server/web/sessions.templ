@@ -8,19 +8,16 @@ import (
 
 // SessionsPage is the cross-project session list: a faceted filter rail beside a
 // feed of every session, newest first. It is the surface for "find a run"
-// without first picking a project.
+// without first picking a project. The page carries no heading: the sidebar
+// already marks this section as Sessions, so the rail and feed fill the surface.
 templ SessionsPage(p Page, rows []store.SessionRow, facets store.GlobalFacetValues, sel store.SessionFilter) {
 	@layout(p) {
-		<div class="page-head">
-			<h1>Sessions</h1>
-			<span class="muted small">{ fmt.Sprintf("%d projects", len(facets.Projects)) }</span>
-		</div>
 		<div class="sessions-layout">
 			<aside class="facets" aria-label="Filters">
 				@facetGroup("Agent", "agent", facets.Agents, sel)
-				@projectFacetGroup(facets.Projects, sel)
 				@facetGroup("User", "user", facets.Users, sel)
 				@facetGroup("Machine", "machine", facets.Machines, sel)
+				@projectFacetGroup(facets.Projects, sel)
 			</aside>
 			<div class="sessions-main">
 				if AnyFilterActive(sel) {
@@ -33,7 +30,7 @@ templ SessionsPage(p Page, rows []store.SessionRow, facets store.GlobalFacetValu
 					</div>
 				}
 				<div id="session-list">
-					@GlobalSessionList(rows)
+					@GlobalSessionList(rows, sel)
 				</div>
 			</div>
 		</div>
@@ -108,22 +105,24 @@ templ activeProjectChip(opts []store.ProjectFacet, sel store.SessionFilter) {
 // with its project, agent, branch, and figures. It is the htmx-swappable body of
 // the Sessions page. The session id is left off (the whole row links to the
 // session); columns size to their content and the Project column absorbs the
-// slack so the row reads flush on a wide page.
-templ GlobalSessionList(rows []store.SessionRow) {
+// slack so the row reads flush on a wide page. Every header but Tags is a sort
+// control: it carries the current order (sel) so the active column lights its
+// direction glyph and clicking toggles ascending/descending.
+templ GlobalSessionList(rows []store.SessionRow, sel store.SessionFilter) {
 	if len(rows) == 0 {
 		<div class="empty">No sessions match these filters.</div>
 	} else {
 		<table class="grid sessions">
 			<thead>
 				<tr>
-					<th class="col-grow">Project</th>
+					@sortHeader("Project", "project", "col-grow", sel)
 					<th>Tags</th>
-					<th>Agent</th>
-					<th>Branch</th>
-					<th>User</th>
-					<th class="num">Messages</th>
-					<th class="num">Tokens</th>
-					<th>Updated</th>
+					@sortHeader("Agent", "agent", "", sel)
+					@sortHeader("Branch", "branch", "", sel)
+					@sortHeader("User", "user", "", sel)
+					@sortHeader("Messages", "messages", "num", sel)
+					@sortHeader("Tokens", "tokens", "num", sel)
+					@sortHeader("Updated", "updated", "", sel)
 				</tr>
 			</thead>
 			<tbody>
@@ -141,6 +140,40 @@ templ GlobalSessionList(rows []store.SessionRow) {
 				}
 			</tbody>
 		</table>
+	}
+}
+
+// sortHeader renders one click-to-sort column header: the whole cell is a link
+// (it fills the th's padding box) that toggles the sort, with a glyph showing the
+// active column's direction. extra carries the column's layout class (col-grow on
+// Project, num on the figures); sel supplies the current order.
+templ sortHeader(label, key, extra string, sel store.SessionFilter) {
+	<th class={ sortThClass(key, extra, sel) } aria-sort={ ariaSort(key, sel) }>
+		<a class="sort-link" href={ SortHref(sel, key) } title={ "Sort by " + label }>
+			<span class="sort-label">{ label }</span>
+			@sortGlyph(key, sel)
+		</a>
+	</th>
+}
+
+// sortGlyph draws the header's sort indicator: a single chevron in the active
+// column's direction (down for descending, up for ascending), or a faint
+// up/down pair on the other sortable columns that surfaces on hover to advertise
+// they can be sorted too.
+templ sortGlyph(key string, sel store.SessionFilter) {
+	if sortIsActive(key, sel) {
+		<svg class="sort-ico" viewBox="0 0 12 12" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+			if sel.Desc {
+				<path d="M3 5l3 3 3-3" stroke-linecap="round" stroke-linejoin="round"></path>
+			} else {
+				<path d="M3 7l3-3 3 3" stroke-linecap="round" stroke-linejoin="round"></path>
+			}
+		</svg>
+	} else {
+		<svg class="sort-ico sort-ico-idle" viewBox="0 0 12 12" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
+			<path d="M3.5 4.75L6 2.5l2.5 2.25" stroke-linecap="round" stroke-linejoin="round"></path>
+			<path d="M3.5 7.25L6 9.5l2.5-2.25" stroke-linecap="round" stroke-linejoin="round"></path>
+		</svg>
 	}
 }
 
