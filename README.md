@@ -115,6 +115,36 @@ The server runs as `go run ./cmd/akari-server`, so a restart picks up source
 changes, and it applies its embedded migrations on boot. Point the client at the
 URL `eph status` reports (also exported as `AKARI_URL`).
 
+### Example data for development
+
+The `.eph` server service runs `akari-server dev-seed` as a post-start hook, so
+the first `eph up` against an empty database leaves you with something to look at.
+It creates a few demo accounts (all sharing the password `akari-dev`), then runs
+the akari client in-process for 30 seconds to ingest *this machine's* real agent
+sessions through the normal upload and parse pipeline, and finally reassigns those
+sessions randomly across the accounts so the UI looks like a small team's history.
+
+It is idempotent: once the store holds sessions it is a no-op, so later `eph up`
+runs cost nothing. The ingest is bounded by `--time-limit` (default 30s): when the
+window elapses, in-flight uploads are cancelled rather than left to finish, so a
+few very large local sessions cannot make the hook block `eph up`. To re-seed (or
+run it by hand against a stack already up):
+
+```sh
+eph run go run ./cmd/akari-server dev-seed --force   # clear sessions, re-ingest, re-shuffle
+go run ./cmd/akari-server dev-seed --users 6 --time-limit 1m   # more accounts, longer ingest
+```
+
+`--force` clears existing sessions before re-seeding. That clean slate matters:
+the client keys a session on (its account, agent, source id), so re-ingesting
+under the seed account after a prior run had moved sessions to other accounts
+would otherwise create duplicate rows.
+
+`dev-seed` is best-effort by default (it logs and exits 0 on failure so it never
+blocks `eph up`); pass `--strict` to make failures non-zero when invoking it
+yourself. It reads `AKARI_DATABASE_URL` and the upload target from `AKARI_URL`
+(falling back to `--server-url` or `AKARI_LISTEN`).
+
 ### Server configuration
 
 | Variable | Default | Meaning |
@@ -133,6 +163,7 @@ akari-server            # run the HTTP server (default)
 akari-server reparse    # force a rebuild of every projection from stored raw bytes
 akari-server reparse --agent claude   # limit a reparse to one agent
 akari-server sweep      # reclaim orphaned CAS blobs now
+akari-server dev-seed   # fill a local server with example data (see Example data above)
 akari-server update     # update to the latest release (see Updating below)
 akari-server version    # print the build version and exit
 ```

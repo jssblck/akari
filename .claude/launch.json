@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "akari",
+      "runtimeExecutable": "eph",
+      "runtimeArgs": ["run", "go", "run", "./cmd/akari-server"],
+      "port": 8080,
+      "autoPort": true
+    }
+  ]
+}

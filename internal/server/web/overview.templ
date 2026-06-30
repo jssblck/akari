@@ -34,12 +34,20 @@ templ analyticsPanel(a store.Analytics, chartID string, ranges []RangeOption, rn
 		if !a.HasData() {
 			<div class="empty">No usage recorded yet.</div>
 		} else {
-			<div class="stats">
-				@stat("Cost", FmtCost(a.TotalCost, false), "")
-				@statTokens(a)
-				@stat("Sessions", fmt.Sprintf("%d", a.Sessions), "")
+			// The totals strip and activity grid form the panel's lead. It carries its
+			// own centered column (capped to the page's reading width) so that on a
+			// full-bleed surface like the project page, where main runs edge to edge for
+			// the session table, the calendar grid still reads at the same width as the
+			// Overview instead of stretching across the whole screen. On the already
+			// centered Overview the cap matches the content box, so it changes nothing.
+			<div class="usage-lead">
+				<div class="stats">
+					@stat("Cost", FmtCost(a.TotalCost, false), "")
+					@statTokens(a)
+					@stat("Sessions", fmt.Sprintf("%d", a.Sessions), "")
+				</div>
+				@heatmapBlock(a, chartID, ranges, rng, users, selected)
 			</div>
-			@heatmapBlock(a, chartID, ranges, rng, users, selected)
 			<div class="breakdowns">
 				@breakdownList("By model", BuildBreakdown(FoldUnknownModels(a.Models)))
 				@breakdownList("By agent", BuildBreakdown(a.Agents))

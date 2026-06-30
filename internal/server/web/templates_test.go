@@ -335,4 +335,13 @@ func TestProjectPageRendersHeatmap(t *testing.T) {
 	if strings.Contains(html, `<h2>Usage</h2>`) {
 		t.Error("project page should drop the redundant Usage panel header")
 	}
+	// The totals strip and activity grid sit in the centered lead column so the
+	// calendar grid reads at the Overview's width on this full-bleed page; the
+	// breakdowns stay a full-width sibling after the lead closes.
+	lead := strings.Index(html, `class="usage-lead"`)
+	grid := strings.Index(html, `data-heatmap`)
+	breakdowns := strings.Index(html, `class="breakdowns"`)
+	if lead < 0 || !(lead < grid && grid < breakdowns) {
+		t.Errorf("activity grid should sit inside the centered usage-lead, breakdowns after it; got lead=%d grid=%d breakdowns=%d", lead, grid, breakdowns)
+	}
 }
