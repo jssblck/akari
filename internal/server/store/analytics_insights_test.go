@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -203,5 +204,62 @@ func TestArchetypeDistributionBoundaries(t *testing.T) {
 	c := countByKey(dist)
 	if c["quick"] != 2 || c["standard"] != 1 || c["deep"] != 1 || c["marathon"] != 0 || c["automation"] != 0 {
 		t.Errorf("boundary counts = %+v, want quick2 standard1 deep1 marathon0 automation0", c)
+	}
+}
+
+// TestConcurrencyStats builds four overlapping spans with a known three-way peak and
+// pins the sweep-line result: the fleet peak and when it is reached, the busiest single
+// user's own peak, and the average concurrency over the covered span. It also confirms
+// the per-user scoping narrows the sweep.
+func TestConcurrencyStats(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	ada := seedUser(t, st, "ada")
+	grace := seedUser(t, st, "grace")
+	pid, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	day := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	at := func(min int) time.Time { return day.Add(time.Duration(min) * time.Minute) }
+	span := func(user int64, src string, startMin, endMin int) {
+		sid := seedSession(t, st, user, pid, src)
+		setSessionShape(t, st, ctx, sid, at(startMin), at(endMin), 10, 2)
+	}
+	span(ada, "sA", 0, 30)    // 10:00-10:30
+	span(ada, "sB", 10, 40)   // 10:10-10:40, overlaps sA -> ada runs two at once
+	span(grace, "sC", 20, 50) // 10:20-10:50, three overlap in 10:20-10:30 -> fleet peak 3
+	span(ada, "sD", 60, 70)   // 11:00-11:10, no overlap
+
+	cs, err := st.ConcurrencyStats(ctx, store.AnalyticsFilter{})
+	if err != nil {
+		t.Fatalf("concurrency stats: %v", err)
+	}
+	if cs.Sessions != 4 {
+		t.Errorf("Sessions = %d, want 4", cs.Sessions)
+	}
+	if cs.FleetPeak != 3 {
+		t.Errorf("FleetPeak = %d, want 3", cs.FleetPeak)
+	}
+	if !cs.FleetPeakAt.Equal(at(20)) {
+		t.Errorf("FleetPeakAt = %s, want %s (the third session's start)", cs.FleetPeakAt, at(20))
+	}
+	if cs.BusiestUser != "ada" || cs.BusiestUserPeak != 2 {
+		t.Errorf("busiest = (%s, %d), want (ada, 2)", cs.BusiestUser, cs.BusiestUserPeak)
+	}
+	// Active session-time = 30+30+30+10 = 100 min; covered span = 70 min (10:00..11:10).
+	wantAvg := 100.0 / 70.0
+	if math.Abs(cs.AvgConcurrent-wantAvg) > 0.01 {
+		t.Errorf("AvgConcurrent = %.3f, want ~%.3f", cs.AvgConcurrent, wantAvg)
+	}
+
+	// Scope to Ada: Grace's sC drops out, so the fleet peak is Ada's own two-at-once.
+	adaOnly, err := st.ConcurrencyStats(ctx, store.AnalyticsFilter{Username: "ada"})
+	if err != nil {
+		t.Fatalf("ada concurrency: %v", err)
+	}
+	if adaOnly.Sessions != 3 || adaOnly.FleetPeak != 2 || adaOnly.BusiestUser != "ada" {
+		t.Errorf("ada scope = {sessions %d, peak %d, busiest %s}, want {3, 2, ada}", adaOnly.Sessions, adaOnly.FleetPeak, adaOnly.BusiestUser)
 	}
 }

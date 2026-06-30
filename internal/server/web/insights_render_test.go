@@ -3,12 +3,21 @@ package web
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jssblck/akari/internal/server/store"
 )
 
 func sampleInsights() store.Insights {
 	return store.Insights{
+		Concurrency: store.ConcurrencyStats{
+			FleetPeak:       4,
+			FleetPeakAt:     time.Date(2026, 6, 12, 14, 30, 0, 0, time.UTC),
+			BusiestUser:     "ada",
+			BusiestUserPeak: 3,
+			AvgConcurrent:   1.7,
+			Sessions:        15,
+		},
 		Quality: store.QualityDistribution{
 			Grades: []store.LabeledCount{
 				{Key: "A", Count: 5}, {Key: "B", Count: 3}, {Key: "C", Count: 2},
@@ -37,8 +46,13 @@ func TestInsightsPageRendersDistributions(t *testing.T) {
 
 	for _, want := range []string{
 		`id="insights"`,            // the swap target
-		`>Grades<`, `>Outcomes<`, `>Archetypes<`, // the three panels
+		`>Concurrency<`,            // the headline band
+		`>Grades<`, `>Outcomes<`, `>Archetypes<`, // the three distribution panels
 		`15 sessions in window`,    // the summary count
+		`>4</div>`,                 // the fleet peak figure
+		`>peak at once<`,           // its label
+		`ada (3)`,                  // the busiest user and their peak
+		`>1.7</div>`,               // average concurrent, one decimal
 		`>Unscored<`,               // the empty grade key reads as a word, not a blank
 		`>Completed<`,              // outcome label, title-cased
 		`>Quick<`,                  // archetype label, title-cased
@@ -50,6 +64,28 @@ func TestInsightsPageRendersDistributions(t *testing.T) {
 		if !strings.Contains(html, want) {
 			t.Errorf("insights page missing %q", want)
 		}
+	}
+}
+
+// When the window has graded sessions but none carry a measured start and end, the
+// distribution grid still renders while the concurrency band falls back to a note
+// instead of showing a real-looking row of zeros.
+func TestInsightsPageConcurrencyNoSpans(t *testing.T) {
+	p := Page{Title: "Insights", LoggedIn: true, Active: "insights", Username: "ada"}
+	ranges := RangeOptions("/insights", nil, "30d")
+	ins := sampleInsights()
+	ins.Concurrency = store.ConcurrencyStats{} // no measured spans
+
+	html := renderComponent(t, InsightsPage(p, ins, "30d", ranges))
+
+	if !strings.Contains(html, "No sessions with a measured start and end in this window.") {
+		t.Error("concurrency band should note the missing spans")
+	}
+	if strings.Contains(html, `class="conc-figs"`) {
+		t.Error("concurrency band should not render figures when there are no spans")
+	}
+	if !strings.Contains(html, `>Grades<`) {
+		t.Error("the distribution grid should still render alongside the concurrency note")
 	}
 }
 

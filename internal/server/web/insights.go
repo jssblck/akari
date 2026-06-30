@@ -1,10 +1,26 @@
 package web
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/jssblck/akari/internal/server/store"
 )
+
+// ConcurrencyBusiest formats the busiest user's peak for the concurrency panel: the name
+// and their peak simultaneous sessions, or a dash when no user had a measurable span.
+func ConcurrencyBusiest(c store.ConcurrencyStats) string {
+	if c.BusiestUser == "" {
+		return "-"
+	}
+	return fmt.Sprintf("%s (%d)", c.BusiestUser, c.BusiestUserPeak)
+}
+
+// FmtAvgConcurrent renders the average concurrency to one decimal, the granularity that
+// reads as a rate ("1.4 concurrent") without implying false precision.
+func FmtAvgConcurrent(v float64) string {
+	return fmt.Sprintf("%.1f", v)
+}
 
 // Distribution bar colours, drawn from the data-viz ramp and the status palette so the
 // Insights bars read in the same hues as the rest of the app. Grades and outcomes carry

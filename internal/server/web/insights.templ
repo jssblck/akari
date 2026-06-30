@@ -25,6 +25,9 @@ templ InsightsPage(p Page, ins store.Insights, rng string, ranges []RangeOption)
 			if !ins.HasData() {
 				<div class="empty">No sessions in this window yet.</div>
 			} else {
+				<div class="ins-headline">
+					@concurrencyPanel(ins.Concurrency)
+				</div>
 				<div class="ins-grid">
 					@distributionPanel("Grades", "the quality score banded A to F, unscored for an ungraded session", GradeBars(ins.Quality.Grades))
 					@distributionPanel("Outcomes", "how each session ended", OutcomeBars(ins.Quality.Outcomes))
@@ -33,6 +36,41 @@ templ InsightsPage(p Page, ins store.Insights, rng string, ranges []RangeOption)
 			}
 		</section>
 	}
+}
+
+// concurrencyPanel is the headline band: how many sessions overlapped at the fleet's
+// peak (and when), which single user ran the most at once, and the average concurrency
+// across the span the sessions cover. Three figures read left to right, the same
+// instrument tone as the overview stat tiles, since concurrency is a measured rate
+// rather than a distribution of buckets.
+templ concurrencyPanel(c store.ConcurrencyStats) {
+	<div class="ins-panel ins-concurrency">
+		<div class="ins-panel-head">
+			<span class="label">Concurrency</span>
+			<span class="muted small ins-caption">peak overlap among sessions that started in this window</span>
+		</div>
+		if !c.HasData() {
+			<div class="muted small">No sessions with a measured start and end in this window.</div>
+		} else {
+			<div class="conc-figs">
+				<div class="conc-fig">
+					<div class="conc-v">{ fmt.Sprintf("%d", c.FleetPeak) }</div>
+					<div class="conc-k">peak at once</div>
+					if !c.FleetPeakAt.IsZero() {
+						<div class="conc-sub muted small">{ FmtTimeAt(c.FleetPeakAt) }</div>
+					}
+				</div>
+				<div class="conc-fig">
+					<div class="conc-v">{ ConcurrencyBusiest(c) }</div>
+					<div class="conc-k">busiest user</div>
+				</div>
+				<div class="conc-fig">
+					<div class="conc-v">{ FmtAvgConcurrent(c.AvgConcurrent) }</div>
+					<div class="conc-k">average concurrent</div>
+				</div>
+			</div>
+		}
+	</div>
 }
 
 // distributionPanel renders one labeled set of horizontal bars: a title, a one-line
