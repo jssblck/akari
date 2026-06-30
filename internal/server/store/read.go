@@ -164,13 +164,16 @@ func IsSortKey(key string) bool {
 }
 
 // orderClause builds the ORDER BY for the global session list from the filter's
-// Sort and Desc, falling back to DefaultSort for an unknown key. The session id
-// is always the tiebreaker so ties order deterministically and pagination stays
-// stable across requests.
+// Sort and Desc. An empty or unknown Sort is the default order, most recent
+// first: callers that pass a bare filter (the overview feed, the project page)
+// expect newest-first, and a bool Desc cannot distinguish "explicitly ascending"
+// from its zero value, so the default is not routed through Desc at all. The
+// session id is always the tiebreaker so ties order deterministically and
+// pagination stays stable across requests.
 func (f SessionFilter) orderClause() string {
 	expr, ok := sessionSortColumns[f.Sort]
 	if !ok {
-		expr = sessionSortColumns[DefaultSort]
+		return fmt.Sprintf(" ORDER BY %s DESC NULLS LAST, s.id DESC", sessionSortColumns[DefaultSort])
 	}
 	dir := "ASC"
 	if f.Desc {
