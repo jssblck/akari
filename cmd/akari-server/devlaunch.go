@@ -58,6 +58,10 @@ func runDevLaunch(args []string) error {
 	}
 	// Tear the stack down when the launch ends, however it ends. `eph down` keeps
 	// the named pgdata volume, so a restart is quick and the data stays seeded.
+	// Registered before the seeder's stop defer below, so LIFO runs it after the
+	// seeder has been cancelled and drained: no in-flight seed work races the
+	// teardown. (A forced second Ctrl-C exits before either defer runs; the next
+	// launch just reuses the still-running stack.)
 	defer func() {
 		if err := eph(context.Background(), "down"); err != nil {
 			log.Printf("dev-launch: eph down: %v", err)
@@ -77,7 +81,18 @@ func runDevLaunch(args []string) error {
 		if err != nil {
 			return err
 		}
-		go seedWhenHealthy(ctx, deriveServerURL(cfg.Listen))
+		seedDone := make(chan struct{})
+		go func() {
+			defer close(seedDone)
+			seedWhenHealthy(ctx, deriveServerURL(cfg.Listen))
+		}()
+		// Stop the seeder before the deferred eph down: cancel its context and wait
+		// for it to wind down. Registered after the eph down defer, so LIFO runs it
+		// first.
+		defer func() {
+			cancel()
+			<-seedDone
+		}()
 	}
 
 	// Run the server in the foreground, reusing the normal startup. It returns
@@ -135,42 +150,46 @@ func parseEphEnv(data []byte) (map[string]string, error) {
 }
 
 // seedWhenHealthy waits for the server to pass its health check, then seeds
-// example data. The first `go run` of the server can spend tens of seconds
-// compiling, so it polls for up to two minutes. Seeding is best-effort: a failure
-// is logged and the launch carries on.
+// example data. Both steps are best-effort: a failure is logged and the launch
+// carries on.
 func seedWhenHealthy(ctx context.Context, serverURL string) {
-	healthz := strings.TrimRight(serverURL, "/") + "/healthz"
+	// The first `go run` of the server can spend tens of seconds compiling, so
+	// allow up to two minutes for it to start serving.
 	client := &http.Client{Timeout: 2 * time.Second}
+	if err := waitHealthy(ctx, client, serverURL, 120, time.Second); err != nil {
+		log.Printf("dev-launch: %v; skipping seed", err)
+		return
+	}
+	if err := seed(ctx, serverURL); err != nil {
+		log.Printf("dev-launch: seed: %v (continuing)", err)
+	}
+}
 
-	healthy := false
-	for i := 0; i < 120; i++ {
+// waitHealthy polls the server's /healthz until it returns 200, the context is
+// cancelled, or attempts run out (one probe per interval). It is split out from
+// seedWhenHealthy so the polling state machine is testable without a real server
+// or database.
+func waitHealthy(ctx context.Context, client *http.Client, serverURL string, attempts int, interval time.Duration) error {
+	healthz := strings.TrimRight(serverURL, "/") + "/healthz"
+	for i := 0; i < attempts; i++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, healthz, nil)
 		if err != nil {
-			log.Printf("dev-launch: seed: %v (continuing)", err)
-			return
+			return err
 		}
 		resp, err := client.Do(req)
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
-				healthy = true
-				break
+				return nil
 			}
 		}
 		select {
 		case <-ctx.Done():
-			return
-		case <-time.After(time.Second):
+			return ctx.Err()
+		case <-time.After(interval):
 		}
 	}
-	if !healthy {
-		log.Printf("dev-launch: server was not healthy after 120s; skipping seed")
-		return
-	}
-
-	if err := seed(ctx, serverURL); err != nil {
-		log.Printf("dev-launch: seed: %v (continuing)", err)
-	}
+	return fmt.Errorf("server was not healthy after %s", time.Duration(attempts)*interval)
 }
 
 // seed fills the running server with example data. It mirrors the dev-seed
