@@ -82,39 +82,79 @@ func TestMessagesAfterKeysetWindows(t *testing.T) {
 	}
 }
 
-// TestSessionRawToPinsTotalToChunks pins total_bytes to the chunk stream the reader
-// serves. A stale session_raw.byte_len (here deliberately wrong) must not leak into
-// total: the reported length is the sum of the chunk content actually streamed, so
-// total_bytes and content can never disagree.
-func TestSessionRawToPinsTotalToChunks(t *testing.T) {
+// TestSessionRawByteLenMatchesChunks pins the invariant SessionRawTo depends on for
+// total_bytes: session_raw.byte_len, the O(1) running length AppendChunk and ResetRaw
+// maintain, stays equal to the summed length of the chunk content the reader streams.
+// If these ever drifted, total_bytes would stop describing the bytes served. The test
+// drives the production append path so the maintained value, the chunk sum, and the
+// streamed content must all agree, and it exercises the capped read alongside the
+// full one.
+func TestSessionRawByteLenMatchesChunks(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
 	ctx := context.Background()
-	sid := seedTranscript(t, st, "grace", 1)
-
-	raw := []byte("{\"type\":\"user\"}\n{\"type\":\"assistant\"}\n")
-	// byte_len is intentionally wrong: the reader must ignore it for total.
-	if _, err := st.Pool.Exec(ctx,
-		`INSERT INTO session_raw (session_id, byte_len, content_sha256) VALUES ($1, 9999, $2)`,
-		sid, store.HashString(string(raw))); err != nil {
-		t.Fatalf("session_raw: %v", err)
+	uid := seedUser(t, st, "grace")
+	pid, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
 	}
-	if _, err := st.Pool.Exec(ctx,
-		`INSERT INTO session_raw_chunks (session_id, byte_offset, byte_len, content) VALUES ($1,0,$2,$3)`,
-		sid, len(raw), raw); err != nil {
-		t.Fatalf("session_raw_chunks: %v", err)
+	ann, err := st.Announce(ctx, store.AnnounceParams{
+		UserID: uid, Agent: "claude", SourceSessionID: "sess-raw",
+		ProjectID: pid, GitBranch: "main", Cwd: "/home/grace/akari", Machine: "box",
+	})
+	if err != nil {
+		t.Fatalf("announce: %v", err)
 	}
 
+	// Append several line-aligned chunks through the production path, which updates
+	// session_raw.byte_len in the same transaction that writes each chunk row.
+	lines := [][]byte{
+		[]byte("{\"type\":\"user\"}\n"),
+		[]byte("{\"type\":\"assistant\"}\n"),
+		[]byte("{\"type\":\"result\"}\n"),
+	}
+	var whole []byte
+	var offset int64
+	for _, l := range lines {
+		if _, err := st.AppendChunk(ctx, ann.SessionID, offset, l); err != nil {
+			t.Fatalf("append at %d: %v", offset, err)
+		}
+		offset += int64(len(l))
+		whole = append(whole, l...)
+	}
+
+	var byteLen, chunkSum int64
+	if err := st.Pool.QueryRow(ctx,
+		`SELECT byte_len FROM session_raw WHERE session_id = $1`, ann.SessionID).Scan(&byteLen); err != nil {
+		t.Fatalf("byte_len: %v", err)
+	}
+	if err := st.Pool.QueryRow(ctx,
+		`SELECT coalesce(sum(length(content)), 0) FROM session_raw_chunks WHERE session_id = $1`,
+		ann.SessionID).Scan(&chunkSum); err != nil {
+		t.Fatalf("chunk sum: %v", err)
+	}
+	if byteLen != chunkSum || byteLen != int64(len(whole)) {
+		t.Fatalf("byte_len=%d, chunk sum=%d, appended=%d must all match", byteLen, chunkSum, len(whole))
+	}
+
+	// SessionRawTo reports that same total and streams exactly those bytes.
 	var buf bytes.Buffer
-	written, truncated, total, err := st.SessionRawTo(ctx, &buf, sid, 0)
+	written, truncated, total, err := st.SessionRawTo(ctx, &buf, ann.SessionID, 0)
 	if err != nil {
 		t.Fatalf("raw: %v", err)
 	}
-	if total != int64(len(raw)) {
-		t.Fatalf("total_bytes = %d, want %d (must track chunk content, not byte_len)", total, len(raw))
+	if total != int64(len(whole)) || written != int64(len(whole)) || truncated || !bytes.Equal(buf.Bytes(), whole) {
+		t.Fatalf("raw mismatch: total=%d written=%d truncated=%v content=%q", total, written, truncated, buf.Bytes())
 	}
-	if written != int64(len(raw)) || truncated || !bytes.Equal(buf.Bytes(), raw) {
-		t.Fatalf("stream mismatch: written=%d truncated=%v content=%q", written, truncated, buf.Bytes())
+
+	// A capped read reports the full total but streams only the cap, flagged truncated.
+	var capped bytes.Buffer
+	w2, tr2, total2, err := st.SessionRawTo(ctx, &capped, ann.SessionID, 5)
+	if err != nil {
+		t.Fatalf("capped raw: %v", err)
+	}
+	if total2 != int64(len(whole)) || w2 != 5 || !tr2 || !bytes.Equal(capped.Bytes(), whole[:5]) {
+		t.Fatalf("capped mismatch: total=%d written=%d truncated=%v content=%q", total2, w2, tr2, capped.Bytes())
 	}
 
 	// A session that never received an upload is ErrNotFound, not a zero-length read.

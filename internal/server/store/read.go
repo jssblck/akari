@@ -1069,29 +1069,25 @@ func (s *Store) scanAttachments(ctx context.Context, query string, args ...any) 
 // returns ErrNotFound.
 func (s *Store) SessionRawTo(ctx context.Context, w io.Writer, sessionID, limit int64) (written int64, truncated bool, total int64, err error) {
 	// total and the streamed content must come from one snapshot: an AppendChunk or
-	// ResetRaw committing between the length sum and the chunk stream would otherwise
+	// ResetRaw committing between the length read and the chunk stream would otherwise
 	// let total_bytes describe one version of the raw while content is another. A
-	// repeatable-read, read-only transaction pins all three reads (existence, length,
-	// stream) to the same MVCC snapshot, so a concurrent writer is simply invisible to
-	// this reader rather than half-seen.
+	// repeatable-read, read-only transaction pins both reads to the same MVCC snapshot,
+	// so a concurrent writer is simply invisible to this reader rather than half-seen.
 	txErr := pgx.BeginTxFunc(ctx, s.Pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly},
 		func(tx pgx.Tx) error {
-			// A session_raw row is the existence gate; its byte_len is not the basis for
-			// total. total is sum(length(content)) over the same chunks this reader serves,
-			// so total_bytes can never disagree with the bytes streamed. A missing session_raw
-			// row (no upload yet) is ErrNotFound.
-			var exists bool
+			// total is session_raw.byte_len, the running length AppendChunk and ResetRaw
+			// maintain in the same transaction that writes the chunk rows (so the invariant
+			// byte_len == sum(length(content)) holds at every committed state, pinned by
+			// TestSessionRawByteLenMatchesChunks). Reading it is O(1) rather than scanning the
+			// whole growing raw, and reading it inside this snapshot keeps it exactly
+			// consistent with the chunks streamed below. A missing session_raw row (no upload
+			// yet) is ErrNotFound.
 			if err := tx.QueryRow(ctx,
-				`SELECT true FROM session_raw WHERE session_id = $1`, sessionID).Scan(&exists); err != nil {
+				`SELECT byte_len FROM session_raw WHERE session_id = $1`, sessionID).Scan(&total); err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
 					return ErrNotFound
 				}
 				return fmt.Errorf("read raw length for session %d: %w", sessionID, err)
-			}
-			if err := tx.QueryRow(ctx,
-				`SELECT coalesce(sum(length(content)), 0) FROM session_raw_chunks WHERE session_id = $1`,
-				sessionID).Scan(&total); err != nil {
-				return fmt.Errorf("sum raw chunk length for session %d: %w", sessionID, err)
 			}
 
 			rows, err := tx.Query(ctx,
