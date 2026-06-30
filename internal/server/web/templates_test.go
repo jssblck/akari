@@ -209,12 +209,12 @@ func TestProjectsPageIsBareTable(t *testing.T) {
 	}
 }
 
-// GlobalSessionList drives the redesigned global session table. A non-empty
-// render must drop the session-id column, fold state into one Tags column (the
-// local-kind chip plus the public visibility chip), show the Tokens cell with
-// its breakdown card and cost, and render Updated as relative time carrying the
-// exact stamp as a title.
-func TestGlobalSessionListColumns(t *testing.T) {
+// GlobalSessionList renders the cross-project feed. A row leads with the session's
+// derived title (cleaned from its opening prompt), carries the agent, project,
+// branch, and state chips in its meta line, shows the token figure with its
+// breakdown card and cost, and links the whole row to the session. The session id
+// is never printed.
+func TestGlobalSessionListRow(t *testing.T) {
 	ts := time.Now().UTC().Add(-3 * 24 * time.Hour)
 	rows := []store.SessionRow{{
 		SessionSummary: store.SessionSummary{
@@ -224,82 +224,59 @@ func TestGlobalSessionListColumns(t *testing.T) {
 			TotalCostUSD: 1.25, Visibility: "public", UpdatedAt: &ts,
 		},
 		ProjectID: 4, ProjectKey: "scratch", ProjectName: "scratch", ProjectKind: "standalone",
+		FirstPrompt: "Fix the login bug in the auth module",
 	}}
-	// Render in the default order (most recent first): Updated is the active sort,
-	// descending.
 	html := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Sort: "updated", Desc: true}))
 
-	// Tags column carries both the local-kind chip and the public chip.
-	for _, want := range []string{`>Tags</th>`, `class="tag standalone"`, `class="tag public"`, `>public</span>`} {
+	for _, want := range []string{
+		// The title is the cleaned opening prompt, and the whole row links to the
+		// session.
+		`Fix the login bug in the auth module`,
+		`data-row-href="/sessions/7"`,
+		// Meta carries the agent, project, branch, and both state chips.
+		`>claude</span>`, `>scratch</span>`, `>main</span>`,
+		`class="tag standalone"`, `class="tag public"`,
+		// Tokens: compact figure plus the breakdown card and cost.
+		`160 tokens`, "<dt>In</dt>", "<dt>Out</dt>", "<dt>Cache read</dt>", "<dt>Cache write</dt>", "$1.25",
+		// Time reads as the clock with the exact stamp on hover.
+		`title="` + FmtTime(&ts) + `"`,
+	} {
 		if !strings.Contains(html, want) {
-			t.Errorf("tags column missing %q", want)
+			t.Errorf("feed row missing %q", want)
 		}
 	}
-	// Tokens cell: the total, the breakdown rows, and the cost, replacing Cost. The
-	// Tokens header is now a sort control, so its label rides a span.
-	for _, want := range []string{`>Tokens</span>`, "160 tokens", "<dt>In</dt>", "<dt>Out</dt>", "<dt>Cache read</dt>", "<dt>Cache write</dt>", "$1.25"} {
-		if !strings.Contains(html, want) {
-			t.Errorf("tokens cell missing %q", want)
-		}
-	}
-	if strings.Contains(html, `>Cost</th>`) {
-		t.Error("Cost column should be gone")
-	}
-	// Updated reads relative, with the exact stamp as the cell title.
-	if rel := FmtRelTime(&ts); !strings.Contains(html, ">"+rel+"<") {
-		t.Errorf("updated cell missing relative time %q", rel)
-	}
-	if titled := `title="` + FmtTime(&ts) + `"`; !strings.Contains(html, titled) {
-		t.Errorf("updated cell missing exact-time title %q", titled)
-	}
-	// The session-id column is gone: no "#7" label and no Session header.
-	if strings.Contains(html, "#7") || strings.Contains(html, `>Session</th>`) {
-		t.Error("session-id column should be dropped")
+	// The session id is never printed, and the old table chrome is gone.
+	if strings.Contains(html, "#7") || strings.Contains(html, "<table") || strings.Contains(html, "sort-link") {
+		t.Error("feed should drop the session id, the table, and the sort headers")
 	}
 }
 
-// The global session list's column headers are click-to-sort controls: each
-// (but Tags) links to toggle its column, the active column carries the sorted
-// state and its direction for the glyph, and clicking the active column flips the
-// direction in the link.
-func TestGlobalSessionListSortHeaders(t *testing.T) {
-	ts := time.Now().UTC()
-	rows := []store.SessionRow{{
-		SessionSummary: store.SessionSummary{ID: 1, Agent: "claude", Username: "ada", UpdatedAt: &ts},
-		ProjectID:      1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote",
-	}}
-
-	// Sorted by messages descending: that header is active and its link flips to
-	// ascending, while another column links in its own default direction.
-	html := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Sort: "messages", Desc: true}))
-	for _, want := range []string{
-		`class="sortable num sorted desc"`,
-		`aria-sort="descending"`,
-		// The active column's link flips direction on the next click.
-		`href="/sessions?dir=asc&amp;sort=messages"`,
-		// A non-active text column links in its natural ascending default.
-		`href="/sessions?dir=asc&amp;sort=agent"`,
-		// Inactive columns advertise their aria state as none.
-		`aria-sort="none"`,
-		`class="sort-link"`,
-	} {
-		if !strings.Contains(html, want) {
-			t.Errorf("sort headers missing %q", want)
-		}
-	}
-	// Tags stays a plain header, never a sort control.
-	if strings.Contains(html, `class="sort-link" href="/sessions?dir=asc&amp;sort=tags"`) {
-		t.Error("Tags column should not be sortable")
+// In the default most-recent order the feed groups rows under day headings, and a
+// row whose project repeats the row above it fades; any other sort renders a flat,
+// ungrouped list.
+func TestGlobalSessionListGrouping(t *testing.T) {
+	// Anchor both rows at midday today so they share a UTC calendar day (and the
+	// Today heading) no matter when the test runs.
+	n := time.Now().UTC()
+	today := time.Date(n.Year(), n.Month(), n.Day(), 12, 0, 0, 0, time.UTC)
+	earlier := today.Add(-2 * time.Hour)
+	rows := []store.SessionRow{
+		{SessionSummary: store.SessionSummary{ID: 1, Agent: "claude", UpdatedAt: &today}, ProjectID: 1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote", FirstPrompt: "first"},
+		{SessionSummary: store.SessionSummary{ID: 2, Agent: "claude", UpdatedAt: &earlier}, ProjectID: 1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote", FirstPrompt: "second"},
 	}
 
-	// The default order (updated, descending) leaves the bare path on the active
-	// column's flip-to-ascending link and marks Updated active.
-	def := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Sort: "updated", Desc: true}))
-	if !strings.Contains(def, `href="/sessions?dir=asc&amp;sort=updated"`) {
-		t.Error("default order should let the Updated header flip to ascending")
+	grouped := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Sort: "updated", Desc: true}))
+	if !strings.Contains(grouped, `class="day-head"`) || !strings.Contains(grouped, `>Today</span>`) {
+		t.Error("most-recent order should render a day heading")
 	}
-	if !strings.Contains(def, `aria-sort="descending"`) {
-		t.Error("default order should mark Updated descending")
+	// The second row repeats the first row's project, so its label fades.
+	if !strings.Contains(grouped, `class="srow-proj faded"`) {
+		t.Error("a repeated project label should fade")
+	}
+
+	flat := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Sort: "tokens", Desc: true}))
+	if strings.Contains(flat, `class="day-head"`) {
+		t.Error("a non-recent sort should not day-group the feed")
 	}
 }
 

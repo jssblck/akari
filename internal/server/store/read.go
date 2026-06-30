@@ -191,6 +191,11 @@ type SessionRow struct {
 	ProjectKey  string
 	ProjectName string
 	ProjectKind string
+	// FirstPrompt is the opening user message's text (capped in the query), the
+	// raw material the Sessions feed cleans into a recognizable per-session title.
+	// It is empty for a session with no user-authored message (a subagent run that
+	// only carries tool turns), which the view renders with its fallback label.
+	FirstPrompt string
 }
 
 // ListProjects returns every project with rolled-up stats, most recently active
@@ -317,7 +322,15 @@ func (s *Store) ListSessions(ctx context.Context, f SessionFilter) ([]SessionSum
 
 // globalSessionSelect is the column list and joins for cross-project session
 // rows: the same session columns as sessionSelect, plus the owning project's
-// identity so the list can show and link a project per row.
+// identity so the list can show and link a project per row, and the opening user
+// message so the feed can title each row by what the run was about.
+//
+// The first prompt comes from a LATERAL subquery that walks the session's
+// messages by (session_id, ordinal) (their primary key) and stops at the first
+// user turn, so it touches one row per session rather than the whole transcript.
+// Its content is capped in SQL (firstPromptCap) because only the opening line
+// becomes a title; the cap keeps a pasted-in spec from detoasting a large value
+// just to be truncated again.
 const globalSessionSelect = `
 	SELECT s.id, s.agent, s.machine, s.git_branch, u.username,
 	       s.message_count, s.user_message_count,
@@ -325,10 +338,18 @@ const globalSessionSelect = `
 	       s.total_cache_write_tokens, s.total_cache_read_tokens,
 	       s.total_cost_usd, s.cost_incomplete, s.visibility, s.public_id,
 	       s.started_at, s.ended_at, s.updated_at,
-	       p.id, p.remote_key, p.display_name, p.kind
+	       p.id, p.remote_key, p.display_name, p.kind,
+	       coalesce(fm.content, '')
 	  FROM sessions s
 	  JOIN users u ON u.id = s.user_id
-	  JOIN projects p ON p.id = s.project_id`
+	  JOIN projects p ON p.id = s.project_id
+	  LEFT JOIN LATERAL (
+	    SELECT left(m.content, 4000) AS content
+	      FROM messages m
+	     WHERE m.session_id = s.id AND m.role = 'user'
+	     ORDER BY m.ordinal
+	     LIMIT 1
+	  ) fm ON true`
 
 func scanSessionRow(rows pgx.Rows) (SessionRow, error) {
 	var r SessionRow
@@ -337,7 +358,8 @@ func scanSessionRow(rows pgx.Rows) (SessionRow, error) {
 		&r.TotalInput, &r.TotalOutput, &r.TotalCacheWrite, &r.TotalCacheRead,
 		&r.TotalCostUSD, &r.CostIncomplete, &r.Visibility, &r.PublicID,
 		&r.StartedAt, &r.EndedAt, &r.UpdatedAt,
-		&r.ProjectID, &r.ProjectKey, &r.ProjectName, &r.ProjectKind)
+		&r.ProjectID, &r.ProjectKey, &r.ProjectName, &r.ProjectKind,
+		&r.FirstPrompt)
 	if err != nil {
 		return r, fmt.Errorf("scan global session row: %w", err)
 	}

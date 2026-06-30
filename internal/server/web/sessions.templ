@@ -6,80 +6,90 @@ import (
 	"github.com/jssblck/akari/internal/server/store"
 )
 
-// SessionsPage is the cross-project session list: a faceted filter rail beside a
-// feed of every session, newest first. It is the surface for "find a run"
-// without first picking a project. The page carries no heading: the sidebar
-// already marks this section as Sessions, so the rail and feed fill the surface.
+// SessionsPage is the cross-project session view: a slim filter toolbar above a
+// day-grouped feed of every session. It is the surface for "find a run" without
+// first picking a project. The page carries no heading: the sidebar already marks
+// this section as Sessions, so the toolbar and feed fill the surface.
 templ SessionsPage(p Page, rows []store.SessionRow, facets store.GlobalFacetValues, sel store.SessionFilter) {
 	@layout(p) {
-		<div class="sessions-layout">
-			<aside class="facets" aria-label="Filters">
-				@facetGroup("Agent", "agent", facets.Agents, sel)
-				@facetGroup("User", "user", facets.Users, sel)
-				@facetGroup("Machine", "machine", facets.Machines, sel)
-				@projectFacetGroup(facets.Projects, sel)
-			</aside>
-			<div class="sessions-main">
-				if AnyFilterActive(sel) {
-					<div class="active-filters">
-						@activeChip("agent", sel.Agent, sel)
-						@activeChip("user", sel.Username, sel)
-						@activeChip("machine", sel.Machine, sel)
-						@activeProjectChip(facets.Projects, sel)
-						<a class="small clear" href="/sessions">Clear all</a>
-					</div>
-				}
-				<div id="session-list">
-					@GlobalSessionList(rows, sel)
+		<div class="sessions">
+			@sessionsToolbar(facets, sel)
+			if AnyFilterActive(sel) {
+				<div class="active-filters">
+					@activeChip("agent", sel.Agent, sel)
+					@activeChip("machine", sel.Machine, sel)
+					@activeChip("user", sel.Username, sel)
+					@activeProjectChip(facets.Projects, sel)
+					<a class="small clear" href="/sessions">Clear all</a>
 				</div>
+			}
+			<div id="session-list">
+				@GlobalSessionList(rows, sel)
 			</div>
 		</div>
 	}
 }
 
-// facetGroup renders one filter section: a labeled list of toggle links, each
-// with its session count, the selected one marked active.
-templ facetGroup(title, field string, opts []store.FacetCount, sel store.SessionFilter) {
-	if len(opts) > 0 {
-		<div class="facet">
-			<div class="facet-title label">{ title }</div>
-			<ul class="opts">
-				for _, o := range opts {
-					<li>
-						<a class={ facetOptClass(field, o.Value, sel) } href={ facetHref(field, o.Value, sel) }>
-							<span class="opt-label" title={ o.Value }>{ o.Value }</span>
-							<span class="opt-count">{ fmt.Sprintf("%d", o.Count) }</span>
-						</a>
-					</li>
+// sessionsToolbar is the filter strip: a GET form of selects (agent, project,
+// then machine and user only when more than one exists) and a sort control. The
+// selects auto-submit on change (a small delegated handler in app.js), with a
+// no-script Apply button as the fallback, so changing a filter reloads the page
+// and keeps the selects, chips, and feed in agreement. It replaces the tall
+// faceted rail, whose single-value User group and thirty-row Project list were
+// most of the old page's clutter.
+templ sessionsToolbar(facets store.GlobalFacetValues, sel store.SessionFilter) {
+	<form class="toolbar" method="get" action="/sessions">
+		@tbSelect("Agent", "agent") {
+			<option value="" selected?={ sel.Agent == "" }>All agents</option>
+			for _, a := range facets.Agents {
+				<option value={ a.Value } selected?={ sel.Agent == a.Value }>{ a.Value }</option>
+			}
+		}
+		@tbSelect("Project", "project") {
+			<option value="" selected?={ sel.ProjectID == 0 }>All projects</option>
+			for _, pf := range facets.Projects {
+				<option value={ fmt.Sprintf("%d", pf.ID) } selected?={ sel.ProjectID == pf.ID }>{ ProjectFacetLabel(pf) }</option>
+			}
+		}
+		if len(facets.Machines) > 1 {
+			@tbSelect("Machine", "machine") {
+				<option value="" selected?={ sel.Machine == "" }>All machines</option>
+				for _, m := range facets.Machines {
+					<option value={ m.Value } selected?={ sel.Machine == m.Value }>{ m.Value }</option>
 				}
-			</ul>
-		</div>
-	}
+			}
+		}
+		if len(facets.Users) > 1 {
+			@tbSelect("User", "user") {
+				<option value="" selected?={ sel.Username == "" }>All users</option>
+				for _, u := range facets.Users {
+					<option value={ u.Value } selected?={ sel.Username == u.Value }>{ u.Value }</option>
+				}
+			}
+		}
+		<span class="spacer"></span>
+		@tbSelect("Sort", "sort") {
+			for _, o := range SessionSortOptions() {
+				<option value={ o.Key } selected?={ sortSelected(sel, o.Key) }>{ o.Label }</option>
+			}
+		}
+		<noscript><button type="submit">Apply</button></noscript>
+	</form>
 }
 
-// projectFacetGroup is the project filter: like facetGroup but each option
-// carries a categorical swatch and links by project id.
-templ projectFacetGroup(opts []store.ProjectFacet, sel store.SessionFilter) {
-	if len(opts) > 0 {
-		<div class="facet">
-			<div class="facet-title label">Project</div>
-			<ul class="opts">
-				for i, o := range opts {
-					<li>
-						<a class={ projectOptClass(o.ID, sel) } href={ ProjectFacetHref(sel, o.ID) }>
-							<span class={ swatchClass(i) }></span>
-							<span class="opt-label" title={ ProjectFacetLabel(o) }>{ ProjectFacetLabel(o) }</span>
-							<span class="opt-count">{ fmt.Sprintf("%d", o.Count) }</span>
-						</a>
-					</li>
-				}
-			</ul>
-		</div>
-	}
+// tbSelect is one labeled toolbar control: a knurled-cap label over an
+// auto-submitting select carrying the option children.
+templ tbSelect(label, name string) {
+	<label class="tb-field">
+		<span class="tb-k label">{ label }</span>
+		<select name={ name } data-autosubmit aria-label={ label }>
+			{ children... }
+		</select>
+	</label>
 }
 
-// activeChip renders a removable chip for a selected text facet (agent / user /
-// machine); it renders nothing when that facet is unset.
+// activeChip renders a removable chip for a selected text facet (agent / machine /
+// user); it renders nothing when that facet is unset.
 templ activeChip(field, value string, sel store.SessionFilter) {
 	if value != "" {
 		<a class="fchip" href={ facetHref(field, value, sel) }>
@@ -101,115 +111,80 @@ templ activeProjectChip(opts []store.ProjectFacet, sel store.SessionFilter) {
 	}
 }
 
-// GlobalSessionList renders the cross-project session feed: one row per session
-// with its project, agent, branch, and figures. It is the htmx-swappable body of
-// the Sessions page. The session id is left off (the whole row links to the
-// session); columns size to their content and the Project column absorbs the
-// slack so the row reads flush on a wide page. Every header but Tags is a sort
-// control: it carries the current order (sel) so the active column lights its
-// direction glyph and clicking toggles ascending/descending.
+// GlobalSessionList renders the cross-project session feed: rows grouped under day
+// headings (in the default most-recent order) or as a flat ranked list (any other
+// sort). It is the body of the Sessions page. Each row leads with the session's
+// derived title so a run is recognizable by what it was about, with the agent,
+// project, branch, and figures in support; lilac is reserved for the active
+// filter, never spent per row.
 templ GlobalSessionList(rows []store.SessionRow, sel store.SessionFilter) {
 	if len(rows) == 0 {
 		<div class="empty">No sessions match these filters.</div>
 	} else {
-		<table class="grid sessions">
-			<thead>
-				<tr>
-					@sortHeader("Project", "project", "col-grow", sel)
-					<th>Tags</th>
-					@sortHeader("Agent", "agent", "", sel)
-					@sortHeader("Branch", "branch", "", sel)
-					@sortHeader("User", "user", "", sel)
-					@sortHeader("Messages", "messages", "num", sel)
-					@sortHeader("Tokens", "tokens", "num", sel)
-					@sortHeader("Updated", "updated", "", sel)
-				</tr>
-			</thead>
-			<tbody>
-				for _, s := range rows {
-					<tr data-row-href={ SessionPath(s.ID) }>
-						<td class="col-grow"><a class="proj-link" href={ ProjectHref(s.ProjectID) }>{ SessionRowProject(s) }</a></td>
-						@tagsCell(s.ProjectKind, s.Visibility)
-						<td><span class="tag agent">{ s.Agent }</span></td>
-						<td class="muted mono small">{ s.GitBranch }</td>
-						<td class="muted">{ s.Username }</td>
-						<td class="num">{ fmt.Sprintf("%d", s.MessageCount) }</td>
-						@tokenCell(s.SessionSummary)
-						<td class="muted" title={ FmtTime(s.UpdatedAt) }>{ FmtRelTime(s.UpdatedAt) }</td>
-					</tr>
+		<div class="feed">
+			for _, g := range BuildSessionFeed(rows, FeedIsGrouped(sel)) {
+				if g.Label != "" {
+					<div class="day-head">
+						<span class="day-label label">{ g.Label }</span>
+						<span class="day-rule"></span>
+						<span class="day-count mono small">{ fmt.Sprintf("%d", len(g.Rows)) }</span>
+					</div>
 				}
-			</tbody>
-		</table>
-	}
-}
-
-// sortHeader renders one click-to-sort column header: the whole cell is a link
-// (it fills the th's padding box) that toggles the sort, with a glyph showing the
-// active column's direction. extra carries the column's layout class (col-grow on
-// Project, num on the figures); sel supplies the current order.
-templ sortHeader(label, key, extra string, sel store.SessionFilter) {
-	<th class={ sortThClass(key, extra, sel) } aria-sort={ ariaSort(key, sel) }>
-		<a class="sort-link" href={ SortHref(sel, key) } title={ "Sort by " + label }>
-			<span class="sort-label">{ label }</span>
-			@sortGlyph(key, sel)
-		</a>
-	</th>
-}
-
-// sortGlyph draws the header's sort indicator: a single chevron in the active
-// column's direction (down for descending, up for ascending), or a faint
-// up/down pair on the other sortable columns that surfaces on hover to advertise
-// they can be sorted too.
-templ sortGlyph(key string, sel store.SessionFilter) {
-	if sortIsActive(key, sel) {
-		<svg class="sort-ico" viewBox="0 0 12 12" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
-			if sel.Desc {
-				<path d="M3 5l3 3 3-3" stroke-linecap="round" stroke-linejoin="round"></path>
-			} else {
-				<path d="M3 7l3-3 3 3" stroke-linecap="round" stroke-linejoin="round"></path>
+				for _, fr := range g.Rows {
+					@feedRow(fr)
+				}
 			}
-		</svg>
-	} else {
-		<svg class="sort-ico sort-ico-idle" viewBox="0 0 12 12" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
-			<path d="M3.5 4.75L6 2.5l2.5 2.25" stroke-linecap="round" stroke-linejoin="round"></path>
-			<path d="M3.5 7.25L6 9.5l2.5-2.25" stroke-linecap="round" stroke-linejoin="round"></path>
-		</svg>
+		</div>
 	}
 }
 
-// tagsCell gathers a row's state chips into one column: the project's
-// standalone/orphaned state (a remote project shows none) and the session's
-// public visibility. It replaces the two awkward separate columns.
-templ tagsCell(kind, visibility string) {
-	<td class="tags">
-		@kindTag(kind)
-		if visibility == "public" {
-			<span class="tag public">public</span>
-		}
-	</td>
+// feedRow renders one session as a single feed line. The whole row is the click
+// target (the data attribute, wired in app.js), so the project and branch read as
+// plain text rather than competing links.
+templ feedRow(fr FeedRow) {
+	<div class="srow" data-row-href={ SessionPath(fr.Row.ID) }>
+		<span class="srow-agent mono small">{ fr.Row.Agent }</span>
+		<div class="srow-main">
+			<div class={ titleClass(fr.Derived) }>{ fr.Title }</div>
+			<div class="srow-meta">
+				<span class={ projClass(fr.FadeProject) }>{ SessionRowProject(fr.Row) }</span>
+				if fr.Row.GitBranch != "" {
+					<span class="sep">·</span>
+					<span class="srow-branch mono">{ fr.Row.GitBranch }</span>
+				}
+				@kindTag(fr.Row.ProjectKind)
+				if fr.Row.Visibility == "public" {
+					<span class="tag public">public</span>
+				}
+			</div>
+		</div>
+		<span class="srow-msgs mono small" title="messages">{ fmt.Sprintf("%d", fr.Row.MessageCount) }</span>
+		@feedTokens(fr)
+		<span class="srow-time mono small" title={ FmtTime(fr.Row.UpdatedAt) }>{ FeedTime(fr.Row.UpdatedAt) }</span>
+	</div>
 }
 
-// tokenCell renders a session's total token volume with a hover/focus card that
-// breaks it down by class and shows cost, mirroring the overview heatmap's
-// tooltip so the two surfaces read alike.
-templ tokenCell(s store.SessionSummary) {
-	<td class="num tokens">
-		<span class="tok-cell" tabindex="0">
-			<span class="tok-total">{ FmtTokens(RowTokens(s)) }</span>
-			<span class="tok-tip" role="tooltip">
-				<span class="tt-total">{ FmtTokens(RowTokens(s)) } tokens</span>
-				<dl class="tt-grid">
-					<dt>In</dt>
-					<dd>{ FmtTokens(s.TotalInput) }</dd>
-					<dt>Out</dt>
-					<dd>{ FmtTokens(s.TotalOutput) }</dd>
-					<dt>Cache read</dt>
-					<dd>{ FmtTokens(s.TotalCacheRead) }</dd>
-					<dt>Cache write</dt>
-					<dd>{ FmtTokens(s.TotalCacheWrite) }</dd>
-				</dl>
-				<span class="tt-cost">{ FmtCost(s.TotalCostUSD, s.CostIncomplete) }</span>
-			</span>
+// feedTokens renders a session's token volume as a magnitude bar plus a compact
+// figure, with the same hover/focus breakdown card the overview and projects use
+// so the three surfaces read alike. The bar fills in steel, not lilac, so a feed
+// of a hundred rows does not drown the one-voice accent.
+templ feedTokens(fr FeedRow) {
+	<span class="srow-tok tok-cell" tabindex="0">
+		<span class="tokbar"><span class="tokbar-fill" style={ barStyle(fr.TokenPct) }></span></span>
+		<span class="tok-total mono">{ FmtTokensCompact(RowTokens(fr.Row.SessionSummary)) }</span>
+		<span class="tok-tip" role="tooltip">
+			<span class="tt-total">{ FmtTokens(RowTokens(fr.Row.SessionSummary)) } tokens</span>
+			<dl class="tt-grid">
+				<dt>In</dt>
+				<dd>{ FmtTokens(fr.Row.TotalInput) }</dd>
+				<dt>Out</dt>
+				<dd>{ FmtTokens(fr.Row.TotalOutput) }</dd>
+				<dt>Cache read</dt>
+				<dd>{ FmtTokens(fr.Row.TotalCacheRead) }</dd>
+				<dt>Cache write</dt>
+				<dd>{ FmtTokens(fr.Row.TotalCacheWrite) }</dd>
+			</dl>
+			<span class="tt-cost">{ FmtCost(fr.Row.TotalCostUSD, fr.Row.CostIncomplete) }</span>
 		</span>
-	</td>
+	</span>
 }
