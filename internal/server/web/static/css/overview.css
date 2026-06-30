@@ -12,6 +12,13 @@
 
 /* ---- Analytics ---- */
 .analytics { margin-top: var(--sp-md); }
+/* The panel's lead (totals strip + activity grid) holds a centered reading column
+   capped to the content box width the Overview's centered main provides (--maxw
+   less main's horizontal padding). On the Overview this equals the content box, so
+   it is a no-op; on the project page, whose main runs full-bleed for the session
+   table, it keeps the calendar grid at the Overview's width instead of stretching
+   it across the screen. The breakdowns and the session list below stay full width. */
+.usage-lead { max-width: calc(var(--maxw) - 2 * var(--sp-xl)); margin-inline: auto; }
 /* The metric toggle and the window selector share this segmented-control row; it
    sits above the activity grid (and, for the window selector, in the grid head). */
 .chart-toolbar { margin-bottom: var(--sp-sm); }
