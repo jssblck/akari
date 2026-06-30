@@ -47,9 +47,9 @@ func (b Breakdown) Tokens() int64 {
 	return b.Input + b.Output + b.CacheRead + b.CacheWrite
 }
 
-// Analytics is everything the inline charts render from, scoped either to one
-// project or (with projectID 0) the whole instance, and optionally bounded to a
-// trailing time window.
+// Analytics is everything the inline charts render from, scoped by an
+// AnalyticsFilter (a project or the whole instance, a trailing window, and an
+// optional user/agent/machine narrowing).
 type Analytics struct {
 	Series          []DayPoint
 	Models          []Breakdown
@@ -68,6 +68,21 @@ type Analytics struct {
 	CostIncomplete bool
 }
 
+// AnalyticsFilter scopes an Analytics query. The zero value is the whole instance,
+// all of history, every user, every agent and machine. ProjectID 0 means all
+// projects; a zero Since means all of history; an empty UserIDs/Agent/Machine means
+// no scoping on that dimension. The project page sets Agent/User/Machine so its
+// usage panel reflects the same filter as its session table, which keeps the panel
+// headline and the rows beneath it reconciled under a filter rather than letting
+// the headline stay instance-wide while the rows narrow.
+type AnalyticsFilter struct {
+	ProjectID int64
+	Since     time.Time
+	UserIDs   []int64
+	Agent     string
+	Machine   string
+}
+
 // HasData reports whether there is anything worth charting, so the view can show
 // an empty state instead of an axis with no line.
 func (a Analytics) HasData() bool {
@@ -81,11 +96,9 @@ func (a Analytics) TotalTokens() int64 {
 	return a.TotalIn + a.TotalOut + a.TotalCacheRead + a.TotalCacheWrite
 }
 
-// Analytics aggregates usage for the charts. projectID 0 means the whole
-// instance; a non-zero id scopes every query to that project. A non-zero `since`
-// bounds every rollup to events at or after that instant; the zero time means
-// all of history. A non-empty userIDs scopes every rollup to sessions owned by
-// those users; nil or empty means every user.
+// Analytics aggregates usage for the charts, scoped by f (see AnalyticsFilter):
+// project or whole instance, a trailing window, and an optional user/agent/machine
+// narrowing applied uniformly to every base.
 //
 // Every figure derives from one base set, the scoped dated usage_events, so the
 // headline totals, the daily series, the by-model split, and the by-agent split
@@ -109,22 +122,22 @@ func (a Analytics) TotalTokens() int64 {
 // The headline totals are summed from the by-agent split rather than queried
 // again: a session has exactly one agent, so the per-agent rows partition the
 // usage cleanly and their sum is the grand total with no double counting.
-func (s *Store) Analytics(ctx context.Context, projectID int64, since time.Time, userIDs []int64) (Analytics, error) {
+func (s *Store) Analytics(ctx context.Context, f AnalyticsFilter) (Analytics, error) {
 	var a Analytics
 
-	series, err := s.analyticsSeries(ctx, projectID, since, userIDs)
+	series, err := s.analyticsSeries(ctx, f)
 	if err != nil {
 		return a, err
 	}
 	a.Series = series
 
-	models, err := s.analyticsByModel(ctx, projectID, since, userIDs)
+	models, err := s.analyticsByModel(ctx, f)
 	if err != nil {
 		return a, err
 	}
 	a.Models = models
 
-	agents, err := s.analyticsByAgent(ctx, projectID, since, userIDs)
+	agents, err := s.analyticsByAgent(ctx, f)
 	if err != nil {
 		return a, err
 	}
@@ -147,30 +160,40 @@ func (s *Store) Analytics(ctx context.Context, projectID int64, since time.Time,
 	return a, nil
 }
 
-// usageFilter builds the conjunctive WHERE additions for a usage_events query
-// joined to sessions as `s`: the optional project scope, the optional set-of-users
-// scope, and the optional trailing time bound. Placeholders are numbered so it can
-// follow an existing WHERE clause that already opened the predicate.
-func usageFilter(projectID int64, since time.Time, userIDs []int64) (string, []any) {
+// clause builds the conjunctive WHERE additions for a usage_events query joined to
+// sessions as `s`: the optional project, user-set, agent, and machine scopes, plus
+// the optional trailing time bound. Agent and machine read the verbatim session
+// columns the session list filters on, so the panel and the table narrow by the
+// same values. Placeholders are numbered so it can follow an existing WHERE clause
+// that already opened the predicate.
+func (f AnalyticsFilter) clause() (string, []any) {
 	var clauses string
 	var args []any
-	if projectID != 0 {
-		args = append(args, projectID)
+	if f.ProjectID != 0 {
+		args = append(args, f.ProjectID)
 		clauses += fmt.Sprintf(" AND s.project_id = $%d", len(args))
 	}
-	if len(userIDs) > 0 {
-		args = append(args, userIDs)
+	if len(f.UserIDs) > 0 {
+		args = append(args, f.UserIDs)
 		clauses += fmt.Sprintf(" AND s.user_id = ANY($%d)", len(args))
 	}
-	if !since.IsZero() {
-		args = append(args, since)
+	if f.Agent != "" {
+		args = append(args, f.Agent)
+		clauses += fmt.Sprintf(" AND s.agent = $%d", len(args))
+	}
+	if f.Machine != "" {
+		args = append(args, f.Machine)
+		clauses += fmt.Sprintf(" AND s.machine = $%d", len(args))
+	}
+	if !f.Since.IsZero() {
+		args = append(args, f.Since)
 		clauses += fmt.Sprintf(" AND ue.occurred_at >= $%d", len(args))
 	}
 	return clauses, args
 }
 
-func (s *Store) analyticsSeries(ctx context.Context, projectID int64, since time.Time, userIDs []int64) ([]DayPoint, error) {
-	filter, args := usageFilter(projectID, since, userIDs)
+func (s *Store) analyticsSeries(ctx context.Context, f AnalyticsFilter) ([]DayPoint, error) {
+	filter, args := f.clause()
 	rows, err := s.Pool.Query(ctx,
 		`SELECT date_trunc('day', ue.occurred_at) AS day,
 		        coalesce(sum(ue.cost_usd), 0),
@@ -210,8 +233,8 @@ func (s *Store) analyticsSeries(ctx context.Context, projectID int64, since time
 // splits agree.
 const costIncompleteExpr = `bool_or(ue.cost_usd IS NULL AND (ue.input_tokens + ue.output_tokens + ue.cache_read_tokens + ue.cache_write_tokens + ue.reasoning_tokens) > 0)`
 
-func (s *Store) analyticsByModel(ctx context.Context, projectID int64, since time.Time, userIDs []int64) ([]Breakdown, error) {
-	filter, args := usageFilter(projectID, since, userIDs)
+func (s *Store) analyticsByModel(ctx context.Context, f AnalyticsFilter) ([]Breakdown, error) {
+	filter, args := f.clause()
 	// occurred_at IS NOT NULL matches the series and the by-agent split, so the
 	// three reconcile; see Analytics. No model <> '' filter though: usage that
 	// carries no model id still has to be in the split, or the by-model rows would
@@ -243,14 +266,14 @@ func (s *Store) analyticsByModel(ctx context.Context, projectID int64, since tim
 	return out, nil
 }
 
-func (s *Store) analyticsByAgent(ctx context.Context, projectID int64, since time.Time, userIDs []int64) ([]Breakdown, error) {
+func (s *Store) analyticsByAgent(ctx context.Context, f AnalyticsFilter) ([]Breakdown, error) {
 	// One path, the same dated usage_events base as the by-model split and the
 	// series, so all of them reconcile with the headline (see Analytics for why the
 	// occurred_at IS NOT NULL guard is uniform). The headline is summed from these
 	// rows, so this query defines the totals; the rollups equal this sum by
 	// construction (sessions.total_* == sum over a session's usage_events), so
 	// reading the ledger here loses nothing the old session-rollup path carried.
-	filter, args := usageFilter(projectID, since, userIDs)
+	filter, args := f.clause()
 	rows, err := s.Pool.Query(ctx,
 		`SELECT s.agent,
 		        coalesce(sum(ue.cost_usd), 0),

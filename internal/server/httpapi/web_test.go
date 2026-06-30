@@ -568,20 +568,22 @@ func TestProjectPageRangeWindow(t *testing.T) {
 		t.Fatalf("the all-history window should list the 60-day-old session, got:\n%s", body)
 	}
 
-	// An htmx request that targets #usage (the range selector) gets the full panel.
-	reqUsage, _ := http.NewRequest(http.MethodGet, srv.URL+base+"?range=90d", nil)
-	reqUsage.Header.Set("HX-Request", "true")
-	reqUsage.Header.Set("HX-Target", "usage")
-	if body = readBody(t, mustDo(t, c, reqUsage)); !strings.Contains(body, "data-heatmap") {
-		t.Fatalf("an htmx request targeting #usage should render the usage panel, got:\n%s", body)
+	// The range selector and filter form both swap the whole #project-view, so the
+	// usage panel and the session table re-scope together rather than drifting apart
+	// (the panel narrowing with the rows under a filter is the point). The controls
+	// target that region, and a swap of it carries both the panel and the list.
+	if !strings.Contains(body, `id="project-view"`) {
+		t.Fatalf("project page should wrap the panel and table in #project-view, got:\n%s", body)
 	}
-
-	// An htmx request that targets #session-list (the filter form) gets only the list.
-	reqList, _ := http.NewRequest(http.MethodGet, srv.URL+base, nil)
-	reqList.Header.Set("HX-Request", "true")
-	reqList.Header.Set("HX-Target", "session-list")
-	if body = readBody(t, mustDo(t, c, reqList)); strings.Contains(body, "data-heatmap") {
-		t.Fatalf("a session-list htmx request should not include the usage panel, got:\n%s", body)
+	if !strings.Contains(body, `hx-target="#project-view"`) || !strings.Contains(body, `hx-select="#project-view"`) {
+		t.Fatalf("project controls should target #project-view, got:\n%s", body)
+	}
+	reqView, _ := http.NewRequest(http.MethodGet, srv.URL+base+"?range=all", nil)
+	reqView.Header.Set("HX-Request", "true")
+	reqView.Header.Set("HX-Target", "project-view")
+	body = readBody(t, mustDo(t, c, reqView))
+	if !strings.Contains(body, "data-heatmap") || !strings.Contains(body, `id="session-list"`) {
+		t.Fatalf("a #project-view swap should carry both the usage panel and the session list, got:\n%s", body)
 	}
 }
 

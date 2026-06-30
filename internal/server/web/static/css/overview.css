@@ -53,8 +53,20 @@
   opacity: 0.5; pointer-events: none;
   transition: opacity var(--dur-base) var(--ease-state);
 }
+/* The project page swaps the larger #project-view (panel plus session table) when
+   its filter toolbar changes, so dim that whole region while the request is in
+   flight, the same "updating" feedback the range control gives. The range selector
+   on this page lives inside #project-view too, so it reuses this rule. */
+#project-view:has(.toolbar .htmx-request) .stats,
+#project-view:has(.toolbar .htmx-request) .heatmap,
+#project-view:has(.toolbar .htmx-request) .breakdowns,
+#project-view:has(.toolbar .htmx-request) #session-list {
+  opacity: 0.5; pointer-events: none;
+  transition: opacity var(--dur-base) var(--ease-state);
+}
 @media (prefers-reduced-motion: no-preference) {
   .heatmap-controls .htmx-request { animation: ctrl-busy 0.9s var(--ease-state) infinite; }
+  .toolbar .htmx-request { animation: ctrl-busy 0.9s var(--ease-state) infinite; }
   @keyframes ctrl-busy { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
 }
 

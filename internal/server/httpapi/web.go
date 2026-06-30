@@ -82,7 +82,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	selected := web.SelectedUserIDs(r.URL.Query()["user"], users)
-	analytics, err := s.Store.Analytics(r.Context(), 0, web.RangeSince(rng, time.Now()), selected)
+	analytics, err := s.Store.Analytics(r.Context(), store.AnalyticsFilter{Since: web.RangeSince(rng, time.Now()), UserIDs: selected})
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "overview"), http.StatusInternalServerError, "Could not load analytics."))
 		return
@@ -195,23 +195,23 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The session filter form swaps only the session list (it targets #session-list);
-	// the usage panel's range selector also refetches this handler but targets #usage
-	// and selects the full panel out of a complete page render, so only a session-list
-	// request short-circuits to the list fragment.
-	if r.Header.Get("HX-Request") == "true" && r.Header.Get("HX-Target") == "session-list" {
-		render(w, r, http.StatusOK, web.ProjectSessionList(sessions))
-		return
-	}
-
 	facets, err := s.Store.SessionFacets(r.Context(), id)
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load filters."))
 		return
 	}
-	// The project page has no per-user filter, so user scope is nil; the window is
-	// the same `since` the session list above is bounded to.
-	analytics, err := s.Store.Analytics(r.Context(), id, since, nil)
+	// The usage panel scopes to the same agent/user/machine the session table does, so
+	// the headline and the rows reconcile under a filter rather than the panel staying
+	// project-wide while the rows narrow. The username resolves to a user id (the
+	// analytics base scopes by id); an unknown name yields no scope, which combined
+	// with an empty session list reads as "no such user here" consistently.
+	af := store.AnalyticsFilter{ProjectID: id, Since: since, Agent: filter.Agent, Machine: filter.Machine}
+	if filter.Username != "" {
+		if u, err := s.Store.UserByUsername(r.Context(), filter.Username); err == nil {
+			af.UserIDs = []int64{u.ID}
+		}
+	}
+	analytics, err := s.Store.Analytics(r.Context(), af)
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load analytics."))
 		return

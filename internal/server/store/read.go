@@ -35,6 +35,14 @@ type ProjectSummary struct {
 	// is the OR of the per-session cost_incomplete flags, letting the index render
 	// the same "$X+" marker the per-session rows show instead of an exact figure
 	// that silently understates an aggregate built from incomplete sessions.
+	//
+	// Like every other figure on this index, it is rollup-scoped (every surviving
+	// usage row), so it can read true for a project whose only unpriced usage is
+	// undated while the all-time analytics panel, which drops undated rows off its
+	// time axis, reads exact. That is the one documented rollup-vs-analytics gap,
+	// the same one the token and cost totals carry (see, in package store's tests,
+	// TestUndatedUsageIsTheOnlyRollupAnalyticsGap): the flag tracks each surface's
+	// own displayed total rather than diverging from it.
 	CostIncomplete bool
 	LastActivity   *time.Time
 }

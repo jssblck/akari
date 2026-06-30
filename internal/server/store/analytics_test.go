@@ -129,7 +129,7 @@ func TestCostIncompleteRollsUp(t *testing.T) {
 
 	// Analytics flags A's window as incomplete and at least one of its breakdown
 	// rows; B's window is exact.
-	aA, err := st.Analytics(ctx, projA, time.Time{}, nil)
+	aA, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: projA, Since: time.Time{}, UserIDs: nil})
 	if err != nil {
 		t.Fatalf("analytics A: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestCostIncompleteRollsUp(t *testing.T) {
 	if !anyModelIncomplete {
 		t.Error("a by-model breakdown row should carry the incomplete marker")
 	}
-	aB, err := st.Analytics(ctx, projB, time.Time{}, nil)
+	aB, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: projB, Since: time.Time{}, UserIDs: nil})
 	if err != nil {
 		t.Fatalf("analytics B: %v", err)
 	}
@@ -209,12 +209,69 @@ func TestCostIncompleteReasoningOnly(t *testing.T) {
 		t.Fatalf("seed reasoning-only usage: %v", err)
 	}
 
-	a, err := st.Analytics(ctx, proj, time.Time{}, nil)
+	a, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: proj, Since: time.Time{}, UserIDs: nil})
 	if err != nil {
 		t.Fatalf("analytics: %v", err)
 	}
 	if !a.CostIncomplete {
 		t.Error("a reasoning-only unpriced usage event should flag the window cost-incomplete")
+	}
+}
+
+// TestAnalyticsFiltersByAgentAndMachine pins the project page's reconciliation fix:
+// the usage panel scopes to the same agent/machine the session table does, so a
+// filtered headline reflects only the filtered slice rather than staying
+// project-wide. Without this, /projects/<id>?agent=claude would narrow the rows
+// while the headline still summed every agent.
+func TestAnalyticsFiltersByAgentAndMachine(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	user, err := st.Register(ctx, "grace", "h", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	proj, err := st.UpsertProject(ctx, "github.com/ada/multi", "github.com", "ada", "multi", "multi", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+
+	sC := seedSessionWithStats(t, st, user.ID, proj, "claude", "c1", 1.0, 500, 100)
+	seedUsage(t, st, sC, "claude-opus-4-8", 1.0, 500, 100, 0, "c-u")
+	sX := seedSessionWithStats(t, st, user.ID, proj, "codex", "x1", 2.0, 800, 200)
+	seedUsage(t, st, sX, "gpt-5.5", 2.0, 800, 200, 0, "x-u")
+
+	all, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: proj})
+	if err != nil {
+		t.Fatalf("analytics all: %v", err)
+	}
+	if all.TotalIn != 1300 || all.Sessions != 2 {
+		t.Errorf("unfiltered = in %d sessions %d, want 1300/2", all.TotalIn, all.Sessions)
+	}
+
+	claude, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: proj, Agent: "claude"})
+	if err != nil {
+		t.Fatalf("analytics agent: %v", err)
+	}
+	if claude.TotalIn != 500 || claude.TotalOut != 100 || claude.Sessions != 1 {
+		t.Errorf("agent=claude = in %d out %d sessions %d, want 500/100/1", claude.TotalIn, claude.TotalOut, claude.Sessions)
+	}
+	if len(claude.Agents) != 1 || claude.Agents[0].Label != "claude" {
+		t.Errorf("agent=claude by-agent split = %+v, want one claude row", claude.Agents)
+	}
+
+	// Machine narrows identically. Give the claude session a distinct machine, then
+	// scope to it: only that session's usage should remain.
+	if _, err := st.Pool.Exec(ctx, "UPDATE sessions SET machine = 'laptop' WHERE id = $1", sC); err != nil {
+		t.Fatalf("set machine: %v", err)
+	}
+	lap, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: proj, Machine: "laptop"})
+	if err != nil {
+		t.Fatalf("analytics machine: %v", err)
+	}
+	if lap.TotalIn != 500 || lap.Sessions != 1 {
+		t.Errorf("machine=laptop = in %d sessions %d, want 500/1", lap.TotalIn, lap.Sessions)
 	}
 }
 
@@ -253,7 +310,7 @@ func TestAnalyticsRollups(t *testing.T) {
 	seedUsage(t, st, s1, "claude-opus-4-8", 1.5, 500, 100, 1, "u2")
 	seedUsage(t, st, s2, "gpt-5.5", 1.0, 400, 80, 2, "u3")
 
-	a, err := st.Analytics(ctx, proj, time.Time{}, nil)
+	a, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: proj, Since: time.Time{}, UserIDs: nil})
 	if err != nil {
 		t.Fatalf("analytics: %v", err)
 	}
@@ -285,7 +342,7 @@ func TestAnalyticsRollups(t *testing.T) {
 	}
 
 	// Global scope (projectID 0) sees the same single project.
-	g, err := st.Analytics(ctx, 0, time.Time{}, nil)
+	g, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: 0, Since: time.Time{}, UserIDs: nil})
 	if err != nil {
 		t.Fatalf("global analytics: %v", err)
 	}
@@ -318,7 +375,7 @@ func TestAnalyticsUserFilter(t *testing.T) {
 	seedUsage(t, st, sa, "gpt-5.5", 1.0, 300, 60, 1, "a1")
 
 	// Scoped to grace, all-time: only her session, spend, and agent survive.
-	g, err := st.Analytics(ctx, 0, time.Time{}, []int64{graceID})
+	g, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: 0, Since: time.Time{}, UserIDs: []int64{graceID}})
 	if err != nil {
 		t.Fatalf("grace all-time analytics: %v", err)
 	}
@@ -337,7 +394,7 @@ func TestAnalyticsUserFilter(t *testing.T) {
 
 	// Scoped to grace, windowed: the usage_events path agrees with the rollup path.
 	since := time.Now().AddDate(0, 0, -7)
-	gw, err := st.Analytics(ctx, 0, since, []int64{graceID})
+	gw, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: 0, Since: since, UserIDs: []int64{graceID}})
 	if err != nil {
 		t.Fatalf("grace windowed analytics: %v", err)
 	}
@@ -346,11 +403,11 @@ func TestAnalyticsUserFilter(t *testing.T) {
 	}
 
 	// Both users selected matches the unscoped view: two sessions, full spend.
-	both, err := st.Analytics(ctx, 0, time.Time{}, []int64{graceID, adaID})
+	both, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: 0, Since: time.Time{}, UserIDs: []int64{graceID, adaID}})
 	if err != nil {
 		t.Fatalf("both-user analytics: %v", err)
 	}
-	all, err := st.Analytics(ctx, 0, time.Time{}, nil)
+	all, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: 0, Since: time.Time{}, UserIDs: nil})
 	if err != nil {
 		t.Fatalf("unscoped analytics: %v", err)
 	}
@@ -407,7 +464,7 @@ func TestAnalyticsProjectAndUserScope(t *testing.T) {
 
 	// Windowed path (usage_events): project A AND grace.
 	since := time.Now().AddDate(0, 0, -7)
-	w, err := st.Analytics(ctx, projA, since, []int64{graceID})
+	w, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: projA, Since: since, UserIDs: []int64{graceID}})
 	if err != nil {
 		t.Fatalf("windowed combined analytics: %v", err)
 	}
@@ -417,7 +474,7 @@ func TestAnalyticsProjectAndUserScope(t *testing.T) {
 	}
 
 	// Unbounded view (no time bound): project A AND grace.
-	all, err := st.Analytics(ctx, projA, time.Time{}, []int64{graceID})
+	all, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: projA, Since: time.Time{}, UserIDs: []int64{graceID}})
 	if err != nil {
 		t.Fatalf("all-time combined analytics: %v", err)
 	}
@@ -540,7 +597,7 @@ func TestAnalyticsHeadlineMatchesBreakdowns(t *testing.T) {
 
 	// All-time: every dated event counts, including the unpriced one; the undated
 	// event does not, so the headline still equals the chart.
-	all, err := st.Analytics(ctx, proj, time.Time{}, nil)
+	all, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: proj, Since: time.Time{}, UserIDs: nil})
 	if err != nil {
 		t.Fatalf("all-time analytics: %v", err)
 	}
@@ -558,7 +615,7 @@ func TestAnalyticsHeadlineMatchesBreakdowns(t *testing.T) {
 	// Windowed: all dated events fall inside a 7-day window, so the window sees the
 	// same dated set and reconciles identically.
 	since := time.Now().AddDate(0, 0, -7)
-	win, err := st.Analytics(ctx, proj, since, nil)
+	win, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: proj, Since: since, UserIDs: nil})
 	if err != nil {
 		t.Fatalf("windowed analytics: %v", err)
 	}
@@ -607,7 +664,7 @@ func TestAnalyticsTimeWindow(t *testing.T) {
 
 	// A 7-day window keeps only s1's two recent events.
 	since := time.Now().AddDate(0, 0, -7)
-	a, err := st.Analytics(ctx, 0, since, nil)
+	a, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: 0, Since: since, UserIDs: nil})
 	if err != nil {
 		t.Fatalf("windowed analytics: %v", err)
 	}
@@ -631,7 +688,7 @@ func TestAnalyticsTimeWindow(t *testing.T) {
 	}
 
 	// The unbounded view still sees both sessions and the older spend.
-	full, err := st.Analytics(ctx, 0, time.Time{}, nil)
+	full, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: 0, Since: time.Time{}, UserIDs: nil})
 	if err != nil {
 		t.Fatalf("full analytics: %v", err)
 	}
@@ -676,7 +733,7 @@ func TestAnalyticsScopedWindowWithCacheTotals(t *testing.T) {
 	seedUsageCache(t, st, sB, "gpt-5.5", 9.0, 999, 999, 999, 999, 1, "b-recent")
 
 	since := time.Now().AddDate(0, 0, -7)
-	a, err := st.Analytics(ctx, projA, since, nil)
+	a, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: projA, Since: since, UserIDs: nil})
 	if err != nil {
 		t.Fatalf("scoped windowed analytics: %v", err)
 	}
@@ -728,7 +785,7 @@ func TestAnalyticsAllTimeTokenTotals(t *testing.T) {
 	seedUsageCache(t, st, s1, "claude-opus-4-8", 1.0, 100, 20, 30, 7, 0, "c1")
 	seedUsageCache(t, st, s1, "claude-opus-4-8", 1.0, 200, 40, 60, 14, 3, "c2")
 
-	a, err := st.Analytics(ctx, proj, time.Time{}, nil)
+	a, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: proj, Since: time.Time{}, UserIDs: nil})
 	if err != nil {
 		t.Fatalf("all-time analytics: %v", err)
 	}
@@ -767,7 +824,7 @@ func TestAnalyticsWindowLowerBoundInclusive(t *testing.T) {
 	seedUsageAt(t, st, s1, "claude-opus-4-8", 1.0, 100, 20, bound, "at-bound")
 	seedUsageAt(t, st, s1, "claude-opus-4-8", 5.0, 500, 90, bound.Add(-time.Microsecond), "below-bound")
 
-	a, err := st.Analytics(ctx, proj, bound, nil)
+	a, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: proj, Since: bound, UserIDs: nil})
 	if err != nil {
 		t.Fatalf("boundary analytics: %v", err)
 	}

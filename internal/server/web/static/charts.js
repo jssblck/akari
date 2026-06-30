@@ -234,16 +234,19 @@
   } else {
     init();
   }
-  // The range selector swaps the usage panel (#usage) in place, bringing a fresh,
-  // unhydrated heatmap. Hydrate only that panel, and only on that swap: gating on
-  // the swapped target's id by an O(1) check keeps live transcript appends (which
-  // swap #session-body on every SSE update) from scanning a growing document. Scan
-  // the live #usage by id, not the event's target: an outerHTML swap reports the
-  // detached old node. The _hydrated guard skips any grid that survived.
+  // A control swap brings a fresh, unhydrated heatmap: the overview's range/user
+  // controls swap #usage; the project page swaps the larger #project-view (panel
+  // plus session table) so both re-scope to one filter at once. Hydrate the grids
+  // under whichever of those swapped, and only those: gating on the swapped target's
+  // id by an O(1) check keeps live transcript appends (which swap #session-body on
+  // every SSE update) from scanning a growing document. The _hydrated guard skips
+  // any grid that survived the swap.
   document.addEventListener("htmx:afterSwap", function (e) {
     var t = (e.detail && e.detail.target) || e.target;
-    if (!t || t.id !== "usage") return;
-    var root = document.getElementById("usage");
+    if (!t || (t.id !== "usage" && t.id !== "project-view")) return;
+    // Read the live node by id, not the event's target: an outerHTML swap reports
+    // the detached old node, whose subtree is no longer in the document.
+    var root = document.getElementById(t.id);
     if (!root) return;
     Array.prototype.slice.call(root.querySelectorAll("[data-heatmap]")).forEach(initHeatmap);
   });

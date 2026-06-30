@@ -291,11 +291,14 @@ func TestProjectPageRendersHeatmap(t *testing.T) {
 	for _, want := range []string{
 		`data-heatmap`, `data-heatmap-target="chart-project"`, `>Tokens</button>`, `>Dollars</button>`,
 		`id="usage"`, `aria-label="Date range"`,
+		// Panel and table share one swappable region so a range or filter change
+		// refetches both and they reflect the same scope.
+		`id="project-view"`,
 		// The selector refetches the project's own path, carries the active window,
 		// and rides the active agent filter so switching the window keeps it.
 		`hx-get="/projects/7?agent=claude&amp;range=7d"`,
 		`class="seg active" hx-get="/projects/7?agent=claude&amp;range=90d"`,
-		`hx-target="#usage"`, `hx-select="#usage"`,
+		`hx-target="#project-view"`, `hx-select="#project-view"`,
 		// The filter form carries the window so a filter submit does not reset it.
 		`<input type="hidden" name="range" value="90d"`,
 	} {

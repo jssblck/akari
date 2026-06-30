@@ -309,7 +309,7 @@ func TestProjectsIndexReconcilesWithAnalytics(t *testing.T) {
 		if !ok {
 			t.Fatalf("project %d missing from index", pid)
 		}
-		a, err := st.Analytics(ctx, pid, time.Time{}, nil)
+		a, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: pid, Since: time.Time{}, UserIDs: nil})
 		if err != nil {
 			t.Fatalf("analytics for project %d: %v", pid, err)
 		}
@@ -330,7 +330,7 @@ func TestProjectsIndexReconcilesWithAnalytics(t *testing.T) {
 	// The instance-wide overview totals must equal the sum of the per-project index
 	// rollups, so the Overview page and the Projects index never disagree on the
 	// fleet total.
-	all, err := st.Analytics(ctx, 0, time.Time{}, nil)
+	all, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: 0, Since: time.Time{}, UserIDs: nil})
 	if err != nil {
 		t.Fatalf("instance analytics: %v", err)
 	}
@@ -399,7 +399,7 @@ func TestUndatedUsageIsTheOnlyRollupAnalyticsGap(t *testing.T) {
 			p = pr
 		}
 	}
-	a, err := st.Analytics(ctx, proj, time.Time{}, nil)
+	a, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: proj, Since: time.Time{}, UserIDs: nil})
 	if err != nil {
 		t.Fatalf("analytics: %v", err)
 	}
@@ -418,5 +418,57 @@ func TestUndatedUsageIsTheOnlyRollupAnalyticsGap(t *testing.T) {
 	}
 	if got := p.TotalCostUSD - a.TotalCost; got < undatedCost-1e-9 || got > undatedCost+1e-9 {
 		t.Errorf("cost gap = %v, want exactly the undated %v", got, undatedCost)
+	}
+}
+
+// TestCostIncompleteFollowsUndatedGap pins that the cost-incomplete marker rides the
+// same documented rollup-vs-analytics gap as the token and cost totals. An undated,
+// unpriced usage row (tokens, no cost, no occurred_at) sets the session rollup's
+// flag, so the projects index reads "$X+", but it is dropped from the dated
+// analytics base, so the all-time panel's cost is exact and reads no marker. The two
+// surfaces are allowed to differ here, and only here, for exactly the undated row;
+// any OTHER source of divergence in the flag would be a bug this guards against.
+func TestCostIncompleteFollowsUndatedGap(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	user, err := st.Register(ctx, "grace", "h", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	proj, err := st.UpsertProject(ctx, "github.com/ada/engine", "github.com", "ada", "engine", "engine", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+
+	// One undated, unpriced row: tokens but no cost (unpriced model) and no
+	// occurred_at (no place on the time axis).
+	usage := []usageRow{
+		{Model: "some-unpriced-model", In: 500, Out: 250, DedupKey: "undated-unpriced", SourceOffset: 10},
+	}
+	sid := ingestOnly(t, st, user.ID, proj, "claude", "s1", []store.MessageDelta{{Ordinal: 0, Role: "user", Content: "hi"}}, usage)
+	assertRollupMatchesLedger(t, st, sid, "after ingest")
+
+	projects, err := st.ListProjects(ctx)
+	if err != nil {
+		t.Fatalf("list projects: %v", err)
+	}
+	var p store.ProjectSummary
+	for _, pr := range projects {
+		if pr.ID == proj {
+			p = pr
+		}
+	}
+	if !p.CostIncomplete {
+		t.Error("projects index should flag the project cost-incomplete: the rollup counts the undated unpriced row")
+	}
+
+	a, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: proj})
+	if err != nil {
+		t.Fatalf("analytics: %v", err)
+	}
+	if a.CostIncomplete {
+		t.Error("all-time analytics drops the undated row, so its cost is exact and must not flag incomplete")
 	}
 }
