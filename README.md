@@ -118,15 +118,15 @@ URL `eph status` reports (also exported as `AKARI_URL`).
 #### One-shot launch (preview/debug)
 
 The bundled [`.claude/launch.json`](.claude/launch.json) starts the whole stack
-in one action through `akari-server dev-launch`. Unlike a bare `eph run`, which
-only injects the environment of services that are already up, `dev-launch` owns
-the full local lifecycle: it runs `eph up postgres`, seeds example data once the
-server is healthy (the same idempotent seed described below), runs the server in
-the foreground on the launcher's assigned port, and runs `eph down` when the
+in one action through `eph dev`. A Claude Desktop preview server runs a single
+foreground command and offers no separate setup or teardown hook, so `eph dev`
+fills both ends: it brings every service up and runs each `post-start` hook (the
+same idempotent seed described below), foregrounds the server `run=` service on
+the port the launcher assigns (passed as `$PORT`), and runs `eph down` when the
 launch ends. `eph down` keeps the `pgdata` volume, so the next launch restarts
-fast and stays seeded. Pass `--no-seed` to skip seeding. It is meant for the
-launch config; the `eph up` loop above remains the way to drive the stack by
-hand.
+fast and stays seeded. Pass `--clean` (`runtimeArgs: ["dev", "--clean"]`) to
+reset the volume on every launch instead. It is meant for the launch config; the
+`eph up` loop above remains the way to drive the stack by hand.
 
 ### Example data for development
 
@@ -177,7 +177,6 @@ akari-server reparse    # force a rebuild of every projection from stored raw by
 akari-server reparse --agent claude   # limit a reparse to one agent
 akari-server sweep      # reclaim orphaned CAS blobs now
 akari-server dev-seed   # fill a local server with example data (see Example data above)
-akari-server dev-launch # eph up + seed + run the server + eph down (used by .claude/launch.json)
 akari-server update     # update to the latest release (see Updating below)
 akari-server version    # print the build version and exit
 ```
