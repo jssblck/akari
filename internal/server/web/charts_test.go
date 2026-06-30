@@ -66,6 +66,11 @@ func TestBuildBreakdownCountsCacheTokens(t *testing.T) {
 	if claude.Pct != 100 || gpt.Pct >= 100 {
 		t.Errorf("the cache-heavy slice should be full width and lead: claude=%.2f gpt=%.2f", claude.Pct, gpt.Pct)
 	}
+	// Every class is pinned to a distinct value so wiring a field to the wrong
+	// source (In showing the output total, say) fails rather than passing by luck.
+	if claude.Input != 1_000_000 || claude.Output != 500_000 {
+		t.Errorf("row must keep the in/out split for the tooltip: in=%d out=%d", claude.Input, claude.Output)
+	}
 	if claude.CacheRead != 80_000_000 || claude.CacheWrite != 12_000_000 {
 		t.Errorf("row must keep the cache split for the tooltip: read=%d write=%d", claude.CacheRead, claude.CacheWrite)
 	}
@@ -85,6 +90,8 @@ func TestBreakdownListTokenTooltip(t *testing.T) {
 		`class="tok-cell"`, // the hover container wraps the figure
 		`class="tok-total">` + FmtTokens(93_500_000) + `<`, // headline is the all-class total
 		`class="tok-tip"`, // the breakdown card
+		`<dt>In</dt><dd>` + FmtTokens(1_000_000) + `</dd>`,
+		`<dt>Out</dt><dd>` + FmtTokens(500_000) + `</dd>`,
 		`<dt>Cache read</dt><dd>` + FmtTokens(80_000_000) + `</dd>`,
 		`<dt>Cache write</dt><dd>` + FmtTokens(12_000_000) + `</dd>`,
 		`class="tt-cost">$942.08</span>`, // the cost the volume actually bought
@@ -125,11 +132,14 @@ func TestBuildBreakdownTinySliver(t *testing.T) {
 func TestFoldUnknownModels(t *testing.T) {
 	// Priced models keep their identity and order; everything unpriced (including
 	// a codenamed pre-release) collapses into a single trailing "Other" row.
+	// The unpriced models carry a distinct value in every class so the fold is
+	// checked to sum all four, not just Input: dropping Output, CacheRead, or
+	// CacheWrite from the Other row would fail below.
 	folded := FoldUnknownModels([]store.Breakdown{
 		{Label: "claude-opus-4-8", CostUSD: 4, Input: 100, Sessions: 2},
-		{Label: "skunkworks-preview", CostUSD: 0, Input: 30, Sessions: 1},
+		{Label: "skunkworks-preview", CostUSD: 0, Input: 30, Output: 11, CacheRead: 700, CacheWrite: 9, Sessions: 1},
 		{Label: "gpt-5.5", CostUSD: 1, Input: 50, Sessions: 1},
-		{Label: "internal-codename-x", CostUSD: 0, Input: 20, Sessions: 2},
+		{Label: "internal-codename-x", CostUSD: 0, Input: 20, Output: 4, CacheRead: 300, CacheWrite: 1, Sessions: 2},
 	})
 	if len(folded) != 3 {
 		t.Fatalf("want 3 rows (two priced + Other), got %d: %+v", len(folded), folded)
@@ -146,7 +156,13 @@ func TestFoldUnknownModels(t *testing.T) {
 			t.Errorf("an unpriced model name leaked into the overview: %q", row.Label)
 		}
 	}
-	if other.Tokens() != 50 || other.Sessions != 3 {
+	// Each class folds independently: In 30+20, Out 11+4, cache read 700+300,
+	// cache write 9+1, and the total is their sum (1075).
+	if other.Input != 50 || other.Output != 15 || other.CacheRead != 1000 || other.CacheWrite != 10 {
+		t.Errorf("Other should fold every class of the unpriced tail: in=%d out=%d read=%d write=%d",
+			other.Input, other.Output, other.CacheRead, other.CacheWrite)
+	}
+	if other.Tokens() != 1075 || other.Sessions != 3 {
 		t.Errorf("Other should sum the unpriced tail: tokens=%d sessions=%d", other.Tokens(), other.Sessions)
 	}
 }
