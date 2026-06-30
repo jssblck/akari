@@ -52,8 +52,8 @@
 
 /* One session row. The whole row is the click target (wired in app.js), so the
    project and branch read as plain text rather than competing links. The grid
-   keeps the figures in stable columns; the title column takes the slack and
-   ellipsizes. */
+   keeps the figures in stable columns; the main metadata column takes the slack
+   and ellipsizes. */
 .srow {
   display: grid;
   grid-template-columns: 56px minmax(0, 1fr) 52px 132px 46px;
@@ -68,24 +68,33 @@
 
 .srow-agent { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-.srow-main { min-width: 0; }
-.srow-title {
-  color: var(--text); font-size: 0.875rem; line-height: 1.35;
+/* The main column is a single metadata line: the project anchors it, the branch
+   carries the detail that tells two same-project runs apart, then the state chips.
+   The branch takes the slack and ellipsizes so a long ref never pushes the chips
+   out of the row. */
+.srow-main {
+  min-width: 0;
+  display: flex; align-items: center; gap: var(--sp-sm);
+}
+.srow-proj {
+  flex: none; color: var(--text); font-size: 0.875rem;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40ch;
+}
+/* A project that repeats the row above recedes, so a run of same-project sessions
+   reads as one burst rather than a stuttering column. It dims to muted rather than
+   vanishing, which leaves the branch (brighter, see below) as the row's lead and
+   the distinguishing field on a run of same-project rows. */
+.srow-proj.faded { color: var(--muted); }
+/* The whole row is the click target; on hover the project brightens to the lilac
+   accent to mark it, the one transient place the feed spends the accent. */
+.srow:hover .srow-proj { color: var(--lilac); }
+/* The branch sits a notch under a fresh project but above a faded one, so it leads
+   the rows where the project has receded and tells two same-project runs apart. */
+.srow-branch {
+  flex: 0 1 auto; min-width: 0; color: var(--subtext); font-size: 0.75rem;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.srow-title.fallback { color: var(--muted); }
-.srow:hover .srow-title { color: var(--lilac); }
-.srow-meta {
-  display: flex; align-items: center; gap: 6px; margin-top: 2px;
-  font-size: 0.75rem; color: var(--muted); min-width: 0;
-}
-.srow-proj { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40ch; }
-/* A project that repeats the row above fades, so a run of same-project sessions
-   reads as one burst rather than a stuttering column. */
-.srow-proj.faded { color: var(--faint); }
-.srow-meta .sep { color: var(--faint); }
-.srow-branch { color: var(--muted); }
-.srow-meta .tag { font-size: 0.625rem; padding: 1px 5px; }
+.srow-main .tag { flex: none; font-size: 0.625rem; padding: 1px 5px; }
 
 .srow-msgs { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
 .srow-time { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
@@ -119,8 +128,8 @@
 
 /* ---- Responsive ---- */
 /* On a narrow viewport the agent column and the token bar fold away, leaving
-   title, message count, the token figure, and time. The reader is almost always
-   on desktop; this keeps the row intact when they are not. */
+   the project/branch line, message count, the token figure, and time. The reader
+   is almost always on desktop; this keeps the row intact when they are not. */
 @media (max-width: 760px) {
   .srow { grid-template-columns: minmax(0, 1fr) 44px 64px 44px; }
   .srow-agent { display: none; }

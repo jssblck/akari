@@ -209,11 +209,11 @@ func TestProjectsPageIsBareTable(t *testing.T) {
 	}
 }
 
-// GlobalSessionList renders the cross-project feed. A row leads with the session's
-// derived title (cleaned from its opening prompt), carries the agent, project,
-// branch, and state chips in its meta line, shows the token figure with its
-// breakdown card and cost, and links the whole row to the session. The session id
-// is never printed.
+// GlobalSessionList renders the cross-project feed. A row carries the session's
+// metadata: the project leads as the anchor, the branch the detail, with the agent
+// and state chips alongside, the token figure with its breakdown card and cost, and
+// the whole row links to the session. No prompt content and no session id are
+// printed.
 func TestGlobalSessionListRow(t *testing.T) {
 	ts := time.Now().UTC().Add(-3 * 24 * time.Hour)
 	rows := []store.SessionRow{{
@@ -224,16 +224,13 @@ func TestGlobalSessionListRow(t *testing.T) {
 			TotalCostUSD: 1.25, Visibility: "public", UpdatedAt: &ts,
 		},
 		ProjectID: 4, ProjectKey: "scratch", ProjectName: "scratch", ProjectKind: "standalone",
-		FirstPrompt: "Fix the login bug in the auth module",
 	}}
 	html := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Sort: "updated", Desc: true}))
 
 	for _, want := range []string{
-		// The title is the cleaned opening prompt, and the whole row links to the
-		// session.
-		`Fix the login bug in the auth module`,
+		// The whole row links to the session.
 		`data-row-href="/sessions/7"`,
-		// Meta carries the agent, project, branch, and both state chips.
+		// The row carries the agent, project, branch, and both state chips.
 		`>claude</span>`, `>scratch</span>`, `>main</span>`,
 		`class="tag standalone"`, `class="tag public"`,
 		// Tokens: compact figure plus the breakdown card and cost.
@@ -261,8 +258,8 @@ func TestGlobalSessionListGrouping(t *testing.T) {
 	today := time.Date(n.Year(), n.Month(), n.Day(), 12, 0, 0, 0, time.UTC)
 	earlier := today.Add(-2 * time.Hour)
 	rows := []store.SessionRow{
-		{SessionSummary: store.SessionSummary{ID: 1, Agent: "claude", UpdatedAt: &today}, ProjectID: 1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote", FirstPrompt: "first"},
-		{SessionSummary: store.SessionSummary{ID: 2, Agent: "claude", UpdatedAt: &earlier}, ProjectID: 1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote", FirstPrompt: "second"},
+		{SessionSummary: store.SessionSummary{ID: 1, Agent: "claude", UpdatedAt: &today}, ProjectID: 1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote"},
+		{SessionSummary: store.SessionSummary{ID: 2, Agent: "claude", UpdatedAt: &earlier}, ProjectID: 1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote"},
 	}
 
 	grouped := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Sort: "updated", Desc: true}))

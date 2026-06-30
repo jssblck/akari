@@ -113,10 +113,9 @@ templ activeProjectChip(opts []store.ProjectFacet, sel store.SessionFilter) {
 
 // GlobalSessionList renders the cross-project session feed: rows grouped under day
 // headings (in the default most-recent order) or as a flat ranked list (any other
-// sort). It is the body of the Sessions page. Each row leads with the session's
-// derived title so a run is recognizable by what it was about, with the agent,
-// project, branch, and figures in support; lilac is reserved for the active
-// filter, never spent per row.
+// sort). It is the body of the Sessions page. Each row carries the session's
+// metadata (project, branch, agent, message count, token volume, time); lilac is
+// reserved for the active filter, never spent per row.
 templ GlobalSessionList(rows []store.SessionRow, sel store.SessionFilter) {
 	if len(rows) == 0 {
 		<div class="empty">No sessions match these filters.</div>
@@ -138,25 +137,23 @@ templ GlobalSessionList(rows []store.SessionRow, sel store.SessionFilter) {
 	}
 }
 
-// feedRow renders one session as a single feed line. The whole row is the click
-// target (the data attribute, wired in app.js), so the project and branch read as
-// plain text rather than competing links.
+// feedRow renders one session as a single metadata line. The whole row is the
+// click target (the data attribute, wired in app.js), so the project and branch
+// read as plain text rather than competing links. With no prompt-derived title,
+// the project leads as the recognizable anchor and the branch carries the detail
+// that tells two same-project runs apart.
 templ feedRow(fr FeedRow) {
 	<div class="srow" data-row-href={ SessionPath(fr.Row.ID) }>
 		<span class="srow-agent mono small">{ fr.Row.Agent }</span>
 		<div class="srow-main">
-			<div class={ titleClass(fr.Derived) }>{ fr.Title }</div>
-			<div class="srow-meta">
-				<span class={ projClass(fr.FadeProject) }>{ SessionRowProject(fr.Row) }</span>
-				if fr.Row.GitBranch != "" {
-					<span class="sep">·</span>
-					<span class="srow-branch mono">{ fr.Row.GitBranch }</span>
-				}
-				@kindTag(fr.Row.ProjectKind)
-				if fr.Row.Visibility == "public" {
-					<span class="tag public">public</span>
-				}
-			</div>
+			<span class={ projClass(fr.FadeProject) }>{ SessionRowProject(fr.Row) }</span>
+			if fr.Row.GitBranch != "" {
+				<span class="srow-branch mono">{ fr.Row.GitBranch }</span>
+			}
+			@kindTag(fr.Row.ProjectKind)
+			if fr.Row.Visibility == "public" {
+				<span class="tag public">public</span>
+			}
 		</div>
 		<span class="srow-msgs mono small" title="messages">{ fmt.Sprintf("%d", fr.Row.MessageCount) }</span>
 		@feedTokens(fr)

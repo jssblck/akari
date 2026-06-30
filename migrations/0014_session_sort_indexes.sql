@@ -30,14 +30,19 @@
 -- append, so their indexes carry that update cost, the same posture the updated_at
 -- feed indexes already take.
 
+-- The IF NOT EXISTS guards keep this migration replayable on a database whose
+-- schema already carries these objects but whose schema_migrations does not record
+-- the version, as happens when a dev instance is restored from a schema-only dump
+-- (the local dev-seed snapshot does exactly this). The runner keys on the version
+-- string alone, so a clean database still applies this once and is unaffected.
 ALTER TABLE sessions
-  ADD COLUMN total_tokens BIGINT NOT NULL
+  ADD COLUMN IF NOT EXISTS total_tokens BIGINT NOT NULL
   GENERATED ALWAYS AS (
     total_input_tokens + total_output_tokens
     + total_cache_read_tokens + total_cache_write_tokens
   ) STORED;
 
-CREATE INDEX idx_sessions_agent_sort    ON sessions(agent, id);
-CREATE INDEX idx_sessions_branch_sort   ON sessions(git_branch, id);
-CREATE INDEX idx_sessions_messages_sort ON sessions(message_count, id);
-CREATE INDEX idx_sessions_tokens_sort   ON sessions(total_tokens, id);
+CREATE INDEX IF NOT EXISTS idx_sessions_agent_sort    ON sessions(agent, id);
+CREATE INDEX IF NOT EXISTS idx_sessions_branch_sort   ON sessions(git_branch, id);
+CREATE INDEX IF NOT EXISTS idx_sessions_messages_sort ON sessions(message_count, id);
+CREATE INDEX IF NOT EXISTS idx_sessions_tokens_sort   ON sessions(total_tokens, id);

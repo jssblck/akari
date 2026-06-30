@@ -478,16 +478,18 @@
   });
 
   // ---------------- Whole-row navigation ----------------
-  // A table row carrying data-row-href navigates as a unit, so the whole cell is
-  // the hit target (see DESIGN.md: "the whole row is the hit target"). A click
-  // that lands on a real control inside the row (a nested link, a button, a
-  // field) falls through to that control instead of the row's destination.
+  // A row carrying data-row-href navigates as a unit, so the whole row is the hit
+  // target (see DESIGN.md: "the whole row is the hit target"). This covers both the
+  // project page's table rows (<tr data-row-href>) and the Sessions feed's row divs
+  // (.srow), so the selector matches any element, not just <tr>. A click that lands
+  // on a real control inside the row (a nested link, a button, a field) falls
+  // through to that control instead of the row's destination.
   function rowHrefFrom(target) {
     if (!target || !target.closest) return null;
-    var tr = target.closest("tr[data-row-href]");
-    if (!tr) return null;
+    var row = target.closest("[data-row-href]");
+    if (!row) return null;
     if (target.closest("a, button, input, select, textarea, label, summary")) return null;
-    return tr.getAttribute("data-row-href");
+    return row.getAttribute("data-row-href");
   }
   document.addEventListener("click", function (ev) {
     if (ev.defaultPrevented || ev.button !== 0) return;
