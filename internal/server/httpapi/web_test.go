@@ -736,6 +736,194 @@ func TestSessionPageDuplicateIDChip(t *testing.T) {
 	}
 }
 
+// TestPublicOverviewFlow drives a user's public overview end to end: it is
+// unreachable before publishing, the account Publicity control publishes it and
+// surfaces the share link (and the signed-in overview gains its badge), an
+// anonymous viewer then reads only that user's aggregate usage (never another
+// account's, never a session), and making it private 404s the link while a
+// re-publish restores the same URL.
+func TestPublicOverviewFlow(t *testing.T) {
+	t.Parallel()
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+	c := newClient(t)
+
+	owner, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	// A second account whose usage must never leak onto grace's public overview.
+	var adaID int64
+	if err := st.Pool.QueryRow(ctx,
+		`INSERT INTO users (username, password_hash, is_admin) VALUES ('ada', 'x', FALSE) RETURNING id`).Scan(&adaID); err != nil {
+		t.Fatalf("seed ada: %v", err)
+	}
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	// grace runs claude, ada runs codex; one in-window usage event each.
+	seed := func(userID int64, agent, src, model string) int64 {
+		ann, err := st.Announce(ctx, store.AnnounceParams{
+			UserID: userID, Agent: agent, SourceSessionID: src,
+			ProjectID: projectID, Cwd: "/home/x/akari", Machine: "laptop",
+		})
+		if err != nil {
+			t.Fatalf("announce %s: %v", src, err)
+		}
+		if _, err := st.Pool.Exec(ctx,
+			`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cost_usd, occurred_at, dedup_key)
+			 VALUES ($1, $2, 100, 50, 1.0, now() - make_interval(days => 1), $3)`,
+			ann.SessionID, model, src+"-u"); err != nil {
+			t.Fatalf("seed usage %s: %v", src, err)
+		}
+		return ann.SessionID
+	}
+	graceSession := seed(owner.ID, "claude", "sess-grace", "claude-opus-4-8")
+	seed(adaID, "codex", "sess-ada", "gpt-5.5")
+
+	const pubPath = "/u/grace"
+
+	// Before publishing, the username 404s (the public page never redirects to
+	// login).
+	anon := newClient(t)
+	anon.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp := mustGet(t, anon, srv.URL+pubPath)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("anon %s before publish = %d, want 404", pubPath, resp.StatusCode)
+	}
+	resp.Body.Close()
+	anon.CheckRedirect = nil
+
+	if _, err := c.PostForm(srv.URL+"/login", url.Values{
+		"username": {"grace"}, "password": {"hopper-1906"},
+	}); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+
+	// Before publishing, the account page offers the publish control, not a link.
+	body := readBody(t, mustGet(t, c, srv.URL+"/account"))
+	if !strings.Contains(body, "Publicity") || !strings.Contains(body, "Make overview public") {
+		t.Fatalf("account page should offer the publicity control, got:\n%s", body)
+	}
+	// The signed-in overview carries no public badge while private.
+	body = readBody(t, mustGet(t, c, srv.URL+"/"))
+	if strings.Contains(body, "View public page") {
+		t.Fatalf("overview should not show the public badge before publishing, got:\n%s", body)
+	}
+
+	// Publish via the account control.
+	if _, err := c.PostForm(srv.URL+"/account/overview/publish", url.Values{}); err != nil {
+		t.Fatalf("publish overview: %v", err)
+	}
+	if u, err := st.UserByID(ctx, owner.ID); err != nil || !u.OverviewPublic {
+		t.Fatalf("account not public after publish: err=%v public=%v", err, u.OverviewPublic)
+	}
+
+	// The account page now shows the username link and the make-private control; the
+	// signed-in overview gains the badge linking to the public page.
+	body = readBody(t, mustGet(t, c, srv.URL+"/account"))
+	if !strings.Contains(body, pubPath) || !strings.Contains(body, "Make private") {
+		t.Fatalf("account page should show the username link and make-private control, got:\n%s", body)
+	}
+	body = readBody(t, mustGet(t, c, srv.URL+"/"))
+	if !strings.Contains(body, "View public page") || !strings.Contains(body, pubPath) {
+		t.Fatalf("overview should show the public badge after publishing, got:\n%s", body)
+	}
+
+	// An anonymous viewer reads grace's aggregate usage: her agent (claude) and her
+	// username, but never ada's codex usage and never a session link.
+	resp = mustGet(t, anon, srv.URL+pubPath)
+	body = readBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("anon public overview status = %d, want 200", resp.StatusCode)
+	}
+	for _, want := range []string{"grace", ">claude</span>"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("public overview missing %q, got:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, ">codex</span>") {
+		t.Fatalf("public overview leaked another user's usage (codex), got:\n%s", body)
+	}
+	// The public overview is aggregate only: it must expose no session, neither
+	// grace's own session path nor the per-user filter that names other accounts.
+	if strings.Contains(body, fmt.Sprintf("/sessions/%d", graceSession)) {
+		t.Fatalf("public overview leaked a session path, got:\n%s", body)
+	}
+	if strings.Contains(body, fmt.Sprintf(`name="user" value="%d"`, adaID)) {
+		t.Fatalf("public overview leaked the per-user filter, got:\n%s", body)
+	}
+	// Its range buttons refetch the public path, not the authed overview.
+	if !strings.Contains(body, `hx-get="`+pubPath+`?range=`) {
+		t.Fatalf("public overview range buttons should target the public path, got:\n%s", body)
+	}
+
+	// Another account's overview is independent: ada never published, so /u/ada
+	// 404s even while grace's is public.
+	anon.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp = mustGet(t, anon, srv.URL+"/u/ada")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("unpublished /u/ada = %d, want 404", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Make private: the link 404s.
+	anon.CheckRedirect = nil
+	if _, err := c.PostForm(srv.URL+"/account/overview/unpublish", url.Values{}); err != nil {
+		t.Fatalf("unpublish overview: %v", err)
+	}
+	anon.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp = mustGet(t, anon, srv.URL+pubPath)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("public overview after make-private = %d, want 404", resp.StatusCode)
+	}
+	resp.Body.Close()
+	anon.CheckRedirect = nil
+
+	// Re-publishing brings the same /u/<username> back.
+	if _, err := c.PostForm(srv.URL+"/account/overview/publish", url.Values{}); err != nil {
+		t.Fatalf("re-publish overview: %v", err)
+	}
+	resp = mustGet(t, anon, srv.URL+pubPath)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("public overview after re-publish = %d, want 200", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+// TestPublicOverviewPublishRequiresAuth confirms the publicity toggles are gated:
+// a logged-out client cannot publish or unpublish another account's overview, so
+// the public page is opt-in by its owner alone and not flippable by anyone who
+// finds the route.
+func TestPublicOverviewPublishRequiresAuth(t *testing.T) {
+	t.Parallel()
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+
+	owner, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	// No credential: the full-scope guard rejects the POST and nothing toggles.
+	anon := newClient(t)
+	anon.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	for _, path := range []string{"/account/overview/publish", "/account/overview/unpublish"} {
+		resp, err := anon.PostForm(srv.URL+path, url.Values{})
+		if err != nil {
+			t.Fatalf("anon post %s: %v", path, err)
+		}
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("anon POST %s = %d, want 401", path, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+	if u, _ := st.UserByID(ctx, owner.ID); u.OverviewPublic {
+		t.Fatalf("overview public after rejected anon publish, want still private")
+	}
+}
+
 func TestSafeNext(t *testing.T) {
 	cases := map[string]string{
 		"":                  "/",

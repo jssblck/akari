@@ -265,6 +265,20 @@ func AnyFilterActive(f store.SessionFilter) bool {
 // link to copy.
 func PublicPath(publicID string) string { return "/s/" + publicID }
 
+// PublicOverviewPath is the plain-string path of a user's public usage overview,
+// rooted at /u/<username>. The username is path-escaped so an unusual character
+// cannot break the URL or escape the segment. The range selector on the public
+// page builds its buttons from this base (via RangeOptions), so switching the
+// window refetches the public path rather than the authed overview, and the
+// account page shows it as the shareable link.
+func PublicOverviewPath(username string) string { return "/u/" + url.PathEscape(username) }
+
+// PublicOverviewHref is the sanitized href form of PublicOverviewPath, for the
+// account page's link and the signed-in overview badge.
+func PublicOverviewHref(username string) templ.SafeURL {
+	return templ.URL(PublicOverviewPath(username))
+}
+
 // SessionBlobBase and PublicBlobBase are the per-session prefixes under which CAS
 // blobs are served, for the authenticated and logged-out views respectively. A
 // blob URL is the base plus "/blob/{sha256}"; serving is gated on the session

@@ -261,7 +261,8 @@ Projects, Search, Account); the signed-in user and log-out sit at its foot.
 - **Charts** are rendered by a small dependency-free SVG module bundled as a
   static asset; the UI fonts (Geist and Geist Mono) are self-hosted, so the binary
   stays self-contained with no Node toolchain.
-- **Account**: API tokens (ingest or full scope), and invites for admins.
+- **Account**: API tokens (ingest or full scope), invites for admins, and a
+  Publicity control to publish your own usage overview (see below).
 
 ### Visibility and publishing
 
@@ -271,6 +272,16 @@ owner of a session can publish it, which mints an unguessable link at
 `/s/{public_id}` for logged-out viewing; unpublishing clears the link so it stops
 resolving. A public page never exposes the numeric session id, and a published
 session only links to subagents that are themselves public.
+
+A user can also publish their own usage overview from the account page's
+Publicity section, which exposes it at `/u/<username>` for logged-out viewing.
+The public page is the same aggregate panel the owner sees (totals, the activity
+grid, and the by-model and by-agent breakdowns), scoped to that one account: it
+carries no session links and no other user's usage, so publishing the overview
+shares neither sessions nor anyone else's numbers. The address is the username, so
+making it private hides the page without changing the link, and re-publishing
+brings the same URL back. When public, a badge on the owner's overview links to
+the page.
 
 CAS blobs are served per session, not by bare hash: a viewer can fetch a tool
 body only through a session that references it and that they may see. This keeps
