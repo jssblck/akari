@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -249,6 +250,22 @@ func (s *Server) sessionView(r *http.Request, id int64) (store.SessionDetail, []
 	return d, msgs, web.ToolsByOrdinal(tools), web.AttachmentsByOrdinal(atts), subs, nil
 }
 
+// sessionHeaderStats loads the derived stat-tile inputs the session instrument header
+// renders: the session's all-usage cache effectiveness and its stored quality signals.
+// Both session-page handlers and the live body fragment share it, so the header reads
+// the same way on first load and on every SSE refresh.
+func (s *Server) sessionHeaderStats(ctx context.Context, id int64) (web.HeaderStats, error) {
+	cache, err := s.Store.SessionCacheStats(ctx, id)
+	if err != nil {
+		return web.HeaderStats{}, err
+	}
+	sig, err := s.Store.SessionSignalsByID(ctx, id)
+	if err != nil {
+		return web.HeaderStats{}, err
+	}
+	return web.HeaderStats{Cache: cache, Signals: sig}, nil
+}
+
 func (s *Server) handleSessionPage(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
@@ -271,7 +288,7 @@ func (s *Server) handleSessionPage(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load session."))
 		return
 	}
-	cache, err := s.Store.SessionCacheStats(r.Context(), id)
+	hs, err := s.sessionHeaderStats(r.Context(), id)
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load session."))
 		return
@@ -279,7 +296,7 @@ func (s *Server) handleSessionPage(w http.ResponseWriter, r *http.Request) {
 	title := fmt.Sprintf("Session #%d", d.ID)
 	p, _ := principalFrom(r.Context())
 	owner := p.UserID == d.OwnerID
-	render(w, r, http.StatusOK, web.SessionPage(s.pageForNav(r, title, "sessions"), d, msgs, tools, atts, subs, cache, dupIDs, true, owner))
+	render(w, r, http.StatusOK, web.SessionPage(s.pageForNav(r, title, "sessions"), d, msgs, tools, atts, subs, hs, dupIDs, true, owner))
 }
 
 // handlePublishSession marks the owner's session public and redirects back to it.
@@ -385,12 +402,12 @@ func (s *Server) handlePublicSession(w http.ResponseWriter, r *http.Request) {
 			publicSubs = append(publicSubs, sub)
 		}
 	}
-	cache, err := s.Store.SessionCacheStats(r.Context(), d.ID)
+	hs, err := s.sessionHeaderStats(r.Context(), d.ID)
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load session."))
 		return
 	}
-	render(w, r, http.StatusOK, web.PublicSessionPage(d, msgs, web.ToolsByOrdinal(tools), web.AttachmentsByOrdinal(atts), publicSubs, cache))
+	render(w, r, http.StatusOK, web.PublicSessionPage(d, msgs, web.ToolsByOrdinal(tools), web.AttachmentsByOrdinal(atts), publicSubs, hs))
 }
 
 // handleSessionBody serves just the live-updating body fragment, re-fetched by
@@ -413,14 +430,14 @@ func (s *Server) handleSessionBody(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The live fragment re-renders the stat header on every SSE update, so the Cache
-	// tile re-reads here too and tracks the session's growing usage in step with the
-	// Tokens tile beside it.
-	cache, err := s.Store.SessionCacheStats(r.Context(), id)
+	// and Quality tiles re-read here too and track the session's growing usage and
+	// shifting outcome in step with the Tokens tile beside them.
+	hs, err := s.sessionHeaderStats(r.Context(), id)
 	if err != nil {
 		http.Error(w, "Could not load session.", http.StatusInternalServerError)
 		return
 	}
-	render(w, r, http.StatusOK, web.SessionMain(d, msgs, tools, atts, subs, cache))
+	render(w, r, http.StatusOK, web.SessionMain(d, msgs, tools, atts, subs, hs))
 }
 
 // handleSessionEvents is the SSE endpoint that signals a watching browser to

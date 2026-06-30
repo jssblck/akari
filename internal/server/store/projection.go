@@ -225,6 +225,17 @@ func (s *Store) AdvanceProjection(ctx context.Context, sessionID int64, parserVe
 		}
 
 		parsedTo, caughtUp = regionEnd, regionEnd >= byteLen
+		// Once this region brings the session fully current, recompute its behavioral
+		// signals from the now-complete projection, in this same transaction so the
+		// signals commit with the rows they summarize. A still-catching-up region skips
+		// it: the signals read the whole session (the last word, failure streaks across
+		// the transcript), so a partial recompute would be wasted work and a transiently
+		// wrong verdict that the next region overwrites anyway.
+		if caughtUp {
+			if err := refreshSignalsTx(ctx, tx, sessionID); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	return parsedTo, caughtUp, err
@@ -598,7 +609,12 @@ func (s *Store) ReparseSession(ctx context.Context, sessionID int64, parserVersi
 			state = newState
 			parsedLen = regionEnd
 		}
-		return nil
+		// The projection is fully rebuilt; recompute the session's signals from it in
+		// this same transaction. A reparse is also the versioned backfill: a caught-up
+		// session never re-enters AdvanceProjection, so an Epoch bump that reparses the
+		// corpus is what fills signals for sessions ingested before they existed, and
+		// what re-grades every session when the scoring version changes.
+		return refreshSignalsTx(ctx, tx, sessionID)
 	})
 }
 
@@ -637,6 +653,10 @@ func clearProjectionForReparseTx(ctx context.Context, tx pgx.Tx, sessionID int64
 		"DELETE FROM tool_calls WHERE session_id = $1",
 		"DELETE FROM usage_events WHERE session_id = $1",
 		"DELETE FROM attachments WHERE session_id = $1",
+		// session_signals is parser-owned too (derived from messages and tool_calls), so
+		// it clears with the rest. ReparseSession rebuilds it at the end of its replay;
+		// the standalone reset leaves it absent until the next catch-up refreshes it.
+		"DELETE FROM session_signals WHERE session_id = $1",
 	} {
 		if _, err := tx.Exec(ctx, q, sessionID); err != nil {
 			return fmt.Errorf("clear projection for reparse of session %d (%s): %w", sessionID, q, err)

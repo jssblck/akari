@@ -25,4 +25,16 @@ package parse
 // test (epoch_test.go) is the guardrail that makes the Epoch bump impossible to
 // forget: it snapshots the projection for representative fixtures and fails, by
 // name, when that output drifts.
-const Epoch = 1
+//
+// An Epoch bump is also the way to backfill a derived projection table that did not
+// exist before. A caught-up session never re-enters AdvanceProjection, so a table
+// the live path now fills (session_signals) stays empty for old sessions until
+// something reparses them. The reparse is also where session_signals is rebuilt to
+// the running quality.Version, so a scoring-model change rides the same signal. Such
+// a bump leaves the parser's projection delta byte-for-byte identical, so the golden
+// fixtures do not move; the bump is intentional and stands on its own.
+//
+// Epoch 1 -> 2: introduce session_signals (per-session outcome, quality score and
+// grade, and tool-health counts), computed on catch-up and reparse. The bump
+// backfills the table across the existing corpus.
+const Epoch = 2

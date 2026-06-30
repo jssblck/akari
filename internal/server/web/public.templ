@@ -6,7 +6,7 @@ import (
 	"github.com/jssblck/akari/internal/server/store"
 )
 
-templ PublicSessionPage(d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, publicSubs []store.SessionSummary, cache store.CacheStats) {
+templ PublicSessionPage(d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, publicSubs []store.SessionSummary, hs HeaderStats) {
 	@publicLayout(SessionProjectLabel(d) + " session") {
 		<div class="session-page">
 			<div class="session-head">
@@ -30,7 +30,7 @@ templ PublicSessionPage(d store.SessionDetail, msgs []store.Message, tools map[i
 						@Outline(msgs, tools, PublicBlobBase(*d.PublicID))
 					</aside>
 					<div class="session-main">
-						@sessionStats(d, cache)
+						@sessionStats(d, hs)
 						if len(publicSubs) > 0 {
 							<h2>Subagents</h2>
 							<div class="subagents">

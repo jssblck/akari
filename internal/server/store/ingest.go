@@ -310,6 +310,9 @@ func (s *Store) ResetRaw(ctx context.Context, sessionID int64) error {
 			"DELETE FROM tool_calls WHERE session_id = $1",
 			"DELETE FROM usage_events WHERE session_id = $1",
 			"DELETE FROM attachments WHERE session_id = $1",
+			// Derived signals clear with the projection they summarize; the next chunk's
+			// catch-up rebuilds the row from the freshly re-parsed messages and tool calls.
+			"DELETE FROM session_signals WHERE session_id = $1",
 			"DELETE FROM session_raw_chunks WHERE session_id = $1",
 		} {
 			if _, err := tx.Exec(ctx, q, sessionID); err != nil {

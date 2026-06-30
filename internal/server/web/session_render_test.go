@@ -58,7 +58,7 @@ func sessionFixture() (store.SessionDetail, []store.Message, map[int][]store.Too
 func TestSessionPageCompactHeaderAndModal(t *testing.T) {
 	p := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "jessoteric"}
 	d, msgs, tools := sessionFixture()
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, store.CacheStats{}, 0, false, true))
+	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, HeaderStats{}, 0, false, true))
 
 	for _, want := range []string{
 		`class="session-page"`,    // full-width wrapper drives main:has(> .session-page)
@@ -93,7 +93,7 @@ func TestSessionPageCompactHeaderAndModal(t *testing.T) {
 func TestSessionStatsFoldTokensAndDropLive(t *testing.T) {
 	p := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "jessoteric"}
 	d, msgs, tools := sessionFixture()
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, store.CacheStats{}, 0, true, true))
+	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, HeaderStats{}, 0, true, true))
 
 	// The tile must show the aggregate of all four token classes, and the tooltip
 	// must carry each class value plus the cost, run through the same formatters
@@ -122,6 +122,60 @@ func TestSessionStatsFoldTokensAndDropLive(t *testing.T) {
 	}
 }
 
+// The Quality tile shows the letter grade as its headline, banded by the report-card
+// class, and reveals the outcome, confidence, score, and tool-health counts in its
+// tooltip. A scored session reads its grade; the tool-health rows appear only when the
+// session ran tools.
+func TestSessionStatsQualityTileScored(t *testing.T) {
+	p := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "jessoteric"}
+	d, msgs, tools := sessionFixture()
+	score := 82
+	grade := "B"
+	hs := HeaderStats{Signals: store.SessionSignals{
+		Outcome: "completed", OutcomeConfidence: "high",
+		Score: &score, Grade: &grade,
+		ToolCalls: 12, ToolFailures: 2, ToolRetries: 1, EditChurn: 3, LongestFailureStreak: 1,
+	}}
+	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, hs, 0, false, true))
+
+	for _, want := range []string{
+		`class="stat quality-stat q-good"`,         // a B bands as "good"
+		`data-stat-key="quality">B</div>`,          // the grade headline, flashed on live change
+		`>Outcome</dt>`, `<dd>Completed</dd>`,       // outcome row, title-cased
+		`>Confidence</dt>`, `<dd>high</dd>`,         // confidence row
+		`>Score</dt>`, `<dd>82 / 100</dd>`,          // numeric score
+		`>Failures</dt>`, `<dd>2 / 12</dd>`,         // tool-health rows (the session ran tools)
+		`>Longest fail streak</dt>`, `<dd>1</dd>`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("quality tile missing %q", want)
+		}
+	}
+}
+
+// An unscored session (an unknown outcome with no tool signal) shows a neutral dash
+// rather than a letter, bands as "none", and says "not scored" with no tool-health rows.
+func TestSessionStatsQualityTileUnscored(t *testing.T) {
+	p := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "jessoteric"}
+	d, msgs, tools := sessionFixture()
+	hs := HeaderStats{Signals: store.SessionSignals{Outcome: "unknown", OutcomeConfidence: "low"}}
+	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, hs, 0, false, true))
+
+	for _, want := range []string{
+		`class="stat quality-stat q-none"`,
+		`data-stat-key="quality">-</div>`, // a dash, never a grade
+		`<dd>Unknown</dd>`,
+		`<dd>not scored</dd>`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("unscored quality tile missing %q", want)
+		}
+	}
+	if strings.Contains(html, `>Failures</dt>`) {
+		t.Error("an unscored, tool-less session should show no tool-health rows")
+	}
+}
+
 // A published session owned by the viewer swaps Publish for Unpublish and surfaces
 // the public share path as a link.
 func TestSessionPagePublicShowsUnpublish(t *testing.T) {
@@ -130,7 +184,7 @@ func TestSessionPagePublicShowsUnpublish(t *testing.T) {
 	pub := "k3y"
 	d.Visibility = "public"
 	d.PublicID = &pub
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, store.CacheStats{}, 0, false, true))
+	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, HeaderStats{}, 0, false, true))
 
 	for _, want := range []string{`>Unpublish</button>`, `class="share-link`, PublicPath(pub)} {
 		if !strings.Contains(html, want) {
@@ -148,7 +202,7 @@ func TestSessionPageActionsGating(t *testing.T) {
 	d, msgs, tools := sessionFixture()
 
 	admin := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "ada", IsAdmin: true}
-	adminHTML := renderComponent(t, SessionPage(admin, d, msgs, tools, nil, nil, store.CacheStats{}, 0, false, false))
+	adminHTML := renderComponent(t, SessionPage(admin, d, msgs, tools, nil, nil, HeaderStats{}, 0, false, false))
 	if !strings.Contains(adminHTML, `>Delete</button>`) {
 		t.Error("admin should be able to delete a session they do not own")
 	}
@@ -157,7 +211,7 @@ func TestSessionPageActionsGating(t *testing.T) {
 	}
 
 	viewer := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "anna"}
-	viewerHTML := renderComponent(t, SessionPage(viewer, d, msgs, tools, nil, nil, store.CacheStats{}, 0, false, false))
+	viewerHTML := renderComponent(t, SessionPage(viewer, d, msgs, tools, nil, nil, HeaderStats{}, 0, false, false))
 	if strings.Contains(viewerHTML, `class="session-actions"`) {
 		t.Error("a plain viewer should see no actions cluster")
 	}
@@ -171,7 +225,7 @@ func TestPublicSessionPageWrapperAndModal(t *testing.T) {
 	pub := "k3y"
 	d.Visibility = "public"
 	d.PublicID = &pub
-	html := renderComponent(t, PublicSessionPage(d, msgs, tools, nil, nil, store.CacheStats{}))
+	html := renderComponent(t, PublicSessionPage(d, msgs, tools, nil, nil, HeaderStats{}))
 
 	for _, want := range []string{`class="session-page"`, `id="session-modal"`, `id="session-inspector"`} {
 		if !strings.Contains(html, want) {
