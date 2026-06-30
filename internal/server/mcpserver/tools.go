@@ -198,13 +198,16 @@ func registerTools(s *mcp.Server, st *store.Store) {
 			return nil, bodyDTO{}, errors.New("session does not reference that body, or it does not exist")
 		}
 		limit := clampMax(in.MaxBytes)
-		var buf cappedBuffer
-		buf.limit = limit
-		mediaType, err := st.WriteBlobTo(ctx, &buf, in.SHA256)
+		// Read the stored size first, then pull at most `limit` bytes of the body. The
+		// large-object reader transfers only the prefix it copies, so a capped preview of a
+		// bulky CAS body costs O(limit), not O(blob), and truncation is the stored length
+		// against the cap rather than something measured by reading the whole object.
+		meta, err := st.BlobMeta(ctx, in.SHA256)
 		if err != nil {
 			return nil, bodyDTO{}, mapNotFound(err, "tool body")
 		}
-		meta, err := st.BlobMeta(ctx, in.SHA256)
+		var buf bytes.Buffer
+		mediaType, err := st.WriteBlobPrefixTo(ctx, &buf, in.SHA256, limit)
 		if err != nil {
 			return nil, bodyDTO{}, mapNotFound(err, "tool body")
 		}
@@ -212,9 +215,9 @@ func registerTools(s *mcp.Server, st *store.Store) {
 			SHA256:    in.SHA256,
 			MediaType: mediaType,
 			ByteLen:   meta.ByteLen,
-			Truncated: buf.truncated || buf.written < meta.ByteLen,
+			Truncated: meta.ByteLen > limit,
 		}
-		encodeBody(&out, buf.buf.Bytes())
+		encodeBody(&out, buf.Bytes())
 		return jsonResult(out)
 	})
 
@@ -354,32 +357,6 @@ func clampMax(max int) int64 {
 		return bodyCeiling
 	}
 	return int64(max)
-}
-
-// cappedBuffer is an io.Writer that retains at most limit bytes and notes whether
-// more was offered. WriteBlobTo streams a whole (decompressed) blob through it, so
-// the cap bounds memory even when the underlying body is large; bytes past the cap
-// are counted (to detect truncation) but discarded.
-type cappedBuffer struct {
-	buf       bytes.Buffer
-	limit     int64
-	written   int64
-	truncated bool
-}
-
-func (c *cappedBuffer) Write(p []byte) (int, error) {
-	if room := c.limit - c.written; room > 0 {
-		take := int64(len(p))
-		if take > room {
-			take = room
-			c.truncated = true
-		}
-		c.buf.Write(p[:take])
-	} else if len(p) > 0 {
-		c.truncated = true
-	}
-	c.written += int64(len(p))
-	return len(p), nil
 }
 
 // encodeBody fills a bodyDTO's content as UTF-8 text when the bytes are valid text,

@@ -321,6 +321,29 @@ func TestGetSessionTranscriptWindowPaging(t *testing.T) {
 	}
 }
 
+func TestReadToolBodyTruncates(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	fx := seedSession(t, st)
+	sess := connect(t, st)
+
+	// A small max_bytes returns only that prefix and flags truncation, while byte_len
+	// still reports the full body size. The store reads only the prefix from the CAS,
+	// so this stays cheap on a bulky body.
+	out := callJSON(t, sess, "read_tool_body", map[string]any{
+		"session_id": fx.sessionID, "sha256": fx.inputSHA, "max_bytes": 10,
+	})
+	if out["encoding"] != "text" || out["content"] != fx.toolBody[:10] {
+		t.Fatalf("prefix mismatch: %+v", out)
+	}
+	if out["truncated"] != true {
+		t.Fatalf("want truncated=true: %+v", out)
+	}
+	if int(out["byte_len"].(float64)) != len(fx.toolBody) {
+		t.Fatalf("byte_len should report the full body: %+v", out)
+	}
+}
+
 func TestRawTruncation(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
