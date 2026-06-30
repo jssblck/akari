@@ -176,6 +176,21 @@ func FmtTokens(n int64) string {
 	return string(out)
 }
 
+// FmtTokensCompact renders a token count to a short magnitude (1.7M, 63.0k, 412),
+// for the feed's inline figure where the exact value lives in the hover card. The
+// thousands-separated FmtTokens stays the form for places that show the full
+// number.
+func FmtTokensCompact(n int64) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
+}
+
 // FmtTime renders a timestamp, or a dash when absent.
 func FmtTime(t *time.Time) string {
 	if t == nil || t.IsZero() {

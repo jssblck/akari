@@ -1,55 +1,32 @@
-/* The global Sessions view: a faceted filter rail beside a wide session table.
-   The token card (.tok-cell/.tok-tip) defined here is reused by the projects
-   index; the heatmap tooltip (overview.css) shares the card's inner grid. */
+/* The global Sessions view: a slim filter toolbar above a day-grouped feed of
+   sessions. Each row leads with the run's derived title so a session is
+   recognizable by what it was about, not decoded from a row of figures. Lilac is
+   spent only on the active filter; the feed itself is steel and ink. The token
+   card (.tok-cell/.tok-tip) defined here is reused by the projects index, and the
+   heatmap tooltip (overview.css) shares the card's inner grid. */
 
-/* ---- Viz swatches (categorical ramp, matches VizColor order) ---- */
-.swatch { width: 8px; height: 8px; border-radius: 2px; flex: none; display: inline-block; }
-.viz-0 { background: var(--viz-1, #c6a8f2); } .viz-1 { background: #88cfce; }
-.viz-2 { background: #f0bf92; } .viz-3 { background: #ec98b0; }
-.viz-4 { background: #a6d29e; } .viz-5 { background: #95c0ef; }
-.viz-6 { background: #ddc885; } .viz-7 { background: #a98ad4; }
+.sessions { display: flex; flex-direction: column; }
 
-/* ---- Sessions: faceted layout ---- */
-/* The global Sessions view runs edge to edge: a faceted rail plus a wide table
-   put the whole viewport to use, unlike the reading-width pages. The rail column
-   sizes to its widest label (no more clipped project names) rather than a fixed
-   width, and the table takes the rest. */
-main:has(.sessions-layout) { max-width: none; }
-.sessions-layout { display: grid; grid-template-columns: minmax(196px, max-content) minmax(0, 1fr); gap: var(--sp-xl); align-items: start; }
-.facets { display: flex; flex-direction: column; gap: var(--sp-lg); position: sticky; top: var(--sp-md); }
-
-/* Independent scroll: on the wide two-column layout the view is capped to the
-   viewport so the filter rail and the session feed each own their scrollbar and
-   scroll past each other, rather than the whole page scrolling as one. The page
-   head stays pinned above both. Below the two-column breakpoint the view returns
-   to normal document flow (one scroll), which reads better when stacked. */
-@media (min-width: 861px) {
-  main:has(.sessions-layout) {
-    height: 100vh; display: flex; flex-direction: column; overflow: hidden;
-  }
-  .sessions-layout { flex: 1; min-height: 0; grid-template-rows: minmax(0, 1fr); align-items: stretch; }
-  /* The panes own the scroll, so the rail no longer sticks; each caps to the row
-     track and scrolls its overflow. The rail keeps a little gutter so its
-     scrollbar does not crowd the labels. */
-  .facets { position: static; top: auto; min-height: 0; max-height: 100%; overflow-y: auto; padding-right: var(--sp-xs); }
-  .sessions-main { min-height: 0; max-height: 100%; overflow-y: auto; }
+/* ---- Filter toolbar ---- */
+/* A GET form of compact selects: agent and project always, machine and user only
+   when more than one exists, and a sort control pushed to the right. It replaces
+   the old tall faceted rail (whose single-value User group and thirty-row Project
+   list were most of the page's clutter) with one quiet strip. */
+.toolbar {
+  display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--sp-md);
+  margin: 0 0 var(--sp-md); padding: 0;
 }
-.facet-title { margin-bottom: var(--sp-sm); }
-.facets .opts { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
-.facets .opt {
-  display: flex; align-items: center; gap: 8px;
-  padding: 5px 8px; border-radius: var(--r-sm);
-  color: var(--subtext); font-size: 0.8125rem;
-  transition: background var(--dur-fast) var(--ease-state), color var(--dur-fast) var(--ease-state);
+.tb-field { display: flex; flex-direction: column; gap: 4px; }
+.tb-k { color: var(--muted); }
+.toolbar select {
+  padding: 6px 10px; font-size: 0.8125rem; min-width: 132px;
+  color: var(--subtext); background: var(--surface);
 }
-.facets .opt:hover { background: var(--surface-2); text-decoration: none; }
-.facets .opt.active { background: var(--surface-3); color: var(--text); }
-/* The rail column sizes to the widest label, so labels stay on one line and show
-   in full rather than truncating with an ellipsis. */
-.facets .opt-label { white-space: nowrap; }
-.facets .opt-count { margin-left: auto; font-family: var(--mono); font-size: 0.75rem; color: var(--faint); font-variant-numeric: tabular-nums; }
-.facets .opt.active .opt-count { color: var(--lilac); }
-.sessions-main { min-width: 0; }
+.toolbar select:hover { border-color: var(--border-strong); }
+/* The project list is the long one; let it grow without forcing the row wide. */
+.tb-field:nth-child(2) select { max-width: 280px; }
+
+/* ---- Active filter chips ---- */
 .active-filters { display: flex; gap: var(--sp-sm); flex-wrap: wrap; align-items: center; margin-bottom: var(--sp-md); }
 .fchip {
   display: inline-flex; align-items: center; gap: 6px;
@@ -60,68 +37,92 @@ main:has(.sessions-layout) { max-width: none; }
 .fchip .fchip-k { color: var(--muted); }
 .fchip .fchip-x { color: var(--faint); }
 .active-filters .clear { margin-left: 4px; }
-.proj-link { color: var(--subtext); }
-.proj-link:hover { color: var(--lilac); }
 
-/* The Sessions table fills the wide page: every column sizes to its content and
-   never wraps, with the Project column (col-grow) absorbing the slack so the row
-   stays flush rather than leaving a ragged right edge. */
-table.sessions th, table.sessions td { white-space: nowrap; }
-table.sessions .col-grow { width: 100%; }
-table.sessions td.tags .tag + .tag { margin-left: 4px; }
+/* ---- The feed ---- */
+.feed { display: flex; flex-direction: column; }
 
-/* Sticky header: the column row pins to the top of the scrolling feed so the
-   labels stay put as rows scroll under. An opaque page-colored background hides
-   the rows passing beneath, and an inset hairline keeps the divider (a collapsed
-   border-bottom would scroll away with the cells). */
-table.sessions thead th {
-  position: sticky; top: 0; z-index: var(--z-sticky);
-  background: var(--bg); box-shadow: inset 0 -1px 0 var(--border);
+/* Day heading: the label, a scribed rule that fills the line, and the day's count.
+   It absorbs the "today" that used to repeat on every row, turning time into
+   structure the eye can skim. */
+.day-head { display: flex; align-items: center; gap: var(--sp-md); margin: var(--sp-lg) 0 var(--sp-xs); }
+.day-head:first-child { margin-top: var(--sp-xs); }
+.day-label { color: var(--subtext); }
+.day-rule { flex: 1; height: 1px; background: var(--border); }
+.day-count { color: var(--faint); }
+
+/* One session row. The whole row is the click target (wired in app.js), so the
+   project and branch read as plain text rather than competing links. The grid
+   keeps the figures in stable columns; the title column takes the slack and
+   ellipsizes. */
+.srow {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr) 52px 132px 46px;
+  align-items: center; gap: var(--sp-md);
+  padding: var(--sp-sm) var(--sp-sm);
+  border-radius: var(--r-sm);
+  border-bottom: 1px solid var(--border);
+  transition: background var(--dur-fast) var(--ease-state);
 }
+.srow:hover { background: var(--surface-2); }
+.srow:last-child { border-bottom: 0; }
 
-/* Click-to-sort headers: the whole cell is the hit target (the link fills the
-   th's padding box) and carries a direction glyph. The active column lights its
-   chevron in lilac; the others reveal a faint up/down pair on hover to hint they
-   sort too. */
-table.sessions th.sortable { padding: 0; }
-table.sessions .sort-link {
-  display: flex; align-items: center; gap: 6px;
-  padding: var(--sp-sm) var(--sp-md);
-  color: inherit; font: inherit; letter-spacing: inherit; text-transform: inherit;
-  transition: background var(--dur-fast) var(--ease-state), color var(--dur-fast) var(--ease-state);
-}
-table.sessions th.num .sort-link { justify-content: flex-end; }
-table.sessions .sort-link:hover { background: var(--surface-2); color: var(--subtext); text-decoration: none; }
-table.sessions th.sorted .sort-link { color: var(--text); }
-.sessions .sort-ico { flex: none; color: var(--lilac); }
-.sessions .sort-ico-idle {
-  color: var(--faint); opacity: 0;
-  transition: opacity var(--dur-fast) var(--ease-state);
-}
-table.sessions th.sortable:hover .sort-ico-idle, .sessions .sort-link:focus-visible .sort-ico-idle { opacity: 1; }
+.srow-agent { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-/* Tokens column: the figure carries a hover/focus card that breaks it down by
-   class and cost, reusing the heatmap tooltip's inner styles. The cell lifts its
-   stacking context on hover so the card paints over the rows below. */
-table.sessions td.tokens { overflow: visible; }
-.tok-cell { position: relative; display: inline-block; }
+.srow-main { min-width: 0; }
+.srow-title {
+  color: var(--text); font-size: 0.875rem; line-height: 1.35;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.srow-title.fallback { color: var(--muted); }
+.srow:hover .srow-title { color: var(--lilac); }
+.srow-meta {
+  display: flex; align-items: center; gap: 6px; margin-top: 2px;
+  font-size: 0.75rem; color: var(--muted); min-width: 0;
+}
+.srow-proj { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40ch; }
+/* A project that repeats the row above fades, so a run of same-project sessions
+   reads as one burst rather than a stuttering column. */
+.srow-proj.faded { color: var(--faint); }
+.srow-meta .sep { color: var(--faint); }
+.srow-branch { color: var(--muted); }
+.srow-meta .tag { font-size: 0.625rem; padding: 1px 5px; }
+
+.srow-msgs { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+.srow-time { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* Token magnitude: a steel bar scaled to the feed's largest session, then the
+   compact figure. The bar lets the big runs stand out without the reader parsing
+   seven-digit numbers; the exact breakdown is on the hover card below. */
+.srow-tok { display: flex; align-items: center; gap: var(--sp-sm); justify-content: flex-end; }
+.tokbar { width: 56px; height: 5px; background: var(--surface-3); border-radius: 999px; overflow: hidden; flex: none; }
+.tokbar-fill { display: block; height: 100%; background: var(--border-strong); border-radius: 999px; }
+.srow-tok .tok-total { color: var(--subtext); font-variant-numeric: tabular-nums; min-width: 48px; text-align: right; }
+
+/* Tokens hover card: the figure carries a hover/focus card that breaks the total
+   down by class and cost, reusing the heatmap tooltip's inner styles. The cell
+   lifts its stacking context on hover so the card paints over the rows below. */
+.tok-cell { position: relative; }
 .tok-cell:hover, .tok-cell:focus-within { z-index: var(--z-overlay); }
-.tok-total { border-bottom: 1px dotted var(--border-strong); }
+.tok-cell:focus-visible { outline: none; box-shadow: var(--ring); border-radius: var(--r-sm); }
 .tok-tip {
   display: none; position: absolute; right: 0; top: calc(100% + 6px);
-  min-width: 170px; text-align: left; z-index: var(--z-overlay);
-  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-sm);
-  padding: var(--sp-sm); box-shadow: var(--shadow-overlay);
+  min-width: 184px; text-align: left; z-index: var(--z-overlay);
+  background: var(--surface-2); border: 1px solid var(--border-strong); border-radius: var(--r-md);
+  padding: var(--sp-sm) var(--sp-md); box-shadow: var(--shadow-overlay);
 }
 .tok-cell:hover .tok-tip, .tok-cell:focus-within .tok-tip { display: block; }
-/* The card's rows are spans here (the heatmap builds them as divs), so make them
-   stack. */
-.tok-tip .tt-total, .tok-tip .tt-cost { display: block; }
+.tok-tip .tt-total { display: block; color: var(--text); font: 450 0.8125rem var(--mono); font-variant-numeric: tabular-nums; }
+.tok-tip .tt-grid { display: grid; grid-template-columns: auto auto; gap: 1px var(--sp-md); margin: 5px 0 0; font: 450 0.75rem/1.6 var(--mono); }
+.tok-tip .tt-grid dt { color: var(--muted); }
+.tok-tip .tt-grid dd { margin: 0; color: var(--subtext); text-align: right; font-variant-numeric: tabular-nums; }
+.tok-tip .tt-cost { display: block; margin-top: 5px; padding-top: 5px; border-top: 1px solid var(--border); color: var(--text); font: 450 0.75rem var(--mono); font-variant-numeric: tabular-nums; text-align: right; }
 
 /* ---- Responsive ---- */
-@media (max-width: 980px) {
-  .facets { position: static; }
-}
-@media (max-width: 860px) {
-  .sessions-layout { grid-template-columns: 1fr; gap: var(--sp-lg); }
+/* On a narrow viewport the agent column and the token bar fold away, leaving
+   title, message count, the token figure, and time. The reader is almost always
+   on desktop; this keeps the row intact when they are not. */
+@media (max-width: 760px) {
+  .srow { grid-template-columns: minmax(0, 1fr) 44px 64px 44px; }
+  .srow-agent { display: none; }
+  .tokbar { display: none; }
 }
