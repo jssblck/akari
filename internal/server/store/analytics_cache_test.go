@@ -170,6 +170,219 @@ func TestCacheStatsIncompleteAndUndated(t *testing.T) {
 	}
 }
 
+// markNeedsCacheBackfill flags a session as not-yet-backfilled, standing in for a session that
+// predates the rollup column (the migration marks such cache-bearing sessions false). A test
+// session is ingested after the column, so it defaults authoritative (backfilled=true); a backfill
+// test that wants it treated as a candidate clears the flag here.
+func markNeedsCacheBackfill(t *testing.T, st *store.Store, ctx context.Context, sid int64) {
+	t.Helper()
+	if _, err := st.Pool.Exec(ctx,
+		"UPDATE sessions SET cache_savings_backfilled = false WHERE id = $1", sid); err != nil {
+		t.Fatalf("mark session %d needs cache backfill: %v", sid, err)
+	}
+}
+
+// TestBackfillCacheSavings pins the startup backfill that repairs a session whose parse-time
+// savings fold never ran: one ingested before the rollup column existed, or one whose reparse
+// deterministically fails so the epoch reparse cannot fill it. The saving is a pure function of
+// usage_events, so the backfill prices the ledger directly and lands on the same figure the
+// per-model recompute does. It is non-parallel because it shrinks the batch global to exercise
+// the multi-batch keyset drain across two candidate sessions.
+func TestBackfillCacheSavings(t *testing.T) {
+	// Batch of one, so two candidates span two internal batches and the keyset cursor has to
+	// advance past each priced session. Not parallel: it mutates a package global.
+	defer store.SetCacheSavingsBackfillBatch(1)()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	admin, err := st.Register(ctx, "grace", "h", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	proj, err := st.UpsertProject(ctx, "github.com/ada/backfill", "github.com", "ada", "backfill", "backfill", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+
+	// Priced cache reads whose rollup sits at the column default (the pre-column / failed-parse
+	// state): the backfill must price it to a real, positive saving.
+	sPriced := seedSessionWithStats(t, st, admin.ID, proj, "claude", "priced", 0, 0, 0)
+	seedUsageCache(t, st, sPriced, "claude-opus-4-8", 1, 200_000, 100_000, 800_000, 0, 1, "p-1")
+	// Cache volume on an unpriced model: the backfill must flag the saving incomplete rather
+	// than leave a clean zero that reads as "no saving".
+	sUnpriced := seedSessionWithStats(t, st, admin.ID, proj, "claude", "unpriced", 0, 0, 0)
+	seedUsageCacheUndatedOrUnpriced(t, st, sUnpriced, "secret-model", 100_000, 0, 300_000, 0, true, "u-1")
+	// No cache tokens: not a candidate even when flagged for backfill, so it must be left
+	// untouched (the EXISTS probe excludes it).
+	sNoCache := seedSessionWithStats(t, st, admin.ID, proj, "claude", "nocache", 0, 0, 0)
+	seedUsageCache(t, st, sNoCache, "claude-opus-4-8", 1, 50_000, 20_000, 0, 0, 1, "n-1")
+
+	// All three predate the column (flag cleared); only the two cache-bearing ones are candidates.
+	for _, id := range []int64{sPriced, sUnpriced, sNoCache} {
+		markNeedsCacheBackfill(t, st, ctx, id)
+	}
+
+	for _, id := range []int64{sPriced, sUnpriced, sNoCache} {
+		d, err := st.SessionDetailByID(ctx, id)
+		if err != nil {
+			t.Fatalf("pre-backfill detail %d: %v", id, err)
+		}
+		if d.TotalCacheSavingsUSD != 0 || d.CacheSavingsIncomplete {
+			t.Fatalf("session %d pre-backfill savings = %v incomplete=%v, want zero/false", id, d.TotalCacheSavingsUSD, d.CacheSavingsIncomplete)
+		}
+	}
+
+	n, err := st.BackfillCacheSavings(ctx)
+	if err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("backfilled %d sessions, want 2 (the two cache-carrying ones; the no-cache session is not a candidate)", n)
+	}
+
+	// The priced session now carries the same figure a from-scratch per-model recompute gives,
+	// and it is positive and complete.
+	recompute, err := st.SessionCacheStats(ctx, sPriced)
+	if err != nil {
+		t.Fatalf("recompute priced: %v", err)
+	}
+	dp, err := st.SessionDetailByID(ctx, sPriced)
+	if err != nil {
+		t.Fatalf("priced detail: %v", err)
+	}
+	if math.Abs(dp.TotalCacheSavingsUSD-recompute.SavingsUSD) > 1e-9 {
+		t.Errorf("priced savings %v != recompute %v", dp.TotalCacheSavingsUSD, recompute.SavingsUSD)
+	}
+	if dp.TotalCacheSavingsUSD <= 0 || dp.CacheSavingsIncomplete {
+		t.Errorf("priced session savings = %v incomplete=%v, want positive and complete", dp.TotalCacheSavingsUSD, dp.CacheSavingsIncomplete)
+	}
+
+	// The unpriced session is flagged incomplete (its saving is omitted), not a clean zero.
+	du, err := st.SessionDetailByID(ctx, sUnpriced)
+	if err != nil {
+		t.Fatalf("unpriced detail: %v", err)
+	}
+	if !du.CacheSavingsIncomplete {
+		t.Error("unpriced-cache session should be flagged incomplete after backfill")
+	}
+
+	// The no-cache session is untouched.
+	dn, err := st.SessionDetailByID(ctx, sNoCache)
+	if err != nil {
+		t.Fatalf("nocache detail: %v", err)
+	}
+	if dn.TotalCacheSavingsUSD != 0 || dn.CacheSavingsIncomplete {
+		t.Errorf("no-cache session was touched: savings = %v incomplete=%v", dn.TotalCacheSavingsUSD, dn.CacheSavingsIncomplete)
+	}
+
+	// Idempotent: both priced sessions are now marked cache_savings_backfilled, so a second pass
+	// finds no candidates and corrects nothing.
+	n2, err := st.BackfillCacheSavings(ctx)
+	if err != nil {
+		t.Fatalf("second backfill: %v", err)
+	}
+	if n2 != 0 {
+		t.Errorf("second backfill corrected %d, want 0 (idempotent)", n2)
+	}
+}
+
+// TestBackfillCacheSavingsSkipsAlreadyBackfilled pins the row-lock recheck: a session already
+// marked cache_savings_backfilled (the default for a session ingested after the column, or one a
+// concurrent backfill just priced) is left untouched even when it carries cache tokens. The
+// recheck keys on the flag, not the stored number, so an authoritative session is never re-priced
+// and a concurrent live fold can never be clobbered.
+func TestBackfillCacheSavingsSkipsAlreadyBackfilled(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	admin, err := st.Register(ctx, "grace", "h", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	proj, err := st.UpsertProject(ctx, "github.com/ada/recheck", "github.com", "ada", "recheck", "recheck", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+
+	// A cache-carrying session left at the authoritative default (backfilled=true) with a stored
+	// figure, standing in for a session already priced by its live fold.
+	s := seedSessionWithStats(t, st, admin.ID, proj, "claude", "recheck", 0, 0, 0)
+	seedUsageCache(t, st, s, "claude-opus-4-8", 1, 200_000, 100_000, 800_000, 0, 1, "r-1")
+	const sentinel = 4.2
+	if _, err := st.Pool.Exec(ctx,
+		"UPDATE sessions SET total_cache_savings_usd = $2 WHERE id = $1", s, sentinel); err != nil {
+		t.Fatalf("seed priced rollup: %v", err)
+	}
+
+	wrote, err := st.BackfillOneCacheSavings(ctx, s)
+	if err != nil {
+		t.Fatalf("backfill one: %v", err)
+	}
+	if wrote {
+		t.Error("backfill re-priced an already-backfilled session; the recheck should have skipped it")
+	}
+	d, err := st.SessionDetailByID(ctx, s)
+	if err != nil {
+		t.Fatalf("detail: %v", err)
+	}
+	if math.Abs(d.TotalCacheSavingsUSD-sentinel) > 1e-9 {
+		t.Errorf("rollup = %v, want %v preserved (an authoritative session is not re-priced)", d.TotalCacheSavingsUSD, sentinel)
+	}
+}
+
+// TestBackfillCacheSavingsRepairsPartialFold pins the reason the backfill keys on the flag rather
+// than a zero rollup: a session seeded at 0 that took a live append carries a partial nonzero
+// total, and the backfill must recompute the full value, not skip it as "already priced". A
+// candidate (backfilled=false) holding a deliberately-wrong partial figure is repaired to the full
+// per-model recompute. The old "total is zero" candidate test would have skipped this.
+func TestBackfillCacheSavingsRepairsPartialFold(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	admin, err := st.Register(ctx, "grace", "h", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	proj, err := st.UpsertProject(ctx, "github.com/ada/partial", "github.com", "ada", "partial", "partial", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+
+	s := seedSessionWithStats(t, st, admin.ID, proj, "claude", "partial", 0, 0, 0)
+	seedUsageCache(t, st, s, "claude-opus-4-8", 1, 200_000, 100_000, 800_000, 0, 1, "p-1")
+	markNeedsCacheBackfill(t, st, ctx, s)
+	// A partial fold: a nonzero figure that is not the full recompute, the state a post-migration
+	// append on a mis-seeded base leaves behind.
+	if _, err := st.Pool.Exec(ctx,
+		"UPDATE sessions SET total_cache_savings_usd = 0.01 WHERE id = $1", s); err != nil {
+		t.Fatalf("seed partial fold: %v", err)
+	}
+
+	recompute, err := st.SessionCacheStats(ctx, s)
+	if err != nil {
+		t.Fatalf("recompute: %v", err)
+	}
+	wrote, err := st.BackfillOneCacheSavings(ctx, s)
+	if err != nil {
+		t.Fatalf("backfill one: %v", err)
+	}
+	if !wrote {
+		t.Fatal("backfill skipped a partial-fold candidate; it must recompute the full value")
+	}
+	d, err := st.SessionDetailByID(ctx, s)
+	if err != nil {
+		t.Fatalf("detail: %v", err)
+	}
+	if math.Abs(d.TotalCacheSavingsUSD-recompute.SavingsUSD) > 1e-9 {
+		t.Errorf("repaired rollup = %v, want the full recompute %v, not the 0.01 partial", d.TotalCacheSavingsUSD, recompute.SavingsUSD)
+	}
+	if d.TotalCacheSavingsUSD <= 0.01 {
+		t.Errorf("repaired rollup = %v, want it replaced by the larger full value, not left at the partial", d.TotalCacheSavingsUSD)
+	}
+}
+
 // seedUsageCacheUndatedOrUnpriced inserts a usage event carrying cache tokens that is
 // either undated (no occurred_at, so the scoped analytics path drops it) or dated, and
 // either unpriced (NULL cost, so it flags the saving incomplete) or priced. It covers

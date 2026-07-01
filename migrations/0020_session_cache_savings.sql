@@ -18,8 +18,37 @@
 -- The DEFAULTs seed existing rows at 0 / false. Pricing lives in the Go binary, not in SQL,
 -- so this migration cannot compute the historical saving in place; the parse.Epoch bump
 -- reparses the whole corpus on first deploy, re-folding every session's usage through
--- applyDelta and filling these columns exactly as a fresh ingest would. That is the same
--- reason total_cost_usd is a parse-time fold and not a SQL sum.
+-- applyDelta and filling these columns exactly as a fresh ingest would.
+--
+-- Unlike total_cost_usd, which sums a cost the transcript stored per usage row, the saving
+-- has no per-row source: it is always priced from the rate table at fold time. So a reprice
+-- makes this stored per-session figure stale until a reparse, where total_cost_usd would not
+-- move. That is not a new gap: AGENTS.md already requires a parse.Epoch bump on any reprice,
+-- and that bump reparses the corpus and restamps this column, so the stored per-session
+-- figure and the live per-model recompute (SessionCacheStats, and the analytics CacheStats
+-- that reprices on every read) only diverge during the reparse the reprice already mandates.
 ALTER TABLE sessions
     ADD COLUMN total_cache_savings_usd  DOUBLE PRECISION NOT NULL DEFAULT 0,
     ADD COLUMN cache_savings_incomplete BOOLEAN          NOT NULL DEFAULT false;
+
+-- cache_savings_backfilled marks a session whose rollup is the authoritative full fold of its
+-- usage_events, so BackfillCacheSavings can find the ones that are not without inferring it from
+-- the stored number. A zero or nonzero total is not proof: a session seeded at 0 here that then
+-- takes a live append folds only the new rows, leaving a partial nonzero total, and if the epoch
+-- reparse fails that partial value sticks. Keying the backfill on this flag instead of "total is
+-- zero" catches that case, and its authoritative recompute repairs it.
+--
+-- It defaults true, so a session ingested after this migration (which folds its whole usage from
+-- a correct empty base) is authoritative from creation and never a backfill candidate. Every
+-- session that predates the column is seeded at a suspect 0, so the UPDATE marks the cache-bearing
+-- ones false: the epoch reparse re-folds them and the backfill is the safety net for any reparse
+-- that fails. A reset (a reparse in flight) deliberately leaves this flag alone, so a reparse that
+-- rolls back does not turn an authoritative session back into a candidate.
+ALTER TABLE sessions
+    ADD COLUMN cache_savings_backfilled BOOLEAN NOT NULL DEFAULT true;
+
+UPDATE sessions
+   SET cache_savings_backfilled = false
+ WHERE EXISTS (SELECT 1 FROM usage_events u
+                WHERE u.session_id = sessions.id
+                  AND (u.cache_read_tokens > 0 OR u.cache_write_tokens > 0));

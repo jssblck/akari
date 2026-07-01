@@ -156,6 +156,24 @@ func run() error {
 		close(settleDone)
 	}
 
+	// Backfill the per-session cache-savings rollup for any session the parse-time fold never
+	// reached: a session ingested before the column existed whose reparse fails keeps its
+	// usage_events but a zero rollup, which the epoch reparse cannot fix. The saving is a pure
+	// function of usage_events, so this prices it directly, independent of the parse. It is a
+	// self-limiting, idempotent one-shot (not a loop), run in the background so a large first
+	// pass does not delay accepting connections; backfillDone lets shutdown wait for it.
+	backfillDone := make(chan struct{})
+	go func() {
+		defer close(backfillDone)
+		if n, err := st.BackfillCacheSavings(rootCtx); err != nil {
+			if !errors.Is(err, context.Canceled) {
+				log.Printf("cache-savings backfill: %v", err)
+			}
+		} else if n > 0 {
+			log.Printf("cache-savings backfill: priced %d session(s)", n)
+		}
+	}()
+
 	// Registered after st.Close so LIFO runs it first: cancel the background loops
 	// and wait for them to finish before the pool closes, on every return path
 	// (including an early ListenAndServe error). Receiving from an already-closed
@@ -165,6 +183,7 @@ func run() error {
 		<-sweepDone
 		<-ogDone
 		<-settleDone
+		<-backfillDone
 	}()
 
 	srv := &http.Server{
@@ -196,6 +215,7 @@ func run() error {
 		<-sweepDone
 		<-ogDone
 		<-settleDone
+		<-backfillDone
 		close(idleClosed)
 	}()
 
