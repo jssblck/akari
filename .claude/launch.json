@@ -4,7 +4,15 @@
     {
       "name": "akari",
       "runtimeExecutable": "eph",
-      "runtimeArgs": ["dev"],
+      "runtimeArgs": [
+        "dev",
+        "--watch",
+        "**/*.go",
+        "--watch",
+        "**/*.templ",
+        "--watch",
+        "!**/*_templ.go"
+      ],
       "port": 8080,
       "autoPort": true
     }
