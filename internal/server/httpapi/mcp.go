@@ -26,11 +26,28 @@ const mcpSessionTimeout = 30 * time.Minute
 // newMCPHandler builds the Streamable-HTTP handler for the remote MCP server. One
 // MCP server instance, holding the read tools, serves every session; the calling
 // user is carried per request on the bearer token, not on the server.
+//
+// DisableLocalhostProtection is deliberate. The go-sdk auto-enables a DNS-rebinding
+// guard whenever the accepted connection's local address is loopback: it then 403s
+// any request whose Host header is not itself loopback. akari runs as a remote
+// server behind a TLS-terminating reverse proxy (Caddy) that dials the app over
+// loopback while forwarding the public Host (akari.jessica.black), so that guard
+// would reject every authenticated /mcp request. Because the reject only fires once
+// a bearer token has passed (the auth middleware runs first, so an unauthenticated
+// probe never reaches it), the symptom is that OAuth completes and then the first
+// real request 403s, which an MCP client reports as its freshly minted credentials
+// being rejected on reconnect. The guard targets locally bound servers a browser
+// could reach by rebinding DNS; akari's /mcp is neither browser-reachable without a
+// bearer token nor bound to a name an attacker controls, so turning it off is the
+// documented choice for a proxied deployment and costs no real protection.
 func newMCPHandler(s *Server) http.Handler {
 	srv := mcpserver.New(s.Store)
 	return mcpsdk.NewStreamableHTTPHandler(
 		func(*http.Request) *mcpsdk.Server { return srv },
-		&mcpsdk.StreamableHTTPOptions{SessionTimeout: mcpSessionTimeout},
+		&mcpsdk.StreamableHTTPOptions{
+			SessionTimeout:             mcpSessionTimeout,
+			DisableLocalhostProtection: true,
+		},
 	)
 }
 

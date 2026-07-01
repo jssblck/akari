@@ -40,6 +40,24 @@ func (b bearerRT) RoundTrip(r *http.Request) (*http.Response, error) {
 	return b.base.RoundTrip(r)
 }
 
+// hostRewriteRT injects a bearer token and forces the outgoing Host header, so a
+// test can dial the loopback httptest server while presenting the public Host a
+// reverse proxy would forward. This reproduces the deployment shape (Caddy dials
+// akari over loopback, forwards Host: akari.jessica.black) that trips the go-sdk's
+// loopback DNS-rebinding guard.
+type hostRewriteRT struct {
+	base  http.RoundTripper
+	token string
+	host  string
+}
+
+func (h hostRewriteRT) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Host = h.host
+	r.Header.Set("Authorization", "Bearer "+h.token)
+	return h.base.RoundTrip(r)
+}
+
 // mcpSession dials the MCP endpoint with the given bearer token and returns an
 // initialized client session.
 func mcpSession(t *testing.T, srvURL, token string) *mcpsdk.ClientSession {
@@ -305,6 +323,54 @@ func TestOAuthFlowEndToEndAndMCP(t *testing.T) {
 	defer cancel()
 	if _, err := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "t", Version: "0"}, nil).Connect(ctx, transport, nil); err == nil {
 		t.Fatalf("expected connect to fail after the grant was revoked")
+	}
+}
+
+// TestMCPAllowsProxiedHost pins the fix for the remote-deployment 403. The go-sdk
+// auto-enables a DNS-rebinding guard when the accepted connection is loopback and
+// then rejects any non-loopback Host with 403 Forbidden. A production akari sits
+// behind a reverse proxy that dials it over loopback while forwarding the public
+// Host, so without DisableLocalhostProtection every authenticated /mcp request
+// 403s: OAuth completes, then the first real request is rejected, which the client
+// reports as its new credentials being refused on reconnect. httptest listens on
+// loopback, so presenting a non-loopback Host here recreates that shape exactly.
+func TestMCPAllowsProxiedHost(t *testing.T) {
+	t.Parallel()
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+
+	u, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), "")
+	if err != nil {
+		t.Fatalf("register grace: %v", err)
+	}
+	secret, _ := auth.NewToken()
+	if _, err := st.CreateAPIToken(ctx, u.ID, "read tok", "read", auth.HashToken(secret)); err != nil {
+		t.Fatalf("create read token: %v", err)
+	}
+
+	// Dial the loopback server but forward a public Host, the way Caddy would. This
+	// connects (rather than 403ing) only because the handler disables the loopback
+	// guard; the whoami round-trip proves the request reached the tools.
+	transport := &mcpsdk.StreamableClientTransport{
+		Endpoint:             srv.URL + "/mcp",
+		HTTPClient:           &http.Client{Transport: hostRewriteRT{base: http.DefaultTransport, token: secret, host: "akari.jessica.black"}},
+		DisableStandaloneSSE: true,
+	}
+	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "test", Version: "0"}, nil)
+	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	sess, err := client.Connect(cctx, transport, nil)
+	if err != nil {
+		t.Fatalf("connect through a forwarded non-loopback Host: %v", err)
+	}
+	defer sess.Close()
+
+	var who struct {
+		Username string `json:"username"`
+	}
+	callToolJSON(t, sess, "whoami", map[string]any{}, &who)
+	if who.Username != "grace" {
+		t.Fatalf("whoami = %+v, want grace", who)
 	}
 }
 
