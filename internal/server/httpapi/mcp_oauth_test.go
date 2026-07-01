@@ -343,7 +343,10 @@ func TestMCPAllowsProxiedHost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register grace: %v", err)
 	}
-	secret, _ := auth.NewToken()
+	secret, err := auth.NewToken()
+	if err != nil {
+		t.Fatalf("new token: %v", err)
+	}
 	if _, err := st.CreateAPIToken(ctx, u.ID, "read tok", "read", auth.HashToken(secret)); err != nil {
 		t.Fatalf("create read token: %v", err)
 	}
