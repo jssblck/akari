@@ -76,18 +76,25 @@ func (t ToolStats) ToolsPerTurn() float64 {
 	return float64(t.TotalCalls) / float64(t.Turns)
 }
 
-// ToolStats computes the scope's tool volume, reliability, and mix. The per-tool query
+// ToolStats computes the scope's tool volume, reliability, and mix on its own pooled
+// connection for the Insights page. The snapshot path threads toolStatsFrom so every panel
+// reads one MVCC snapshot.
+func (s *Store) ToolStats(ctx context.Context, f AnalyticsFilter) (ToolStats, error) {
+	return s.toolStatsFrom(ctx, s.Pool, f)
+}
+
+// toolStatsFrom computes the scope's tool volume, reliability, and mix. The per-tool query
 // dedupes replayed calls exactly as the per-session signals do (a resumed or compacted
 // transcript replays prior turns verbatim, and a call's id legitimately rides several
 // rows), but partitions the dedup by session_id as well, since a call id is only unique
 // within its session. The mix is clipped to the busiest tools for legibility while the
 // fleet totals sum over every tool, so the headline error rate is the true fleet rate
 // even when the bar list is short.
-func (s *Store) ToolStats(ctx context.Context, f AnalyticsFilter) (ToolStats, error) {
+func (s *Store) toolStatsFrom(ctx context.Context, q querier, f AnalyticsFilter) (ToolStats, error) {
 	var ts ToolStats
 
 	filter, args := f.clauseFor("s.started_at")
-	rows, err := s.Pool.Query(ctx,
+	rows, err := q.Query(ctx,
 		`WITH scoped AS (
 		   SELECT tc.session_id, tc.message_ordinal, tc.call_index, tc.tool_name,
 		          tc.input_sha256, tc.result_status, tc.call_uid
@@ -147,7 +154,7 @@ func (s *Store) ToolStats(ctx context.Context, f AnalyticsFilter) (ToolStats, er
 	// than an exact per-logical-prompt figure. The skew is bounded by how often sessions
 	// resume, which is rare enough to leave the fleet signal intact.
 	filter, args = f.clauseFor("s.started_at")
-	if err := s.Pool.QueryRow(ctx,
+	if err := q.QueryRow(ctx,
 		`SELECT coalesce(sum(s.user_message_count), 0) FROM sessions s WHERE TRUE`+filter, args...).Scan(&ts.Turns); err != nil {
 		return ToolStats{}, fmt.Errorf("tool turns denominator: %w", err)
 	}

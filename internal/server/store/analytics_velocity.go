@@ -42,7 +42,14 @@ func (v VelocityStats) HasThroughput() bool { return v.ActiveSeconds > 0 }
 // activity in the velocity literature; five minutes is the common default.
 const activeGapSeconds = 300
 
-// VelocityStats computes the scope's cadence figures in three reads over the message
+// VelocityStats computes the scope's cadence figures on its own pooled connection for the
+// Insights page. The snapshot path threads velocityStatsFrom so every panel reads one MVCC
+// snapshot.
+func (s *Store) VelocityStats(ctx context.Context, f AnalyticsFilter) (VelocityStats, error) {
+	return s.velocityStatsFrom(ctx, s.Pool, f)
+}
+
+// velocityStatsFrom computes the scope's cadence figures in three reads over the message
 // timeline.
 //
 // A turn is one prompt and the reply it draws: a running count of user-role messages
@@ -59,7 +66,7 @@ const activeGapSeconds = 300
 // rather than an idle pause (see activeGapSeconds). Both the counts and the active time
 // read the stored projection rows as they are, replays included, so the numerator and the
 // denominator stay on the same footing and the rate never skews from deduping one side.
-func (s *Store) VelocityStats(ctx context.Context, f AnalyticsFilter) (VelocityStats, error) {
+func (s *Store) velocityStatsFrom(ctx context.Context, q querier, f AnalyticsFilter) (VelocityStats, error) {
 	var v VelocityStats
 
 	// Turn-cycle latency percentiles, plus the turn and session counts.
@@ -73,7 +80,7 @@ func (s *Store) VelocityStats(ctx context.Context, f AnalyticsFilter) (VelocityS
 	// later assistant row whose clock drifted earlier cannot understate the latency.
 	filter, args := f.clauseFor("s.started_at")
 	var p50, p90, firstP50 float64
-	if err := s.Pool.QueryRow(ctx,
+	if err := q.QueryRow(ctx,
 		`WITH m AS (
 		   SELECT m.session_id, m.ordinal, m.role, m.timestamp,
 		          count(*) FILTER (WHERE m.role = 'user')
@@ -121,7 +128,7 @@ func (s *Store) VelocityStats(ctx context.Context, f AnalyticsFilter) (VelocityS
 	// Active time and the message count that rides on it.
 	filter, args = f.clauseFor("s.started_at")
 	var msgCount int
-	if err := s.Pool.QueryRow(ctx,
+	if err := q.QueryRow(ctx,
 		fmt.Sprintf(`WITH g AS (
 		   SELECT extract(epoch FROM (m.timestamp - lag(m.timestamp)
 		            OVER (PARTITION BY m.session_id ORDER BY m.ordinal))) AS gap
@@ -139,7 +146,7 @@ func (s *Store) VelocityStats(ctx context.Context, f AnalyticsFilter) (VelocityS
 	// time and message count read, so the numerator and denominator describe one timeline.
 	filter, args = f.clauseFor("s.started_at")
 	var toolCount int
-	if err := s.Pool.QueryRow(ctx,
+	if err := q.QueryRow(ctx,
 		`SELECT count(*)
 		   FROM tool_calls tc
 		   JOIN messages m ON m.session_id = tc.session_id AND m.ordinal = tc.message_ordinal

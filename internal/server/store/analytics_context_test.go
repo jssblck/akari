@@ -24,6 +24,7 @@ func insertContextSignal(t *testing.T, st *store.Store, ctx context.Context, sid
 		sid, version, peak, resets); err != nil {
 		t.Fatalf("insert context signal for session %d: %v", sid, err)
 	}
+	markSignalsFresh(t, st, ctx, sid)
 }
 
 // TestContextHealth pins the cohort aggregate: the peak percentiles read actual stored

@@ -33,18 +33,25 @@ type FileChurn struct {
 // rather than an empty list for a window with no repeated edits.
 func (c FileChurn) HasData() bool { return len(c.Files) > 0 }
 
-// FileChurn computes which files a scope edited repeatedly. It dedupes replayed edit calls
+// FileChurn computes which files a scope edited repeatedly on its own pooled connection for
+// the Insights page. The snapshot path threads fileChurnFrom so every panel reads one MVCC
+// snapshot.
+func (s *Store) FileChurn(ctx context.Context, f AnalyticsFilter) (FileChurn, error) {
+	return s.fileChurnFrom(ctx, s.Pool, f)
+}
+
+// fileChurnFrom computes which files a scope edited repeatedly. It dedupes replayed edit calls
 // with the shared cohort partition (see dedupToolCallsPartition), keeps only edits that
 // carry a parsed file path (the projection stores an edit whose path did not parse as NULL
 // via nullString, so file_path IS NOT NULL drops them, the same guard the per-session
 // edit_churn signal uses so an unattributable edit invents no thrash), groups by path, and
 // keeps the paths edited more than once. The list is capped at the busiest files while the
 // churned-file count comes from the whole set, so the panel can report the dropped tail.
-func (s *Store) FileChurn(ctx context.Context, f AnalyticsFilter) (FileChurn, error) {
+func (s *Store) fileChurnFrom(ctx context.Context, q querier, f AnalyticsFilter) (FileChurn, error) {
 	var fc FileChurn
 
 	filter, args := f.clauseFor("s.started_at")
-	rows, err := s.Pool.Query(ctx,
+	rows, err := q.Query(ctx,
 		`WITH scoped AS (
 		   SELECT tc.session_id, tc.message_ordinal, tc.call_index, tc.tool_name,
 		          tc.file_path, tc.input_sha256, tc.result_status, tc.call_uid

@@ -41,18 +41,26 @@ var outcomeOrder = []string{
 	string(quality.OutcomeUnknown),
 }
 
-// QualityDistribution aggregates the scoped sessions' grades and outcomes for the
-// Insights page. It shares the analytics filter (clauseFor on s.started_at, so a
-// windowed view counts sessions that started in the window). The two splits come from
-// one scan each over the scoped sessions left-joined to their current-version signals,
-// folded into the fixed canonical order with zero-filled buckets so every grade and
-// outcome draws a comparable bar even at zero.
+// QualityDistribution aggregates the scoped sessions' grades and outcomes on its own pooled
+// connection. Insights instead threads its snapshot transaction through
+// qualityDistributionFrom, so the split shares one MVCC snapshot with the other panels it must
+// reconcile against (its session total equals the archetype split's).
 func (s *Store) QualityDistribution(ctx context.Context, f AnalyticsFilter) (QualityDistribution, error) {
-	grades, gTotal, err := s.scopedSignalCounts(ctx, f, "grade", "")
+	return s.qualityDistributionFrom(ctx, s.Pool, f)
+}
+
+// qualityDistributionFrom aggregates the scoped sessions' grades and outcomes for the Insights
+// page from one querier. It shares the analytics filter (clauseFor on s.started_at, so a
+// windowed view counts sessions that started in the window). The two splits come from one scan
+// each over the scoped sessions left-joined to their current-version signals, folded into the
+// fixed canonical order with zero-filled buckets so every grade and outcome draws a comparable
+// bar even at zero.
+func (s *Store) qualityDistributionFrom(ctx context.Context, q querier, f AnalyticsFilter) (QualityDistribution, error) {
+	grades, gTotal, err := s.scopedSignalCounts(ctx, q, f, "grade", "")
 	if err != nil {
 		return QualityDistribution{}, fmt.Errorf("grade distribution: %w", err)
 	}
-	outcomes, _, err := s.scopedSignalCounts(ctx, f, "outcome", string(quality.OutcomeUnknown))
+	outcomes, _, err := s.scopedSignalCounts(ctx, q, f, "outcome", string(quality.OutcomeUnknown))
 	if err != nil {
 		return QualityDistribution{}, fmt.Errorf("outcome distribution: %w", err)
 	}
@@ -67,18 +75,24 @@ func (s *Store) QualityDistribution(ctx context.Context, f AnalyticsFilter) (Qua
 // and returns the per-key counts plus the total. It scopes over sessions and LEFT JOINs
 // the current-version signals row, so a session whose row is missing or stale folds into
 // the missing bucket rather than dropping out: that keeps the count equal to the scoped
-// session total and reconciles the grade and outcome splits with the archetype split.
-// col and missing are internal constants (the column name and the bucket a session with
-// no current row reads as, "" for grade or "unknown" for outcome), never caller input,
-// so interpolating them is safe.
-func (s *Store) scopedSignalCounts(ctx context.Context, f AnalyticsFilter, col, missing string) (map[string]int, int, error) {
+// session total and reconciles the grade and outcome splits with the archetype split. The
+// join also requires the row to be usable (NOT s.signals_stale), so a session that gained an
+// appended region after its last grade, or was graded while still live, reads as unscored/unknown
+// until the settle pass re-grades it, rather than counting a grade for an earlier or not-yet-
+// settled state; that is the read-side mirror of the signals_stale flag the settle pass drains
+// on. The flag rather than a refreshed_at >= updated_at comparison is deliberate: updated_at also
+// moves on metadata-only writes that leave the grade valid, and the flag is set at exactly the
+// projection-change sites, so it is the precise staleness signal. col and missing are internal
+// constants (the column name and the bucket a session with no usable row reads as, "" for grade
+// or "unknown" for outcome), never caller input, so interpolating them is safe.
+func (s *Store) scopedSignalCounts(ctx context.Context, q querier, f AnalyticsFilter, col, missing string) (map[string]int, int, error) {
 	filter, args := f.clauseFor("s.started_at")
 	args = append(args, quality.Version)
-	rows, err := s.Pool.Query(ctx, fmt.Sprintf(
+	rows, err := q.Query(ctx, fmt.Sprintf(
 		`SELECT coalesce(sig.%s, '%s'), count(*)
 		   FROM sessions s
 		   LEFT JOIN session_signals sig
-		     ON sig.session_id = s.id AND sig.signals_version = $%d
+		     ON sig.session_id = s.id AND sig.signals_version = $%d AND NOT s.signals_stale
 		  WHERE TRUE`+filter+`
 		  GROUP BY 1`, col, missing, len(args)), args...)
 	if err != nil {

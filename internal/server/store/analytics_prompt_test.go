@@ -24,6 +24,7 @@ func insertHygieneSignal(t *testing.T, st *store.Store, ctx context.Context, sid
 		sid, version, promptCount, short, dup, nocode, unstructured); err != nil {
 		t.Fatalf("insert hygiene signal for session %d: %v", sid, err)
 	}
+	markSignalsFresh(t, st, ctx, sid)
 }
 
 // TestPromptHygiene pins the cohort aggregate: it sums the per-session hygiene counts over

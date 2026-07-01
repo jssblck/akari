@@ -32,7 +32,14 @@ func (c ConcurrencyStats) HasData() bool { return c.Sessions > 0 }
 // sits at the front of every concurrency CTE so the three queries measure the same set.
 const spanFilter = " s.started_at IS NOT NULL AND s.ended_at IS NOT NULL AND s.ended_at >= s.started_at"
 
-// ConcurrencyStats computes the scope's overlap figures with a sweep line over the
+// ConcurrencyStats computes the scope's overlap figures on its own pooled connection for
+// the Insights page. The snapshot path threads concurrencyStatsFrom so every panel reads
+// one MVCC snapshot.
+func (s *Store) ConcurrencyStats(ctx context.Context, f AnalyticsFilter) (ConcurrencyStats, error) {
+	return s.concurrencyStatsFrom(ctx, s.Pool, f)
+}
+
+// concurrencyStatsFrom computes the scope's overlap figures with a sweep line over the
 // session spans: each session contributes a +1 at its start and a -1 at its end, and the
 // running sum over those events ordered by time is the live concurrency. Ties order
 // starts before ends (delta DESC), so two sessions that touch at an instant register the
@@ -41,13 +48,13 @@ const spanFilter = " s.started_at IS NOT NULL AND s.ended_at IS NOT NULL AND s.e
 // total active session-time divided by the span the sessions actually cover, so a window
 // with a short burst of activity reads its average over that burst, not over the dead air
 // around it.
-func (s *Store) ConcurrencyStats(ctx context.Context, f AnalyticsFilter) (ConcurrencyStats, error) {
+func (s *Store) concurrencyStatsFrom(ctx context.Context, q querier, f AnalyticsFilter) (ConcurrencyStats, error) {
 	var cs ConcurrencyStats
 
 	// Fleet peak and the instant it was first reached.
 	filter, args := f.clauseFor("s.started_at")
 	var peakAt *time.Time
-	err := s.Pool.QueryRow(ctx,
+	err := q.QueryRow(ctx,
 		`WITH spans AS (
 		   SELECT s.started_at AS a, s.ended_at AS b
 		     FROM sessions s WHERE`+spanFilter+filter+`
@@ -72,7 +79,7 @@ func (s *Store) ConcurrencyStats(ctx context.Context, f AnalyticsFilter) (Concur
 	filter, args = f.clauseFor("s.started_at")
 	var user *string
 	var userPeak int
-	err = s.Pool.QueryRow(ctx,
+	err = q.QueryRow(ctx,
 		`WITH spans AS (
 		   SELECT s.user_id AS u, s.started_at AS a, s.ended_at AS b
 		     FROM sessions s WHERE`+spanFilter+filter+`
@@ -102,7 +109,7 @@ func (s *Store) ConcurrencyStats(ctx context.Context, f AnalyticsFilter) (Concur
 	filter, args = f.clauseFor("s.started_at")
 	var sumSecs float64
 	var minStart, maxEnd *time.Time
-	if err := s.Pool.QueryRow(ctx,
+	if err := q.QueryRow(ctx,
 		`SELECT count(*),
 		        coalesce(sum(extract(epoch FROM (s.ended_at - s.started_at))), 0),
 		        min(s.started_at), max(s.ended_at)

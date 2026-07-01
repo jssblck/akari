@@ -154,8 +154,29 @@ func (a Analytics) TotalTokens() int64 {
 // The headline totals are summed from the by-agent split rather than queried
 // again: a session has exactly one agent, so the per-agent rows partition the
 // usage cleanly and their sum is the grand total with no double counting.
+// It reads inside one read-only REPEATABLE READ transaction so every grouped query and the
+// Cache tile share a single MVCC snapshot: the headline token classes and the Cache split are
+// the same sums regrouped, so a concurrent ingest landing between two pooled reads would let
+// them disagree by the usage that arrived mid-render. Unlike AnalyticsSnapshot this takes no
+// reparse-lock gate (a live panel tolerates a snapshot that falls during a reparse, where each
+// session is atomically old or new), and being read-only it takes no locks that could block
+// ingest.
 func (s *Store) Analytics(ctx context.Context, f AnalyticsFilter) (Analytics, error) {
-	return s.analyticsFrom(ctx, s.Pool, f)
+	var a Analytics
+	err := pgx.BeginTxFunc(ctx, s.Pool,
+		pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly},
+		func(tx pgx.Tx) error {
+			var err error
+			a, err = s.analyticsFrom(ctx, tx, f)
+			return err
+		})
+	if err != nil {
+		// Wrap so a begin or commit failure on the snapshot transaction reaches callers
+		// (the MCP overview and project tools among them) named as an analytics-snapshot
+		// failure, not a bare pgx or context error with no indication of what read broke.
+		return Analytics{}, fmt.Errorf("analytics snapshot: %w", err)
+	}
+	return a, nil
 }
 
 // querier is the subset of *pgxpool.Pool and pgx.Tx that the analytics queries

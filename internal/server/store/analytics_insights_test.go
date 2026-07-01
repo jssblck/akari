@@ -26,6 +26,7 @@ func insertSignal(t *testing.T, st *store.Store, ctx context.Context, sid int64,
 		 VALUES ($1, $2, $3, 'high', $4, $5)`, sid, version, outcome, score, gradeArg); err != nil {
 		t.Fatalf("insert signal for session %d: %v", sid, err)
 	}
+	markSignalsFresh(t, st, ctx, sid)
 }
 
 // setSessionShape stamps the facts the archetype banding and the windowing read: the

@@ -33,15 +33,22 @@ var archetypeOrder = []string{
 	string(quality.ArchetypeAutomation),
 }
 
-// ArchetypeDistribution buckets the scoped sessions by shape (quick / standard / deep /
+// ArchetypeDistribution buckets the scoped sessions by shape on its own pooled connection
+// for the Insights page. The snapshot path threads archetypeDistributionFrom so every
+// panel reads one MVCC snapshot.
+func (s *Store) ArchetypeDistribution(ctx context.Context, f AnalyticsFilter) ([]LabeledCount, error) {
+	return s.archetypeDistributionFrom(ctx, s.Pool, f)
+}
+
+// archetypeDistributionFrom buckets the scoped sessions by shape (quick / standard / deep /
 // marathon / automation) for the Insights page. It reads straight from sessions (the
 // facts are columns there: user turns, message count, and the start/end span), scoped
 // by the shared analytics filter on s.started_at, so the same window and narrowing the
 // usage panel uses applies here. One GROUP BY over the banding CASE, folded into the
 // fixed order with zero-filled buckets.
-func (s *Store) ArchetypeDistribution(ctx context.Context, f AnalyticsFilter) ([]LabeledCount, error) {
+func (s *Store) archetypeDistributionFrom(ctx context.Context, q querier, f AnalyticsFilter) ([]LabeledCount, error) {
 	filter, args := f.clauseFor("s.started_at")
-	rows, err := s.Pool.Query(ctx,
+	rows, err := q.Query(ctx,
 		`SELECT `+archetypeCaseExpr+`, count(*)
 		   FROM sessions s
 		  WHERE TRUE`+filter+`
