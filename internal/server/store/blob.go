@@ -436,9 +436,18 @@ func (s *Store) BlobMeta(ctx context.Context, sha256hex string) (Blob, error) {
 	return b, err
 }
 
-// WriteBlobTo streams a blob's bytes to w and returns its media type. Large
+// WriteBlobTo streams a blob's whole body to w and returns its media type. Large
 // object reads must run in a transaction, so the copy happens inside one.
 func (s *Store) WriteBlobTo(ctx context.Context, w io.Writer, sha256hex string) (mediaType string, err error) {
+	return s.WriteBlobPrefixTo(ctx, w, sha256hex, 0)
+}
+
+// WriteBlobPrefixTo streams at most limit bytes of a blob's body to w and returns its
+// media type; limit <= 0 means the whole body. The large-object reader pulls only the
+// bytes it copies, so a small limit transfers a small prefix rather than the whole
+// object: a capped preview of a bulky CAS body is O(limit), not O(blob). A caller that
+// needs to flag truncation compares limit against the stored byte_len from BlobMeta.
+func (s *Store) WriteBlobPrefixTo(ctx context.Context, w io.Writer, sha256hex string, limit int64) (mediaType string, err error) {
 	err = pgx.BeginTxFunc(ctx, s.Pool, pgx.TxOptions{AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
 		var oid uint32
 		row := tx.QueryRow(ctx, "SELECT lo_oid, media_type FROM blobs WHERE sha256 = $1", sha256hex)
@@ -454,7 +463,11 @@ func (s *Store) WriteBlobTo(ctx context.Context, w io.Writer, sha256hex string) 
 			return err
 		}
 		defer lo.Close()
-		_, err = io.Copy(w, lo)
+		var src io.Reader = lo
+		if limit > 0 {
+			src = io.LimitReader(lo, limit)
+		}
+		_, err = io.Copy(w, src)
 		return err
 	})
 	return mediaType, err

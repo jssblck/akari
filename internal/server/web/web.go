@@ -28,6 +28,27 @@ type Page struct {
 	// "sessions", "projects", "account"), so the shell can mark the
 	// current section. Empty leaves no item active.
 	Active string
+	// OverviewPublic reports whether the signed-in user has published their own
+	// usage overview, which drives the account page's Publicity controls and the
+	// "Public" badge on the signed-in overview. The share link is /u/<username>, so
+	// Username (already on the page) is all the badge and account section need to
+	// build it. This is populated from the same UserByID lookup that fills Username,
+	// so reading it costs no extra query.
+	OverviewPublic bool
+}
+
+// OGMeta carries the Open Graph and Twitter card metadata a public page emits so a
+// shared link unfurls with a title, description, and preview image. The zero value
+// emits only the basic title tags; Image (an absolute URL) switches the Twitter
+// card to the large-image form and adds og:image. Description and URL are optional.
+type OGMeta struct {
+	Title       string
+	Description string
+	// Image is the absolute URL of the preview card. Open Graph requires an absolute
+	// URL here, so the handler builds it from the request origin; empty omits it.
+	Image string
+	// URL is the absolute canonical URL of the page; empty omits og:url.
+	URL string
 }
 
 // IsLocalKind reports whether a project kind is one of the non-remote kinds
@@ -373,6 +394,15 @@ func FmtTimeAt(t time.Time) string {
 		return "-"
 	}
 	return t.UTC().Format("2006-01-02 15:04")
+}
+
+// grantName renders a connected app's display name, falling back to a generic
+// label when the client registered without one.
+func grantName(name string) string {
+	if strings.TrimSpace(name) == "" {
+		return "Unnamed MCP client"
+	}
+	return name
 }
 
 // FmtDuration renders the span between start and end, or a dash.

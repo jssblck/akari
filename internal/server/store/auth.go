@@ -16,6 +16,12 @@ type User struct {
 	PasswordHash string
 	IsAdmin      bool
 	CreatedAt    time.Time
+	// OverviewPublic reports whether this account has published its own usage
+	// overview to logged-out viewers at /u/<username>. It is loaded by UserByID
+	// (the account page and the overview badge read the owner's own state through
+	// it); ListUsers leaves it zero, since the per-user filter only needs
+	// identities.
+	OverviewPublic bool
 }
 
 // APIToken is a stored client token (the secret itself is never stored, only its
@@ -94,12 +100,14 @@ func (s *Store) UserByUsername(ctx context.Context, username string) (User, erro
 	return u, err
 }
 
-// UserByID looks up a user by id.
+// UserByID looks up a user by id, including its overview publicity state, which
+// the account page and the overview badge read for the signed-in owner.
 func (s *Store) UserByID(ctx context.Context, id int64) (User, error) {
 	var u User
 	err := s.Pool.QueryRow(ctx,
-		`SELECT id, username, password_hash, is_admin, created_at FROM users WHERE id = $1`,
-		id).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.IsAdmin, &u.CreatedAt)
+		`SELECT id, username, password_hash, is_admin, created_at, overview_public
+		   FROM users WHERE id = $1`,
+		id).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.IsAdmin, &u.CreatedAt, &u.OverviewPublic)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return User{}, ErrNotFound
 	}

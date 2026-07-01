@@ -60,3 +60,51 @@ func (s *Store) UnpublishSession(ctx context.Context, sessionID, userID int64) e
 	}
 	return nil
 }
+
+// PublishOverview marks a user's own usage overview public, so /u/<username>
+// resolves for logged-out viewers. The address is the username, so there is no
+// capability id to mint: the call only flips the gate.
+func (s *Store) PublishOverview(ctx context.Context, userID int64) error {
+	tag, err := s.Pool.Exec(ctx,
+		`UPDATE users SET overview_public = TRUE WHERE id = $1`, userID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UnpublishOverview hides a user's public overview by clearing the gate flag. The
+// URL is the username and never changes, so re-publishing later brings the same
+// /u/<username> back.
+func (s *Store) UnpublishOverview(ctx context.Context, userID int64) error {
+	tag, err := s.Pool.Exec(ctx,
+		`UPDATE users SET overview_public = FALSE WHERE id = $1`, userID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// PublicOverviewUser resolves a username to its account for the logged-out
+// overview page, only while that account's overview is public. The flag is folded
+// into the WHERE clause, so an unknown or unpublished name yields ErrNotFound and
+// the link 404s. Only the fields the public page needs are loaded; the password
+// hash is left zero.
+func (s *Store) PublicOverviewUser(ctx context.Context, username string) (User, error) {
+	var u User
+	err := s.Pool.QueryRow(ctx,
+		`SELECT id, username, overview_public
+		   FROM users
+		  WHERE username = $1 AND overview_public = TRUE`,
+		username).Scan(&u.ID, &u.Username, &u.OverviewPublic)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return User{}, ErrNotFound
+	}
+	return u, err
+}

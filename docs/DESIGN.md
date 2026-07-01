@@ -575,7 +575,7 @@ CREATE TABLE api_tokens (
   id           BIGSERIAL PRIMARY KEY,
   user_id      BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   name         TEXT NOT NULL,
-  scope        TEXT NOT NULL DEFAULT 'ingest',  -- ingest | full
+  scope        TEXT NOT NULL DEFAULT 'ingest',  -- ingest | read | full
   token_hash   TEXT NOT NULL UNIQUE,      -- sha256 of the presented token
   created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
   last_used_at TIMESTAMPTZ,
@@ -907,14 +907,43 @@ partials, not JSON, to keep the rendering in one place.
   cleared on logout.
 - API tokens: a long random string shown once at creation; only its sha256 is
   stored. Presented as `Bearer`. `last_used_at` updated on use. Each token is
-  scoped `ingest` (push only) or `full` (push and read).
+  scoped `ingest` (push only), `read` (read only, for the MCP surface), or `full`
+  (push and read).
 - Registration requires a valid, unredeemed invite token (stored as a sha256
   hash, single use). The first-ever account bootstraps without one and becomes
   admin; every later account must redeem an invite an admin issued.
-- Authorization checks, and only these: ingest endpoints require any valid token
-  (scope `ingest` or `full`); reads require a browser session or a `full` token,
-  or that the specific session is public (for logged-out reads). Owner-only
-  actions are limited to publish/unpublish and token management.
+- Authorization checks, and only these: ingest endpoints require a push token
+  (scope `ingest` or `full`); UI reads require a browser session or a `full` token,
+  or that the specific session is public (for logged-out reads); the MCP endpoint
+  accepts a `read` or `full` token (or an OAuth access token). Owner-only actions
+  are limited to publish/unpublish and token management.
+
+### Remote MCP server
+
+The server hosts a remote [MCP](https://modelcontextprotocol.io) endpoint at `/mcp`
+so coding agents can read the corpus without the UI. Two decisions shape it:
+
+- **The protocol layer is the official Go SDK** (`modelcontextprotocol/go-sdk`),
+  speaking Streamable HTTP. One server instance holds the read tools; the calling
+  user rides each request's bearer token, attached to the tool handler as
+  `TokenInfo`. The tools are thin: each maps to an existing `store` read and
+  reshapes the result into a stable, snake_case DTO, so the MCP surface never grows
+  its own query logic and stays decoupled from internal renames. The raw underlying
+  data the UI fetches on demand is exposed too: tool-call bodies from the CAS
+  (gated by a session that references the hash, the same gate the UI enforces) and
+  a session's lossless ingested bytes, both size-capped.
+- **akari is its own OAuth 2.1 authorization server**, so connecting an agent
+  reuses the browser session rather than asking the user to mint and paste a token.
+  The server publishes the protected-resource (RFC 9728) and authorization-server
+  (RFC 8414) metadata, accepts dynamic client registration (RFC 7591), and runs the
+  authorize and token endpoints. The authorize endpoint recognizes the `web_sessions`
+  cookie a user already holds, so consent is one click; PKCE (S256) is mandatory,
+  codes are single-use, and access tokens are short-lived with single-use refresh
+  rotation. Tokens are minted read-only (`read` scope): an MCP credential can read
+  everything a logged-in user sees and publish, delete, or mint nothing. New tables:
+  `oauth_clients`, `oauth_auth_codes`, `oauth_tokens`, every secret stored only as
+  its sha256, matching how API tokens, sessions, and invites are already handled. A
+  user disconnects a client from the account page, revoking its tokens at once.
 
 ## Client
 

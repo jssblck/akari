@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"image/png"
+	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -12,11 +14,15 @@ import (
 	"strings"
 	"testing"
 
+	"time"
+
 	"github.com/jssblck/akari/internal/config"
 	"github.com/jssblck/akari/internal/server/auth"
+	"github.com/jssblck/akari/internal/server/ogimage"
 	"github.com/jssblck/akari/internal/server/reparse"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/storetest"
+	"github.com/jssblck/akari/internal/server/web"
 )
 
 // mustHash hashes a password for seeding a test account directly via the store.
@@ -66,14 +72,32 @@ func TestWebFlow(t *testing.T) {
 	srv, _ := newTestServer(t)
 	c := newClient(t)
 
-	// An unauthenticated read page redirects to login.
+	// The unauthenticated root serves the landing page (explaining akari), not a
+	// redirect to login: the request stays on / and renders the marketing hero
+	// with links into sign-in and registration.
 	resp, err := c.Get(srv.URL + "/")
 	if err != nil {
 		t.Fatalf("get /: %v", err)
 	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("unauthenticated / = %d, want 200 landing page", resp.StatusCode)
+	}
+	if resp.Request.URL.Path != "/" {
+		t.Fatalf("unauthenticated / redirected to %q, want the landing page at /", resp.Request.URL.Path)
+	}
 	body := readBody(t, resp)
+	if !strings.Contains(body, "self-hosted instrument") || !strings.Contains(body, `href="/register"`) {
+		t.Fatalf("unauthenticated / should render the landing page, got:\n%s", body)
+	}
+
+	// An authed-only read page still redirects an anonymous visitor to login.
+	resp, err = c.Get(srv.URL + "/projects")
+	if err != nil {
+		t.Fatalf("get /projects: %v", err)
+	}
+	body = readBody(t, resp)
 	if !strings.Contains(body, "Log in") {
-		t.Fatalf("unauthenticated / should land on login page, got:\n%s", body)
+		t.Fatalf("unauthenticated /projects should land on login page, got:\n%s", body)
 	}
 
 	// Register the first account (becomes admin, no invite needed).
@@ -164,14 +188,67 @@ func TestWebFlow(t *testing.T) {
 		t.Fatalf("GET /search after removal = %d, want 404", resp.StatusCode)
 	}
 
-	// Logout clears the session; the root redirects to login again.
+	// Logout clears the session and lands on the login page.
 	resp, err = c.PostForm(srv.URL+"/logout", url.Values{})
 	if err != nil {
 		t.Fatalf("logout: %v", err)
 	}
 	body = readBody(t, resp)
 	if !strings.Contains(body, "Log in") {
-		t.Fatalf("after logout / should be login page, got:\n%s", body)
+		t.Fatalf("after logout should be login page, got:\n%s", body)
+	}
+
+	// With the session gone, the root is the public landing page again rather
+	// than the signed-in overview.
+	resp, err = c.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("get / after logout: %v", err)
+	}
+	body = readBody(t, resp)
+	if !strings.Contains(body, "self-hosted instrument") {
+		t.Fatalf("after logout / should render the landing page, got:\n%s", body)
+	}
+}
+
+// TestRootNonFullCredentialGetsLanding pins handleRoot's gate: only a full-scope
+// credential reaches the overview, so a read- or ingest-scope bearer token (a
+// non-browser credential pointed at the UI root) is treated as logged out and
+// gets the landing page, not the signed-in overview. This exercises the branch
+// TestWebFlow leaves uncovered, which only drives an anonymous request and a
+// full-scope browser session.
+func TestRootNonFullCredentialGetsLanding(t *testing.T) {
+	t.Parallel()
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+
+	u, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), "")
+	if err != nil {
+		t.Fatalf("register user: %v", err)
+	}
+	for _, tc := range []struct{ scope, token string }{
+		{scopeRead, "read-secret-token"},
+		{scopeIngest, "ingest-secret-token"},
+	} {
+		if _, err := st.CreateAPIToken(ctx, u.ID, tc.scope, tc.scope, auth.HashToken(tc.token)); err != nil {
+			t.Fatalf("create %s token: %v", tc.scope, err)
+		}
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/", nil)
+		req.Header.Set("Authorization", "Bearer "+tc.token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("get / with %s token: %v", tc.scope, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			t.Fatalf("get / with %s token = %d, want 200 landing page", tc.scope, resp.StatusCode)
+		}
+		body := readBody(t, resp)
+		if !strings.Contains(body, "self-hosted instrument") {
+			t.Fatalf("%s-scope root should render the landing page, got:\n%s", tc.scope, body)
+		}
+		if strings.Contains(body, `class="sidebar"`) {
+			t.Fatalf("%s-scope root should not render the signed-in overview shell, got:\n%s", tc.scope, body)
+		}
 	}
 }
 
@@ -733,6 +810,372 @@ func TestSessionPageDuplicateIDChip(t *testing.T) {
 	}
 	if !strings.Contains(body, "1 duplicate id") {
 		t.Fatalf("session page should show the duplicate-id chip, got:\n%s", body)
+	}
+}
+
+// TestPublicOverviewFlow drives a user's public overview end to end: it is
+// unreachable before publishing, the account Publicity control publishes it and
+// surfaces the share link (and the signed-in overview gains its badge), an
+// anonymous viewer then reads only that user's aggregate usage (never another
+// account's, never a session), and making it private 404s the link while a
+// re-publish restores the same URL.
+func TestPublicOverviewFlow(t *testing.T) {
+	t.Parallel()
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+	c := newClient(t)
+
+	owner, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	// A second account whose usage must never leak onto grace's public overview.
+	var adaID int64
+	if err := st.Pool.QueryRow(ctx,
+		`INSERT INTO users (username, password_hash, is_admin) VALUES ('ada', 'x', FALSE) RETURNING id`).Scan(&adaID); err != nil {
+		t.Fatalf("seed ada: %v", err)
+	}
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	// grace runs claude, ada runs codex; one in-window usage event each.
+	seed := func(userID int64, agent, src, model string) int64 {
+		ann, err := st.Announce(ctx, store.AnnounceParams{
+			UserID: userID, Agent: agent, SourceSessionID: src,
+			ProjectID: projectID, Cwd: "/home/x/akari", Machine: "laptop",
+		})
+		if err != nil {
+			t.Fatalf("announce %s: %v", src, err)
+		}
+		if _, err := st.Pool.Exec(ctx,
+			`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cost_usd, occurred_at, dedup_key)
+			 VALUES ($1, $2, 100, 50, 1.0, now() - make_interval(days => 1), $3)`,
+			ann.SessionID, model, src+"-u"); err != nil {
+			t.Fatalf("seed usage %s: %v", src, err)
+		}
+		return ann.SessionID
+	}
+	graceSession := seed(owner.ID, "claude", "sess-grace", "claude-opus-4-8")
+	seed(adaID, "codex", "sess-ada", "gpt-5.5")
+
+	const pubPath = "/u/grace"
+
+	// Before publishing, the username 404s (the public page never redirects to
+	// login).
+	anon := newClient(t)
+	anon.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp := mustGet(t, anon, srv.URL+pubPath)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("anon %s before publish = %d, want 404", pubPath, resp.StatusCode)
+	}
+	resp.Body.Close()
+	anon.CheckRedirect = nil
+
+	if _, err := c.PostForm(srv.URL+"/login", url.Values{
+		"username": {"grace"}, "password": {"hopper-1906"},
+	}); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+
+	// Before publishing, the account page offers the publish control, not a link.
+	body := readBody(t, mustGet(t, c, srv.URL+"/account"))
+	if !strings.Contains(body, "Publicity") || !strings.Contains(body, "Make overview public") {
+		t.Fatalf("account page should offer the publicity control, got:\n%s", body)
+	}
+	// The signed-in overview carries no public badge while private.
+	body = readBody(t, mustGet(t, c, srv.URL+"/"))
+	if strings.Contains(body, "View public page") {
+		t.Fatalf("overview should not show the public badge before publishing, got:\n%s", body)
+	}
+
+	// Publish via the account control.
+	if _, err := c.PostForm(srv.URL+"/account/overview/publish", url.Values{}); err != nil {
+		t.Fatalf("publish overview: %v", err)
+	}
+	if u, err := st.UserByID(ctx, owner.ID); err != nil || !u.OverviewPublic {
+		t.Fatalf("account not public after publish: err=%v public=%v", err, u.OverviewPublic)
+	}
+
+	// The account page now shows the username link and the make-private control; the
+	// signed-in overview gains the badge linking to the public page.
+	body = readBody(t, mustGet(t, c, srv.URL+"/account"))
+	if !strings.Contains(body, pubPath) || !strings.Contains(body, "Make private") {
+		t.Fatalf("account page should show the username link and make-private control, got:\n%s", body)
+	}
+	body = readBody(t, mustGet(t, c, srv.URL+"/"))
+	if !strings.Contains(body, "View public page") || !strings.Contains(body, pubPath) {
+		t.Fatalf("overview should show the public badge after publishing, got:\n%s", body)
+	}
+
+	// An anonymous viewer reads grace's aggregate usage: her agent (claude) and her
+	// username, but never ada's codex usage and never a session link.
+	resp = mustGet(t, anon, srv.URL+pubPath)
+	body = readBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("anon public overview status = %d, want 200", resp.StatusCode)
+	}
+	for _, want := range []string{"grace", ">claude</span>"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("public overview missing %q, got:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, ">codex</span>") {
+		t.Fatalf("public overview leaked another user's usage (codex), got:\n%s", body)
+	}
+	// The public overview is aggregate only: it must expose no session, neither
+	// grace's own session path nor the per-user filter that names other accounts.
+	if strings.Contains(body, fmt.Sprintf("/sessions/%d", graceSession)) {
+		t.Fatalf("public overview leaked a session path, got:\n%s", body)
+	}
+	if strings.Contains(body, fmt.Sprintf(`name="user" value="%d"`, adaID)) {
+		t.Fatalf("public overview leaked the per-user filter, got:\n%s", body)
+	}
+	// Its range buttons refetch the public path, not the authed overview.
+	if !strings.Contains(body, `hx-get="`+pubPath+`?range=`) {
+		t.Fatalf("public overview range buttons should target the public path, got:\n%s", body)
+	}
+
+	// Another account's overview is independent: ada never published, so /u/ada
+	// 404s even while grace's is public.
+	anon.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp = mustGet(t, anon, srv.URL+"/u/ada")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("unpublished /u/ada = %d, want 404", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Make private: the link 404s.
+	anon.CheckRedirect = nil
+	if _, err := c.PostForm(srv.URL+"/account/overview/unpublish", url.Values{}); err != nil {
+		t.Fatalf("unpublish overview: %v", err)
+	}
+	anon.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp = mustGet(t, anon, srv.URL+pubPath)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("public overview after make-private = %d, want 404", resp.StatusCode)
+	}
+	resp.Body.Close()
+	anon.CheckRedirect = nil
+
+	// Re-publishing brings the same /u/<username> back.
+	if _, err := c.PostForm(srv.URL+"/account/overview/publish", url.Values{}); err != nil {
+		t.Fatalf("re-publish overview: %v", err)
+	}
+	resp = mustGet(t, anon, srv.URL+pubPath)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("public overview after re-publish = %d, want 200", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+// TestPublicOverviewOGImage drives the Open Graph preview card end to end:
+// publishing renders a card up front, the public page advertises it via og:image
+// meta tags, the /og.png route serves a valid 1200x630 PNG to an anonymous
+// viewer, and making the overview private 404s the card just as it does the page.
+func TestPublicOverviewOGImage(t *testing.T) {
+	t.Parallel()
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+	c := newClient(t)
+
+	owner, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	ann, err := st.Announce(ctx, store.AnnounceParams{
+		UserID: owner.ID, Agent: "claude", SourceSessionID: "sess-grace",
+		ProjectID: projectID, Cwd: "/home/grace/akari", Machine: "laptop",
+	})
+	if err != nil {
+		t.Fatalf("announce: %v", err)
+	}
+	if _, err := st.Pool.Exec(ctx,
+		`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cost_usd, occurred_at, dedup_key)
+		 VALUES ($1, 'claude-opus-4-8', 100, 50, 1.0, now() - make_interval(days => 1), 'u1')`,
+		ann.SessionID); err != nil {
+		t.Fatalf("seed usage: %v", err)
+	}
+
+	anon := newClient(t)
+	anon.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+	// Before publishing, the card 404s (the page does too).
+	resp := mustGet(t, anon, srv.URL+"/u/grace/og.png")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("og.png before publish = %d, want 404", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Publish through the account control, which renders the card synchronously.
+	if _, err := c.PostForm(srv.URL+"/login", url.Values{
+		"username": {"grace"}, "password": {"hopper-1906"},
+	}); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	if _, err := c.PostForm(srv.URL+"/account/overview/publish", url.Values{}); err != nil {
+		t.Fatalf("publish overview: %v", err)
+	}
+
+	// The public page advertises the card via Open Graph meta tags.
+	body := readBody(t, mustGet(t, anon, srv.URL+"/u/grace"))
+	for _, want := range []string{
+		`property="og:image" content="`,
+		`/u/grace/og.png"`,
+		`name="twitter:card" content="summary_large_image"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("public overview missing OG tag %q, got:\n%s", want, body)
+		}
+	}
+
+	// Under a narrower ?range the page totals no longer match the year-window card,
+	// so the card must not be advertised there (it would unfurl a mismatched figure);
+	// the page still renders fine, just without og:image.
+	ranged := readBody(t, mustGet(t, anon, srv.URL+"/u/grace?range=7d"))
+	if strings.Contains(ranged, "og:image") {
+		t.Fatalf("non-default range page must not advertise the card, got:\n%s", ranged)
+	}
+
+	// The card itself is a valid, correctly sized PNG served as an image.
+	resp = mustGet(t, anon, srv.URL+"/u/grace/og.png")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("og.png after publish = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "image/png" {
+		t.Fatalf("og.png content-type = %q, want image/png", ct)
+	}
+	raw, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read og.png: %v", err)
+	}
+	img, err := png.Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("decode og.png: %v", err)
+	}
+	if b := img.Bounds(); b.Dx() != 1200 || b.Dy() != 630 {
+		t.Fatalf("og.png size = %dx%d, want 1200x630", b.Dx(), b.Dy())
+	}
+
+	// Making the overview private 404s the card, matching the page.
+	if _, err := c.PostForm(srv.URL+"/account/overview/unpublish", url.Values{}); err != nil {
+		t.Fatalf("unpublish overview: %v", err)
+	}
+	resp = mustGet(t, anon, srv.URL+"/u/grace/og.png")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("og.png after make-private = %d, want 404", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+// TestPublishDuringReparseSkipsCard guards the publish-time render's reparse gate:
+// publishing while a reparse rebuilds the projection must not cache a card from a
+// half-rebuilt aggregate. It holds the real reparse advisory lock (as a live
+// reparse does for its whole run) so ogimage.Generate takes its abort path. The
+// publish still succeeds (the overview is public); the card only appears once a
+// reparse is not running.
+func TestPublishDuringReparseSkipsCard(t *testing.T) {
+	t.Parallel()
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+	c := newClient(t)
+
+	if _, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), ""); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if _, err := c.PostForm(srv.URL+"/login", url.Values{
+		"username": {"grace"}, "password": {"hopper-1906"},
+	}); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+
+	// Publish while the reparse advisory lock is held: the overview goes public, but
+	// the card render aborts, so /og.png 404s.
+	lock, ok, err := st.AcquireReparseLock(ctx)
+	if err != nil || !ok {
+		t.Fatalf("acquire reparse lock: ok=%v err=%v", ok, err)
+	}
+	if _, err := c.PostForm(srv.URL+"/account/overview/publish", url.Values{}); err != nil {
+		lock.Release(ctx)
+		t.Fatalf("publish: %v", err)
+	}
+	anon := newClient(t)
+	anon.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp := mustGet(t, anon, srv.URL+"/u/grace/og.png")
+	if resp.StatusCode != http.StatusNotFound {
+		lock.Release(ctx)
+		t.Fatalf("og.png after publish-during-reparse = %d, want 404 (render skipped)", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// With the lock cleared, re-publishing renders the card.
+	lock.Release(ctx)
+	if _, err := c.PostForm(srv.URL+"/account/overview/publish", url.Values{}); err != nil {
+		t.Fatalf("re-publish: %v", err)
+	}
+	resp = mustGet(t, anon, srv.URL+"/u/grace/og.png")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("og.png after reparse cleared = %d, want 200", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+// TestOGCardWindowReconcilesWithDefaultRange pins the card's analytics window to
+// the public overview's default range on BOTH bounds. The card is generated from a
+// fixed trailing-year window bounded at the end of today and is advertised only on
+// the default-range page; the handler feeds that page the same bounds, so a
+// future-dated event cannot land in the page total while the card omits it. Both
+// halves are pinned here so a change to either bound that breaks the match fails
+// loudly.
+func TestOGCardWindowReconcilesWithDefaultRange(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	// Lower bound: the card's DefaultSince equals the default range's Since.
+	if card, page := ogimage.DefaultSince(now), web.RangeSince(web.DefaultRange, now); !card.Equal(page) {
+		t.Fatalf("card Since %v != default page Since %v", card, page)
+	}
+	// Upper bound: both the card and the page cut off at the end of today, so the
+	// handler must apply ogimage.DefaultUntil to the page (see handlePublicOverview).
+	// DefaultUntil is the exclusive start of tomorrow, UTC.
+	if got, want := ogimage.DefaultUntil(now), now.UTC().Truncate(24*time.Hour).AddDate(0, 0, 1); !got.Equal(want) {
+		t.Fatalf("DefaultUntil(%v) = %v, want end of today %v", now, got, want)
+	}
+}
+
+// TestPublicOverviewPublishRequiresAuth confirms the publicity toggles are gated:
+// a logged-out client cannot publish or unpublish another account's overview, so
+// the public page is opt-in by its owner alone and not flippable by anyone who
+// finds the route.
+func TestPublicOverviewPublishRequiresAuth(t *testing.T) {
+	t.Parallel()
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+
+	owner, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	// No credential: the full-scope guard rejects the POST and nothing toggles.
+	anon := newClient(t)
+	anon.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	for _, path := range []string{"/account/overview/publish", "/account/overview/unpublish"} {
+		resp, err := anon.PostForm(srv.URL+path, url.Values{})
+		if err != nil {
+			t.Fatalf("anon post %s: %v", path, err)
+		}
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("anon POST %s = %d, want 401", path, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+	if u, _ := st.UserByID(ctx, owner.ID); u.OverviewPublic {
+		t.Fatalf("overview public after rejected anon publish, want still private")
 	}
 }
 

@@ -1,0 +1,87 @@
+package web
+
+// LandingPage is the logged-out root at "/": a short explanation of what akari
+// is, shown instead of bouncing an anonymous visitor straight to the login form.
+// It rides the public layout, so it carries the same wordmark and a "Log in" link
+// in the top bar; the hero's own actions lead to sign-in and registration.
+templ LandingPage() {
+	@publicLayout("akari", OGMeta{}) {
+		<div class="landing">
+			<section class="landing-hero">
+				<span class="landing-glyph">
+					<svg viewBox="0 0 16 16" width="48" height="48" aria-hidden="true">
+						<circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.2"></circle>
+						<circle cx="8" cy="8" r="2.2" fill="currentColor"></circle>
+					</svg>
+				</span>
+				<h1>Read every AI coding-agent session in one place.</h1>
+				<p class="landing-lede">
+					akari is a self-hosted instrument for your coding agents. It collects the
+					local session logs of Claude Code, Codex, and pi, parses them on the
+					server, and shows them as a searchable history across all your machines —
+					grouped by git project, with token usage and cost on every run.
+				</p>
+				<div class="landing-actions">
+					<a class="btn" href="/login">Log in</a>
+					<a class="btn secondary" href="/register">Register</a>
+				</div>
+			</section>
+			<section class="landing-features">
+				<div class="card landing-feature">
+					<h2>One history, every machine</h2>
+					<p>
+						Thin clients push raw session bytes from every laptop and workstation to
+						one server. The same repo cloned into several worktrees collapses into a
+						single project, so a run is findable no matter where it happened.
+					</p>
+				</div>
+				<div class="card landing-feature">
+					<h2>Tokens and cost, priced in</h2>
+					<p>
+						Each session carries its input, output, and cache tokens and a dollar
+						cost from a compiled-in rate table. Fleet-wide usage rolls up on the
+						overview, bounded to a trailing window you choose.
+					</p>
+				</div>
+				<div class="card landing-feature">
+					<h2>Parsing lives on the server</h2>
+					<p>
+						Clients keep no derived state; the server does all the parsing and
+						storage. A parser improvement reaches old sessions by re-parsing in
+						place, with nothing re-uploaded.
+					</p>
+				</div>
+				<div class="card landing-feature">
+					<h2>Publish a session</h2>
+					<p>
+						Sessions are visible to any signed-in user by default. Publish one to
+						mint an unguessable link for logged-out viewing, or publish your own
+						usage overview at a stable per-user address.
+					</p>
+				</div>
+				<div class="card landing-feature">
+					<h2>Read it from your agent</h2>
+					<p>
+						A read-only Model Context Protocol endpoint exposes the same surface the
+						UI shows — overview, projects, sessions, and full transcripts — so a
+						coding agent can read your history without opening a browser.
+					</p>
+				</div>
+				<div class="card landing-feature">
+					<h2>Self-contained and self-hosted</h2>
+					<p>
+						One server binary with an embedded UI, self-hosted fonts, and no Node
+						toolchain, backed by Postgres. Run it with the bundled Docker Compose
+						file and own every byte of your agent history.
+					</p>
+				</div>
+			</section>
+			<section class="landing-foot">
+				<p class="muted">
+					Already have an account? <a href="/login">Log in</a>. The first account
+					on a fresh server needs no invite and becomes the admin.
+				</p>
+			</section>
+		</div>
+	}
+}

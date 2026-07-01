@@ -18,3 +18,13 @@
 .reparse-idle { padding: var(--sp-md) 0; }
 .reparse-form { margin-top: var(--sp-md); }
 .reparse-public-track { max-width: 360px; margin: var(--sp-lg) auto; }
+
+/* ---- Publicity ---- */
+/* The control that publishes the signed-in user's own usage overview. The lede
+   caps to the page's reading width so the explanation does not run edge to edge,
+   and the live row aligns the public tag, the copyable link, and the controls on
+   one baseline (reusing the session header's .share-link clamp so a long
+   capability id ellipsizes rather than wrapping). */
+.publicity-lede { max-width: 60ch; margin: 0 0 var(--sp-md); }
+.publicity-live { display: flex; align-items: center; gap: var(--sp-sm); flex-wrap: wrap; }
+.publicity-live .share-link { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 32ch; }

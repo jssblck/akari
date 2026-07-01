@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/a-h/templ"
 	"github.com/jssblck/akari/internal/server/auth"
+	"github.com/jssblck/akari/internal/server/ogimage"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/web"
 )
@@ -44,6 +46,7 @@ func (s *Server) pageFor(r *http.Request, title string) web.Page {
 	if u, err := s.Store.UserByID(r.Context(), p.UserID); err == nil {
 		pg.Username = u.Username
 		pg.IsAdmin = u.IsAdmin
+		pg.OverviewPublic = u.OverviewPublic
 	}
 	return pg
 }
@@ -65,6 +68,22 @@ func render(w http.ResponseWriter, r *http.Request, status int, c templ.Componen
 		// http error path is impossible, so swallow (the connection will close).
 		_ = err
 	}
+}
+
+// handleRoot serves the site root at /. A signed-in reader (full-scope
+// credential, a browser session in practice) gets the overview, the app's
+// landing surface, gated during a reparse like the rest of the parsed UI. A
+// logged-out visitor gets the marketing landing page explaining what akari is,
+// rather than an immediate bounce to the login form. A non-full credential (an
+// ingest- or read-scope token pointed at the browser UI) is treated as
+// logged-out here, matching requireReadHTML's gate on the rest of the UI.
+func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
+	p, ok := s.resolve(r)
+	if !ok || p.Scope != scopeFull {
+		render(w, r, http.StatusOK, web.LandingPage())
+		return
+	}
+	s.gateParsed(s.handleOverview)(w, s.withPrincipal(r, p))
 }
 
 // handleOverview is the landing surface at /: fleet-wide usage bounded to the
@@ -337,6 +356,127 @@ func (s *Server) handlePublishSession(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, fmt.Sprintf("/sessions/%d", id), http.StatusSeeOther)
 }
 
+// handlePublishOverview marks the signed-in user's own usage overview public and
+// redirects back to the account page, where the Publicity section then shows the
+// /u/<username> link. It also renders the Open Graph preview card up front, so a
+// link shared the moment after publishing already unfurls; a render failure does
+// not fail the publish (the card 404s until the daily refresh fills it in).
+func (s *Server) handlePublishOverview(w http.ResponseWriter, r *http.Request) {
+	p, _ := principalFrom(r.Context())
+	if err := s.Store.PublishOverview(r.Context(), p.UserID); err != nil {
+		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not publish overview."))
+		return
+	}
+	// Render the card up front, logging any failure. A lookup or render error does
+	// not fail the publish (the overview is already public, and the daily refresh
+	// fills the card in), but it must not be swallowed silently, or a missing
+	// publish-time card would be undiagnosable. The user lookup and the render are
+	// logged distinctly so the cause is clear.
+	//
+	// Generate coordinates with reparse itself: it aborts (ErrReparseInProgress)
+	// rather than cache a card read across a projection rebuild, so a startup or
+	// admin reparse running concurrently with this publish yields a quiet skip here,
+	// not a stored mixed aggregate. The post-reparse daily refresh fills the card
+	// once the projection is whole.
+	if u, err := s.Store.UserByID(r.Context(), p.UserID); err != nil {
+		log.Printf("overview og: user lookup for %d failed, skipping publish-time render: %v", p.UserID, err)
+	} else if err := ogimage.Generate(r.Context(), s.Store, u, time.Now()); errors.Is(err, ogimage.ErrReparseInProgress) {
+		log.Printf("overview og: reparse in progress, skipping publish-time render for user %d", p.UserID)
+	} else if err != nil {
+		log.Printf("overview og: publish-time render for user %d failed: %v", p.UserID, err)
+	}
+	http.Redirect(w, r, "/account", http.StatusSeeOther)
+}
+
+// handleUnpublishOverview hides the signed-in user's public overview. The URL is
+// the username and never changes, so re-publishing later restores the same link.
+func (s *Server) handleUnpublishOverview(w http.ResponseWriter, r *http.Request) {
+	p, _ := principalFrom(r.Context())
+	if err := s.Store.UnpublishOverview(r.Context(), p.UserID); err != nil {
+		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not update overview."))
+		return
+	}
+	http.Redirect(w, r, "/account", http.StatusSeeOther)
+}
+
+// handlePublicOverview serves a user's published usage overview to logged-out
+// viewers at /u/<username>. Every figure is scoped to that one account (UserIDs),
+// so the page exposes neither another user's usage nor any session: it is the same
+// aggregate panel the owner sees, with the per-user filter and session links
+// absent. An unknown or unpublished username is a 404; a backend failure is a 500,
+// not a "link expired", so a database hiccup is not misreported as a private page.
+func (s *Server) handlePublicOverview(w http.ResponseWriter, r *http.Request) {
+	username := r.PathValue("username")
+	u, err := s.Store.PublicOverviewUser(r.Context(), username)
+	if errors.Is(err, store.ErrNotFound) {
+		render(w, r, http.StatusNotFound, web.PublicErrorPage(http.StatusNotFound, "This overview is not published, or the link has expired."))
+		return
+	}
+	if err != nil {
+		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load overview."))
+		return
+	}
+	rng := web.ParseRange(r.URL.Query().Get("range"))
+	// The upper bound matches the card's (ogimage.DefaultUntil): the end of today, so
+	// the page's headline totals cover exactly the days its heatmap draws (the grid
+	// stops at today) rather than folding in a future-dated event no cell shows, and
+	// the card advertised beside the default-range page reads the identical scope.
+	now := time.Now()
+	analytics, err := s.Store.Analytics(r.Context(), store.AnalyticsFilter{
+		Since:   web.RangeSince(rng, now),
+		Until:   ogimage.DefaultUntil(now),
+		UserIDs: []int64{u.ID},
+	})
+	if err != nil {
+		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load overview."))
+		return
+	}
+	og := web.OGMeta{
+		Title:       u.Username + " · usage overview",
+		Description: "A snapshot of " + u.Username + "'s AI coding-agent usage on akari.",
+		URL:         s.baseURL(r) + web.PublicOverviewPath(u.Username),
+	}
+	// The preview card is a periodic snapshot (rendered at publish, refreshed about
+	// daily) of the default trailing-year window, cached per user rather than per
+	// range. It is an as-of snapshot, not a live mirror of the page: the card carries
+	// its own "as of <date>" stamp, so it may trail the live totals until the next
+	// refresh without claiming to equal them. It is advertised only on the default
+	// window (a narrower ?range is a different view the year-window card does not
+	// represent); the page still carries a well-formed summary card via its title and
+	// description when the image is omitted.
+	if rng == web.DefaultRange {
+		og.Image = s.baseURL(r) + "/u/" + url.PathEscape(u.Username) + "/og.png"
+	}
+	render(w, r, http.StatusOK, web.PublicOverviewPage(u.Username, analytics, rng, og))
+}
+
+// handlePublicOverviewOGImage serves the pre-rendered Open Graph preview card for a
+// published overview at /u/<username>/og.png. The bytes are a stored snapshot
+// (rendered at publish time and refreshed daily), so this is a cheap byte-serve
+// with no analytics query and no reparse gate: it returns the same PNG whether or
+// not a reparse is rebuilding the projection. An unpublished or not-yet-rendered
+// account 404s, matching the page itself.
+func (s *Server) handlePublicOverviewOGImage(w http.ResponseWriter, r *http.Request) {
+	username := r.PathValue("username")
+	img, err := s.Store.PublicOverviewOGImage(r.Context(), username)
+	if errors.Is(err, store.ErrNotFound) {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		http.Error(w, "Could not load preview image.", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Content-Length", strconv.Itoa(len(img.PNG)))
+	// A crawler may re-fetch on every share; the card only changes about daily, so a
+	// modest cache keeps repeat unfurls off the database without pinning a stale card
+	// for long.
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(img.PNG)
+}
+
 // handleUnpublishSession returns the owner's session to internal visibility.
 func (s *Server) handleUnpublishSession(w http.ResponseWriter, r *http.Request) {
 	p, _ := principalFrom(r.Context())
@@ -524,13 +664,18 @@ func (s *Server) handleAccountPage(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load tokens."))
 		return
 	}
+	grants, err := s.Store.ListOAuthGrants(r.Context(), p.UserID)
+	if err != nil {
+		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load connected apps."))
+		return
+	}
 	// Freshly minted secrets are passed once via short-lived flash cookies, then
 	// cleared, so a page reload does not keep showing them.
 	newToken := readFlash(w, r, "akari_new_token")
 	newInvite := readFlash(w, r, "akari_new_invite")
 	st := s.reparser.Status()
 	rp := web.ReparseView{InProgress: st.InProgress, Done: st.Done, Total: st.Total, Failed: st.Failed}
-	render(w, r, http.StatusOK, web.AccountPage(s.pageForNav(r, "Account", "account"), tokens, newToken, newInvite, rp))
+	render(w, r, http.StatusOK, web.AccountPage(s.pageForNav(r, "Account", "account"), tokens, grants, newToken, newInvite, rp))
 }
 
 // Login and register, form (HTML) variants. These mirror the JSON handlers but
@@ -633,7 +778,7 @@ func (s *Server) handleCreateTokenForm(w http.ResponseWriter, r *http.Request) {
 	}
 	name := strings.TrimSpace(r.PostFormValue("name"))
 	scope := r.PostFormValue("scope")
-	if scope != scopeIngest && scope != scopeFull {
+	if scope != scopeIngest && scope != scopeFull && scope != scopeRead {
 		scope = scopeIngest
 	}
 	if name == "" {
@@ -657,6 +802,24 @@ func (s *Server) handleRevokeTokenForm(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err == nil {
 		_ = s.Store.RevokeAPIToken(r.Context(), p.UserID, id)
+	}
+	http.Redirect(w, r, "/account", http.StatusSeeOther)
+}
+
+// handleRevokeConnectionForm disconnects an OAuth client from the account, revoking
+// every token the grant holds. It is scoped to the signed-in user, so it can only
+// disconnect the user's own connections.
+func (s *Server) handleRevokeConnectionForm(w http.ResponseWriter, r *http.Request) {
+	p, _ := principalFrom(r.Context())
+	clientID := r.PathValue("client_id")
+	if clientID != "" {
+		// Surface a revocation failure instead of redirecting as if it worked: a
+		// silent redirect would tell the user the app is disconnected while its
+		// tokens stay live.
+		if err := s.Store.RevokeOAuthGrant(r.Context(), p.UserID, clientID); err != nil {
+			render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not disconnect the app. Try again."))
+			return
+		}
 	}
 	http.Redirect(w, r, "/account", http.StatusSeeOther)
 }

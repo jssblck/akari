@@ -84,6 +84,63 @@ func TestPublishUnpublish(t *testing.T) {
 	}
 }
 
+func TestPublishUnpublishOverview(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	owner, err := st.Register(ctx, "grace", "hash", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A fresh account is not public.
+	if u, _ := st.UserByID(ctx, owner.ID); u.OverviewPublic {
+		t.Fatalf("fresh account public=%v, want false", u.OverviewPublic)
+	}
+	// While unpublished, the username lookup finds nothing.
+	if _, err := st.PublicOverviewUser(ctx, "grace"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("lookup before publish = %v, want ErrNotFound", err)
+	}
+
+	// Publishing flips the gate; the page resolves by username.
+	if err := st.PublishOverview(ctx, owner.ID); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	if u, err := st.PublicOverviewUser(ctx, "grace"); err != nil || u.ID != owner.ID {
+		t.Fatalf("lookup by username: u.ID=%d err=%v", u.ID, err)
+	}
+
+	// Disabling hides the page (the link stops resolving).
+	if err := st.UnpublishOverview(ctx, owner.ID); err != nil {
+		t.Fatalf("unpublish: %v", err)
+	}
+	if _, err := st.PublicOverviewUser(ctx, "grace"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("lookup after unpublish = %v, want ErrNotFound", err)
+	}
+	if u, _ := st.UserByID(ctx, owner.ID); u.OverviewPublic {
+		t.Fatalf("after unpublish public=%v, want false", u.OverviewPublic)
+	}
+
+	// Re-publishing brings the same /u/<username> back.
+	if err := st.PublishOverview(ctx, owner.ID); err != nil {
+		t.Fatalf("re-publish: %v", err)
+	}
+	if u, err := st.PublicOverviewUser(ctx, "grace"); err != nil || u.ID != owner.ID {
+		t.Fatalf("lookup after re-publish: u.ID=%d err=%v", u.ID, err)
+	}
+
+	// Toggling a user that does not exist touches no row and is ErrNotFound rather
+	// than a silent no-op, so a caller cannot mistake "nothing happened" for success.
+	missing := owner.ID + 9999
+	if err := st.PublishOverview(ctx, missing); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("publish missing user = %v, want ErrNotFound", err)
+	}
+	if err := st.UnpublishOverview(ctx, missing); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("unpublish missing user = %v, want ErrNotFound", err)
+	}
+}
+
 func TestDeleteSessionCascadesAndOrphansBlob(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)

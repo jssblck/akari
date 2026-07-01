@@ -1,0 +1,36 @@
+/* Landing page: the logged-out root. A centered hero over a grid of feature
+   cards, on the same dark-steel-under-lilac system as the app. */
+
+.landing { max-width: 960px; margin: 0 auto; }
+
+/* ---- Hero ---- */
+.landing-hero { text-align: center; padding: var(--sp-2xl) 0 var(--sp-xl); }
+.landing-glyph { color: var(--lilac); display: inline-flex; margin-bottom: var(--sp-lg); }
+.landing-hero h1 { font-size: 2.25rem; line-height: 1.1; margin: 0 auto; max-width: 18ch; }
+.landing-lede {
+  color: var(--subtext); font-size: 1rem; line-height: 1.6;
+  max-width: 60ch; margin: var(--sp-lg) auto 0;
+}
+.landing-actions { display: flex; gap: var(--sp-md); justify-content: center; margin-top: var(--sp-xl); }
+.landing-actions .btn { padding: 10px 20px; }
+
+/* ---- Feature grid ---- */
+.landing-features {
+  margin-top: var(--sp-2xl);
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--sp-lg);
+}
+.landing-feature { padding: var(--sp-lg); }
+.landing-feature h2 { font-size: 1.0625rem; margin-bottom: var(--sp-sm); }
+.landing-feature p { color: var(--subtext); margin: 0; line-height: 1.6; }
+
+/* ---- Foot ---- */
+.landing-foot { margin-top: var(--sp-2xl); text-align: center; }
+
+/* ---- Responsive ---- */
+@media (max-width: 860px) {
+  .landing-features { grid-template-columns: 1fr; }
+  .landing-hero h1 { font-size: 1.875rem; }
+}
+@media (min-width: 861px) and (max-width: 1080px) {
+  .landing-features { grid-template-columns: repeat(2, 1fr); }
+}

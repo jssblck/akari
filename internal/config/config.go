@@ -21,10 +21,26 @@ type Server struct {
 	// CookieSecure marks session cookies Secure. Defaults true; set
 	// AKARI_COOKIE_INSECURE=1 for plain-HTTP local development.
 	CookieSecure bool
+	// PublicURL is the externally reachable base URL of the server (scheme and
+	// host, no trailing slash), e.g. "https://akari.example.com". It is the OAuth
+	// issuer and the base of every absolute URL the MCP authorization flow
+	// advertises (the discovery documents, the authorize and token endpoints, the
+	// MCP resource identifier). Read from AKARI_PUBLIC_URL, falling back to
+	// AKARI_URL (which eph already exports for the dev stack). When neither is set,
+	// it is empty and the OAuth handlers derive the base from each request's scheme
+	// and Host header, which is correct for a single-origin deployment behind a
+	// well-behaved proxy.
+	PublicURL string
 	// SweepInterval is how often the server reclaims orphaned CAS blobs
 	// (AKARI_SWEEP_INTERVAL, a Go duration like "1h"). Defaults to 1h; set "0" to
 	// disable the background sweep (for example to run it only via the subcommand).
 	SweepInterval time.Duration
+	// OGRefreshInterval is how often the server wakes to refresh the Open Graph
+	// preview cards of published overviews (AKARI_OG_REFRESH_INTERVAL). On each wake
+	// it re-renders any card older than a day, so a published overview's preview
+	// tracks its usage without a render on every page load. Defaults to 1h; set "0"
+	// to disable the background refresh (a card is still rendered at publish time).
+	OGRefreshInterval time.Duration
 }
 
 // LoadServer reads server configuration from the environment, applying defaults
@@ -34,6 +50,7 @@ func LoadServer() (Server, error) {
 		DatabaseURL:  os.Getenv("AKARI_DATABASE_URL"),
 		Listen:       listenAddr(),
 		CookieSecure: !truthy(os.Getenv("AKARI_COOKIE_INSECURE")),
+		PublicURL:    publicURL(),
 	}
 	if s.DatabaseURL == "" {
 		return Server{}, fmt.Errorf("AKARI_DATABASE_URL is required")
@@ -43,6 +60,11 @@ func LoadServer() (Server, error) {
 		return Server{}, fmt.Errorf("AKARI_SWEEP_INTERVAL: %w", err)
 	}
 	s.SweepInterval = interval
+	ogInterval, err := parseDuration(os.Getenv("AKARI_OG_REFRESH_INTERVAL"), time.Hour)
+	if err != nil {
+		return Server{}, fmt.Errorf("AKARI_OG_REFRESH_INTERVAL: %w", err)
+	}
+	s.OGRefreshInterval = ogInterval
 	return s, nil
 }
 
@@ -75,6 +97,20 @@ func listenAddr() string {
 		return ":" + p
 	}
 	return ":8080"
+}
+
+// publicURL resolves the server's externally reachable base URL. AKARI_PUBLIC_URL
+// wins; failing that it honors AKARI_URL, the variable eph exports pointing at the
+// running dev server, so the OAuth flow works out of the box under eph. The result
+// is trimmed of any trailing slash so callers can join paths with a leading slash
+// without doubling it. An empty result tells the OAuth handlers to derive the base
+// from the request instead.
+func publicURL() string {
+	v := strings.TrimSpace(os.Getenv("AKARI_PUBLIC_URL"))
+	if v == "" {
+		v = strings.TrimSpace(os.Getenv("AKARI_URL"))
+	}
+	return strings.TrimRight(v, "/")
 }
 
 func truthy(v string) bool {

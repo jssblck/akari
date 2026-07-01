@@ -7,7 +7,7 @@ import (
 )
 
 templ PublicSessionPage(d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, publicSubs []store.SessionSummary, hs HeaderStats) {
-	@publicLayout(SessionProjectLabel(d) + " session") {
+	@publicLayout(SessionProjectLabel(d)+" session", OGMeta{}) {
 		<div class="session-page">
 			<div class="session-head">
 				<div class="session-title">
@@ -58,8 +58,32 @@ templ PublicSessionPage(d store.SessionDetail, msgs []store.Message, tools map[i
 	}
 }
 
+// PublicOverviewPage is the logged-out view of one account's published usage
+// overview at /u/<username>. It reuses the signed-in overview's analytics panel
+// verbatim, scoped by the handler to this one user, so the totals, activity grid,
+// and breakdowns read identically. The panel's per-user filter is absent (users is
+// nil), the range buttons refetch the public path (and htmx swaps #usage just as
+// the authed overview does), and the Tokens/Dollars toggle keeps working since it
+// is client-side. The panel carries no session links, so nothing here exposes a
+// session or another user.
+templ PublicOverviewPage(username string, a store.Analytics, rng string, og OGMeta) {
+	@publicLayout(username+" usage", og) {
+		<div class="public-overview">
+			<div class="public-overview-head">
+				<h1>
+					<span>{ username }</span>
+					<span class="sep">/</span>
+					<span class="muted">usage</span>
+				</h1>
+				<span class="tag public">public</span>
+			</div>
+			@analyticsPanel(a, "chart-public", RangeOptions(PublicOverviewPath(username), nil, rng), rng, nil, nil, "#usage")
+		</div>
+	}
+}
+
 templ PublicErrorPage(code int, message string) {
-	@publicLayout(fmt.Sprintf("%d", code)) {
+	@publicLayout(fmt.Sprintf("%d", code), OGMeta{}) {
 		<div class="empty big">
 			<h1>{ fmt.Sprintf("%d", code) }</h1>
 			<p>{ message }</p>

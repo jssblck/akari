@@ -15,6 +15,18 @@ import (
 // already marks this section as Overview, so the usage panel is the whole surface.
 templ OverviewPage(p Page, a store.Analytics, rng string, users []store.User, selected []int64) {
 	@layout(p) {
+		if p.OverviewPublic {
+			// A second entry point to the publicity control, so a published overview is
+			// discoverable from the overview itself and not only buried in account
+			// settings. The badge links to the public view at /u/<username> (which is
+			// scoped to this one user, unlike this fleet-wide page), and Manage jumps to
+			// the account control to toggle it off.
+			<div class="overview-public-badge">
+				<span class="tag public">public</span>
+				<a class="share-link" href={ PublicOverviewHref(p.Username) } target="_blank" rel="noopener" title="Your public overview link">View public page</a>
+				<a class="muted small" href="/account#publicity">Manage</a>
+			</div>
+		}
 		@analyticsPanel(a, "chart-global", RangeOptions("/", userValues(selected), rng), rng, users, selected, "#usage")
 	}
 }
