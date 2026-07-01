@@ -57,7 +57,7 @@ func TestRefreshSettledSignalsMaterializesSettledOnly(t *testing.T) {
 	fresh := seedSettledSession(t, st, ctx, uid, pid, "sess-fresh", 5)
 	live := seedSession(t, st, uid, pid, "sess-live") // never ended: ended_at stays NULL
 
-	n, err := st.RefreshSettledSignals(ctx, 500)
+	n, err := st.RefreshSettledSignals(ctx)
 	if err != nil {
 		t.Fatalf("refresh settled: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestRefreshSettledSignalsReStampsStaleVersion(t *testing.T) {
 		t.Fatalf("stale-version read = %s, want unknown before re-stamp", sig.Outcome)
 	}
 
-	n, err := st.RefreshSettledSignals(ctx, 500)
+	n, err := st.RefreshSettledSignals(ctx)
 	if err != nil {
 		t.Fatalf("refresh settled: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestRefreshSettledSignalsCorrectsPreSettleRow(t *testing.T) {
 		t.Fatalf("pin updated_at: %v", err)
 	}
 
-	n, err := st.RefreshSettledSignals(ctx, 500)
+	n, err := st.RefreshSettledSignals(ctx)
 	if err != nil {
 		t.Fatalf("refresh settled: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestRefreshSettledSignalsCorrectsPreSettleRow(t *testing.T) {
 	}
 	// The correction is stable: now settled and freshly refreshed, the session drops out of
 	// the due set rather than being recomputed on every pass.
-	n2, err := st.RefreshSettledSignals(ctx, 500)
+	n2, err := st.RefreshSettledSignals(ctx)
 	if err != nil {
 		t.Fatalf("second refresh settled: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestRefreshSettledSignalsStableAcrossPasses(t *testing.T) {
 	st, ctx, uid, pid := signalsEnv(t)
 	sid := seedSettledSession(t, st, ctx, uid, pid, "sess-stable", 120)
 
-	if n, err := st.RefreshSettledSignals(ctx, 500); err != nil {
+	if n, err := st.RefreshSettledSignals(ctx); err != nil {
 		t.Fatalf("first refresh: %v", err)
 	} else if n != 1 {
 		t.Fatalf("first refresh count = %d, want 1", n)
@@ -188,7 +188,7 @@ func TestRefreshSettledSignalsStableAcrossPasses(t *testing.T) {
 		t.Fatalf("read after first refresh: %v", err)
 	}
 
-	if n, err := st.RefreshSettledSignals(ctx, 500); err != nil {
+	if n, err := st.RefreshSettledSignals(ctx); err != nil {
 		t.Fatalf("second refresh: %v", err)
 	} else if n != 0 {
 		t.Errorf("second refresh count = %d, want 0 (already settled and current)", n)
@@ -203,38 +203,34 @@ func TestRefreshSettledSignalsStableAcrossPasses(t *testing.T) {
 	}
 }
 
-// TestRefreshSettledSignalsBatchDrains confirms the limit bounds one call and that repeated
-// calls make progress: each refreshed row updates refreshed_at and drops out of the due set,
-// so a backlog larger than one batch drains over successive calls (the loop the settle loop
-// and the settle subcommand run). The final call returns zero, the drain signal.
+// TestRefreshSettledSignalsBatchDrains confirms one call drains a backlog larger than a
+// single batch. With the batch size shrunk to two and three sessions due, the keyset cursor
+// has to walk three internal batches in one call, refreshing every due session exactly once
+// (a restart-per-batch scan would rescan the refreshed prefix each time). A second call
+// finds the backlog drained and refreshes nothing.
 func TestRefreshSettledSignalsBatchDrains(t *testing.T) {
-	t.Parallel()
+	// Not parallel: SetSettledSignalBatch mutates a package global, so this must run in the
+	// sequential phase rather than overlap the parallel settle tests that read it.
+	defer store.SetSettledSignalBatch(2)()
 	st, ctx, uid, pid := signalsEnv(t)
 	for i, src := range []string{"drain-a", "drain-b", "drain-c"} {
 		// Stagger ended_at so the oldest-first order is well defined; all are long settled.
 		seedSettledSession(t, st, ctx, uid, pid, src, 120+i)
 	}
 
-	first, err := st.RefreshSettledSignals(ctx, 2)
+	first, err := st.RefreshSettledSignals(ctx)
 	if err != nil {
-		t.Fatalf("first batch: %v", err)
+		t.Fatalf("first drain: %v", err)
 	}
-	if first != 2 {
-		t.Errorf("first batch refreshed %d, want 2 (the batch limit)", first)
+	if first != 3 {
+		t.Errorf("first drain refreshed %d, want 3 (all due sessions across the internal batches)", first)
 	}
-	second, err := st.RefreshSettledSignals(ctx, 2)
+	second, err := st.RefreshSettledSignals(ctx)
 	if err != nil {
-		t.Fatalf("second batch: %v", err)
+		t.Fatalf("second drain: %v", err)
 	}
-	if second != 1 {
-		t.Errorf("second batch refreshed %d, want 1 (the remainder)", second)
-	}
-	third, err := st.RefreshSettledSignals(ctx, 2)
-	if err != nil {
-		t.Fatalf("third batch: %v", err)
-	}
-	if third != 0 {
-		t.Errorf("third batch refreshed %d, want 0 (drained)", third)
+	if second != 0 {
+		t.Errorf("second drain refreshed %d, want 0 (already drained)", second)
 	}
 }
 
@@ -251,7 +247,7 @@ func TestRefreshSettledSignalsReRefreshesOnLateProjectionChange(t *testing.T) {
 	st, ctx, uid, pid := signalsEnv(t)
 	sid := seedSettledSession(t, st, ctx, uid, pid, "sess-latechunk", 6000) // ended days ago
 
-	if n, err := st.RefreshSettledSignals(ctx, 500); err != nil {
+	if n, err := st.RefreshSettledSignals(ctx); err != nil {
 		t.Fatalf("materialize: %v", err)
 	} else if n != 1 {
 		t.Fatalf("materialize count = %d, want 1", n)
@@ -280,7 +276,7 @@ func TestRefreshSettledSignalsReRefreshesOnLateProjectionChange(t *testing.T) {
 		t.Fatalf("bump updated_at for late chunk: %v", err)
 	}
 
-	n, err := st.RefreshSettledSignals(ctx, 500)
+	n, err := st.RefreshSettledSignals(ctx)
 	if err != nil {
 		t.Fatalf("refresh after late chunk: %v", err)
 	}
@@ -296,7 +292,7 @@ func TestRefreshSettledSignalsReRefreshesOnLateProjectionChange(t *testing.T) {
 	}
 	// The correction is stable: refreshed_at now trails updated_at no longer, so a further
 	// pass finds nothing due.
-	if n2, err := st.RefreshSettledSignals(ctx, 500); err != nil {
+	if n2, err := st.RefreshSettledSignals(ctx); err != nil {
 		t.Fatalf("steady-state refresh: %v", err)
 	} else if n2 != 0 {
 		t.Errorf("re-refreshed after late chunk settled: %d, want 0", n2)

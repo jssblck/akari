@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jssblck/akari/internal/quality"
@@ -393,11 +394,11 @@ func (s *Store) RefreshSessionSignals(ctx context.Context, sessionID int64) erro
 	})
 }
 
-// RefreshSettledSignals recomputes signals for a bounded batch of settled sessions whose
-// stored row is missing, stamped at an older signals version, or was computed before the
-// session settled. It is the production path that materializes signals: the append path no
-// longer refreshes on catch-up (see AdvanceProjection), so a session's signals are computed
-// once here, after it has been idle past the abandoned threshold, off the ingest hot path.
+// RefreshSettledSignals recomputes signals for every settled session whose stored row is
+// missing, stamped at an older signals version, or older than its source. It is the
+// production path that materializes signals: the append path no longer refreshes on
+// catch-up (see AdvanceProjection), so a session's signals are computed once here, after it
+// has been idle past the abandoned threshold, off the ingest hot path.
 //
 // A session is due when it is settled (ended_at at least abandonedIdleMinutes in the past)
 // AND its signals are not already current for that settled state. Three clauses catch every
@@ -419,57 +420,87 @@ func (s *Store) RefreshSessionSignals(ctx context.Context, sessionID int64) erro
 //     both are the transaction clock, a reparse (which refreshes in the same transaction that
 //     bumps updated_at) reads them equal and does not re-trigger itself.
 //
-// It processes at most limit sessions per call, each in its own transaction so one slow
-// session never holds a broad lock, and returns how many it refreshed. The caller loops
-// until it returns zero to drain a backlog, then falls back to a timer for the trickle.
-func (s *Store) RefreshSettledSignals(ctx context.Context, limit int) (int, error) {
-	if limit <= 0 {
-		limit = 500
+// It drains the whole due backlog in bounded batches, walking the settled tail once in
+// (ended_at, id) order via a keyset cursor: each batch resumes strictly after the last row
+// of the previous one, so a row it just refreshed is stepped over rather than rescanned.
+// Draining D due sessions is then one forward pass over the settled sessions, O(D_settled),
+// not a scan restarted per batch (which would reconsider the already-refreshed prefix every
+// time, O(D^2/batch)). Each session is refreshed in its own transaction so one slow session
+// never holds a broad lock, cancellation stops the drain between sessions, and it returns
+// how many it refreshed.
+func (s *Store) RefreshSettledSignals(ctx context.Context) (int, error) {
+	// The zero time sorts before every real ended_at, so the first batch starts at the
+	// oldest settled session and the cursor only moves forward from there.
+	var afterEnded time.Time
+	var afterID int64
+	total := 0
+	for {
+		ids, lastEnded, lastID, err := s.dueSettledBatch(ctx, afterEnded, afterID, settledSignalBatch)
+		if err != nil {
+			return total, err
+		}
+		for _, id := range ids {
+			if err := ctx.Err(); err != nil {
+				return total, err
+			}
+			if err := s.RefreshSessionSignals(ctx, id); err != nil {
+				return total, fmt.Errorf("refresh settled session %d: %w", id, err)
+			}
+			total++
+		}
+		if len(ids) < settledSignalBatch {
+			return total, nil // a short batch means the due backlog is drained
+		}
+		afterEnded, afterID = lastEnded, lastID
 	}
-	// Collect the due ids up front and release the query's connection before refreshing,
-	// so the per-session transactions below do not contend with the cursor that found them.
+}
+
+// dueSettledBatch returns up to limit due settled session ids strictly after the
+// (afterEnded, afterID) keyset cursor, in (ended_at, id) order, with the cursor to resume
+// from (the last row's ended_at and id). "Due" is the four-case predicate documented on
+// RefreshSettledSignals. The ids are read up front and the query's connection is released
+// (deferred Close) before the caller refreshes them, so the scan does not contend with the
+// per-session refresh transactions.
+func (s *Store) dueSettledBatch(ctx context.Context, afterEnded time.Time, afterID int64, limit int) ([]int64, time.Time, int64, error) {
 	rows, err := s.Pool.Query(ctx,
-		`SELECT s.id
+		`SELECT s.id, s.ended_at
 		   FROM sessions s
 		   LEFT JOIN session_signals sig ON sig.session_id = s.id
 		  WHERE s.ended_at IS NOT NULL
 		    AND s.ended_at < now() - make_interval(mins => $1)
+		    AND (s.ended_at, s.id) > ($4, $5)
 		    AND ( sig.session_id IS NULL
 		       OR sig.signals_version <> $2
 		       OR sig.refreshed_at < s.ended_at + make_interval(mins => $1)
 		       OR sig.refreshed_at < s.updated_at )
-		  ORDER BY s.ended_at
+		  ORDER BY s.ended_at, s.id
 		  LIMIT $3`,
-		abandonedIdleMinutes, quality.Version, limit)
+		abandonedIdleMinutes, quality.Version, limit, afterEnded, afterID)
 	if err != nil {
-		return 0, fmt.Errorf("select settled sessions for signal refresh: %w", err)
+		return nil, afterEnded, afterID, fmt.Errorf("select settled sessions for signal refresh: %w", err)
 	}
+	defer rows.Close()
 	var ids []int64
+	lastEnded, lastID := afterEnded, afterID
 	for rows.Next() {
 		var id int64
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return 0, fmt.Errorf("scan settled session id: %w", err)
+		var ended time.Time
+		if err := rows.Scan(&id, &ended); err != nil {
+			return nil, afterEnded, afterID, fmt.Errorf("scan settled session id: %w", err)
 		}
 		ids = append(ids, id)
+		lastEnded, lastID = ended, id
 	}
-	rows.Close()
 	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("iterate settled sessions: %w", err)
+		return nil, afterEnded, afterID, fmt.Errorf("iterate settled sessions: %w", err)
 	}
-
-	var refreshed int
-	for _, id := range ids {
-		if err := ctx.Err(); err != nil {
-			return refreshed, err
-		}
-		if err := s.RefreshSessionSignals(ctx, id); err != nil {
-			return refreshed, fmt.Errorf("refresh settled session %d: %w", id, err)
-		}
-		refreshed++
-	}
-	return refreshed, nil
+	return ids, lastEnded, lastID, nil
 }
+
+// settledSignalBatch bounds one due-session query and the run of per-session refreshes
+// behind it. It is a var so a test can shrink it to exercise the multi-batch keyset drain
+// without seeding thousands of sessions (see SetSettledSignalBatch).
+var settledSignalBatch = 500
 
 // SessionSignalsByID reads a session's current-version stored signals. A session with no
 // current-version row (one ingested before signals existed and not yet reparsed, still

@@ -12,19 +12,15 @@ import (
 	"github.com/jssblck/akari/migrations"
 )
 
-// settleBatchSize bounds one RefreshSettledSignals call so a single pass never holds a
-// broad lock or a long transaction. A pass drains the backlog by looping in batches, so the
-// bound only caps per-call work, not per-pass work.
-const settleBatchSize = 500
-
 // runSignalsSettle computes per-session signals for settled sessions on a fixed interval
 // until the context is cancelled. The ingest append path deliberately does not recompute
 // signals (that would be quadratic in the session's turns, and would grade a still-running
 // session with a time-dependent outcome), so this is where a settled session's grade is
 // filled in, once, after it has been idle past the abandoned threshold. Each wake drains
-// the whole due backlog in bounded batches, so a version bump or a fresh import catches up
-// over one pass rather than one session per tick. The pass is bounded by its own timeout so
-// a slow catch-up cannot stack up behind the ticker.
+// the whole due backlog (RefreshSettledSignals keyset-walks the settled tail once), so a
+// version bump or a fresh import catches up in one pass rather than one session per tick.
+// The pass is bounded by its own timeout so a slow catch-up cannot stack up behind the
+// ticker.
 func runSignalsSettle(ctx context.Context, st *store.Store, interval time.Duration) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
@@ -34,7 +30,7 @@ func runSignalsSettle(ctx context.Context, st *store.Store, interval time.Durati
 			return
 		case <-t.C:
 			passCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-			n, err := drainSettledSignals(passCtx, st)
+			n, err := st.RefreshSettledSignals(passCtx)
 			cancel()
 			switch {
 			case err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded):
@@ -42,25 +38,6 @@ func runSignalsSettle(ctx context.Context, st *store.Store, interval time.Durati
 			case n > 0:
 				log.Printf("signals settle: refreshed %d session(s)", n)
 			}
-		}
-	}
-}
-
-// drainSettledSignals refreshes every currently-due session in bounded batches, returning
-// the total refreshed. It loops until a batch comes back short, which means the query found
-// fewer than a full batch of due sessions and the backlog is drained: each refreshed row
-// updates refreshed_at and drops out of the due set, so the next batch is strictly the
-// remaining work and the loop makes progress every iteration.
-func drainSettledSignals(ctx context.Context, st *store.Store) (int, error) {
-	total := 0
-	for {
-		n, err := st.RefreshSettledSignals(ctx, settleBatchSize)
-		total += n
-		if err != nil {
-			return total, err
-		}
-		if n < settleBatchSize {
-			return total, nil
 		}
 	}
 }
@@ -88,7 +65,7 @@ func runSettle(args []string) error {
 		return err
 	}
 
-	refreshed, err := drainSettledSignals(ctx, st)
+	refreshed, err := st.RefreshSettledSignals(ctx)
 	if err != nil {
 		return err
 	}
