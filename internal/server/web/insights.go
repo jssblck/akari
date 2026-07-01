@@ -82,6 +82,29 @@ func FmtErrorRate(v float64) string {
 	return fmt.Sprintf("%.0f%%", pct)
 }
 
+// HygienePct renders a prompt-hygiene rate (a count over the prompt or session total) as
+// a whole-percent figure. It keeps the "<1%" floor the tool error rate uses, so a rare
+// but present signal does not round away to a clean 0%. A zero count reads as a real 0%
+// (no such prompts), not a dash; the dash is only the guard for an empty denominator,
+// which the panel already avoids by gating on PromptHygiene.HasData.
+func HygienePct(n, d int) string {
+	if d <= 0 {
+		return "-"
+	}
+	pct := float64(n) / float64(d) * 100
+	if pct > 0 && pct < 1 {
+		return "<1%"
+	}
+	return fmt.Sprintf("%.0f%%", pct)
+}
+
+// HygieneCount renders the raw count behind a hygiene rate ("12 of 340"), the sub-line
+// under each figure, so a reader sees the magnitude and not only the proportion (3% of
+// 1000 prompts and 3% of 30 read very differently).
+func HygieneCount(n, d int) string {
+	return fmt.Sprintf("%d of %d", n, d)
+}
+
 // ToolBar is one tool's bar in the mix: sized by call volume, coloured by its error band,
 // and annotated with its error rate when it had any failures. The dual encoding reads mix
 // (bar length) and reliability (colour and the error suffix) in one row.

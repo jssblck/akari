@@ -8,12 +8,12 @@ import (
 
 // InsightsPage is the cross-cutting analytics surface at /insights: two headline bands of
 // measured rates (concurrency and velocity) over the fleet, a tools band (reliability and
-// mix), how the window's sessions distribute across quality grades, outcomes, and
-// archetypes, then the files it edited more than once. Everything is bounded to the
-// selected trailing window. Like the overview it carries no heading (the sidebar marks the
-// section); the toolbar holds the window selector and a session count for context. The
-// whole section carries id="insights" so the selector can swap it in one shot, the same
-// pattern the usage panel uses.
+// mix), a prompt-hygiene band (input quality), how the window's sessions distribute across
+// quality grades, outcomes, and archetypes, then the files it edited more than once.
+// Everything is bounded to the selected trailing window. Like the overview it carries no
+// heading (the sidebar marks the section); the toolbar holds the window selector and a
+// session count for context. The whole section carries id="insights" so the selector can
+// swap it in one shot, the same pattern the usage panel uses.
 templ InsightsPage(p Page, ins store.Insights, rng string, ranges []RangeOption) {
 	@layout(p) {
 		<section class="insights" id="insights">
@@ -33,6 +33,9 @@ templ InsightsPage(p Page, ins store.Insights, rng string, ranges []RangeOption)
 				</div>
 				<div class="ins-tools">
 					@toolsPanel(ins.Tools)
+				</div>
+				<div class="ins-hygiene">
+					@hygienePanel(ins.Hygiene)
 				</div>
 				<div class="ins-grid">
 					@distributionPanel("Grades", "the quality score banded A to F, unscored for an ungraded session", GradeBars(ins.Quality.Grades))
@@ -170,6 +173,47 @@ templ toolsPanel(t store.ToolStats) {
 			if t.Clipped > 0 {
 				<div class="muted small tool-clip">{ fmt.Sprintf("+%d more tool%s not shown", t.Clipped, plural(t.Clipped)) }</div>
 			}
+		}
+	</div>
+}
+
+// hygienePanel is the full-width input-quality band: four rates over the window's human
+// prompts (terse, repeated, and no-code-context prompts) and its sessions (unstructured
+// openings), each figure paired with the raw count it came from. It reads the human's
+// side of the fleet, the counterpart to the tools band's read of the agent's side, so it
+// sits directly below it. The rates never feed the quality score: an unclear prompt is
+// the human's to tighten, not a mark against the agent.
+templ hygienePanel(h store.PromptHygiene) {
+	<div class="ins-panel ins-hygiene-panel">
+		<div class="ins-panel-head">
+			<span class="label">Prompt hygiene</span>
+			<span class="muted small ins-caption">how clearly the window's prompts set the agent up</span>
+		</div>
+		if !h.HasData() {
+			<div class="muted small">No prompts in this window.</div>
+		} else {
+			<div class="ins-figs">
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ HygienePct(h.Short, h.Prompts) }</div>
+					<div class="ins-fig-k">terse prompts</div>
+					<div class="ins-fig-sub muted small">{ HygieneCount(h.Short, h.Prompts) }</div>
+				</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ HygienePct(h.Duplicate, h.Prompts) }</div>
+					<div class="ins-fig-k">repeated prompts</div>
+					<div class="ins-fig-sub muted small">{ HygieneCount(h.Duplicate, h.Prompts) }</div>
+				</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ HygienePct(h.NoCodeContext, h.Prompts) }</div>
+					<div class="ins-fig-k">no code pointer</div>
+					<div class="ins-fig-sub muted small">{ HygieneCount(h.NoCodeContext, h.Prompts) }</div>
+				</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ HygienePct(h.UnstructuredStarts, h.Sessions) }</div>
+					<div class="ins-fig-k">unstructured start</div>
+					<div class="ins-fig-sub muted small">{ HygieneCount(h.UnstructuredStarts, h.Sessions) }</div>
+				</div>
+			</div>
 		}
 	</div>
 }

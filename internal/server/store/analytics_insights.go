@@ -3,16 +3,18 @@ package store
 import "context"
 
 // Insights is everything the Insights page renders for a scope: the quality
-// distribution (grades and outcomes), the archetype mix, the concurrency figures, and the
-// velocity cadence. It is the cross-cutting counterpart to Analytics (which is about cost
-// and tokens), scoped by the same AnalyticsFilter so a window or a per-user narrowing
-// applies to both surfaces alike.
+// distribution (grades and outcomes), the archetype mix, the concurrency figures, the
+// velocity cadence, the tool reliability and mix, the prompt-hygiene rates, and the file
+// churn. It is the cross-cutting counterpart to Analytics (which is about cost and
+// tokens), scoped by the same AnalyticsFilter so a window or a per-user narrowing applies
+// to both surfaces alike.
 type Insights struct {
 	Quality     QualityDistribution
 	Archetypes  []LabeledCount
 	Concurrency ConcurrencyStats
 	Velocity    VelocityStats
 	Tools       ToolStats
+	Hygiene     PromptHygiene
 	Churn       FileChurn
 }
 
@@ -44,6 +46,10 @@ func (s *Store) Insights(ctx context.Context, f AnalyticsFilter) (Insights, erro
 	if err != nil {
 		return Insights{}, err
 	}
+	hygiene, err := s.PromptHygiene(ctx, f)
+	if err != nil {
+		return Insights{}, err
+	}
 	churn, err := s.FileChurn(ctx, f)
 	if err != nil {
 		return Insights{}, err
@@ -54,6 +60,7 @@ func (s *Store) Insights(ctx context.Context, f AnalyticsFilter) (Insights, erro
 		Concurrency: concurrency,
 		Velocity:    velocity,
 		Tools:       tools,
+		Hygiene:     hygiene,
 		Churn:       churn,
 	}, nil
 }

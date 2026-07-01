@@ -31,6 +31,15 @@ type SessionSignals struct {
 	ToolRetries          int
 	EditChurn            int
 	LongestFailureStreak int
+	// Prompt-hygiene counts describe the human's input, not the agent's work, so they
+	// ride alongside the tool-health counts but never feed the score. PromptCount is the
+	// classifier's base (non-empty human prompts), the denominator the counts are read
+	// against.
+	PromptCount          int
+	ShortPromptCount     int
+	DuplicatePromptCount int
+	NoCodeContextCount   int
+	UnstructuredStart    bool
 }
 
 // Scored reports whether the session carries a score and grade, so the UI can show a
@@ -41,6 +50,13 @@ func (s SessionSignals) Scored() bool { return s.Score != nil && s.Grade != nil 
 // HasToolActivity reports whether the session ran any tools, so the UI can omit the
 // tool-health detail for a pure-conversation session that has none.
 func (s SessionSignals) HasToolActivity() bool { return s.ToolCalls > 0 }
+
+// HasHygieneSignal reports whether any prompt-hygiene signal fired, so the UI can omit
+// the input readout for a session whose prompts were all clean.
+func (s SessionSignals) HasHygieneSignal() bool {
+	return s.ShortPromptCount > 0 || s.DuplicatePromptCount > 0 ||
+		s.NoCodeContextCount > 0 || s.UnstructuredStart
+}
 
 // signalFacts are the raw, projection-derived inputs a refresh gathers before scoring:
 // the tool-health counts that feed quality.Score and the outcome facts that feed
@@ -59,6 +75,15 @@ type signalFacts struct {
 	lastAssistantOrd int
 	lastUserOrd      int
 	idleLongEnough   bool
+
+	// hygiene is computed in Go from the session's ordered human prompts rather than in
+	// SQL: the rules are text heuristics (word counts, code detection, verbatim repeats)
+	// that read far clearer in the tested quality package than as a window-function query.
+	hygiene quality.PromptHygiene
+	// promptCount is the classifier's base: the count of non-empty human prompts it saw,
+	// stored so the cohort aggregate divides the hygiene counts by exactly the set they
+	// came from rather than by user_message_count (which can include empty-text turns).
+	promptCount int
 }
 
 // gatherSignalFacts reads a session's tool-health and outcome facts from its
@@ -150,7 +175,45 @@ func gatherSignalFacts(ctx context.Context, tx pgx.Tx, sessionID int64) (signalF
 	if err != nil {
 		return signalFacts{}, fmt.Errorf("gather outcome facts for session %d: %w", sessionID, err)
 	}
+
+	// Prompt-hygiene facts. The human prompts in order, non-empty only (an empty turn is
+	// tool plumbing, not a prompt), so the classifier never reads a blank as a terse
+	// turn. role='user' is already the real-human-turn set (the Claude reducer drops
+	// tool-result-only user entries), and ordinal order puts the opening prompt first so
+	// the unstructured-start rule reads the right turn.
+	prompts, err := gatherPromptTexts(ctx, tx, sessionID)
+	if err != nil {
+		return signalFacts{}, err
+	}
+	f.promptCount = len(prompts)
+	f.hygiene = quality.ClassifyPromptHygiene(prompts)
 	return f, nil
+}
+
+// gatherPromptTexts reads a session's human prompts in transcript order, dropping empties
+// so a tool-plumbing turn does not read as a terse prompt. It is a small read (bounded by
+// the session's human turns) and feeds quality.ClassifyPromptHygiene.
+func gatherPromptTexts(ctx context.Context, tx pgx.Tx, sessionID int64) ([]string, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT content FROM messages
+		  WHERE session_id = $1 AND role = 'user' AND content <> ''
+		  ORDER BY ordinal`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("gather prompts for session %d: %w", sessionID, err)
+	}
+	defer rows.Close()
+	var prompts []string
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			return nil, fmt.Errorf("scan prompt for session %d: %w", sessionID, err)
+		}
+		prompts = append(prompts, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate prompts for session %d: %w", sessionID, err)
+	}
+	return prompts, nil
 }
 
 // refreshSignalsTx recomputes a session's signals from its projection and UPSERTs the
@@ -187,8 +250,10 @@ func refreshSignalsTx(ctx context.Context, tx pgx.Tx, sessionID int64) error {
 	_, err = tx.Exec(ctx,
 		`INSERT INTO session_signals
 		   (session_id, signals_version, outcome, outcome_confidence, score, grade,
-		    tool_calls, tool_failures, tool_retries, edit_churn, longest_failure_streak, refreshed_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, now())
+		    tool_calls, tool_failures, tool_retries, edit_churn, longest_failure_streak,
+		    prompt_count, short_prompt_count, duplicate_prompt_count, no_code_context_count, unstructured_start,
+		    refreshed_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16, now())
 		 ON CONFLICT (session_id) DO UPDATE SET
 		   signals_version = EXCLUDED.signals_version,
 		   outcome = EXCLUDED.outcome,
@@ -200,9 +265,15 @@ func refreshSignalsTx(ctx context.Context, tx pgx.Tx, sessionID int64) error {
 		   tool_retries = EXCLUDED.tool_retries,
 		   edit_churn = EXCLUDED.edit_churn,
 		   longest_failure_streak = EXCLUDED.longest_failure_streak,
+		   prompt_count = EXCLUDED.prompt_count,
+		   short_prompt_count = EXCLUDED.short_prompt_count,
+		   duplicate_prompt_count = EXCLUDED.duplicate_prompt_count,
+		   no_code_context_count = EXCLUDED.no_code_context_count,
+		   unstructured_start = EXCLUDED.unstructured_start,
 		   refreshed_at = now()`,
 		sessionID, quality.Version, string(outcome), string(conf), scoreArg, gradeArg,
-		f.toolCalls, f.toolFailures, f.toolRetries, f.editChurn, f.longestFailureStreak)
+		f.toolCalls, f.toolFailures, f.toolRetries, f.editChurn, f.longestFailureStreak,
+		f.promptCount, f.hygiene.Short, f.hygiene.Duplicate, f.hygiene.NoCodeContext, f.hygiene.UnstructuredStart)
 	if err != nil {
 		return fmt.Errorf("upsert signals for session %d: %w", sessionID, err)
 	}
@@ -230,10 +301,12 @@ func (s *Store) SessionSignalsByID(ctx context.Context, sessionID int64) (Sessio
 	var sig SessionSignals
 	err := s.Pool.QueryRow(ctx,
 		`SELECT session_id, signals_version, outcome, outcome_confidence, score, grade,
-		        tool_calls, tool_failures, tool_retries, edit_churn, longest_failure_streak
+		        tool_calls, tool_failures, tool_retries, edit_churn, longest_failure_streak,
+		        prompt_count, short_prompt_count, duplicate_prompt_count, no_code_context_count, unstructured_start
 		   FROM session_signals WHERE session_id = $1`, sessionID).Scan(
 		&sig.SessionID, &sig.Version, &sig.Outcome, &sig.OutcomeConfidence, &sig.Score, &sig.Grade,
-		&sig.ToolCalls, &sig.ToolFailures, &sig.ToolRetries, &sig.EditChurn, &sig.LongestFailureStreak)
+		&sig.ToolCalls, &sig.ToolFailures, &sig.ToolRetries, &sig.EditChurn, &sig.LongestFailureStreak,
+		&sig.PromptCount, &sig.ShortPromptCount, &sig.DuplicatePromptCount, &sig.NoCodeContextCount, &sig.UnstructuredStart)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return SessionSignals{SessionID: sessionID, Outcome: string(quality.OutcomeUnknown), OutcomeConfidence: string(quality.ConfLow)}, nil
 	}

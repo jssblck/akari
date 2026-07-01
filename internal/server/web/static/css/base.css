@@ -253,6 +253,11 @@ td.num, th.num { text-align: right; font-family: var(--mono); font-variant-numer
 .stat-tip .tt-grid dt { color: var(--muted); }
 .stat-tip .tt-grid dd { margin: 0; color: var(--subtext); text-align: right; font-variant-numeric: tabular-nums; }
 .stat-tip .tt-cost { margin-top: 5px; padding-top: 5px; border-top: 1px solid var(--border); color: var(--text); font: 450 0.75rem var(--mono); font-variant-numeric: tabular-nums; text-align: right; }
+/* tt-sub heads a second group inside a stat tooltip (the quality tile's input-hygiene
+   readout below its score drivers), a muted, ruled label that keeps the two groups from
+   reading as one list. */
+.stat-tip .tt-sub { margin-top: 6px; padding-top: 5px; border-top: 1px solid var(--border); color: var(--muted); font: 500 0.6875rem/1.4 var(--mono); text-transform: uppercase; letter-spacing: 0.04em; }
+.stat-tip .tt-sub + .tt-grid { margin-top: 4px; }
 .value.settling { animation: settle var(--dur-slow) var(--ease-settle); }
 @keyframes settle {
   0% { color: var(--lilac); text-shadow: 0 0 14px rgba(198, 168, 242, 0.75); }

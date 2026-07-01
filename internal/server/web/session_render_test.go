@@ -125,7 +125,8 @@ func TestSessionStatsFoldTokensAndDropLive(t *testing.T) {
 // The Quality tile shows the letter grade as its headline, banded by the report-card
 // class, and reveals the outcome, confidence, score, and tool-health counts in its
 // tooltip. A scored session reads its grade; the tool-health rows appear only when the
-// session ran tools.
+// session ran tools. The prompt-hygiene signals that fired read under a separate Input
+// group, and a clean signal (zero duplicates here) draws no row.
 func TestSessionStatsQualityTileScored(t *testing.T) {
 	p := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "jessoteric"}
 	d, msgs, tools := sessionFixture()
@@ -135,6 +136,7 @@ func TestSessionStatsQualityTileScored(t *testing.T) {
 		Outcome: "completed", OutcomeConfidence: "high",
 		Score: &score, Grade: &grade,
 		ToolCalls: 12, ToolFailures: 2, ToolRetries: 1, EditChurn: 3, LongestFailureStreak: 1,
+		ShortPromptCount: 4, NoCodeContextCount: 2, UnstructuredStart: true,
 	}}
 	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, hs, 0, false, true))
 
@@ -146,10 +148,17 @@ func TestSessionStatsQualityTileScored(t *testing.T) {
 		`>Score</dt>`, `<dd>82 / 100</dd>`,          // numeric score
 		`>Failures</dt>`, `<dd>2 / 12</dd>`,         // tool-health rows (the session ran tools)
 		`>Longest fail streak</dt>`, `<dd>1</dd>`,
+		`class="tt-sub">Input</div>`,               // the hygiene group under its own ruled label
+		`>Terse prompts</dt>`, `<dd>4</dd>`,         // a hygiene row that fired
+		`>No code pointer</dt>`, `<dd>2</dd>`,
+		`>Opening</dt>`, `<dd>terse</dd>`,           // the unstructured-start flag
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("quality tile missing %q", want)
 		}
+	}
+	if strings.Contains(html, `>Repeated</dt>`) {
+		t.Error("a clean hygiene signal (zero duplicates) should draw no Repeated row")
 	}
 }
 

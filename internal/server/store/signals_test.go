@@ -436,6 +436,57 @@ func TestSignalsBuiltByReparse(t *testing.T) {
 	}
 }
 
+// TestSignalsPromptHygiene drives the whole hygiene path: the refresh reads the session's
+// human prompts in order, classifies them, and stores the counts. The seeded prompts are
+// chosen to trip each signal exactly once or twice so the stored row can be pinned: a
+// terse opener (short and unstructured start), a repeated real request (a duplicate, both
+// copies naming no code), and a clean anchored request that trips nothing.
+func TestSignalsPromptHygiene(t *testing.T) {
+	t.Parallel()
+	st, ctx, uid, pid := signalsEnv(t)
+	sid := seedSession(t, st, uid, pid, "sess-hygiene")
+
+	delta := store.ProjectionDelta{
+		Messages: []store.MessageDelta{
+			{Ordinal: 0, Role: "user", Content: "hey"},                                                  // terse opener
+			{Ordinal: 1, Role: "assistant", Content: "on it"},
+			{Ordinal: 2, Role: "user", Content: "add pagination to the sessions list"},                  // no code anchor
+			{Ordinal: 3, Role: "assistant", Content: "done"},
+			{Ordinal: 4, Role: "user", Content: "add pagination to the sessions list"},                  // verbatim repeat
+			{Ordinal: 5, Role: "assistant", Content: "done again"},
+			{Ordinal: 6, Role: "user", Content: "now refactor the loop in internal/server/store/signals.go"}, // anchored, clean
+			{Ordinal: 7, Role: "assistant", Content: "refactored"},
+		},
+	}
+	if err := st.ApplyProjectionDelta(ctx, sid, delta); err != nil {
+		t.Fatalf("apply delta: %v", err)
+	}
+	setUserMessageCount(t, st, ctx, sid, 4)
+	if err := st.RefreshSessionSignals(ctx, sid); err != nil {
+		t.Fatalf("refresh signals: %v", err)
+	}
+
+	sig, err := st.SessionSignalsByID(ctx, sid)
+	if err != nil {
+		t.Fatalf("read signals: %v", err)
+	}
+	// Four non-empty human prompts, so the classifier base is 4.
+	if sig.PromptCount != 4 {
+		t.Errorf("prompt_count = %d, want 4 (the non-empty human prompts)", sig.PromptCount)
+	}
+	// "hey" is the only terse prompt; the second "add pagination" line is the duplicate;
+	// both "add pagination" lines name no code (the refactor line names a file, so it is
+	// clean); the opener is terse, so the start is unstructured.
+	if sig.ShortPromptCount != 1 || sig.DuplicatePromptCount != 1 ||
+		sig.NoCodeContextCount != 2 || !sig.UnstructuredStart {
+		t.Errorf("hygiene = {short %d, dup %d, nocode %d, unstructured %v}, want {1, 1, 2, true}",
+			sig.ShortPromptCount, sig.DuplicatePromptCount, sig.NoCodeContextCount, sig.UnstructuredStart)
+	}
+	if !sig.HasHygieneSignal() {
+		t.Error("HasHygieneSignal should be true when any hygiene count fired")
+	}
+}
+
 func signalsRowCount(t *testing.T, st *store.Store, ctx context.Context, sid int64) int {
 	t.Helper()
 	var n int

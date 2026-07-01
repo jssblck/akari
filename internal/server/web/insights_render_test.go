@@ -40,6 +40,14 @@ func sampleInsights() store.Insights {
 			},
 			Clipped: 2,
 		},
+		Hygiene: store.PromptHygiene{
+			Prompts:            200,
+			Short:              20,
+			Duplicate:          6,
+			NoCodeContext:      14,
+			Sessions:           15,
+			UnstructuredStarts: 3,
+		},
 		Churn: store.FileChurn{
 			Files: []store.ChurnFile{
 				{Path: "internal/server/store/analytics.go", Edits: 6, Sessions: 2},
@@ -97,6 +105,13 @@ func TestInsightsPageRendersDistributions(t *testing.T) {
 		`class="tool-err"`,         // a failing tool carries its error rate
 		`>40%<`,                    // Bash's error rate suffix (8/20)
 		`+2 more tools not shown`,  // the clipped-tail note
+		`>Prompt hygiene<`,         // the input-quality band
+		`>terse prompts<`,          // a hygiene figure label
+		`>repeated prompts<`,       // another hygiene figure label
+		`>no code pointer<`,        // the no-code-context figure label
+		`>unstructured start<`,     // the per-session opener figure label
+		`20 of 200`,                // the terse-prompt sub-count (unique to hygiene)
+		`3 of 15`,                  // the unstructured-start sub-count (over sessions, not prompts)
 		`>File churn<`,             // the churn panel
 		`internal/server/store/analytics.go`, // the churned path (full path in the label)
 		`6 edits`,                  // its edit count
@@ -189,6 +204,24 @@ func TestInsightsPageChurnEmpty(t *testing.T) {
 	}
 	if !strings.Contains(html, `>File churn<`) {
 		t.Error("the churn panel heading should still render")
+	}
+}
+
+// When the window has sessions but none carry hygiene data, the prompt-hygiene band shows
+// a note instead of a row of zero-over-zero rates, while the rest of the page renders.
+func TestInsightsPageHygieneEmpty(t *testing.T) {
+	p := Page{Title: "Insights", LoggedIn: true, Active: "insights", Username: "ada"}
+	ranges := RangeOptions("/insights", nil, "30d")
+	ins := sampleInsights()
+	ins.Hygiene = store.PromptHygiene{} // no signalled prompts
+
+	html := renderComponent(t, InsightsPage(p, ins, "30d", ranges))
+
+	if !strings.Contains(html, "No prompts in this window.") {
+		t.Error("hygiene band should note the absence of prompts")
+	}
+	if !strings.Contains(html, `>Prompt hygiene<`) {
+		t.Error("the hygiene band heading should still render")
 	}
 }
 

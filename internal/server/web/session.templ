@@ -197,6 +197,9 @@ templ sessionStats(d store.SessionDetail, hs HeaderStats) {
 // (an unknown outcome with no tool signal) shows a neutral dash and names the outcome
 // in the tooltip rather than inventing a grade. The tool-health rows are omitted for a
 // pure-conversation session that ran no tools, so the tooltip shows only what applies.
+// A separate Input group lists the prompt-hygiene signals that fired (terse, repeated, or
+// no-code-context prompts, an unstructured opening); it reads the human's side and does
+// not feed the score, so it sits under its own ruled label rather than among the drivers.
 templ statQuality(s store.SessionSignals) {
 	<div class={ "stat quality-stat " + QualityGradeClass(s) } tabindex="0">
 		<div class="label">Quality</div>
@@ -220,6 +223,27 @@ templ statQuality(s store.SessionSignals) {
 					<dd>{ fmt.Sprintf("%d", s.LongestFailureStreak) }</dd>
 				}
 			</dl>
+			if s.HasHygieneSignal() {
+				<div class="tt-sub">Input</div>
+				<dl class="tt-grid">
+					if s.ShortPromptCount > 0 {
+						<dt>Terse prompts</dt>
+						<dd>{ fmt.Sprintf("%d", s.ShortPromptCount) }</dd>
+					}
+					if s.DuplicatePromptCount > 0 {
+						<dt>Repeated</dt>
+						<dd>{ fmt.Sprintf("%d", s.DuplicatePromptCount) }</dd>
+					}
+					if s.NoCodeContextCount > 0 {
+						<dt>No code pointer</dt>
+						<dd>{ fmt.Sprintf("%d", s.NoCodeContextCount) }</dd>
+					}
+					if s.UnstructuredStart {
+						<dt>Opening</dt>
+						<dd>terse</dd>
+					}
+				</dl>
+			}
 		</div>
 	</div>
 }

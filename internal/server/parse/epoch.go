@@ -37,4 +37,9 @@ package parse
 // Epoch 1 -> 2: introduce session_signals (per-session outcome, quality score and
 // grade, and tool-health counts), computed on catch-up and reparse. The bump
 // backfills the table across the existing corpus.
-const Epoch = 2
+//
+// Epoch 2 -> 3: add prompt-hygiene signals to session_signals (quality.Version 1 -> 2).
+// The projection delta is unchanged (the new signals derive from stored messages), so
+// the golden fixtures do not move; the bump exists only to rebuild every signals row at
+// the current version, backfilling the hygiene counts across the existing corpus.
+const Epoch = 3

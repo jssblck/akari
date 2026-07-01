@@ -14,9 +14,12 @@ package quality
 // reparse runs, so a reader never mixes versions mid-rebuild.
 //
 // Version 1: tool-health signals (failures, immediate retries, edit churn, the
-// longest failure streak) plus an outcome classification. Later versions add
-// prompt-hygiene and context-pressure signals.
-const Version = 1
+// longest failure streak) plus an outcome classification.
+// Version 2: adds prompt-hygiene signals (terse, duplicate, and no-code-context
+// prompt counts, plus an unstructured-start flag). These describe the human's input,
+// so they extend the stored signal set but do not change the score: a session's grade
+// at version 2 equals its grade at version 1. Later versions add context-pressure signals.
+const Version = 2
 
 // Outcome is how a session ended, inferred from its projection. It is a best effort:
 // without a terminal marker in the transcript the ending is a heuristic, so every
