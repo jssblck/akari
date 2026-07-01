@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"image/png"
+	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -12,11 +14,15 @@ import (
 	"strings"
 	"testing"
 
+	"time"
+
 	"github.com/jssblck/akari/internal/config"
 	"github.com/jssblck/akari/internal/server/auth"
+	"github.com/jssblck/akari/internal/server/ogimage"
 	"github.com/jssblck/akari/internal/server/reparse"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/storetest"
+	"github.com/jssblck/akari/internal/server/web"
 )
 
 // mustHash hashes a password for seeding a test account directly via the store.
@@ -961,6 +967,184 @@ func TestPublicOverviewFlow(t *testing.T) {
 		t.Fatalf("public overview after re-publish = %d, want 200", resp.StatusCode)
 	}
 	resp.Body.Close()
+}
+
+// TestPublicOverviewOGImage drives the Open Graph preview card end to end:
+// publishing renders a card up front, the public page advertises it via og:image
+// meta tags, the /og.png route serves a valid 1200x630 PNG to an anonymous
+// viewer, and making the overview private 404s the card just as it does the page.
+func TestPublicOverviewOGImage(t *testing.T) {
+	t.Parallel()
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+	c := newClient(t)
+
+	owner, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	ann, err := st.Announce(ctx, store.AnnounceParams{
+		UserID: owner.ID, Agent: "claude", SourceSessionID: "sess-grace",
+		ProjectID: projectID, Cwd: "/home/grace/akari", Machine: "laptop",
+	})
+	if err != nil {
+		t.Fatalf("announce: %v", err)
+	}
+	if _, err := st.Pool.Exec(ctx,
+		`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cost_usd, occurred_at, dedup_key)
+		 VALUES ($1, 'claude-opus-4-8', 100, 50, 1.0, now() - make_interval(days => 1), 'u1')`,
+		ann.SessionID); err != nil {
+		t.Fatalf("seed usage: %v", err)
+	}
+
+	anon := newClient(t)
+	anon.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+	// Before publishing, the card 404s (the page does too).
+	resp := mustGet(t, anon, srv.URL+"/u/grace/og.png")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("og.png before publish = %d, want 404", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Publish through the account control, which renders the card synchronously.
+	if _, err := c.PostForm(srv.URL+"/login", url.Values{
+		"username": {"grace"}, "password": {"hopper-1906"},
+	}); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	if _, err := c.PostForm(srv.URL+"/account/overview/publish", url.Values{}); err != nil {
+		t.Fatalf("publish overview: %v", err)
+	}
+
+	// The public page advertises the card via Open Graph meta tags.
+	body := readBody(t, mustGet(t, anon, srv.URL+"/u/grace"))
+	for _, want := range []string{
+		`property="og:image" content="`,
+		`/u/grace/og.png"`,
+		`name="twitter:card" content="summary_large_image"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("public overview missing OG tag %q, got:\n%s", want, body)
+		}
+	}
+
+	// Under a narrower ?range the page totals no longer match the year-window card,
+	// so the card must not be advertised there (it would unfurl a mismatched figure);
+	// the page still renders fine, just without og:image.
+	ranged := readBody(t, mustGet(t, anon, srv.URL+"/u/grace?range=7d"))
+	if strings.Contains(ranged, "og:image") {
+		t.Fatalf("non-default range page must not advertise the card, got:\n%s", ranged)
+	}
+
+	// The card itself is a valid, correctly sized PNG served as an image.
+	resp = mustGet(t, anon, srv.URL+"/u/grace/og.png")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("og.png after publish = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "image/png" {
+		t.Fatalf("og.png content-type = %q, want image/png", ct)
+	}
+	raw, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read og.png: %v", err)
+	}
+	img, err := png.Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("decode og.png: %v", err)
+	}
+	if b := img.Bounds(); b.Dx() != 1200 || b.Dy() != 630 {
+		t.Fatalf("og.png size = %dx%d, want 1200x630", b.Dx(), b.Dy())
+	}
+
+	// Making the overview private 404s the card, matching the page.
+	if _, err := c.PostForm(srv.URL+"/account/overview/unpublish", url.Values{}); err != nil {
+		t.Fatalf("unpublish overview: %v", err)
+	}
+	resp = mustGet(t, anon, srv.URL+"/u/grace/og.png")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("og.png after make-private = %d, want 404", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+// TestPublishDuringReparseSkipsCard guards the publish-time render's reparse gate:
+// publishing while a reparse rebuilds the projection must not cache a card from a
+// half-rebuilt aggregate. It holds the real reparse advisory lock (as a live
+// reparse does for its whole run) so ogimage.Generate takes its abort path. The
+// publish still succeeds (the overview is public); the card only appears once a
+// reparse is not running.
+func TestPublishDuringReparseSkipsCard(t *testing.T) {
+	t.Parallel()
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+	c := newClient(t)
+
+	if _, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), ""); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if _, err := c.PostForm(srv.URL+"/login", url.Values{
+		"username": {"grace"}, "password": {"hopper-1906"},
+	}); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+
+	// Publish while the reparse advisory lock is held: the overview goes public, but
+	// the card render aborts, so /og.png 404s.
+	lock, ok, err := st.AcquireReparseLock(ctx)
+	if err != nil || !ok {
+		t.Fatalf("acquire reparse lock: ok=%v err=%v", ok, err)
+	}
+	if _, err := c.PostForm(srv.URL+"/account/overview/publish", url.Values{}); err != nil {
+		lock.Release(ctx)
+		t.Fatalf("publish: %v", err)
+	}
+	anon := newClient(t)
+	anon.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp := mustGet(t, anon, srv.URL+"/u/grace/og.png")
+	if resp.StatusCode != http.StatusNotFound {
+		lock.Release(ctx)
+		t.Fatalf("og.png after publish-during-reparse = %d, want 404 (render skipped)", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// With the lock cleared, re-publishing renders the card.
+	lock.Release(ctx)
+	if _, err := c.PostForm(srv.URL+"/account/overview/publish", url.Values{}); err != nil {
+		t.Fatalf("re-publish: %v", err)
+	}
+	resp = mustGet(t, anon, srv.URL+"/u/grace/og.png")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("og.png after reparse cleared = %d, want 200", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+// TestOGCardWindowReconcilesWithDefaultRange pins the card's analytics window to
+// the public overview's default range on BOTH bounds. The card is generated from a
+// fixed trailing-year window bounded at the end of today and is advertised only on
+// the default-range page; the handler feeds that page the same bounds, so a
+// future-dated event cannot land in the page total while the card omits it. Both
+// halves are pinned here so a change to either bound that breaks the match fails
+// loudly.
+func TestOGCardWindowReconcilesWithDefaultRange(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	// Lower bound: the card's DefaultSince equals the default range's Since.
+	if card, page := ogimage.DefaultSince(now), web.RangeSince(web.DefaultRange, now); !card.Equal(page) {
+		t.Fatalf("card Since %v != default page Since %v", card, page)
+	}
+	// Upper bound: both the card and the page cut off at the end of today, so the
+	// handler must apply ogimage.DefaultUntil to the page (see handlePublicOverview).
+	// DefaultUntil is the exclusive start of tomorrow, UTC.
+	if got, want := ogimage.DefaultUntil(now), now.UTC().Truncate(24*time.Hour).AddDate(0, 0, 1); !got.Equal(want) {
+		t.Fatalf("DefaultUntil(%v) = %v, want end of today %v", now, got, want)
+	}
 }
 
 // TestPublicOverviewPublishRequiresAuth confirms the publicity toggles are gated:

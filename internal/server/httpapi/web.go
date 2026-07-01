@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/a-h/templ"
 	"github.com/jssblck/akari/internal/server/auth"
+	"github.com/jssblck/akari/internal/server/ogimage"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/web"
 )
@@ -318,12 +320,32 @@ func (s *Server) handlePublishSession(w http.ResponseWriter, r *http.Request) {
 
 // handlePublishOverview marks the signed-in user's own usage overview public and
 // redirects back to the account page, where the Publicity section then shows the
-// /u/<username> link.
+// /u/<username> link. It also renders the Open Graph preview card up front, so a
+// link shared the moment after publishing already unfurls; a render failure does
+// not fail the publish (the card 404s until the daily refresh fills it in).
 func (s *Server) handlePublishOverview(w http.ResponseWriter, r *http.Request) {
 	p, _ := principalFrom(r.Context())
 	if err := s.Store.PublishOverview(r.Context(), p.UserID); err != nil {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not publish overview."))
 		return
+	}
+	// Render the card up front, logging any failure. A lookup or render error does
+	// not fail the publish (the overview is already public, and the daily refresh
+	// fills the card in), but it must not be swallowed silently, or a missing
+	// publish-time card would be undiagnosable. The user lookup and the render are
+	// logged distinctly so the cause is clear.
+	//
+	// Generate coordinates with reparse itself: it aborts (ErrReparseInProgress)
+	// rather than cache a card read across a projection rebuild, so a startup or
+	// admin reparse running concurrently with this publish yields a quiet skip here,
+	// not a stored mixed aggregate. The post-reparse daily refresh fills the card
+	// once the projection is whole.
+	if u, err := s.Store.UserByID(r.Context(), p.UserID); err != nil {
+		log.Printf("overview og: user lookup for %d failed, skipping publish-time render: %v", p.UserID, err)
+	} else if err := ogimage.Generate(r.Context(), s.Store, u, time.Now()); errors.Is(err, ogimage.ErrReparseInProgress) {
+		log.Printf("overview og: reparse in progress, skipping publish-time render for user %d", p.UserID)
+	} else if err != nil {
+		log.Printf("overview og: publish-time render for user %d failed: %v", p.UserID, err)
 	}
 	http.Redirect(w, r, "/account", http.StatusSeeOther)
 }
@@ -357,15 +379,64 @@ func (s *Server) handlePublicOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rng := web.ParseRange(r.URL.Query().Get("range"))
+	// The upper bound matches the card's (ogimage.DefaultUntil): the end of today, so
+	// the page's headline totals cover exactly the days its heatmap draws (the grid
+	// stops at today) rather than folding in a future-dated event no cell shows, and
+	// the card advertised beside the default-range page reads the identical scope.
+	now := time.Now()
 	analytics, err := s.Store.Analytics(r.Context(), store.AnalyticsFilter{
-		Since:   web.RangeSince(rng, time.Now()),
+		Since:   web.RangeSince(rng, now),
+		Until:   ogimage.DefaultUntil(now),
 		UserIDs: []int64{u.ID},
 	})
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load overview."))
 		return
 	}
-	render(w, r, http.StatusOK, web.PublicOverviewPage(u.Username, analytics, rng))
+	og := web.OGMeta{
+		Title:       u.Username + " · usage overview",
+		Description: "A snapshot of " + u.Username + "'s AI coding-agent usage on akari.",
+		URL:         s.baseURL(r) + web.PublicOverviewPath(u.Username),
+	}
+	// The preview card is a periodic snapshot (rendered at publish, refreshed about
+	// daily) of the default trailing-year window, cached per user rather than per
+	// range. It is an as-of snapshot, not a live mirror of the page: the card carries
+	// its own "as of <date>" stamp, so it may trail the live totals until the next
+	// refresh without claiming to equal them. It is advertised only on the default
+	// window (a narrower ?range is a different view the year-window card does not
+	// represent); the page still carries a well-formed summary card via its title and
+	// description when the image is omitted.
+	if rng == web.DefaultRange {
+		og.Image = s.baseURL(r) + "/u/" + url.PathEscape(u.Username) + "/og.png"
+	}
+	render(w, r, http.StatusOK, web.PublicOverviewPage(u.Username, analytics, rng, og))
+}
+
+// handlePublicOverviewOGImage serves the pre-rendered Open Graph preview card for a
+// published overview at /u/<username>/og.png. The bytes are a stored snapshot
+// (rendered at publish time and refreshed daily), so this is a cheap byte-serve
+// with no analytics query and no reparse gate: it returns the same PNG whether or
+// not a reparse is rebuilding the projection. An unpublished or not-yet-rendered
+// account 404s, matching the page itself.
+func (s *Server) handlePublicOverviewOGImage(w http.ResponseWriter, r *http.Request) {
+	username := r.PathValue("username")
+	img, err := s.Store.PublicOverviewOGImage(r.Context(), username)
+	if errors.Is(err, store.ErrNotFound) {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		http.Error(w, "Could not load preview image.", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Content-Length", strconv.Itoa(len(img.PNG)))
+	// A crawler may re-fetch on every share; the card only changes about daily, so a
+	// modest cache keeps repeat unfurls off the database without pinning a stale card
+	// for long.
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(img.PNG)
 }
 
 // handleUnpublishSession returns the owner's session to internal visibility.

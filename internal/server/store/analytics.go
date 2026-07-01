@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // DayPoint is one day's aggregated usage, the unit of the analytics time series.
@@ -78,7 +80,14 @@ type Analytics struct {
 type AnalyticsFilter struct {
 	ProjectID int64
 	Since     time.Time
-	UserIDs   []int64
+	// Until is an exclusive upper bound on occurred_at; the zero value means no upper
+	// bound (every figure through the latest event). The OG card sets it to the end
+	// of the current day so its headline and caption cover exactly the days its
+	// heatmap draws (the grid stops at today), rather than folding a future-dated
+	// event into the total that no visible cell accounts for. The live pages leave it
+	// zero.
+	Until   time.Time
+	UserIDs []int64
 	// Username scopes by a single account name, the form the project page's filter
 	// carries. It is independent of UserIDs (the overview's multi-select by id): an
 	// unknown name resolves to no session, the same empty result the session list's
@@ -130,21 +139,36 @@ func (a Analytics) TotalTokens() int64 {
 // again: a session has exactly one agent, so the per-agent rows partition the
 // usage cleanly and their sum is the grand total with no double counting.
 func (s *Store) Analytics(ctx context.Context, f AnalyticsFilter) (Analytics, error) {
+	return s.analyticsFrom(ctx, s.Pool, f)
+}
+
+// querier is the subset of *pgxpool.Pool and pgx.Tx that the analytics queries
+// use, so the same query builders serve both a plain pool read (Analytics) and a
+// transaction-scoped read (AnalyticsSnapshot).
+type querier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// analyticsFrom assembles the Analytics from one querier, so a pooled read and a
+// single-transaction snapshot share the same three grouped queries and the same
+// headline arithmetic.
+func (s *Store) analyticsFrom(ctx context.Context, q querier, f AnalyticsFilter) (Analytics, error) {
 	var a Analytics
 
-	series, err := s.analyticsSeries(ctx, f)
+	series, err := s.analyticsSeries(ctx, q, f)
 	if err != nil {
 		return a, err
 	}
 	a.Series = series
 
-	models, err := s.analyticsByModel(ctx, f)
+	models, err := s.analyticsByModel(ctx, q, f)
 	if err != nil {
 		return a, err
 	}
 	a.Models = models
 
-	agents, err := s.analyticsByAgent(ctx, f)
+	agents, err := s.analyticsByAgent(ctx, q, f)
 	if err != nil {
 		return a, err
 	}
@@ -165,6 +189,51 @@ func (s *Store) Analytics(ctx context.Context, f AnalyticsFilter) (Analytics, er
 		a.CostIncomplete = a.CostIncomplete || ag.CostIncomplete
 	}
 	return a, nil
+}
+
+// AnalyticsSnapshot reads Analytics as a single consistent snapshot that is
+// guaranteed not to straddle a reparse, for the OG card render. It runs the three
+// grouped queries inside one REPEATABLE READ transaction, so they all read one MVCC
+// snapshot rather than three independently-timed reads. The first statement in that
+// transaction is the reparse-lock check, which both establishes the snapshot and
+// reads the lock state at that instant: if no reparse holds the lock at the snapshot
+// point, none is mid-flight, so every session in the snapshot is in a settled state
+// (fully reparsed or untouched) rather than a half-rebuilt mix, and a reparse that
+// starts later cannot alter the frozen snapshot. When a reparse does hold the lock
+// at that instant, it returns ok=false and no analytics, so the caller skips the
+// render rather than caching a mixed aggregate. Unlike taking the reparse advisory
+// lock itself, this holds no lock, so it never makes the fleet read as "reparsing".
+func (s *Store) AnalyticsSnapshot(ctx context.Context, f AnalyticsFilter) (a Analytics, ok bool, err error) {
+	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return a, false, fmt.Errorf("begin analytics snapshot: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var held bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (
+		   SELECT 1 FROM pg_locks
+		   WHERE locktype = 'advisory'
+		     AND classid = hashtext(current_database())::oid
+		     AND objid = $1::oid
+		     AND objsubid = 2
+		     AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+		 )`, reparseLockKey).Scan(&held); err != nil {
+		return a, false, fmt.Errorf("check reparse lock in snapshot: %w", err)
+	}
+	if held {
+		return a, false, nil
+	}
+
+	a, err = s.analyticsFrom(ctx, tx, f)
+	if err != nil {
+		return Analytics{}, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Analytics{}, false, fmt.Errorf("commit analytics snapshot: %w", err)
+	}
+	return a, true, nil
 }
 
 // clause builds the conjunctive WHERE additions for a usage_events query joined to
@@ -204,12 +273,16 @@ func (f AnalyticsFilter) clause() (string, []any) {
 		args = append(args, f.Since)
 		clauses += fmt.Sprintf(" AND ue.occurred_at >= $%d", len(args))
 	}
+	if !f.Until.IsZero() {
+		args = append(args, f.Until)
+		clauses += fmt.Sprintf(" AND ue.occurred_at < $%d", len(args))
+	}
 	return clauses, args
 }
 
-func (s *Store) analyticsSeries(ctx context.Context, f AnalyticsFilter) ([]DayPoint, error) {
+func (s *Store) analyticsSeries(ctx context.Context, q querier, f AnalyticsFilter) ([]DayPoint, error) {
 	filter, args := f.clause()
-	rows, err := s.Pool.Query(ctx,
+	rows, err := q.Query(ctx,
 		`SELECT date_trunc('day', ue.occurred_at) AS day,
 		        coalesce(sum(ue.cost_usd), 0),
 		        coalesce(sum(ue.input_tokens), 0),
@@ -248,7 +321,7 @@ func (s *Store) analyticsSeries(ctx context.Context, f AnalyticsFilter) ([]DayPo
 // splits agree.
 const costIncompleteExpr = `bool_or(ue.cost_usd IS NULL AND (ue.input_tokens + ue.output_tokens + ue.cache_read_tokens + ue.cache_write_tokens + ue.reasoning_tokens) > 0)`
 
-func (s *Store) analyticsByModel(ctx context.Context, f AnalyticsFilter) ([]Breakdown, error) {
+func (s *Store) analyticsByModel(ctx context.Context, q querier, f AnalyticsFilter) ([]Breakdown, error) {
 	filter, args := f.clause()
 	// occurred_at IS NOT NULL matches the series and the by-agent split, so the
 	// three reconcile; see Analytics. No model <> '' filter though: usage that
@@ -256,7 +329,7 @@ func (s *Store) analyticsByModel(ctx context.Context, f AnalyticsFilter) ([]Brea
 	// sum to less than the headline. An unnamed model groups into its own row and
 	// FoldUnknownModels collapses it (with every other unpriced model) into
 	// "Other", so it counts without leaking a blank row.
-	rows, err := s.Pool.Query(ctx,
+	rows, err := q.Query(ctx,
 		`SELECT ue.model,
 		        coalesce(sum(ue.cost_usd), 0),
 		        coalesce(sum(ue.input_tokens), 0),
@@ -281,7 +354,7 @@ func (s *Store) analyticsByModel(ctx context.Context, f AnalyticsFilter) ([]Brea
 	return out, nil
 }
 
-func (s *Store) analyticsByAgent(ctx context.Context, f AnalyticsFilter) ([]Breakdown, error) {
+func (s *Store) analyticsByAgent(ctx context.Context, q querier, f AnalyticsFilter) ([]Breakdown, error) {
 	// One path, the same dated usage_events base as the by-model split and the
 	// series, so all of them reconcile with the headline (see Analytics for why the
 	// occurred_at IS NOT NULL guard is uniform). The headline is summed from these
@@ -289,7 +362,7 @@ func (s *Store) analyticsByAgent(ctx context.Context, f AnalyticsFilter) ([]Brea
 	// construction (sessions.total_* == sum over a session's usage_events), so
 	// reading the ledger here loses nothing the old session-rollup path carried.
 	filter, args := f.clause()
-	rows, err := s.Pool.Query(ctx,
+	rows, err := q.Query(ctx,
 		`SELECT s.agent,
 		        coalesce(sum(ue.cost_usd), 0),
 		        coalesce(sum(ue.input_tokens), 0),

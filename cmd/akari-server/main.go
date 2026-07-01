@@ -120,13 +120,29 @@ func run() error {
 	} else {
 		close(sweepDone)
 	}
-	// Registered after st.Close so LIFO runs it first: cancel the sweep and wait
-	// for it to finish before the pool closes, on every return path (including an
-	// early ListenAndServe error). Receiving from an already-closed sweepDone is
-	// safe, so this composes with the signal handler's own wait.
+	// Refresh Open Graph preview cards for published overviews on the same footing
+	// as the sweep: a background loop that re-renders any card older than a day, so a
+	// shared /u/<username> link's preview tracks the account's usage without a render
+	// on every crawl. ogDone lets shutdown wait for an in-flight refresh pass before
+	// the pool closes.
+	ogDone := make(chan struct{})
+	if cfg.OGRefreshInterval > 0 {
+		go func() {
+			defer close(ogDone)
+			runOGRefresh(rootCtx, st, cfg.OGRefreshInterval)
+		}()
+	} else {
+		close(ogDone)
+	}
+
+	// Registered after st.Close so LIFO runs it first: cancel the background loops
+	// and wait for them to finish before the pool closes, on every return path
+	// (including an early ListenAndServe error). Receiving from an already-closed
+	// channel is safe, so this composes with the signal handler's own wait.
 	defer func() {
 		stop()
 		<-sweepDone
+		<-ogDone
 	}()
 
 	srv := &http.Server{
@@ -156,11 +172,15 @@ func run() error {
 			log.Printf("shutdown: %v", err)
 		}
 		<-sweepDone
+		<-ogDone
 		close(idleClosed)
 	}()
 
 	if cfg.SweepInterval > 0 {
 		log.Printf("background blob sweep every %s", cfg.SweepInterval)
+	}
+	if cfg.OGRefreshInterval > 0 {
+		log.Printf("overview preview refresh every %s", cfg.OGRefreshInterval)
 	}
 	log.Printf("akari-server listening on %s", cfg.Listen)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

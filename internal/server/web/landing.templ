@@ -5,7 +5,7 @@ package web
 // It rides the public layout, so it carries the same wordmark and a "Log in" link
 // in the top bar; the hero's own actions lead to sign-in and registration.
 templ LandingPage() {
-	@publicLayout("akari") {
+	@publicLayout("akari", OGMeta{}) {
 		<div class="landing">
 			<section class="landing-hero">
 				<span class="landing-glyph">

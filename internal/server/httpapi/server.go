@@ -104,6 +104,10 @@ func (s *Server) Routes() http.Handler {
 	// one account, and gated during a reparse like the public session view (it shows
 	// parsed data).
 	mux.HandleFunc("GET /u/{username}", s.gatePublicParsed(s.handlePublicOverview))
+	// The Open Graph preview card for that overview. It serves pre-rendered PNG
+	// bytes (rendered at publish and refreshed daily), so it is not reparse-gated:
+	// the more specific pattern wins over /u/{username} for this exact path.
+	mux.HandleFunc("GET /u/{username}/og.png", s.handlePublicOverviewOGImage)
 	mux.HandleFunc("GET /login", s.handleLoginPage)
 	mux.HandleFunc("POST /login", s.handleLoginForm)
 	mux.HandleFunc("GET /register", s.handleRegisterPage)

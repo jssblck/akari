@@ -37,6 +37,20 @@ type Page struct {
 	OverviewPublic bool
 }
 
+// OGMeta carries the Open Graph and Twitter card metadata a public page emits so a
+// shared link unfurls with a title, description, and preview image. The zero value
+// emits only the basic title tags; Image (an absolute URL) switches the Twitter
+// card to the large-image form and adds og:image. Description and URL are optional.
+type OGMeta struct {
+	Title       string
+	Description string
+	// Image is the absolute URL of the preview card. Open Graph requires an absolute
+	// URL here, so the handler builds it from the request origin; empty omits it.
+	Image string
+	// URL is the absolute canonical URL of the page; empty omits og:url.
+	URL string
+}
+
 // IsLocalKind reports whether a project kind is one of the non-remote kinds
 // (standalone or orphaned), which are grouped and labeled apart from git-remote
 // projects in the UI.
