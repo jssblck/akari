@@ -17,12 +17,14 @@ const (
 	// signal rather than a fault, but a session driven mostly by terse prompts is worth
 	// surfacing.
 	shortPromptWords = 4
-	// duplicateMinWords keeps confirmations out of the duplicate count: two identical
+	// DuplicateMinWords keeps confirmations out of the duplicate count: two identical
 	// "yes" turns are assent, not a re-sent instruction. Only prompts of at least this
 	// many words can count as a duplicate, so a duplicate reads as a repeated real
 	// request (the agent missed it, or the user gave up waiting and re-sent). It equals
-	// shortPromptWords, so a prompt is either short or duplicate-eligible, never both.
-	duplicateMinWords = shortPromptWords
+	// shortPromptWords, so a prompt is either short or duplicate-eligible, never both. It
+	// is exported because the duplicate count is a database aggregate (see the store's
+	// signal gather), so the SQL and this package must share the one threshold.
+	DuplicateMinWords = shortPromptWords
 )
 
 // PromptHygiene is a session's input-quality summary, computed from its ordered human
@@ -86,53 +88,52 @@ var pleasantryWords = map[string]bool{
 	"doing": true, "today": true, "please": true, "thanks": true, "hiya": true,
 }
 
-// ClassifyPromptHygiene computes a session's hygiene counts from its human prompts in
-// order (prompts[0] is the opening turn). The caller passes only real human turns with
-// non-empty content: the Claude reducer already drops tool-result-only user entries, and
-// the store's fetch filters empties, so an empty prompt never reaches here to read as a
-// spurious terse turn.
-func ClassifyPromptHygiene(prompts []string) PromptHygiene {
-	var h PromptHygiene
-	// seen remembers the normalized text of each non-terse prompt so a later verbatim
-	// repeat counts as a duplicate. Exact within-session duplicate detection is inherently
-	// stateful: a prompt cannot be known to repeat without remembering the ones before it.
-	// The map is bounded by this session's prompt count (human turns are few and each key
-	// is one normalized message body, not a tool payload) and is released when the function
-	// returns, so it holds kilobytes for a real session. A fixed recent window would cap it
-	// further but would miss a repeat of an older prompt, a trade a bounded session does
-	// not need.
-	seen := make(map[string]bool, len(prompts))
-	for i, p := range prompts {
-		words := len(strings.Fields(p))
-		switch {
-		case words < shortPromptWords:
-			h.Short++
-		default:
-			// Only non-terse prompts can be duplicates, so repeated assent does not read
-			// as a re-sent instruction. The first occurrence seeds the set; a later match
-			// on the normalized text counts.
-			norm := normalizePrompt(p)
-			if seen[norm] {
-				h.Duplicate++
-			} else {
-				seen[norm] = true
-			}
-		}
-		if changeVerbRe.MatchString(p) && !hasCodeAnchor(p) {
-			h.NoCodeContext++
-		}
-		if i == 0 {
-			h.UnstructuredStart = words < shortPromptWords || isBareGreeting(p)
-		}
-	}
-	return h
+// PromptHygieneFolder computes a session's per-prompt hygiene signals in one streaming
+// pass, holding O(1) state so the store can fold prompts as they arrive from an ordered
+// query rather than buffering the whole session. Add the human prompts in order (the first
+// Add is the opening turn). The caller passes only real human turns with non-empty content:
+// the Claude reducer drops tool-result-only user entries and the store's fetch filters
+// empties, so an empty prompt never folds in as a spurious terse turn.
+//
+// Duplicate detection is deliberately NOT here. Counting exact verbatim repeats needs state
+// proportional to the prompt count (a set of everything seen), the whole-session allocation
+// this streaming form exists to avoid. The store computes the duplicate count as a database
+// aggregate over the same normalized text and threshold (see DuplicateMinWords) and passes
+// it to Result, so the memory-bounded per-prompt tests live here and the memory-heavy
+// cross-prompt count lives in SQL.
+type PromptHygieneFolder struct {
+	h     PromptHygiene
+	count int
+	begun bool
 }
 
-// normalizePrompt collapses a prompt to a canonical form for duplicate detection:
-// lowercased, with runs of whitespace folded to single spaces and the ends trimmed. Two
-// prompts that differ only in case or spacing normalize equal.
-func normalizePrompt(p string) string {
-	return strings.Join(strings.Fields(strings.ToLower(p)), " ")
+// Add folds one human prompt into the running signals.
+func (f *PromptHygieneFolder) Add(prompt string) {
+	words := len(strings.Fields(prompt))
+	if !f.begun {
+		// The opening turn sets whether the session started with a clear task.
+		f.h.UnstructuredStart = words < shortPromptWords || isBareGreeting(prompt)
+		f.begun = true
+	}
+	if words < shortPromptWords {
+		f.h.Short++
+	}
+	if changeVerbRe.MatchString(prompt) && !hasCodeAnchor(prompt) {
+		f.h.NoCodeContext++
+	}
+	f.count++
+}
+
+// Count is the number of prompts folded, the classifier base the store stores so the cohort
+// aggregate divides the hygiene counts by exactly the set they came from.
+func (f *PromptHygieneFolder) Count() int { return f.count }
+
+// Result returns the folded per-prompt signals with the duplicate count (computed
+// separately, see the type doc) filled in.
+func (f *PromptHygieneFolder) Result(duplicate int) PromptHygiene {
+	h := f.h
+	h.Duplicate = duplicate
+	return h
 }
 
 // isBareGreeting reports whether every word of the opener is a greeting or pleasantry, so

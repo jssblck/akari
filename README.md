@@ -172,6 +172,7 @@ yourself. It reads `AKARI_DATABASE_URL` and the upload target from `AKARI_URL`
 | `AKARI_PUBLIC_URL` | (derived) | The externally reachable base URL (`https://akari.example.com`), used as the OAuth issuer and the base of every URL the MCP authorization flow advertises. Falls back to `AKARI_URL`; when neither is set the server derives the origin from each request (correct for a single-origin deployment behind a sane proxy). |
 | `AKARI_SWEEP_INTERVAL` | `1h` | How often the server reclaims orphaned CAS blobs. A Go duration (`30m`, `2h`); `0` disables the background sweep. |
 | `AKARI_OG_REFRESH_INTERVAL` | `1h` | How often the server wakes to refresh the Open Graph preview cards of published overviews; on each wake it re-renders any card older than a day. A Go duration; `0` disables the background refresh (a card is still rendered when the overview is published). |
+| `AKARI_SIGNALS_SETTLE_INTERVAL` | `5m` | How often the server computes per-session quality signals (outcome, grade, prompt hygiene, context health) for sessions that have settled: a session is graded once it has been idle past the abandoned threshold, off the ingest path, so a live session is never graded with an outcome that would drift. A Go duration; `0` disables the background pass (signals then land only on reparse or via `akari-server settle`). |
 
 Migrations are embedded and applied on startup, so the server is safe to restart.
 
@@ -182,6 +183,7 @@ akari-server            # run the HTTP server (default)
 akari-server reparse    # force a rebuild of every projection from stored raw bytes
 akari-server reparse --agent claude   # limit a reparse to one agent
 akari-server sweep      # reclaim orphaned CAS blobs now
+akari-server settle     # compute quality signals for every settled session now
 akari-server dev-seed   # fill a local server with example data (see Example data above)
 akari-server update     # update to the latest release (see Updating below)
 akari-server version    # print the build version and exit
@@ -192,7 +194,9 @@ parser epoch against the epoch the stored data was last rebuilt under and, when 
 differ, reparses in the background on startup. An admin can also force one from the
 account page. `akari-server reparse` is the manual escape hatch and forces a run
 regardless of the epoch; it sweeps orphaned blobs afterward, as the automatic run
-does. `sweep` is the manual form of the periodic background sweep.
+does. `sweep` is the manual form of the periodic background sweep, and `settle` is
+the manual form of the periodic signals pass (it grades every settled session that
+is missing a current-version row, then exits).
 
 ## Running a client
 

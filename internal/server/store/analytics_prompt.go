@@ -10,11 +10,12 @@ import (
 // PromptHygiene is the cohort's input-quality picture over a scope: how many of the
 // window's human prompts were terse, repeated, or asked for a change without pointing at
 // code, and how many sessions opened with an unstructured prompt. The counts come from
-// the stored per-session signals (quality.ClassifyPromptHygiene, refreshed on catch-up or
-// reparse), summed over the sessions carrying a current-version row so the numerators and
-// the Prompts denominator cover the same set. A stale or missing signals row contributes
-// nothing to either, the same way the quality distribution folds it into the unknown
-// bucket, so the panel never mixes a half-rebuilt view.
+// the stored per-session signals (quality.PromptHygieneFolder for the per-prompt rules and
+// a database duplicate aggregate, materialized by the settle pass or a reparse), summed
+// over the sessions carrying a current-version row so the numerators and the Prompts
+// denominator cover the same set. A stale or missing signals row contributes nothing to
+// either, the same way the quality distribution folds it into the unknown bucket, so the
+// panel never mixes a half-rebuilt view.
 type PromptHygiene struct {
 	Prompts            int // human prompts across the scoped sessions, the rate denominator
 	Short              int // prompts under the terse-word threshold

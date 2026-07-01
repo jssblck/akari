@@ -225,38 +225,19 @@ func (s *Store) AdvanceProjection(ctx context.Context, sessionID int64, parserVe
 		}
 
 		parsedTo, caughtUp = regionEnd, regionEnd >= byteLen
-		// Once this region brings the session fully current, recompute its behavioral
-		// signals from the now-complete projection, in this same transaction so the
-		// signals commit with the rows they summarize. A still-catching-up region skips
-		// it: the signals read the whole session (the last word, failure streaks across
-		// the transcript), so a partial recompute would be wasted work and a transiently
-		// wrong verdict that the next region overwrites anyway.
-		//
-		// This is a whole-session recompute, so a live session caught up after each
-		// appended turn pays one refresh per turn, making cumulative refresh work
-		// quadratic in the session's turn count. That cost is deliberate and does not
-		// bite on real data. A session is a bounded artifact (a client-capped transcript,
-		// hundreds of turns at the extreme), one refresh is a few indexed window-function
-		// queries plus a linear fold that runs in low single-digit milliseconds over that
-		// many rows, and live appends are human-paced, so the refreshes spread across the
-		// session's wall-clock life rather than a tight loop; even a 500-turn session is
-		// on the order of a second of cumulative database CPU. The linear alternative
-		// costs more than it saves: the signals read cross-message global order (failure
-		// streaks, the last word, the context-reset sequence, verbatim prompt repeats),
-		// so folding them incrementally means a versioned stateful reducer that
-		// reconstructs that order from per-region deltas, which reintroduces the
-		// rollup-drift class of bug the sessions.total_* invariant exists to prevent. The
-		// only pass whose cost scales with the whole corpus is the reparse, behind the
-		// reparse advisory lock and off ingest; a live catch-up deliberately does not
-		// take it. If a live session ever grows large enough to matter, the lever is to
-		// debounce this refresh (recompute once the session settles, compute on read for
-		// the rare mid-flight view), which bounds the refresh count without an
-		// incremental fold.
-		if caughtUp {
-			if err := refreshSignalsTx(ctx, tx, sessionID); err != nil {
-				return err
-			}
-		}
+		// The append path deliberately does NOT refresh signals. Signals read the whole
+		// session (the last word, failure streaks across the transcript, the per-turn
+		// context sequence), so refreshing them here would recompute the entire session on
+		// every caught-up append, turning a live session's K appends into O(K^2) ingest
+		// work. It would also bake a time-dependent verdict into the row: the abandoned
+		// versus unknown outcome depends on how long the session has been idle, so a refresh
+		// taken mid-session stores a verdict that drifts once the session crosses the idle
+		// threshold. Both are avoided by computing signals once, after the session settles,
+		// off the ingest path: RefreshSettledSignals (a periodic pass) refreshes a session
+		// only once it has been idle past the abandoned threshold, so the append path stays
+		// linear and the stored outcome is computed when it is stable. A reparse still
+		// refreshes at the end of its full replay (that is the versioned backfill, not the
+		// append path).
 		return nil
 	})
 	return parsedTo, caughtUp, err
@@ -680,7 +661,9 @@ func clearProjectionForReparseTx(ctx context.Context, tx pgx.Tx, sessionID int64
 		"DELETE FROM attachments WHERE session_id = $1",
 		// session_signals is parser-owned too (derived from messages and tool_calls), so
 		// it clears with the rest. ReparseSession rebuilds it at the end of its replay;
-		// the standalone reset leaves it absent until the next catch-up refreshes it.
+		// the standalone reset leaves it absent until the settle pass refreshes it, once
+		// the re-parsed session has settled (the append path that catches the cursor back
+		// up no longer touches signals, so the row does not come back on catch-up).
 		"DELETE FROM session_signals WHERE session_id = $1",
 	} {
 		if _, err := tx.Exec(ctx, q, sessionID); err != nil {

@@ -78,6 +78,21 @@ func TestContextHealth(t *testing.T) {
 			if resets != tc.wantResets {
 				t.Errorf("resets = %d, want %d", resets, tc.wantResets)
 			}
+			// The streaming folder the store uses must land on the same figures as the
+			// buffered reference for the same turns fed one at a time, and must report
+			// whether any turn was seen so an empty session stores NULL rather than a
+			// measured-looking zero.
+			var f ContextHealthFolder
+			for _, tokens := range tc.perTurn {
+				f.Add(tokens)
+			}
+			fp, fr, any := f.Result()
+			if fp != tc.wantPeak || fr != tc.wantResets {
+				t.Errorf("folder = (peak %d, resets %d), want (%d, %d)", fp, fr, tc.wantPeak, tc.wantResets)
+			}
+			if any != (len(tc.perTurn) > 0) {
+				t.Errorf("folder any = %v, want %v (measured iff a turn was folded)", any, len(tc.perTurn) > 0)
+			}
 		})
 	}
 }

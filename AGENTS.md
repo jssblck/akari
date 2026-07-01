@@ -46,8 +46,14 @@ with eph" and "Example data for development".
 ## Signals and the reparse epoch
 
 Per-session signals (outcome, quality score and grade, tool health, prompt
-hygiene, context health) live in `session_signals`, derived from the projection
-and rebuilt on catch-up or reparse. They sit OUTSIDE the `sessions.total_* ==
+hygiene, context health) live in `session_signals`, derived from the projection.
+A row is materialized by the settle pass (`RefreshSettledSignals`, run on a timer
+from `cmd/akari-server` and available as `akari-server settle`) once the session
+has been idle past the abandoned threshold, and re-derived on reparse. The ingest
+append path deliberately does NOT compute signals: doing it per message would be
+quadratic in a session's turns, and a verdict taken mid-session would drift once
+the session crossed the idle threshold, so signals are computed once, after the
+session settles, off the hot path. They sit OUTSIDE the `sessions.total_* ==
 sum(usage_events)` invariant: a new signal derives from the same rows without
 touching the rollups. Three version constants gate the machinery, and forgetting
 one leaves a half-migrated corpus:
@@ -58,8 +64,12 @@ one leaves a half-migrated corpus:
   fails by name and tells you to bump the epoch and refresh the snapshots with
   `go test ./internal/server/parse -run TestGoldenProjection -update`.
 - `quality.Version` (`internal/quality`): bump when the signal set or the scoring
-  changes, so the analytics count only rebuilt rows. The `Epoch` bump is what
-  backfills the corpus, and a reparse re-stamps every row at the running version.
+  changes, so the analytics count only rebuilt rows. The settle pass treats a
+  stale-version row as due and re-stamps it once the session is settled, so a
+  version bump backfills incrementally on its own. The `Epoch` bump forces a
+  one-time full reparse that re-derives every row atomically, the belt-and-suspenders
+  path when you want the whole corpus current on first deploy regardless of whether
+  the settle loop is enabled.
 
 A new signal should default to a value that reads as "unmeasured" (NULL, or a
-zero the aggregate excludes) until the backfill reparse fills it.
+zero the aggregate excludes) until the settle pass (or a backfill reparse) fills it.

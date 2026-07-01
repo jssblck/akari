@@ -41,6 +41,15 @@ type Server struct {
 	// tracks its usage without a render on every page load. Defaults to 1h; set "0"
 	// to disable the background refresh (a card is still rendered at publish time).
 	OGRefreshInterval time.Duration
+	// SignalsSettleInterval is how often the server wakes to compute per-session
+	// signals for sessions that have settled (AKARI_SIGNALS_SETTLE_INTERVAL). The
+	// ingest append path deliberately does not recompute signals per message (that
+	// would be quadratic and would grade a still-running session with a
+	// time-dependent outcome), so a settled session's grade is filled in here, once,
+	// after it has been idle past the abandoned threshold. Defaults to 5m; set "0"
+	// to disable the background pass (signals then land only on reparse or via the
+	// subcommand).
+	SignalsSettleInterval time.Duration
 }
 
 // LoadServer reads server configuration from the environment, applying defaults
@@ -65,6 +74,11 @@ func LoadServer() (Server, error) {
 		return Server{}, fmt.Errorf("AKARI_OG_REFRESH_INTERVAL: %w", err)
 	}
 	s.OGRefreshInterval = ogInterval
+	settleInterval, err := parseDuration(os.Getenv("AKARI_SIGNALS_SETTLE_INTERVAL"), 5*time.Minute)
+	if err != nil {
+		return Server{}, fmt.Errorf("AKARI_SIGNALS_SETTLE_INTERVAL: %w", err)
+	}
+	s.SignalsSettleInterval = settleInterval
 	return s, nil
 }
 

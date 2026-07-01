@@ -22,6 +22,40 @@ const (
 	resetKeepFloorTokens = 20000
 )
 
+// ContextHealthFolder computes a session's context-health figures in one streaming pass,
+// holding O(1) state (the running peak, the reset count, and the previous turn's size)
+// rather than buffering the whole session. The store folds usage rows as they arrive from
+// an ordered query, so peak memory does not grow with an arbitrarily long session. Add the
+// turns in transcript order; Result reports the peak, the inferred reset count, and whether
+// any turn was seen (so the caller can tell "measured as zero" from "nothing to measure").
+type ContextHealthFolder struct {
+	peak   int64
+	resets int
+	prev   int64
+	seen   bool
+}
+
+// Add folds one turn's context size (uncached input plus cached read plus cache creation)
+// into the running figures. A reset is inferred when this turn's size falls to at most
+// resetDropFraction of the prior turn's and the prior turn was at least resetKeepFloorTokens
+// large (see the constants above for why the floor is there).
+func (f *ContextHealthFolder) Add(tokens int64) {
+	if tokens > f.peak {
+		f.peak = tokens
+	}
+	if f.seen && f.prev >= resetKeepFloorTokens && float64(tokens) <= float64(f.prev)*resetDropFraction {
+		f.resets++
+	}
+	f.prev = tokens
+	f.seen = true
+}
+
+// Result reports the folded figures. any is false when no turn was added, so the caller
+// can store NULL rather than a measured-looking zero for a session with no usage.
+func (f *ContextHealthFolder) Result() (peak int64, resets int, any bool) {
+	return f.peak, f.resets, f.seen
+}
+
 // ContextHealth summarizes a session's context load from its ordered per-turn prompt
 // sizes (uncached input plus cached read plus cache creation, in transcript order). Peak is
 // the largest single-turn context the session reached: a
@@ -29,22 +63,16 @@ const (
 // the session ran closer to whatever its model's limit was. Resets is the count of
 // inferred context resets, the sharp drops that read as a compaction or a manual clear.
 //
-// It is pure so the rule lives in one tested place; the store gathers the ordered sizes
-// from usage_events and stores the result on the session's signals row. An empty input
-// (a session with no usage) yields a zero peak and zero resets; the caller distinguishes
-// "measured as zero" from "nothing to measure" by whether it had any turns.
+// It is the buffered form over ContextHealthFolder, kept as the tested reference and for
+// callers that already hold the whole slice; the store folds the streaming form instead so
+// its memory stays bounded. An empty input (a session with no usage) yields a zero peak and
+// zero resets; the caller distinguishes "measured as zero" from "nothing to measure" by
+// whether it had any turns.
 func ContextHealth(perTurnTokens []int64) (peak int64, resets int) {
-	for i, tokens := range perTurnTokens {
-		if tokens > peak {
-			peak = tokens
-		}
-		if i == 0 {
-			continue
-		}
-		prev := perTurnTokens[i-1]
-		if prev >= resetKeepFloorTokens && float64(tokens) <= float64(prev)*resetDropFraction {
-			resets++
-		}
+	var f ContextHealthFolder
+	for _, tokens := range perTurnTokens {
+		f.Add(tokens)
 	}
+	peak, resets, _ = f.Result()
 	return peak, resets
 }

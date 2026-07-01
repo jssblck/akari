@@ -18,7 +18,8 @@ const abandonedIdleMinutes = 30
 // SessionSignals is a session's stored behavioral signals: its outcome, its quality
 // score and grade (nil when unscored), and the tool-health counts the score is built
 // from. It is the read shape of the session_signals row, derived from the session's
-// own projection and rebuilt on catch-up or reparse.
+// own projection and materialized by the settle pass once the session settles, or
+// re-derived on reparse.
 type SessionSignals struct {
 	SessionID            int64
 	Version              int
@@ -196,17 +197,16 @@ func gatherSignalFacts(ctx context.Context, tx pgx.Tx, sessionID int64) (signalF
 		return signalFacts{}, fmt.Errorf("gather outcome facts for session %d: %w", sessionID, err)
 	}
 
-	// Prompt-hygiene facts. The human prompts in order, non-empty only (an empty turn is
-	// tool plumbing, not a prompt), so the classifier never reads a blank as a terse
-	// turn. role='user' is already the real-human-turn set (the Claude reducer drops
-	// tool-result-only user entries), and ordinal order puts the opening prompt first so
-	// the unstructured-start rule reads the right turn.
-	prompts, err := gatherPromptTexts(ctx, tx, sessionID)
+	// Prompt-hygiene facts, folded over the human prompts in order (non-empty only: an
+	// empty turn is tool plumbing, not a prompt; role='user' is the real-human-turn set,
+	// since the Claude reducer drops tool-result-only user entries; ordinal order puts the
+	// opening prompt first so the unstructured-start rule reads the right turn).
+	hygiene, promptCount, err := gatherPromptHygiene(ctx, tx, sessionID)
 	if err != nil {
 		return signalFacts{}, err
 	}
-	f.promptCount = len(prompts)
-	f.hygiene = quality.ClassifyPromptHygiene(prompts)
+	f.hygiene = hygiene
+	f.promptCount = promptCount
 
 	// Context-health facts. Read from the same projection but from usage_events rather
 	// than messages, so they live in their own pass over the session's ordered turns.
@@ -217,7 +217,7 @@ func gatherSignalFacts(ctx context.Context, tx pgx.Tx, sessionID int64) (signalF
 }
 
 // gatherContextHealth reads a session's ordered per-turn context sizes and folds them
-// into the facts via quality.ContextHealth. Context size is the whole prompt presented
+// into the facts via a streaming quality.ContextHealthFolder. Context size is the whole prompt presented
 // that turn: uncached input plus cached read plus cache creation, so the figure is robust
 // to prompt caching (an expired cache moves tokens between those buckets without changing
 // their sum) and to an unknown model (it is a raw token count, never divided by a window).
@@ -238,72 +238,86 @@ func gatherContextHealth(ctx context.Context, tx pgx.Tx, sessionID int64, f *sig
 		return fmt.Errorf("gather context health for session %d: %w", sessionID, err)
 	}
 	defer rows.Close()
-	// perTurn holds one token count per usage turn of THIS session and nothing else:
-	// the bulky tool inputs and results live in the CAS, never here. Its length is the
-	// session's usage-turn count, which real transcripts keep to hundreds, so the slice
-	// is a few kilobytes and is freed when the refresh transaction commits. A running
-	// fold over rows.Next() (previous tokens, a running peak, a reset count) could drop
-	// even that, but quality.ContextHealth reads the ordered sequence as a unit and the
-	// resident cost stays bounded and small, so the materialized form is kept for clarity.
-	var perTurn []int64
+	// Fold each turn as it streams, holding no whole-session buffer: the folder keeps only
+	// the running peak, the reset count, and the previous turn's size (see
+	// quality.ContextHealthFolder), so peak memory does not grow with an arbitrarily long
+	// session even though usage turns are unbounded in principle.
+	var folder quality.ContextHealthFolder
 	for rows.Next() {
 		var tokens int64
 		if err := rows.Scan(&tokens); err != nil {
 			return fmt.Errorf("scan context turn for session %d: %w", sessionID, err)
 		}
-		perTurn = append(perTurn, tokens)
+		folder.Add(tokens)
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate context turns for session %d: %w", sessionID, err)
 	}
-	if len(perTurn) == 0 {
+	peak, resets, any := folder.Result()
+	if !any {
 		return nil // no usage to measure: leave both facts nil so the row stores NULL
 	}
-	peak, resets := quality.ContextHealth(perTurn)
 	f.peakContextTokens = &peak
 	f.contextResets = &resets
 	return nil
 }
 
-// gatherPromptTexts reads a session's human prompts in transcript order, dropping empties
-// so a tool-plumbing turn does not read as a terse prompt. It is a small read (bounded by
-// the session's human turns) and feeds quality.ClassifyPromptHygiene.
-func gatherPromptTexts(ctx context.Context, tx pgx.Tx, sessionID int64) ([]string, error) {
+// gatherPromptHygiene folds a session's human prompts into the hygiene signals and returns
+// them with the prompt count. It reads the prompts in transcript order, dropping empties so
+// a tool-plumbing turn does not read as a terse prompt, and folds each as it streams (see
+// quality.PromptHygieneFolder), so no whole-session buffer of prompt bodies is held.
+//
+// The duplicate count is the one cross-prompt signal, and computing it exactly needs state
+// proportional to the prompt count (a set of everything seen). Rather than hold that in Go,
+// it is a database aggregate: over the same non-terse prompts (at least DuplicateMinWords
+// words), the number of repeats beyond the first is the count minus the distinct normalized
+// texts, where the normalization (lowercase, collapse whitespace, trim) mirrors the Go rule
+// the folder's siblings use. This keeps peak memory on the refresh path bounded to the
+// folder's O(1) state while preserving exact, whole-session duplicate detection.
+func gatherPromptHygiene(ctx context.Context, tx pgx.Tx, sessionID int64) (quality.PromptHygiene, int, error) {
 	rows, err := tx.Query(ctx,
 		`SELECT content FROM messages
 		  WHERE session_id = $1 AND role = 'user' AND content <> ''
 		  ORDER BY ordinal`, sessionID)
 	if err != nil {
-		return nil, fmt.Errorf("gather prompts for session %d: %w", sessionID, err)
+		return quality.PromptHygiene{}, 0, fmt.Errorf("gather prompts for session %d: %w", sessionID, err)
 	}
 	defer rows.Close()
-	// prompts holds one string per non-empty human turn of THIS session. Human turns are
-	// a small fraction of a transcript and each prompt is a message body (kept small;
-	// bulky tool payloads go to the CAS, not here), so the slice is bounded by the
-	// session's prompt count and freed when this function returns. The set is held in
-	// full because ClassifyPromptHygiene detects verbatim repeats across the whole
-	// session, which a single forward pass cannot do without remembering the prompts it
-	// has already seen anyway.
-	var prompts []string
+	var folder quality.PromptHygieneFolder
 	for rows.Next() {
 		var c string
 		if err := rows.Scan(&c); err != nil {
-			return nil, fmt.Errorf("scan prompt for session %d: %w", sessionID, err)
+			return quality.PromptHygiene{}, 0, fmt.Errorf("scan prompt for session %d: %w", sessionID, err)
 		}
-		prompts = append(prompts, c)
+		folder.Add(c)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate prompts for session %d: %w", sessionID, err)
+		return quality.PromptHygiene{}, 0, fmt.Errorf("iterate prompts for session %d: %w", sessionID, err)
 	}
-	return prompts, nil
+
+	var duplicates int
+	if err := tx.QueryRow(ctx,
+		`WITH p AS (
+		   SELECT btrim(regexp_replace(lower(content), '\s+', ' ', 'g')) AS norm
+		     FROM messages
+		    WHERE session_id = $1 AND role = 'user' AND content <> ''
+		      AND array_length(regexp_split_to_array(btrim(content), '\s+'), 1) >= $2
+		 )
+		 SELECT count(*) - count(DISTINCT norm) FROM p`,
+		sessionID, quality.DuplicateMinWords).Scan(&duplicates); err != nil {
+		return quality.PromptHygiene{}, 0, fmt.Errorf("count duplicate prompts for session %d: %w", sessionID, err)
+	}
+	return folder.Result(duplicates), folder.Count(), nil
 }
 
 // refreshSignalsTx recomputes a session's signals from its projection and UPSERTs the
-// session_signals row, inside the caller's transaction. It runs as the last step of a
-// catch-up or a reparse (the rows it reads are already written and visible in-txn), so
-// the signals commit atomically with the projection they summarize. It is a whole-
-// session recompute, not an incremental fold: the signals depend on cross-message order
-// (retry runs, failure streaks, the last word), which a per-region delta cannot carry.
+// session_signals row, inside the caller's transaction. It is driven by the settle pass
+// (each due session in its own transaction) and by a reparse (in the reparse transaction,
+// so the signals commit atomically with the projection they summarize; the rows it reads
+// are already written and visible in-txn). It is a whole-session recompute, not an
+// incremental fold: the signals depend on cross-message order (retry runs, failure streaks,
+// the last word), which a per-region delta cannot carry, which is also why it is not run on
+// the incremental append path.
 func refreshSignalsTx(ctx context.Context, tx pgx.Tx, sessionID int64) error {
 	f, err := gatherSignalFacts(ctx, tx, sessionID)
 	if err != nil {
@@ -366,10 +380,10 @@ func refreshSignalsTx(ctx context.Context, tx pgx.Tx, sessionID int64) error {
 	return nil
 }
 
-// RefreshSessionSignals recomputes one session's signals in its own transaction. It is
-// the standalone form the backfill (a reparse) and the tests use; the live parse and
-// reparse paths call refreshSignalsTx inside their existing transaction instead, so the
-// signals commit with the projection rather than in a second round trip.
+// RefreshSessionSignals recomputes one session's signals in its own transaction. It is the
+// standalone form the settle pass (RefreshSettledSignals) and the tests use; the reparse
+// path calls refreshSignalsTx inside its existing transaction instead, so the signals commit
+// with the projection rather than in a second round trip.
 func (s *Store) RefreshSessionSignals(ctx context.Context, sessionID int64) error {
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		if err := lockSession(ctx, tx, sessionID); err != nil {
@@ -377,6 +391,84 @@ func (s *Store) RefreshSessionSignals(ctx context.Context, sessionID int64) erro
 		}
 		return refreshSignalsTx(ctx, tx, sessionID)
 	})
+}
+
+// RefreshSettledSignals recomputes signals for a bounded batch of settled sessions whose
+// stored row is missing, stamped at an older signals version, or was computed before the
+// session settled. It is the production path that materializes signals: the append path no
+// longer refreshes on catch-up (see AdvanceProjection), so a session's signals are computed
+// once here, after it has been idle past the abandoned threshold, off the ingest hot path.
+//
+// A session is due when it is settled (ended_at at least abandonedIdleMinutes in the past)
+// AND its signals are not already current for that settled state. Three clauses catch every
+// way the stored row can disagree with a fresh recompute, so the derived row stays equal to
+// its source:
+//
+//   - No row, or a stale signals_version: nothing current exists, so compute or re-stamp it.
+//   - Refreshed before the settle point (refreshed_at earlier than ended_at plus the idle
+//     window): a reparse that graded the session while it was still live left an outcome that
+//     was not yet stable (abandoned versus unknown turns on the idle gap). The idle window
+//     only grows from here, so recomputing once past the settle point pins the outcome.
+//   - Refreshed before the projection last changed (refreshed_at earlier than updated_at):
+//     the source grew after the row was computed. This is the one ended_at cannot catch,
+//     because ended_at is the transcript's own last-activity time, not the ingest time: a
+//     historical session uploaded in several chunks keeps an ended_at far in the past, so a
+//     later chunk does not move ended_at anywhere near now. applyAggregates stamps updated_at
+//     = now() on every appended region (and every reparse), so comparing it to refreshed_at
+//     catches a partial-projection grade that a late chunk would otherwise strand. Because
+//     both are the transaction clock, a reparse (which refreshes in the same transaction that
+//     bumps updated_at) reads them equal and does not re-trigger itself.
+//
+// It processes at most limit sessions per call, each in its own transaction so one slow
+// session never holds a broad lock, and returns how many it refreshed. The caller loops
+// until it returns zero to drain a backlog, then falls back to a timer for the trickle.
+func (s *Store) RefreshSettledSignals(ctx context.Context, limit int) (int, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	// Collect the due ids up front and release the query's connection before refreshing,
+	// so the per-session transactions below do not contend with the cursor that found them.
+	rows, err := s.Pool.Query(ctx,
+		`SELECT s.id
+		   FROM sessions s
+		   LEFT JOIN session_signals sig ON sig.session_id = s.id
+		  WHERE s.ended_at IS NOT NULL
+		    AND s.ended_at < now() - make_interval(mins => $1)
+		    AND ( sig.session_id IS NULL
+		       OR sig.signals_version <> $2
+		       OR sig.refreshed_at < s.ended_at + make_interval(mins => $1)
+		       OR sig.refreshed_at < s.updated_at )
+		  ORDER BY s.ended_at
+		  LIMIT $3`,
+		abandonedIdleMinutes, quality.Version, limit)
+	if err != nil {
+		return 0, fmt.Errorf("select settled sessions for signal refresh: %w", err)
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("scan settled session id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate settled sessions: %w", err)
+	}
+
+	var refreshed int
+	for _, id := range ids {
+		if err := ctx.Err(); err != nil {
+			return refreshed, err
+		}
+		if err := s.RefreshSessionSignals(ctx, id); err != nil {
+			return refreshed, fmt.Errorf("refresh settled session %d: %w", id, err)
+		}
+		refreshed++
+	}
+	return refreshed, nil
 }
 
 // SessionSignalsByID reads a session's current-version stored signals. A session with no

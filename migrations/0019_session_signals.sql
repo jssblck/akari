@@ -1,6 +1,9 @@
 -- session_signals holds per-session derived behavioral signals, all rebuilt from a
--- session's own projection (its messages, tool_calls, and usage_events) whenever the
--- session catches up to its stored bytes or is reparsed. Being derived, it never
+-- session's own projection (its messages, tool_calls, and usage_events). A row is
+-- materialized by the settle pass (RefreshSettledSignals) once the session has been idle
+-- past the abandoned threshold, and re-derived on reparse; the ingest append path
+-- deliberately leaves it alone, so ingest stays linear and no row is written with a
+-- time-dependent outcome while the session is still live. Being derived, it never
 -- participates in the token-rollup invariant (sessions.total_* == sum over
 -- usage_events): a stale or missing row self-heals on the next rebuild rather than
 -- being a correctness bug. ON DELETE CASCADE ties each row to its session, so the parse
@@ -105,6 +108,18 @@ CREATE INDEX idx_session_signals_outcome ON session_signals (signals_version, ou
 CREATE INDEX IF NOT EXISTS idx_sessions_started_at
   ON sessions(started_at)
   WHERE started_at IS NOT NULL;
+
+-- The settle pass (RefreshSettledSignals) selects sessions that have ended past the
+-- abandoned-idle cutoff, oldest first, to materialize their signals once they are stable:
+--   WHERE s.ended_at IS NOT NULL AND s.ended_at < now() - interval ... ORDER BY s.ended_at
+-- This partial index seeks straight to the cutoff and hands the rows back already in
+-- ended_at order, so the pass reads only the settled tail in the order it wants rather than
+-- seq-scanning and sorting the whole sessions table every wake. A session with no recorded
+-- end (ended_at NULL) is never settled, so it is excluded from the index. IF NOT EXISTS
+-- keeps it replayable on a schema-only dev dump that already carries the index.
+CREATE INDEX IF NOT EXISTS idx_sessions_ended_at
+  ON sessions(ended_at)
+  WHERE ended_at IS NOT NULL;
 
 -- Link every already-ingested Claude subagent session to the session that spawned it. A
 -- subagent runs in its own transcript file that the client nests under the parent's source

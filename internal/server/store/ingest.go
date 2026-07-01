@@ -414,8 +414,10 @@ func (s *Store) ResetRaw(ctx context.Context, sessionID int64) error {
 			"DELETE FROM tool_calls WHERE session_id = $1",
 			"DELETE FROM usage_events WHERE session_id = $1",
 			"DELETE FROM attachments WHERE session_id = $1",
-			// Derived signals clear with the projection they summarize; the next chunk's
-			// catch-up rebuilds the row from the freshly re-parsed messages and tool calls.
+			// Derived signals clear with the projection they summarize; the settle pass
+			// rebuilds the row from the re-parsed messages and tool calls once the
+			// re-ingested session settles (the append path that re-parses the chunks does
+			// not touch signals, so the row does not return on catch-up).
 			"DELETE FROM session_signals WHERE session_id = $1",
 			"DELETE FROM session_raw_chunks WHERE session_id = $1",
 		} {

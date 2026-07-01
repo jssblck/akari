@@ -345,7 +345,7 @@ func TestSignalsUnknownIsUnscored(t *testing.T) {
 
 // TestSignalsClearedOnReset confirms a raw reset drops the signals row with the rest of
 // the projection, so a session about to be re-parsed from zero does not keep a stale
-// verdict. The next catch-up rebuilds it.
+// verdict. The settle pass rebuilds it once the re-parsed session settles.
 func TestSignalsClearedOnReset(t *testing.T) {
 	t.Parallel()
 	st, ctx, uid, pid := signalsEnv(t)

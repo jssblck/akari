@@ -26,19 +26,22 @@ package parse
 // forget: it snapshots the projection for representative fixtures and fails, by
 // name, when that output drifts.
 //
-// An Epoch bump is also the way to backfill a derived projection table that did not
-// exist before. A caught-up session never re-enters AdvanceProjection, so a table
-// the live path now fills (session_signals) stays empty for old sessions until
-// something reparses them. The reparse is also where session_signals is rebuilt to
-// the running quality.Version, so a scoring-model change rides the same signal. Such
-// a bump leaves the parser's projection delta byte-for-byte identical, so the golden
-// fixtures do not move; the bump is intentional and stands on its own.
+// An Epoch bump is also a way to backfill a derived projection table that did not
+// exist before. A caught-up session never re-enters AdvanceProjection, and the append
+// path does not fill session_signals (the settle pass does, once a session settles),
+// so on the first deploy of a new derived table an Epoch bump reparses the corpus to
+// populate it in one pass, independent of whether the settle loop is enabled. The
+// reparse also rebuilds session_signals at the running quality.Version, so a
+// scoring-model change rides the same signal. Such a bump leaves the parser's projection
+// delta byte-for-byte identical, so the golden fixtures do not move; the bump is
+// intentional and stands on its own.
 //
 // Epoch 1 -> 2: introduce session_signals, the per-session derived behavioral signals
 // (an outcome classification, a quality score and grade, tool-health counts,
-// prompt-hygiene counts, and context-health figures), computed on catch-up and reparse.
-// session_signals is a new derived table rather than a change to the parser's output, so
-// this bump leaves the projection delta byte-for-byte identical and the golden fixtures do
-// not move; it stands on its own to backfill the table across the existing corpus and to
-// stamp every row at the running quality.Version.
+// prompt-hygiene counts, and context-health figures). They are materialized by the settle
+// pass as sessions settle and rebuilt on reparse; this one-time Epoch bump backfills the
+// table across the existing (already-settled) corpus on first deploy and stamps every row
+// at the running quality.Version. session_signals is a new derived table rather than a
+// change to the parser's output, so this bump leaves the projection delta byte-for-byte
+// identical and the golden fixtures do not move; it stands on its own.
 const Epoch = 2
