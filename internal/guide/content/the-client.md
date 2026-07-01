@@ -1,8 +1,5 @@
 # The client
 
-> The akari CLI in depth: login, sync, watch, the daemon, discovery, and the
-> resumable upload.
-
 The `akari` client is the piece that runs on each machine. It finds the session
 logs your agents write, works out which git project each belongs to, and streams
 the raw bytes to the server. It keeps almost no state of its own: a config file
@@ -53,9 +50,7 @@ re-run sends only bytes the server does not already have.
   duration such as `30s` or `5m` (default `5m`; `0` removes the cap). The limit
   gates only when new work begins, so the file being uploaded when the limit
   elapses runs to a clean stopping point rather than being abandoned mid-stream.
-  Because uploads resume, repeated short runs ingest a backlog in chunks, which is
-  handy for trickling data in or grabbing a few seconds of samples against a dev
-  server.
+  Because uploads resume, repeated short runs ingest a backlog in chunks.
 - `--concurrency <n>` bounds how many files upload in parallel (default the CPU
   count, capped at 8). Each file also parallelizes its own body uploads under a
   shared limiter, so the file-level cap stays modest on purpose. A given file
@@ -74,7 +69,7 @@ missed: an OS file-system watcher for prompt, debounced uploads; a periodic
 re-stat of known files to catch changes the OS watcher drops (network filesystems,
 watch exhaustion); and a slower full rescan that rediscovers roots for
 newly created files. It does an initial full pass before entering the event loop,
-so starting `watch` also catches you up.
+ingesting any backlog on startup.
 
 ### daemon
 
@@ -88,7 +83,7 @@ akari daemon stop      # stop the running watcher
 is not a system service). It writes a pidfile and a log file under your config
 directory; `start` confirms the child took the single-instance lock before
 returning, and `stop` verifies a live instance holds it before signaling. This is
-the steady state on a workstation: `akari daemon start` once and forget it.
+the steady state on a workstation: run `akari daemon start` once.
 
 ### update and version
 
@@ -164,13 +159,13 @@ file, the client peeks the first line to read the working directory and session
 id, then resolves that directory's git `origin` remote to a project key. A file
 whose header cannot be read is skipped entirely; a directory with no usable remote
 produces a standalone or orphaned project rather than being dropped
-([Concepts](./concepts.md#projects)).
+([Glossary](./glossary.md#projects)).
 
 ## How the upload works
 
-You do not have to think about the wire protocol to use akari, but the shape of it
-explains the client's behavior. The upload is **resumable** and **append-only**,
-and the client is stateless across runs:
+The upload protocol is not something you invoke directly, but its shape explains
+the client's behavior. The upload is **resumable** and **append-only**, and the
+client is stateless across runs:
 
 1. **Announce.** The client tells the server about a file (its agent, source id,
    project, branch, machine). The server replies with how many bytes it already
@@ -190,8 +185,7 @@ Two consequences worth knowing:
 
 - **A session's final turn is withheld until its file goes idle.** The last turn
   often has no closing line to mark it complete, so the client waits for the file
-  to be untouched briefly before flushing it. A run you just finished may take a
-  moment to show its last turn.
+  to be untouched briefly before flushing it.
 - **Re-running is cheap and safe.** Because the server tracks the cursor and the
   client re-derives everything from the file, `sync` after `sync` uploads only new
   bytes, and an interrupted upload resumes rather than restarting.

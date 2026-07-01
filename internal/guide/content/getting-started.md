@@ -1,16 +1,12 @@
 # Getting started
 
-> Install the client, mint an ingest token, and push your first sessions in about
-> five minutes.
-
 This chapter gets you from nothing to a session history flowing to a server. It
 assumes a server already exists (a teammate runs one, or you do). If you need to
 stand one up first, [Self-hosting](./self-hosting.md) does it with a single
 `docker compose up`, then come back here.
 
-A little vocabulary shows up in passing: *session*, *project*, *ingest token*,
-*scope*. The inline notes are enough to follow along; [Concepts](./concepts.md)
-defines each precisely.
+Terms like *session*, *project*, *ingest token*, and *scope* appear in passing;
+the [Glossary](./glossary.md) defines each.
 
 ## 1. Install the client
 
@@ -47,7 +43,7 @@ The client updates itself in place later with `akari update` (and `akari update
 
 The client authenticates to the server with an **ingest token**: a push-only
 credential scoped so it can upload sessions and nothing else. It cannot read your
-history or mint other tokens, so it is safe to leave sitting on a laptop.
+history or mint other tokens.
 
 Mint one from the server's web UI:
 
@@ -115,8 +111,7 @@ akari daemon status        # is it running?
 akari daemon stop          # stop it
 ```
 
-That is the steady state on a developer machine: `akari daemon start` once, and
-every session from then on lands on the server as it happens.
+Run `akari daemon start` once and the watcher keeps uploading in the background.
 
 ## 5. Read what you pushed
 
@@ -145,7 +140,7 @@ The most common first-run snags:
   directory had no usable git `origin` remote (not a repo, no `origin`, several
   origins, or an unrecognized origin URL), so it was keyed to the machine and
   folder instead of a shared project. See
-  [Concepts](./concepts.md#projects).
+  [Glossary](./glossary.md#projects).
 - **`akari login` succeeds but `sync` is rejected.** The token is probably not an
   ingest (or full) scope token, or it was revoked. Mint a fresh **ingest** token
   and log in again.
@@ -155,4 +150,5 @@ The most common first-run snags:
 
 ---
 
-Next: [Concepts](./concepts.md) -> the vocabulary the rest of the guide builds on.
+Next: [The client](./the-client.md) -> the CLI in depth: how it discovers,
+resolves, and uploads.

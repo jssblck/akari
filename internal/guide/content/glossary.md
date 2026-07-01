@@ -1,10 +1,6 @@
-# Concepts
+# Glossary
 
-> The vocabulary akari runs on: sessions, projects, the fleet, transcripts,
-> tokens and cost, and reparse.
-
-This chapter defines the terms the rest of the guide uses. It is a reference, not
-a tutorial; skim it now and come back when a word needs pinning down.
+Definitions for the terms the rest of the guide uses.
 
 ## The session
 
@@ -150,7 +146,7 @@ covers running one.
 
 A session's **visibility** is `internal` by default: visible to any signed-in
 user of the server. There is no private-to-one-user state; on a given server,
-signed in means you see everything. To share a session outward, its owner
+signed in means you see everything. To share a session publicly, its owner
 **publishes** it, minting an unguessable public link at `/s/<public-id>` that a
 logged-out viewer can open; unpublishing clears the link. A user can likewise
 publish their own **usage overview** at `/u/<username>`. The full model, including
@@ -158,5 +154,6 @@ who can delete what, is [Accounts and sharing](./accounts-and-sharing.md).
 
 ---
 
-Next: [The client](./the-client.md) -> the CLI in depth: how it discovers,
-resolves, and uploads.
+Back to the [overview](./index.md) for the map, or the
+[akari repository](https://github.com/jssblck/akari) for the engineering design
+and code.

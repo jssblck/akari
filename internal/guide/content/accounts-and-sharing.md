@@ -1,8 +1,5 @@
 # Accounts and sharing
 
-> Registration and invites, the three token scopes, and publishing a session or
-> your usage overview.
-
 akari's authorization is deliberately flat. Signed in to a server, you see every
 session on it; there is no per-user wall to reason about. What this chapter covers
 is the thin layer around that: how accounts are created, the three token scopes
@@ -32,8 +29,8 @@ and clears the cookie.
 ## API tokens
 
 Beyond the browser session, akari issues **API tokens**: bearer credentials for
-machines. Every token has one of three **scopes**, and the scope is the whole
-security story. Create and revoke them from the Account page; the plaintext is
+machines. Every token has one of three **scopes**, and the scope alone determines
+what the token can do. Create and revoke them from the Account page; the plaintext is
 shown once, at creation, then only its metadata (name, scope, last used) is
 visible.
 
@@ -59,15 +56,13 @@ The intent behind each:
 
 A useful consequence: the server-rendered UI requires a full-scope credential, so
 pointing an ingest- or read-scope token at a browser page just bounces to the
-login screen. The scopes keep the push path, the read path, and the admin path
-from bleeding into one another.
+login screen.
 
 ## Session visibility
 
 A session's visibility is **internal** by default: any signed-in user of the
 server can read it. There is no state below that; on one server, signed in means
-you see everything. Sharing is therefore always an outward act, never an unlocking
-of something hidden.
+you see everything.
 
 ### Sharing a session
 

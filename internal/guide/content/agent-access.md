@@ -1,8 +1,5 @@
 # Agent access
 
-> Point a coding agent at your history through the read-only Model Context
-> Protocol endpoint.
-
 akari serves a remote [Model Context Protocol](https://modelcontextprotocol.io)
 endpoint, so a coding agent can read your whole session history without opening a
 browser. It exposes the same surface the web UI shows (the overview analytics, the
@@ -26,9 +23,8 @@ claude mcp add --transport http akari https://akari.example.com/mcp
 ```
 
 On first use the harness opens your browser to akari, which recognizes the session
-you are already signed in to and asks you to approve the connection. Nothing is
-copied into the agent and no password is typed into it: the browser sign-in is the
-authentication, and approving is one click.
+you are already signed in to and asks you to approve the connection. The browser
+sign-in is the authentication; no credential is passed to the agent.
 
 Behind that click is the OAuth 2.1 flow MCP defines, with akari acting as both the
 resource and the authorization server. The agent registers itself, redirects
@@ -75,8 +71,7 @@ then `read_tool_body` or `get_session_raw` to go deeper on one.
 | `read_tool_body` | A tool call's input or result body from the content store, by the hash the tool call carries. |
 | `get_session_raw` | The lossless bytes a session was ingested from, behind the parsed projection. |
 
-A few parameters are worth calling out, because they shape how you page through a
-large history:
+Parameters that govern paging through a large history:
 
 - **Trailing windows.** `overview`, `get_project`, and `list_sessions` take
   `days`; `0` or omitted means all of history.
@@ -99,8 +94,7 @@ The MCP surface mirrors the web UI: the same sessions, the same visibility rule
 (every internal session, exactly what a signed-in user sees), plus `get_session_raw`
 for the ingested bytes, which the web UI does not surface. It exposes no account or
 token management and no way to publish, delete, or write; those stay on the
-full-scope web surface. An agent connected to akari is a reader of your history,
-never an editor of it.
+full-scope web surface.
 
 ---
 

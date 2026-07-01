@@ -1,13 +1,9 @@
 # Self-hosting
 
-> Run the server: Docker Compose, configuration, the database, the first admin,
-> and reparse.
-
 The akari server is a single Linux binary backed by Postgres. It embeds its own
-UI, fonts, and database migrations, so hosting it is running one process against
-one database. This chapter covers standing it up, configuring it, and the handful
-of operations it needs over its life. (The client that pushes sessions to it runs
-anywhere and is [its own chapter](./the-client.md).)
+UI, fonts, and database migrations. This chapter covers standing it up,
+configuring it, and the operations it needs over its life. (The client that pushes
+sessions to it runs anywhere and is [its own chapter](./the-client.md).)
 
 ## Running the server
 
@@ -69,7 +65,7 @@ Only the database URL is required.
 | --- | --- | --- |
 | `AKARI_DATABASE_URL` | (required) | Postgres connection string, for example `postgres://akari:akari@localhost:5432/akari?sslmode=disable`. |
 | `AKARI_LISTEN` | `:8080` | Address the HTTP server binds. Falls back to `PORT` when unset. |
-| `AKARI_PUBLIC_URL` | (derived) | The externally reachable base URL (`https://akari.example.com`), used as the OAuth issuer and the base of the URLs the [MCP](./agent-access.md) authorization flow advertises. Falls back to `AKARI_URL`; when neither is set the server derives the origin per request, which is correct for a single-origin deployment behind a sane proxy. |
+| `AKARI_PUBLIC_URL` | (derived) | The externally reachable base URL (`https://akari.example.com`), used as the OAuth issuer and the base of the URLs the [MCP](./agent-access.md) authorization flow advertises. Falls back to `AKARI_URL`; when neither is set the server derives the origin per request, which is correct for a single-origin deployment behind a proxy that forwards the host. |
 | `AKARI_COOKIE_INSECURE` | unset | Set truthy to drop the `Secure` flag on session cookies, for plain-HTTP local development. Leave unset in production so cookies are HTTPS-only. |
 | `AKARI_SWEEP_INTERVAL` | `1h` | How often the server reclaims orphaned content-addressed blobs. A Go duration (`30m`, `2h`); `0` disables the background sweep. |
 | `AKARI_OG_REFRESH_INTERVAL` | `1h` | How often the server refreshes the Open Graph preview cards of published overviews; each wake re-renders any card older than a day. A Go duration; `0` disables the background refresh. |
@@ -84,15 +80,14 @@ Migrations are embedded in the binary and applied on every startup: the server
 records each applied migration and runs only the new ones, each in its own
 transaction, so restarts and upgrades need no manual database step. Back it up like
 any Postgres database on your normal schedule; a standard `pg_dump` that includes
-large objects captures the blobs along with everything else. No akari-specific
-backup logic is needed.
+large objects captures the blobs along with everything else.
 
 ## The first account
 
 Registration is closed and invite-gated, with one bootstrap exception: **the first
-account registered on a fresh server needs no invite and becomes the admin.** So
-the very first thing to do after the server is up is open it in a browser and
-register. That account can then mint invite tokens (Account page) for everyone
+account registered on a fresh server needs no invite and becomes the admin.** Open
+the server in a browser and register to claim it. That account can then mint
+invite tokens (Account page) for everyone
 else, who redeem them when they register. The full account and token model is
 [Accounts and sharing](./accounts-and-sharing.md).
 
@@ -142,8 +137,8 @@ rebuild the image and redeploy rather than updating the binary in place.
 
 `dev-seed` is a development convenience: it creates a few demo accounts (sign in as
 `grace`, the admin, with password `akari-dev`) and ingests this machine's real
-agent sessions so a local server has something to look at. It is idempotent (a
-no-op once the store holds sessions) and best-effort by default. Keep it away from
+agent sessions. It is idempotent (a no-op once the store holds sessions) and
+best-effort by default. Keep it away from
 any server holding real data.
 
 ## Production
@@ -167,8 +162,4 @@ connection pool closes.
 
 ---
 
-That is the whole guide. If you started at the top you now have sessions flowing,
-a way to read them as a human and as an agent, and a server you can run yourself.
-Back to the [overview](./index.md) for the map, or the
-[akari repository](https://github.com/jssblck/akari) for the engineering design
-and code.
+Next: [Glossary](./glossary.md) -> the terms the guide uses, for reference.

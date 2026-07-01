@@ -1,13 +1,10 @@
 # The web UI
 
-> Reading your history: the overview, the session feed, projects, and the
-> transcript view.
-
-The web UI is where a human reads what the agents did. It is a server-rendered,
-dense-but-calm instrument: a persistent left sidebar carries the primary sections
-(Overview, Projects, Sessions, Account), with the signed-in user and a log-out
-control at its foot. Reading the UI needs a full-scope credential, which in
-practice is a browser session; signing in gives you that.
+The web UI is where a human reads what the agents did. It is server-rendered: a
+persistent left sidebar carries the primary sections (Overview, Projects,
+Sessions, Account), with the signed-in user and a log-out control at its foot.
+Reading the UI needs a full-scope credential, which in practice is a browser
+session; signing in gives you that.
 
 ## Overview
 
@@ -22,8 +19,7 @@ figure on the panel follows it:
   is visible at a glance.
 - **By-model and by-agent breakdowns** of where the usage went.
 
-You can also scope the overview to specific accounts. It is the wide-angle view;
-the deep read is a single session.
+You can also scope the overview to specific accounts.
 
 ## Sessions
 
@@ -59,7 +55,7 @@ message counts. Below it is the transcript itself:
   them, fetched from content-addressed storage on demand. An editing tool's input
   expands as a rendered **diff** rather than raw JSON.
 - **A density toggle** switches between a comfortable and a compact reading mode,
-  for skimming a long run or settling into a close read.
+  for skimming a long run or reading it closely.
 - **Subagents** spawned by the session are listed under it, so a run that launched
   helpers reads as a tree rather than scattered rows.
 - **Live updates.** A session still being written updates in place over
@@ -83,13 +79,6 @@ The **Account** page is your control surface:
 - **Reparse** (admins only): force a rebuild of the parsed projection, with a live
   progress bar. The Account page stays available during a reparse, since it is not
   parsed data and it hosts this control.
-
-## A note on the reader's experience
-
-akari is built for long reading of large transcripts: figures are tabular and do
-not jitter as data streams in, status is carried by more than color, motion
-communicates state rather than decorating, and reduced-motion preferences are
-honored.
 
 ---
 

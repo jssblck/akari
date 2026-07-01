@@ -3,14 +3,14 @@
 // web layer shows and the plain-text forms an agent ingests.
 //
 // The chapters live as plain Markdown under content/ (embedded in the binary),
-// each starting with its H1 and a one-line blockquote subtitle. Chapter
-// metadata (title, summary, order, slug) is a typed registry here rather than
-// frontmatter parsed out of the files, so the ordering and nav are compile-time
-// data and the served .md stays clean, self-contained Markdown.
+// each starting with its H1. Chapter metadata (title, summary, order, slug) is a
+// typed registry here rather than frontmatter parsed out of the files, so the
+// ordering and nav are compile-time data and the served .md stays clean,
+// self-contained Markdown.
 //
 // Rendering is goldmark with GFM (tables and the like) and GitHub-style heading
 // ids. A small AST pass rewrites the relative cross-links the chapters use
-// (./concepts.md) to the hosted routes (/guide/concepts) for the HTML view,
+// (./glossary.md) to the hosted routes (/guide/glossary) for the HTML view,
 // while the raw .md the agents fetch keeps the portable relative form. The same
 // parse pass collects the H2/H3 headings the table of contents rail is built
 // from.
@@ -44,8 +44,8 @@ type Chapter struct {
 	Slug string
 	// Title matches the chapter's H1 and labels it in the nav and the index.
 	Title string
-	// Summary is the one-line description shown in the index and in llms.txt,
-	// echoing the chapter's blockquote subtitle.
+	// Summary is the one-line description used for the page's meta description and
+	// the llms.txt index. It does not render on the page itself.
 	Summary string
 	// Order sets reading order: 0 is the overview, 1..n the chapters. It is the
 	// sole ordering key, so a chapter can be renamed without disturbing the
@@ -73,36 +73,36 @@ func (c Chapter) RawRoute() string {
 }
 
 // chapters is the ordered registry: the source of truth for what exists and in
-// what order. Titles and summaries mirror each chapter's H1 and blockquote; a
-// test guards that they have not drifted from the files.
+// what order. Each title mirrors its chapter's H1; a test guards that they have
+// not drifted from the files.
 var chapters = []Chapter{
 	{Slug: "index", Order: 0, file: "index.md",
 		Title:   "akari user guide",
 		Summary: "One searchable history of every AI coding-agent session across your fleet, self-hosted."},
 	{Slug: "introduction", Order: 1, file: "introduction.md",
 		Title:   "Introduction",
-		Summary: "Why akari exists, and the one idea to hold in your head."},
+		Summary: "Why akari exists and the client/server model the rest of the system follows from."},
 	{Slug: "getting-started", Order: 2, file: "getting-started.md",
 		Title:   "Getting started",
-		Summary: "Install the client, mint an ingest token, and push your first sessions in about five minutes."},
-	{Slug: "concepts", Order: 3, file: "concepts.md",
-		Title:   "Concepts",
-		Summary: "The vocabulary akari runs on: sessions, projects, the fleet, transcripts, tokens and cost, and reparse."},
-	{Slug: "the-client", Order: 4, file: "the-client.md",
+		Summary: "Install the client, mint an ingest token, and push your first sessions."},
+	{Slug: "the-client", Order: 3, file: "the-client.md",
 		Title:   "The client",
 		Summary: "The akari CLI in depth: login, sync, watch, the daemon, discovery, and the resumable upload."},
-	{Slug: "the-web-ui", Order: 5, file: "the-web-ui.md",
+	{Slug: "the-web-ui", Order: 4, file: "the-web-ui.md",
 		Title:   "The web UI",
 		Summary: "Reading your history: the overview, the session feed, projects, and the transcript view."},
-	{Slug: "accounts-and-sharing", Order: 6, file: "accounts-and-sharing.md",
+	{Slug: "accounts-and-sharing", Order: 5, file: "accounts-and-sharing.md",
 		Title:   "Accounts and sharing",
 		Summary: "Registration and invites, the three token scopes, and publishing a session or your usage overview."},
-	{Slug: "agent-access", Order: 7, file: "agent-access.md",
+	{Slug: "agent-access", Order: 6, file: "agent-access.md",
 		Title:   "Agent access",
 		Summary: "Point a coding agent at your history through the read-only Model Context Protocol endpoint."},
-	{Slug: "self-hosting", Order: 8, file: "self-hosting.md",
+	{Slug: "self-hosting", Order: 7, file: "self-hosting.md",
 		Title:   "Self-hosting",
 		Summary: "Run the server: Docker Compose, configuration, the database, the first admin, and reparse."},
+	{Slug: "glossary", Order: 8, file: "glossary.md",
+		Title:   "Glossary",
+		Summary: "The terms the guide uses: sessions, projects, the fleet, transcripts, tokens and cost, and reparse."},
 }
 
 // Chapters returns the guide's chapters in reading order.
@@ -229,8 +229,8 @@ func collectHeadings(doc ast.Node, src []byte) []Heading {
 	return out
 }
 
-// docLinks rewrites the relative cross-links the chapters author (./concepts.md,
-// getting-started.md#section) into the hosted routes (/guide/concepts,
+// docLinks rewrites the relative cross-links the chapters author (./glossary.md,
+// getting-started.md#section) into the hosted routes (/guide/glossary,
 // /guide/getting-started#section) so the rendered HTML navigates the served
 // guide, while the raw .md keeps the portable relative form. Only internal
 // .md targets are touched; external URLs, bare anchors, and other links pass

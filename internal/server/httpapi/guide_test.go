@@ -38,15 +38,15 @@ func TestGuideRoutesArePublic(t *testing.T) {
 	}
 
 	// A chapter renders and its relative cross-links are rewritten to hosted routes.
-	resp = mustGet(t, c, srv.URL+"/guide/concepts")
+	resp = mustGet(t, c, srv.URL+"/guide/glossary")
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET /guide/concepts = %d, want 200", resp.StatusCode)
+		t.Fatalf("GET /guide/glossary = %d, want 200", resp.StatusCode)
 	}
 	body = readBody(t, resp)
-	if !strings.Contains(body, "The vocabulary akari runs on") {
-		t.Fatalf("chapter body missing its subtitle, got:\n%s", body)
+	if !strings.Contains(body, "Definitions for the terms the rest of the guide uses") {
+		t.Fatalf("chapter body missing its intro, got:\n%s", body)
 	}
-	if !strings.Contains(body, `href="/guide/the-client`) {
+	if !strings.Contains(body, `href="/guide/accounts-and-sharing`) {
 		t.Fatalf("chapter should carry a rewritten internal link, got:\n%s", body)
 	}
 	// The prose must carry no un-rewritten relative cross-link. (The head's
@@ -58,18 +58,18 @@ func TestGuideRoutesArePublic(t *testing.T) {
 
 	// The raw-Markdown mirror serves text/markdown, starts with the H1, and keeps
 	// the portable relative links (the .md form agents and Copy page consume).
-	resp = mustGet(t, c, srv.URL+"/guide/concepts.md")
+	resp = mustGet(t, c, srv.URL+"/guide/glossary.md")
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET /guide/concepts.md = %d, want 200", resp.StatusCode)
+		t.Fatalf("GET /guide/glossary.md = %d, want 200", resp.StatusCode)
 	}
 	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/markdown") {
 		t.Fatalf("raw markdown content-type = %q, want text/markdown", ct)
 	}
 	raw := readBody(t, resp)
-	if !strings.HasPrefix(raw, "# Concepts\n") {
+	if !strings.HasPrefix(raw, "# Glossary\n") {
 		t.Fatalf("raw markdown should start with the H1, got:\n%s", raw[:min(80, len(raw))])
 	}
-	if !strings.Contains(raw, "](./the-client.md)") {
+	if !strings.Contains(raw, "](./accounts-and-sharing.md)") {
 		t.Fatalf("raw markdown should keep relative .md links, got:\n%s", raw)
 	}
 

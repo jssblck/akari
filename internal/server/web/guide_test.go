@@ -10,22 +10,22 @@ import (
 // every part of the layout.
 func sampleGuideView() GuideView {
 	return GuideView{
-		Title:       "Concepts",
-		Summary:     "The vocabulary akari runs on.",
-		BodyHTML:    `<h1>Concepts</h1><blockquote><p>The vocabulary akari runs on.</p></blockquote><h2 id="the-session">The session</h2><p>A run.</p>`,
-		RawMarkdown: "# Concepts\n\n> The vocabulary akari runs on.\n",
-		RawPath:     "/guide/concepts.md",
-		GithubURL:   "https://github.com/jssblck/akari/blob/main/internal/guide/content/concepts.md",
+		Title:       "The client",
+		Summary:     "The akari CLI in depth.",
+		BodyHTML:    `<h1>The client</h1><h2 id="commands">Commands</h2><p>Driving the CLI.</p><h2 id="discovery">Discovery</h2><p>Finding sessions.</p>`,
+		RawMarkdown: "# The client\n\nThe akari CLI in depth.\n",
+		RawPath:     "/guide/the-client.md",
+		GithubURL:   "https://github.com/jssblck/akari/blob/main/internal/guide/content/the-client.md",
 		Nav: []GuideNavItem{
 			{Num: "00", Label: "Overview", Route: "/guide", Active: false},
-			{Num: "03", Label: "Concepts", Route: "/guide/concepts", Active: true},
+			{Num: "03", Label: "The client", Route: "/guide/the-client", Active: true},
 		},
 		Toc: []GuideTocItem{
-			{ID: "the-session", Text: "The session", Level: 2},
-			{ID: "projects", Text: "Projects", Level: 2},
+			{ID: "commands", Text: "Commands", Level: 2},
+			{ID: "discovery", Text: "Discovery", Level: 2},
 		},
 		Prev: &GuideLink{Label: "Getting started", Route: "/guide/getting-started"},
-		Next: &GuideLink{Label: "The client", Route: "/guide/the-client"},
+		Next: &GuideLink{Label: "The web UI", Route: "/guide/the-web-ui"},
 	}
 }
 
@@ -36,25 +36,25 @@ func TestGuidePageRendersDocsLayout(t *testing.T) {
 	html := renderComponent(t, GuidePage(sampleGuideView()))
 
 	for _, want := range []string{
-		`<title>Concepts - akari</title>`,
-		`<link rel="alternate" type="text/markdown" href="/guide/concepts.md">`,
+		`<title>The client - akari</title>`,
+		`<link rel="alternate" type="text/markdown" href="/guide/the-client.md">`,
 		`<link rel="alternate" type="text/plain" title="llms.txt" href="/llms.txt">`,
 		`href="/static/guide.css"`,
 		`src="/static/guide.js"`,
 		// The rendered chapter body is injected verbatim (its heading anchor intact).
-		`<h2 id="the-session">The session</h2>`,
+		`<h2 id="commands">Commands</h2>`,
 		// Sidebar rail with the active chapter marked.
 		`class="guide-nav-link is-active"`,
 		`aria-current="page"`,
 		// Page actions for humans and agents.
 		`data-copy-page`,
-		`href="/guide/concepts.md"`,
-		`href="https://github.com/jssblck/akari/blob/main/internal/guide/content/concepts.md"`,
+		`href="/guide/the-client.md"`,
+		`href="https://github.com/jssblck/akari/blob/main/internal/guide/content/the-client.md"`,
 		// TOC rail with scroll-spy hooks.
-		`data-guide-toc="the-session"`,
+		`data-guide-toc="commands"`,
 		// Prev/next footer.
 		`Getting started`,
-		`The client`,
+		`The web UI`,
 		// The raw Markdown is embedded once for the copy action.
 		`id="guide-page-markdown"`,
 	} {

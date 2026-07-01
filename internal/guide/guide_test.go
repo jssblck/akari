@@ -5,30 +5,6 @@ import (
 	"testing"
 )
 
-// norm collapses runs of whitespace to single spaces, so a line-wrapped
-// blockquote compares equal to its one-line summary.
-func norm(s string) string { return strings.Join(strings.Fields(s), " ") }
-
-// subtitle extracts the first blockquote (the chapter subtitle) after the H1,
-// with its "> " markers stripped and whitespace collapsed.
-func subtitle(raw string) string {
-	lines := strings.Split(raw, "\n")
-	var parts []string
-	inQuote := false
-	for _, ln := range lines[1:] { // skip the H1
-		t := strings.TrimSpace(ln)
-		if strings.HasPrefix(t, ">") {
-			inQuote = true
-			parts = append(parts, strings.TrimSpace(strings.TrimPrefix(t, ">")))
-			continue
-		}
-		if inQuote {
-			break
-		}
-	}
-	return norm(strings.Join(parts, " "))
-}
-
 // The registry must be strictly ordered starting at 0 (the index), with unique
 // slugs, so the sidebar, prev/next, and llms outputs all read in one stable
 // order.
@@ -55,9 +31,9 @@ func TestChaptersAreOrdered(t *testing.T) {
 	}
 }
 
-// Every chapter must render, and its registry title must match its H1 and its
-// summary its subtitle blockquote, so the nav and index never drift from the
-// prose. This also proves each embedded file is present and parseable.
+// Every chapter must render, and its registry title must match its H1, so the nav
+// and index never drift from the prose. This also proves each embedded file is
+// present and parseable.
 func TestEveryChapterRendersAndMatchesMetadata(t *testing.T) {
 	for _, c := range Chapters() {
 		raw, err := c.Raw()
@@ -75,9 +51,6 @@ func TestEveryChapterRendersAndMatchesMetadata(t *testing.T) {
 		if !strings.HasPrefix(raw, wantH1+"\n") {
 			t.Errorf("%s: first line is not %q (registry title drifted from the H1)", c.Slug, wantH1)
 		}
-		if got, want := subtitle(raw), norm(c.Summary); got != want {
-			t.Errorf("%s: subtitle blockquote %q does not match registry summary %q", c.Slug, got, want)
-		}
 		r, err := c.Render()
 		if err != nil {
 			t.Errorf("%s: render: %v", c.Slug, err)
@@ -89,12 +62,12 @@ func TestEveryChapterRendersAndMatchesMetadata(t *testing.T) {
 	}
 }
 
-// The concepts chapter has H2 sections, so its table of contents must be
+// The glossary chapter has H2 sections, so its table of contents must be
 // populated with anchored H2/H3 headings the rail can link.
 func TestHeadingsExtracted(t *testing.T) {
-	c, ok := Lookup("concepts")
+	c, ok := Lookup("glossary")
 	if !ok {
-		t.Fatal("concepts chapter missing")
+		t.Fatal("glossary chapter missing")
 	}
 	r, err := c.Render()
 	if err != nil {
@@ -136,8 +109,8 @@ func TestRewriteDocLink(t *testing.T) {
 		in, want string
 		ok       bool
 	}{
-		{"./concepts.md", "/guide/concepts", true},
-		{"concepts.md", "/guide/concepts", true},
+		{"./glossary.md", "/guide/glossary", true},
+		{"glossary.md", "/guide/glossary", true},
 		{"./index.md", "/guide", true},
 		{"./getting-started.md#push", "/guide/getting-started#push", true},
 		{"#anchor", "", false},
@@ -215,7 +188,7 @@ func TestNeighbors(t *testing.T) {
 	if prev, next := first.Neighbors(); prev != nil || next == nil {
 		t.Errorf("index should have no prev and a next")
 	}
-	last, _ := Lookup("self-hosting")
+	last, _ := Lookup("glossary")
 	if prev, next := last.Neighbors(); prev == nil || next != nil {
 		t.Errorf("last chapter should have a prev and no next")
 	}
