@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -134,7 +135,7 @@ func (s *Store) PublicOverviewCard(ctx context.Context, username string) (User, 
 		return User{}, OverviewOGImage{}, false, nil
 	}
 	if err != nil {
-		return User{}, OverviewOGImage{}, false, err
+		return User{}, OverviewOGImage{}, false, fmt.Errorf("read public overview card for %q: %w", username, err)
 	}
 	var card OverviewOGImage
 	if png != nil && generatedAt != nil {

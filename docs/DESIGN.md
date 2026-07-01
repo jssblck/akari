@@ -465,9 +465,9 @@ The session rollups (`message_count`, `user_message_count`, the token totals, an
 the reducer carries. The projection inserts messages and usage under their unique
 indexes with `ON CONFLICT DO NOTHING`, so a duplicate is dropped from the ledger,
 and only an insert that survives that guard contributes to the rollup. This
-matters because a Claude transcript repeats the same usage block across sidechain
-and summary lines (the same `dedup_key`), so the ledger keeps one row while the
-raw region carries several. Folding the persisted set keeps the invariant that,
+matters because a Claude transcript streams one assistant message across several
+lines that share a `dedup_key`, so the ledger keeps one row while the raw region
+carries several. Folding the persisted set keeps the invariant that,
 for every agent, `sessions.total_*` equals the matching `sum` over `usage_events`
 and `message_count` equals the count of `messages` rows. `cost_incomplete` is
 derived the same way: a surviving usage row that carries tokens but no priced cost

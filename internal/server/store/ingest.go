@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -145,7 +146,13 @@ func (s *Store) AnnounceWithProject(ctx context.Context, p AnnounceParams, proje
 // The remote-attribution guard is read-before-write, so a local announce that
 // started before a concurrent remote announce must wait and re-read the settled
 // project before deciding whether to keep or move attribution.
+//
+// It first takes the coarser family lock (see lockAnnounceFamilyTx), always before the
+// identity lock, so the two are acquired in one order and cannot deadlock.
 func lockAnnounceIdentityTx(ctx context.Context, tx pgx.Tx, p AnnounceParams) error {
+	if err := lockAnnounceFamilyTx(ctx, tx, p); err != nil {
+		return err
+	}
 	_, err := tx.Exec(ctx,
 		`SELECT pg_advisory_xact_lock(
 			hashtext(current_database() || ':announce-session'),
@@ -154,6 +161,35 @@ func lockAnnounceIdentityTx(ctx context.Context, tx pgx.Tx, p AnnounceParams) er
 		p.UserID, p.Agent, p.SourceSessionID)
 	if err != nil {
 		return fmt.Errorf("lock announce session identity: %w", err)
+	}
+	return nil
+}
+
+// lockAnnounceFamilyTx serializes a Claude session and all of its subagents on one key,
+// the parent's source id, so linkSubagentParentTx never runs concurrently for a parent
+// and one of its children. Without it the link is a check-then-act across two separately
+// announced rows: under READ COMMITTED a parent and a child announcing at once can each
+// run their link step before the other's session row commits, so neither sees the other,
+// both commit, and the child's parent_session_id stays NULL with no later announce to
+// retry it. A subagent's family key is its parent-source prefix, a top-level session's is
+// its own source id, so a parent and every child hash to the same lock. The identity lock
+// namespace differs ('announce-session'), so the two never false-share. Only Claude nests
+// subagents, so nothing else pays for this.
+func lockAnnounceFamilyTx(ctx context.Context, tx pgx.Tx, p AnnounceParams) error {
+	if p.Agent != "claude" {
+		return nil
+	}
+	family := p.SourceSessionID
+	if parentSource, ok := subagentParentSource(p.SourceSessionID); ok {
+		family = parentSource
+	}
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(
+			hashtext(current_database() || ':announce-family'),
+			hashtext($1::bigint::text || chr(31) || $2)
+		)`,
+		p.UserID, family); err != nil {
+		return fmt.Errorf("lock announce family: %w", err)
 	}
 	return nil
 }
@@ -203,6 +239,9 @@ func announceIntoProjectTx(ctx context.Context, tx pgx.Tx, p AnnounceParams) (An
 		p.UserID, p.ProjectID, p.Agent, p.SourceSessionID, p.Machine, p.Cwd, p.GitBranch).Scan(&r.SessionID); err != nil {
 		return AnnounceResult{}, fmt.Errorf("upsert session for announce: %w", err)
 	}
+	if err := linkSubagentParentTx(ctx, tx, p, r.SessionID); err != nil {
+		return AnnounceResult{}, err
+	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO session_raw (session_id) VALUES ($1) ON CONFLICT DO NOTHING`, r.SessionID); err != nil {
 		return AnnounceResult{}, err
@@ -210,6 +249,71 @@ func announceIntoProjectTx(ctx context.Context, tx pgx.Tx, p AnnounceParams) (An
 	return r, tx.QueryRow(ctx,
 		`SELECT byte_len, content_sha256 FROM session_raw WHERE session_id = $1`, r.SessionID).
 		Scan(&r.StoredBytes, &r.PrefixSHA256)
+}
+
+// subagentMarker is the path segment the client's source id uses to nest a Claude
+// subagent or workflow transcript under the session that spawned it: a child's source id
+// is "<parent source id>/subagents/...". Splitting on it recovers the parent's source id.
+const subagentMarker = "/subagents/"
+
+// subagentParentSource returns the parent session's source id for a subagent transcript,
+// or ok=false for a top-level session. Only Claude nests children this way (Codex and Pi
+// write one flat id per session), so a non-Claude source id never matches. A marker at the
+// very start has no parent before it and is rejected.
+func subagentParentSource(sourceID string) (parentSource string, ok bool) {
+	i := strings.Index(sourceID, subagentMarker)
+	if i <= 0 {
+		return "", false
+	}
+	return sourceID[:i], true
+}
+
+// linkSubagentParentTx records the parent/child relationship the schema models, keying on
+// the source id: a subagent's is "<parent>/subagents/...", so the parent id is the prefix.
+// A subagent runs in its own transcript file that akari ingests as its own session, and
+// this is the one step that links it to the session that spawned it (parent_session_id and
+// relationship_type). It runs on every announce, so whichever of the pair lands second does
+// the linking and ingest order does not matter: when the announced session is a subagent it
+// links up to an existing parent, and when it is a top-level session it adopts any subagent
+// children ingested before it. Both are guarded by parent_session_id IS NULL, so a settled
+// link is never rewritten. Only Claude nests children this way, so nothing here runs for
+// another agent.
+func linkSubagentParentTx(ctx context.Context, tx pgx.Tx, p AnnounceParams, sessionID int64) error {
+	if p.Agent != "claude" {
+		return nil
+	}
+	if parentSource, ok := subagentParentSource(p.SourceSessionID); ok {
+		if _, err := tx.Exec(ctx,
+			`UPDATE sessions
+			    SET parent_session_id = parent.id, relationship_type = 'subagent'
+			   FROM sessions AS parent
+			  WHERE sessions.id = $1
+			    AND sessions.parent_session_id IS NULL
+			    AND parent.user_id = $2 AND parent.agent = 'claude'
+			    AND parent.source_session_id = $3`,
+			sessionID, p.UserID, parentSource); err != nil {
+			return fmt.Errorf("link subagent session %d to parent: %w", sessionID, err)
+		}
+		return nil
+	}
+	// A top-level session may be the parent of subagents ingested before it. Matching the
+	// parent-source expression (not a LIKE prefix) keeps the lookup on
+	// idx_sessions_unlinked_subagents under pgx's cached generic plans, where a parameterized
+	// LIKE cannot extract a prefix range. The split_part literal mirrors the index expression
+	// exactly so the planner uses it, and the position guard drops the announcing session's
+	// own row, which shares the expression value but is not a subagent. It is the same match
+	// the 0019 backfill runs for existing rows.
+	if _, err := tx.Exec(ctx,
+		`UPDATE sessions
+		    SET parent_session_id = $1, relationship_type = 'subagent'
+		  WHERE user_id = $2 AND agent = 'claude'
+		    AND parent_session_id IS NULL
+		    AND position('/subagents/' IN source_session_id) > 1
+		    AND split_part(source_session_id, '/subagents/', 1) = $3`,
+		sessionID, p.UserID, p.SourceSessionID); err != nil {
+		return fmt.Errorf("adopt subagents of session %d: %w", sessionID, err)
+	}
+	return nil
 }
 
 // SessionMeta returns the owning user and agent of a session, or ErrNotFound.
@@ -310,6 +414,11 @@ func (s *Store) ResetRaw(ctx context.Context, sessionID int64) error {
 			"DELETE FROM tool_calls WHERE session_id = $1",
 			"DELETE FROM usage_events WHERE session_id = $1",
 			"DELETE FROM attachments WHERE session_id = $1",
+			// Derived signals clear with the projection they summarize; the settle pass
+			// rebuilds the row from the re-parsed messages and tool calls once the
+			// re-ingested session settles (the append path that re-parses the chunks does
+			// not touch signals, so the row does not return on catch-up).
+			"DELETE FROM session_signals WHERE session_id = $1",
 			"DELETE FROM session_raw_chunks WHERE session_id = $1",
 		} {
 			if _, err := tx.Exec(ctx, q, sessionID); err != nil {

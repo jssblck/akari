@@ -137,9 +137,9 @@ func TestFoldUnknownModels(t *testing.T) {
 	// CacheWrite from the Other row would fail below.
 	folded := FoldUnknownModels([]store.Breakdown{
 		{Label: "claude-opus-4-8", CostUSD: 4, Input: 100, Sessions: 2},
-		{Label: "skunkworks-preview", CostUSD: 0, Input: 30, Output: 11, CacheRead: 700, CacheWrite: 9, Sessions: 1},
+		{Label: "skunkworks-preview", CostUSD: 0, Input: 30, Output: 11, CacheRead: 700, CacheWrite: 9, Reasoning: 40, Sessions: 1},
 		{Label: "gpt-5.5", CostUSD: 1, Input: 50, Sessions: 1},
-		{Label: "internal-codename-x", CostUSD: 0, Input: 20, Output: 4, CacheRead: 300, CacheWrite: 1, Sessions: 2},
+		{Label: "internal-codename-x", CostUSD: 0, Input: 20, Output: 4, CacheRead: 300, CacheWrite: 1, Reasoning: 60, Sessions: 2},
 	})
 	if len(folded) != 3 {
 		t.Fatalf("want 3 rows (two priced + Other), got %d: %+v", len(folded), folded)
@@ -157,10 +157,11 @@ func TestFoldUnknownModels(t *testing.T) {
 		}
 	}
 	// Each class folds independently: In 30+20, Out 11+4, cache read 700+300,
-	// cache write 9+1, and the total is their sum (1075).
-	if other.Input != 50 || other.Output != 15 || other.CacheRead != 1000 || other.CacheWrite != 10 {
-		t.Errorf("Other should fold every class of the unpriced tail: in=%d out=%d read=%d write=%d",
-			other.Input, other.Output, other.CacheRead, other.CacheWrite)
+	// cache write 9+1, reasoning 40+60, and the total is their sum (1075). Reasoning folds
+	// too but stays out of Tokens(), so the total is the four billed classes alone.
+	if other.Input != 50 || other.Output != 15 || other.CacheRead != 1000 || other.CacheWrite != 10 || other.Reasoning != 100 {
+		t.Errorf("Other should fold every class of the unpriced tail: in=%d out=%d read=%d write=%d reasoning=%d",
+			other.Input, other.Output, other.CacheRead, other.CacheWrite, other.Reasoning)
 	}
 	if other.Tokens() != 1075 || other.Sessions != 3 {
 		t.Errorf("Other should sum the unpriced tail: tokens=%d sessions=%d", other.Tokens(), other.Sessions)

@@ -1,13 +1,18 @@
 package web
 
 // tokenCard is the hover/focus breakdown shared by every inline token figure: the
-// four-class split (in, out, cache read, cache write) and the cost line. The
-// caller supplies the surrounding .tok-cell wrapper and the visible headline
+// four-class split (in, out, cache read, cache write), an optional reasoning line, and the
+// cost line. The caller supplies the surrounding .tok-cell wrapper and the visible headline
 // figure; this renders only the card. Routing every figure through one component
 // is what makes a token total read identically across the overview breakdowns,
 // the sessions feed, and the projects index, and guarantees the hover card is
 // never missing from one of them.
-templ tokenCard(total, in, out, cacheRead, cacheWrite int64, cost float64, incomplete bool) {
+//
+// reasoning is the model's hidden-deliberation class, shown only when a slice carries it
+// (codex and pi report it; Claude and the session/project rollups do not, and pass 0), so
+// the line appears on the overview breakdowns that have the figure and stays absent
+// everywhere it would read a hardcoded zero.
+templ tokenCard(total, in, out, cacheRead, cacheWrite, reasoning int64, cost float64, incomplete bool) {
 	<span class="tok-tip" role="tooltip">
 		<span class="tt-total">{ FmtTokens(total) } tokens</span>
 		<dl class="tt-grid">
@@ -19,6 +24,10 @@ templ tokenCard(total, in, out, cacheRead, cacheWrite int64, cost float64, incom
 			<dd>{ FmtTokens(cacheRead) }</dd>
 			<dt>Cache write</dt>
 			<dd>{ FmtTokens(cacheWrite) }</dd>
+			if reasoning > 0 {
+				<dt>Reasoning</dt>
+				<dd>{ FmtTokens(reasoning) }</dd>
+			}
 		</dl>
 		<span class="tt-cost">{ FmtCost(cost, incomplete) }</span>
 	</span>
