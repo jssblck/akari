@@ -174,18 +174,18 @@ func Render(username string, a store.Analytics, now time.Time) ([]byte, error) {
 	// number (mono, for tabular tolerance) nested directly under its uppercase label
 	// so the two stat blocks read as two columns rather than one crowded row.
 	//
-	// The token total is shown here on its own, without akari's usual four-class split
-	// and cost. Everywhere else a bare total is paired with its breakdown (input,
-	// output, cache read, cache write, cost) so a figure is never seen without its
-	// composition; this card is the deliberate exception. An Open Graph card is a
-	// glanceable thumbnail seen at a distance in a chat unfurl, and five extra figures
-	// crammed under the total is information overload at that size. The card shows the
-	// total and the session count only; the full breakdown is one click away on the
-	// page the card links to.
+	// The token figure is a single all-classes total, not the per-class breakdown the
+	// web UI shows. TotalTokens folds in every class (input, output, cache read, cache
+	// write), so no class is dropped: only the display is condensed. The interactive
+	// pages attach a hover/focus breakdown card to each token figure, but a static
+	// 1200x630 unfurl image has nothing to hover, and five figures in fixed text is
+	// information overload on a thumbnail glanced at in a chat. The full breakdown is
+	// one click away on the /u/<username> page this card links to. (The token-consistency
+	// review policy scopes its breakdown-card rule to the web UI for exactly this reason.)
 	numBase := Height - pad - 12
 	// Sit the label clear of the number rather than tight against it: the figures are
-	// 72pt, so a small offset buries the label against the digits' caps. This drop
-	// echoes the space between the PUBLIC tag and the "as of" date up top.
+	// 72pt, so a small offset would bury the label against the digits' caps. The 66px
+	// drop is the deliberate breathing room between each stat's label and its value.
 	labelY := numBase - 66
 	drawText(img, fc.label, pad, labelY, colMuted, "TOTAL TOKENS")
 	drawText(img, fc.num, pad, numBase, colText, fmtScale(a.TotalTokens()))

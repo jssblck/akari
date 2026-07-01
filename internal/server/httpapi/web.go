@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -401,21 +402,24 @@ func (s *Server) handlePublicOverview(w http.ResponseWriter, r *http.Request) {
 // matching how /u/<username> itself resolves.
 func (s *Server) handlePublicOverviewOGImage(w http.ResponseWriter, r *http.Request) {
 	username := r.PathValue("username")
-	u, err := s.Store.PublicOverviewUser(r.Context(), username)
-	if errors.Is(err, store.ErrNotFound) {
-		http.NotFound(w, r)
-		return
-	}
+	now := time.Now()
+
+	// One query resolves the user, checks the public gate, and reads any cached card
+	// together. Folding the public check into the card read keeps the serve atomic: a
+	// split (resolve the user, then read the card) would leave a window where a
+	// concurrent unpublish slips between the two steps and a card is served for an
+	// overview that just went private.
+	u, cached, found, err := s.Store.PublicOverviewCard(r.Context(), username)
 	if err != nil {
 		http.Error(w, "Could not load preview image.", http.StatusInternalServerError)
 		return
 	}
-
-	now := time.Now()
-	// Serve the cached card while it is fresh. cacheErr != nil (including ErrNotFound)
-	// just means "no card to serve yet"; the render path below covers it.
-	cached, cacheErr := s.Store.OverviewOGImage(r.Context(), u.ID)
-	if cacheErr == nil && now.Sub(cached.GeneratedAt) < s.ogCacheTTL() {
+	if !found {
+		http.NotFound(w, r)
+		return
+	}
+	haveCache := cached.PNG != nil
+	if haveCache && now.Sub(cached.GeneratedAt) < s.ogCacheTTL() {
 		s.writeOGImage(w, cached.PNG)
 		return
 	}
@@ -425,25 +429,100 @@ func (s *Server) handlePublicOverviewOGImage(w http.ResponseWriter, r *http.Requ
 	// rather than cache a half-rebuilt total, Generate aborts. In that case serve the
 	// last good card if we still hold one, else 404 (transient, clears once the
 	// reparse finishes and a later request renders the card).
-	png, genErr := ogimage.Generate(r.Context(), s.Store, u, now)
+	//
+	// Coalesce concurrent renders for this user through singleflight, so a burst of
+	// unfurls on a cold or expired cache runs the render once and the rest serve its
+	// result. renderOGImage detaches the shared render from any single request (so one
+	// crawler dropping its connection cannot cancel it for the others) but bounds it
+	// with a timeout, and lets this handler return early if its own request is
+	// cancelled while the render continues for whoever is still waiting.
+	png, genErr := s.renderOGImage(r.Context(), u, now)
+
+	// The client may have disconnected mid-render: renderOGImage returns the request
+	// context's error when it does. Nothing to serve and nothing broke, so return
+	// quietly (and skip the gate re-read below, which that cancelled context would fail
+	// anyway) rather than logging a spurious failure.
+	if r.Context().Err() != nil {
+		return
+	}
+
+	// Re-confirm the overview is still public before serving anything: an unpublish
+	// during the render must 404, not unfurl a card (fresh or stale) for a now-private
+	// overview. One gated read does double duty: it re-checks visibility and returns
+	// the canonical cached card the stale-fallback branches serve. A real lookup error
+	// is distinct from a closed gate: withhold the card either way, but surface the
+	// backend failure rather than disguising it as a missing card.
+	_, latest, stillPublic, gateErr := s.Store.PublicOverviewCard(r.Context(), username)
+	switch {
+	case gateErr != nil:
+		log.Printf("overview og: public re-check for user %d (%s) failed: %v", u.ID, u.Username, gateErr)
+		http.Error(w, "Could not load preview image.", http.StatusInternalServerError)
+		return
+	case !stillPublic:
+		http.NotFound(w, r)
+		return
+	}
+
 	switch {
 	case genErr == nil:
 		s.writeOGImage(w, png)
 	case errors.Is(genErr, ogimage.ErrReparseInProgress):
-		if cacheErr == nil {
-			s.writeOGImage(w, cached.PNG)
+		// A reparse blocked the fresh render. Serve the last good card if the gated
+		// re-read still holds one, else 404 (transient, clears once the reparse ends).
+		if latest.PNG != nil {
+			s.writeOGImage(w, latest.PNG)
 			return
 		}
 		http.NotFound(w, r)
 	default:
-		// A stale card in hand beats a 500 to a crawler: serve it if we have one,
-		// otherwise report the failure so a broken render is diagnosable.
-		if cacheErr == nil {
-			s.writeOGImage(w, cached.PNG)
+		// A real render failure. Log it regardless of whether a stale card saves the
+		// response: serving stale masks the failure from the crawler, but the refresh
+		// still broke, and a persistently failing render must stay diagnosable rather
+		// than hiding behind an ever-staler card. Then serve the last good card if we
+		// hold one (it beats a 500 to a crawler), else report the error.
+		log.Printf("overview og: render for user %d (%s) failed: %v", u.ID, u.Username, genErr)
+		if latest.PNG != nil {
+			s.writeOGImage(w, latest.PNG)
 			return
 		}
-		log.Printf("overview og: render for user %d (%s) failed: %v", u.ID, u.Username, genErr)
 		http.Error(w, "Could not load preview image.", http.StatusInternalServerError)
+	}
+}
+
+// ogRenderTimeout bounds a single on-demand card render (its analytics snapshot, the
+// raster, and the cache write). The render is detached from the request that triggers
+// it so a dropped crawler connection cannot cancel it for the other waiters, so it
+// needs its own deadline: without one a stuck query would pin the singleflight leader
+// and every same-user waiter, and could stall shutdown. Rendering is normally
+// sub-second, so 30s is a generous safety ceiling well above the expected duration.
+const ogRenderTimeout = 30 * time.Second
+
+// renderOGImage renders and caches one user's preview card through the per-user
+// singleflight group, so concurrent misses for the same overview share a single
+// render rather than each running the full year-window analytics and raster. The
+// waiters receive the same bytes and error the leader produced; ogimage.Generate
+// already reconciles a losing guarded write to the canonical cached card, so every
+// caller here serves what the cache holds.
+//
+// The shared render runs under a bounded context detached from any single caller
+// (context.WithoutCancel plus a timeout), so one request disconnecting does not cancel
+// it for the others, yet it cannot run unbounded. Each caller still waits on its own
+// request context: a crawler that drops its connection returns promptly with that
+// context's error while the detached render continues for whoever remains.
+func (s *Server) renderOGImage(ctx context.Context, u store.User, now time.Time) ([]byte, error) {
+	ch := s.ogRender.DoChan(strconv.FormatInt(u.ID, 10), func() (any, error) {
+		renderCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ogRenderTimeout)
+		defer cancel()
+		return ogimage.Generate(renderCtx, s.Store, u, now)
+	})
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case res := <-ch:
+		if res.Err != nil {
+			return nil, res.Err
+		}
+		return res.Val.([]byte), nil
 	}
 }
 

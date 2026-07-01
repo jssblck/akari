@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"image/png"
@@ -1024,6 +1025,14 @@ func TestPublicOverviewOGImage(t *testing.T) {
 		t.Fatalf("publish overview: %v", err)
 	}
 
+	// Publishing must not render a card synchronously: it is rendered lazily on the
+	// first /og.png fetch. If publish-time rendering were reintroduced, this would
+	// fail (and the "first fetch renders" assertion below would still pass, so this
+	// guards the behavior change directly).
+	if _, err := st.OverviewOGImage(ctx, owner.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("card cached right after publish (err = %v), want ErrNotFound (no publish-time render)", err)
+	}
+
 	// The public page advertises the card via Open Graph meta tags (the tags do not
 	// depend on a card being cached yet: they name the URL the crawler will fetch).
 	body := readBody(t, mustGet(t, anon, srv.URL+"/u/grace"))
@@ -1055,7 +1064,7 @@ func TestPublicOverviewOGImage(t *testing.T) {
 	// it by overwriting the cached bytes with a sentinel: a cache hit returns the
 	// sentinel verbatim, while a re-render would overwrite it with a real PNG.
 	sentinel := []byte("cached-sentinel-not-a-real-png")
-	if err := st.PutOverviewOGImage(ctx, owner.ID, sentinel); err != nil {
+	if _, err := st.PutOverviewOGImage(ctx, owner.ID, sentinel, time.Now()); err != nil {
 		t.Fatalf("seed sentinel card: %v", err)
 	}
 	resp = mustGet(t, anon, srv.URL+"/u/grace/og.png")
@@ -1157,6 +1166,17 @@ func TestOGImageDuringReparse(t *testing.T) {
 	}
 	resp.Body.Close()
 
+	// The aborted render must not have cached anything: a half-rebuilt aggregate is
+	// never stored, so the cache is still empty (not a bad card waiting to be served).
+	owner, err := st.UserByUsername(ctx, "grace")
+	if err != nil {
+		t.Fatalf("lookup grace: %v", err)
+	}
+	if _, err := st.OverviewOGImage(ctx, owner.ID); !errors.Is(err, store.ErrNotFound) {
+		lock.Release(ctx)
+		t.Fatalf("card cached during aborted render (err = %v), want ErrNotFound (nothing stored)", err)
+	}
+
 	// With the lock cleared, the next fetch renders the card.
 	lock.Release(ctx)
 	resp = mustGet(t, anon, srv.URL+"/u/grace/og.png")
@@ -1164,6 +1184,97 @@ func TestOGImageDuringReparse(t *testing.T) {
 		t.Fatalf("og.png after reparse cleared = %d, want 200", resp.StatusCode)
 	}
 	resp.Body.Close()
+}
+
+// TestOGImageServesStaleCardDuringReparse guards the warm-cache half of the reparse
+// gate: when a reparse blocks a fresh render but a previously rendered card is still
+// in the cache (even one past its TTL), the handler serves that last good card rather
+// than 404ing. A crawler unfurling the link during a reparse gets the old picture,
+// not a broken preview, and the card refreshes once the reparse clears.
+func TestOGImageServesStaleCardDuringReparse(t *testing.T) {
+	t.Parallel()
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+	c := newClient(t)
+
+	owner, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if _, err := c.PostForm(srv.URL+"/login", url.Values{
+		"username": {"grace"}, "password": {"hopper-1906"},
+	}); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	if _, err := c.PostForm(srv.URL+"/account/overview/publish", url.Values{}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	// Seed a stale cached card (stamped two hours back, well past the 1h TTL) with a
+	// sentinel body so a cache hit is unmistakable. A fresh render would replace it,
+	// but the held reparse lock blocks that, so the stale bytes must come back.
+	stale := []byte("stale-card-served-during-reparse")
+	if _, err := st.PutOverviewOGImage(ctx, owner.ID, stale, time.Now().Add(-2*time.Hour)); err != nil {
+		t.Fatalf("seed stale card: %v", err)
+	}
+
+	lock, ok, err := st.AcquireReparseLock(ctx)
+	if err != nil || !ok {
+		t.Fatalf("acquire reparse lock: ok=%v err=%v", ok, err)
+	}
+	defer lock.Release(ctx)
+
+	anon := newClient(t)
+	resp := mustGet(t, anon, srv.URL+"/u/grace/og.png")
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("og.png with a stale card during reparse = %d, want 200 (serve the stale card)", resp.StatusCode)
+	}
+	raw, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read stale og.png: %v", err)
+	}
+	if !bytes.Equal(raw, stale) {
+		t.Fatalf("reparse fallback should serve the stale card verbatim, got %d bytes", len(raw))
+	}
+}
+
+// TestOGImageCacheControlHonorsTTL pins the served Cache-Control window to the
+// configured TTL: a crawler's max-age matches how long the server itself treats the
+// cached card as fresh, so repeat unfurls stay off the render path for the same span
+// rather than a hardcoded default.
+func TestOGImageCacheControlHonorsTTL(t *testing.T) {
+	t.Parallel()
+	const ttl = 15 * time.Minute
+	st := storetest.NewStore(t)
+	rp := reparse.New(context.Background(), st)
+	srv := httptest.NewServer(New(st, config.Server{OGCacheTTL: ttl}, rp).Routes())
+	t.Cleanup(srv.Close)
+
+	ctx := context.Background()
+	c := newClient(t)
+	if _, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), ""); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if _, err := c.PostForm(srv.URL+"/login", url.Values{
+		"username": {"grace"}, "password": {"hopper-1906"},
+	}); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	if _, err := c.PostForm(srv.URL+"/account/overview/publish", url.Values{}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	anon := newClient(t)
+	resp := mustGet(t, anon, srv.URL+"/u/grace/og.png")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("og.png = %d, want 200", resp.StatusCode)
+	}
+	if got, want := resp.Header.Get("Cache-Control"), fmt.Sprintf("public, max-age=%d", int(ttl.Seconds())); got != want {
+		t.Fatalf("Cache-Control = %q, want %q (mirrors the configured TTL)", got, want)
+	}
 }
 
 // TestOGCardWindowReconcilesWithDefaultRange pins the card's analytics window to

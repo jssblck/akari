@@ -75,8 +75,25 @@ func Generate(ctx context.Context, st *store.Store, u store.User, now time.Time)
 	if err != nil {
 		return nil, fmt.Errorf("rendering overview card for user %d: %w", u.ID, err)
 	}
-	if err := st.PutOverviewOGImage(ctx, u.ID, png); err != nil {
+	// Stamp the card with now, the instant its analytics window is anchored to, so a
+	// slower render that read older data cannot overwrite a fresher stored card (see
+	// PutOverviewOGImage).
+	wrote, err := st.PutOverviewOGImage(ctx, u.ID, png, now)
+	if err != nil {
 		return nil, fmt.Errorf("storing overview card for user %d: %w", u.ID, err)
+	}
+	if !wrote {
+		// A concurrent render with a later window already cached a newer card, so the
+		// guarded upsert skipped ours. Return that canonical card rather than the bytes
+		// we just rendered: the served image must equal what the cache holds, or two
+		// fetches of the same URL could unfurl different pictures. A card newer than now
+		// cannot have been pruned (cleanup only drops cards older than the TTL), so this
+		// reload finds it.
+		canonical, err := st.OverviewOGImage(ctx, u.ID)
+		if err != nil {
+			return nil, fmt.Errorf("reloading canonical overview card for user %d: %w", u.ID, err)
+		}
+		return canonical.PNG, nil
 	}
 	return png, nil
 }
