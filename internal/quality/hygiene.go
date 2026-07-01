@@ -93,6 +93,14 @@ var pleasantryWords = map[string]bool{
 // spurious terse turn.
 func ClassifyPromptHygiene(prompts []string) PromptHygiene {
 	var h PromptHygiene
+	// seen remembers the normalized text of each non-terse prompt so a later verbatim
+	// repeat counts as a duplicate. Exact within-session duplicate detection is inherently
+	// stateful: a prompt cannot be known to repeat without remembering the ones before it.
+	// The map is bounded by this session's prompt count (human turns are few and each key
+	// is one normalized message body, not a tool payload) and is released when the function
+	// returns, so it holds kilobytes for a real session. A fixed recent window would cap it
+	// further but would miss a repeat of an older prompt, a trade a bounded session does
+	// not need.
 	seen := make(map[string]bool, len(prompts))
 	for i, p := range prompts {
 		words := len(strings.Fields(p))

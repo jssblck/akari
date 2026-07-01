@@ -231,6 +231,27 @@ func (s *Store) AdvanceProjection(ctx context.Context, sessionID int64, parserVe
 		// it: the signals read the whole session (the last word, failure streaks across
 		// the transcript), so a partial recompute would be wasted work and a transiently
 		// wrong verdict that the next region overwrites anyway.
+		//
+		// This is a whole-session recompute, so a live session caught up after each
+		// appended turn pays one refresh per turn, making cumulative refresh work
+		// quadratic in the session's turn count. That cost is deliberate and does not
+		// bite on real data. A session is a bounded artifact (a client-capped transcript,
+		// hundreds of turns at the extreme), one refresh is a few indexed window-function
+		// queries plus a linear fold that runs in low single-digit milliseconds over that
+		// many rows, and live appends are human-paced, so the refreshes spread across the
+		// session's wall-clock life rather than a tight loop; even a 500-turn session is
+		// on the order of a second of cumulative database CPU. The linear alternative
+		// costs more than it saves: the signals read cross-message global order (failure
+		// streaks, the last word, the context-reset sequence, verbatim prompt repeats),
+		// so folding them incrementally means a versioned stateful reducer that
+		// reconstructs that order from per-region deltas, which reintroduces the
+		// rollup-drift class of bug the sessions.total_* invariant exists to prevent. The
+		// only pass whose cost scales with the whole corpus is the reparse, behind the
+		// reparse advisory lock and off ingest; a live catch-up deliberately does not
+		// take it. If a live session ever grows large enough to matter, the lever is to
+		// debounce this refresh (recompute once the session settles, compute on read for
+		// the rare mid-flight view), which bounds the refresh count without an
+		// incremental fold.
 		if caughtUp {
 			if err := refreshSignalsTx(ctx, tx, sessionID); err != nil {
 				return err

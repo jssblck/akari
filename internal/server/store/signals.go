@@ -238,6 +238,13 @@ func gatherContextHealth(ctx context.Context, tx pgx.Tx, sessionID int64, f *sig
 		return fmt.Errorf("gather context health for session %d: %w", sessionID, err)
 	}
 	defer rows.Close()
+	// perTurn holds one token count per usage turn of THIS session and nothing else:
+	// the bulky tool inputs and results live in the CAS, never here. Its length is the
+	// session's usage-turn count, which real transcripts keep to hundreds, so the slice
+	// is a few kilobytes and is freed when the refresh transaction commits. A running
+	// fold over rows.Next() (previous tokens, a running peak, a reset count) could drop
+	// even that, but quality.ContextHealth reads the ordered sequence as a unit and the
+	// resident cost stays bounded and small, so the materialized form is kept for clarity.
 	var perTurn []int64
 	for rows.Next() {
 		var tokens int64
@@ -270,6 +277,13 @@ func gatherPromptTexts(ctx context.Context, tx pgx.Tx, sessionID int64) ([]strin
 		return nil, fmt.Errorf("gather prompts for session %d: %w", sessionID, err)
 	}
 	defer rows.Close()
+	// prompts holds one string per non-empty human turn of THIS session. Human turns are
+	// a small fraction of a transcript and each prompt is a message body (kept small;
+	// bulky tool payloads go to the CAS, not here), so the slice is bounded by the
+	// session's prompt count and freed when this function returns. The set is held in
+	// full because ClassifyPromptHygiene detects verbatim repeats across the whole
+	// session, which a single forward pass cannot do without remembering the prompts it
+	// has already seen anyway.
 	var prompts []string
 	for rows.Next() {
 		var c string
