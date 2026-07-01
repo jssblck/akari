@@ -5,6 +5,18 @@ import (
 	"fmt"
 )
 
+// dedupToolCallsPartition is the PARTITION BY that collapses replayed tool-call rows in a
+// COHORT query (one spanning many sessions). A resumed or compacted transcript re-emits a
+// call under new ordinals, so rows sharing (session, id, tool, input, result) are one call.
+// session_id leads the partition because a call id is only unique within its session; the
+// CASE gives an id-less row its own per-row key ("ordinal:index") in a separate column, so
+// a real id can never collide with a synthetic one. It mirrors the per-session dedup in
+// gatherSignalFacts (signals.go), with session_id added for the cross-session scope, and is
+// shared by the tool and churn cohort queries so the two cannot drift apart.
+const dedupToolCallsPartition = `session_id, call_uid,
+	CASE WHEN call_uid IS NULL THEN message_ordinal::text || ':' || call_index END,
+	tool_name, coalesce(input_sha256, ''), coalesce(result_status, '')`
+
 // maxToolBars caps the per-tool mix at the busiest tools, so a fleet with a long tail of
 // rarely-used tools still reads as a short, legible bar list. The fleet totals (calls,
 // failures, error rate) are summed over EVERY tool, not just the ones shown, so the
@@ -86,10 +98,7 @@ func (s *Store) ToolStats(ctx context.Context, f AnalyticsFilter) (ToolStats, er
 		 ranked AS (
 		   SELECT tool_name, result_status,
 		          row_number() OVER (
-		            PARTITION BY session_id, call_uid,
-		                         CASE WHEN call_uid IS NULL
-		                              THEN message_ordinal::text || ':' || call_index END,
-		                         tool_name, coalesce(input_sha256, ''), coalesce(result_status, '')
+		            PARTITION BY `+dedupToolCallsPartition+`
 		            ORDER BY message_ordinal, call_index
 		          ) AS rn
 		     FROM scoped

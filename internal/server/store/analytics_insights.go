@@ -13,6 +13,7 @@ type Insights struct {
 	Concurrency ConcurrencyStats
 	Velocity    VelocityStats
 	Tools       ToolStats
+	Churn       FileChurn
 }
 
 // HasData reports whether any scoped session carried signals, so the page can show an
@@ -43,11 +44,16 @@ func (s *Store) Insights(ctx context.Context, f AnalyticsFilter) (Insights, erro
 	if err != nil {
 		return Insights{}, err
 	}
+	churn, err := s.FileChurn(ctx, f)
+	if err != nil {
+		return Insights{}, err
+	}
 	return Insights{
 		Quality:     quality,
 		Archetypes:  archetypes,
 		Concurrency: concurrency,
 		Velocity:    velocity,
 		Tools:       tools,
+		Churn:       churn,
 	}, nil
 }

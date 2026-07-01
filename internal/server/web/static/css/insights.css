@@ -57,6 +57,16 @@
 .tool-err { color: var(--err); margin-left: 6px; font-variant-numeric: tabular-nums; }
 .tool-clip { margin-top: var(--sp-sm); }
 
+/* The file-churn list is a full-width panel below the distribution grid: a bar per path
+   the window edited more than once, the session count muted beside the edit total, and the
+   full path on hover. A long path truncates from the LEFT (direction: rtl on the label), so
+   the filename at the end stays visible while the leading directories give way, the
+   opposite of the default end-ellipsis that would hide the part that identifies the file. */
+.ins-churn { margin-top: var(--sp-xl); }
+.churn-bars { margin-top: var(--sp-sm); }
+.churn-bars .bar-label { direction: rtl; text-align: left; max-width: 65%; }
+.churn-sess { color: var(--muted); margin-left: 8px; }
+
 @media (max-width: 1100px) {
   .ins-headline { grid-template-columns: 1fr; gap: var(--sp-lg); }
   .ins-grid { grid-template-columns: repeat(2, 1fr); gap: var(--sp-lg); }

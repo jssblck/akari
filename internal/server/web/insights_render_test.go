@@ -40,6 +40,13 @@ func sampleInsights() store.Insights {
 			},
 			Clipped: 2,
 		},
+		Churn: store.FileChurn{
+			Files: []store.ChurnFile{
+				{Path: "internal/server/store/analytics.go", Edits: 6, Sessions: 2},
+				{Path: "app.js", Edits: 3, Sessions: 1},
+			},
+			Clipped: 1,
+		},
 		Quality: store.QualityDistribution{
 			Grades: []store.LabeledCount{
 				{Key: "A", Count: 5}, {Key: "B", Count: 3}, {Key: "C", Count: 2},
@@ -90,6 +97,11 @@ func TestInsightsPageRendersDistributions(t *testing.T) {
 		`class="tool-err"`,         // a failing tool carries its error rate
 		`>40%<`,                    // Bash's error rate suffix (8/20)
 		`+2 more tools not shown`,  // the clipped-tail note
+		`>File churn<`,             // the churn panel
+		`internal/server/store/analytics.go`, // the churned path (full path in the label)
+		`6 edits`,                  // its edit count
+		`2 sessions`,               // spread across two sessions
+		`+1 more churned file not shown`, // the churn clip note
 		`>Unscored<`,               // the empty grade key reads as a word, not a blank
 		`>Completed<`,              // outcome label, title-cased
 		`>Quick<`,                  // archetype label, title-cased
@@ -159,6 +171,24 @@ func TestInsightsPageToolsEmpty(t *testing.T) {
 	}
 	if !strings.Contains(html, `>Tools<`) {
 		t.Error("the tools band heading should still render")
+	}
+}
+
+// When the window edited no file more than once, the churn panel shows a note instead of
+// an empty bar list.
+func TestInsightsPageChurnEmpty(t *testing.T) {
+	p := Page{Title: "Insights", LoggedIn: true, Active: "insights", Username: "ada"}
+	ranges := RangeOptions("/insights", nil, "30d")
+	ins := sampleInsights()
+	ins.Churn = store.FileChurn{} // nothing edited twice
+
+	html := renderComponent(t, InsightsPage(p, ins, "30d", ranges))
+
+	if !strings.Contains(html, "No files were edited more than once in this window.") {
+		t.Error("churn panel should note the absence of repeated edits")
+	}
+	if !strings.Contains(html, `>File churn<`) {
+		t.Error("the churn panel heading should still render")
 	}
 }
 

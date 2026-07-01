@@ -136,6 +136,47 @@ func toolBarColor(errRate float64) string {
 	}
 }
 
+// ChurnBar is one file's bar in the churn list: sized by edit count, labelled with its
+// path, and annotated with how many sessions returned to it.
+type ChurnBar struct {
+	Path     string
+	Edits    int
+	Sessions int
+	Pct      float64
+}
+
+// ChurnBars turns the most-edited files into renderable bars, each width its share of the
+// most-churned file so the worst hotspot reads full and the rest relative.
+func ChurnBars(c store.FileChurn) []ChurnBar {
+	var maxEdits int
+	for _, f := range c.Files {
+		if f.Edits > maxEdits {
+			maxEdits = f.Edits
+		}
+	}
+	bars := make([]ChurnBar, 0, len(c.Files))
+	for _, f := range c.Files {
+		pct := 0.0
+		if maxEdits > 0 {
+			pct = float64(f.Edits) / float64(maxEdits) * 100
+		}
+		if pct > 0 && pct < 2 {
+			pct = 2
+		}
+		bars = append(bars, ChurnBar{Path: f.Path, Edits: f.Edits, Sessions: f.Sessions, Pct: pct})
+	}
+	return bars
+}
+
+// ChurnSessions labels how many sessions edited a file, so a path churned across the fleet
+// reads apart from one a single session kept rewriting.
+func ChurnSessions(sessions int) string {
+	if sessions == 1 {
+		return "1 session"
+	}
+	return fmt.Sprintf("%d sessions", sessions)
+}
+
 // Distribution bar colours, drawn from the data-viz ramp and the status palette so the
 // Insights bars read in the same hues as the rest of the app. Grades and outcomes carry
 // a semantic tone (good / watch / poor); archetypes carry a categorical sequence. The

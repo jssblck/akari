@@ -8,11 +8,12 @@ import (
 
 // InsightsPage is the cross-cutting analytics surface at /insights: two headline bands of
 // measured rates (concurrency and velocity) over the fleet, a tools band (reliability and
-// mix), then how the window's sessions distribute across quality grades, outcomes, and
-// archetypes. Everything is bounded to the selected trailing window. Like the overview it
-// carries no heading (the sidebar marks the section); the toolbar holds the window selector
-// and a session count for context. The whole section carries id="insights" so the selector
-// can swap it in one shot, the same pattern the usage panel uses.
+// mix), how the window's sessions distribute across quality grades, outcomes, and
+// archetypes, then the files it edited more than once. Everything is bounded to the
+// selected trailing window. Like the overview it carries no heading (the sidebar marks the
+// section); the toolbar holds the window selector and a session count for context. The
+// whole section carries id="insights" so the selector can swap it in one shot, the same
+// pattern the usage panel uses.
 templ InsightsPage(p Page, ins store.Insights, rng string, ranges []RangeOption) {
 	@layout(p) {
 		<section class="insights" id="insights">
@@ -37,6 +38,9 @@ templ InsightsPage(p Page, ins store.Insights, rng string, ranges []RangeOption)
 					@distributionPanel("Grades", "the quality score banded A to F, unscored for an ungraded session", GradeBars(ins.Quality.Grades))
 					@distributionPanel("Outcomes", "how each session ended", OutcomeBars(ins.Quality.Outcomes))
 					@distributionPanel("Archetypes", "session shape by length and turns", ArchetypeBars(ins.Archetypes))
+				</div>
+				<div class="ins-churn">
+					@churnPanel(ins.Churn)
 				</div>
 			}
 		</section>
@@ -165,6 +169,42 @@ templ toolsPanel(t store.ToolStats) {
 			</ul>
 			if t.Clipped > 0 {
 				<div class="muted small tool-clip">{ fmt.Sprintf("+%d more tool%s not shown", t.Clipped, plural(t.Clipped)) }</div>
+			}
+		}
+	</div>
+}
+
+// churnPanel is the full-width edit-thrash list: the files a window edited more than once,
+// most-edited first, each bar sized by edit count and annotated with how many sessions
+// returned to the path. It sits last, after the distributions, since a file path needs the
+// full width to read without truncating to nothing.
+templ churnPanel(c store.FileChurn) {
+	<div class="ins-panel ins-churn-panel">
+		<div class="ins-panel-head">
+			<span class="label">File churn</span>
+			<span class="muted small ins-caption">files edited more than once in this window</span>
+		</div>
+		if !c.HasData() {
+			<div class="muted small">No files were edited more than once in this window.</div>
+		} else {
+			<ul class="bars churn-bars">
+				for _, b := range ChurnBars(c) {
+					<li class="bar-row">
+						<div class="bar-head">
+							<span class="bar-label" title={ b.Path }>{ b.Path }</span>
+							<span class="bar-val">
+								{ fmt.Sprintf("%d edits", b.Edits) }
+								<span class="churn-sess">{ ChurnSessions(b.Sessions) }</span>
+							</span>
+						</div>
+						<div class="bar-track">
+							<div class="bar-fill" data-pct={ fmt.Sprintf("%.2f", b.Pct) } data-color={ barPeach }></div>
+						</div>
+					</li>
+				}
+			</ul>
+			if c.Clipped > 0 {
+				<div class="muted small tool-clip">{ fmt.Sprintf("+%d more churned file%s not shown", c.Clipped, plural(c.Clipped)) }</div>
 			}
 		}
 	</div>
