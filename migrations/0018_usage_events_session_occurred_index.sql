@@ -7,17 +7,16 @@
 -- bound. Without this index the planner's cheapest path is the occurred_at-only
 -- index (migration 0012), which scans every event in the window before filtering
 -- by user through the join. That makes a per-user render cost O(all recent events),
--- so the background OG refresh -- which renders each stale published overview in
--- turn -- would scale with (public users x recent events) instead of with the
--- events those users actually produced.
+-- which the on-demand OG card render (a year-window, user-scoped analytics read on
+-- the first fetch of a published overview's card) would pay in full on every miss.
 --
 -- With (session_id, occurred_at) the planner can drive from idx_sessions_user
 -- (migration 0001): resolve the user's sessions, then range-scan each session's
 -- events within the window here. Each render then touches only that user's events,
--- so the refresh pass is linear in the published users' own usage, and the live
--- per-user overview page (which runs the same query on every load) gets the same
--- win. The existing (session_id, ...) unique indexes lead with session_id but carry
--- no time column, so they cannot range-scan the window; this composite can.
+-- so an OG card render is linear in that account's own usage, and the live per-user
+-- overview page (which runs the same query on every load) gets the same win. The
+-- existing (session_id, ...) unique indexes lead with session_id but carry no time
+-- column, so they cannot range-scan the window; this composite can.
 --
 -- The IF NOT EXISTS guard keeps this migration replayable on a database whose
 -- schema already carries the index but whose schema_migrations does not record the

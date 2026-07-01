@@ -5,36 +5,71 @@ import (
 	"time"
 )
 
-func TestLoadServerOGRefreshInterval(t *testing.T) {
+func TestLoadServerOGCacheTTL(t *testing.T) {
 	t.Setenv("AKARI_DATABASE_URL", "postgres://x/y")
 	// Isolate from any ambient value the harness may export.
-	t.Setenv("AKARI_OG_REFRESH_INTERVAL", "")
+	t.Setenv("AKARI_OG_CACHE_TTL", "")
 
 	// Default when unset.
 	s, err := LoadServer()
 	if err != nil {
 		t.Fatalf("LoadServer: %v", err)
 	}
-	if s.OGRefreshInterval != time.Hour {
-		t.Fatalf("default OGRefreshInterval = %v, want 1h", s.OGRefreshInterval)
+	if s.OGCacheTTL != time.Hour {
+		t.Fatalf("default OGCacheTTL = %v, want 1h", s.OGCacheTTL)
 	}
 
 	// Explicit duration.
-	t.Setenv("AKARI_OG_REFRESH_INTERVAL", "15m")
-	if s, err = LoadServer(); err != nil || s.OGRefreshInterval != 15*time.Minute {
-		t.Fatalf("OGRefreshInterval = %v (err %v), want 15m", s.OGRefreshInterval, err)
+	t.Setenv("AKARI_OG_CACHE_TTL", "15m")
+	if s, err = LoadServer(); err != nil || s.OGCacheTTL != 15*time.Minute {
+		t.Fatalf("OGCacheTTL = %v (err %v), want 15m", s.OGCacheTTL, err)
 	}
 
-	// "0" disables.
-	t.Setenv("AKARI_OG_REFRESH_INTERVAL", "0")
-	if s, err = LoadServer(); err != nil || s.OGRefreshInterval != 0 {
-		t.Fatalf("OGRefreshInterval = %v (err %v), want 0", s.OGRefreshInterval, err)
+	// The card is always cached, so a non-positive TTL is a load error, not a silent
+	// "never cache".
+	t.Setenv("AKARI_OG_CACHE_TTL", "0")
+	if _, err = LoadServer(); err == nil {
+		t.Fatal("LoadServer accepted a zero AKARI_OG_CACHE_TTL")
 	}
 
 	// A malformed value is a load error, not a silent default.
-	t.Setenv("AKARI_OG_REFRESH_INTERVAL", "banana")
+	t.Setenv("AKARI_OG_CACHE_TTL", "banana")
 	if _, err = LoadServer(); err == nil {
-		t.Fatal("LoadServer accepted a malformed AKARI_OG_REFRESH_INTERVAL")
+		t.Fatal("LoadServer accepted a malformed AKARI_OG_CACHE_TTL")
+	}
+}
+
+func TestLoadServerOGCleanupInterval(t *testing.T) {
+	t.Setenv("AKARI_DATABASE_URL", "postgres://x/y")
+	// Isolate from any ambient values the harness may export.
+	t.Setenv("AKARI_OG_CACHE_TTL", "")
+	t.Setenv("AKARI_OG_CLEANUP_INTERVAL", "")
+
+	// Default when unset.
+	s, err := LoadServer()
+	if err != nil {
+		t.Fatalf("LoadServer: %v", err)
+	}
+	if s.OGCleanupInterval != 24*time.Hour {
+		t.Fatalf("default OGCleanupInterval = %v, want 24h", s.OGCleanupInterval)
+	}
+
+	// Explicit duration.
+	t.Setenv("AKARI_OG_CLEANUP_INTERVAL", "6h")
+	if s, err = LoadServer(); err != nil || s.OGCleanupInterval != 6*time.Hour {
+		t.Fatalf("OGCleanupInterval = %v (err %v), want 6h", s.OGCleanupInterval, err)
+	}
+
+	// "0" disables the sweep.
+	t.Setenv("AKARI_OG_CLEANUP_INTERVAL", "0")
+	if s, err = LoadServer(); err != nil || s.OGCleanupInterval != 0 {
+		t.Fatalf("OGCleanupInterval = %v (err %v), want 0", s.OGCleanupInterval, err)
+	}
+
+	// A malformed value is a load error, not a silent default.
+	t.Setenv("AKARI_OG_CLEANUP_INTERVAL", "banana")
+	if _, err = LoadServer(); err == nil {
+		t.Fatal("LoadServer accepted a malformed AKARI_OG_CLEANUP_INTERVAL")
 	}
 }
 

@@ -13,9 +13,8 @@ import (
 )
 
 // TestGenerateStoresRenderedCard drives Generate against a real store: it queries
-// the user-scoped analytics, renders, and persists a valid PNG that the public
-// read then returns. It also confirms the window is user-scoped — a second
-// account's usage never lands in the card's figures.
+// the user-scoped analytics, renders, returns a valid PNG, and persists the same
+// bytes that the cache read then returns.
 func TestGenerateStoresRenderedCard(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -46,19 +45,24 @@ func TestGenerateStoresRenderedCard(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := ogimage.Generate(ctx, st, u, time.Now()); err != nil {
+	returned, err := ogimage.Generate(ctx, st, u, time.Now())
+	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-
-	img, err := st.PublicOverviewOGImage(ctx, "grace")
+	decoded, err := png.Decode(bytes.NewReader(returned))
 	if err != nil {
-		t.Fatalf("load card: %v", err)
-	}
-	decoded, err := png.Decode(bytes.NewReader(img.PNG))
-	if err != nil {
-		t.Fatalf("decode card: %v", err)
+		t.Fatalf("decode returned card: %v", err)
 	}
 	if b := decoded.Bounds(); b.Dx() != ogimage.Width || b.Dy() != ogimage.Height {
 		t.Fatalf("card size = %dx%d, want %dx%d", b.Dx(), b.Dy(), ogimage.Width, ogimage.Height)
+	}
+
+	// The returned bytes are exactly what Generate cached.
+	img, err := st.OverviewOGImage(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("load cached card: %v", err)
+	}
+	if !bytes.Equal(img.PNG, returned) {
+		t.Fatal("cached card bytes differ from the bytes Generate returned")
 	}
 }

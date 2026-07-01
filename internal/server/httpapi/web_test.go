@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"image"
 	"image/png"
 	"io"
 	"net/http"
@@ -969,10 +970,11 @@ func TestPublicOverviewFlow(t *testing.T) {
 	resp.Body.Close()
 }
 
-// TestPublicOverviewOGImage drives the Open Graph preview card end to end:
-// publishing renders a card up front, the public page advertises it via og:image
-// meta tags, the /og.png route serves a valid 1200x630 PNG to an anonymous
-// viewer, and making the overview private 404s the card just as it does the page.
+// TestPublicOverviewOGImage drives the Open Graph preview card end to end: the
+// public page advertises it via og:image meta tags, the /og.png route renders a
+// valid 1200x630 PNG on demand and caches it, a repeat fetch within the TTL is
+// served from the cache (not re-rendered), an expired card re-renders, and making
+// the overview private 404s the card just as it does the page.
 func TestPublicOverviewOGImage(t *testing.T) {
 	t.Parallel()
 	srv, st := newTestServer(t)
@@ -1011,7 +1013,8 @@ func TestPublicOverviewOGImage(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	// Publish through the account control, which renders the card synchronously.
+	// Publish through the account control. Publishing does not render the card; the
+	// first fetch of /og.png does.
 	if _, err := c.PostForm(srv.URL+"/login", url.Values{
 		"username": {"grace"}, "password": {"hopper-1906"},
 	}); err != nil {
@@ -1021,7 +1024,8 @@ func TestPublicOverviewOGImage(t *testing.T) {
 		t.Fatalf("publish overview: %v", err)
 	}
 
-	// The public page advertises the card via Open Graph meta tags.
+	// The public page advertises the card via Open Graph meta tags (the tags do not
+	// depend on a card being cached yet: they name the URL the crawler will fetch).
 	body := readBody(t, mustGet(t, anon, srv.URL+"/u/grace"))
 	for _, want := range []string{
 		`property="og:image" content="`,
@@ -1041,25 +1045,41 @@ func TestPublicOverviewOGImage(t *testing.T) {
 		t.Fatalf("non-default range page must not advertise the card, got:\n%s", ranged)
 	}
 
-	// The card itself is a valid, correctly sized PNG served as an image.
+	// The first fetch renders the card on demand: a valid, correctly sized PNG served
+	// as an image.
+	if b := fetchPNG(t, anon, srv.URL+"/u/grace/og.png"); b.Dx() != 1200 || b.Dy() != 630 {
+		t.Fatalf("rendered og.png size = %dx%d, want 1200x630", b.Dx(), b.Dy())
+	}
+
+	// A repeat fetch within the TTL is served from the cache, not re-rendered. Prove
+	// it by overwriting the cached bytes with a sentinel: a cache hit returns the
+	// sentinel verbatim, while a re-render would overwrite it with a real PNG.
+	sentinel := []byte("cached-sentinel-not-a-real-png")
+	if err := st.PutOverviewOGImage(ctx, owner.ID, sentinel); err != nil {
+		t.Fatalf("seed sentinel card: %v", err)
+	}
 	resp = mustGet(t, anon, srv.URL+"/u/grace/og.png")
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("og.png after publish = %d, want 200", resp.StatusCode)
-	}
-	if ct := resp.Header.Get("Content-Type"); ct != "image/png" {
-		t.Fatalf("og.png content-type = %q, want image/png", ct)
+		t.Fatalf("cached og.png = %d, want 200", resp.StatusCode)
 	}
 	raw, err := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if err != nil {
-		t.Fatalf("read og.png: %v", err)
+		t.Fatalf("read cached og.png: %v", err)
 	}
-	img, err := png.Decode(bytes.NewReader(raw))
-	if err != nil {
-		t.Fatalf("decode og.png: %v", err)
+	if !bytes.Equal(raw, sentinel) {
+		t.Fatalf("fresh cache should serve the cached bytes unchanged, got %d bytes", len(raw))
 	}
-	if b := img.Bounds(); b.Dx() != 1200 || b.Dy() != 630 {
-		t.Fatalf("og.png size = %dx%d, want 1200x630", b.Dx(), b.Dy())
+
+	// Age the cached card past the TTL; the next fetch re-renders it (the sentinel is
+	// replaced with a real PNG again).
+	if _, err := st.Pool.Exec(ctx,
+		`UPDATE overview_og_images SET generated_at = now() - make_interval(hours => 2) WHERE user_id = $1`,
+		owner.ID); err != nil {
+		t.Fatalf("age cached card: %v", err)
+	}
+	if b := fetchPNG(t, anon, srv.URL+"/u/grace/og.png"); b.Dx() != 1200 || b.Dy() != 630 {
+		t.Fatalf("re-rendered og.png size = %dx%d, want 1200x630", b.Dx(), b.Dy())
 	}
 
 	// Making the overview private 404s the card, matching the page.
@@ -1073,13 +1093,36 @@ func TestPublicOverviewOGImage(t *testing.T) {
 	resp.Body.Close()
 }
 
-// TestPublishDuringReparseSkipsCard guards the publish-time render's reparse gate:
-// publishing while a reparse rebuilds the projection must not cache a card from a
-// half-rebuilt aggregate. It holds the real reparse advisory lock (as a live
-// reparse does for its whole run) so ogimage.Generate takes its abort path. The
-// publish still succeeds (the overview is public); the card only appears once a
-// reparse is not running.
-func TestPublishDuringReparseSkipsCard(t *testing.T) {
+// fetchPNG GETs a URL, asserts a 200 image/png, and returns the decoded image's
+// bounds so a caller can check the card's dimensions.
+func fetchPNG(t *testing.T, c *http.Client, url string) image.Rectangle {
+	t.Helper()
+	resp := mustGet(t, c, url)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s = %d, want 200", url, resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "image/png" {
+		t.Fatalf("GET %s content-type = %q, want image/png", url, ct)
+	}
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read %s: %v", url, err)
+	}
+	img, err := png.Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("decode %s: %v", url, err)
+	}
+	return img.Bounds()
+}
+
+// TestOGImageDuringReparse guards the on-demand render's reparse gate: rendering a
+// card while a reparse rebuilds the projection must not serve a card from a
+// half-rebuilt aggregate. It holds the real reparse advisory lock (as a live reparse
+// does for its whole run) so ogimage.Generate takes its abort path. With a cold
+// cache the request 404s (nothing good to serve yet); once the reparse clears, the
+// next request renders and serves the card.
+func TestOGImageDuringReparse(t *testing.T) {
 	t.Parallel()
 	srv, st := newTestServer(t)
 	ctx := context.Background()
@@ -1093,31 +1136,29 @@ func TestPublishDuringReparseSkipsCard(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("login: %v", err)
 	}
+	if _, err := c.PostForm(srv.URL+"/account/overview/publish", url.Values{}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
 
-	// Publish while the reparse advisory lock is held: the overview goes public, but
-	// the card render aborts, so /og.png 404s.
+	anon := newClient(t)
+	anon.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+	// Hold the reparse advisory lock, standing in for a running reparse: an on-demand
+	// render against a cold cache aborts, so /og.png 404s rather than caching a
+	// half-rebuilt aggregate.
 	lock, ok, err := st.AcquireReparseLock(ctx)
 	if err != nil || !ok {
 		t.Fatalf("acquire reparse lock: ok=%v err=%v", ok, err)
 	}
-	if _, err := c.PostForm(srv.URL+"/account/overview/publish", url.Values{}); err != nil {
-		lock.Release(ctx)
-		t.Fatalf("publish: %v", err)
-	}
-	anon := newClient(t)
-	anon.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	resp := mustGet(t, anon, srv.URL+"/u/grace/og.png")
 	if resp.StatusCode != http.StatusNotFound {
 		lock.Release(ctx)
-		t.Fatalf("og.png after publish-during-reparse = %d, want 404 (render skipped)", resp.StatusCode)
+		t.Fatalf("og.png during reparse (cold cache) = %d, want 404 (render skipped)", resp.StatusCode)
 	}
 	resp.Body.Close()
 
-	// With the lock cleared, re-publishing renders the card.
+	// With the lock cleared, the next fetch renders the card.
 	lock.Release(ctx)
-	if _, err := c.PostForm(srv.URL+"/account/overview/publish", url.Values{}); err != nil {
-		t.Fatalf("re-publish: %v", err)
-	}
 	resp = mustGet(t, anon, srv.URL+"/u/grace/og.png")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("og.png after reparse cleared = %d, want 200", resp.StatusCode)
