@@ -11,8 +11,6 @@
   color: var(--subtext); font-size: 1rem; line-height: 1.6;
   max-width: 60ch; margin: var(--sp-lg) auto 0;
 }
-.landing-actions { display: flex; gap: var(--sp-md); justify-content: center; margin-top: var(--sp-xl); }
-.landing-actions .btn { padding: 10px 20px; }
 
 /* ---- Feature grid ---- */
 .landing-features {

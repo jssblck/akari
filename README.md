@@ -35,6 +35,18 @@ the background, so there is no manual step after a parser upgrade.
                                                               web UI (templ+htmx)
 ```
 
+## User guide
+
+A complete user guide is served by the running server, themed to match the UI:
+open [`/guide`](https://akari.example.com/guide) on your instance. It walks a new
+user from installing the client through reading their history, sharing sessions,
+and self-hosting, and it is written for agents as much as humans: every page is
+available as raw Markdown by appending `.md` to its URL, the whole guide
+concatenates into [`/llms-full.txt`](https://akari.example.com/llms-full.txt) for
+a single-fetch ingest, and [`/llms.txt`](https://akari.example.com/llms.txt) is
+its machine-readable index. The source lives in
+[`internal/guide/content`](internal/guide/content).
+
 ## Install
 
 Prebuilt, checksum-verified binaries are published for each release. Each script

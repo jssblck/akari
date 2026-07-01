@@ -93,6 +93,16 @@ func (s *Server) Routes() http.Handler {
 	// Static assets.
 	mux.Handle("GET /static/", staticHandler())
 
+	// The user guide: public documentation, readable logged out and served to a
+	// coding agent as raw Markdown and as one concatenated file. It is static
+	// content independent of the parsed projection, so it carries neither the auth
+	// gate nor the reparse gate. handleGuidePage splits the .md suffix itself, so
+	// /guide/<slug> and /guide/<slug>.md share one route.
+	mux.HandleFunc("GET /guide", s.handleGuideIndex)
+	mux.HandleFunc("GET /guide/{slug}", s.handleGuidePage)
+	mux.HandleFunc("GET /llms.txt", s.handleLLMsTxt)
+	mux.HandleFunc("GET /llms-full.txt", s.handleLLMsFullTxt)
+
 	// CAS blob serving, gated by the referencing session. Raw blob bytes stay
 	// available during a reparse (they are content-addressed and not part of the
 	// parsed projection), so these are not behind the reparse gate.

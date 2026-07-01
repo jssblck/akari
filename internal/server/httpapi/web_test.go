@@ -88,7 +88,7 @@ func TestWebFlow(t *testing.T) {
 		t.Fatalf("unauthenticated / redirected to %q, want the landing page at /", resp.Request.URL.Path)
 	}
 	body := readBody(t, resp)
-	if !strings.Contains(body, "self-hosted instrument") || !strings.Contains(body, `href="/register"`) {
+	if !strings.Contains(body, "self-hosted instrument") || !strings.Contains(body, `href="/guide"`) {
 		t.Fatalf("unauthenticated / should render the landing page, got:\n%s", body)
 	}
 

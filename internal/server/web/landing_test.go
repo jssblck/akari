@@ -5,19 +5,21 @@ import (
 	"testing"
 )
 
-// The logged-out landing page rides the public layout (its top bar carries the
-// wordmark and a Log in link) and pitches akari in a hero with paths into
-// sign-in and registration. Pinning the wrapper and those links at the source
-// package guards the anonymous root's entry points independently of the httpapi
-// route wiring.
+// The logged-out landing page rides the public layout, whose top bar carries the
+// wordmark plus the Docs, GitHub, and Log in links. The hero is explanation, not
+// a call to action. Pinning the wrapper and the top-bar entry points at the
+// source package guards the anonymous root independently of the httpapi route
+// wiring.
 func TestLandingPageRendersHeroAndEntryPoints(t *testing.T) {
 	html := renderComponent(t, LandingPage())
 
-	// The public layout wraps it: the top bar's brand and Log in link, and the
-	// page title carries the product name.
+	// The public layout wraps it: the top bar's brand, the Docs and GitHub links,
+	// the Log in link, and the product name in the page title.
 	for _, want := range []string{
 		`<title>akari - akari</title>`,
 		`class="topbar"`,
+		`href="/guide">Docs`,
+		`aria-label="akari on GitHub"`,
 		`<a href="/login">Log in</a>`,
 	} {
 		if !strings.Contains(html, want) {
@@ -25,15 +27,20 @@ func TestLandingPageRendersHeroAndEntryPoints(t *testing.T) {
 		}
 	}
 
-	// The hero explains what akari is and offers both a sign-in and a registration
-	// action, so a first-time visitor can act without hunting for a link.
-	for _, want := range []string{
-		`self-hosted instrument`,
+	// The hero explains what akari is.
+	if !strings.Contains(html, `self-hosted instrument`) {
+		t.Errorf("landing hero should explain what akari is")
+	}
+
+	// The prominent hero buttons and the first-account note were removed, so the
+	// hero carries no call-to-action buttons and the foot makes no admin claim.
+	for _, unwanted := range []string{
 		`class="btn" href="/login"`,
 		`class="btn secondary" href="/register"`,
+		`needs no invite and becomes the admin`,
 	} {
-		if !strings.Contains(html, want) {
-			t.Errorf("landing hero missing %q", want)
+		if strings.Contains(html, unwanted) {
+			t.Errorf("landing should no longer render %q", unwanted)
 		}
 	}
 
