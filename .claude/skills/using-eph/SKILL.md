@@ -32,7 +32,7 @@ first to learn the shape of the workspace.
 ## The core loop
 
 ```sh
-eph up                   # start all services: pull/build, wait for health, run post-start
+eph up                   # start all services: pre-start, pull/build, wait for health, post-start
 eval "$(eph env)"        # load resolved connection env vars into your shell
 # ... do your work against the running services ...
 eph down                 # stop services, keep containers + data for a fast restart
@@ -106,22 +106,24 @@ DATABASE_URL=postgres://dev@localhost:${postgres.port}/app
 - `env.X=` is set inside the container; the trailing `DATABASE_URL=` is a shell
   env var emitted by `eph env`.
 - `volume=name:/path` is a per-workspace named volume; `healthcheck` for an image
-  service runs with no shell (whitespace-split, `docker exec`); `post-start` and
-  `pre-stop` run on the host via `sh -c` (after the service is healthy / before
-  it is stopped) with eph's resolved environment injected (see below).
+  service runs with no shell (whitespace-split, `docker exec`); the lifecycle
+  hooks run on the host via `sh -c` with eph's resolved environment injected (see
+  below).
 
 ## Lifecycle hooks see eph's environment
 
-`post-start` and `pre-stop` hooks run with the same variables `eph env` emits
-already in their environment, so a database migration just works:
+Four hooks bracket a service, in order: `pre-start` (before it is created),
+`post-start` (after it is healthy), `pre-stop` (before it stops), `post-stop`
+(after it has stopped). All run with the same variables `eph env` emits already
+in their environment, so a database migration or codegen step just works:
 
 ```ini
-[postgres]
-image=postgres:16-alpine
-port=5432
-env.POSTGRES_USER=dev
-healthcheck=pg_isready -U dev
+[api]
+run=./bin/server
+pre-start=go generate ./...                     # runs before the server boots
 post-start=psql "$DATABASE_URL" -f schema.sql   # DATABASE_URL is already set
+pre-stop=./scripts/backup.sh
+post-stop=rm -rf .cache/scratch                 # cleanup eph cannot do itself
 
 DATABASE_URL=postgres://dev@localhost:${postgres.port}/app
 ```
@@ -135,21 +137,27 @@ Each hook receives, layered in this order (later wins):
    `EPH_<SERVICE>_CONTAINER` (service names upper-cased, `-` -> `_`),
 3. the owning service's own `env.X=` values.
 
+`pre-start` runs just before its own service is created, so it cannot see that
+service's own port, but it does see any service already up (backing services
+start before `run=` apps). Use it for prep the service depends on, like codegen.
 `post-start` hooks run only after **every** service in the `up` is healthy, so a
 hook may reference any other service's port (`${redis.port}` resolves even if
-redis started after the service whose hook needs it).
+redis started after the service whose hook needs it). `post-stop` runs after its
+service has stopped and sees the same pre-teardown environment as `pre-stop`.
 
-`post-start` runs on **every** `eph up` (fresh create *or* restart), and a
-failing `post-start` aborts the `up`; a failing `pre-stop` aborts the `down` /
-`clean` and leaves the service running so you can fix and retry. Write hooks to
-be idempotent (a migration that no-ops when already applied, an
+`pre-start` and `post-start` run on **every** `eph up` (fresh create *or*
+restart); a failing `pre-start` aborts the `up` before its service starts and a
+failing `post-start` aborts the `up`. A failing `pre-stop` aborts the `down` /
+`clean` and leaves the service running so you can fix and retry; a failing
+`post-stop` aborts the rest of teardown, but its service is already stopped.
+Write hooks to be idempotent (a migration that no-ops when already applied, an
 `INSERT ... ON CONFLICT` seed). For one-off, non-idempotent work, use `eph run`
 instead.
 
 Pass `--skip-hooks` to skip hooks for one invocation: `eph up --skip-hooks`
-starts services without `post-start`; `eph down --skip-hooks` /
-`eph clean --skip-hooks` tear down without `pre-stop` (the escape hatch when a
-broken `pre-stop` hook is wedging teardown).
+starts services without `pre-start`/`post-start`; `eph down --skip-hooks` /
+`eph clean --skip-hooks` tear down without `pre-stop`/`post-stop` (the escape
+hatch when a broken hook is wedging teardown).
 
 ## Running one-off commands with the environment: `eph run`
 
@@ -173,10 +181,12 @@ ad-hoc queries) -- unlike `post-start`, it runs every time you invoke it.
 
 `eph dev` runs the whole stack in the foreground for a Claude Desktop preview
 server (`.claude/launch.json`), which launches one command and watches its port
-but has no setup or teardown hook. `eph dev` fills both: it brings every service
-up and runs `post-start` (seeding), foregrounds a `run=` app with eph's own
-stdin, stdout, and stderr wired through to it, and on stop tears the stack down
--- `eph down` by default, or `eph clean` with `--clean`.
+but has no setup or teardown hook. `eph dev` fills both: it runs
+`pre-start` hooks (e.g. codegen), brings every service up, foregrounds a `run=`
+app with eph's own stdin, stdout, and stderr wired through to it, runs
+`post-start` (seeding), and on stop tears the stack down -- `eph down` by
+default, or `eph clean` with `--clean` (each running `pre-stop` then
+`post-stop`).
 
 ```jsonc
 // .claude/launch.json -- point the preview server at eph dev
@@ -188,9 +198,12 @@ stdin, stdout, and stderr wired through to it, and on stop tears the stack down
 }
 ```
 
-- Model the app as a `run=` service with `port=auto`. `eph dev` binds it to the
-  `$PORT` the preview server injects (its `autoPort`), so the preview connects to
-  the right port. Do not also give the app a fixed port.
+- Model the app as a `run=` service with `port=auto`. The app runs on its own
+  internal port; `eph dev` opens the `$PORT` the preview server injects (its
+  `autoPort`) as a forwarding gate to the app, but only *after* `post-start`
+  hooks finish. Since the preview watches `$PORT`, it does not see the app as
+  ready until seeding is done, not the instant the server can answer a health
+  check. Do not also give the app a fixed port.
 - With no SERVICE the sole `run=` service is foregrounded; `eph dev <service>`
   picks one when the `.eph` defines several.
 - Teardown defaults to `eph down` (keeps data for a fast relaunch, since Claude
@@ -225,9 +238,11 @@ trace -- check `eph logs <service>` when a service is missing from `eph status`.
 - **Ports are random and change per create.** Never hardcode a host port; always
   go through `eph env`.
 - **Idempotent up.** A running service is reused and a stopped one restarted, but
-  `post-start` hooks run on **every** `eph up` regardless. Write them to be
-  idempotent (migrations that no-op when applied), or move one-off work to
-  `eph run`. A failing `post-start` aborts the `up`.
+  `pre-start` and `post-start` hooks run on **every** `eph up` regardless. Write
+  them to be idempotent (migrations that no-op when applied, codegen that
+  overwrites in place), or move one-off work to `eph run`. A failing `pre-start`
+  aborts the `up` before its service starts; a failing `post-start` aborts the
+  `up`.
 - **Image health checks have no shell**: one whitespace-split command, no pipes,
   `&&`, `$VAR`, or quoted spaces, and the binary must exist in the image.
 - **A service with no health check** is given a fixed short wait, so it may need a
