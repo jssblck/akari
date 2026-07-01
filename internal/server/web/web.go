@@ -258,6 +258,27 @@ func QualityScoreLabel(s store.SessionSignals) string {
 	return fmt.Sprintf("%d / 100", *s.Score)
 }
 
+// PeakContextLabel renders the heaviest single-turn context the session reached, in full
+// tokens, for the Tokens tooltip. It is the main-thread peak (subagent turns excluded), a
+// window-independent measure of how loaded the session got. An unmeasured session (no
+// main-thread usage) reads a dash rather than a misleading zero.
+func PeakContextLabel(s store.SessionSignals) string {
+	if s.PeakContextTokens == nil {
+		return "-"
+	}
+	return FmtTokens(*s.PeakContextTokens)
+}
+
+// ContextResetsLabel renders how many inferred context resets (compactions or clears) the
+// session went through, for the Tokens tooltip. An unmeasured session reads a dash; a
+// measured session with none reads "0", a real "it never shed context".
+func ContextResetsLabel(s store.SessionSignals) string {
+	if s.ContextResetCount == nil {
+		return "-"
+	}
+	return fmt.Sprintf("%d", *s.ContextResetCount)
+}
+
 // FmtTokens renders a token count with thousands separators.
 func FmtTokens(n int64) string {
 	if n < 1000 {

@@ -55,6 +55,14 @@ func sampleInsights() store.Insights {
 			},
 			Clipped: 1,
 		},
+		Context: store.ContextHealthStats{
+			Sessions:          15,
+			PeakTokensP50:     128000,
+			PeakTokensP90:     412000,
+			PeakTokensMax:     1_200_000,
+			TotalResets:       9,
+			SessionsWithReset: 6,
+		},
 		Quality: store.QualityDistribution{
 			Grades: []store.LabeledCount{
 				{Key: "A", Count: 5}, {Key: "B", Count: 3}, {Key: "C", Count: 2},
@@ -112,6 +120,14 @@ func TestInsightsPageRendersDistributions(t *testing.T) {
 		`>unstructured start<`,     // the per-session opener figure label
 		`20 of 200`,                // the terse-prompt sub-count (unique to hygiene)
 		`3 of 15`,                  // the unstructured-start sub-count (over sessions, not prompts)
+		`>Context health<`,         // the context-load band
+		`>median peak<`,            // a context figure label
+		`>128.0k</div>`,            // the median peak, compact tokens
+		`>p90 peak<`,               // the p90 figure label
+		`>1.2M</div>`,              // the heaviest peak, compact tokens
+		`>shed context<`,           // the reset-rate figure label
+		`6 of 15 sessions`,         // the shed-context sub-count (sessions that reset)
+		`>context resets<`,         // the total-resets figure label
 		`>File churn<`,             // the churn panel
 		`internal/server/store/analytics.go`, // the churned path (full path in the label)
 		`6 edits`,                  // its edit count
@@ -222,6 +238,24 @@ func TestInsightsPageHygieneEmpty(t *testing.T) {
 	}
 	if !strings.Contains(html, `>Prompt hygiene<`) {
 		t.Error("the hygiene band heading should still render")
+	}
+}
+
+// When the window has sessions but none carry measured context, the context-health band
+// shows a note instead of a row of zeroes, while the rest of the page renders.
+func TestInsightsPageContextEmpty(t *testing.T) {
+	p := Page{Title: "Insights", LoggedIn: true, Active: "insights", Username: "ada"}
+	ranges := RangeOptions("/insights", nil, "30d")
+	ins := sampleInsights()
+	ins.Context = store.ContextHealthStats{} // no measured context
+
+	html := renderComponent(t, InsightsPage(p, ins, "30d", ranges))
+
+	if !strings.Contains(html, "No sessions with measured context in this window.") {
+		t.Error("context band should note the missing measurements")
+	}
+	if !strings.Contains(html, `>Context health<`) {
+		t.Error("the context band heading should still render")
 	}
 }
 

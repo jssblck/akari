@@ -30,7 +30,11 @@ import (
 // Version 3 added Codex custom_tool_call bodies and binary image attachments (image
 // generation results and pasted images) to the projection, so a reparse backfills
 // those rows on already-ingested sessions.
-const Version = 3
+//
+// Version 4 tags each usage event with is_sidechain (a Claude subagent turn's
+// accounting, written into the parent transcript), so a reparse backfills the flag
+// and context-health analysis can read main-thread turns alone.
+const Version = 4
 
 // Advance parses any not-yet-parsed bytes of a session and applies them to the
 // projection, looping until the parse cursor catches up to the stored length. It
@@ -187,6 +191,7 @@ func toProjectionDelta(p parser.Delta) store.ProjectionDelta {
 			DedupKey:       u.DedupKey,
 			SourceOffset:   u.SourceOffset,
 			SourceIndex:    u.SourceIndex,
+			IsSidechain:    u.IsSidechain,
 		}
 		// Price the event here; whether it counts toward the session total is decided
 		// at insert time, where a duplicate usage line is dropped and only the

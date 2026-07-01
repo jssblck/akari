@@ -4,10 +4,10 @@ import "context"
 
 // Insights is everything the Insights page renders for a scope: the quality
 // distribution (grades and outcomes), the archetype mix, the concurrency figures, the
-// velocity cadence, the tool reliability and mix, the prompt-hygiene rates, and the file
-// churn. It is the cross-cutting counterpart to Analytics (which is about cost and
-// tokens), scoped by the same AnalyticsFilter so a window or a per-user narrowing applies
-// to both surfaces alike.
+// velocity cadence, the tool reliability and mix, the prompt-hygiene rates, the file
+// churn, and the context-load figures. It is the cross-cutting counterpart to Analytics
+// (which is about cost and tokens), scoped by the same AnalyticsFilter so a window or a
+// per-user narrowing applies to both surfaces alike.
 type Insights struct {
 	Quality     QualityDistribution
 	Archetypes  []LabeledCount
@@ -16,6 +16,7 @@ type Insights struct {
 	Tools       ToolStats
 	Hygiene     PromptHygiene
 	Churn       FileChurn
+	Context     ContextHealthStats
 }
 
 // HasData reports whether any scoped session carried signals, so the page can show an
@@ -54,6 +55,10 @@ func (s *Store) Insights(ctx context.Context, f AnalyticsFilter) (Insights, erro
 	if err != nil {
 		return Insights{}, err
 	}
+	contextHealth, err := s.ContextHealth(ctx, f)
+	if err != nil {
+		return Insights{}, err
+	}
 	return Insights{
 		Quality:     quality,
 		Archetypes:  archetypes,
@@ -62,5 +67,6 @@ func (s *Store) Insights(ctx context.Context, f AnalyticsFilter) (Insights, erro
 		Tools:       tools,
 		Hygiene:     hygiene,
 		Churn:       churn,
+		Context:     contextHealth,
 	}, nil
 }

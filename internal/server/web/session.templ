@@ -183,7 +183,7 @@ templ sessionStats(d store.SessionDetail, hs HeaderStats) {
 	<div class="stats sticky" id="session-stats">
 		@stat("Messages", fmt.Sprintf("%d", d.MessageCount), "messages")
 		@stat("User msgs", fmt.Sprintf("%d", d.UserMessageCount), "user")
-		@tokenStat(d)
+		@tokenStat(d, hs.Signals)
 		@statCache(hs.Cache)
 		@statQuality(hs.Signals)
 		@stat("Duration", FmtDuration(d.StartedAt, d.EndedAt), "dur")
@@ -251,8 +251,11 @@ templ statQuality(s store.SessionSignals) {
 // tokenStat folds the five token-and-cost readouts (input, output, cache read,
 // cache write, cost) into one Tokens tile: the total reads at a glance, and the
 // per-class breakdown plus cost reveal on hover or keyboard focus, the same detail
-// the overview heatmap surfaces for a day.
-templ tokenStat(d store.SessionDetail) {
+// the overview heatmap surfaces for a day. When the session's context was measured, a
+// Context sub-group adds the heaviest single-turn context it held and how many times it
+// shed that context (a compaction or clear), token-flavored facts that sit naturally
+// beside the token totals but describe peak load rather than cumulative spend.
+templ tokenStat(d store.SessionDetail, s store.SessionSignals) {
 	<div class="stat tokens-stat" tabindex="0">
 		<div class="label">Tokens</div>
 		<div class="value tokens-value" data-stat-key="tokens">{ FmtTokens(d.TotalInput + d.TotalOutput + d.TotalCacheRead + d.TotalCacheWrite) }</div>
@@ -267,6 +270,15 @@ templ tokenStat(d store.SessionDetail) {
 				<dt>Cache write</dt>
 				<dd>{ FmtTokens(d.TotalCacheWrite) }</dd>
 			</dl>
+			if s.HasContextHealth() {
+				<div class="tt-sub">Context</div>
+				<dl class="tt-grid">
+					<dt>Peak context</dt>
+					<dd>{ PeakContextLabel(s) }</dd>
+					<dt>Resets</dt>
+					<dd>{ ContextResetsLabel(s) }</dd>
+				</dl>
+			}
 			<div class="tt-cost">{ FmtCost(d.TotalCostUSD, d.CostIncomplete) }</div>
 		</div>
 	</div>

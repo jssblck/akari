@@ -37,6 +37,9 @@ templ InsightsPage(p Page, ins store.Insights, rng string, ranges []RangeOption)
 				<div class="ins-hygiene">
 					@hygienePanel(ins.Hygiene)
 				</div>
+				<div class="ins-context">
+					@contextPanel(ins.Context)
+				</div>
 				<div class="ins-grid">
 					@distributionPanel("Grades", "the quality score banded A to F, unscored for an ungraded session", GradeBars(ins.Quality.Grades))
 					@distributionPanel("Outcomes", "how each session ended", OutcomeBars(ins.Quality.Outcomes))
@@ -212,6 +215,48 @@ templ hygienePanel(h store.PromptHygiene) {
 					<div class="ins-fig-v">{ HygienePct(h.UnstructuredStarts, h.Sessions) }</div>
 					<div class="ins-fig-k">unstructured start</div>
 					<div class="ins-fig-sub muted small">{ HygieneCount(h.UnstructuredStarts, h.Sessions) }</div>
+				</div>
+			</div>
+		}
+	</div>
+}
+
+// contextPanel is the full-width context-load band: how heavy the window's sessions got
+// (the median, p90, and heaviest peak context, in tokens) and how often they shed that
+// context (the share of sessions that hit at least one inferred reset, and the total).
+// Peak is a raw token count, deliberately not divided by any model's window, so it reads
+// the same whether a model holds 200k tokens or a million: 180k in context is heavy either
+// way. Like hygiene these figures never feed the quality score; they describe resource load.
+templ contextPanel(c store.ContextHealthStats) {
+	<div class="ins-panel ins-context-panel">
+		<div class="ins-panel-head">
+			<span class="label">Context health</span>
+			<span class="muted small ins-caption">how heavy sessions got and how often they shed context</span>
+		</div>
+		if !c.HasData() {
+			<div class="muted small">No sessions with measured context in this window.</div>
+		} else {
+			<div class="ins-figs">
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ FmtTokensCompact(c.PeakTokensP50) }</div>
+					<div class="ins-fig-k">median peak</div>
+				</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ FmtTokensCompact(c.PeakTokensP90) }</div>
+					<div class="ins-fig-k">p90 peak</div>
+				</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ FmtTokensCompact(c.PeakTokensMax) }</div>
+					<div class="ins-fig-k">heaviest peak</div>
+				</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ HygienePct(c.SessionsWithReset, c.Sessions) }</div>
+					<div class="ins-fig-k">shed context</div>
+					<div class="ins-fig-sub muted small">{ HygieneCount(c.SessionsWithReset, c.Sessions) } sessions</div>
+				</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ FmtTokens(c.TotalResets) }</div>
+					<div class="ins-fig-k">context resets</div>
 				</div>
 			</div>
 		}

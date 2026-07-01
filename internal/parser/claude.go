@@ -21,6 +21,11 @@ func (r *reducer) reduceClaude(region []byte, base int64) error {
 		ts := parseTime(e.Get("timestamp").String())
 		r.observe(ts)
 
+		// isSidechain rides on the entry itself: Claude Code writes a subagent's turns
+		// into the parent transcript flagged this way. It is carried onto the turn's usage
+		// so context-health analysis can exclude a subagent's separately-growing context.
+		sidechain := e.Get("isSidechain").Bool()
+
 		if cwd := e.Get("cwd").String(); cwd != "" {
 			r.d.Cwd = cwd
 		}
@@ -87,6 +92,7 @@ func (r *reducer) reduceClaude(region []byte, base int64) error {
 					CacheRead:      int(u.Get("cache_read_input_tokens").Int()),
 					OccurredAt:     ts,
 					DedupKey:       msg.Get("id").String(),
+					IsSidechain:    sidechain,
 				}, offset)
 			}
 		}

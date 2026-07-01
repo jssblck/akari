@@ -73,6 +73,8 @@ type ToolResultDelta struct {
 
 // ProjUsage is one usage_events insert. SourceOffset and SourceIndex make the
 // insert idempotent (the unique index absorbs a replay via ON CONFLICT).
+// IsSidechain marks a subagent turn's usage (Claude writes those into the parent
+// transcript), so context-health analysis can read main-thread turns alone.
 type ProjUsage struct {
 	MessageOrdinal *int
 	Model          string
@@ -86,6 +88,7 @@ type ProjUsage struct {
 	DedupKey       string
 	SourceOffset   int64
 	SourceIndex    int
+	IsSidechain    bool
 }
 
 // AttachmentDelta is one attachments insert (today a lifted image). Like a tool
@@ -419,6 +422,14 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 	// with that surviving set. cost_incomplete is derived the same way: a surviving
 	// row that carries tokens but no priced cost is what makes the session total a
 	// partial sum.
+	//
+	// DO NOTHING (not DO UPDATE) is deliberate, and it is safe for is_sidechain even
+	// though the flag decides which turns context-health analysis reads: a dedup_key is
+	// a single assistant message's id, and its sidechain status is a property of where
+	// that one message lives, identical on every replayed copy. So the surviving row's
+	// flag matches every duplicate's, and keeping the first is deterministic. A DO UPDATE
+	// to "merge" the flag would instead fold a duplicate's tokens into the rollup (its
+	// RowsAffected is 1 too), breaking the sessions.total_* == sum(usage_events) invariant.
 	for _, u := range d.Usage {
 		var ord, cost any
 		if u.MessageOrdinal != nil {
@@ -431,11 +442,11 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 			`INSERT INTO usage_events
 			   (session_id, message_ordinal, model, input_tokens, output_tokens,
 			    cache_write_tokens, cache_read_tokens, reasoning_tokens, cost_usd,
-			    occurred_at, dedup_key, source_offset, source_index)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+			    occurred_at, dedup_key, source_offset, source_index, is_sidechain)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 			 ON CONFLICT DO NOTHING`,
 			sessionID, ord, sanitizeText(u.Model), u.Input, u.Output, u.CacheWrite, u.CacheRead,
-			u.Reasoning, cost, nullTime(u.OccurredAt), sanitizeText(u.DedupKey), u.SourceOffset, u.SourceIndex)
+			u.Reasoning, cost, nullTime(u.OccurredAt), sanitizeText(u.DedupKey), u.SourceOffset, u.SourceIndex, u.IsSidechain)
 		if err != nil {
 			return appliedDelta{}, fmt.Errorf("insert usage event for session %d at offset %d: %w", sessionID, u.SourceOffset, err)
 		}

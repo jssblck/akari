@@ -18,8 +18,12 @@ package quality
 // Version 2: adds prompt-hygiene signals (terse, duplicate, and no-code-context
 // prompt counts, plus an unstructured-start flag). These describe the human's input,
 // so they extend the stored signal set but do not change the score: a session's grade
-// at version 2 equals its grade at version 1. Later versions add context-pressure signals.
-const Version = 2
+// at version 2 equals its grade at version 1.
+// Version 3: adds context-health signals (peak context tokens and an inferred
+// context-reset count; see ContextHealth). These describe resource load rather than
+// whether the session went well, so like hygiene they extend the stored signals but do
+// not change the score: a session's grade at version 3 equals its grade at version 2.
+const Version = 3
 
 // Outcome is how a session ended, inferred from its projection. It is a best effort:
 // without a terminal marker in the transcript the ending is a heuristic, so every

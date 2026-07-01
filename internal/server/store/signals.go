@@ -40,6 +40,14 @@ type SessionSignals struct {
 	DuplicatePromptCount int
 	NoCodeContextCount   int
 	UnstructuredStart    bool
+	// Context-health figures describe resource load, not the agent's work, so like the
+	// hygiene counts they ride alongside the score without feeding it. Both are nil when
+	// the session had no main-thread usage to measure, so the UI can tell "unmeasured"
+	// apart from a measured zero. PeakContextTokens is the heaviest single-turn context
+	// the session reached; ContextResetCount is how many inferred context resets
+	// (compactions or clears) it went through.
+	PeakContextTokens *int64
+	ContextResetCount *int
 }
 
 // Scored reports whether the session carries a score and grade, so the UI can show a
@@ -57,6 +65,11 @@ func (s SessionSignals) HasHygieneSignal() bool {
 	return s.ShortPromptCount > 0 || s.DuplicatePromptCount > 0 ||
 		s.NoCodeContextCount > 0 || s.UnstructuredStart
 }
+
+// HasContextHealth reports whether the session had main-thread usage to measure, so the
+// UI can show the context readout only when there is a real figure rather than a blank
+// stand-in. Peak and reset count are populated together, so testing the peak is enough.
+func (s SessionSignals) HasContextHealth() bool { return s.PeakContextTokens != nil }
 
 // signalFacts are the raw, projection-derived inputs a refresh gathers before scoring:
 // the tool-health counts that feed quality.Score and the outcome facts that feed
@@ -84,6 +97,13 @@ type signalFacts struct {
 	// stored so the cohort aggregate divides the hygiene counts by exactly the set they
 	// came from rather than by user_message_count (which can include empty-text turns).
 	promptCount int
+
+	// Context-health facts, computed from the session's ordered main-thread usage. Both
+	// are nil when there was no main-thread usage to measure (so the row stores NULL, not
+	// a misleading zero); peakContextTokens is the heaviest single-turn context and
+	// contextResets is the inferred compaction/clear count.
+	peakContextTokens *int64
+	contextResets     *int
 }
 
 // gatherSignalFacts reads a session's tool-health and outcome facts from its
@@ -187,7 +207,56 @@ func gatherSignalFacts(ctx context.Context, tx pgx.Tx, sessionID int64) (signalF
 	}
 	f.promptCount = len(prompts)
 	f.hygiene = quality.ClassifyPromptHygiene(prompts)
+
+	// Context-health facts. Read from the same projection but from usage_events rather
+	// than messages, so they live in their own pass over the session's ordered turns.
+	if err := gatherContextHealth(ctx, tx, sessionID, &f); err != nil {
+		return signalFacts{}, err
+	}
 	return f, nil
+}
+
+// gatherContextHealth reads a session's ordered main-thread per-turn context sizes and
+// folds them into the facts via quality.ContextHealth. Context size is the whole prompt
+// presented that turn: uncached input plus cached read plus cache creation, so the figure
+// is robust to prompt caching (an expired cache moves tokens between those buckets without
+// changing their sum) and to an unknown model (it is a raw token count, never divided by a
+// window). Subagent turns are excluded (is_sidechain): a subagent grows its own smaller
+// context, and counting its turns would read as the main session shedding context. Order
+// is the transcript's own byte order (source_offset, source_index), which is the turns'
+// chronological order in an append-only file; the row id is a final tiebreaker so the
+// order is total even for the (schema-permitted but parser-never-emitted) case of a NULL
+// or repeated source offset, keeping the reset count deterministic. A session with no
+// main-thread usage leaves both facts nil, so the row stores NULL rather than a
+// measured-looking zero.
+func gatherContextHealth(ctx context.Context, tx pgx.Tx, sessionID int64, f *signalFacts) error {
+	rows, err := tx.Query(ctx,
+		`SELECT input_tokens + cache_read_tokens + cache_write_tokens
+		   FROM usage_events
+		  WHERE session_id = $1 AND NOT is_sidechain
+		  ORDER BY source_offset, source_index, id`, sessionID)
+	if err != nil {
+		return fmt.Errorf("gather context health for session %d: %w", sessionID, err)
+	}
+	defer rows.Close()
+	var perTurn []int64
+	for rows.Next() {
+		var tokens int64
+		if err := rows.Scan(&tokens); err != nil {
+			return fmt.Errorf("scan context turn for session %d: %w", sessionID, err)
+		}
+		perTurn = append(perTurn, tokens)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate context turns for session %d: %w", sessionID, err)
+	}
+	if len(perTurn) == 0 {
+		return nil // no main-thread usage: leave both facts nil so the row stores NULL
+	}
+	peak, resets := quality.ContextHealth(perTurn)
+	f.peakContextTokens = &peak
+	f.contextResets = &resets
+	return nil
 }
 
 // gatherPromptTexts reads a session's human prompts in transcript order, dropping empties
@@ -252,8 +321,9 @@ func refreshSignalsTx(ctx context.Context, tx pgx.Tx, sessionID int64) error {
 		   (session_id, signals_version, outcome, outcome_confidence, score, grade,
 		    tool_calls, tool_failures, tool_retries, edit_churn, longest_failure_streak,
 		    prompt_count, short_prompt_count, duplicate_prompt_count, no_code_context_count, unstructured_start,
+		    peak_context_tokens, context_reset_count,
 		    refreshed_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16, now())
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18, now())
 		 ON CONFLICT (session_id) DO UPDATE SET
 		   signals_version = EXCLUDED.signals_version,
 		   outcome = EXCLUDED.outcome,
@@ -270,10 +340,13 @@ func refreshSignalsTx(ctx context.Context, tx pgx.Tx, sessionID int64) error {
 		   duplicate_prompt_count = EXCLUDED.duplicate_prompt_count,
 		   no_code_context_count = EXCLUDED.no_code_context_count,
 		   unstructured_start = EXCLUDED.unstructured_start,
+		   peak_context_tokens = EXCLUDED.peak_context_tokens,
+		   context_reset_count = EXCLUDED.context_reset_count,
 		   refreshed_at = now()`,
 		sessionID, quality.Version, string(outcome), string(conf), scoreArg, gradeArg,
 		f.toolCalls, f.toolFailures, f.toolRetries, f.editChurn, f.longestFailureStreak,
-		f.promptCount, f.hygiene.Short, f.hygiene.Duplicate, f.hygiene.NoCodeContext, f.hygiene.UnstructuredStart)
+		f.promptCount, f.hygiene.Short, f.hygiene.Duplicate, f.hygiene.NoCodeContext, f.hygiene.UnstructuredStart,
+		f.peakContextTokens, f.contextResets)
 	if err != nil {
 		return fmt.Errorf("upsert signals for session %d: %w", sessionID, err)
 	}
@@ -302,11 +375,13 @@ func (s *Store) SessionSignalsByID(ctx context.Context, sessionID int64) (Sessio
 	err := s.Pool.QueryRow(ctx,
 		`SELECT session_id, signals_version, outcome, outcome_confidence, score, grade,
 		        tool_calls, tool_failures, tool_retries, edit_churn, longest_failure_streak,
-		        prompt_count, short_prompt_count, duplicate_prompt_count, no_code_context_count, unstructured_start
+		        prompt_count, short_prompt_count, duplicate_prompt_count, no_code_context_count, unstructured_start,
+		        peak_context_tokens, context_reset_count
 		   FROM session_signals WHERE session_id = $1`, sessionID).Scan(
 		&sig.SessionID, &sig.Version, &sig.Outcome, &sig.OutcomeConfidence, &sig.Score, &sig.Grade,
 		&sig.ToolCalls, &sig.ToolFailures, &sig.ToolRetries, &sig.EditChurn, &sig.LongestFailureStreak,
-		&sig.PromptCount, &sig.ShortPromptCount, &sig.DuplicatePromptCount, &sig.NoCodeContextCount, &sig.UnstructuredStart)
+		&sig.PromptCount, &sig.ShortPromptCount, &sig.DuplicatePromptCount, &sig.NoCodeContextCount, &sig.UnstructuredStart,
+		&sig.PeakContextTokens, &sig.ContextResetCount)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return SessionSignals{SessionID: sessionID, Outcome: string(quality.OutcomeUnknown), OutcomeConfidence: string(quality.ConfLow)}, nil
 	}

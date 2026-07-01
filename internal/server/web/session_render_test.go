@@ -122,6 +122,38 @@ func TestSessionStatsFoldTokensAndDropLive(t *testing.T) {
 	}
 }
 
+// The Tokens tile adds a Context sub-group when the session's context was measured: the
+// heaviest single-turn context it held and how many times it shed that context. A session
+// with no measured context (nil signals) draws no Context group, so an unmeasured session
+// never shows a misleading zero.
+func TestSessionStatsTokensContext(t *testing.T) {
+	p := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "jessoteric"}
+	d, msgs, tools := sessionFixture()
+	peak := int64(142000)
+	resets := 2
+	hs := HeaderStats{Signals: store.SessionSignals{
+		Outcome: "completed", OutcomeConfidence: "high",
+		PeakContextTokens: &peak, ContextResetCount: &resets,
+	}}
+	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, hs, 0, false, true))
+
+	for _, want := range []string{
+		`class="tt-sub">Context</div>`,        // the context group under its own ruled label
+		`>Peak context</dt>`, `<dd>142,000</dd>`, // the peak, full thousands-separated tokens
+		`>Resets</dt>`, `<dd>2</dd>`,           // the inferred reset count
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("tokens context group missing %q", want)
+		}
+	}
+
+	// A session with no measured context draws no Context group at all.
+	bare := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, HeaderStats{}, 0, false, true))
+	if strings.Contains(bare, `class="tt-sub">Context</div>`) {
+		t.Error("an unmeasured session should draw no Context group in the Tokens tile")
+	}
+}
+
 // The Quality tile shows the letter grade as its headline, banded by the report-card
 // class, and reveals the outcome, confidence, score, and tool-health counts in its
 // tooltip. A scored session reads its grade; the tool-health rows appear only when the

@@ -42,4 +42,11 @@ package parse
 // The projection delta is unchanged (the new signals derive from stored messages), so
 // the golden fixtures do not move; the bump exists only to rebuild every signals row at
 // the current version, backfilling the hygiene counts across the existing corpus.
-const Epoch = 3
+//
+// Epoch 3 -> 4: capture is_sidechain on usage events (parse.Version 3 -> 4) and add
+// context-health signals to session_signals (peak context tokens and inferred context
+// resets; quality.Version 2 -> 3). Unlike the hygiene bump this one DOES move the golden
+// fixtures: the usage rows in the projection delta gain the new field, so the snapshots
+// are refreshed in the same commit. The reparse backfills the flag and recomputes every
+// signals row at the current version across the corpus.
+const Epoch = 4
