@@ -204,6 +204,48 @@ func TestWebFlow(t *testing.T) {
 	}
 }
 
+// TestRootNonFullCredentialGetsLanding pins handleRoot's gate: only a full-scope
+// credential reaches the overview, so a read- or ingest-scope bearer token (a
+// non-browser credential pointed at the UI root) is treated as logged out and
+// gets the landing page, not the signed-in overview. This exercises the branch
+// TestWebFlow leaves uncovered, which only drives an anonymous request and a
+// full-scope browser session.
+func TestRootNonFullCredentialGetsLanding(t *testing.T) {
+	t.Parallel()
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+
+	u, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), "")
+	if err != nil {
+		t.Fatalf("register user: %v", err)
+	}
+	for _, tc := range []struct{ scope, token string }{
+		{scopeRead, "read-secret-token"},
+		{scopeIngest, "ingest-secret-token"},
+	} {
+		if _, err := st.CreateAPIToken(ctx, u.ID, tc.scope, tc.scope, auth.HashToken(tc.token)); err != nil {
+			t.Fatalf("create %s token: %v", tc.scope, err)
+		}
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/", nil)
+		req.Header.Set("Authorization", "Bearer "+tc.token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("get / with %s token: %v", tc.scope, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			t.Fatalf("get / with %s token = %d, want 200 landing page", tc.scope, resp.StatusCode)
+		}
+		body := readBody(t, resp)
+		if !strings.Contains(body, "self-hosted instrument") {
+			t.Fatalf("%s-scope root should render the landing page, got:\n%s", tc.scope, body)
+		}
+		if strings.Contains(body, `class="sidebar"`) {
+			t.Fatalf("%s-scope root should not render the signed-in overview shell, got:\n%s", tc.scope, body)
+		}
+	}
+}
+
 // TestStandaloneOrphanedIndex drives the real ingest endpoint with both a remote
 // and non-remote kinds and confirms the projects index lists only the git-remote
 // project: standalone and orphaned folders are kept off this surface (they reach
