@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -252,6 +253,110 @@ func TestSessionRollupMatchesLedger(t *testing.T) {
 			t.Fatalf("reparse session %d: %v", s.id, err)
 		}
 		assertRollupMatchesLedger(t, st, s.id, "after reparse")
+	}
+}
+
+// cacheSavingsUsage is a usage shape aimed at the savings rollup: a priced Claude row whose
+// cache reads save money while its cache write costs money (the saving nets the two and can
+// go negative), the SAME row repeated under a colliding dedup_key (the ledger keeps one, so
+// the saving must not double), a second priced model that also carries cache reads, and an
+// unpriced model that carries cache reads (its saving is omitted, so cache_savings_incomplete
+// must be set while its tokens still fold). A fold that priced pre-dedup rows, dropped a
+// model, missed the unpriced-with-cache case, or mishandled the negative cache-write term
+// would diverge from the per-model recompute the test reconciles against.
+func cacheSavingsUsage() []usageRow {
+	at := time.Date(2024, 3, 1, 12, 0, 0, 0, time.UTC)
+	priced := func(v float64) *float64 { return &v }
+	return []usageRow{
+		{Model: "claude-opus-4-8", In: 1000, Out: 2000, CR: 500_000, CW: 40_000, At: at, Cost: priced(1.50), DedupKey: "sv_a", SourceOffset: 10},
+		{Model: "claude-opus-4-8", In: 1000, Out: 2000, CR: 500_000, CW: 40_000, At: at, Cost: priced(1.50), DedupKey: "sv_a", SourceOffset: 20},
+		{Model: "gpt-5.5", In: 800, Out: 400, CR: 100_000, CW: 0, At: at.Add(time.Hour), Cost: priced(0.40), DedupKey: "sv_b", SourceOffset: 30},
+		{Model: "some-unpriced-model", In: 500, Out: 250, CR: 200_000, CW: 0, At: at.Add(2 * time.Hour), DedupKey: "sv_c", SourceOffset: 40},
+	}
+}
+
+// TestCacheSavingsRollupMatchesRecompute pins the per-session cache-savings rollup
+// (sessions.total_cache_savings_usd, folded per surviving usage row at parse time) against
+// SessionCacheStats, the from-scratch per-model recompute over the same rows. Pricing is
+// linear in tokens, so the per-row fold and the per-model recompute must land on the same
+// dollars and the same incomplete flag, after the live ingest path and again after a reparse.
+// It is the savings analogue of TestSessionRollupMatchesLedger: a fold that doubles a deduped
+// row, drops a model, mishandles the unpriced-with-cache case, swaps the read and write terms,
+// or fails to zero-and-rebuild on reparse diverges from the recompute here. The rollup is what
+// the session header's Cache tile now reads in O(1), so this is the guard that the O(1) tile
+// shows the same figure the per-row scan would.
+func TestCacheSavingsRollupMatchesRecompute(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	user, err := st.Register(ctx, "grace", "h", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	proj, err := st.UpsertProject(ctx, "github.com/ada/savings", "github.com", "ada", "savings", "savings", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	msgs := []store.MessageDelta{{Ordinal: 0, Role: "user", Content: "go"}}
+
+	// reconcile pins the rollup to the independent recompute for one session, so a failure
+	// says which phase (ingest or reparse) and which session broke it.
+	reconcile := func(t *testing.T, id int64, when string) {
+		t.Helper()
+		d, err := st.SessionDetailByID(ctx, id)
+		if err != nil {
+			t.Fatalf("%s: session detail %d: %v", when, id, err)
+		}
+		recompute, err := st.SessionCacheStats(ctx, id)
+		if err != nil {
+			t.Fatalf("%s: session cache stats %d: %v", when, id, err)
+		}
+		if math.Abs(d.TotalCacheSavingsUSD-recompute.SavingsUSD) > 1e-9 {
+			t.Errorf("%s: session %d rollup savings %v != recompute %v", when, id, d.TotalCacheSavingsUSD, recompute.SavingsUSD)
+		}
+		if d.CacheSavingsIncomplete != recompute.SavingsIncomplete {
+			t.Errorf("%s: session %d rollup incomplete %v != recompute %v", when, id, d.CacheSavingsIncomplete, recompute.SavingsIncomplete)
+		}
+	}
+
+	sMixed, reduceMixed := ingestSession(t, st, user.ID, proj, "claude", "s-mixed", msgs, cacheSavingsUsage())
+	sEmpty, reduceEmpty := ingestSession(t, st, user.ID, proj, "claude", "s-empty", msgs, nil)
+
+	reconcile(t, sMixed, "after ingest")
+	reconcile(t, sEmpty, "after ingest")
+
+	// Beyond reconciling with the oracle, pin the boundary values directly: the mixed session
+	// saves real money from its priced models yet flags incomplete for the unpriced one, and
+	// the empty session is a complete zero rather than a misleading incomplete or non-zero.
+	dMixed, err := st.SessionDetailByID(ctx, sMixed)
+	if err != nil {
+		t.Fatalf("mixed detail: %v", err)
+	}
+	if !dMixed.CacheSavingsIncomplete {
+		t.Error("mixed session should flag cache_savings_incomplete: an unpriced model carried cache reads")
+	}
+	if dMixed.TotalCacheSavingsUSD <= 0 {
+		t.Errorf("mixed session should have a positive saving from its priced cache reads; got %v", dMixed.TotalCacheSavingsUSD)
+	}
+	dEmpty, err := st.SessionDetailByID(ctx, sEmpty)
+	if err != nil {
+		t.Fatalf("empty detail: %v", err)
+	}
+	if dEmpty.CacheSavingsIncomplete || dEmpty.TotalCacheSavingsUSD != 0 {
+		t.Errorf("empty session should carry a zero complete saving; got %v incomplete=%v", dEmpty.TotalCacheSavingsUSD, dEmpty.CacheSavingsIncomplete)
+	}
+
+	// Reparse both through the identical fold: the reset must zero the saving and its flag and
+	// the rebuild must re-fold to the same figure, so the rollup does not double or drift.
+	for _, s := range []struct {
+		id     int64
+		reduce store.ReduceFunc
+	}{{sMixed, reduceMixed}, {sEmpty, reduceEmpty}} {
+		if err := st.ReparseSession(ctx, s.id, ingestVersion, s.reduce); err != nil {
+			t.Fatalf("reparse session %d: %v", s.id, err)
+		}
+		reconcile(t, s.id, "after reparse")
 	}
 }
 

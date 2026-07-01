@@ -127,13 +127,19 @@ func (s *Store) cacheStats(ctx context.Context, q querier, f AnalyticsFilter) (C
 	return cacheStatsFrom(mrows), nil
 }
 
-// SessionCacheStats computes one session's cache effectiveness. Unlike the scoped
-// CacheStats it counts ALL the session's usage, dated or not, so its prompt totals
-// match the session's token rollups (sessions.total_*) that the session header renders
-// beside it; the scoped path keeps the dated guard to match the time-bounded panel
-// instead. That mirrors the one documented rollup-versus-analytics gap the cost and
-// token figures already carry: a per-session figure counts every usage row, an
-// analytics figure counts only the dated rows it can plot.
+// SessionCacheStats recomputes one session's cache effectiveness by scanning its usage
+// rows and pricing per model. Unlike the scoped CacheStats it counts ALL the session's
+// usage, dated or not, so its prompt totals match the session's token rollups
+// (sessions.total_*); the scoped path keeps the dated guard to match the time-bounded
+// panel instead. That mirrors the one documented rollup-versus-analytics gap the cost and
+// token figures already carry: a per-session figure counts every usage row, an analytics
+// figure counts only the dated rows it can plot.
+//
+// The session header no longer calls this on the hot path: it reads the same figure off
+// the total_cache_savings_usd rollup (folded per row at parse time), which is O(1) rather
+// than a per-refresh scan. This full recompute stays as the independent oracle the
+// reconciliation test prices the rollup against, so a drift between the parse-time fold and
+// a from-scratch per-model recompute fails a test rather than shipping a wrong tile.
 func (s *Store) SessionCacheStats(ctx context.Context, sessionID int64) (CacheStats, error) {
 	rows, err := s.Pool.Query(ctx,
 		`SELECT model,

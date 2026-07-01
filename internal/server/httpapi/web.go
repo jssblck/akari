@@ -285,16 +285,26 @@ func (s *Server) sessionView(r *http.Request, id int64) (store.SessionDetail, []
 	return d, msgs, web.ToolsByOrdinal(tools), web.AttachmentsByOrdinal(atts), subs, nil
 }
 
-// sessionHeaderStats loads the derived stat-tile inputs the session instrument header
+// sessionHeaderStats builds the derived stat-tile inputs the session instrument header
 // renders: the session's all-usage cache effectiveness and its stored quality signals.
-// Both session-page handlers and the live body fragment share it, so the header reads
-// the same way on first load and on every SSE refresh.
-func (s *Server) sessionHeaderStats(ctx context.Context, id int64) (web.HeaderStats, error) {
-	cache, err := s.Store.SessionCacheStats(ctx, id)
-	if err != nil {
-		return web.HeaderStats{}, err
+// Both session-page handlers and the live body fragment share it, so the header reads the
+// same way on first load and on every SSE refresh.
+//
+// The Cache tile comes straight off the already-loaded SessionDetail rollups (the token
+// classes plus the parse-time cache-savings fold), so it costs nothing here. That is the
+// point of the rollup: the live body re-renders on every SSE update, and reading the tile
+// from the row the caller already holds keeps a long session's K refreshes linear rather
+// than rescanning its K usage rows each time. Only the stored signals still need a read.
+func (s *Server) sessionHeaderStats(ctx context.Context, d store.SessionDetail) (web.HeaderStats, error) {
+	cache := store.CacheStats{
+		Input:             d.TotalInput,
+		Output:            d.TotalOutput,
+		CacheRead:         d.TotalCacheRead,
+		CacheWrite:        d.TotalCacheWrite,
+		SavingsUSD:        d.TotalCacheSavingsUSD,
+		SavingsIncomplete: d.CacheSavingsIncomplete,
 	}
-	sig, err := s.Store.SessionSignalsByID(ctx, id)
+	sig, err := s.Store.SessionSignalsByID(ctx, d.ID)
 	if err != nil {
 		return web.HeaderStats{}, err
 	}
@@ -323,7 +333,7 @@ func (s *Server) handleSessionPage(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load session."))
 		return
 	}
-	hs, err := s.sessionHeaderStats(r.Context(), id)
+	hs, err := s.sessionHeaderStats(r.Context(), d)
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load session."))
 		return
@@ -558,7 +568,7 @@ func (s *Server) handlePublicSession(w http.ResponseWriter, r *http.Request) {
 			publicSubs = append(publicSubs, sub)
 		}
 	}
-	hs, err := s.sessionHeaderStats(r.Context(), d.ID)
+	hs, err := s.sessionHeaderStats(r.Context(), d)
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load session."))
 		return
@@ -585,10 +595,11 @@ func (s *Server) handleSessionBody(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Could not load session.", http.StatusInternalServerError)
 		return
 	}
-	// The live fragment re-renders the stat header on every SSE update, so the Cache
-	// and Quality tiles re-read here too and track the session's growing usage and
-	// shifting outcome in step with the Tokens tile beside them.
-	hs, err := s.sessionHeaderStats(r.Context(), id)
+	// The live fragment re-renders the stat header on every SSE update. The Cache tile now
+	// comes off the same SessionDetail the body already loaded, so it tracks the session's
+	// growing usage in step with the Tokens tile beside it without a second read; only the
+	// stored quality signals are fetched here.
+	hs, err := s.sessionHeaderStats(r.Context(), d)
 	if err != nil {
 		http.Error(w, "Could not load session.", http.StatusInternalServerError)
 		return

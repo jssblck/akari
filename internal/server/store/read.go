@@ -77,7 +77,10 @@ type SessionSummary struct {
 	UpdatedAt        *time.Time
 }
 
-// SessionDetail adds the owning project to a session summary.
+// SessionDetail adds the owning project to a session summary, plus the rolled-up
+// prompt-cache saving the session header's Cache tile renders. The saving lives only on
+// the detail (not the list summary): the session list shows no cache tile, so the extra
+// per-model-priced rollup rides only the single-session read that needs it.
 type SessionDetail struct {
 	SessionSummary
 	OwnerID       int64
@@ -88,6 +91,13 @@ type SessionDetail struct {
 	Cwd           string
 	ParentID      *int64
 	ParserVersion int
+	// TotalCacheSavingsUSD is the session's rolled-up prompt-cache saving (folded at parse
+	// time beside total_cost_usd), so the Cache tile reads it in O(1) instead of scanning
+	// usage_events on every live refresh. CacheSavingsIncomplete flags that some cached
+	// volume rode an unpriced model, so the figure is partial (and, unlike cost, not a clean
+	// lower bound: an omitted model's saving can be either sign).
+	TotalCacheSavingsUSD   float64
+	CacheSavingsIncomplete bool
 }
 
 // Message is one transcript row for rendering.
@@ -854,7 +864,8 @@ func (s *Store) scanDetail(ctx context.Context, where string, arg any) (SessionD
 		        s.total_cache_write_tokens, s.total_cache_read_tokens,
 		        s.total_cost_usd, s.cost_incomplete, s.visibility, s.public_id,
 		        s.started_at, s.ended_at, s.updated_at,
-		        s.user_id, s.project_id, p.remote_key, p.display_name, p.kind, s.cwd, s.parent_session_id, s.parser_version
+		        s.user_id, s.project_id, p.remote_key, p.display_name, p.kind, s.cwd, s.parent_session_id, s.parser_version,
+		        s.total_cache_savings_usd, s.cache_savings_incomplete
 		   FROM sessions s
 		   JOIN users u ON u.id = s.user_id
 		   JOIN projects p ON p.id = s.project_id
@@ -865,7 +876,8 @@ func (s *Store) scanDetail(ctx context.Context, where string, arg any) (SessionD
 		&d.TotalInput, &d.TotalOutput, &d.TotalCacheWrite, &d.TotalCacheRead,
 		&d.TotalCostUSD, &d.CostIncomplete, &d.Visibility, &d.PublicID,
 		&d.StartedAt, &d.EndedAt, &d.UpdatedAt,
-		&d.OwnerID, &d.ProjectID, &d.ProjectKey, &d.ProjectName, &d.ProjectKind, &d.Cwd, &d.ParentID, &d.ParserVersion)
+		&d.OwnerID, &d.ProjectID, &d.ProjectKey, &d.ProjectName, &d.ProjectKind, &d.Cwd, &d.ParentID, &d.ParserVersion,
+		&d.TotalCacheSavingsUSD, &d.CacheSavingsIncomplete)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return SessionDetail{}, ErrNotFound
 	}

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jssblck/akari/internal/pricing"
 )
 
 // parseBatchBytes bounds how much raw content one AdvanceProjection call parses
@@ -138,6 +139,16 @@ type appliedDelta struct {
 	CacheRead         int64
 	CostUSD           float64
 	CostIncomplete    bool
+	// CacheSavingsUSD is the prompt-cache dollars the surviving rows saved versus paying
+	// the uncached input rate for the same cached volume, priced per model (the rate gap
+	// differs by family and is negative on a Claude cache write). It folds into the session
+	// rollup like CostUSD so the session header's Cache tile reads one row rather than
+	// rescanning usage_events on every live refresh. CacheSavingsIncomplete is sticky like
+	// CostIncomplete: set when a surviving row carried cached volume on an unpriced model,
+	// so that row's saving is omitted. Unlike cost it is not a clean lower bound (the
+	// omitted term can be either sign), which the UI reflects as "partial" rather than "+".
+	CacheSavingsUSD        float64
+	CacheSavingsIncomplete bool
 }
 
 // roleUser is the message role that counts toward user_message_count. The reducer
@@ -460,6 +471,16 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 			// total is a partial sum and the flag says so.
 			applied.CostIncomplete = true
 		}
+		// Fold the prompt-cache saving the same way, over the same surviving rows. Pricing
+		// is linear in tokens, so summing each row's saving equals summing the model's
+		// grouped totals (what SessionCacheStats does over the whole session), which is what
+		// lets the rollup and that per-model recompute reconcile exactly. Cost is a stored
+		// per-row figure; the saving is not, so it is priced here rather than read off the row.
+		if saving, ok := pricing.CacheSavings(u.Model, int64(u.CacheRead), int64(u.CacheWrite)); ok {
+			applied.CacheSavingsUSD += saving
+		} else if u.CacheRead > 0 || u.CacheWrite > 0 {
+			applied.CacheSavingsIncomplete = true
+		}
 	}
 	// Attachments carry no rollup column, so they do not fold into appliedDelta; they
 	// are inserted here for their blob references and metadata. Like a tool body each
@@ -505,8 +526,10 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 // inserted, not from a pre-dedup per-region count, so the rollups equal the ledger
 // (sessions.total_* == sum over usage_events, message_count == count of messages
 // rows) for every agent. The span widens by LEAST/GREATEST (both ignore NULLs, so
-// a region with no timestamps leaves the bounds unchanged); cost_incomplete is
-// sticky once any surviving unpriced usage row is seen.
+// a region with no timestamps leaves the bounds unchanged); cost_incomplete and
+// cache_savings_incomplete are both sticky once any surviving unpriced usage row is
+// seen. total_cache_savings_usd folds like total_cost_usd, so the session header's Cache
+// tile reads the saving off this one row rather than rescanning usage_events per refresh.
 func applyAggregates(ctx context.Context, tx pgx.Tx, sessionID int64, parserVersion int, a appliedDelta, started, ended time.Time) error {
 	_, err := tx.Exec(ctx,
 		`UPDATE sessions SET
@@ -518,14 +541,17 @@ func applyAggregates(ctx context.Context, tx pgx.Tx, sessionID int64, parserVers
 		   total_cache_read_tokens = total_cache_read_tokens + $7,
 		   total_cost_usd = total_cost_usd + $8,
 		   cost_incomplete = cost_incomplete OR $9,
-		   started_at = LEAST(started_at, $10),
-		   ended_at = GREATEST(ended_at, $11),
-		   parser_version = $12,
+		   total_cache_savings_usd = total_cache_savings_usd + $10,
+		   cache_savings_incomplete = cache_savings_incomplete OR $11,
+		   started_at = LEAST(started_at, $12),
+		   ended_at = GREATEST(ended_at, $13),
+		   parser_version = $14,
 		   updated_at = now()
 		 WHERE id = $1`,
 		sessionID, a.MessagesAdded, a.UserMessagesAdded,
 		a.Input, a.Output, a.CacheWrite, a.CacheRead,
 		a.CostUSD, a.CostIncomplete,
+		a.CacheSavingsUSD, a.CacheSavingsIncomplete,
 		nullTime(started), nullTime(ended), parserVersion)
 	if err != nil {
 		return fmt.Errorf("update aggregates for session %d: %w", sessionID, err)
@@ -689,6 +715,7 @@ func resetSessionAggregates(ctx context.Context, tx pgx.Tx, sessionID int64) err
 		   total_input_tokens = 0, total_output_tokens = 0,
 		   total_cache_write_tokens = 0, total_cache_read_tokens = 0,
 		   total_cost_usd = 0, cost_incomplete = FALSE,
+		   total_cache_savings_usd = 0, cache_savings_incomplete = FALSE,
 		   started_at = NULL, ended_at = NULL,
 		   updated_at = now()
 		 WHERE id = $1`, sessionID)
