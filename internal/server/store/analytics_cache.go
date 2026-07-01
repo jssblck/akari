@@ -306,6 +306,24 @@ func (s *Store) reconcileCacheSavingsPricingIfNeeded(ctx context.Context) error 
 	return nil
 }
 
+// cacheSavingsPricedVersion reads the singleton pricing marker (cache_savings_priced_version), the
+// version of the rate table the cache-savings rollups were last reconciled to. A missing singleton (a
+// database before migration 0013) reads as 0, below any real version. Callers compare it to
+// pricing.Version: equal means the stored rollups are priced at this binary's rates and are
+// authoritative, and any difference means a pricing rollout is in flight so a stored rollup may sit at
+// a different rate table than a live recompute would use.
+func (s *Store) cacheSavingsPricedVersion(ctx context.Context) (int, error) {
+	var priced int
+	if err := s.Pool.QueryRow(ctx,
+		`SELECT cache_savings_priced_version FROM parse_meta WHERE id = TRUE`).Scan(&priced); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("read pricing marker: %w", err)
+	}
+	return priced, nil
+}
+
 // backfillCacheSavingsForSession recomputes one candidate session's cache saving from its
 // usage_events and writes it authoritatively under the session row lock, so a backfill write can
 // never clobber the live parse fold. The fold (applyAggregates) increments total_cache_savings_usd
@@ -377,11 +395,16 @@ func (s *Store) backfillCacheSavingsForSession(ctx context.Context, id int64) (b
 }
 
 // cacheSavingsBackfillBatch returns up to limit candidate session ids after afterID, in id
-// order: cache-bearing sessions not yet marked cache_savings_backfilled. The cheap flag predicate
-// is evaluated before the EXISTS probe, so a session already backfilled is skipped without
-// touching usage_events. The id cursor makes the whole backfill one forward walk of the sessions
-// id space, and because backfilling flips the flag, a session is visited at most once even though
-// its priced saving may legitimately be zero.
+// order: cache-bearing sessions not yet marked cache_savings_backfilled. The partial index
+// idx_sessions_cache_savings_candidate (WHERE NOT cache_savings_backfilled) carries only the
+// candidate rows in id order, so this seeks past the id cursor over the candidates alone rather
+// than scanning the whole sessions table, and a steady-state pass with no candidates is an O(1)
+// index probe rather than an O(total sessions) walk. That matters because the drain runs on the
+// periodic settle loop, so a full scan per tick would be quadratic as history grows. The EXISTS
+// probe on usage_events is a post-filter on the (few) indexed candidates, so a candidate with no
+// cache volume is dropped without a wasted price. The id cursor makes the whole backfill one
+// forward walk of the candidate id space, and because backfilling flips the flag, a session is
+// visited at most once even though its priced saving may legitimately be zero.
 func (s *Store) cacheSavingsBackfillBatch(ctx context.Context, afterID int64, limit int) ([]int64, error) {
 	rows, err := s.Pool.Query(ctx,
 		`SELECT s.id

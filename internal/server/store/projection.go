@@ -549,15 +549,18 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 // seen. total_cache_savings_usd folds like total_cost_usd, so the session header's Cache
 // tile reads the saving off this one row rather than rescanning usage_events per refresh.
 //
-// The one wrinkle is a pricing rolling deploy. This fold prices the region's saving with the
-// running binary's rate table (CacheSavings, in applyDelta), so if a newer binary has advanced
-// cache_savings_priced_version past this one, an old binary that ingests or appends cache-bearing
-// usage here would fold an old-rate saving into the rollup and leave it flagged authoritative, out
-// of the newer binary's reprice reach (its reconcile already ran before this append). So when the
-// pricing marker is ahead and this region carried cache volume, the fold drops cache_savings_backfilled
-// to false, returning the session to the backfill candidate set so the newer binary re-prices the
-// whole saving from usage_events at its rates. In steady state (marker current) the flag is untouched
-// and the O(1) rollup stays authoritative.
+// The one wrinkle is a pricing rolling deploy. This fold prices the region's saving with the running
+// binary's rate table (CacheSavings, in applyDelta), so a fold is consistent with the stored rollup
+// only when the corpus is priced at that same table, which the singleton marker records as
+// cache_savings_priced_version == pricing.Version. When the marker differs, in either direction, a fold
+// onto a backfilled=true row would mix rate tables and leave the row flagged authoritative. Marker
+// ahead of this binary: a newer binary priced the corpus at newer rates, so this older binary's fold
+// would splice an old-rate saving in. Marker behind: this newer binary's reconcile has not run yet, so
+// the row is still at the OLD rates while this fold adds a new-rate saving. So when this region carried
+// cache volume and the marker is not equal to pricing.Version, the fold drops cache_savings_backfilled
+// to false, returning the session to the backfill candidate set for the reconcile and drain to re-price
+// the whole saving from usage_events at the settled rate table. In steady state (marker current) the
+// flag is untouched and the O(1) rollup stays authoritative.
 func applyAggregates(ctx context.Context, tx pgx.Tx, sessionID int64, parserVersion int, a appliedDelta, started, ended time.Time) error {
 	regionHasCache := a.CacheRead > 0 || a.CacheWrite > 0
 	_, err := tx.Exec(ctx,
@@ -572,11 +575,13 @@ func applyAggregates(ctx context.Context, tx pgx.Tx, sessionID int64, parserVers
 		   cost_incomplete = cost_incomplete OR $9,
 		   total_cache_savings_usd = total_cache_savings_usd + $10,
 		   cache_savings_incomplete = cache_savings_incomplete OR $11,
-		   -- Drop the authoritative flag when this cache-bearing region was priced under a rate
-		   -- table a newer binary has already superseded, so that binary re-prices it; the COALESCE
-		   -- treats the pre-migration no-singleton case as current so the flag is left alone.
+		   -- Drop the authoritative flag when this cache-bearing region was folded while the corpus
+		   -- pricing marker differs from this binary's pricing.Version (a rollout in either direction),
+		   -- so the reconcile and drain re-price the whole saving at the settled rate table. The COALESCE
+		   -- reads a missing singleton as 0, which differs from any real version, so the safe direction
+		   -- (treat as in-flight, drop the flag) also covers a pre-migration database.
 		   cache_savings_backfilled = cache_savings_backfilled
-		     AND NOT ($15 AND COALESCE((SELECT cache_savings_priced_version FROM parse_meta WHERE id = TRUE), 0) > $16),
+		     AND NOT ($15 AND COALESCE((SELECT cache_savings_priced_version FROM parse_meta WHERE id = TRUE), 0) <> $16),
 		   started_at = LEAST(started_at, $12),
 		   ended_at = GREATEST(ended_at, $13),
 		   parser_version = $14,

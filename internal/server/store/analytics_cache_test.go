@@ -266,16 +266,19 @@ func TestSessionDetailBackfillsUnbackfilledCacheSavingsOnRead(t *testing.T) {
 	}
 }
 
-// TestSessionDetailFlagsCacheSavingsPartialWhenPricingMarkerAhead pins the read-path half of the
-// pricing rolling-deploy fix. When a newer binary has won the pricing marker, the on-demand backfill in
-// scanDetail bows out (leaving cache_savings_backfilled=false) so the newer binary re-prices at its
-// rates. The read then serves the stored rollup (the running old-rate fold applyAggregates maintains)
-// flagged partial, rather than recompute from usage_events on every read: that recompute is on the SSE
+// TestSessionDetailFlagsCacheSavingsPartialWhenPricingMarkerDiffers pins the read-path half of the
+// pricing rolling-deploy fix. A stored total_cache_savings_usd is authoritative only while the corpus
+// pricing marker equals this binary's pricing.Version. Any difference means a pricing rollout is in
+// flight and the rollup may sit at a different rate table than a live recompute, so scanDetail serves it
+// flagged partial and does NOT recompute from usage_events on the read: that recompute is on the SSE
 // body path, so an O(K) scan per refresh would be O(K^2) over a live session, the cost the O(1) rollup
-// exists to avoid. The test seeds a candidate whose stored rollup differs from a fresh recompute,
-// advances the marker, reads the detail, and asserts the read returns the stored value flagged partial
-// (proving no per-read recompute) while leaving the stored rollup and the false flag untouched.
-func TestSessionDetailFlagsCacheSavingsPartialWhenPricingMarkerAhead(t *testing.T) {
+// exists to avoid. This covers both directions with two sessions carrying identical usage:
+//   - marker ahead, a backfilled=false candidate: the on-demand backfill bows out and the read serves
+//     the stored old-rate rollup flagged partial, leaving the flag and rollup for the newer binary.
+//   - marker behind, a backfilled=true row already priced at the old rates: still served partial, not
+//     exact. This is the case the pre-fix early return got wrong, trusting the flag over the marker and
+//     pairing an old-rate saving with current-rate token figures on the same tile.
+func TestSessionDetailFlagsCacheSavingsPartialWhenPricingMarkerDiffers(t *testing.T) {
 	// Not parallel: it writes the singleton parse_meta pricing marker, shared process-wide state on
 	// this store's database.
 	st := storetest.NewStore(t)
@@ -290,48 +293,79 @@ func TestSessionDetailFlagsCacheSavingsPartialWhenPricingMarkerAhead(t *testing.
 		t.Fatalf("project: %v", err)
 	}
 
-	s := seedSessionWithStats(t, st, admin.ID, proj, "claude", "readmarker", 0, 0, 0)
-	seedUsageCache(t, st, s, "claude-opus-4-8", 1, 200_000, 100_000, 800_000, 0, 1, "rm-1")
-	recompute, err := st.SessionCacheStats(ctx, s)
+	// Marker ahead: a newer binary won the marker. A backfilled=false candidate whose stored rollup is a
+	// known value distinct from a fresh recompute, standing in for the running old-rate fold.
+	sAhead := seedSessionWithStats(t, st, admin.ID, proj, "claude", "readmarker-ahead", 0, 0, 0)
+	seedUsageCache(t, st, sAhead, "claude-opus-4-8", 1, 200_000, 100_000, 800_000, 0, 1, "rma-1")
+	recompute, err := st.SessionCacheStats(ctx, sAhead)
 	if err != nil {
 		t.Fatalf("recompute: %v", err)
 	}
 	if recompute.SavingsUSD <= 0 || recompute.SavingsIncomplete {
 		t.Fatalf("test needs a positive, complete recompute saving, got %v incomplete=%v", recompute.SavingsUSD, recompute.SavingsIncomplete)
 	}
-
-	// A candidate (backfilled=false) whose stored rollup is a known value distinct from a fresh
-	// recompute, standing in for the running old-rate fold. A newer pricing binary has won the marker.
-	markNeedsCacheBackfill(t, st, ctx, s)
-	const stored = 42.0
-	if math.Abs(stored-recompute.SavingsUSD) < 1e-6 {
-		t.Fatalf("test setup is vacuous: the seeded stored value %v equals the recompute %v", stored, recompute.SavingsUSD)
+	markNeedsCacheBackfill(t, st, ctx, sAhead)
+	const storedAhead = 42.0
+	if math.Abs(storedAhead-recompute.SavingsUSD) < 1e-6 {
+		t.Fatalf("test setup is vacuous: the seeded ahead value %v equals the recompute %v", storedAhead, recompute.SavingsUSD)
 	}
 	if _, err := st.Pool.Exec(ctx,
-		"UPDATE sessions SET total_cache_savings_usd = $2 WHERE id = $1", s, stored); err != nil {
-		t.Fatalf("seed stored rollup: %v", err)
+		"UPDATE sessions SET total_cache_savings_usd = $2 WHERE id = $1", sAhead, storedAhead); err != nil {
+		t.Fatalf("seed ahead rollup: %v", err)
 	}
 	setCacheSavingsPricedVersion(t, st, ctx, pricing.Version+1)
 
-	// The read serves the stored rollup flagged partial, without a per-read recompute.
-	d, err := st.SessionDetailByID(ctx, s)
+	// The read serves the stored rollup flagged partial, without a per-read recompute, and leaves the
+	// candidate untouched for the newer binary to price authoritatively.
+	d, err := st.SessionDetailByID(ctx, sAhead)
 	if err != nil {
-		t.Fatalf("detail: %v", err)
+		t.Fatalf("detail (marker ahead): %v", err)
 	}
-	if math.Abs(d.TotalCacheSavingsUSD-stored) > 1e-9 {
-		t.Errorf("read savings = %v, want the stored rollup %v served as-is (no per-read recompute to %v)", d.TotalCacheSavingsUSD, stored, recompute.SavingsUSD)
+	if math.Abs(d.TotalCacheSavingsUSD-storedAhead) > 1e-9 {
+		t.Errorf("marker-ahead read savings = %v, want the stored rollup %v served as-is (no per-read recompute to %v)", d.TotalCacheSavingsUSD, storedAhead, recompute.SavingsUSD)
 	}
 	if !d.CacheSavingsIncomplete {
 		t.Error("a marker-ahead read must flag the saving partial so the tile presents it as provisional")
 	}
-
-	// The read must not have flipped the flag or rewritten the rollup: the session stays a candidate for
-	// the newer binary to price authoritatively.
-	if backfilledFlag(t, st, ctx, s) {
+	if backfilledFlag(t, st, ctx, sAhead) {
 		t.Error("a marker-ahead read must leave cache_savings_backfilled=false for the newer binary")
 	}
-	if storedNow, _ := storedCacheSavings(t, st, ctx, s); math.Abs(storedNow-stored) > 1e-9 {
-		t.Errorf("marker-ahead read wrote the stored rollup to %v, want %v left for the newer binary", storedNow, stored)
+	if storedNow, _ := storedCacheSavings(t, st, ctx, sAhead); math.Abs(storedNow-storedAhead) > 1e-9 {
+		t.Errorf("marker-ahead read wrote the stored rollup to %v, want %v left for the newer binary", storedNow, storedAhead)
+	}
+
+	// Marker behind: this newer binary's own reconcile has not run yet, so the marker still names the old
+	// rate table. A row already priced authoritatively at those old rates (backfilled=true) with a stored
+	// rollup distinct from a fresh recompute. The read must still flag it partial, because the marker, not
+	// the flag, decides authority; and it must not disturb the row, since the pending reconcile owns
+	// clearing the flag and re-pricing.
+	sBehind := seedSessionWithStats(t, st, admin.ID, proj, "claude", "readmarker-behind", 0, 0, 0)
+	seedUsageCache(t, st, sBehind, "claude-opus-4-8", 1, 200_000, 100_000, 800_000, 0, 1, "rmb-1")
+	const storedBehind = 43.0
+	if math.Abs(storedBehind-recompute.SavingsUSD) < 1e-6 {
+		t.Fatalf("test setup is vacuous: the seeded behind value %v equals the recompute %v", storedBehind, recompute.SavingsUSD)
+	}
+	if _, err := st.Pool.Exec(ctx,
+		"UPDATE sessions SET total_cache_savings_usd = $2, cache_savings_backfilled = true WHERE id = $1", sBehind, storedBehind); err != nil {
+		t.Fatalf("seed old-rate rollup: %v", err)
+	}
+	setCacheSavingsPricedVersion(t, st, ctx, pricing.Version-1)
+
+	d, err = st.SessionDetailByID(ctx, sBehind)
+	if err != nil {
+		t.Fatalf("detail (marker behind): %v", err)
+	}
+	if math.Abs(d.TotalCacheSavingsUSD-storedBehind) > 1e-9 {
+		t.Errorf("marker-behind read savings = %v, want the stored rollup %v served as-is (no per-read recompute to %v)", d.TotalCacheSavingsUSD, storedBehind, recompute.SavingsUSD)
+	}
+	if !d.CacheSavingsIncomplete {
+		t.Error("a marker-behind read of an old-rate row must flag the saving partial, not serve it exact off the backfilled flag")
+	}
+	if !backfilledFlag(t, st, ctx, sBehind) {
+		t.Error("a marker-behind read must not disturb cache_savings_backfilled; the pending reconcile owns clearing it")
+	}
+	if storedNow, _ := storedCacheSavings(t, st, ctx, sBehind); math.Abs(storedNow-storedBehind) > 1e-9 {
+		t.Errorf("marker-behind read wrote the stored rollup to %v, want %v left for the reconcile", storedNow, storedBehind)
 	}
 }
 
@@ -376,8 +410,8 @@ func TestBackfillCacheSavings(t *testing.T) {
 	}
 
 	// The persisted rollup is at the column default before the backfill prices it. Read the
-	// column directly, not through SessionDetailByID: the read-side gate recomputes an
-	// unbackfilled session's saving live (see TestSessionDetailRecomputesUnbackfilledCacheSavings),
+	// column directly, not through SessionDetailByID: the read-side gate prices an
+	// unbackfilled session's saving on demand (see TestSessionDetailBackfillsUnbackfilledCacheSavingsOnRead),
 	// so the tile would already show a nonzero figure; here we are pinning the stored state.
 	for _, id := range []int64{sPriced, sUnpriced, sNoCache} {
 		if v, incomplete := storedCacheSavings(t, st, ctx, id); v != 0 || incomplete {
@@ -868,15 +902,18 @@ func TestReconcileCacheSavingsLocksAlreadyCandidateRow(t *testing.T) {
 	}
 }
 
-// TestLiveFoldDropsBackfilledWhenPricingMarkerAhead pins the live-fold half of the pricing
+// TestLiveFoldDropsBackfilledWhenPricingMarkerDiffers pins the live-fold half of the pricing
 // rolling-deploy fix. applyAggregates prices a region's cache saving with the running binary's rate
-// table, so if a newer binary has advanced cache_savings_priced_version, an old binary that folds
-// cache-bearing usage would leave an old-rate saving flagged authoritative and out of the newer
-// binary's reprice reach. The fold drops cache_savings_backfilled to false in exactly that case, so
-// the newer binary re-prices from usage_events. This test folds a cache-bearing region with the marker
-// current (flag stays authoritative) and again with the marker ahead (flag drops), so it is the marker,
-// not the fold itself, that clears the flag.
-func TestLiveFoldDropsBackfilledWhenPricingMarkerAhead(t *testing.T) {
+// table, so the stored rollup is authoritative only while the corpus marker equals this binary's
+// pricing.Version. If the marker differs in either direction, a cache-bearing fold would otherwise leave
+// a rate-mismatched saving flagged authoritative and out of the reconcile's reprice reach: marker ahead,
+// a newer binary priced the corpus at newer rates and this older binary would splice an old-rate saving
+// in; marker behind, this newer binary's reconcile has not run so the row is still at the old rates while
+// this fold adds a new-rate saving. The fold drops cache_savings_backfilled to false in both cases,
+// returning the session to the candidate set for the reconcile and drain to re-price. This folds a
+// cache-bearing region with the marker current (flag stays authoritative), ahead (flag drops), and
+// behind (flag drops), so it is the marker differing, not the fold itself, that clears the flag.
+func TestLiveFoldDropsBackfilledWhenPricingMarkerDiffers(t *testing.T) {
 	// Not parallel: it writes the singleton parse_meta pricing marker, shared process-wide state on
 	// this store's database.
 	st := storetest.NewStore(t)
@@ -910,6 +947,16 @@ func TestLiveFoldDropsBackfilledWhenPricingMarkerAhead(t *testing.T) {
 	sAhead, _ := ingestSession(t, st, admin.ID, proj, "claude", "lf-ahead", msgs, cacheUsage("lfa-1"))
 	if backfilledFlag(t, st, ctx, sAhead) {
 		t.Error("with a newer pricing marker a cache-bearing fold must clear cache_savings_backfilled so the newer binary re-prices")
+	}
+
+	// Marker behind: this newer binary's own reconcile has not advanced the marker yet, so the corpus is
+	// still at the old rates while this fold prices at the new ones. The fold must likewise drop the flag
+	// so the pending reconcile re-prices the whole saving, rather than leave a mixed-rate rollup
+	// authoritative.
+	setCacheSavingsPricedVersion(t, st, ctx, pricing.Version-1)
+	sBehind, _ := ingestSession(t, st, admin.ID, proj, "claude", "lf-behind", msgs, cacheUsage("lfb-1"))
+	if backfilledFlag(t, st, ctx, sBehind) {
+		t.Error("with the pricing marker behind a cache-bearing fold must clear cache_savings_backfilled so the pending reconcile re-prices")
 	}
 }
 

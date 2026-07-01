@@ -150,7 +150,7 @@ func run() error {
 	if cfg.SignalsSettleInterval > 0 {
 		go func() {
 			defer close(settleDone)
-			runSignalsSettle(rootCtx, st, cfg.SignalsSettleInterval)
+			runSettleMaintenance(rootCtx, st, cfg.SignalsSettleInterval)
 		}()
 	} else {
 		close(settleDone)
@@ -159,9 +159,12 @@ func run() error {
 	// Backfill the per-session cache-savings rollup for any session the parse-time fold never
 	// reached: a session ingested before the column existed whose reparse fails keeps its
 	// usage_events but a zero rollup, which the epoch reparse cannot fix. The saving is a pure
-	// function of usage_events, so this prices it directly, independent of the parse. It is a
-	// self-limiting, idempotent one-shot (not a loop), run in the background so a large first
-	// pass does not delay accepting connections; backfillDone lets shutdown wait for it.
+	// function of usage_events, so this prices it directly, independent of the parse. This
+	// startup pass is a self-limiting, idempotent one-shot (not a loop), run in the background so
+	// a large first pass does not delay accepting connections; backfillDone lets shutdown wait for
+	// it. It is the fast initial catch-up only: runSettleMaintenance re-runs the same drain each
+	// tick, which is what consumes candidates minted after this pass (a pricing rolling deploy
+	// keeps producing them), so a session is never left provisional once the settle loop is on.
 	backfillDone := make(chan struct{})
 	go func() {
 		defer close(backfillDone)

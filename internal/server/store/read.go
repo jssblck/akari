@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/jssblck/akari/internal/pricing"
 )
 
 // ProjectSummary is one row of the projects index: a project plus rolled-up
@@ -908,14 +910,47 @@ func (s *Store) scanDetailRow(ctx context.Context, where string, arg any) (Sessi
 // saving, persists it, and flips the flag (safe against the live parse fold), after which this read
 // and every later one serve the O(1) rollup from one consistent scanDetailRow snapshot.
 //
-// The one case the backfill leaves the flag unset is a pricing rolling deploy: when a newer binary has
-// won the pricing marker, backfillCacheSavingsForSession bows out so that binary re-prices at its
-// rates, so the flag stays false. This read then flags the saving partial rather than pay a per-read
-// recompute (see below), keeping the O(1) rollup contract on the SSE body path intact.
+// A stored rollup is authoritative only when the corpus has been priced at THIS binary's rate table,
+// which the singleton pricing marker records: cache_savings_priced_version == pricing.Version. When
+// the marker differs, a pricing rollout is in flight in one of two directions, and either way a
+// backfilled=true row may hold a saving at a different rate table than a live recompute would produce,
+// so the rollup is provisional. A newer binary is ahead (marker > pricing.Version): the stored value
+// was priced at the newer rates and this older binary must not present it as its own exact figure. Or
+// this newer binary's own reconcile has not run yet (marker < pricing.Version): existing rows are
+// still at the OLD rates while a live recompute here uses the new ones. In both cases the read serves
+// the stored value flagged partial rather than pay a per-read recompute: this is the session-body SSE
+// path, so an O(K) usage_events scan per refresh would be O(K^2) over a live session, the exact cost
+// the total_cache_savings_usd rollup exists to avoid. The marker check is one O(1) singleton read, and
+// the periodic reconcile re-prices the corpus to pricing.Version within a settle tick, so the partial
+// flag clears itself; until then it reads as provisional (the tile appends "partial") rather than
+// asserting a figure a recompute would contradict.
+//
+// When the marker is current (the steady state), the rollup is authoritative once cache_savings_backfilled
+// is set. A session that predates the column is seeded at 0 and left unbackfilled until it is priced,
+// and the startup BackfillCacheSavings runs asynchronously, so a detail read can arrive before it.
+// Serving the seeded value would put a wrong saving on the very session a reader opened, so this
+// backfills the row once on demand, under the same locked primitive the startup pass uses:
+// backfillCacheSavingsForSession prices the saving, persists it, and flips the flag (safe against the
+// live parse fold), after which this read and every later one serve the O(1) rollup from one consistent
+// scanDetailRow snapshot. Recomputing on every read, or reading the token split from the rollup while
+// recomputing only the saving from usage_events, are both rejected for the same reasons: the first is
+// O(K^2) under SSE, the second lets a concurrent append tear the tile by pairing an old split with a
+// newer saving.
 func (s *Store) scanDetail(ctx context.Context, where string, arg any) (SessionDetail, error) {
+	marker, err := s.cacheSavingsPricedVersion(ctx)
+	if err != nil {
+		return SessionDetail{}, err
+	}
 	d, backfilled, err := s.scanDetailRow(ctx, where, arg)
 	if err != nil {
 		return SessionDetail{}, err
+	}
+	if marker != pricing.Version {
+		// A pricing rollout is in flight (marker ahead or behind pricing.Version), so the stored rollup
+		// may be at a different rate table than a live recompute. Serve it flagged partial, from the same
+		// single row read as the token split so the two never tear, and do NOT recompute on this hot path.
+		d.CacheSavingsIncomplete = true
+		return d, nil
 	}
 	if backfilled {
 		return d, nil
@@ -933,16 +968,9 @@ func (s *Store) scanDetail(ctx context.Context, where string, arg any) (SessionD
 		return SessionDetail{}, err
 	}
 	if !backfilled {
-		// A pricing rolling deploy: a newer binary won the marker, so backfillCacheSavingsForSession
-		// bowed out (leaving the flag false) to let that binary re-price at its rates. Do NOT recompute
-		// the saving here. This read is the session-body SSE path, so an O(K) usage_events scan per
-		// refresh would be O(K^2) over a live session, the exact cost the total_cache_savings_usd rollup
-		// exists to avoid. The stored value is not stale: applyAggregates keeps folding a live session's
-		// regions at this binary's rates and, seeing the marker ahead, drops the authoritative flag
-		// rather than the value, so what is stored is a correct saving at the running binary's rates.
-		// It is only provisional because the newer binary will re-price it at its rates, so flag it
-		// partial (the tile appends "partial", as it does for a genuinely incomplete saving) and serve
-		// the rollup unchanged, from the same single row read as the token split so the two never tear.
+		// The marker moved between the read above and the backfill (a concurrent reconcile winning the
+		// marker), so backfillCacheSavingsForSession bowed out. Serve the stored value flagged partial for
+		// the same reason as the marker-in-flight branch above rather than recompute on the SSE path.
 		d.CacheSavingsIncomplete = true
 	}
 	return d, nil
