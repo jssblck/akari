@@ -42,3 +42,24 @@ AKARI_TEST_DATABASE_URL=postgres://akari:akari@localhost:5432/akari go test ./..
 `eph up` brings up Postgres plus the server and seeds demo data; sign in as
 `grace` (admin) with password `akari-dev`. See README "Worktree-based development
 with eph" and "Example data for development".
+
+## Signals and the reparse epoch
+
+Per-session signals (outcome, quality score and grade, tool health, prompt
+hygiene, context health) live in `session_signals`, derived from the projection
+and rebuilt on catch-up or reparse. They sit OUTSIDE the `sessions.total_* ==
+sum(usage_events)` invariant: a new signal derives from the same rows without
+touching the rollups. Three version constants gate the machinery, and forgetting
+one leaves a half-migrated corpus:
+
+- `parse.Version` and `parse.Epoch` (`internal/server/parse`): bump both when
+  parser or reducer output changes (a new or removed row, a changed field, a
+  reprice). The golden-fixtures test (`internal/server/parse/epoch_test.go`)
+  fails by name and tells you to bump the epoch and refresh the snapshots with
+  `go test ./internal/server/parse -run TestGoldenProjection -update`.
+- `quality.Version` (`internal/quality`): bump when the signal set or the scoring
+  changes, so the analytics count only rebuilt rows. The `Epoch` bump is what
+  backfills the corpus, and a reparse re-stamps every row at the running version.
+
+A new signal should default to a value that reads as "unmeasured" (NULL, or a
+zero the aggregate excludes) until the backfill reparse fills it.
