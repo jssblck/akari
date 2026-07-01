@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/jssblck/akari/internal/config"
 	"github.com/jssblck/akari/internal/server/reparse"
 	"github.com/jssblck/akari/internal/server/store"
@@ -20,6 +22,12 @@ type Server struct {
 	// mcp is the Streamable-HTTP handler for the remote MCP server, built once and
 	// shared across requests; handleMCP wraps it per request with the bearer check.
 	mcp http.Handler
+	// ogRender coalesces concurrent on-demand renders of the same user's Open Graph
+	// card, keyed by user id. A crawler burst (or several unfurls landing at once on a
+	// cache miss or an expired card) would otherwise run the full year-window analytics
+	// and raster once per request; singleflight lets one render run while the rest wait
+	// for and serve its result.
+	ogRender singleflight.Group
 }
 
 // New builds a Server. The reparse service is shared with the startup auto-run and
@@ -104,9 +112,10 @@ func (s *Server) Routes() http.Handler {
 	// one account, and gated during a reparse like the public session view (it shows
 	// parsed data).
 	mux.HandleFunc("GET /u/{username}", s.gatePublicParsed(s.handlePublicOverview))
-	// The Open Graph preview card for that overview. It serves pre-rendered PNG
-	// bytes (rendered at publish and refreshed daily), so it is not reparse-gated:
-	// the more specific pattern wins over /u/{username} for this exact path.
+	// The Open Graph preview card for that overview. It serves PNG bytes rendered on
+	// demand and held in a TTL cache (see handlePublicOverviewOGImage), so it is not
+	// reparse-gated: the more specific pattern wins over /u/{username} for this exact
+	// path.
 	mux.HandleFunc("GET /u/{username}/og.png", s.handlePublicOverviewOGImage)
 	mux.HandleFunc("GET /login", s.handleLoginPage)
 	mux.HandleFunc("POST /login", s.handleLoginForm)

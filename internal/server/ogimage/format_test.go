@@ -2,8 +2,6 @@ package ogimage
 
 import (
 	"testing"
-
-	"github.com/jssblck/akari/internal/server/store"
 )
 
 func TestLevelFor(t *testing.T) {
@@ -30,80 +28,29 @@ func TestLevelFor(t *testing.T) {
 	}
 }
 
-func TestGroupThousands(t *testing.T) {
+func TestFmtScale(t *testing.T) {
 	cases := map[int64]string{
-		0:          "0",
-		42:         "42",
-		999:        "999",
-		1000:       "1,000",
-		1234567:    "1,234,567",
-		1000000000: "1,000,000,000",
+		0:                 "0",       // raw below 1000
+		42:                "42",      // raw
+		999:               "999",     // raw, just under the first suffix
+		1000:              "1K",      // exact unit, no trailing zeros
+		1500:              "1.5K",    // one decimal, trailing zeros trimmed
+		1696:              "1.696K",  // three decimals
+		12345:             "12.345K", //
+		1_999:             "1.999K",  //
+		1_000_000:         "1M",      // exact million
+		2_000_000:         "2M",      //
+		1_050_000:         "1.05M",   // interior zero kept, trailing zero trimmed
+		355_300_000:       "355.3M",  //
+		1_000_000_000:     "1B",      // exact billion
+		12_137_766_601:    "12.137B", // rounds down (drops .766601)
+		12_137_999_999:    "12.137B", // still rounds down, never up
+		1_000_000_000_000: "1T",      // exact trillion
+		1_500_000_000_000: "1.5T",    //
 	}
 	for in, want := range cases {
-		if got := groupThousands(in); got != want {
-			t.Errorf("groupThousands(%d) = %q, want %q", in, got, want)
+		if got := fmtScale(in); got != want {
+			t.Errorf("fmtScale(%d) = %q, want %q", in, got, want)
 		}
 	}
-}
-
-func TestFmtCompact(t *testing.T) {
-	cases := map[int64]string{
-		0:         "0",
-		412:       "412",
-		999:       "999",
-		1000:      "1.0k",
-		63000:     "63.0k",
-		1_700_000: "1.7M",
-	}
-	for in, want := range cases {
-		if got := fmtCompact(in); got != want {
-			t.Errorf("fmtCompact(%d) = %q, want %q", in, got, want)
-		}
-	}
-}
-
-func TestFmtCost(t *testing.T) {
-	cases := []struct {
-		usd        float64
-		incomplete bool
-		want       string
-	}{
-		{0, false, "$0"},
-		{0.0042, false, "$0.0042"},
-		{1.5, false, "$1.50"},
-		{184.2, false, "$184.20"},
-		{184.2, true, "$184.20+"}, // incomplete lower-bound marker
-		{0, true, "$0+"},
-	}
-	for _, c := range cases {
-		if got := fmtCost(c.usd, c.incomplete); got != c.want {
-			t.Errorf("fmtCost(%v, %v) = %q, want %q", c.usd, c.incomplete, got, c.want)
-		}
-	}
-}
-
-// TestTokenBreakdownCoversAllClasses guards the invariant the card exists to
-// satisfy: the caption carries every token class plus the cost, so the standalone
-// total is never shown without its breakdown.
-func TestTokenBreakdownCoversAllClasses(t *testing.T) {
-	a := store.Analytics{
-		TotalIn: 284_120_000, TotalOut: 41_900_000,
-		TotalCacheRead: 902_000_000, TotalCacheWrite: 8_400_000,
-		TotalCost: 184.20,
-	}
-	got := tokenBreakdown(a)
-	for _, want := range []string{"in 284.1M", "out 41.9M", "cache r 902.0M", "cache w 8.4M", "$184.20"} {
-		if !contains(got, want) {
-			t.Errorf("tokenBreakdown missing %q in %q", want, got)
-		}
-	}
-}
-
-func contains(s, sub string) bool {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }

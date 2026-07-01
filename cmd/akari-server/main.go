@@ -126,16 +126,16 @@ func run() error {
 	} else {
 		close(sweepDone)
 	}
-	// Refresh Open Graph preview cards for published overviews on the same footing
-	// as the sweep: a background loop that re-renders any card older than a day, so a
-	// shared /u/<username> link's preview tracks the account's usage without a render
-	// on every crawl. ogDone lets shutdown wait for an in-flight refresh pass before
-	// the pool closes.
+	// Prune expired Open Graph preview cards on the same footing as the sweep: a
+	// background loop that deletes cards older than the cache TTL. The cards are
+	// rendered lazily on request and cached, so this only clears cards for overviews
+	// nobody is sharing anymore; a live share re-renders on demand. ogDone lets
+	// shutdown wait for an in-flight cleanup pass before the pool closes.
 	ogDone := make(chan struct{})
-	if cfg.OGRefreshInterval > 0 {
+	if cfg.OGCleanupInterval > 0 {
 		go func() {
 			defer close(ogDone)
-			runOGRefresh(rootCtx, st, cfg.OGRefreshInterval)
+			runOGCleanup(rootCtx, st, cfg.OGCleanupInterval, cfg.OGCacheTTL)
 		}()
 	} else {
 		close(ogDone)
@@ -222,8 +222,8 @@ func run() error {
 	if cfg.SweepInterval > 0 {
 		log.Printf("background blob sweep every %s", cfg.SweepInterval)
 	}
-	if cfg.OGRefreshInterval > 0 {
-		log.Printf("overview preview refresh every %s", cfg.OGRefreshInterval)
+	if cfg.OGCleanupInterval > 0 {
+		log.Printf("overview preview cache cleanup every %s", cfg.OGCleanupInterval)
 	}
 	if cfg.SignalsSettleInterval > 0 {
 		log.Printf("signals settle pass every %s", cfg.SignalsSettleInterval)

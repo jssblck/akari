@@ -20,6 +20,8 @@ import (
 	"image/draw"
 	"image/png"
 	"math"
+	"strconv"
+	"strings"
 	"time"
 
 	"golang.org/x/image/font"
@@ -46,13 +48,11 @@ var fontFS embed.FS
 // solid colors here since a PNG card has no page behind it to blend against.
 var (
 	colRoom     = color.NRGBA{0x14, 0x13, 0x1b, 0xff} // The Room, the page ground
-	colSurface  = color.NRGBA{0x1b, 0x1a, 0x24, 0xff} // Surface
 	colSurface3 = color.NRGBA{0x2b, 0x29, 0x39, 0xff} // Surface Elevated (empty cell)
 	colScribe   = color.NRGBA{0x38, 0x35, 0x48, 0xff} // Scribe Line hairline
 	colLilac    = color.NRGBA{0xc6, 0xa8, 0xf2, 0xff} // Machined Lilac
 	colText     = color.NRGBA{0xe6, 0xe3, 0xf0, 0xff} // Text
 	colMuted    = color.NRGBA{0x9a, 0x94, 0xad, 0xff} // Muted (labels)
-	colSage     = color.NRGBA{0x9f, 0xd6, 0xa6, 0xff} // Sage (the public tag)
 )
 
 // heatLevels are the five cell fills, level 0 (empty) through level 4 (peak),
@@ -83,10 +83,9 @@ func blend(fg, bg color.NRGBA, alpha float64) color.NRGBA {
 type faces struct {
 	num   font.Face // big mono figures (the two headline numbers)
 	name  font.Face // the username heading (semibold display)
-	label font.Face // the uppercase stat labels and muted captions
+	label font.Face // the uppercase stat labels
 	brand font.Face // the wordmark
 	sub   font.Face // the "/ usage overview" subhead
-	cap   font.Face // the muted mono token-breakdown caption
 }
 
 func newFaces() (*faces, error) {
@@ -112,7 +111,6 @@ func newFaces() (*faces, error) {
 		{&fc.label, sans, 22},
 		{&fc.brand, sans, 34},
 		{&fc.sub, sans, 34},
-		{&fc.cap, mono, 24},
 	}
 	for _, s := range specs {
 		face, err := mk(s.f, s.size)
@@ -157,17 +155,10 @@ func Render(username string, a store.Analytics, now time.Time) ([]byte, error) {
 	brandBaseline := pad + 22
 	drawText(img, fc.brand, pad+34, brandBaseline, colText, "akari")
 
-	// A "public" tag, top-right, mirroring the badge the page carries. Sage text on
-	// a raised surface rectangle (the public-tag convention from DESIGN.md).
-	drawTag(img, fc.label, Width-pad, pad+4, "PUBLIC")
-
-	// An "as of" date stamp beneath the tag. The card is a periodic snapshot
-	// (rendered at publish and refreshed about daily), not a live mirror of the
-	// page, so it names the instant it was taken. This is deliberate: the figures
-	// below are the totals as of this date and may trail the live overview until the
-	// next refresh, and the stamp says so rather than implying an exact duplicate.
-	asOf := "as of " + now.UTC().Format("Jan 2, 2006")
-	drawText(img, fc.cap, Width-pad-textWidth(fc.cap, asOf), pad+68, colMuted, asOf)
+	// No "public" tag and no "as of" date: the card only exists for a published
+	// overview, so anyone seeing it already knows it is public, and a date stamp is
+	// noise on a glanceable share thumbnail. The figures are the trailing-year totals
+	// as of the render, which is enough context for a preview.
 
 	// Heading: the username in the display face, then "/ usage overview" muted, the
 	// same scent as the page's own head.
@@ -179,23 +170,29 @@ func Render(username string, a store.Analytics, now time.Time) ([]byte, error) {
 	gridTop := pad + 196
 	drawHeatmap(img, a, now, pad, gridTop, Width-2*pad)
 
-	// The two headline figures, along the foot: total tokens and session count. The
-	// numbers are mono (tabular tolerance) over uppercase Geist labels.
+	// The two headline figures, along the foot: total tokens and session count, each
+	// number (mono, for tabular tolerance) nested directly under its uppercase label
+	// so the two stat blocks read as two columns rather than one crowded row.
 	//
-	// The token total never stands alone: every token figure in akari carries its
-	// four-class split and cost, so the card draws the same breakdown as a caption
-	// beneath the figures (the static equivalent of the hover card the page shows).
-	// Sessions is a plain count, so it needs none.
-	numBase := Height - pad - 44
-	labelY := numBase - 50
+	// The token figure is a single all-classes total, not the per-class breakdown the
+	// web UI shows. TotalTokens folds in every class (input, output, cache read, cache
+	// write), so no class is dropped: only the display is condensed. The interactive
+	// pages attach a hover/focus breakdown card to each token figure, but a static
+	// 1200x630 unfurl image has nothing to hover, and five figures in fixed text is
+	// information overload on a thumbnail glanced at in a chat. The full breakdown is
+	// one click away on the /u/<username> page this card links to. (The token-consistency
+	// review policy scopes its breakdown-card rule to the web UI for exactly this reason.)
+	numBase := Height - pad - 12
+	// Sit the label clear of the number rather than tight against it: the figures are
+	// 72pt, so a small offset would bury the label against the digits' caps. The 66px
+	// drop is the deliberate breathing room between each stat's label and its value.
+	labelY := numBase - 66
 	drawText(img, fc.label, pad, labelY, colMuted, "TOTAL TOKENS")
-	drawText(img, fc.num, pad, numBase, colText, groupThousands(a.TotalTokens()))
+	drawText(img, fc.num, pad, numBase, colText, fmtScale(a.TotalTokens()))
 
 	col2 := Width/2 + 120
 	drawText(img, fc.label, col2, labelY, colMuted, "SESSIONS")
-	drawText(img, fc.num, col2, numBase, colText, groupThousands(int64(a.Sessions)))
-
-	drawText(img, fc.cap, pad, Height-pad, colMuted, tokenBreakdown(a))
+	drawText(img, fc.num, col2, numBase, colText, fmtScale(int64(a.Sessions)))
 
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, img); err != nil {
@@ -282,20 +279,6 @@ func drawAperture(img *image.NRGBA, cx, cy, radius int) {
 	fillCircle(img, cx, cy, radius/3+1, colLilac)
 }
 
-// drawTag paints a small machined-rectangle tag with its right edge at rightX and
-// its top at topY, label centered inside. It returns nothing; tags are decorative.
-func drawTag(img *image.NRGBA, face font.Face, rightX, topY int, label string) {
-	tw := textWidth(face, label)
-	const padX, padY, h = 14, 7, 34
-	w := tw + 2*padX
-	x0 := rightX - w
-	fillRect(img, image.Rect(x0, topY, x0+w, topY+h), colSurface)
-	strokeRect(img, image.Rect(x0, topY, x0+w, topY+h), colScribe)
-	// A public tag carries Sage, per DESIGN.md's tag convention; lilac stays spent
-	// on the activity grid (the one-voice rule).
-	drawText(img, face, x0+padX, topY+h-11, colSage, label)
-}
-
 // --- primitive raster helpers ---------------------------------------------
 
 func fillRect(img *image.NRGBA, r image.Rectangle, c color.NRGBA) {
@@ -351,67 +334,40 @@ func drawText(img *image.NRGBA, face font.Face, x, y int, c color.NRGBA, s strin
 	return d.Dot.X.Round()
 }
 
-// textWidth measures the advance of s in the given face.
-func textWidth(face font.Face, s string) int {
-	return font.MeasureString(face, s).Round()
-}
-
-// groupThousands renders n with comma thousands separators, the form the overview
-// shows its token and session figures in.
-func groupThousands(n int64) string {
-	s := fmt.Sprintf("%d", n)
-	neg := ""
-	if len(s) > 0 && s[0] == '-' {
-		neg, s = "-", s[1:]
+// fmtScale renders a count in a compact scaled form for the card's headline
+// figures. The scale climbs K, M (million), B (billion), then T (trillion), carrying
+// up to three decimal places rounded down (never padded with trailing zeros); a
+// count below 1000 is shown raw, with no suffix. So 512 stays "512", 1,696 becomes
+// "1.696K", 2,000,000 becomes "2M", and 12,137,766,601 becomes "12.137B". The scale
+// starts at K rather than the M the fleet-wide page uses, since one account's figures
+// are smaller and would otherwise read as a long string of raw digits.
+func fmtScale(n int64) string {
+	if n < 1000 {
+		return strconv.FormatInt(n, 10)
 	}
-	var out []byte
-	for i := 0; i < len(s); i++ {
-		if i > 0 && (len(s)-i)%3 == 0 {
-			out = append(out, ',')
+	// perMilli is a thousandth of each unit's divisor, so integer division by it
+	// yields the value in thousandths (value x 1000) directly: floor(n*1000/divisor).
+	// Working in integer thousandths keeps the round-down exact and dodges the drift a
+	// float divide-then-truncate would introduce at these magnitudes.
+	units := []struct {
+		suffix   string
+		perMilli int64
+	}{
+		{"T", 1_000_000_000},
+		{"B", 1_000_000},
+		{"M", 1_000},
+		{"K", 1},
+	}
+	for _, u := range units {
+		if n >= u.perMilli*1000 {
+			thousandths := n / u.perMilli
+			whole, frac := thousandths/1000, thousandths%1000
+			s := strconv.FormatInt(whole, 10)
+			if frac > 0 {
+				s += "." + strings.TrimRight(fmt.Sprintf("%03d", frac), "0")
+			}
+			return s + u.suffix
 		}
-		out = append(out, s[i])
 	}
-	return neg + string(out)
-}
-
-// tokenBreakdown is the caption that attaches the four token classes and the cost
-// to the standalone total, so the card carries the same detail every token figure
-// in the app does (input, output, cache read, cache write, cost). The figures are
-// compact magnitudes to stay on one line; the exact grand total sits above them.
-func tokenBreakdown(a store.Analytics) string {
-	return fmt.Sprintf("in %s  ·  out %s  ·  cache r %s  ·  cache w %s  ·  %s",
-		fmtCompact(a.TotalIn), fmtCompact(a.TotalOut),
-		fmtCompact(a.TotalCacheRead), fmtCompact(a.TotalCacheWrite),
-		fmtCost(a.TotalCost, a.CostIncomplete))
-}
-
-// fmtCompact renders a token count to a short magnitude (1.7M, 63.0k, 412), the
-// same form the app's compact token figure uses.
-func fmtCompact(n int64) string {
-	switch {
-	case n >= 1_000_000:
-		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
-	case n >= 1_000:
-		return fmt.Sprintf("%.1fk", float64(n)/1_000)
-	default:
-		return fmt.Sprintf("%d", n)
-	}
-}
-
-// fmtCost renders a USD cost the way the overview strip does, with the "$X+"
-// lower-bound marker when the cost folded in an unpriced usage event.
-func fmtCost(usd float64, incomplete bool) string {
-	var s string
-	switch {
-	case usd == 0:
-		s = "$0"
-	case usd < 0.01:
-		s = fmt.Sprintf("$%.4f", usd)
-	default:
-		s = fmt.Sprintf("$%.2f", usd)
-	}
-	if incomplete {
-		s += "+"
-	}
-	return s
+	return strconv.FormatInt(n, 10) // unreachable: n >= 1000 always matches the K unit
 }

@@ -171,7 +171,8 @@ yourself. It reads `AKARI_DATABASE_URL` and the upload target from `AKARI_URL`
 | `AKARI_COOKIE_INSECURE` | unset | Set truthy to drop the `Secure` flag on session cookies for plain-HTTP local development. |
 | `AKARI_PUBLIC_URL` | (derived) | The externally reachable base URL (`https://akari.example.com`), used as the OAuth issuer and the base of every URL the MCP authorization flow advertises. Falls back to `AKARI_URL`; when neither is set the server derives the origin from each request (correct for a single-origin deployment behind a sane proxy). |
 | `AKARI_SWEEP_INTERVAL` | `1h` | How often the server reclaims orphaned CAS blobs. A Go duration (`30m`, `2h`); `0` disables the background sweep. |
-| `AKARI_OG_REFRESH_INTERVAL` | `1h` | How often the server wakes to refresh the Open Graph preview cards of published overviews; on each wake it re-renders any card older than a day. A Go duration; `0` disables the background refresh (a card is still rendered when the overview is published). |
+| `AKARI_OG_CACHE_TTL` | `1h` | How long a rendered Open Graph preview card is served from cache before the next request re-renders it. A Go duration; must be positive (the card is always cached). |
+| `AKARI_OG_CLEANUP_INTERVAL` | `24h` | How often the server prunes expired preview cards (older than `AKARI_OG_CACHE_TTL`) from the cache. A Go duration; `0` disables the sweep. |
 | `AKARI_SIGNALS_SETTLE_INTERVAL` | `5m` | How often the server computes per-session quality signals (outcome, grade, prompt hygiene, context health) for sessions that have settled: a session is graded once it has been idle past the abandoned threshold, off the ingest path, so a live session is never graded with an outcome that would drift. A Go duration; `0` disables the background pass (signals then land only on reparse or via `akari-server settle`). |
 
 Migrations are embedded and applied on startup, so the server is safe to restart.
@@ -328,10 +329,12 @@ the page.
 A published overview also gets an Open Graph preview card at
 `/u/<username>/og.png`, so a shared link unfurls with an image: a simplified copy
 of the activity heatmap plus the total-token and session figures, rendered in the
-house style. The card is a pure-Go PNG (no headless browser), rendered once when
-the overview is published and refreshed about once a day by a background loop
-(`AKARI_OG_REFRESH_INTERVAL`), so the preview tracks the account's usage without
-re-rendering on every crawl.
+house style. The card is a pure-Go PNG (no headless browser), rendered on demand
+the first time it is fetched (a share unfurl) and cached for a short TTL
+(`AKARI_OG_CACHE_TTL`); once it expires the next fetch renders a fresh one, so the
+preview tracks the account's usage without re-rendering on every crawl and without
+rendering at all for an overview nobody shares. A background sweep
+(`AKARI_OG_CLEANUP_INTERVAL`) prunes expired cards from the cache.
 
 CAS blobs are served per session, not by bare hash: a viewer can fetch a tool
 body only through a session that references it and that they may see. This keeps

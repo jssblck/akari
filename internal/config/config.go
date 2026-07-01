@@ -35,12 +35,18 @@ type Server struct {
 	// (AKARI_SWEEP_INTERVAL, a Go duration like "1h"). Defaults to 1h; set "0" to
 	// disable the background sweep (for example to run it only via the subcommand).
 	SweepInterval time.Duration
-	// OGRefreshInterval is how often the server wakes to refresh the Open Graph
-	// preview cards of published overviews (AKARI_OG_REFRESH_INTERVAL). On each wake
-	// it re-renders any card older than a day, so a published overview's preview
-	// tracks its usage without a render on every page load. Defaults to 1h; set "0"
-	// to disable the background refresh (a card is still rendered at publish time).
-	OGRefreshInterval time.Duration
+	// OGCacheTTL is how long a rendered Open Graph preview card is served from the
+	// cache before the next request re-renders it (AKARI_OG_CACHE_TTL, a Go duration
+	// like "1h"). A published overview's card is rendered lazily on first request and
+	// cached; once it ages past this TTL a later request renders a fresh one in its
+	// place. Defaults to 1h and must be positive (the card is always cached).
+	OGCacheTTL time.Duration
+	// OGCleanupInterval is how often the server sweeps expired preview cards from the
+	// cache (AKARI_OG_CLEANUP_INTERVAL, a Go duration). Each pass deletes cards older
+	// than OGCacheTTL, so a card for an overview nobody shares does not linger. It is
+	// pure housekeeping: a live share re-renders its card on demand regardless.
+	// Defaults to 24h; set "0" to disable the sweep.
+	OGCleanupInterval time.Duration
 	// SignalsSettleInterval is how often the server wakes to compute per-session
 	// signals for sessions that have settled (AKARI_SIGNALS_SETTLE_INTERVAL). The
 	// ingest append path deliberately does not recompute signals per message (that
@@ -69,11 +75,19 @@ func LoadServer() (Server, error) {
 		return Server{}, fmt.Errorf("AKARI_SWEEP_INTERVAL: %w", err)
 	}
 	s.SweepInterval = interval
-	ogInterval, err := parseDuration(os.Getenv("AKARI_OG_REFRESH_INTERVAL"), time.Hour)
+	ttl, err := parseDuration(os.Getenv("AKARI_OG_CACHE_TTL"), time.Hour)
 	if err != nil {
-		return Server{}, fmt.Errorf("AKARI_OG_REFRESH_INTERVAL: %w", err)
+		return Server{}, fmt.Errorf("AKARI_OG_CACHE_TTL: %w", err)
 	}
-	s.OGRefreshInterval = ogInterval
+	if ttl <= 0 {
+		return Server{}, fmt.Errorf("AKARI_OG_CACHE_TTL must be positive")
+	}
+	s.OGCacheTTL = ttl
+	cleanup, err := parseDuration(os.Getenv("AKARI_OG_CLEANUP_INTERVAL"), 24*time.Hour)
+	if err != nil {
+		return Server{}, fmt.Errorf("AKARI_OG_CLEANUP_INTERVAL: %w", err)
+	}
+	s.OGCleanupInterval = cleanup
 	settleInterval, err := parseDuration(os.Getenv("AKARI_SIGNALS_SETTLE_INTERVAL"), 5*time.Minute)
 	if err != nil {
 		return Server{}, fmt.Errorf("AKARI_SIGNALS_SETTLE_INTERVAL: %w", err)
