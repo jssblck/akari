@@ -116,7 +116,7 @@ func (s *Server) Routes() http.Handler {
 	// half-rebuilt rows while a reparse runs. The session events SSE stream stays
 	// ungated: gating it would write HTML into the event stream, and the gated
 	// session page does not open it anyway.
-	mux.HandleFunc("GET /{$}", s.requireReadHTML(s.gateParsed(s.handleOverview)))
+	mux.HandleFunc("GET /{$}", s.handleRoot)
 	mux.HandleFunc("GET /projects", s.requireReadHTML(s.gateParsed(s.handleProjectsIndex)))
 	mux.HandleFunc("GET /sessions", s.requireReadHTML(s.gateParsed(s.handleSessions)))
 	mux.HandleFunc("GET /projects/{id}", s.requireReadHTML(s.gateParsed(s.handleProjectPage)))

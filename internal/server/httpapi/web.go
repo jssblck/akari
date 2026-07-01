@@ -67,6 +67,22 @@ func render(w http.ResponseWriter, r *http.Request, status int, c templ.Componen
 	}
 }
 
+// handleRoot serves the site root at /. A signed-in reader (full-scope
+// credential, a browser session in practice) gets the overview, the app's
+// landing surface, gated during a reparse like the rest of the parsed UI. A
+// logged-out visitor gets the marketing landing page explaining what akari is,
+// rather than an immediate bounce to the login form. A non-full credential (an
+// ingest- or read-scope token pointed at the browser UI) is treated as
+// logged-out here, matching requireReadHTML's gate on the rest of the UI.
+func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
+	p, ok := s.resolve(r)
+	if !ok || p.Scope != scopeFull {
+		render(w, r, http.StatusOK, web.LandingPage())
+		return
+	}
+	s.gateParsed(s.handleOverview)(w, s.withPrincipal(r, p))
+}
+
 // handleOverview is the landing surface at /: fleet-wide usage bounded to the
 // selected trailing window. The range selector refetches this same handler and
 // swaps the usage panel (hx-select="#usage"), so a plain load and an htmx swap

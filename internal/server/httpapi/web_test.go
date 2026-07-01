@@ -66,14 +66,32 @@ func TestWebFlow(t *testing.T) {
 	srv, _ := newTestServer(t)
 	c := newClient(t)
 
-	// An unauthenticated read page redirects to login.
+	// The unauthenticated root serves the landing page (explaining akari), not a
+	// redirect to login: the request stays on / and renders the marketing hero
+	// with links into sign-in and registration.
 	resp, err := c.Get(srv.URL + "/")
 	if err != nil {
 		t.Fatalf("get /: %v", err)
 	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("unauthenticated / = %d, want 200 landing page", resp.StatusCode)
+	}
+	if resp.Request.URL.Path != "/" {
+		t.Fatalf("unauthenticated / redirected to %q, want the landing page at /", resp.Request.URL.Path)
+	}
 	body := readBody(t, resp)
+	if !strings.Contains(body, "self-hosted instrument") || !strings.Contains(body, `href="/register"`) {
+		t.Fatalf("unauthenticated / should render the landing page, got:\n%s", body)
+	}
+
+	// An authed-only read page still redirects an anonymous visitor to login.
+	resp, err = c.Get(srv.URL + "/projects")
+	if err != nil {
+		t.Fatalf("get /projects: %v", err)
+	}
+	body = readBody(t, resp)
 	if !strings.Contains(body, "Log in") {
-		t.Fatalf("unauthenticated / should land on login page, got:\n%s", body)
+		t.Fatalf("unauthenticated /projects should land on login page, got:\n%s", body)
 	}
 
 	// Register the first account (becomes admin, no invite needed).
@@ -164,14 +182,67 @@ func TestWebFlow(t *testing.T) {
 		t.Fatalf("GET /search after removal = %d, want 404", resp.StatusCode)
 	}
 
-	// Logout clears the session; the root redirects to login again.
+	// Logout clears the session and lands on the login page.
 	resp, err = c.PostForm(srv.URL+"/logout", url.Values{})
 	if err != nil {
 		t.Fatalf("logout: %v", err)
 	}
 	body = readBody(t, resp)
 	if !strings.Contains(body, "Log in") {
-		t.Fatalf("after logout / should be login page, got:\n%s", body)
+		t.Fatalf("after logout should be login page, got:\n%s", body)
+	}
+
+	// With the session gone, the root is the public landing page again rather
+	// than the signed-in overview.
+	resp, err = c.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("get / after logout: %v", err)
+	}
+	body = readBody(t, resp)
+	if !strings.Contains(body, "self-hosted instrument") {
+		t.Fatalf("after logout / should render the landing page, got:\n%s", body)
+	}
+}
+
+// TestRootNonFullCredentialGetsLanding pins handleRoot's gate: only a full-scope
+// credential reaches the overview, so a read- or ingest-scope bearer token (a
+// non-browser credential pointed at the UI root) is treated as logged out and
+// gets the landing page, not the signed-in overview. This exercises the branch
+// TestWebFlow leaves uncovered, which only drives an anonymous request and a
+// full-scope browser session.
+func TestRootNonFullCredentialGetsLanding(t *testing.T) {
+	t.Parallel()
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+
+	u, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), "")
+	if err != nil {
+		t.Fatalf("register user: %v", err)
+	}
+	for _, tc := range []struct{ scope, token string }{
+		{scopeRead, "read-secret-token"},
+		{scopeIngest, "ingest-secret-token"},
+	} {
+		if _, err := st.CreateAPIToken(ctx, u.ID, tc.scope, tc.scope, auth.HashToken(tc.token)); err != nil {
+			t.Fatalf("create %s token: %v", tc.scope, err)
+		}
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/", nil)
+		req.Header.Set("Authorization", "Bearer "+tc.token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("get / with %s token: %v", tc.scope, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			t.Fatalf("get / with %s token = %d, want 200 landing page", tc.scope, resp.StatusCode)
+		}
+		body := readBody(t, resp)
+		if !strings.Contains(body, "self-hosted instrument") {
+			t.Fatalf("%s-scope root should render the landing page, got:\n%s", tc.scope, body)
+		}
+		if strings.Contains(body, `class="sidebar"`) {
+			t.Fatalf("%s-scope root should not render the signed-in overview shell, got:\n%s", tc.scope, body)
+		}
 	}
 }
 
