@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jssblck/akari/internal/pricing"
+	"github.com/jssblck/akari/internal/quality"
 )
 
 // parseBatchBytes bounds how much raw content one AdvanceProjection call parses
@@ -322,14 +323,31 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 	// rows that inserted keeps message_count equal to the count of messages rows
 	// even if a region is ever replayed.
 	for _, m := range d.Messages {
+		content := sanitizeText(m.Content)
+		// Derive the prompt's hygiene facts here, where the body is already resident, and store
+		// them beside the row as fixed-size columns. The settle pass then aggregates those columns
+		// instead of reading every prompt body back to re-classify it, so its peak memory does not
+		// track the largest prompt a session held (see quality.ClassifyPrompt and gatherPromptHygiene).
+		// Only real human turns carry facts; other rows leave the columns NULL and the hygiene
+		// aggregate reads role='user' only. The facts are stamped with quality.PromptFactsVersion so a
+		// later change to the classifier is told apart from the current rules: the settle pass treats an
+		// old-version row like an unfilled one until the reparse re-derives it (see gatherPromptHygiene).
+		var pShort, pNoCode, pGreeting, pDigest, pFactsVersion any
+		if m.Role == roleUser {
+			facts := quality.ClassifyPrompt(content)
+			pShort, pNoCode, pGreeting, pDigest = facts.Short, facts.NoCodeContext, facts.BareGreeting, facts.Digest
+			pFactsVersion = quality.PromptFactsVersion
+		}
 		tag, err := tx.Exec(ctx,
 			`INSERT INTO messages
-			   (session_id, ordinal, role, content, thinking_text, model, timestamp, has_thinking, has_tool_use)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+			   (session_id, ordinal, role, content, thinking_text, model, timestamp, has_thinking, has_tool_use,
+			    prompt_short, prompt_no_code, prompt_bare_greeting, prompt_digest, prompt_facts_version)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 			 ON CONFLICT (session_id, ordinal) DO NOTHING`,
-			sessionID, m.Ordinal, sanitizeText(m.Role), sanitizeText(m.Content),
+			sessionID, m.Ordinal, sanitizeText(m.Role), content,
 			sanitizeText(m.ThinkingText), sanitizeText(m.Model),
-			nullTime(m.Timestamp), m.HasThinking, m.HasToolUse)
+			nullTime(m.Timestamp), m.HasThinking, m.HasToolUse,
+			pShort, pNoCode, pGreeting, pDigest, pFactsVersion)
 		if err != nil {
 			return appliedDelta{}, fmt.Errorf("write message %d for session %d: %w", m.Ordinal, sessionID, err)
 		}

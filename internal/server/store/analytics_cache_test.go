@@ -5,6 +5,7 @@ import (
 	"math"
 	"testing"
 
+	"github.com/jssblck/akari/internal/pricing"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/storetest"
 )
@@ -182,6 +183,88 @@ func markNeedsCacheBackfill(t *testing.T, st *store.Store, ctx context.Context, 
 	}
 }
 
+// storedCacheSavings reads the persisted rollup columns directly, bypassing the scanDetail
+// read-side gate. A test uses it to assert what is stored on the session row, as opposed to the
+// value the Cache tile would compute live for an unbackfilled session.
+func storedCacheSavings(t *testing.T, st *store.Store, ctx context.Context, sid int64) (float64, bool) {
+	t.Helper()
+	var v float64
+	var incomplete bool
+	if err := st.Pool.QueryRow(ctx,
+		"SELECT total_cache_savings_usd, cache_savings_incomplete FROM sessions WHERE id = $1", sid).
+		Scan(&v, &incomplete); err != nil {
+		t.Fatalf("read stored cache savings for %d: %v", sid, err)
+	}
+	return v, incomplete
+}
+
+// TestSessionDetailBackfillsUnbackfilledCacheSavingsOnRead pins the read-side cache-savings gate. A
+// session whose rollup is not yet backfilled (the migration seeds it at 0 and the async backfill has
+// not reached it) must not have the seeded value served: the detail read prices the saving from
+// usage_events once, persists it, and flips the flag, so the tile shows the real figure and every
+// later read is the O(1) stored rollup rather than a per-refresh rescan. This is the read-side
+// companion to BackfillCacheSavings.
+func TestSessionDetailBackfillsUnbackfilledCacheSavingsOnRead(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	admin, err := st.Register(ctx, "grace", "h", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	proj, err := st.UpsertProject(ctx, "github.com/ada/readgate", "github.com", "ada", "readgate", "readgate", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+
+	s := seedSessionWithStats(t, st, admin.ID, proj, "claude", "readgate", 0, 0, 0)
+	seedUsageCache(t, st, s, "claude-opus-4-8", 1, 200_000, 100_000, 800_000, 0, 1, "rg-1")
+	recompute, err := st.SessionCacheStats(ctx, s)
+	if err != nil {
+		t.Fatalf("recompute: %v", err)
+	}
+	if recompute.SavingsUSD <= 0 || recompute.SavingsIncomplete {
+		t.Fatalf("test needs a positive, complete recompute saving, got %v incomplete=%v", recompute.SavingsUSD, recompute.SavingsIncomplete)
+	}
+
+	// Unbackfilled, with a deliberately wrong stored rollup and stale incomplete flag, standing in
+	// for a pre-0020 session the startup backfill has not yet reached.
+	markNeedsCacheBackfill(t, st, ctx, s)
+	const wrong = 99.0
+	if _, err := st.Pool.Exec(ctx,
+		"UPDATE sessions SET total_cache_savings_usd = $2, cache_savings_incomplete = true WHERE id = $1", s, wrong); err != nil {
+		t.Fatalf("seed wrong rollup: %v", err)
+	}
+
+	// The read serves the priced saving, not the seeded one.
+	d, err := st.SessionDetailByID(ctx, s)
+	if err != nil {
+		t.Fatalf("detail: %v", err)
+	}
+	if math.Abs(d.TotalCacheSavingsUSD-recompute.SavingsUSD) > 1e-9 {
+		t.Errorf("read savings = %v, want the priced recompute %v (not the seeded %v)", d.TotalCacheSavingsUSD, recompute.SavingsUSD, wrong)
+	}
+	if d.CacheSavingsIncomplete {
+		t.Error("read should have priced a complete saving, not carried the seeded incomplete=true")
+	}
+
+	// The read persisted the saving and flipped the flag, so the row is now authoritative and a
+	// later read is the O(1) rollup rather than another usage_events scan.
+	stored, incomplete := storedCacheSavings(t, st, ctx, s)
+	if math.Abs(stored-recompute.SavingsUSD) > 1e-9 || incomplete {
+		t.Errorf("stored rollup after read = %v incomplete=%v, want the priced %v / false persisted", stored, incomplete, recompute.SavingsUSD)
+	}
+	var backfilled bool
+	if err := st.Pool.QueryRow(ctx,
+		"SELECT cache_savings_backfilled FROM sessions WHERE id = $1", s).Scan(&backfilled); err != nil {
+		t.Fatalf("read flag: %v", err)
+	}
+	if !backfilled {
+		t.Error("read should have flipped cache_savings_backfilled so later reads skip the recompute")
+	}
+}
+
 // TestBackfillCacheSavings pins the startup backfill that repairs a session whose parse-time
 // savings fold never ran: one ingested before the rollup column existed, or one whose reparse
 // deterministically fails so the epoch reparse cannot fill it. The saving is a pure function of
@@ -222,13 +305,13 @@ func TestBackfillCacheSavings(t *testing.T) {
 		markNeedsCacheBackfill(t, st, ctx, id)
 	}
 
+	// The persisted rollup is at the column default before the backfill prices it. Read the
+	// column directly, not through SessionDetailByID: the read-side gate recomputes an
+	// unbackfilled session's saving live (see TestSessionDetailRecomputesUnbackfilledCacheSavings),
+	// so the tile would already show a nonzero figure; here we are pinning the stored state.
 	for _, id := range []int64{sPriced, sUnpriced, sNoCache} {
-		d, err := st.SessionDetailByID(ctx, id)
-		if err != nil {
-			t.Fatalf("pre-backfill detail %d: %v", id, err)
-		}
-		if d.TotalCacheSavingsUSD != 0 || d.CacheSavingsIncomplete {
-			t.Fatalf("session %d pre-backfill savings = %v incomplete=%v, want zero/false", id, d.TotalCacheSavingsUSD, d.CacheSavingsIncomplete)
+		if v, incomplete := storedCacheSavings(t, st, ctx, id); v != 0 || incomplete {
+			t.Fatalf("session %d pre-backfill stored rollup = %v incomplete=%v, want zero/false", id, v, incomplete)
 		}
 	}
 
@@ -266,13 +349,15 @@ func TestBackfillCacheSavings(t *testing.T) {
 		t.Error("unpriced-cache session should be flagged incomplete after backfill")
 	}
 
-	// The no-cache session is untouched.
+	// The no-cache session was never a backfill candidate (the EXISTS probe excludes it), so its
+	// saving stays 0 whether read before or after the detail read's on-demand backfill prices its
+	// empty cache to 0.
 	dn, err := st.SessionDetailByID(ctx, sNoCache)
 	if err != nil {
 		t.Fatalf("nocache detail: %v", err)
 	}
 	if dn.TotalCacheSavingsUSD != 0 || dn.CacheSavingsIncomplete {
-		t.Errorf("no-cache session was touched: savings = %v incomplete=%v", dn.TotalCacheSavingsUSD, dn.CacheSavingsIncomplete)
+		t.Errorf("no-cache session shows a saving: %v incomplete=%v", dn.TotalCacheSavingsUSD, dn.CacheSavingsIncomplete)
 	}
 
 	// Idempotent: both priced sessions are now marked cache_savings_backfilled, so a second pass
@@ -380,6 +465,124 @@ func TestBackfillCacheSavingsRepairsPartialFold(t *testing.T) {
 	}
 	if d.TotalCacheSavingsUSD <= 0.01 {
 		t.Errorf("repaired rollup = %v, want it replaced by the larger full value, not left at the partial", d.TotalCacheSavingsUSD)
+	}
+}
+
+// setCacheSavingsPricedVersion overwrites the parse_meta pricing marker, standing in for the corpus
+// having last been priced under an earlier pricing.Version so the next BackfillCacheSavings runs the
+// reprice reconcile. readCacheSavingsPricedVersion reads it back to assert the reconcile advanced it.
+func setCacheSavingsPricedVersion(t *testing.T, st *store.Store, ctx context.Context, v int) {
+	t.Helper()
+	if _, err := st.Pool.Exec(ctx,
+		"UPDATE parse_meta SET cache_savings_priced_version = $1 WHERE id = TRUE", v); err != nil {
+		t.Fatalf("set cache_savings_priced_version: %v", err)
+	}
+}
+
+func readCacheSavingsPricedVersion(t *testing.T, st *store.Store, ctx context.Context) int {
+	t.Helper()
+	var v int
+	if err := st.Pool.QueryRow(ctx,
+		"SELECT cache_savings_priced_version FROM parse_meta WHERE id = TRUE").Scan(&v); err != nil {
+		t.Fatalf("read cache_savings_priced_version: %v", err)
+	}
+	return v
+}
+
+// backfilledFlag reads a session's cache_savings_backfilled directly, so a test can assert the reprice
+// reconcile flipped an authoritative session back into the candidate set and the backfill flipped it
+// forward again.
+func backfilledFlag(t *testing.T, st *store.Store, ctx context.Context, sid int64) bool {
+	t.Helper()
+	var f bool
+	if err := st.Pool.QueryRow(ctx,
+		"SELECT cache_savings_backfilled FROM sessions WHERE id = $1", sid).Scan(&f); err != nil {
+		t.Fatalf("read cache_savings_backfilled for %d: %v", sid, err)
+	}
+	return f
+}
+
+// TestCacheSavingsRepriceReconcile pins the pricing-version reconcile that closes the failed-reparse
+// gap. A rate change re-prices the whole cache-bearing corpus, but a session whose reparse fails keeps
+// its old-priced rollup with cache_savings_backfilled=true, so the ordinary backfill (which only
+// visits backfilled=false candidates) skips it and its tile drifts from a live recompute forever.
+// reconcileCacheSavingsPricingIfNeeded marks such sessions for re-price when pricing.Version moves past
+// the stored marker, in a statement committed independently of any reparse, so even a session that
+// never re-parses is corrected. This test stands in for that session: an authoritative rollup carrying
+// a stale-priced (deliberately wrong) figure, re-priced to the live recompute by the reconcile, and
+// then left alone once the marker is current so a steady-state startup never re-prices.
+func TestCacheSavingsRepriceReconcile(t *testing.T) {
+	// Not parallel: it writes the singleton parse_meta pricing marker, shared process-wide state on
+	// this store's database.
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	admin, err := st.Register(ctx, "grace", "h", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	proj, err := st.UpsertProject(ctx, "github.com/ada/reprice", "github.com", "ada", "reprice", "reprice", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+
+	// A cache-bearing session already priced and authoritative (backfilled=true), the state a
+	// successfully-folded session sits in. Its stored rollup is then overwritten with a deliberately
+	// wrong figure, standing in for a session left at the old rates by a reparse that rolled back after
+	// a reprice: the value is stale but the flag says "done", so the plain backfill would never revisit it.
+	s := seedSessionWithStats(t, st, admin.ID, proj, "claude", "reprice", 0, 0, 0)
+	seedUsageCache(t, st, s, "claude-opus-4-8", 1, 200_000, 100_000, 800_000, 0, 1, "rp-1")
+	recompute, err := st.SessionCacheStats(ctx, s)
+	if err != nil {
+		t.Fatalf("recompute: %v", err)
+	}
+	if recompute.SavingsUSD <= 0 || recompute.SavingsIncomplete {
+		t.Fatalf("test needs a positive, complete recompute saving, got %v incomplete=%v", recompute.SavingsUSD, recompute.SavingsIncomplete)
+	}
+	const stalePriced = 1.0 // a wrong figure, as if priced under superseded rates
+	if _, err := st.Pool.Exec(ctx,
+		"UPDATE sessions SET total_cache_savings_usd = $2, cache_savings_backfilled = true WHERE id = $1", s, stalePriced); err != nil {
+		t.Fatalf("seed stale-priced authoritative rollup: %v", err)
+	}
+	if math.Abs(stalePriced-recompute.SavingsUSD) < 1e-6 {
+		t.Fatalf("test setup is vacuous: stale figure %v equals the recompute %v", stalePriced, recompute.SavingsUSD)
+	}
+
+	// Rewind the pricing marker behind pricing.Version, standing in for a rate change the running
+	// binary carries. The next backfill must run the reconcile, flip this authoritative session back
+	// into the candidate set, and re-price it to the live recompute.
+	setCacheSavingsPricedVersion(t, st, ctx, pricing.Version-1)
+	if _, err := st.BackfillCacheSavings(ctx); err != nil {
+		t.Fatalf("backfill after reprice: %v", err)
+	}
+	stored, incomplete := storedCacheSavings(t, st, ctx, s)
+	if math.Abs(stored-recompute.SavingsUSD) > 1e-9 || incomplete {
+		t.Errorf("re-priced rollup = %v incomplete=%v, want the live recompute %v / false (not the stale %v)", stored, incomplete, recompute.SavingsUSD, stalePriced)
+	}
+	if !backfilledFlag(t, st, ctx, s) {
+		t.Error("the backfill should have re-set cache_savings_backfilled after re-pricing")
+	}
+	if v := readCacheSavingsPricedVersion(t, st, ctx); v != pricing.Version {
+		t.Errorf("pricing marker = %d after reconcile, want %d", v, pricing.Version)
+	}
+
+	// Steady state: the marker is now current, so a later startup must NOT re-price. Poke another
+	// wrong figure onto the authoritative row and confirm a second backfill leaves it untouched, so the
+	// reconcile is genuinely gated to once per pricing change and never re-prices an authoritative row.
+	const wrongAgain = 2.0
+	if _, err := st.Pool.Exec(ctx,
+		"UPDATE sessions SET total_cache_savings_usd = $2 WHERE id = $1", s, wrongAgain); err != nil {
+		t.Fatalf("re-seed wrong rollup: %v", err)
+	}
+	n, err := st.BackfillCacheSavings(ctx)
+	if err != nil {
+		t.Fatalf("steady-state backfill: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("steady-state backfill corrected %d sessions, want 0 (marker current, nothing to re-price)", n)
+	}
+	if stored, _ := storedCacheSavings(t, st, ctx, s); math.Abs(stored-wrongAgain) > 1e-9 {
+		t.Errorf("steady-state backfill changed an authoritative rollup to %v, want the poked %v left untouched", stored, wrongAgain)
 	}
 }
 

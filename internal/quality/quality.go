@@ -24,6 +24,23 @@ package quality
 // file and never mixes into another session's context.
 const Version = 1
 
+// PromptFactsVersion stamps the per-message prompt-hygiene facts ClassifyPrompt materializes on
+// each human message (see the messages.prompt_* columns and store.gatherPromptHygiene). It is
+// deliberately separate from Version: those facts are cached ON the messages row and can only be
+// re-derived by re-inserting the message, which happens on a reparse, whereas Version-stamped
+// session_signals rows are re-derived by the settle pass from whatever facts the row currently
+// holds. Reusing Version would break the settle pass's incremental re-stamp: a Version-only bump
+// (a scoring tweak that leaves ClassifyPrompt untouched and ships no reparse) would mark every
+// cached fact stale, and the settle pass, which cannot re-derive them, could never grade those
+// sessions again.
+//
+// Bump this ONLY when ClassifyPrompt's output changes (a new or changed prompt flag, a different
+// normalization for the duplicate digest), and pair the bump with a parse.Epoch bump so the
+// corpus reparses and re-derives every message's facts at the new version. Until that reparse
+// reaches a session, gatherPromptHygiene treats its old-version facts as unmeasured and leaves the
+// session ungraded, so a stored hygiene count is never computed from a superseded classifier.
+const PromptFactsVersion = 1
+
 // Outcome is how a session ended, inferred from its projection. It is a best effort:
 // without a terminal marker in the transcript the ending is a heuristic, so every
 // outcome carries a Confidence.

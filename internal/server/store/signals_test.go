@@ -529,6 +529,170 @@ func TestSignalsPromptHygiene(t *testing.T) {
 	}
 }
 
+// TestSignalsSkipUnbackfilledPromptFacts pins the pre-reparse guard. Migration 0022 adds the
+// per-message hygiene columns but cannot backfill them, so a session ingested before it reads NULL
+// facts until the Epoch reparse re-inserts its messages through the classifier. If the settle pass
+// reaches such a settled session first, it must leave it ungraded and stale rather than record a
+// hollow all-zero hygiene row and clear the flag, which would read as measured-clean and mask the
+// real signal. Once the facts are materialized (as the reparse fills them), the same refresh grades
+// the session normally.
+func TestSignalsSkipUnbackfilledPromptFacts(t *testing.T) {
+	t.Parallel()
+	st, ctx, uid, pid := signalsEnv(t)
+	sid := seedSession(t, st, uid, pid, "sess-prereparse")
+
+	const opener = "please refactor the retry loop in internal/server/store/signals.go"
+	delta := store.ProjectionDelta{
+		Messages: []store.MessageDelta{
+			{Ordinal: 0, Role: "user", Content: opener},
+			{Ordinal: 1, Role: "assistant", Content: "done"},
+		},
+	}
+	if err := st.ApplyProjectionDelta(ctx, sid, delta); err != nil {
+		t.Fatalf("apply delta: %v", err)
+	}
+	setUserMessageCount(t, st, ctx, sid, 1)
+	settleSession(t, st, ctx, sid)
+	// Simulate a message written before migration 0022 added the columns: NULL every prompt fact the
+	// insert would have computed, and mark the session due as the settle pass would find it.
+	if _, err := st.Pool.Exec(ctx,
+		`UPDATE messages
+		    SET prompt_short = NULL, prompt_no_code = NULL, prompt_bare_greeting = NULL, prompt_digest = NULL
+		  WHERE session_id = $1 AND role = 'user'`, sid); err != nil {
+		t.Fatalf("null prompt facts: %v", err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE sessions SET signals_stale = true WHERE id = $1`, sid); err != nil {
+		t.Fatalf("mark stale: %v", err)
+	}
+
+	if err := st.RefreshSessionSignals(ctx, sid); err != nil {
+		t.Fatalf("refresh signals (pre-backfill): %v", err)
+	}
+
+	// The refresh must have written no row and left the session due, so the reparse still owns it.
+	var rows int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM session_signals WHERE session_id = $1`, sid).Scan(&rows); err != nil {
+		t.Fatalf("count signals rows: %v", err)
+	}
+	if rows != 0 {
+		t.Errorf("a pre-reparse session must stay ungraded; got %d session_signals row(s)", rows)
+	}
+	var stale bool
+	if err := st.Pool.QueryRow(ctx, `SELECT signals_stale FROM sessions WHERE id = $1`, sid).Scan(&stale); err != nil {
+		t.Fatalf("read signals_stale: %v", err)
+	}
+	if !stale {
+		t.Error("a pre-reparse session must stay stale so the reparse re-grades it")
+	}
+
+	// Materialize the facts as the reparse's message re-insert would, then re-grade: the session is
+	// now ready and grades normally. The insert stamps quality.PromptFactsVersion alongside the
+	// verdicts, so the backfill must set it too; a row left at the default NULL version reads as
+	// unmeasured (see the stale-version guard in TestSignalsSkipStalePromptFactsVersion).
+	facts := quality.ClassifyPrompt(opener)
+	if _, err := st.Pool.Exec(ctx,
+		`UPDATE messages
+		    SET prompt_short = $2, prompt_no_code = $3, prompt_bare_greeting = $4, prompt_digest = $5,
+		        prompt_facts_version = $6
+		  WHERE session_id = $1 AND role = 'user'`,
+		sid, facts.Short, facts.NoCodeContext, facts.BareGreeting, facts.Digest, quality.PromptFactsVersion); err != nil {
+		t.Fatalf("backfill prompt facts: %v", err)
+	}
+	if err := st.RefreshSessionSignals(ctx, sid); err != nil {
+		t.Fatalf("refresh signals (post-backfill): %v", err)
+	}
+	sig, err := st.SessionSignalsByID(ctx, sid)
+	if err != nil {
+		t.Fatalf("read signals: %v", err)
+	}
+	if !sig.Scored() {
+		t.Errorf("a backfilled settled session should grade; got unscored %+v", sig)
+	}
+	// The opener is anchored and substantive, so no hygiene flag fires and the base is the one prompt.
+	if sig.PromptCount != 1 || sig.HasHygieneSignal() {
+		t.Errorf("hygiene = {prompts %d, hasSignal %v}, want {1, false}", sig.PromptCount, sig.HasHygieneSignal())
+	}
+}
+
+// TestSignalsSkipStalePromptFactsVersion pins the version half of the pre-reparse guard. Filled facts
+// are not enough: a change to ClassifyPrompt's rules bumps quality.PromptFactsVersion, and a message
+// still carrying facts at the superseded version was classified by the old rules. Mixing those into a
+// hygiene count would blend classifier versions, so gatherPromptHygiene treats an old-version row like
+// an unfilled one and leaves the session ungraded until the paired Epoch reparse re-derives the facts
+// at the current version. This is the version companion to the NULL-facts guard above.
+func TestSignalsSkipStalePromptFactsVersion(t *testing.T) {
+	t.Parallel()
+	st, ctx, uid, pid := signalsEnv(t)
+	sid := seedSession(t, st, uid, pid, "sess-staleversion")
+
+	const opener = "please refactor the retry loop in internal/server/store/signals.go"
+	delta := store.ProjectionDelta{
+		Messages: []store.MessageDelta{
+			{Ordinal: 0, Role: "user", Content: opener},
+			{Ordinal: 1, Role: "assistant", Content: "done"},
+		},
+	}
+	if err := st.ApplyProjectionDelta(ctx, sid, delta); err != nil {
+		t.Fatalf("apply delta: %v", err)
+	}
+	setUserMessageCount(t, st, ctx, sid, 1)
+	settleSession(t, st, ctx, sid)
+
+	// The insert filled facts at the current version. Rewind just the version stamp to the prior one,
+	// standing in for a message classified by superseded rules that the reparse has not yet reached,
+	// and mark the session due as the settle pass would find it.
+	facts := quality.ClassifyPrompt(opener)
+	if _, err := st.Pool.Exec(ctx,
+		`UPDATE messages
+		    SET prompt_short = $2, prompt_no_code = $3, prompt_bare_greeting = $4, prompt_digest = $5,
+		        prompt_facts_version = $6
+		  WHERE session_id = $1 AND role = 'user'`,
+		sid, facts.Short, facts.NoCodeContext, facts.BareGreeting, facts.Digest, quality.PromptFactsVersion-1); err != nil {
+		t.Fatalf("rewind prompt facts version: %v", err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE sessions SET signals_stale = true WHERE id = $1`, sid); err != nil {
+		t.Fatalf("mark stale: %v", err)
+	}
+
+	if err := st.RefreshSessionSignals(ctx, sid); err != nil {
+		t.Fatalf("refresh signals (stale version): %v", err)
+	}
+
+	// A stale-version session must stay ungraded and due, exactly like a NULL-facts one.
+	var rows int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM session_signals WHERE session_id = $1`, sid).Scan(&rows); err != nil {
+		t.Fatalf("count signals rows: %v", err)
+	}
+	if rows != 0 {
+		t.Errorf("a stale-facts-version session must stay ungraded; got %d session_signals row(s)", rows)
+	}
+	var stale bool
+	if err := st.Pool.QueryRow(ctx, `SELECT signals_stale FROM sessions WHERE id = $1`, sid).Scan(&stale); err != nil {
+		t.Fatalf("read signals_stale: %v", err)
+	}
+	if !stale {
+		t.Error("a stale-facts-version session must stay stale so the reparse re-grades it")
+	}
+
+	// Advance the stamp to the current version, as the reparse's re-insert would, then re-grade: the
+	// facts are now current and the session grades normally.
+	if _, err := st.Pool.Exec(ctx,
+		`UPDATE messages SET prompt_facts_version = $2 WHERE session_id = $1 AND role = 'user'`,
+		sid, quality.PromptFactsVersion); err != nil {
+		t.Fatalf("advance prompt facts version: %v", err)
+	}
+	if err := st.RefreshSessionSignals(ctx, sid); err != nil {
+		t.Fatalf("refresh signals (current version): %v", err)
+	}
+	sig, err := st.SessionSignalsByID(ctx, sid)
+	if err != nil {
+		t.Fatalf("read signals: %v", err)
+	}
+	if !sig.Scored() {
+		t.Errorf("a current-version settled session should grade; got unscored %+v", sig)
+	}
+}
+
 // TestSessionSignalsByIDVersionFilter pins the per-session read to the running quality
 // version: a session that carries only a stale-version row (one a running reparse has not
 // yet rewritten) reads as an unknown, unscored result rather than surfacing the old grade,

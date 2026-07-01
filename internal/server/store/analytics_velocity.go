@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"math"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // VelocityStats answers "how fast does work move" over a scope: how long the agent takes
@@ -42,11 +44,26 @@ func (v VelocityStats) HasThroughput() bool { return v.ActiveSeconds > 0 }
 // activity in the velocity literature; five minutes is the common default.
 const activeGapSeconds = 300
 
-// VelocityStats computes the scope's cadence figures on its own pooled connection for the
-// Insights page. The snapshot path threads velocityStatsFrom so every panel reads one MVCC
-// snapshot.
+// VelocityStats computes the scope's cadence figures for the Insights page. Latency, active
+// time with message count, and tool count are three separate reads over the message timeline, so
+// it wraps them in one repeatable-read, read-only snapshot: a concurrent projection update between
+// them could otherwise combine active minutes from one message timeline with a tool count from
+// another, making ToolsPerActiveMin and the headline cadence internally inconsistent. Insights
+// threads its own snapshot through velocityStatsFrom; this is the standalone equivalent. The
+// snapshot takes no row locks, so it never blocks ingest.
 func (s *Store) VelocityStats(ctx context.Context, f AnalyticsFilter) (VelocityStats, error) {
-	return s.velocityStatsFrom(ctx, s.Pool, f)
+	var out VelocityStats
+	err := pgx.BeginTxFunc(ctx, s.Pool,
+		pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly},
+		func(tx pgx.Tx) error {
+			var err error
+			out, err = s.velocityStatsFrom(ctx, tx, f)
+			return err
+		})
+	if err != nil {
+		return VelocityStats{}, fmt.Errorf("velocity stats snapshot: %w", err)
+	}
+	return out, nil
 }
 
 // velocityStatsFrom computes the scope's cadence figures in three reads over the message

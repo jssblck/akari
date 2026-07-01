@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jssblck/akari/internal/quality"
 )
 
@@ -41,12 +42,26 @@ var outcomeOrder = []string{
 	string(quality.OutcomeUnknown),
 }
 
-// QualityDistribution aggregates the scoped sessions' grades and outcomes on its own pooled
-// connection. Insights instead threads its snapshot transaction through
-// qualityDistributionFrom, so the split shares one MVCC snapshot with the other panels it must
-// reconcile against (its session total equals the archetype split's).
+// QualityDistribution aggregates the scoped sessions' grades and outcomes. The grade split and the
+// outcome split are separate scans, so it wraps them in one repeatable-read, read-only snapshot:
+// the session total, the grade buckets, and the outcome buckets then all describe the same scoped
+// cohort, where a concurrent session insert or signals_stale change between the two scans could
+// otherwise pair a grade split from one cohort with an outcome split from another. Insights threads
+// its own snapshot through qualityDistributionFrom so its panels reconcile against each other; this
+// is the standalone equivalent. The snapshot takes no row locks, so it never blocks ingest.
 func (s *Store) QualityDistribution(ctx context.Context, f AnalyticsFilter) (QualityDistribution, error) {
-	return s.qualityDistributionFrom(ctx, s.Pool, f)
+	var out QualityDistribution
+	err := pgx.BeginTxFunc(ctx, s.Pool,
+		pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly},
+		func(tx pgx.Tx) error {
+			var err error
+			out, err = s.qualityDistributionFrom(ctx, tx, f)
+			return err
+		})
+	if err != nil {
+		return QualityDistribution{}, fmt.Errorf("quality distribution snapshot: %w", err)
+	}
+	return out, nil
 }
 
 // qualityDistributionFrom aggregates the scoped sessions' grades and outcomes for the Insights
@@ -105,12 +120,15 @@ func (s *Store) scopedSignalCounts(ctx context.Context, q querier, f AnalyticsFi
 		var key string
 		var n int
 		if err := rows.Scan(&key, &n); err != nil {
-			return nil, 0, err
+			return nil, 0, fmt.Errorf("scan signal count row: %w", err)
 		}
 		out[key] = n
 		total += n
 	}
-	return out, total, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("iterate signal counts: %w", err)
+	}
+	return out, total, nil
 }
 
 // orderedCounts projects a key->count map onto a fixed key order, zero-filling missing

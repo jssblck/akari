@@ -32,11 +32,25 @@ func (c ConcurrencyStats) HasData() bool { return c.Sessions > 0 }
 // sits at the front of every concurrency CTE so the three queries measure the same set.
 const spanFilter = " s.started_at IS NOT NULL AND s.ended_at IS NOT NULL AND s.ended_at >= s.started_at"
 
-// ConcurrencyStats computes the scope's overlap figures on its own pooled connection for
-// the Insights page. The snapshot path threads concurrencyStatsFrom so every panel reads
-// one MVCC snapshot.
+// ConcurrencyStats computes the scope's overlap figures for the Insights page. Fleet peak, busiest
+// user, and the average plus session count are three separate reads over the same span set, so it
+// wraps them in one repeatable-read, read-only snapshot: a concurrent ingest between the reads could
+// otherwise return a peak from one cohort with a session count and average from another. Insights
+// threads its own snapshot through concurrencyStatsFrom; this is the standalone equivalent. The
+// snapshot takes no row locks, so it never blocks ingest.
 func (s *Store) ConcurrencyStats(ctx context.Context, f AnalyticsFilter) (ConcurrencyStats, error) {
-	return s.concurrencyStatsFrom(ctx, s.Pool, f)
+	var out ConcurrencyStats
+	err := pgx.BeginTxFunc(ctx, s.Pool,
+		pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly},
+		func(tx pgx.Tx) error {
+			var err error
+			out, err = s.concurrencyStatsFrom(ctx, tx, f)
+			return err
+		})
+	if err != nil {
+		return ConcurrencyStats{}, fmt.Errorf("concurrency stats snapshot: %w", err)
+	}
+	return out, nil
 }
 
 // concurrencyStatsFrom computes the scope's overlap figures with a sweep line over the

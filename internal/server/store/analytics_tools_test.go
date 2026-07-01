@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jssblck/akari/internal/quality"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/storetest"
 )
@@ -309,5 +310,133 @@ func TestToolStatsClips(t *testing.T) {
 	}
 	if ts.Clipped != distinct-10 {
 		t.Errorf("Clipped = %d, want %d", ts.Clipped, distinct-10)
+	}
+}
+
+// TestToolStatsReconcilesWithSessionSignals pins the two projections of a session's tool volume to
+// each other. ToolStats sums deduped fleet totals straight from raw tool_calls, so it can include the
+// live, unsettled, and ungraded sessions the Insights panel must show; gatherSignalFacts stores the
+// same deduped counts per settled session in session_signals. They share one dedup key
+// (dedupToolCallsPartition is gatherSignalFacts's key with session_id prepended) and one failure test
+// (result_status = 'error'), so over a fully-graded cohort the fleet totals must equal the sum of the
+// stored per-session counts exactly. This seeds a settled, graded cohort (with a replayed call so the
+// dedup actually bites) and asserts the equality both ways, so the shared dedup shape cannot drift
+// between the two paths without failing here.
+func TestToolStatsReconcilesWithSessionSignals(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	ada := seedUser(t, st, "ada")
+	pid, err := st.UpsertProject(ctx, "github.com/ada/toolrecon", "github.com", "ada", "toolrecon", "toolrecon", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recent := time.Now().Add(-1 * time.Hour)
+
+	// Three sessions with a mix of tools and failures, and a replayed call in the first that must
+	// collapse on both sides. Each carries a substantive, anchored human prompt so it grades (the
+	// insert stamps prompt facts at the current version, so the pre-reparse guard does not hold it back).
+	type seed struct {
+		name  string
+		calls []store.ProjToolCall
+		res   []store.ToolResultDelta
+	}
+	seeds := []seed{
+		{
+			name: "s1",
+			calls: []store.ProjToolCall{
+				{MessageOrdinal: 1, CallIndex: 0, ToolName: "Read", Category: "read", InputBody: "r-a", CallUID: "a1"},
+				{MessageOrdinal: 1, CallIndex: 1, ToolName: "Bash", Category: "bash", InputBody: "b-a", CallUID: "a2"},
+				{MessageOrdinal: 1, CallIndex: 2, ToolName: "Bash", Category: "bash", InputBody: "b-b", CallUID: "a3"},
+				// a1 replayed in a later turn: same id, tool, input, and result, so it collapses to one call.
+				{MessageOrdinal: 2, CallIndex: 0, ToolName: "Read", Category: "read", InputBody: "r-a", CallUID: "a1"},
+			},
+			res: []store.ToolResultDelta{
+				{CallUID: "a1", Status: "ok"}, {CallUID: "a2", Status: "error"}, {CallUID: "a3", Status: "error"},
+			},
+		},
+		{
+			name: "s2",
+			calls: []store.ProjToolCall{
+				{MessageOrdinal: 1, CallIndex: 0, ToolName: "Edit", Category: "edit", FilePath: "x.go", InputBody: "e-a", CallUID: "b1"},
+				{MessageOrdinal: 1, CallIndex: 1, ToolName: "Grep", Category: "search", InputBody: "g-a", CallUID: "b2"},
+			},
+			res: []store.ToolResultDelta{
+				{CallUID: "b1", Status: "ok"}, {CallUID: "b2", Status: "ok"},
+			},
+		},
+		{
+			name: "s3",
+			calls: []store.ProjToolCall{
+				{MessageOrdinal: 1, CallIndex: 0, ToolName: "Read", Category: "read", InputBody: "r-c", CallUID: "c1"},
+				{MessageOrdinal: 1, CallIndex: 1, ToolName: "Edit", Category: "edit", FilePath: "y.go", InputBody: "e-c", CallUID: "c2"},
+				{MessageOrdinal: 1, CallIndex: 2, ToolName: "Edit", Category: "edit", FilePath: "z.go", InputBody: "e-d", CallUID: "c3"},
+			},
+			res: []store.ToolResultDelta{
+				{CallUID: "c1", Status: "ok"}, {CallUID: "c2", Status: "error"}, {CallUID: "c3", Status: "ok"},
+			},
+		},
+	}
+
+	for _, sd := range seeds {
+		sid := seedSession(t, st, ada, pid, sd.name)
+		if err := st.ApplyProjectionDelta(ctx, sid, store.ProjectionDelta{
+			Messages: []store.MessageDelta{
+				{Ordinal: 0, Role: "user", Content: "please refactor the retry loop in internal/server/store/signals.go"},
+				{Ordinal: 1, Role: "assistant", Content: "working", HasToolUse: true},
+				{Ordinal: 2, Role: "assistant", Content: "more", HasToolUse: true},
+			},
+			ToolCalls:   sd.calls,
+			ToolResults: sd.res,
+		}); err != nil {
+			t.Fatalf("apply %s: %v", sd.name, err)
+		}
+		setSessionShape(t, st, ctx, sid, recent, recent.Add(10*time.Minute), 3, 1)
+		settleSession(t, st, ctx, sid)
+		if err := st.RefreshSessionSignals(ctx, sid); err != nil {
+			t.Fatalf("grade %s: %v", sd.name, err)
+		}
+	}
+
+	ts, err := st.ToolStats(ctx, store.AnalyticsFilter{ProjectID: pid})
+	if err != nil {
+		t.Fatalf("tool stats: %v", err)
+	}
+
+	// Every cohort session is settled and graded, so the summed per-session signal counts must equal
+	// the fleet totals exactly. The version filter mirrors the analytics reads: only current-version
+	// rows count.
+	var sigCalls, sigFailures, sigRows int
+	if err := st.Pool.QueryRow(ctx,
+		`SELECT coalesce(sum(sig.tool_calls), 0), coalesce(sum(sig.tool_failures), 0), count(*)
+		   FROM session_signals sig
+		   JOIN sessions s ON s.id = sig.session_id
+		  WHERE s.project_id = $1 AND sig.signals_version = $2`,
+		pid, quality.Version).Scan(&sigCalls, &sigFailures, &sigRows); err != nil {
+		t.Fatalf("sum session signals: %v", err)
+	}
+	if sigRows != len(seeds) {
+		t.Fatalf("graded %d sessions, want %d (every cohort session must carry a current-version signal row)", sigRows, len(seeds))
+	}
+	if ts.TotalCalls != sigCalls {
+		t.Errorf("ToolStats.TotalCalls %d != sum(session_signals.tool_calls) %d", ts.TotalCalls, sigCalls)
+	}
+	if ts.TotalFailures != sigFailures {
+		t.Errorf("ToolStats.TotalFailures %d != sum(session_signals.tool_failures) %d", ts.TotalFailures, sigFailures)
+	}
+
+	// Non-vacuous: the cohort actually ran tools and failures, and the replayed call was deduped, so
+	// the equality is over a real dedup rather than a trivial no-replay count.
+	if ts.TotalCalls == 0 || ts.TotalFailures == 0 {
+		t.Fatalf("cohort is vacuous: calls %d failures %d, want both positive", ts.TotalCalls, ts.TotalFailures)
+	}
+	var rawCalls int
+	if err := st.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM tool_calls tc JOIN sessions s ON s.id = tc.session_id WHERE s.project_id = $1`,
+		pid).Scan(&rawCalls); err != nil {
+		t.Fatalf("count raw tool calls: %v", err)
+	}
+	if rawCalls <= ts.TotalCalls {
+		t.Errorf("raw tool_calls %d not greater than deduped total %d; the replay did not exercise dedup", rawCalls, ts.TotalCalls)
 	}
 }

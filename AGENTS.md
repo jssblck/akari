@@ -55,7 +55,7 @@ quadratic in a session's turns, and a verdict taken mid-session would drift once
 the session crossed the idle threshold, so signals are computed once, after the
 session settles, off the hot path. They sit OUTSIDE the `sessions.total_* ==
 sum(usage_events)` invariant: a new signal derives from the same rows without
-touching the rollups. Three version constants gate the machinery, and forgetting
+touching the rollups. Five version constants gate the machinery, and forgetting
 one leaves a half-migrated corpus:
 
 - `parse.Version` and `parse.Epoch` (`internal/server/parse`): bump both when
@@ -70,6 +70,23 @@ one leaves a half-migrated corpus:
   one-time full reparse that re-derives every row atomically, the belt-and-suspenders
   path when you want the whole corpus current on first deploy regardless of whether
   the settle loop is enabled.
+- `quality.PromptFactsVersion` (`internal/quality`): bump when `ClassifyPrompt`'s
+  output changes (a new or changed prompt flag, a different duplicate-digest
+  normalization). Unlike `quality.Version`, these facts are cached on the messages
+  row and can only be re-derived by re-inserting the message, so the settle pass
+  cannot re-derive them: `gatherPromptHygiene` treats an older-version row like an
+  unfilled one and leaves the session ungraded until a reparse fills it. Pair the
+  bump with a `parse.Epoch` bump so the corpus reparses and re-derives every
+  message's facts at the new version.
+- `pricing.Version` (`internal/pricing`): bump on any rate change in the pricing
+  table (a new or removed model, a different Input/Output/CacheWrite/CacheRead
+  number). It gates `reconcileCacheSavingsPricingIfNeeded`, which re-prices the
+  per-session cache-savings rollup across the cache-bearing corpus once per bump,
+  so a session whose reparse fails still re-prices from its usage_events at the new
+  rates (per-row cost rides the `Epoch` reparse instead). It is separate from
+  `parse.Epoch` on purpose: keying off Epoch would re-price the whole corpus on
+  every unrelated parser change. Pair a `pricing.Version` bump with the
+  `parse.Epoch` bump a reprice already requires.
 
 A new signal should default to a value that reads as "unmeasured" (NULL, or a
 zero the aggregate excludes) until the settle pass (or a backfill reparse) fills it.

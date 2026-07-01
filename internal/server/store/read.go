@@ -93,7 +93,9 @@ type SessionDetail struct {
 	ParserVersion int
 	// TotalCacheSavingsUSD is the session's rolled-up prompt-cache saving (folded at parse
 	// time beside total_cost_usd), so the Cache tile reads it in O(1) instead of scanning
-	// usage_events on every live refresh. CacheSavingsIncomplete flags that some cached
+	// usage_events on every live refresh. A session whose rollup is not yet backfilled is
+	// priced and persisted once on read (see scanDetail), so the tile is never served the
+	// seeded value and later reads stay O(1). CacheSavingsIncomplete flags that some cached
 	// volume rode an unpriced model, so the figure is partial (and, unlike cost, not a clean
 	// lower bound: an omitted model's saving can be either sign).
 	TotalCacheSavingsUSD   float64
@@ -854,9 +856,13 @@ func (s *Store) GlobalFacets(ctx context.Context) (GlobalFacetValues, error) {
 // rail.
 func isLocalKind(kind string) bool { return kind == "standalone" || kind == "orphaned" }
 
-// scanDetail loads one session with its project, by an arbitrary WHERE clause.
-func (s *Store) scanDetail(ctx context.Context, where string, arg any) (SessionDetail, error) {
+// scanDetailRow loads one session with its project into a SessionDetail by an arbitrary WHERE
+// clause, also reporting whether its cache-savings rollup is backfilled. It is the single-query
+// core that scanDetail wraps with the read-side backfill; every displayed field comes from this
+// one sessions-row read, so the token split and the saving are always one consistent snapshot.
+func (s *Store) scanDetailRow(ctx context.Context, where string, arg any) (SessionDetail, bool, error) {
 	var d SessionDetail
+	var cacheSavingsBackfilled bool
 	err := s.Pool.QueryRow(ctx,
 		`SELECT s.id, s.agent, s.machine, s.git_branch, u.username,
 		        s.message_count, s.user_message_count,
@@ -865,7 +871,7 @@ func (s *Store) scanDetail(ctx context.Context, where string, arg any) (SessionD
 		        s.total_cost_usd, s.cost_incomplete, s.visibility, s.public_id,
 		        s.started_at, s.ended_at, s.updated_at,
 		        s.user_id, s.project_id, p.remote_key, p.display_name, p.kind, s.cwd, s.parent_session_id, s.parser_version,
-		        s.total_cache_savings_usd, s.cache_savings_incomplete
+		        s.total_cache_savings_usd, s.cache_savings_incomplete, s.cache_savings_backfilled
 		   FROM sessions s
 		   JOIN users u ON u.id = s.user_id
 		   JOIN projects p ON p.id = s.project_id
@@ -877,11 +883,51 @@ func (s *Store) scanDetail(ctx context.Context, where string, arg any) (SessionD
 		&d.TotalCostUSD, &d.CostIncomplete, &d.Visibility, &d.PublicID,
 		&d.StartedAt, &d.EndedAt, &d.UpdatedAt,
 		&d.OwnerID, &d.ProjectID, &d.ProjectKey, &d.ProjectName, &d.ProjectKind, &d.Cwd, &d.ParentID, &d.ParserVersion,
-		&d.TotalCacheSavingsUSD, &d.CacheSavingsIncomplete)
+		&d.TotalCacheSavingsUSD, &d.CacheSavingsIncomplete, &cacheSavingsBackfilled)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return SessionDetail{}, ErrNotFound
+		return SessionDetail{}, false, ErrNotFound
 	}
-	return d, err
+	if err != nil {
+		return SessionDetail{}, false, err
+	}
+	return d, cacheSavingsBackfilled, nil
+}
+
+// scanDetail loads one session with its project, by an arbitrary WHERE clause.
+//
+// The Cache tile reads the total_cache_savings_usd rollup rather than rescanning usage_events per
+// refresh, but that rollup is authoritative only once cache_savings_backfilled is set. A session
+// that predates the column is seeded at 0 and left unbackfilled until it is priced, and the startup
+// BackfillCacheSavings runs asynchronously, so a detail read can arrive before it. Serving the
+// seeded value would put a wrong saving on the very session a reader opened. Two cheaper-looking
+// fixes are both wrong: recomputing the saving on every read makes a live session under SSE pay a
+// full usage_events scan per refresh, O(K^2) over its rows; and reading the token split from the
+// sessions rollup while recomputing only the saving from usage_events lets a concurrent append tear
+// the tile, pairing an old split with a newer saving. So this backfills the row once on demand,
+// under the same locked primitive the startup pass uses: backfillCacheSavingsForSession prices the
+// saving, persists it, and flips the flag (safe against the live parse fold), after which this read
+// and every later one serve the O(1) rollup from one consistent scanDetailRow snapshot.
+func (s *Store) scanDetail(ctx context.Context, where string, arg any) (SessionDetail, error) {
+	d, backfilled, err := s.scanDetailRow(ctx, where, arg)
+	if err != nil {
+		return SessionDetail{}, err
+	}
+	if backfilled {
+		return d, nil
+	}
+	if _, err := s.backfillCacheSavingsForSession(ctx, d.ID); err != nil {
+		return SessionDetail{}, fmt.Errorf("backfill cache savings for session %d on read: %w", d.ID, err)
+	}
+	// Re-read with the original predicate, not by id: the flag is now set, so this returns the O(1)
+	// rollup from one post-backfill snapshot rather than a mix of the pre-backfill scan and the new
+	// saving, and re-applying the same where clause rechecks any visibility gate (the public path
+	// filters on visibility = 'public'), so a session unpublished between the two reads is not
+	// rendered from the by-id re-read.
+	d, _, err = s.scanDetailRow(ctx, where, arg)
+	if err != nil {
+		return SessionDetail{}, err
+	}
+	return d, nil
 }
 
 // SessionDetailByID loads a session by numeric id.

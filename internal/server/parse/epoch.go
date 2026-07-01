@@ -44,4 +44,14 @@ package parse
 // at the running quality.Version. session_signals is a new derived table rather than a
 // change to the parser's output, so this bump leaves the projection delta byte-for-byte
 // identical and the golden fixtures do not move; it stands on its own.
-const Epoch = 2
+//
+// Epoch 2 -> 3: materialize per-message prompt-hygiene facts on the messages row
+// (prompt_short, prompt_no_code, prompt_bare_greeting, prompt_digest; see migration
+// 0022_prompt_hygiene_facts and the message insert in store/projection.go). They are derived at
+// insert so the settle pass aggregates fixed-size columns instead of reading prompt bodies back.
+// Migration 0022 adds the columns but, unlike a generated column, cannot backfill them; this bump
+// reparses the corpus so every existing message re-inserts through the classifier and the columns
+// fill in one pass. The facts are store-side derived columns, not parser output, so the reducer's
+// projection delta is byte-for-byte identical and the golden fixtures do not move; the bump is the
+// backfill signal and stands on its own.
+const Epoch = 3

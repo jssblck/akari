@@ -13,7 +13,8 @@ import (
 // This file pins the load-bearing invariant the whole dashboard leans on:
 //
 //	sessions.total_* == sum over a session's usage_events, for every token class
-//	and for cost, and message_count == count of a session's messages rows.
+//	and for cost; message_count == count of a session's messages rows; and
+//	user_message_count == count of its role='user' messages rows.
 //
 // akari aggregates token and cost data from two bases. The usage_events ledger
 // backs the analytics surfaces (the overview and project usage panels, the
@@ -26,6 +27,13 @@ import (
 // it directly, on the live ingest path and after a reparse, and check that the
 // cross-base views built on top of it reconcile. See docs/data-aggregation.md for
 // the full inventory of aggregation sites and which base each reads.
+//
+// user_message_count is pinned here for the same reason: the archetype banding, the
+// session-outcome fold, and the tools-per-turn denominator all read that rollup as if
+// it equaled count(messages WHERE role='user'). It does, because applyAggregates folds
+// it from exactly the user-role message rows that inserted and resetSessionAggregates
+// zeroes it before a reparse re-folds, but that too is unenforced at the schema level,
+// so the assertion below keeps every consumer of the rollup honest.
 
 // usageRow is one usage_events insert for a test ingest, named so a delta reads
 // like the transcript it stands in for. A zero At means an undated event (NULL
@@ -133,26 +141,27 @@ func ledgerTotals(t *testing.T, st *store.Store, sessionID int64) (in, out, cr, 
 
 // rollupTotals reads a session's stored rollups, the base the projects index and
 // every per-session figure read. It is the left-hand side of the invariant.
-func rollupTotals(t *testing.T, st *store.Store, sessionID int64) (in, out, cr, cw int64, cost float64, msgs int) {
+func rollupTotals(t *testing.T, st *store.Store, sessionID int64) (in, out, cr, cw int64, cost float64, msgs, userMsgs int) {
 	t.Helper()
 	if err := st.Pool.QueryRow(context.Background(),
 		`SELECT total_input_tokens, total_output_tokens, total_cache_read_tokens,
-		        total_cache_write_tokens, total_cost_usd, message_count
+		        total_cache_write_tokens, total_cost_usd, message_count, user_message_count
 		   FROM sessions WHERE id = $1`, sessionID).
-		Scan(&in, &out, &cr, &cw, &cost, &msgs); err != nil {
+		Scan(&in, &out, &cr, &cw, &cost, &msgs, &userMsgs); err != nil {
 		t.Fatalf("rollup totals for session %d: %v", sessionID, err)
 	}
-	return in, out, cr, cw, cost, msgs
+	return in, out, cr, cw, cost, msgs, userMsgs
 }
 
 // assertRollupMatchesLedger pins the invariant for one session: every token class
-// and the cost in sessions.total_* equal the sum over its usage_events, and
-// message_count equals the count of its messages rows. `when` labels the phase
-// (after ingest, after reparse) so a failure says which path broke it.
+// and the cost in sessions.total_* equal the sum over its usage_events, message_count
+// equals the count of its messages rows, and user_message_count equals the count of its
+// role='user' messages rows. `when` labels the phase (after ingest, after reparse) so a
+// failure says which path broke it.
 func assertRollupMatchesLedger(t *testing.T, st *store.Store, sessionID int64, when string) {
 	t.Helper()
 	lin, lout, lcr, lcw, lcost, _ := ledgerTotals(t, st, sessionID)
-	rin, rout, rcr, rcw, rcost, msgs := rollupTotals(t, st, sessionID)
+	rin, rout, rcr, rcw, rcost, msgs, userMsgs := rollupTotals(t, st, sessionID)
 	if rin != lin || rout != lout || rcr != lcr || rcw != lcw {
 		t.Errorf("%s: session %d rollup tokens (in=%d out=%d cr=%d cw=%d) != ledger (in=%d out=%d cr=%d cw=%d)",
 			when, sessionID, rin, rout, rcr, rcw, lin, lout, lcr, lcw)
@@ -160,13 +169,17 @@ func assertRollupMatchesLedger(t *testing.T, st *store.Store, sessionID int64, w
 	if rcost != lcost {
 		t.Errorf("%s: session %d total_cost_usd = %v != ledger cost %v", when, sessionID, rcost, lcost)
 	}
-	var rowCount int
+	var rowCount, userRowCount int
 	if err := st.Pool.QueryRow(context.Background(),
-		"SELECT count(*) FROM messages WHERE session_id = $1", sessionID).Scan(&rowCount); err != nil {
+		`SELECT count(*), count(*) FILTER (WHERE role = 'user')
+		   FROM messages WHERE session_id = $1`, sessionID).Scan(&rowCount, &userRowCount); err != nil {
 		t.Fatalf("count messages for session %d: %v", sessionID, err)
 	}
 	if msgs != rowCount {
 		t.Errorf("%s: session %d message_count = %d != count of messages rows %d", when, sessionID, msgs, rowCount)
+	}
+	if userMsgs != userRowCount {
+		t.Errorf("%s: session %d user_message_count = %d != count of role='user' messages rows %d", when, sessionID, userMsgs, userRowCount)
 	}
 }
 

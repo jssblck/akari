@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -187,7 +188,17 @@ func (s *Store) sessionCacheStatsFrom(ctx context.Context, q querier, sessionID 
 // a no-op that is safe to run every startup. Each session is priced under a row lock (see
 // backfillCacheSavingsForSession) so a write can never clobber the live parse fold. It keyset-pages
 // by id so peak memory is one batch of ids, and returns how many sessions it corrected.
+//
+// It first runs the pricing reconcile (reconcileCacheSavingsPricingIfNeeded): a rate change re-prices
+// every cache-bearing session, not just never-folded ones, and a failed-reparse session would keep
+// its old-priced rollup flagged backfilled=true out of the candidate set. The reconcile clears that
+// flag across the cache-bearing corpus once per pricing.Version bump, so the drain below re-prices
+// them at the current rates. On a steady-state startup (marker current) the reconcile is one O(1)
+// read and the drain finds no candidates.
 func (s *Store) BackfillCacheSavings(ctx context.Context) (int, error) {
+	if err := s.reconcileCacheSavingsPricingIfNeeded(ctx); err != nil {
+		return 0, err
+	}
 	total := 0
 	var afterID int64
 	for {
@@ -212,6 +223,55 @@ func (s *Store) BackfillCacheSavings(ctx context.Context) (int, error) {
 		}
 		afterID = ids[len(ids)-1]
 	}
+}
+
+// reconcileCacheSavingsPricingIfNeeded re-prices the cache-savings rollup across the corpus once per
+// pricing.Version change. A reprice bumps pricing.Version (paired with a parse.Epoch bump); the epoch
+// reparse re-folds the rollup for every session it can rebuild, but a session whose reparse fails
+// keeps its old-priced rollup with cache_savings_backfilled=true, so the drain skips it and its tile
+// drifts from a live SessionCacheStats recompute at the new rates forever. This marks every
+// cache-bearing session cache_savings_backfilled=false when the pricing marker is behind, so the
+// drain in BackfillCacheSavings re-prices them all from usage_events at the current rates.
+//
+// The mark is committed on its own, independent of any reparse, which is the whole point: it survives
+// a failed reparse's rollback. A session that never re-parses is still re-priced from its (old)
+// usage_events at the new rates, exactly what SessionCacheStats computes live, so rollup and recompute
+// agree again. The clear only touches currently-backfilled cache-bearing sessions (an already-false
+// one is already a candidate), and the EXISTS probe skips sessions with no cache volume.
+//
+// It is gated on a parse_meta marker, mirroring reconcileStaleVersionsIfNeeded for quality.Version: a
+// steady-state startup reads the singleton (one O(1) read), finds the marker current, and skips the
+// full-corpus UPDATE. A pricing.Version bump ships in a new binary, so the first startup after the
+// upgrade sees the marker behind, marks the cache-bearing corpus once, and advances the marker. The
+// mark and the marker advance are separate statements, but the mark is idempotent (re-clearing a flag,
+// re-pricing an already-current session), so a crash between them just repeats the mark next startup.
+func (s *Store) reconcileCacheSavingsPricingIfNeeded(ctx context.Context) error {
+	var priced int
+	if err := s.Pool.QueryRow(ctx,
+		`SELECT cache_savings_priced_version FROM parse_meta WHERE id = TRUE`).Scan(&priced); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			priced = 0 // the migration seeds the row; a missing one means never priced
+		} else {
+			return fmt.Errorf("read cache_savings_priced_version: %w", err)
+		}
+	}
+	if priced == pricing.Version {
+		return nil
+	}
+	if _, err := s.Pool.Exec(ctx,
+		`UPDATE sessions s SET cache_savings_backfilled = false
+		  WHERE s.cache_savings_backfilled
+		    AND EXISTS (SELECT 1 FROM usage_events u
+		                 WHERE u.session_id = s.id
+		                   AND (u.cache_read_tokens > 0 OR u.cache_write_tokens > 0))`); err != nil {
+		return fmt.Errorf("mark cache-bearing sessions for reprice: %w", err)
+	}
+	if _, err := s.Pool.Exec(ctx,
+		`UPDATE parse_meta SET cache_savings_priced_version = $1, updated_at = now() WHERE id = TRUE`,
+		pricing.Version); err != nil {
+		return fmt.Errorf("mark cache savings priced at version %d: %w", pricing.Version, err)
+	}
+	return nil
 }
 
 // backfillCacheSavingsForSession recomputes one candidate session's cache saving from its

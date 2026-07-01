@@ -91,14 +91,19 @@ type signalFacts struct {
 	lastUserOrd      int
 	idleLongEnough   bool
 
-	// hygiene is computed in Go from the session's ordered human prompts rather than in
-	// SQL: the rules are text heuristics (word counts, code detection, verbatim repeats)
-	// that read far clearer in the tested quality package than as a window-function query.
+	// hygiene is aggregated from the per-message hygiene columns quality.ClassifyPrompt
+	// materialized when each prompt was written (see gatherPromptHygiene): fixed-size facts
+	// the refresh sums without reading a prompt body back.
 	hygiene quality.PromptHygiene
 	// promptCount is the classifier's base: the count of non-empty human prompts it saw,
 	// stored so the cohort aggregate divides the hygiene counts by exactly the set they
 	// came from rather than by user_message_count (which can include empty-text turns).
 	promptCount int
+	// promptFactsReady is false when the session still has a human prompt whose hygiene facts
+	// are NULL: a pre-migration message the Epoch reparse has not yet re-inserted with facts.
+	// refreshSignalsTx leaves such a session stale and ungraded rather than record an all-zero
+	// hygiene row that would mask the real signal until the reparse catches up.
+	promptFactsReady bool
 
 	// Context-health facts, computed from the session's ordered usage. Both are nil when
 	// there was no usage to measure (so the row stores NULL, not a misleading zero);
@@ -184,12 +189,14 @@ func gatherSignalFacts(ctx context.Context, tx pgx.Tx, sessionID int64) (signalF
 
 	// Outcome facts. user_message_count is the rollup (pure tool-result user entries are
 	// not messages, so it already counts only real human turns). The last substantive
-	// turns require non-empty content, so an empty tool-plumbing turn does not count as
-	// the last word. idle is measured against the session's last activity.
+	// turns require non-empty content, tested through the stored content_length column
+	// (octet_length(content), a generated column) rather than content <> '' so the refresh
+	// reads fixed-size metadata and never the prompt body. idle is measured against the
+	// session's last activity.
 	err = tx.QueryRow(ctx,
 		`SELECT s.user_message_count,
-		        coalesce((SELECT max(ordinal) FROM messages WHERE session_id = $1 AND role = 'assistant' AND content <> ''), -1),
-		        coalesce((SELECT max(ordinal) FROM messages WHERE session_id = $1 AND role = 'user' AND content <> ''), -1),
+		        coalesce((SELECT max(ordinal) FROM messages WHERE session_id = $1 AND role = 'assistant' AND content_length > 0), -1),
+		        coalesce((SELECT max(ordinal) FROM messages WHERE session_id = $1 AND role = 'user' AND content_length > 0), -1),
 		        (s.ended_at IS NOT NULL AND s.ended_at < now() - make_interval(mins => $2))
 		   FROM sessions s WHERE s.id = $1`,
 		sessionID, abandonedIdleMinutes).Scan(
@@ -198,16 +205,17 @@ func gatherSignalFacts(ctx context.Context, tx pgx.Tx, sessionID int64) (signalF
 		return signalFacts{}, fmt.Errorf("gather outcome facts for session %d: %w", sessionID, err)
 	}
 
-	// Prompt-hygiene facts, folded over the human prompts in order (non-empty only: an
-	// empty turn is tool plumbing, not a prompt; role='user' is the real-human-turn set,
-	// since the Claude reducer drops tool-result-only user entries; ordinal order puts the
-	// opening prompt first so the unstructured-start rule reads the right turn).
-	hygiene, promptCount, err := gatherPromptHygiene(ctx, tx, sessionID)
+	// Prompt-hygiene facts, aggregated from the per-message hygiene columns (non-empty user turns
+	// only: an empty turn is tool plumbing, not a prompt; role='user' is the real-human-turn set,
+	// since the Claude reducer drops tool-result-only user entries; the min-ordinal prompt is the
+	// opener the unstructured-start rule reads).
+	hygiene, promptCount, ready, err := gatherPromptHygiene(ctx, tx, sessionID)
 	if err != nil {
 		return signalFacts{}, err
 	}
 	f.hygiene = hygiene
 	f.promptCount = promptCount
+	f.promptFactsReady = ready
 
 	// Context-health facts. Read from the same projection but from usage_events rather
 	// than messages, so they live in their own pass over the session's ordered turns.
@@ -263,52 +271,57 @@ func gatherContextHealth(ctx context.Context, tx pgx.Tx, sessionID int64, f *sig
 	return nil
 }
 
-// gatherPromptHygiene folds a session's human prompts into the hygiene signals and returns
-// them with the prompt count. It reads the prompts in transcript order, dropping empties so
-// a tool-plumbing turn does not read as a terse prompt, and folds each as it streams (see
-// quality.PromptHygieneFolder), so no whole-session buffer of prompt bodies is held.
+// gatherPromptHygiene computes a session's prompt-hygiene signals and the prompt count from the
+// per-message facts stored when each message was written (see quality.ClassifyPrompt and the message
+// insert in projection.go). Every signal is a fixed-size aggregate over those columns, so the settle
+// pass never reads a prompt body back: peak memory on the refresh path does not track the largest
+// prompt a session held, no matter how much pasted code one carried. The set is the session's real
+// human turns, tested through the stored content_length column (a generated octet_length(content),
+// so "non-empty" is fixed-size metadata, not a body comparison).
 //
-// The duplicate count is the one cross-prompt signal, and computing it exactly needs state
-// proportional to the prompt count (a set of everything seen). Rather than hold that in Go,
-// it is a database aggregate: over the same non-terse prompts (at least DuplicateMinWords
-// words), the number of repeats beyond the first is the count minus the distinct normalized
-// texts, where the normalization (lowercase, collapse whitespace, trim) mirrors the Go rule
-// the folder's siblings use. This keeps peak memory on the refresh path bounded to the
-// folder's O(1) state while preserving exact, whole-session duplicate detection.
-func gatherPromptHygiene(ctx context.Context, tx pgx.Tx, sessionID int64) (quality.PromptHygiene, int, error) {
-	rows, err := tx.Query(ctx,
-		`SELECT content FROM messages
-		  WHERE session_id = $1 AND role = 'user' AND content <> ''
-		  ORDER BY ordinal`, sessionID)
-	if err != nil {
-		return quality.PromptHygiene{}, 0, fmt.Errorf("gather prompts for session %d: %w", sessionID, err)
-	}
-	defer rows.Close()
-	var folder quality.PromptHygieneFolder
-	for rows.Next() {
-		var c string
-		if err := rows.Scan(&c); err != nil {
-			return quality.PromptHygiene{}, 0, fmt.Errorf("scan prompt for session %d: %w", sessionID, err)
-		}
-		folder.Add(c)
-	}
-	if err := rows.Err(); err != nil {
-		return quality.PromptHygiene{}, 0, fmt.Errorf("iterate prompts for session %d: %w", sessionID, err)
-	}
-
-	var duplicates int
+// It is one aggregate over those turns:
+//   - Short and NoCodeContext are the counts of the stored per-prompt flags.
+//   - Duplicate is repeats beyond the first among the duplicate-eligible prompts, count(*) minus the
+//     distinct digests. Eligibility is "not short": duplicateMinWords equals the terse threshold, so a
+//     prompt is either short or duplicate-eligible, never both, and the stored prompt_short flag is the
+//     eligibility test with no second column or word re-count needed.
+//   - UnstructuredStart is the opening turn's verdict: the min-ordinal prompt was short or a bare
+//     greeting. bool_or over just that row reads the opener's stored flags without fetching its body.
+//
+// ready is false when any human prompt lacks current facts: either NULL facts (a message written
+// before migration 0022 added the columns, not yet re-inserted by the Epoch reparse) or facts at an
+// older prompt_facts_version (classified under a superseded ClassifyPrompt, not yet re-derived). The
+// columns are filled at insert and cannot backfill or re-derive on their own, so a session in either
+// state would otherwise aggregate to hygiene the current classifier never produced. The caller uses
+// ready to leave such a session ungraded until the reparse re-derives its facts, rather than record a
+// count that reads as measured. A session with no human prompts (automation) has nothing to derive,
+// so it reads ready and grades to an honest empty hygiene.
+func gatherPromptHygiene(ctx context.Context, tx pgx.Tx, sessionID int64) (quality.PromptHygiene, int, bool, error) {
+	var (
+		h           quality.PromptHygiene
+		promptCount int
+		stale       bool
+	)
 	if err := tx.QueryRow(ctx,
-		`WITH p AS (
-		   SELECT btrim(regexp_replace(lower(content), '\s+', ' ', 'g')) AS norm
+		`WITH prompts AS (
+		   SELECT ordinal, prompt_short, prompt_no_code, prompt_bare_greeting, prompt_digest, prompt_facts_version
 		     FROM messages
-		    WHERE session_id = $1 AND role = 'user' AND content <> ''
-		      AND array_length(regexp_split_to_array(btrim(content), '\s+'), 1) >= $2
+		    WHERE session_id = $1 AND role = 'user' AND content_length > 0
 		 )
-		 SELECT count(*) - count(DISTINCT norm) FROM p`,
-		sessionID, quality.DuplicateMinWords).Scan(&duplicates); err != nil {
-		return quality.PromptHygiene{}, 0, fmt.Errorf("count duplicate prompts for session %d: %w", sessionID, err)
+		 SELECT
+		   count(*),
+		   count(*) FILTER (WHERE prompt_short),
+		   count(*) FILTER (WHERE prompt_no_code),
+		   count(*) FILTER (WHERE NOT prompt_short)
+		     - count(DISTINCT prompt_digest) FILTER (WHERE NOT prompt_short),
+		   coalesce(bool_or((prompt_short OR prompt_bare_greeting)
+		                    AND ordinal = (SELECT min(ordinal) FROM prompts)), FALSE),
+		   coalesce(bool_or(prompt_digest IS NULL OR prompt_facts_version IS DISTINCT FROM $2), FALSE)
+		   FROM prompts`,
+		sessionID, quality.PromptFactsVersion).Scan(&promptCount, &h.Short, &h.NoCodeContext, &h.Duplicate, &h.UnstructuredStart, &stale); err != nil {
+		return quality.PromptHygiene{}, 0, false, fmt.Errorf("gather prompt hygiene for session %d: %w", sessionID, err)
 	}
-	return folder.Result(duplicates), folder.Count(), nil
+	return h, promptCount, !stale, nil
 }
 
 // refreshSignalsTx recomputes a session's signals from its projection and UPSERTs the
@@ -323,6 +336,19 @@ func refreshSignalsTx(ctx context.Context, tx pgx.Tx, sessionID int64) error {
 	f, err := gatherSignalFacts(ctx, tx, sessionID)
 	if err != nil {
 		return err
+	}
+	if !f.promptFactsReady {
+		// A session whose human prompts lack current facts: either NULL facts (a message written
+		// before migration 0022 added the columns, which cannot backfill on ALTER) or facts at a
+		// superseded prompt_facts_version (classified by an older ClassifyPrompt). Grading now would
+		// store an all-zero or version-mixed hygiene row and clear signals_stale, so the session would
+		// read as measured until something re-graded it. Leave it stale and ungraded instead: the
+		// Epoch bump paired with each change re-inserts every message through the classifier and
+		// re-grades in the same transaction (see epoch.go, projection.go), so it is the reparse, not
+		// this racing settle pass, that first records this session's hygiene. The session stays in the
+		// settle-due set (signals_stale untouched), so once the reparse re-derives its facts at the
+		// current version a later pass grades it normally; until then it never surfaces a hollow verdict.
+		return nil
 	}
 	outcome, conf := quality.Classify(quality.Facts{
 		UserMessages:     f.userMessages,

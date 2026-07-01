@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"fmt"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // dedupToolCallsPartition is the PARTITION BY that collapses replayed tool-call rows in a
@@ -76,24 +78,60 @@ func (t ToolStats) ToolsPerTurn() float64 {
 	return float64(t.TotalCalls) / float64(t.Turns)
 }
 
-// ToolStats computes the scope's tool volume, reliability, and mix on its own pooled
-// connection for the Insights page. The snapshot path threads toolStatsFrom so every panel
-// reads one MVCC snapshot.
+// ToolStats computes the scope's tool volume, reliability, and mix for the Insights page. The
+// deduped tool-call numerator and the turn denominator are separate reads, so it wraps them in one
+// repeatable-read, read-only snapshot: a concurrent projection update between them could otherwise
+// pair TotalCalls from one cohort with Turns from another, making ToolsPerTurn a mixed-snapshot
+// figure. Insights threads its own snapshot through toolStatsFrom; this is the standalone
+// equivalent. The snapshot takes no row locks, so it never blocks ingest.
 func (s *Store) ToolStats(ctx context.Context, f AnalyticsFilter) (ToolStats, error) {
-	return s.toolStatsFrom(ctx, s.Pool, f)
+	var out ToolStats
+	err := pgx.BeginTxFunc(ctx, s.Pool,
+		pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly},
+		func(tx pgx.Tx) error {
+			var err error
+			out, err = s.toolStatsFrom(ctx, tx, f)
+			return err
+		})
+	if err != nil {
+		return ToolStats{}, fmt.Errorf("tool stats snapshot: %w", err)
+	}
+	return out, nil
 }
 
 // toolStatsFrom computes the scope's tool volume, reliability, and mix. The per-tool query
 // dedupes replayed calls exactly as the per-session signals do (a resumed or compacted
 // transcript replays prior turns verbatim, and a call's id legitimately rides several
 // rows), but partitions the dedup by session_id as well, since a call id is only unique
-// within its session. The mix is clipped to the busiest tools for legibility while the
-// fleet totals sum over every tool, so the headline error rate is the true fleet rate
-// even when the bar list is short.
+// within its session.
+//
+// TotalCalls and TotalFailures are summed here from the deduped raw tool_calls, NOT from the
+// per-session session_signals.tool_calls/tool_failures that gatherSignalFacts already stores.
+// That is deliberate, not a duplicated derivation. session_signals rows exist only for settled,
+// graded sessions (the settle pass writes them once a session idles past the abandoned
+// threshold, and a pre-reparse or stale-facts session is left ungraded on purpose), so summing
+// them would silently drop every live, unsettled, or ungraded session from the fleet tool
+// picture, which the Insights panel must show. The two projections are still the same
+// arithmetic: dedupToolCallsPartition is gatherSignalFacts's per-session key with session_id
+// prepended, and both count a failure as result_status = 'error', so over any fully-graded
+// cohort sum(session_signals.tool_calls) == TotalCalls and sum(tool_failures) == TotalFailures
+// exactly. TestToolStatsReconcilesWithSessionSignals pins that equality on a settled cohort, so
+// the shared dedup shape cannot drift between the two paths without failing a test.
+//
+// The panel shows only the busiest maxToolBars, so the cap belongs in SQL: the query LIMITs to
+// that many rows and Postgres bounded-sorts just the top slice rather than ordering and streaming
+// every distinct tool (MCP and agent tool names accumulate across fleet history) for the loop to
+// discard all but the first few. The fleet totals must still sum over every tool so the headline
+// error rate is the true fleet rate even when the bar list is short, and a window count would count
+// only the returned rows under a LIMIT, so total_calls, total_failures, and distinct_tools come from
+// scalar subqueries over agg. agg is referenced several times, which makes Postgres materialize it
+// once, so the dedup and grouping run a single time.
 func (s *Store) toolStatsFrom(ctx context.Context, q querier, f AnalyticsFilter) (ToolStats, error) {
 	var ts ToolStats
 
 	filter, args := f.clauseFor("s.started_at")
+	limitArg := fmt.Sprintf("$%d", len(args)+1)
+	args = append(args, maxToolBars)
 	rows, err := q.Query(ctx,
 		`WITH scoped AS (
 		   SELECT tc.session_id, tc.message_ordinal, tc.call_index, tc.tool_name,
@@ -118,11 +156,12 @@ func (s *Store) toolStatsFrom(ctx context.Context, q querier, f AnalyticsFilter)
 		    GROUP BY tool_name
 		 )
 		 SELECT tool_name, calls, failures,
-		        sum(calls) OVER ()    AS total_calls,
-		        sum(failures) OVER () AS total_failures,
-		        count(*) OVER ()      AS distinct_tools
+		        (SELECT coalesce(sum(calls), 0)    FROM agg) AS total_calls,
+		        (SELECT coalesce(sum(failures), 0) FROM agg) AS total_failures,
+		        (SELECT count(*)                   FROM agg) AS distinct_tools
 		   FROM agg
-		  ORDER BY calls DESC, tool_name`, args...)
+		  ORDER BY calls DESC, tool_name
+		  LIMIT `+limitArg, args...)
 	if err != nil {
 		return ToolStats{}, fmt.Errorf("query tool stats: %w", err)
 	}
@@ -134,9 +173,7 @@ func (s *Store) toolStatsFrom(ctx context.Context, q querier, f AnalyticsFilter)
 		if err := rows.Scan(&t.Name, &t.Calls, &t.Failures, &ts.TotalCalls, &ts.TotalFailures, &distinctTools); err != nil {
 			return ToolStats{}, fmt.Errorf("scan tool stats: %w", err)
 		}
-		if len(ts.Tools) < maxToolBars {
-			ts.Tools = append(ts.Tools, t)
-		}
+		ts.Tools = append(ts.Tools, t)
 	}
 	if err := rows.Err(); err != nil {
 		return ToolStats{}, fmt.Errorf("iterate tool stats: %w", err)

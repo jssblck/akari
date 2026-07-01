@@ -406,11 +406,14 @@ func sessionFamilies(ctx context.Context, pool *pgxpool.Pool) ([]famMember, erro
 	for rows.Next() {
 		var m famMember
 		if err := rows.Scan(&m.id, &m.root); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scan session family row: %w", err)
 		}
 		fam = append(fam, m)
 	}
-	return fam, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate session families: %w", err)
+	}
+	return fam, nil
 }
 
 func userIDs(users []demoUser) []int64 {

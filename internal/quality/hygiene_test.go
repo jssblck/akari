@@ -1,160 +1,116 @@
 package quality
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
-// foldHygiene runs prompts through the streaming folder the store uses, so these cases
-// exercise the same per-prompt path the ingest signals do. The duplicate count is not a
-// per-prompt signal (it is a database aggregate, see PromptHygieneFolder and the store's
-// TestSignalsPromptHygiene), so the folder always reports zero for it here; these cases pin
-// the per-prompt rules (terse, no-code-context, and the opening turn's structure).
-func foldHygiene(prompts []string) (PromptHygiene, int) {
-	var f PromptHygieneFolder
-	for _, p := range prompts {
-		f.Add(p)
-	}
-	return f.Result(0), f.Count()
-}
-
-// TestPromptHygieneFolder pins each per-prompt hygiene rule and the lines it draws. The
-// rules are text heuristics, so the cases fix exactly which prompts trip which signal:
-// terse turns, change requests with no code anchor, and the opening turn's structure.
-func TestPromptHygieneFolder(t *testing.T) {
+// TestClassifyPrompt pins each per-prompt hygiene rule and the lines it draws. The rules are
+// text heuristics, so the cases fix exactly which prompt trips which flag: terse steers, change
+// requests with no code anchor, and bare greetings. The whole-session aggregation (the short and
+// no-code counts, the duplicate count, and the opener's unstructured-start verdict) is the store's,
+// so it is pinned end to end in the store signal tests, not here.
+func TestClassifyPrompt(t *testing.T) {
 	cases := []struct {
-		name      string
-		prompts   []string
-		want      PromptHygiene
-		wantCount int
+		name     string
+		prompt   string
+		short    bool
+		noCode   bool
+		greeting bool
 	}{
-		{
-			name:    "empty session has no signal",
-			prompts: nil,
-			want:    PromptHygiene{},
-		},
-		{
-			name: "a terse opener is short and an unstructured start",
-			// No change verb, so only the terse and unstructured-start signals fire; a
-			// terse "fix it" would additionally count as no-code-context.
-			prompts:   []string{"what now"},
-			want:      PromptHygiene{Short: 1, UnstructuredStart: true},
-			wantCount: 1,
-		},
-		{
-			name:      "a substantive opener with a code anchor is clean",
-			prompts:   []string{"please refactor the retry loop in internal/server/store/signals.go"},
-			want:      PromptHygiene{},
-			wantCount: 1,
-		},
-		{
-			name: "confirmations are terse",
-			// Four short turns each count short; the opener is short, so the start is
-			// unstructured. Duplicate detection is the store's, so it is not tested here.
-			prompts:   []string{"yes", "yes", "go on", "continue"},
-			want:      PromptHygiene{Short: 4, UnstructuredStart: true},
-			wantCount: 4,
-		},
-		{
-			name: "two non-anchored change requests each count no-code-context",
-			prompts: []string{
-				"add pagination to the sessions list please",
-				"add pagination to the sessions list please again",
-			},
-			// Neither is terse and neither names code while using a change verb, so both
-			// count as no-code-context. The opener is not terse, so no unstructured start.
-			want:      PromptHygiene{NoCodeContext: 2},
-			wantCount: 2,
-		},
-		{
-			name: "a change request with a file anchor is not no-code-context",
-			prompts: []string{
-				"rewrite the parser entrypoint in parser/claude.go to stream",
-			},
-			want:      PromptHygiene{},
-			wantCount: 1,
-		},
-		{
-			name: "an extensionless config file anchors a change request",
-			// Dockerfile carries no extension, so it must match by bare name; otherwise
-			// "update the Dockerfile" would be a false no-code-context.
-			prompts:   []string{"update the Dockerfile to pin the base image"},
-			want:      PromptHygiene{},
-			wantCount: 1,
-		},
-		{
-			name: "a dot-prefixed config file anchors a change request",
-			// ".gitignore" leads with a dot, which a word-boundary match would miss, so it
-			// needs its own anchor rule.
-			prompts:   []string{"add build/ to .gitignore"},
-			want:      PromptHygiene{},
-			wantCount: 1,
-		},
-		{
-			name: "a prose authoring request is not a code change",
-			// "write" is not a code-change verb, so a request to author prose with no
-			// file reference does not read as no-code-context.
-			prompts:   []string{"please write a short overview of this pull request"},
-			want:      PromptHygiene{},
-			wantCount: 1,
-		},
-		{
-			name: "a change request with a fenced block is anchored",
-			prompts: []string{
-				"change this to a switch:\n```go\nif x { }\n```",
-			},
-			want:      PromptHygiene{},
-			wantCount: 1,
-		},
-		{
-			name: "a change request naming no code is flagged",
-			prompts: []string{
-				"can you fix the flaky login test for me",
-			},
-			want:      PromptHygiene{NoCodeContext: 1},
-			wantCount: 1,
-		},
-		{
-			name: "prose with no change verb is never no-code-context",
-			prompts: []string{
-				"what does this project do and how is it structured",
-			},
-			want:      PromptHygiene{},
-			wantCount: 1,
-		},
-		{
-			name:      "a greeting-only opener is an unstructured start even when not terse",
-			prompts:   []string{"hello there claude my friend"},
-			want:      PromptHygiene{UnstructuredStart: true},
-			wantCount: 1,
-		},
-		{
-			name: "a greeting-led opener that carries a real task is not flagged",
-			// Opens past the terse threshold and is not a bare greeting (it has a task
-			// after the hello), and it names a file, so nothing fires.
-			prompts:   []string{"hi, please update the config loader in internal/config/load.go"},
-			want:      PromptHygiene{},
-			wantCount: 1,
-		},
-		{
-			name: "one slash is not a code anchor, a path of segments is",
-			prompts: []string{
-				"decide this and/or that and add a helper", // "and/or" is not a path
-				"add a helper under internal/server/web",   // a real path anchors it
-			},
-			// First: change verb ("add"), no anchor -> no-code-context. Second: change
-			// verb but a path anchor -> clean. Neither terse; opener not terse.
-			want:      PromptHygiene{NoCodeContext: 1},
-			wantCount: 2,
-		},
+		{"a terse steer is short", "what now", true, false, false},
+		{"a bare confirmation is short", "yes", true, false, false},
+		{"a substantive anchored request trips nothing", "please refactor the retry loop in internal/server/store/signals.go", false, false, false},
+		{"a non-anchored change request is no-code-context", "add pagination to the sessions list please", false, true, false},
+		{"a change request with a file anchor is anchored", "rewrite the parser entrypoint in parser/claude.go to stream", false, false, false},
+		// Dockerfile carries no extension, so it must match by bare name; otherwise the change
+		// request naming it would be a false no-code-context.
+		{"an extensionless config file anchors a change request", "update the Dockerfile to pin the base image", false, false, false},
+		// ".gitignore" leads with a dot, which a word-boundary match would miss, so it needs its
+		// own anchor rule.
+		{"a dot-prefixed config file anchors a change request", "add build/ to .gitignore", false, false, false},
+		// "write" is not a code-change verb, so authoring prose with no file reference is not
+		// no-code-context.
+		{"a prose authoring request is not a code change", "please write a short overview of this pull request", false, false, false},
+		{"a fenced block anchors a change request", "change this to a switch:\n```go\nif x { }\n```", false, false, false},
+		{"a change request naming no code is flagged", "can you fix the flaky login test for me", false, true, false},
+		{"prose with no change verb is never no-code-context", "what does this project do and how is it structured", false, false, false},
+		{"a greeting-only line is a bare greeting", "hello there claude my friend", false, false, true},
+		// Opens past the terse threshold and is not a bare greeting (a task follows the hello),
+		// and it names a file, so nothing fires.
+		{"a greeting-led line carrying a task is not a bare greeting", "hi, please update the config loader in internal/config/load.go", false, false, false},
+		// "and/or" is one slash, not a path, so the change verb with no anchor is no-code-context.
+		{"one slash is not a code anchor", "decide this and/or that and add a helper", false, true, false},
+		// A real multi-segment path anchors the change request.
+		{"a path of segments is a code anchor", "add a helper under internal/server/web", false, false, false},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, count := foldHygiene(tc.prompts)
-			if got != tc.want {
-				t.Errorf("foldHygiene(%q) = %+v, want %+v", tc.prompts, got, tc.want)
-			}
-			if count != tc.wantCount {
-				t.Errorf("foldHygiene(%q) count = %d, want %d", tc.prompts, count, tc.wantCount)
+			got := ClassifyPrompt(tc.prompt)
+			if got.Short != tc.short || got.NoCodeContext != tc.noCode || got.BareGreeting != tc.greeting {
+				t.Errorf("ClassifyPrompt(%q) = {short %v, noCode %v, greeting %v}, want {%v, %v, %v}",
+					tc.prompt, got.Short, got.NoCodeContext, got.BareGreeting, tc.short, tc.noCode, tc.greeting)
 			}
 		})
+	}
+}
+
+// TestNormalizedDigest pins the fingerprint the store's duplicate count groups on: prompts that
+// differ only in case or whitespace must hash equal (they are the same request re-sent), and
+// genuinely different prompts must not. The digest is what lets the duplicate count be a fixed-size
+// aggregate instead of a re-normalization of every prompt body.
+func TestNormalizedDigest(t *testing.T) {
+	if normalizedDigest("Explain the retry logic here") != normalizedDigest("explain   the   retry logic here") {
+		t.Error("case and whitespace variants of one prompt should hash equal")
+	}
+	if normalizedDigest("  hello world  ") != normalizedDigest("hello world") {
+		t.Error("surrounding whitespace should be trimmed before hashing")
+	}
+	if normalizedDigest("") != normalizedDigest("  \t\n ") {
+		t.Error("a whitespace-only prompt should normalize to empty")
+	}
+	if normalizedDigest("review the pagination approach") == normalizedDigest("review the caching approach") {
+		t.Error("genuinely different prompts should not share a digest")
+	}
+}
+
+// TestPleasantryWordsFitBuffer pins the invariant isPleasantryWord's fixed stack buffer relies on:
+// no greeting word is longer than maxPleasantryLen. A longer word added to the set would hit the
+// length reject and be silently misclassified as non-pleasant, so catch it here rather than in
+// production classification.
+func TestPleasantryWordsFitBuffer(t *testing.T) {
+	for w := range pleasantryWords {
+		if len(w) > maxPleasantryLen {
+			t.Errorf("pleasantry word %q is %d bytes, over maxPleasantryLen %d; raise the constant", w, len(w), maxPleasantryLen)
+		}
+	}
+}
+
+// TestHygieneHandlesLargePrompt pins that the allocation-free scans classify a very large prompt the
+// same as a small one and cost only bounded memory. This is the case the per-message rewrite exists
+// for: reading and folding prompt bodies at settle time would have made peak memory track the largest
+// pasted-code prompt a session ever held, so the facts are derived once at insert with scans that
+// build no input-sized slice or normalized copy.
+func TestHygieneHandlesLargePrompt(t *testing.T) {
+	big := strings.Repeat("token ", 50_000) // ~300KB of words, far past every threshold
+	// A change verb, a real file anchor, and a wall of words: anchored (not no-code-context) and
+	// not terse, exactly as the same request would read at small size.
+	if got := ClassifyPrompt("refactor internal/server/store/read.go " + big); got.Short || got.NoCodeContext || got.BareGreeting {
+		t.Errorf("large anchored change request = %+v, want no per-prompt flags", got)
+	}
+	// The streaming digest is deterministic and never builds a normalized copy of the body.
+	if normalizedDigest(big) != normalizedDigest(big) {
+		t.Error("the digest should be deterministic for one input")
+	}
+	// A huge opener of only pleasantries is still a bare greeting; the scan runs to the end without
+	// short-circuiting and matches every token.
+	if !isBareGreeting("hello there " + strings.Repeat("please ", 20_000)) {
+		t.Error("a large all-pleasantry opener should still read as a bare greeting")
+	}
+	// One real word ends it, and the scan short-circuits at that first token rather than reading the
+	// wall behind it.
+	if isBareGreeting("hello there " + big) {
+		t.Error("a large opener carrying a non-greeting word is not a bare greeting")
 	}
 }

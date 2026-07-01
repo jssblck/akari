@@ -33,7 +33,15 @@ func runSignalsSettle(ctx context.Context, st *store.Store, interval time.Durati
 			n, err := st.RefreshSettledSignals(passCtx)
 			cancel()
 			switch {
-			case err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded):
+			case errors.Is(err, context.Canceled):
+				// Shutdown cancelled the pass; the loop returns on the next ctx.Done check.
+			case errors.Is(err, context.DeadlineExceeded):
+				// The pass hit its own 5m timeout before draining the due backlog, which a large or
+				// slow corpus can cause, so some settled sessions are still ungraded. Unlike shutdown
+				// this is worth surfacing: the next tick resumes the keyset walk, but an operator
+				// seeing it repeatedly should raise the interval or run `akari-server settle`.
+				log.Printf("signals settle: pass timed out before draining the due backlog; it resumes next tick")
+			case err != nil:
 				log.Printf("signals settle: %v", err)
 			case n > 0:
 				log.Printf("signals settle: refreshed %d session(s)", n)

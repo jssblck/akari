@@ -10,8 +10,8 @@ import (
 // PromptHygiene is the cohort's input-quality picture over a scope: how many of the
 // window's human prompts were terse, repeated, or asked for a change without pointing at
 // code, and how many sessions opened with an unstructured prompt. The counts come from
-// the stored per-session signals (quality.PromptHygieneFolder for the per-prompt rules and
-// a database duplicate aggregate, materialized by the settle pass or a reparse), summed
+// the stored per-session signals (aggregated by the settle pass or a reparse from the
+// per-message hygiene columns quality.ClassifyPrompt materializes at insert), summed
 // over the sessions carrying a current-version row so the numerators and the Prompts
 // denominator cover the same set. A stale or missing signals row contributes nothing to
 // either, the same way the quality distribution folds it into the unknown bucket, so the

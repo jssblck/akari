@@ -45,12 +45,21 @@ func (s *Store) FileChurn(ctx context.Context, f AnalyticsFilter) (FileChurn, er
 // carry a parsed file path (the projection stores an edit whose path did not parse as NULL
 // via nullString, so file_path IS NOT NULL drops them, the same guard the per-session
 // edit_churn signal uses so an unattributable edit invents no thrash), groups by path, and
-// keeps the paths edited more than once. The list is capped at the busiest files while the
-// churned-file count comes from the whole set, so the panel can report the dropped tail.
+// keeps the paths edited more than once.
+//
+// The panel shows only the busiest maxChurnFiles, so the cap belongs in SQL, not in Go: the
+// query LIMITs to that many rows and Postgres returns just the top slice by a bounded top-N sort
+// rather than sorting and streaming every churned path for the loop to discard all but the first
+// few. The dropped-tail count still needs the whole-set total, which a count(*) OVER () window
+// could not give under a LIMIT (the window would count only the returned rows), so it comes from
+// a scalar (SELECT count(*) FROM agg) instead. agg is referenced twice (the top-N select and the
+// count), which makes Postgres materialize it once, so the dedup and grouping run a single time.
 func (s *Store) fileChurnFrom(ctx context.Context, q querier, f AnalyticsFilter) (FileChurn, error) {
 	var fc FileChurn
 
 	filter, args := f.clauseFor("s.started_at")
+	limitArg := fmt.Sprintf("$%d", len(args)+1)
+	args = append(args, maxChurnFiles)
 	rows, err := q.Query(ctx,
 		`WITH scoped AS (
 		   SELECT tc.session_id, tc.message_ordinal, tc.call_index, tc.tool_name,
@@ -75,9 +84,10 @@ func (s *Store) fileChurnFrom(ctx context.Context, q querier, f AnalyticsFilter)
 		    GROUP BY file_path
 		   HAVING count(*) > 1
 		 )
-		 SELECT file_path, edits, sessions, count(*) OVER () AS churned
+		 SELECT file_path, edits, sessions, (SELECT count(*) FROM agg) AS churned
 		   FROM agg
-		  ORDER BY edits DESC, file_path`, args...)
+		  ORDER BY edits DESC, file_path
+		  LIMIT `+limitArg, args...)
 	if err != nil {
 		return FileChurn{}, fmt.Errorf("query file churn: %w", err)
 	}
@@ -89,9 +99,7 @@ func (s *Store) fileChurnFrom(ctx context.Context, q querier, f AnalyticsFilter)
 		if err := rows.Scan(&cf.Path, &cf.Edits, &cf.Sessions, &churned); err != nil {
 			return FileChurn{}, fmt.Errorf("scan file churn: %w", err)
 		}
-		if len(fc.Files) < maxChurnFiles {
-			fc.Files = append(fc.Files, cf)
-		}
+		fc.Files = append(fc.Files, cf)
 	}
 	if err := rows.Err(); err != nil {
 		return FileChurn{}, fmt.Errorf("iterate file churn: %w", err)
