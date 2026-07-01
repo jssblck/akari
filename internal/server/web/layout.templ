@@ -78,6 +78,7 @@ templ sidebar(p Page) {
 			@navItem("/projects", "projects", "Projects", p.Active)
 			@navItem("/sessions", "sessions", "Sessions", p.Active)
 			@navItem("/account", "account", "Account", p.Active)
+			@navItem("/guide", "guide", "Guide", p.Active)
 		</nav>
 		<span class="spacer"></span>
 		<div class="sb-foot">
@@ -106,6 +107,9 @@ templ navIcon(key string) {
 			case "account":
 				<circle cx="8" cy="5.5" r="2.6"></circle>
 				<path d="M3 14c0-2.8 2.2-4.5 5-4.5s5 1.7 5 4.5"></path>
+			case "guide":
+				<path d="M3 3h6.5a1.5 1.5 0 0 1 1.5 1.5V14a1.2 1.2 0 0 0-1.2-1.2H3z"></path>
+				<path d="M13 3H9.5A1.5 1.5 0 0 0 8 4.5V14a1.2 1.2 0 0 1 1.2-1.2H13z"></path>
 		}
 	</svg>
 }
