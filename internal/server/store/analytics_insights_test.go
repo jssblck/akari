@@ -78,7 +78,7 @@ func TestQualityDistribution(t *testing.T) {
 	mk(ua, "a1", recent, quality.Version, "completed", "A")
 	mk(ua, "a2", recent, quality.Version, "completed", "A")
 	mk(ua, "a3", recent, quality.Version, "errored", "C")
-	mk(ua, "a4", recent, quality.Version, "unknown", "")            // explicitly unscored
+	mk(ua, "a4", recent, quality.Version, "unknown", "")             // explicitly unscored
 	mk(ua, "a6stale", recent, quality.Version+999, "completed", "A") // stale version -> missing bucket
 	mk(ua, "a5old", old, quality.Version, "completed", "F")          // outside the window
 	// A session with no signals row at all (mid-parse, pre-backfill): still counted.
@@ -143,9 +143,9 @@ func TestArchetypeDistribution(t *testing.T) {
 		sid := seedSession(t, st, u, pid, src)
 		setSessionShape(t, st, ctx, sid, base, base.Add(time.Duration(durMin)*time.Minute), messages, userMessages)
 	}
-	mk("quick", 1, 4, 1)         // quick
-	mk("standard-msgs", 2, 20, 2) // standard by message count
-	mk("deep-msgs", 2, 80, 3)     // deep by message count
+	mk("quick", 1, 4, 1)           // quick
+	mk("standard-msgs", 2, 20, 2)  // standard by message count
+	mk("deep-msgs", 2, 80, 3)      // deep by message count
 	mk("marathon-dur", 180, 30, 4) // marathon by duration
 	mk("automation", 300, 500, 0)  // automation (no human turn) wins over heaviness
 

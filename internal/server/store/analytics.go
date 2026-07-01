@@ -36,8 +36,8 @@ type Breakdown struct {
 	// deliberately excluded from Tokens(): reasoning is neither a prompt nor a cache class,
 	// so folding it into the bar-sizing total would double-count against the billed classes
 	// and unsettle the headline-equals-sum reconciliation. It surfaces as its own figure.
-	Reasoning  int64
-	Sessions   int
+	Reasoning int64
+	Sessions  int
 	// CostIncomplete is true when this slice folded in a usage event that carried
 	// real token volume but no price (an unpriced model), so the slice's cost is a
 	// lower bound. It lets a by-model or by-agent row show the same "$X+" marker the
@@ -71,8 +71,8 @@ type Analytics struct {
 	// like the other totals. It sits beside TotalTokens rather than inside it (see
 	// Breakdown.Reasoning for why), so the Tokens tile shows it as a distinct class without
 	// disturbing the headline-equals-sum-of-series reconciliation the four billed classes hold.
-	TotalReasoning  int64
-	Sessions        int
+	TotalReasoning int64
+	Sessions       int
 	// CostIncomplete is true when any usage event in the window carried token
 	// volume but no price, so TotalCost is a lower bound. The headline Cost tile
 	// shows the "$X+" marker when set, matching how a single session flags an

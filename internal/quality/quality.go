@@ -60,12 +60,12 @@ const (
 // in SQL. "Substantive" means a message that carries conversational content, not an
 // empty turn that only delivered a tool result.
 type Facts struct {
-	UserMessages        int  // messages with role=user (any content)
-	LastAssistantOrd    int  // ordinal of the last substantive assistant message, -1 if none
-	LastUserOrd         int  // ordinal of the last substantive user message, -1 if none
-	ToolCallPending     bool // a tool call never got a result (ended mid-tool / truncated)
-	TrailingFailures    int  // length of the run of failing tool calls at the very end
-	IdleLongEnough      bool // the session has been inactive past the abandoned threshold
+	UserMessages     int  // messages with role=user (any content)
+	LastAssistantOrd int  // ordinal of the last substantive assistant message, -1 if none
+	LastUserOrd      int  // ordinal of the last substantive user message, -1 if none
+	ToolCallPending  bool // a tool call never got a result (ended mid-tool / truncated)
+	TrailingFailures int  // length of the run of failing tool calls at the very end
+	IdleLongEnough   bool // the session has been inactive past the abandoned threshold
 }
 
 // Classify infers a session's Outcome and the Confidence in it from the facts. The

@@ -160,11 +160,11 @@ func TestCacheSavings(t *testing.T) {
 	// A cache read saves the full input-minus-read gap; a cache write costs the
 	// write-minus-input premium (negative saving), the price paid to make reads cheap.
 	cases := []struct {
-		name             string
-		model            string
-		read, write      int64
-		wantSaving       float64
-		wantKnown        bool
+		name        string
+		model       string
+		read, write int64
+		wantSaving  float64
+		wantKnown   bool
 	}{
 		// 1M read alone: 1 * (5 - 0.50) = 4.50.
 		{"read only", "claude-opus-4-8", 1_000_000, 0, 4.50, true},

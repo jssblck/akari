@@ -50,12 +50,12 @@ func TestContextHealth(t *testing.T) {
 		insertContextSignal(t, st, ctx, sid, version, peak, resets)
 	}
 
-	seed(ada, "c1", recent, quality.Version, ptr(100000), rst(0))     // in window, current
-	seed(ada, "c2", recent, quality.Version, ptr(200000), rst(2))     // in window, current
-	seed(grace, "c3", recent, quality.Version, ptr(300000), rst(1))   // in window, current, other user
-	seed(grace, "c4", old, quality.Version, ptr(400000), rst(3))      // out of window, current
+	seed(ada, "c1", recent, quality.Version, ptr(100000), rst(0))          // in window, current
+	seed(ada, "c2", recent, quality.Version, ptr(200000), rst(2))          // in window, current
+	seed(grace, "c3", recent, quality.Version, ptr(300000), rst(1))        // in window, current, other user
+	seed(grace, "c4", old, quality.Version, ptr(400000), rst(3))           // out of window, current
 	seed(ada, "c5stale", recent, quality.Version+999, ptr(999999), rst(9)) // stale -> excluded
-	seed(ada, "c6null", recent, quality.Version, nil, nil)            // no measured context -> excluded
+	seed(ada, "c6null", recent, quality.Version, nil, nil)                 // no measured context -> excluded
 
 	// Unscoped: the four current-version measured rows (c1..c4). percentile_disc returns a
 	// real stored peak: for [100k,200k,300k,400k] the median is 200k and the p90 is 400k.

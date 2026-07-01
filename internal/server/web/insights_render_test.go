@@ -90,55 +90,55 @@ func TestInsightsPageRendersDistributions(t *testing.T) {
 	html := renderComponent(t, InsightsPage(p, sampleInsights(), "30d", ranges))
 
 	for _, want := range []string{
-		`id="insights"`,            // the swap target
-		`>Concurrency<`,            // the headline band
+		`id="insights"`,                          // the swap target
+		`>Concurrency<`,                          // the headline band
 		`>Grades<`, `>Outcomes<`, `>Archetypes<`, // the three distribution panels
-		`15 sessions in window`,    // the summary count
-		`>4</div>`,                 // the fleet peak figure
-		`>peak at once<`,           // its label
-		`ada (3)`,                  // the busiest user and their peak
-		`>1.7</div>`,               // average concurrent, one decimal
-		`>Velocity<`,               // the other headline band
-		`>25s</div>`,               // response p50, formatted seconds
-		`>response p50<`,           // its label
-		`>1m 30s</div>`,            // response p90, formatted minutes and seconds
-		`>4.2</div>`,               // messages per active minute, one decimal
-		`>msgs / active min<`,      // its label
-		`>Tools<`,                  // the tools band
-		`>120</div>`,               // total tool calls
-		`>tool calls<`,             // its label
-		`>10%</div>`,               // fleet error rate (12/120)
-		`>tools / turn<`,           // the tools-per-turn label
-		`>Read<`,                   // the busiest tool in the mix
-		`class="tool-err"`,         // a failing tool carries its error rate
-		`>40%<`,                    // Bash's error rate suffix (8/20)
-		`+2 more tools not shown`,  // the clipped-tail note
-		`>Prompt hygiene<`,         // the input-quality band
-		`>terse prompts<`,          // a hygiene figure label
-		`>repeated prompts<`,       // another hygiene figure label
-		`>no code pointer<`,        // the no-code-context figure label
-		`>unstructured start<`,     // the per-session opener figure label
-		`20 of 200`,                // the terse-prompt sub-count (unique to hygiene)
-		`3 of 15`,                  // the unstructured-start sub-count (over sessions, not prompts)
-		`>Context health<`,         // the context-load band
-		`>median peak<`,            // a context figure label
-		`>128.0k</div>`,            // the median peak, compact tokens
-		`>p90 peak<`,               // the p90 figure label
-		`>1.2M</div>`,              // the heaviest peak, compact tokens
-		`>shed context<`,           // the reset-rate figure label
-		`6 of 15 sessions`,         // the shed-context sub-count (sessions that reset)
-		`>context resets<`,         // the total-resets figure label
-		`>File churn<`,             // the churn panel
+		`15 sessions in window`,              // the summary count
+		`>4</div>`,                           // the fleet peak figure
+		`>peak at once<`,                     // its label
+		`ada (3)`,                            // the busiest user and their peak
+		`>1.7</div>`,                         // average concurrent, one decimal
+		`>Velocity<`,                         // the other headline band
+		`>25s</div>`,                         // response p50, formatted seconds
+		`>response p50<`,                     // its label
+		`>1m 30s</div>`,                      // response p90, formatted minutes and seconds
+		`>4.2</div>`,                         // messages per active minute, one decimal
+		`>msgs / active min<`,                // its label
+		`>Tools<`,                            // the tools band
+		`>120</div>`,                         // total tool calls
+		`>tool calls<`,                       // its label
+		`>10%</div>`,                         // fleet error rate (12/120)
+		`>tools / turn<`,                     // the tools-per-turn label
+		`>Read<`,                             // the busiest tool in the mix
+		`class="tool-err"`,                   // a failing tool carries its error rate
+		`>40%<`,                              // Bash's error rate suffix (8/20)
+		`+2 more tools not shown`,            // the clipped-tail note
+		`>Prompt hygiene<`,                   // the input-quality band
+		`>terse prompts<`,                    // a hygiene figure label
+		`>repeated prompts<`,                 // another hygiene figure label
+		`>no code pointer<`,                  // the no-code-context figure label
+		`>unstructured start<`,               // the per-session opener figure label
+		`20 of 200`,                          // the terse-prompt sub-count (unique to hygiene)
+		`3 of 15`,                            // the unstructured-start sub-count (over sessions, not prompts)
+		`>Context health<`,                   // the context-load band
+		`>median peak<`,                      // a context figure label
+		`>128.0k</div>`,                      // the median peak, compact tokens
+		`>p90 peak<`,                         // the p90 figure label
+		`>1.2M</div>`,                        // the heaviest peak, compact tokens
+		`>shed context<`,                     // the reset-rate figure label
+		`6 of 15 sessions`,                   // the shed-context sub-count (sessions that reset)
+		`>context resets<`,                   // the total-resets figure label
+		`>File churn<`,                       // the churn panel
 		`internal/server/store/analytics.go`, // the churned path (full path in the label)
-		`6 edits`,                  // its edit count
-		`2 sessions`,               // spread across two sessions
-		`+1 more churned file not shown`, // the churn clip note
-		`>Unscored<`,               // the empty grade key reads as a word, not a blank
-		`>Completed<`,              // outcome label, title-cased
-		`>Quick<`,                  // archetype label, title-cased
-		`class="bar-fill"`,         // reuses the breakdown bar markup
-		`data-color="` + barSage + `"`, // a graded bar carries its tone
-		`hx-get="/insights?range=7d"`,  // the window selector refetches this page
+		`6 edits`,                            // its edit count
+		`2 sessions`,                         // spread across two sessions
+		`+1 more churned file not shown`,     // the churn clip note
+		`>Unscored<`,                         // the empty grade key reads as a word, not a blank
+		`>Completed<`,                        // outcome label, title-cased
+		`>Quick<`,                            // archetype label, title-cased
+		`class="bar-fill"`,                   // reuses the breakdown bar markup
+		`data-color="` + barSage + `"`,       // a graded bar carries its tone
+		`hx-get="/insights?range=7d"`,        // the window selector refetches this page
 		`hx-select="#insights"`,
 	} {
 		if !strings.Contains(html, want) {

@@ -8,10 +8,10 @@ import "testing"
 // mid-tool, an errored tail) are checked before the last-word heuristic.
 func TestClassify(t *testing.T) {
 	cases := []struct {
-		name     string
-		facts    Facts
-		outcome  Outcome
-		conf     Confidence
+		name    string
+		facts   Facts
+		outcome Outcome
+		conf    Confidence
 	}{
 		{
 			name:    "no human turn is unknown",

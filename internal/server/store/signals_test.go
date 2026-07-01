@@ -164,9 +164,9 @@ func TestSignalsDistinctNullCallsNotCollapsed(t *testing.T) {
 			{Ordinal: 1, Role: "assistant", Content: "working", HasToolUse: true},
 		},
 		ToolCalls: []store.ProjToolCall{
-			{MessageOrdinal: 1, CallIndex: 0, ToolName: "Read", Category: "read", CallUID: ""},      // no id
-			{MessageOrdinal: 1, CallIndex: 1, ToolName: "Read", Category: "read", CallUID: ""},      // no id, otherwise identical
-			{MessageOrdinal: 1, CallIndex: 2, ToolName: "Read", Category: "read", CallUID: "1:0"},   // real id resembling a synthetic key
+			{MessageOrdinal: 1, CallIndex: 0, ToolName: "Read", Category: "read", CallUID: ""},    // no id
+			{MessageOrdinal: 1, CallIndex: 1, ToolName: "Read", Category: "read", CallUID: ""},    // no id, otherwise identical
+			{MessageOrdinal: 1, CallIndex: 2, ToolName: "Read", Category: "read", CallUID: "1:0"}, // real id resembling a synthetic key
 		},
 	}
 	if err := st.ApplyProjectionDelta(ctx, sid, delta); err != nil {
@@ -448,11 +448,11 @@ func TestSignalsPromptHygiene(t *testing.T) {
 
 	delta := store.ProjectionDelta{
 		Messages: []store.MessageDelta{
-			{Ordinal: 0, Role: "user", Content: "hey"},                                                  // terse opener
+			{Ordinal: 0, Role: "user", Content: "hey"}, // terse opener
 			{Ordinal: 1, Role: "assistant", Content: "on it"},
-			{Ordinal: 2, Role: "user", Content: "add pagination to the sessions list"},                  // no code anchor
+			{Ordinal: 2, Role: "user", Content: "add pagination to the sessions list"}, // no code anchor
 			{Ordinal: 3, Role: "assistant", Content: "done"},
-			{Ordinal: 4, Role: "user", Content: "add pagination to the sessions list"},                  // verbatim repeat
+			{Ordinal: 4, Role: "user", Content: "add pagination to the sessions list"}, // verbatim repeat
 			{Ordinal: 5, Role: "assistant", Content: "done again"},
 			{Ordinal: 6, Role: "user", Content: "now refactor the loop in internal/server/store/signals.go"}, // anchored, clean
 			{Ordinal: 7, Role: "assistant", Content: "refactored"},

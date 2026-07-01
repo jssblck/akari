@@ -51,10 +51,10 @@ func TestPromptHygiene(t *testing.T) {
 		insertHygieneSignal(t, st, ctx, sid, version, prompts, short, dup, nocode, unstructured)
 	}
 
-	seed(ada, "h1", recent, quality.Version, 5, 2, 1, 1, true)     // in window, current
-	seed(ada, "h2", recent, quality.Version, 3, 0, 0, 2, false)    // in window, current
-	seed(grace, "h3", recent, quality.Version, 4, 1, 0, 0, true)   // in window, current, other user
-	seed(grace, "h4", old, quality.Version, 6, 3, 1, 1, true)      // out of window, current
+	seed(ada, "h1", recent, quality.Version, 5, 2, 1, 1, true)          // in window, current
+	seed(ada, "h2", recent, quality.Version, 3, 0, 0, 2, false)         // in window, current
+	seed(grace, "h3", recent, quality.Version, 4, 1, 0, 0, true)        // in window, current, other user
+	seed(grace, "h4", old, quality.Version, 6, 3, 1, 1, true)           // out of window, current
 	seed(ada, "h5stale", recent, quality.Version+999, 9, 9, 9, 9, true) // in window, stale -> excluded
 
 	// Unscoped: every current-version row regardless of start (h1..h4); the stale row drops.

@@ -168,9 +168,9 @@ func TestSessionStatsTokensContext(t *testing.T) {
 	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, hs, 0, false, true))
 
 	for _, want := range []string{
-		`class="tt-sub">Context</div>`,        // the context group under its own ruled label
+		`class="tt-sub">Context</div>`,           // the context group under its own ruled label
 		`>Peak context</dt>`, `<dd>142,000</dd>`, // the peak, full thousands-separated tokens
-		`>Resets</dt>`, `<dd>2</dd>`,           // the inferred reset count
+		`>Resets</dt>`, `<dd>2</dd>`, // the inferred reset count
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("tokens context group missing %q", want)
@@ -203,17 +203,17 @@ func TestSessionStatsQualityTileScored(t *testing.T) {
 	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, hs, 0, false, true))
 
 	for _, want := range []string{
-		`class="stat quality-stat q-good"`,         // a B bands as "good"
-		`data-stat-key="quality">B</div>`,          // the grade headline, flashed on live change
-		`>Outcome</dt>`, `<dd>Completed</dd>`,       // outcome row, title-cased
-		`>Confidence</dt>`, `<dd>high</dd>`,         // confidence row
-		`>Score</dt>`, `<dd>82 / 100</dd>`,          // numeric score
-		`>Failures</dt>`, `<dd>2 / 12</dd>`,         // tool-health rows (the session ran tools)
+		`class="stat quality-stat q-good"`,    // a B bands as "good"
+		`data-stat-key="quality">B</div>`,     // the grade headline, flashed on live change
+		`>Outcome</dt>`, `<dd>Completed</dd>`, // outcome row, title-cased
+		`>Confidence</dt>`, `<dd>high</dd>`, // confidence row
+		`>Score</dt>`, `<dd>82 / 100</dd>`, // numeric score
+		`>Failures</dt>`, `<dd>2 / 12</dd>`, // tool-health rows (the session ran tools)
 		`>Longest fail streak</dt>`, `<dd>1</dd>`,
-		`class="tt-sub">Input</div>`,               // the hygiene group under its own ruled label
-		`>Terse prompts</dt>`, `<dd>4</dd>`,         // a hygiene row that fired
+		`class="tt-sub">Input</div>`,        // the hygiene group under its own ruled label
+		`>Terse prompts</dt>`, `<dd>4</dd>`, // a hygiene row that fired
 		`>No code pointer</dt>`, `<dd>2</dd>`,
-		`>Opening</dt>`, `<dd>terse</dd>`,           // the unstructured-start flag
+		`>Opening</dt>`, `<dd>terse</dd>`, // the unstructured-start flag
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("quality tile missing %q", want)
