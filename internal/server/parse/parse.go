@@ -30,13 +30,7 @@ import (
 // Version 3 added Codex custom_tool_call bodies and binary image attachments (image
 // generation results and pasted images) to the projection, so a reparse backfills
 // those rows on already-ingested sessions.
-//
-// Version 4 tagged each usage event with is_sidechain. Version 5 removes it: a
-// subagent is a separate transcript file, ingested as its own session, so a main
-// session's usage never carries subagent turns and context-health analysis reads a
-// session's own turns directly. The field left the projection delta, so a reparse
-// rewrites the usage rows without it.
-const Version = 5
+const Version = 3
 
 // Advance parses any not-yet-parsed bytes of a session and applies them to the
 // projection, looping until the parse cursor catches up to the stored length. It

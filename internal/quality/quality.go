@@ -13,23 +13,16 @@ package quality
 // version (see store.RefreshSessionSignals), and the UI gates parsed views while a
 // reparse runs, so a reader never mixes versions mid-rebuild.
 //
-// Version 1: tool-health signals (failures, immediate retries, edit churn, the
-// longest failure streak) plus an outcome classification.
-// Version 2: adds prompt-hygiene signals (terse, duplicate, and no-code-context
-// prompt counts, plus an unstructured-start flag). These describe the human's input,
-// so they extend the stored signal set but do not change the score: a session's grade
-// at version 2 equals its grade at version 1.
-// Version 3: adds context-health signals (peak context tokens and an inferred
-// context-reset count; see ContextHealth). These describe resource load rather than
-// whether the session went well, so like hygiene they extend the stored signals but do
-// not change the score: a session's grade at version 3 equals its grade at version 2.
-// Version 4: context health now reads every one of a session's usage turns. Version 3
-// excluded turns flagged is_sidechain, but a subagent is a separate session in its own
-// transcript file, so a session's usage is already a single coherent context and the
-// carve-out only ever stripped a subagent session's own turns. Dropping it leaves the
-// grade unchanged (context health still does not feed the score) but remeasures the
-// context figures, so the signals are rebuilt at this version.
-const Version = 4
+// Version 1 is the initial signal set: tool-health signals (failures, immediate
+// retries, edit churn, the longest failure streak) and an outcome classification that
+// together drive the score and grade, plus two informational signal sets that do not
+// feed the score. Prompt hygiene (terse, duplicate, and no-code-context prompt counts,
+// and an unstructured-start flag) describes the human's input, not the agent's work.
+// Context health (peak context tokens and an inferred context-reset count; see
+// ContextHealth) describes resource load, not whether the session went well; it reads a
+// session's own usage turns, since a subagent is a separate session in its own transcript
+// file and never mixes into another session's context.
+const Version = 1
 
 // Outcome is how a session ended, inferred from its projection. It is a best effort:
 // without a terminal marker in the transcript the ending is a heuristic, so every

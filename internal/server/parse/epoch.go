@@ -34,27 +34,11 @@ package parse
 // a bump leaves the parser's projection delta byte-for-byte identical, so the golden
 // fixtures do not move; the bump is intentional and stands on its own.
 //
-// Epoch 1 -> 2: introduce session_signals (per-session outcome, quality score and
-// grade, and tool-health counts), computed on catch-up and reparse. The bump
-// backfills the table across the existing corpus.
-//
-// Epoch 2 -> 3: add prompt-hygiene signals to session_signals (quality.Version 1 -> 2).
-// The projection delta is unchanged (the new signals derive from stored messages), so
-// the golden fixtures do not move; the bump exists only to rebuild every signals row at
-// the current version, backfilling the hygiene counts across the existing corpus.
-//
-// Epoch 3 -> 4: capture is_sidechain on usage events (parse.Version 3 -> 4) and add
-// context-health signals to session_signals (peak context tokens and inferred context
-// resets; quality.Version 2 -> 3). Unlike the hygiene bump this one DOES move the golden
-// fixtures: the usage rows in the projection delta gain the new field, so the snapshots
-// are refreshed in the same commit. The reparse backfills the flag and recomputes every
-// signals row at the current version across the corpus.
-//
-// Epoch 4 -> 5: remove is_sidechain again (parse.Version 4 -> 5). A subagent is a
-// separate transcript file, ingested as its own session, so a main session's usage never
-// carried subagent turns and the flag guarded a case that never occurred. The field
-// leaves the projection delta, so this bump also moves the golden fixtures, and
-// context-health analysis now reads a session's own turns with no carve-out
-// (quality.Version 3 -> 4). The reparse rewrites the usage rows without the field and
-// recomputes every signals row at the current version.
-const Epoch = 5
+// Epoch 1 -> 2: introduce session_signals, the per-session derived behavioral signals
+// (an outcome classification, a quality score and grade, tool-health counts,
+// prompt-hygiene counts, and context-health figures), computed on catch-up and reparse.
+// session_signals is a new derived table rather than a change to the parser's output, so
+// this bump leaves the projection delta byte-for-byte identical and the golden fixtures do
+// not move; it stands on its own to backfill the table across the existing corpus and to
+// stamp every row at the running quality.Version.
+const Epoch = 2
