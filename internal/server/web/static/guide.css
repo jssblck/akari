@@ -58,7 +58,7 @@
 .guide-brand:hover { text-decoration: none; }
 .guide-header .brandmark { display: inline-flex; align-items: center; gap: var(--sp-sm); }
 .guide-header .brandglyph { color: var(--lilac); display: block; }
-.guide-header .brandver { color: var(--muted); font-family: var(--mono); font-size: 0.6875rem; font-weight: 400; align-self: flex-end; }
+.guide-header .brandver { color: var(--muted); font-family: var(--mono); font-size: 0.6875rem; font-weight: 400; align-self: center; }
 .guide-header-sep { width: 1px; height: 1.1rem; background: var(--border-strong); }
 .guide-header-label {
   font-family: var(--mono); font-size: 0.75rem; color: var(--muted);
