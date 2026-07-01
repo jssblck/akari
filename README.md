@@ -459,3 +459,11 @@ merged pull requests. The same build runs as a dry run on every pull request and
 `main` push, so a break in the release pipeline surfaces on the PR. The binaries
 report the tag through `akari version` / `akari-server version`. See
 [docs/releases.md](docs/releases.md) for the full process and asset list.
+
+## License
+
+akari follows the repository license split described in [`NOTICE`](NOTICE):
+runtime software is AGPL-3.0-or-later, while documentation and creative content
+are CC-BY-SA-4.0 unless a file says otherwise. See also the
+[security policy](SECURITY.md), the [contributing guide](CONTRIBUTING.md), and
+the [code of conduct](CODE_OF_CONDUCT.md).

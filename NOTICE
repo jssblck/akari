@@ -1,0 +1,25 @@
+akari
+
+Copyright (c) 2026 Jessica Black
+
+This repository contains akari, a client/server system that collects the local
+session logs of coding agents, parses them on the server, and shows them in one
+place: a searchable history of every session, grouped by git project, with token
+usage and cost.
+
+Unless a file or directory says otherwise:
+
+- Software, runtime configuration, scripts, package metadata, and other runtime
+  material are licensed under the GNU Affero General Public License version 3 or
+  later (AGPL-3.0-or-later). See LICENSE.
+- Documentation, images, visual assets, and other written or creative content
+  are licensed under the Creative Commons Attribution-ShareAlike 4.0
+  International Public License (CC-BY-SA-4.0). See LICENSES/CC-BY-SA-4.0.txt.
+
+Third-party dependencies and externally sourced material remain under their own
+licenses. Vendored or generated content with a different license should
+identify that license in or near the affected file or directory.
+
+The compiled web templates under `internal/server/web/*_templ.go` are generated
+from the `*.templ` sources and are not committed; they carry the license of the
+sources they are generated from.
