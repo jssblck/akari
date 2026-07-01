@@ -46,6 +46,20 @@ healthcheck=pg_isready -U akari -d akari
 [server]
 # Run the server natively (not in a container) for fast worktree iteration. It
 # applies its embedded migrations on boot, so no migrate step is needed here.
+#
+# The web UI is templ: the server imports internal/server/web/*_templ.go, which
+# `go generate` compiles from the .templ sources. That generated Go is gitignored
+# and absent on a fresh clone, so `go run` fails with `undefined: web.*` until it
+# exists. Regenerate it in a pre-start hook so the server always builds, and so
+# `eph dev --watch "**/*.templ"` recompiles templates on edit (a --watch restart
+# is a full down + up, which re-runs this hook). It is idempotent.
+#
+# .claude/launch.json runs `eph dev` with these watch globs plus
+# `--watch "!**/*_templ.go"`. eph's watcher does NOT honor .gitignore, so without
+# that negation the *_templ.go this hook writes on each restart would match the
+# broad `**/*.go` watch and trigger a second restart on every template edit. The
+# exclusion keeps a .templ edit to a single clean reload.
+pre-start=go generate ./...
 run=go run ./cmd/akari-server
 port=auto
 # Bind loopback only, not the wildcard `:${server.port}` (which is 0.0.0.0, every
