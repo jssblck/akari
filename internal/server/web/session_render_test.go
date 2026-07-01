@@ -199,7 +199,7 @@ func TestSessionStatsQualityTileScored(t *testing.T) {
 		Outcome: "completed", OutcomeConfidence: "high",
 		Score: &score, Grade: &grade,
 		ToolCalls: 12, ToolFailures: 2, ToolRetries: 1, EditChurn: 3, LongestFailureStreak: 1,
-		ShortPromptCount: 4, NoCodeContextCount: 2, UnstructuredStart: true,
+		ShortPromptCount: 4, NoCodeContextCount: 2, UnstructuredStart: true, HygieneMeasured: true,
 	}}
 	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, hs, 0, false, true))
 

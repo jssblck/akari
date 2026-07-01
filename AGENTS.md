@@ -75,9 +75,20 @@ one leaves a half-migrated corpus:
   normalization). Unlike `quality.Version`, these facts are cached on the messages
   row and can only be re-derived by re-inserting the message, so the settle pass
   cannot re-derive them: `gatherPromptHygiene` treats an older-version row like an
-  unfilled one and leaves the session ungraded until a reparse fills it. Pair the
-  bump with a `parse.Epoch` bump so the corpus reparses and re-derives every
-  message's facts at the new version.
+  unfilled one and leaves the session ungraded until a reparse fills it. Because the
+  settle pass cannot fix such a session, `refreshSignalsTx` also clears its
+  `signals_stale` flag so it drops out of the settle-due set rather than being
+  re-scanned every wake (an unfixable transcript, one whose reparse fails
+  deterministically, would otherwise be polled forever). The reparse that fills the
+  facts re-marks it due through `applyAggregates` and grades it, so nothing is lost. The version
+  is also stamped on the `session_signals` row (`prompt_facts_version`) and gated at
+  the two hygiene read sites (`promptHygieneFrom` and the hygiene half of
+  `SessionSignalsByID`), so a graded aggregate at a superseded classifier version
+  reads as unmeasured until the reparse re-derives it, rather than mixing classifier
+  versions into a fleet count while the current `signals_version` still passes. Pair
+  the bump with a `parse.Epoch` bump so the corpus reparses and re-derives every
+  message's facts at the new version (the reparse re-stamps both the messages and the
+  `session_signals` versions).
 - `pricing.Version` (`internal/pricing`): bump on any rate change in the pricing
   table (a new or removed model, a different Input/Output/CacheWrite/CacheRead
   number). It gates `reconcileCacheSavingsPricingIfNeeded`, which re-prices the

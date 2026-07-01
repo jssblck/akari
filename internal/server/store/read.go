@@ -907,6 +907,11 @@ func (s *Store) scanDetailRow(ctx context.Context, where string, arg any) (Sessi
 // under the same locked primitive the startup pass uses: backfillCacheSavingsForSession prices the
 // saving, persists it, and flips the flag (safe against the live parse fold), after which this read
 // and every later one serve the O(1) rollup from one consistent scanDetailRow snapshot.
+//
+// The one case the backfill leaves the flag unset is a pricing rolling deploy: when a newer binary has
+// won the pricing marker, backfillCacheSavingsForSession bows out so that binary re-prices at its
+// rates, so the flag stays false. This read then flags the saving partial rather than pay a per-read
+// recompute (see below), keeping the O(1) rollup contract on the SSE body path intact.
 func (s *Store) scanDetail(ctx context.Context, where string, arg any) (SessionDetail, error) {
 	d, backfilled, err := s.scanDetailRow(ctx, where, arg)
 	if err != nil {
@@ -918,14 +923,27 @@ func (s *Store) scanDetail(ctx context.Context, where string, arg any) (SessionD
 	if _, err := s.backfillCacheSavingsForSession(ctx, d.ID); err != nil {
 		return SessionDetail{}, fmt.Errorf("backfill cache savings for session %d on read: %w", d.ID, err)
 	}
-	// Re-read with the original predicate, not by id: the flag is now set, so this returns the O(1)
-	// rollup from one post-backfill snapshot rather than a mix of the pre-backfill scan and the new
-	// saving, and re-applying the same where clause rechecks any visibility gate (the public path
-	// filters on visibility = 'public'), so a session unpublished between the two reads is not
-	// rendered from the by-id re-read.
-	d, _, err = s.scanDetailRow(ctx, where, arg)
+	// Re-read with the original predicate, not by id: the flag is now set (in the ordinary case), so
+	// this returns the O(1) rollup from one post-backfill snapshot rather than a mix of the pre-backfill
+	// scan and the new saving, and re-applying the same where clause rechecks any visibility gate (the
+	// public path filters on visibility = 'public'), so a session unpublished between the two reads is
+	// not rendered from the by-id re-read.
+	d, backfilled, err = s.scanDetailRow(ctx, where, arg)
 	if err != nil {
 		return SessionDetail{}, err
+	}
+	if !backfilled {
+		// A pricing rolling deploy: a newer binary won the marker, so backfillCacheSavingsForSession
+		// bowed out (leaving the flag false) to let that binary re-price at its rates. Do NOT recompute
+		// the saving here. This read is the session-body SSE path, so an O(K) usage_events scan per
+		// refresh would be O(K^2) over a live session, the exact cost the total_cache_savings_usd rollup
+		// exists to avoid. The stored value is not stale: applyAggregates keeps folding a live session's
+		// regions at this binary's rates and, seeing the marker ahead, drops the authoritative flag
+		// rather than the value, so what is stored is a correct saving at the running binary's rates.
+		// It is only provisional because the newer binary will re-price it at its rates, so flag it
+		// partial (the tile appends "partial", as it does for a genuinely incomplete saving) and serve
+		// the rollup unchanged, from the same single row read as the token split so the two never tear.
+		d.CacheSavingsIncomplete = true
 	}
 	return d, nil
 }

@@ -42,6 +42,13 @@ type SessionSignals struct {
 	DuplicatePromptCount int
 	NoCodeContextCount   int
 	UnstructuredStart    bool
+	// HygieneMeasured is true only when the row's stored prompt-hygiene counts were derived at
+	// the running quality.PromptFactsVersion. The classifier version is deliberately separate
+	// from the scoring quality.Version (see quality.PromptFactsVersion), so a row still at the
+	// current signals_version can carry hygiene counts from a superseded classifier until the
+	// reparse re-derives them. The read sets this from session_signals.prompt_facts_version, and
+	// HasHygieneSignal gates on it, so a stale-classifier count never surfaces as a signal.
+	HygieneMeasured bool
 	// Context-health figures describe resource load, not the agent's work, so like the
 	// hygiene counts they ride alongside the score without feeding it. Both are nil when
 	// the session had no usage to measure, so the UI can tell "unmeasured" apart from a
@@ -62,10 +69,13 @@ func (s SessionSignals) Scored() bool { return s.Score != nil && s.Grade != nil 
 func (s SessionSignals) HasToolActivity() bool { return s.ToolCalls > 0 }
 
 // HasHygieneSignal reports whether any prompt-hygiene signal fired, so the UI can omit
-// the input readout for a session whose prompts were all clean.
+// the input readout for a session whose prompts were all clean. It is false when the row's
+// hygiene is not measured at the current classifier version (HygieneMeasured), so the session
+// page never shows a count a superseded classifier produced: the block reads as unmeasured until
+// the reparse re-derives the facts, the same way the fleet hygiene aggregate excludes the row.
 func (s SessionSignals) HasHygieneSignal() bool {
-	return s.ShortPromptCount > 0 || s.DuplicatePromptCount > 0 ||
-		s.NoCodeContextCount > 0 || s.UnstructuredStart
+	return s.HygieneMeasured && (s.ShortPromptCount > 0 || s.DuplicatePromptCount > 0 ||
+		s.NoCodeContextCount > 0 || s.UnstructuredStart)
 }
 
 // HasContextHealth reports whether the session had usage to measure, so the UI can show the
@@ -333,6 +343,38 @@ func gatherPromptHygiene(ctx context.Context, tx pgx.Tx, sessionID int64) (quali
 // the last word), which a per-region delta cannot carry, which is also why it is not run on
 // the incremental append path.
 func refreshSignalsTx(ctx context.Context, tx pgx.Tx, sessionID int64) error {
+	// Bow out if a newer binary has already won the version marker. During a rolling deploy an old
+	// binary at quality.Version N-1 and a new one at N share the database, and the new one advances
+	// signals_reconciled_version to N as it re-grades. Reading that marker here, in the transaction
+	// that already holds the session lock, lets an old settle pass (or an old reparse) that raced this
+	// far see the newer marker and leave the row and its signals_stale flag alone rather than overwrite
+	// a fresh N grade with an N-1 one and clear the flag, which would hide the row from the N binary's
+	// readers with no later reconcile to mark it due again. This is the reviewer-prescribed recheck of
+	// the marker under the session transaction, the airtight half the reconcile gate cannot cover on
+	// its own: reconcileStaleVersionsIfNeeded stops an old binary re-marking rows once the marker is
+	// ahead, but a pass that had already selected a due session before the marker moved still reaches
+	// this write, and only rereading the marker here can stop it.
+	//
+	// The read is plain (MVCC last-committed), and that suffices. An N-version row is only ever written
+	// by an N binary, whose settle pass advances the marker to N before it drains (RefreshSettledSignals
+	// reconciles first), so any committed N row implies a committed marker at least N. An old binary
+	// that still reads a marker at or below its own version is therefore provably not racing a committed
+	// N row it could clobber. If instead it reads a stale marker and grades at N-1, the N binary's later
+	// reconcile (its mark-stale UPDATE contends on this same session row lock, so it runs strictly
+	// before or after this write, never interleaved) re-marks the row stale and the N binary re-grades
+	// it. Either way the corpus converges on the newest binary's grade.
+	var marker int
+	if err := tx.QueryRow(ctx,
+		`SELECT signals_reconciled_version FROM parse_meta WHERE id = TRUE`).Scan(&marker); err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("read signals marker for session %d: %w", sessionID, err)
+		}
+		// No singleton row (a database before migration 0013): nothing has reconciled, so no newer
+		// binary can have won and marker stays 0, below any real version.
+	}
+	if marker > quality.Version {
+		return nil // superseded by a newer binary; leave the row (and its signals_stale flag) for it
+	}
 	f, err := gatherSignalFacts(ctx, tx, sessionID)
 	if err != nil {
 		return err
@@ -341,13 +383,25 @@ func refreshSignalsTx(ctx context.Context, tx pgx.Tx, sessionID int64) error {
 		// A session whose human prompts lack current facts: either NULL facts (a message written
 		// before migration 0022 added the columns, which cannot backfill on ALTER) or facts at a
 		// superseded prompt_facts_version (classified by an older ClassifyPrompt). Grading now would
-		// store an all-zero or version-mixed hygiene row and clear signals_stale, so the session would
-		// read as measured until something re-graded it. Leave it stale and ungraded instead: the
-		// Epoch bump paired with each change re-inserts every message through the classifier and
-		// re-grades in the same transaction (see epoch.go, projection.go), so it is the reparse, not
-		// this racing settle pass, that first records this session's hygiene. The session stays in the
-		// settle-due set (signals_stale untouched), so once the reparse re-derives its facts at the
-		// current version a later pass grades it normally; until then it never surfaces a hollow verdict.
+		// store an all-zero or version-mixed hygiene row and read as measured until something re-graded
+		// it, so this leaves the session ungraded: only the Epoch bump paired with each classifier
+		// change re-inserts every message through it (see epoch.go, projection.go), so it is the
+		// reparse, not this settle pass, that first records this session's hygiene.
+		//
+		// It also clears signals_stale so the session drops out of the settle-due set. Re-selecting it
+		// every wake would be pure waste: gatherSignalFacts has already scanned this session's messages,
+		// tool_calls, and usage_events before reaching this guard, and nothing the settle pass does can
+		// fill the facts (only a reparse re-inserts the messages), so a session stuck here, a
+		// deterministic parser failure the epoch cannot rebuild is the worst case, would be re-scanned on
+		// every tick forever, O(ticks * history) of unchanged work that grows with the ungradeable set.
+		// Clearing the flag is safe because the reparse that does fill the facts re-marks the session due
+		// through applyAggregates (the replay folds its region, setting signals_stale=true) and then
+		// grades it with facts now current; a later projection change (an append) re-marks it the same
+		// way. So the row is re-graded exactly when it becomes gradeable, not polled until then.
+		if _, err := tx.Exec(ctx,
+			`UPDATE sessions SET signals_stale = false WHERE id = $1`, sessionID); err != nil {
+			return fmt.Errorf("clear signals_stale for ungradeable session %d: %w", sessionID, err)
+		}
 		return nil
 	}
 	outcome, conf := quality.Classify(quality.Facts{
@@ -375,9 +429,9 @@ func refreshSignalsTx(ctx context.Context, tx pgx.Tx, sessionID int64) error {
 		   (session_id, signals_version, outcome, outcome_confidence, score, grade,
 		    tool_calls, tool_failures, tool_retries, edit_churn, longest_failure_streak,
 		    prompt_count, short_prompt_count, duplicate_prompt_count, no_code_context_count, unstructured_start,
-		    peak_context_tokens, context_reset_count,
+		    peak_context_tokens, context_reset_count, prompt_facts_version,
 		    refreshed_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18, now())
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19, now())
 		 ON CONFLICT (session_id) DO UPDATE SET
 		   signals_version = EXCLUDED.signals_version,
 		   outcome = EXCLUDED.outcome,
@@ -396,11 +450,12 @@ func refreshSignalsTx(ctx context.Context, tx pgx.Tx, sessionID int64) error {
 		   unstructured_start = EXCLUDED.unstructured_start,
 		   peak_context_tokens = EXCLUDED.peak_context_tokens,
 		   context_reset_count = EXCLUDED.context_reset_count,
+		   prompt_facts_version = EXCLUDED.prompt_facts_version,
 		   refreshed_at = now()`,
 		sessionID, quality.Version, string(outcome), string(conf), scoreArg, gradeArg,
 		f.toolCalls, f.toolFailures, f.toolRetries, f.editChurn, f.longestFailureStreak,
 		f.promptCount, f.hygiene.Short, f.hygiene.Duplicate, f.hygiene.NoCodeContext, f.hygiene.UnstructuredStart,
-		f.peakContextTokens, f.contextResets)
+		f.peakContextTokens, f.contextResets, quality.PromptFactsVersion)
 	if err != nil {
 		return fmt.Errorf("upsert signals for session %d: %w", sessionID, err)
 	}
@@ -507,28 +562,48 @@ func (s *Store) RefreshSettledSignals(ctx context.Context) (int, error) {
 // current and skips the scan. A quality.Version bump ships in a new binary, so the first settle
 // pass after the upgrade sees the marker behind, runs the reconcile once to flag every
 // stale-version row, and advances the marker; every later pass drains those rows through the
-// signals_stale index without rescanning. The reconcile and the marker bump are separate
-// statements, but the reconcile is idempotent, so a crash between them just repeats it next pass.
+// signals_stale index without rescanning.
+//
+// The marker read, the stale-marking side effect, and the marker advance all run in ONE transaction
+// that holds the parse_meta row lock (SELECT ... FOR UPDATE), which is what keeps a rolling deploy
+// correct. During a rollout an old binary at quality.Version N-1 and a new one at N share the
+// database. The lock serializes their reconciles and forces the version recheck to happen while the
+// lock is held, so whichever binary runs second re-reads the marker the winner wrote and, finding it
+// at or past its own version, does nothing. A plain marker compare-and-set is not enough: without
+// the lock the version check and the stale-marking UPDATE are separate steps, so an old N-1 binary
+// that read a behind marker could run the reconcile AFTER a new N binary had already marked,
+// advanced, and re-graded, re-marking the fresh N rows stale so the old settle drain overwrites them
+// with N-1 output. The compare-and-set stops the marker regressing but not that late side effect;
+// the lock stops both. Running the side effect and the advance in the same transaction also makes
+// the pair atomic: a crash rolls both back, so the next pass repeats the reconcile cleanly.
 func (s *Store) reconcileStaleVersionsIfNeeded(ctx context.Context) error {
-	var reconciled int
-	if err := s.Pool.QueryRow(ctx,
-		`SELECT signals_reconciled_version FROM parse_meta WHERE id = TRUE`).Scan(&reconciled); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			reconciled = 0 // the migration seeds the row; a missing one means never reconciled
-		} else {
-			return fmt.Errorf("read signals_reconciled_version: %w", err)
+	if err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		var reconciled int
+		if err := tx.QueryRow(ctx,
+			`SELECT signals_reconciled_version FROM parse_meta WHERE id = TRUE FOR UPDATE`).Scan(&reconciled); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil // the migration seeds the singleton; a missing row means nothing to lock or reconcile against
+			}
+			return fmt.Errorf("lock signals_reconciled_version: %w", err)
 		}
-	}
-	if reconciled == quality.Version {
+		if reconciled >= quality.Version {
+			return nil // already reconciled at this version or a newer one; never step the marker back
+		}
+		if err := s.reconcileStaleVersions(ctx, tx); err != nil {
+			return err
+		}
+		// The recheck above ran under the row lock, so the marker is provably still behind and no other
+		// binary can move it while this transaction holds the lock: a plain advance is safe here.
+		if _, err := tx.Exec(ctx,
+			`UPDATE parse_meta SET signals_reconciled_version = $1, updated_at = now() WHERE id = TRUE`,
+			quality.Version); err != nil {
+			return fmt.Errorf("mark signals reconciled at version %d: %w", quality.Version, err)
+		}
 		return nil
-	}
-	if err := s.reconcileStaleVersions(ctx); err != nil {
-		return err
-	}
-	if _, err := s.Pool.Exec(ctx,
-		`UPDATE parse_meta SET signals_reconciled_version = $1, updated_at = now() WHERE id = TRUE`,
-		quality.Version); err != nil {
-		return fmt.Errorf("mark signals reconciled at version %d: %w", quality.Version, err)
+	}); err != nil {
+		// Wrap the transaction result too, so a begin or commit failure (which never reaches the
+		// callback and so is not wrapped inside it) still reaches RefreshSettledSignals named.
+		return fmt.Errorf("reconcile stale signal versions: %w", err)
 	}
 	return nil
 }
@@ -538,9 +613,11 @@ func (s *Store) reconcileStaleVersionsIfNeeded(ctx context.Context) error {
 // signals_stale drain as a projection change would. A version bump changes no projection, so the
 // projection-maintained flag cannot catch it; this closes that one gap. reconcileStaleVersionsIfNeeded
 // gates it to run once per version change, since the signals_version <> current test is an
-// inequality scan the settle loop must not repeat on every wake.
-func (s *Store) reconcileStaleVersions(ctx context.Context) error {
-	if _, err := s.Pool.Exec(ctx,
+// inequality scan the settle loop must not repeat on every wake. It runs on the caller's transaction
+// (tx) so the mark, the marker read that gated it, and the marker advance are one atomic, row-locked
+// unit; see reconcileStaleVersionsIfNeeded for why the lock, not just a marker CAS, is required.
+func (s *Store) reconcileStaleVersions(ctx context.Context, tx pgx.Tx) error {
+	if _, err := tx.Exec(ctx,
 		`UPDATE sessions s SET signals_stale = true
 		   FROM session_signals sig
 		  WHERE sig.session_id = s.id
@@ -615,23 +692,32 @@ var settledSignalBatch = 500
 // that updated_at is not.
 func (s *Store) SessionSignalsByID(ctx context.Context, sessionID int64) (SessionSignals, error) {
 	var sig SessionSignals
+	var promptFactsVersion int
 	err := s.Pool.QueryRow(ctx,
 		`SELECT sig.session_id, sig.signals_version, sig.outcome, sig.outcome_confidence, sig.score, sig.grade,
 		        sig.tool_calls, sig.tool_failures, sig.tool_retries, sig.edit_churn, sig.longest_failure_streak,
 		        sig.prompt_count, sig.short_prompt_count, sig.duplicate_prompt_count, sig.no_code_context_count, sig.unstructured_start,
-		        sig.peak_context_tokens, sig.context_reset_count
+		        sig.peak_context_tokens, sig.context_reset_count, sig.prompt_facts_version
 		   FROM session_signals sig
 		   JOIN sessions s ON s.id = sig.session_id
 		  WHERE sig.session_id = $1 AND sig.signals_version = $2 AND NOT s.signals_stale`, sessionID, quality.Version).Scan(
 		&sig.SessionID, &sig.Version, &sig.Outcome, &sig.OutcomeConfidence, &sig.Score, &sig.Grade,
 		&sig.ToolCalls, &sig.ToolFailures, &sig.ToolRetries, &sig.EditChurn, &sig.LongestFailureStreak,
 		&sig.PromptCount, &sig.ShortPromptCount, &sig.DuplicatePromptCount, &sig.NoCodeContextCount, &sig.UnstructuredStart,
-		&sig.PeakContextTokens, &sig.ContextResetCount)
+		&sig.PeakContextTokens, &sig.ContextResetCount, &promptFactsVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return SessionSignals{SessionID: sessionID, Outcome: string(quality.OutcomeUnknown), OutcomeConfidence: string(quality.ConfLow)}, nil
 	}
 	if err != nil {
 		return SessionSignals{}, fmt.Errorf("read signals for session %d: %w", sessionID, err)
 	}
+	// The outcome, score, and tool-health counts are gated on signals_version above and read as
+	// current. The prompt-hygiene counts carry their own quality.PromptFactsVersion (they aggregate
+	// the messages.prompt_* facts), so a row can be at the current signals_version yet hold hygiene
+	// from a superseded classifier until the reparse re-derives it. Mark hygiene measured only when
+	// its version matches, so HasHygieneSignal (and the session page it drives) reads a stale count
+	// as unmeasured rather than as current. The row is not hidden wholesale: the non-hygiene signals
+	// do not depend on the classifier, so suppressing them would drop correct data.
+	sig.HygieneMeasured = promptFactsVersion == quality.PromptFactsVersion
 	return sig, nil
 }

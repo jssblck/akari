@@ -569,7 +569,10 @@ func TestSignalsSkipUnbackfilledPromptFacts(t *testing.T) {
 		t.Fatalf("refresh signals (pre-backfill): %v", err)
 	}
 
-	// The refresh must have written no row and left the session due, so the reparse still owns it.
+	// The refresh must have written no row (ungradeable until a reparse fills the facts) and CLEARED
+	// signals_stale so the settle pass stops re-scanning this session's history every wake. The reparse
+	// that fills the facts re-marks it due through applyAggregates and grades it then, so dropping it
+	// from the due set now loses no grade, it only avoids the O(ticks * history) polling.
 	var rows int
 	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM session_signals WHERE session_id = $1`, sid).Scan(&rows); err != nil {
 		t.Fatalf("count signals rows: %v", err)
@@ -581,8 +584,8 @@ func TestSignalsSkipUnbackfilledPromptFacts(t *testing.T) {
 	if err := st.Pool.QueryRow(ctx, `SELECT signals_stale FROM sessions WHERE id = $1`, sid).Scan(&stale); err != nil {
 		t.Fatalf("read signals_stale: %v", err)
 	}
-	if !stale {
-		t.Error("a pre-reparse session must stay stale so the reparse re-grades it")
+	if stale {
+		t.Error("an ungradeable pre-reparse session must be dropped from the settle-due set (signals_stale=false), not re-scanned every wake")
 	}
 
 	// Materialize the facts as the reparse's message re-insert would, then re-grade: the session is
@@ -658,7 +661,8 @@ func TestSignalsSkipStalePromptFactsVersion(t *testing.T) {
 		t.Fatalf("refresh signals (stale version): %v", err)
 	}
 
-	// A stale-version session must stay ungraded and due, exactly like a NULL-facts one.
+	// A stale-version session must stay ungraded and, like a NULL-facts one, be dropped from the due set
+	// so the settle pass stops re-scanning it; the reparse that advances its facts version re-marks it.
 	var rows int
 	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM session_signals WHERE session_id = $1`, sid).Scan(&rows); err != nil {
 		t.Fatalf("count signals rows: %v", err)
@@ -670,8 +674,8 @@ func TestSignalsSkipStalePromptFactsVersion(t *testing.T) {
 	if err := st.Pool.QueryRow(ctx, `SELECT signals_stale FROM sessions WHERE id = $1`, sid).Scan(&stale); err != nil {
 		t.Fatalf("read signals_stale: %v", err)
 	}
-	if !stale {
-		t.Error("a stale-facts-version session must stay stale so the reparse re-grades it")
+	if stale {
+		t.Error("an ungradeable stale-facts-version session must be dropped from the settle-due set (signals_stale=false), not re-scanned every wake")
 	}
 
 	// Advance the stamp to the current version, as the reparse's re-insert would, then re-grade: the
@@ -690,6 +694,106 @@ func TestSignalsSkipStalePromptFactsVersion(t *testing.T) {
 	}
 	if !sig.Scored() {
 		t.Errorf("a current-version settled session should grade; got unscored %+v", sig)
+	}
+}
+
+// setPromptFactsVersion overwrites a graded row's stored classifier version, standing in for a
+// session_signals aggregate that a ClassifyPrompt change (a quality.PromptFactsVersion bump) left at
+// a superseded classifier version before the paired epoch reparse re-derived it.
+func setPromptFactsVersion(t *testing.T, st *store.Store, ctx context.Context, sid int64, v int) {
+	t.Helper()
+	if _, err := st.Pool.Exec(ctx,
+		`UPDATE session_signals SET prompt_facts_version = $2 WHERE session_id = $1`, sid, v); err != nil {
+		t.Fatalf("set prompt_facts_version: %v", err)
+	}
+}
+
+// TestPromptFactsVersionHidesStaleHygiene pins the read-side invariant for the classifier version.
+// session_signals.prompt_facts_version records the quality.PromptFactsVersion the row's hygiene counts
+// were derived under; it is separate from signals_version, so a scoring-version-current row can still
+// hold hygiene from a superseded classifier until the reparse re-derives it. Both hygiene reads gate on
+// it: SessionSignalsByID marks hygiene unmeasured (so the session page hides it) and the fleet aggregate
+// excludes the row, while the non-hygiene signals (outcome, score) stay visible because they do not
+// depend on the classifier. This walks a graded session through a classifier bump and back, asserting
+// the hygiene is hidden until re-derived and the grade is never dropped along the way.
+func TestPromptFactsVersionHidesStaleHygiene(t *testing.T) {
+	t.Parallel()
+	st, ctx, uid, pid := signalsEnv(t)
+	sid := seedSession(t, st, uid, pid, "sess-factsversion-hide")
+
+	// A terse opener (short and unstructured) and a clean anchored follow-up, so hygiene actually
+	// fires and the row has a signal to hide.
+	delta := store.ProjectionDelta{
+		Messages: []store.MessageDelta{
+			{Ordinal: 0, Role: "user", Content: "hey"},
+			{Ordinal: 1, Role: "assistant", Content: "on it"},
+			{Ordinal: 2, Role: "user", Content: "please refactor the retry loop in internal/server/store/signals.go"},
+			{Ordinal: 3, Role: "assistant", Content: "done"},
+		},
+	}
+	if err := st.ApplyProjectionDelta(ctx, sid, delta); err != nil {
+		t.Fatalf("apply delta: %v", err)
+	}
+	setUserMessageCount(t, st, ctx, sid, 2)
+	settleSession(t, st, ctx, sid)
+	if err := st.RefreshSessionSignals(ctx, sid); err != nil {
+		t.Fatalf("grade: %v", err)
+	}
+
+	// Graded at the current classifier version: hygiene is measured and the fired signal shows, both
+	// per-session and in the fleet aggregate.
+	sig, err := st.SessionSignalsByID(ctx, sid)
+	if err != nil {
+		t.Fatalf("read signals: %v", err)
+	}
+	if !sig.HygieneMeasured || !sig.HasHygieneSignal() || sig.ShortPromptCount != 1 || !sig.UnstructuredStart {
+		t.Fatalf("current-version hygiene = {measured %v, hasSignal %v, short %d, unstructured %v}, want {true, true, 1, true}",
+			sig.HygieneMeasured, sig.HasHygieneSignal(), sig.ShortPromptCount, sig.UnstructuredStart)
+	}
+	if !sig.Scored() {
+		t.Fatalf("session should be scored; got %+v", sig)
+	}
+	if h, err := st.PromptHygiene(ctx, store.AnalyticsFilter{}); err != nil {
+		t.Fatalf("hygiene aggregate (current): %v", err)
+	} else if h.Sessions != 1 || h.Short != 1 || !h.HasData() {
+		t.Fatalf("current-version aggregate = %+v, want it to include the session (Sessions 1, Short 1)", h)
+	}
+
+	// A ClassifyPrompt change bumps quality.PromptFactsVersion; before the paired reparse re-derives
+	// this session, its row still reads the old classifier version. The hygiene must now read as
+	// unmeasured on both paths, while the outcome and score stay visible (they do not depend on the
+	// classifier, so hiding them would drop correct data).
+	setPromptFactsVersion(t, st, ctx, sid, quality.PromptFactsVersion-1)
+	stale, err := st.SessionSignalsByID(ctx, sid)
+	if err != nil {
+		t.Fatalf("read signals (stale facts): %v", err)
+	}
+	if stale.HygieneMeasured || stale.HasHygieneSignal() {
+		t.Errorf("stale-classifier hygiene must read unmeasured; got {measured %v, hasSignal %v}", stale.HygieneMeasured, stale.HasHygieneSignal())
+	}
+	if !stale.Scored() || stale.Outcome != sig.Outcome {
+		t.Errorf("stale hygiene must not drop the grade; got scored %v outcome %q, want scored true outcome %q", stale.Scored(), stale.Outcome, sig.Outcome)
+	}
+	if h, err := st.PromptHygiene(ctx, store.AnalyticsFilter{}); err != nil {
+		t.Fatalf("hygiene aggregate (stale facts): %v", err)
+	} else if h.Sessions != 0 || h.HasData() {
+		t.Errorf("stale-classifier row must drop from the fleet aggregate; got %+v, want no measured session", h)
+	}
+
+	// The reparse re-derives the facts and re-grades at the current version. The hygiene is measured
+	// and counted again, so the read side hid it only until it was re-derived.
+	setPromptFactsVersion(t, st, ctx, sid, quality.PromptFactsVersion)
+	back, err := st.SessionSignalsByID(ctx, sid)
+	if err != nil {
+		t.Fatalf("read signals (re-derived): %v", err)
+	}
+	if !back.HygieneMeasured || !back.HasHygieneSignal() {
+		t.Errorf("re-derived hygiene must read measured again; got {measured %v, hasSignal %v}", back.HygieneMeasured, back.HasHygieneSignal())
+	}
+	if h, err := st.PromptHygiene(ctx, store.AnalyticsFilter{}); err != nil {
+		t.Fatalf("hygiene aggregate (re-derived): %v", err)
+	} else if h.Sessions != 1 || h.Short != 1 {
+		t.Errorf("re-derived aggregate = %+v, want the session back (Sessions 1, Short 1)", h)
 	}
 }
 

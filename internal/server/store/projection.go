@@ -548,7 +548,18 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 // cache_savings_incomplete are both sticky once any surviving unpriced usage row is
 // seen. total_cache_savings_usd folds like total_cost_usd, so the session header's Cache
 // tile reads the saving off this one row rather than rescanning usage_events per refresh.
+//
+// The one wrinkle is a pricing rolling deploy. This fold prices the region's saving with the
+// running binary's rate table (CacheSavings, in applyDelta), so if a newer binary has advanced
+// cache_savings_priced_version past this one, an old binary that ingests or appends cache-bearing
+// usage here would fold an old-rate saving into the rollup and leave it flagged authoritative, out
+// of the newer binary's reprice reach (its reconcile already ran before this append). So when the
+// pricing marker is ahead and this region carried cache volume, the fold drops cache_savings_backfilled
+// to false, returning the session to the backfill candidate set so the newer binary re-prices the
+// whole saving from usage_events at its rates. In steady state (marker current) the flag is untouched
+// and the O(1) rollup stays authoritative.
 func applyAggregates(ctx context.Context, tx pgx.Tx, sessionID int64, parserVersion int, a appliedDelta, started, ended time.Time) error {
+	regionHasCache := a.CacheRead > 0 || a.CacheWrite > 0
 	_, err := tx.Exec(ctx,
 		`UPDATE sessions SET
 		   message_count = message_count + $2,
@@ -561,6 +572,11 @@ func applyAggregates(ctx context.Context, tx pgx.Tx, sessionID int64, parserVers
 		   cost_incomplete = cost_incomplete OR $9,
 		   total_cache_savings_usd = total_cache_savings_usd + $10,
 		   cache_savings_incomplete = cache_savings_incomplete OR $11,
+		   -- Drop the authoritative flag when this cache-bearing region was priced under a rate
+		   -- table a newer binary has already superseded, so that binary re-prices it; the COALESCE
+		   -- treats the pre-migration no-singleton case as current so the flag is left alone.
+		   cache_savings_backfilled = cache_savings_backfilled
+		     AND NOT ($15 AND COALESCE((SELECT cache_savings_priced_version FROM parse_meta WHERE id = TRUE), 0) > $16),
 		   started_at = LEAST(started_at, $12),
 		   ended_at = GREATEST(ended_at, $13),
 		   parser_version = $14,
@@ -575,7 +591,8 @@ func applyAggregates(ctx context.Context, tx pgx.Tx, sessionID int64, parserVers
 		a.Input, a.Output, a.CacheWrite, a.CacheRead,
 		a.CostUSD, a.CostIncomplete,
 		a.CacheSavingsUSD, a.CacheSavingsIncomplete,
-		nullTime(started), nullTime(ended), parserVersion)
+		nullTime(started), nullTime(ended), parserVersion,
+		regionHasCache, pricing.Version)
 	if err != nil {
 		return fmt.Errorf("update aggregates for session %d: %w", sessionID, err)
 	}

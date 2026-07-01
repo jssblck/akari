@@ -242,34 +242,53 @@ func (s *Store) BackfillCacheSavings(ctx context.Context) (int, error) {
 // It is gated on a parse_meta marker, mirroring reconcileStaleVersionsIfNeeded for quality.Version: a
 // steady-state startup reads the singleton (one O(1) read), finds the marker current, and skips the
 // full-corpus UPDATE. A pricing.Version bump ships in a new binary, so the first startup after the
-// upgrade sees the marker behind, marks the cache-bearing corpus once, and advances the marker. The
-// mark and the marker advance are separate statements, but the mark is idempotent (re-clearing a flag,
-// re-pricing an already-current session), so a crash between them just repeats the mark next startup.
+// upgrade sees the marker behind, marks the cache-bearing corpus once, and advances the marker.
+//
+// The marker read, the corpus mark, and the marker advance all run in ONE transaction that holds the
+// parse_meta row lock (SELECT ... FOR UPDATE), the same rolling-deploy fix as the signals reconcile.
+// During a pricing rollout an old binary at pricing.Version N-1 and a new one at N share the
+// database. The lock serializes their reconciles and forces the version recheck to happen while the
+// lock is held, so whichever binary runs second re-reads the marker the winner wrote and, finding it
+// at or past its own version, does nothing. A plain marker compare-and-set is not enough: without the
+// lock the version check and the corpus-clearing UPDATE are separate steps, so an old N-1 binary that
+// read a behind marker could clear cache_savings_backfilled across the corpus AFTER a new N binary had
+// already cleared, advanced, and re-priced, then re-price those rows at the OLD rates on its own
+// drain. The compare-and-set stops the marker regressing but not that late clear; the lock stops both.
+// Running the corpus mark and the marker advance in the same transaction also makes the pair atomic:
+// a crash rolls both back, so the next startup repeats the mark cleanly.
 func (s *Store) reconcileCacheSavingsPricingIfNeeded(ctx context.Context) error {
-	var priced int
-	if err := s.Pool.QueryRow(ctx,
-		`SELECT cache_savings_priced_version FROM parse_meta WHERE id = TRUE`).Scan(&priced); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			priced = 0 // the migration seeds the row; a missing one means never priced
-		} else {
-			return fmt.Errorf("read cache_savings_priced_version: %w", err)
+	if err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		var priced int
+		if err := tx.QueryRow(ctx,
+			`SELECT cache_savings_priced_version FROM parse_meta WHERE id = TRUE FOR UPDATE`).Scan(&priced); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil // the migration seeds the singleton; a missing row means nothing to lock or price against
+			}
+			return fmt.Errorf("lock cache_savings_priced_version: %w", err)
 		}
-	}
-	if priced == pricing.Version {
+		if priced >= pricing.Version {
+			return nil // already priced at this version or a newer one; never step the marker back
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE sessions s SET cache_savings_backfilled = false
+			  WHERE s.cache_savings_backfilled
+			    AND EXISTS (SELECT 1 FROM usage_events u
+			                 WHERE u.session_id = s.id
+			                   AND (u.cache_read_tokens > 0 OR u.cache_write_tokens > 0))`); err != nil {
+			return fmt.Errorf("mark cache-bearing sessions for reprice: %w", err)
+		}
+		// The recheck above ran under the row lock, so the marker is provably still behind and no other
+		// binary can move it while this transaction holds the lock: a plain advance is safe here.
+		if _, err := tx.Exec(ctx,
+			`UPDATE parse_meta SET cache_savings_priced_version = $1, updated_at = now() WHERE id = TRUE`,
+			pricing.Version); err != nil {
+			return fmt.Errorf("mark cache savings priced at version %d: %w", pricing.Version, err)
+		}
 		return nil
-	}
-	if _, err := s.Pool.Exec(ctx,
-		`UPDATE sessions s SET cache_savings_backfilled = false
-		  WHERE s.cache_savings_backfilled
-		    AND EXISTS (SELECT 1 FROM usage_events u
-		                 WHERE u.session_id = s.id
-		                   AND (u.cache_read_tokens > 0 OR u.cache_write_tokens > 0))`); err != nil {
-		return fmt.Errorf("mark cache-bearing sessions for reprice: %w", err)
-	}
-	if _, err := s.Pool.Exec(ctx,
-		`UPDATE parse_meta SET cache_savings_priced_version = $1, updated_at = now() WHERE id = TRUE`,
-		pricing.Version); err != nil {
-		return fmt.Errorf("mark cache savings priced at version %d: %w", pricing.Version, err)
+	}); err != nil {
+		// Wrap the transaction result too, so a begin or commit failure (which never reaches the
+		// callback and so is not wrapped inside it) still reaches BackfillCacheSavings named.
+		return fmt.Errorf("reconcile cache-savings pricing: %w", err)
 	}
 	return nil
 }
@@ -286,6 +305,18 @@ func (s *Store) reconcileCacheSavingsPricingIfNeeded(ctx context.Context) error 
 // of an authoritative base. The recheck is on the flag, not the stored number: the whole point is
 // that a nonzero total can be a partial fold, so "already nonzero" is not proof of correctness. It
 // reports whether it wrote.
+//
+// It also rechecks the pricing marker under the same session lock and bows out if a newer binary has
+// won. During a pricing rolling deploy an old binary at pricing.Version N-1 and a new one at N share
+// the database; the new one clears cache_savings_backfilled across the corpus and advances
+// cache_savings_priced_version to N. Without the recheck an old long-running drain could then lock one
+// of those cleared candidates, price it at the OLD N-1 rates, and set cache_savings_backfilled=true,
+// leaving a mispriced authoritative rollup a newer drain skips forever. The recheck is airtight
+// because the reconcile clears the flag with an UPDATE that locks these very session rows: this
+// SELECT ... FOR UPDATE serializes against that clear, so once the reconcile has committed its
+// advance, an old drain that locks the row afterward reads the advanced marker and skips. If it locks
+// first, it prices at N-1 and the reconcile's later clear flips the row back for the N drain to
+// re-price.
 func (s *Store) backfillCacheSavingsForSession(ctx context.Context, id int64) (bool, error) {
 	wrote := false
 	// The inner wraps name the operation; the outer wrap below adds the session id, so a begin or
@@ -299,6 +330,18 @@ func (s *Store) backfillCacheSavingsForSession(ctx context.Context, id int64) (b
 		}
 		if backfilled {
 			return nil // a concurrent backfill priced it after the batch scan; leave it alone
+		}
+		var priced int
+		if err := tx.QueryRow(ctx,
+			`SELECT cache_savings_priced_version FROM parse_meta WHERE id = TRUE`).Scan(&priced); err != nil {
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("read pricing marker for cache-savings backfill: %w", err)
+			}
+			// No singleton row (a database before migration 0013): nothing has priced, so no newer
+			// binary can have won and priced stays 0, below any real version.
+		}
+		if priced > pricing.Version {
+			return nil // superseded by a newer pricing binary; leave this candidate for it to price
 		}
 		c, err := s.sessionCacheStatsFrom(ctx, tx, id)
 		if err != nil {

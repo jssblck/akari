@@ -1,0 +1,31 @@
+-- Stamps each session_signals row with the quality.PromptFactsVersion its prompt-hygiene counts were
+-- derived under, so a read never serves hygiene from a superseded classifier as if it were current.
+--
+-- The hygiene counts (short_prompt_count, duplicate_prompt_count, no_code_context_count,
+-- unstructured_start, and the prompt_count they read against) are aggregated from the per-message
+-- messages.prompt_* facts, which carry their own quality.PromptFactsVersion. That version is
+-- deliberately separate from quality.Version: a classifier change bumps PromptFactsVersion without
+-- touching the scoring model's Version. The existing read gate checks only signals_version =
+-- quality.Version, so without this column a hygiene aggregate produced by an older classifier would
+-- keep reading as current after a PromptFactsVersion bump, and a fleet aggregate would silently mix
+-- classifier versions until the reparse reached every session.
+--
+-- refreshSignalsTx only writes a session_signals row when the session's prompt facts are already at
+-- the current PromptFactsVersion (see gatherPromptHygiene's readiness guard), so the stamp it writes
+-- is always current at write time. The hygiene reads (promptHygieneFrom and the hygiene half of
+-- SessionSignalsByID) then require prompt_facts_version = quality.PromptFactsVersion, so a row whose
+-- hygiene predates a classifier change reads as unmeasured until re-derived. Only the reparse can
+-- re-derive it (the facts are cached on messages and re-produced by re-inserting the row), which is
+-- why a PromptFactsVersion bump is always paired with a parse.Epoch bump: the reparse deletes and
+-- re-writes each session_signals row at the new version, so the read gate un-hides sessions as it
+-- advances. The settle-pass version reconcile stays keyed on signals_version alone, because it cannot
+-- re-derive prompt facts, so marking a prompt-facts-stale row for it would only spin.
+--
+-- It defaults to 0, below any real PromptFactsVersion, so a row that predates this column (or the
+-- paired epoch reparse that re-stamps it) reads as unmeasured rather than surfacing hygiene at an
+-- unknown version. That is the safe direction, the same one signals_stale's default-true takes: a
+-- spurious "unmeasured" costs a re-grade the epoch reparse already performs, while a spurious
+-- "current" would show version-mixed hygiene. The paired parse.Epoch bump (2 -> 3) re-grades every
+-- session on deploy, stamping the running version, so the default only governs the brief window
+-- before the reparse reaches a session.
+ALTER TABLE session_signals ADD COLUMN prompt_facts_version INT NOT NULL DEFAULT 0;

@@ -100,7 +100,10 @@ func TestRefreshSettledSignalsReStampsStaleVersion(t *testing.T) {
 	st, ctx, uid, pid := signalsEnv(t)
 	sid := seedSettledSession(t, st, ctx, uid, pid, "sess-stale", 120)
 	// A stale-version row that a prior settled grade left clean: signals_stale=false, so only
-	// the version reconcile (not the projection-maintained flag) can make it due again.
+	// the version reconcile (not the projection-maintained flag) can make it due again. It is seeded
+	// at quality.Version+1 because the session_signals_version_ck constraint forbids a version below 1
+	// and the running quality.Version is 1, so the only seedable version that reads as stale (<> the
+	// running version, which the reconcile re-stamps to current) is one above it.
 	insertSignalsRow(t, st, ctx, sid, quality.Version+1, "completed", "high", 0, false)
 
 	// Before the pass the current-version read finds no row and self-heals to unknown.
@@ -177,6 +180,125 @@ func TestRefreshSettledSignalsReconcilesVersionOncePerBump(t *testing.T) {
 		t.Fatalf("read b after bump: %v", err)
 	} else if sig.Outcome != string(quality.OutcomeAbandoned) {
 		t.Errorf("b outcome after bump = %s, want abandoned", sig.Outcome)
+	}
+}
+
+// TestRefreshSettledSignalsMarkerIsMonotonic pins the rolling-deploy safety of the version reconcile.
+// When an old (N-1) and a new (N) binary share one database, the new one advances the marker to N;
+// the old one, waking afterward, must read N, find it at or ahead of its own version, and do nothing.
+// It must NOT re-run reconcileStaleVersions (which at the old version would mark every N-version row
+// stale and let the old scoring model overwrite it) and must NOT write the marker back down to N-1.
+// This stands in the running binary for the OLD one by seeding a marker and a graded row a NEWER
+// binary would have left (both a version ahead of quality.Version) and asserting the settle pass
+// leaves the marker and the row untouched.
+func TestRefreshSettledSignalsMarkerIsMonotonic(t *testing.T) {
+	t.Parallel()
+	st, ctx, uid, pid := signalsEnv(t)
+
+	// A newer binary already reconciled at quality.Version+1 and graded this settled session at that
+	// version, leaving it clean (signals_stale=false).
+	sid := seedSettledSession(t, st, ctx, uid, pid, "sess-newer", 120)
+	insertSignalsRow(t, st, ctx, sid, quality.Version+1, "abandoned", "medium", 0, false)
+	if _, err := st.Pool.Exec(ctx,
+		"UPDATE parse_meta SET signals_reconciled_version = $1 WHERE id = TRUE", quality.Version+1); err != nil {
+		t.Fatalf("seed ahead marker: %v", err)
+	}
+
+	// The old binary's settle pass runs. The reconcile must skip (marker >= its version), so nothing
+	// is marked due and nothing is re-graded.
+	if n, err := st.RefreshSettledSignals(ctx); err != nil {
+		t.Fatalf("old-binary settle pass: %v", err)
+	} else if n != 0 {
+		t.Errorf("old-binary pass refreshed %d, want 0 (the reconcile must not run against a newer marker)", n)
+	}
+
+	// The marker must not have been stepped back to quality.Version.
+	var marker int
+	if err := st.Pool.QueryRow(ctx,
+		"SELECT signals_reconciled_version FROM parse_meta WHERE id = TRUE").Scan(&marker); err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	if marker != quality.Version+1 {
+		t.Errorf("marker = %d after old-binary pass, want %d (never stepped back)", marker, quality.Version+1)
+	}
+
+	// The newer-version row must be untouched: still at its version and still clean, not re-marked
+	// stale for the old scoring model to overwrite.
+	var rowVersion int
+	var stale bool
+	if err := st.Pool.QueryRow(ctx,
+		`SELECT sig.signals_version, s.signals_stale
+		   FROM session_signals sig JOIN sessions s ON s.id = sig.session_id
+		  WHERE sig.session_id = $1`, sid).Scan(&rowVersion, &stale); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if rowVersion != quality.Version+1 || stale {
+		t.Errorf("newer row = (version %d, stale %v), want (%d, false) left untouched", rowVersion, stale, quality.Version+1)
+	}
+}
+
+// TestRefreshSettledSignalsWriteGateSkipsSupersededGrade pins the per-session write gate, the deeper
+// half of the rolling-deploy fix. Advancing the marker gates the reconcile, but an old settle pass
+// that already selected a due session can still reach the per-session write; refreshSignalsTx rechecks
+// the marker under the session lock and, seeing a newer binary has won, must leave the row and its
+// signals_stale flag alone rather than overwrite the pending N grade with an N-1 one. The test seeds a
+// due (signals_stale=true) session, advances the marker past the running version, and asserts the pass
+// neither clears the flag nor changes the seeded row. It then rewinds the marker to the running version
+// and reruns, proving the SAME session grades once no newer binary is ahead, so it is the gate, not
+// some other skip, that held the write.
+func TestRefreshSettledSignalsWriteGateSkipsSupersededGrade(t *testing.T) {
+	t.Parallel()
+	st, ctx, uid, pid := signalsEnv(t)
+
+	// A settled session that is due (signals_stale=true) with a row at the running version. A grade
+	// would flip it to abandoned and clear the flag, so those two are the tells that a write happened.
+	sid := seedSettledSession(t, st, ctx, uid, pid, "sess-writegate", 120)
+	insertSignalsRow(t, st, ctx, sid, quality.Version, "completed", "high", 0, true)
+
+	// A newer binary won the marker.
+	if _, err := st.Pool.Exec(ctx,
+		"UPDATE parse_meta SET signals_reconciled_version = $1 WHERE id = TRUE", quality.Version+1); err != nil {
+		t.Fatalf("seed ahead marker: %v", err)
+	}
+	if _, err := st.RefreshSettledSignals(ctx); err != nil {
+		t.Fatalf("settle pass with marker ahead: %v", err)
+	}
+	var stale bool
+	var outcome string
+	if err := st.Pool.QueryRow(ctx,
+		`SELECT s.signals_stale, sig.outcome
+		   FROM sessions s JOIN session_signals sig ON sig.session_id = s.id
+		  WHERE s.id = $1`, sid).Scan(&stale, &outcome); err != nil {
+		t.Fatalf("read row after gated pass: %v", err)
+	}
+	if !stale {
+		t.Error("write gate should have left signals_stale=true; an old binary must not clear a superseded row")
+	}
+	if outcome != "completed" {
+		t.Errorf("write gate should have left the seeded outcome intact, got %q (the grade must not have run)", outcome)
+	}
+
+	// Rewind the marker to the running version: no newer binary is ahead, so the same due session must
+	// now grade and clear its flag. This proves the marker gate, not a promptFacts or settledness gate,
+	// held the write above.
+	if _, err := st.Pool.Exec(ctx,
+		"UPDATE parse_meta SET signals_reconciled_version = $1 WHERE id = TRUE", quality.Version); err != nil {
+		t.Fatalf("rewind marker: %v", err)
+	}
+	if _, err := st.RefreshSettledSignals(ctx); err != nil {
+		t.Fatalf("settle pass with marker current: %v", err)
+	}
+	if err := st.Pool.QueryRow(ctx,
+		`SELECT s.signals_stale, sig.outcome
+		   FROM sessions s JOIN session_signals sig ON sig.session_id = s.id
+		  WHERE s.id = $1`, sid).Scan(&stale, &outcome); err != nil {
+		t.Fatalf("read row after current pass: %v", err)
+	}
+	if stale {
+		t.Error("with the marker current the due session should have graded and cleared signals_stale")
+	}
+	if outcome != string(quality.OutcomeAbandoned) {
+		t.Errorf("regraded outcome = %q, want abandoned (the settled fixture)", outcome)
 	}
 }
 

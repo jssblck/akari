@@ -51,9 +51,21 @@ func (s *Store) PromptHygiene(ctx context.Context, f AnalyticsFilter) (PromptHyg
 // parsed views are gated during a reparse, so a reader never sees the two disagree. The prompt
 // denominator is the stored prompt_count (the classifier's own base of non-empty prompts), not
 // user_message_count, so a numerator can never exceed it and every rate stays within [0, 1].
+//
+// The join also requires prompt_facts_version = quality.PromptFactsVersion, on top of the
+// signals_version gate. The hygiene counts aggregate the messages.prompt_* facts, which carry
+// the classifier version, and that version is separate from signals_version by design (a classifier
+// change bumps PromptFactsVersion without touching the scoring Version). Without this second gate a
+// row whose hygiene predates a classifier change would keep summing in as current, so a fleet
+// aggregate spanning a PromptFactsVersion migration would mix classifier versions until the reparse
+// reached every session. A stale-hygiene row is excluded until the paired epoch reparse re-derives
+// it at the running version, the read-side companion to gatherPromptHygiene's grade-time guard.
 func (s *Store) promptHygieneFrom(ctx context.Context, q querier, f AnalyticsFilter) (PromptHygiene, error) {
 	filter, args := f.clauseFor("s.started_at")
 	args = append(args, quality.Version)
+	versionArg := fmt.Sprint(len(args))
+	args = append(args, quality.PromptFactsVersion)
+	factsVersionArg := fmt.Sprint(len(args))
 	var h PromptHygiene
 	err := q.QueryRow(ctx,
 		`SELECT coalesce(sum(sig.prompt_count), 0),
@@ -64,7 +76,8 @@ func (s *Store) promptHygieneFrom(ctx context.Context, q querier, f AnalyticsFil
 		        coalesce(sum(CASE WHEN sig.unstructured_start THEN 1 ELSE 0 END), 0)
 		   FROM sessions s
 		   JOIN session_signals sig
-		     ON sig.session_id = s.id AND sig.signals_version = $`+fmt.Sprint(len(args))+` AND NOT s.signals_stale
+		     ON sig.session_id = s.id AND sig.signals_version = $`+versionArg+`
+		        AND sig.prompt_facts_version = $`+factsVersionArg+` AND NOT s.signals_stale
 		  WHERE TRUE`+filter,
 		args...).Scan(&h.Prompts, &h.Short, &h.Duplicate, &h.NoCodeContext, &h.Sessions, &h.UnstructuredStarts)
 	if err != nil {
