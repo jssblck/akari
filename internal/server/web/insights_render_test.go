@@ -28,6 +28,18 @@ func sampleInsights() store.Insights {
 			Turns:             12,
 			Sessions:          15,
 		},
+		Tools: store.ToolStats{
+			TotalCalls:    120,
+			TotalFailures: 12,
+			Turns:         40,
+			Tools: []store.ToolStat{
+				{Name: "Read", Calls: 60, Failures: 0},
+				{Name: "Edit", Calls: 30, Failures: 4},
+				{Name: "Bash", Calls: 20, Failures: 8},
+				{Name: "Grep", Calls: 10, Failures: 0},
+			},
+			Clipped: 2,
+		},
 		Quality: store.QualityDistribution{
 			Grades: []store.LabeledCount{
 				{Key: "A", Count: 5}, {Key: "B", Count: 3}, {Key: "C", Count: 2},
@@ -69,6 +81,15 @@ func TestInsightsPageRendersDistributions(t *testing.T) {
 		`>1m 30s</div>`,            // response p90, formatted minutes and seconds
 		`>4.2</div>`,               // messages per active minute, one decimal
 		`>msgs / active min<`,      // its label
+		`>Tools<`,                  // the tools band
+		`>120</div>`,               // total tool calls
+		`>tool calls<`,             // its label
+		`>10%</div>`,               // fleet error rate (12/120)
+		`>tools / turn<`,           // the tools-per-turn label
+		`>Read<`,                   // the busiest tool in the mix
+		`class="tool-err"`,         // a failing tool carries its error rate
+		`>40%<`,                    // Bash's error rate suffix (8/20)
+		`+2 more tools not shown`,  // the clipped-tail note
 		`>Unscored<`,               // the empty grade key reads as a word, not a blank
 		`>Completed<`,              // outcome label, title-cased
 		`>Quick<`,                  // archetype label, title-cased
@@ -120,6 +141,24 @@ func TestInsightsPageVelocityNoTurns(t *testing.T) {
 	}
 	if !strings.Contains(html, `>Velocity<`) {
 		t.Error("the velocity band heading should still render")
+	}
+}
+
+// When the window has sessions but none ran a tool, the tools band shows a note instead of
+// an empty bar list, while the rest of the page renders as usual.
+func TestInsightsPageToolsEmpty(t *testing.T) {
+	p := Page{Title: "Insights", LoggedIn: true, Active: "insights", Username: "ada"}
+	ranges := RangeOptions("/insights", nil, "30d")
+	ins := sampleInsights()
+	ins.Tools = store.ToolStats{} // no tool calls
+
+	html := renderComponent(t, InsightsPage(p, ins, "30d", ranges))
+
+	if !strings.Contains(html, "No tool calls in this window.") {
+		t.Error("tools band should note the missing tool calls")
+	}
+	if !strings.Contains(html, `>Tools<`) {
+		t.Error("the tools band heading should still render")
 	}
 }
 

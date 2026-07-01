@@ -47,6 +47,16 @@
 .ins-fig-k { color: var(--muted); font-size: 0.8125rem; margin-top: 2px; }
 .ins-fig-sub { margin-top: 1px; }
 
+/* The tools band is a full-width panel between the rate bands and the distribution grid:
+   its three fleet figures reuse the shared figure row, then the tool mix reuses the
+   breakdown bars below them (keeping the base label truncation, since a tool name can run
+   long). The per-bar error suffix reads in the status-error tone so an unreliable tool
+   draws the eye without a second chart. */
+.ins-tools { margin-bottom: var(--sp-xl); }
+.tool-bars { margin-top: var(--sp-lg); }
+.tool-err { color: var(--err); margin-left: 6px; font-variant-numeric: tabular-nums; }
+.tool-clip { margin-top: var(--sp-sm); }
+
 @media (max-width: 1100px) {
   .ins-headline { grid-template-columns: 1fr; gap: var(--sp-lg); }
   .ins-grid { grid-template-columns: repeat(2, 1fr); gap: var(--sp-lg); }

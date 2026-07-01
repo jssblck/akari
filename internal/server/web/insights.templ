@@ -7,12 +7,12 @@ import (
 )
 
 // InsightsPage is the cross-cutting analytics surface at /insights: two headline bands of
-// measured rates (concurrency and velocity) over the fleet, then how the window's sessions
-// distribute across quality grades, outcomes, and archetypes. Everything is bounded to the
-// selected trailing window. Like the overview it carries no heading (the sidebar marks the
-// section); the toolbar holds the window selector and a session count for context. The
-// whole section carries id="insights" so the selector can swap it in one shot, the same
-// pattern the usage panel uses.
+// measured rates (concurrency and velocity) over the fleet, a tools band (reliability and
+// mix), then how the window's sessions distribute across quality grades, outcomes, and
+// archetypes. Everything is bounded to the selected trailing window. Like the overview it
+// carries no heading (the sidebar marks the section); the toolbar holds the window selector
+// and a session count for context. The whole section carries id="insights" so the selector
+// can swap it in one shot, the same pattern the usage panel uses.
 templ InsightsPage(p Page, ins store.Insights, rng string, ranges []RangeOption) {
 	@layout(p) {
 		<section class="insights" id="insights">
@@ -29,6 +29,9 @@ templ InsightsPage(p Page, ins store.Insights, rng string, ranges []RangeOption)
 				<div class="ins-headline">
 					@concurrencyPanel(ins.Concurrency)
 					@velocityPanel(ins.Velocity)
+				</div>
+				<div class="ins-tools">
+					@toolsPanel(ins.Tools)
 				</div>
 				<div class="ins-grid">
 					@distributionPanel("Grades", "the quality score banded A to F, unscored for an ungraded session", GradeBars(ins.Quality.Grades))
@@ -111,6 +114,58 @@ templ velocityPanel(v store.VelocityStats) {
 					<div class="ins-fig-k">tools / active min</div>
 				</div>
 			</div>
+		}
+	</div>
+}
+
+// toolsPanel is the full-width tool band: three fleet figures (total calls, error rate,
+// tools per turn) over a mix of the busiest tools, each bar sized by call volume and
+// coloured by its own reliability. It sits below the rate bands and above the quality
+// distributions, since it is part measured rate and part distribution.
+templ toolsPanel(t store.ToolStats) {
+	<div class="ins-panel ins-tools-panel">
+		<div class="ins-panel-head">
+			<span class="label">Tools</span>
+			<span class="muted small ins-caption">reliability and mix across the window's sessions</span>
+		</div>
+		if !t.HasData() {
+			<div class="muted small">No tool calls in this window.</div>
+		} else {
+			<div class="ins-figs">
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ fmt.Sprintf("%d", t.TotalCalls) }</div>
+					<div class="ins-fig-k">tool calls</div>
+				</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ FmtErrorRate(t.ErrorRate()) }</div>
+					<div class="ins-fig-k">error rate</div>
+				</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ FmtRate(t.ToolsPerTurn()) }</div>
+					<div class="ins-fig-k">tools / turn</div>
+				</div>
+			</div>
+			<ul class="bars tool-bars">
+				for _, b := range ToolBars(t) {
+					<li class="bar-row">
+						<div class="bar-head">
+							<span class="bar-label">{ b.Name }</span>
+							<span class="bar-val">
+								{ fmt.Sprintf("%d", b.Calls) }
+								if b.ErrText != "" {
+									<span class="tool-err">{ b.ErrText }</span>
+								}
+							</span>
+						</div>
+						<div class="bar-track">
+							<div class="bar-fill" data-pct={ fmt.Sprintf("%.2f", b.Pct) } data-color={ b.Color }></div>
+						</div>
+					</li>
+				}
+			</ul>
+			if t.Clipped > 0 {
+				<div class="muted small tool-clip">{ fmt.Sprintf("+%d more tool%s not shown", t.Clipped, plural(t.Clipped)) }</div>
+			}
 		}
 	</div>
 }

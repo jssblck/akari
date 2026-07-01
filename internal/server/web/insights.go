@@ -72,6 +72,70 @@ func FmtLatency(d time.Duration) string {
 	}
 }
 
+// FmtErrorRate renders a failure share (a 0..1 fraction) as a whole-percent figure, with
+// a "<1%" floor so a small but real error rate never rounds down to a reassuring "0%".
+func FmtErrorRate(v float64) string {
+	pct := v * 100
+	if pct > 0 && pct < 1 {
+		return "<1%"
+	}
+	return fmt.Sprintf("%.0f%%", pct)
+}
+
+// ToolBar is one tool's bar in the mix: sized by call volume, coloured by its error band,
+// and annotated with its error rate when it had any failures. The dual encoding reads mix
+// (bar length) and reliability (colour and the error suffix) in one row.
+type ToolBar struct {
+	Name    string
+	Calls   int
+	Pct     float64
+	ErrText string // "" when the tool never failed, else its error rate ("12%")
+	Color   string
+}
+
+// ToolBars turns the fleet's busiest tools into renderable bars: each width is its share
+// of the most-called tool, so the busiest tool is full and the rest are relative, and each
+// colour bands the tool's reliability. A non-zero bar always shows at least a sliver so a
+// rarely-called tool never reads as absent beside a dominant one.
+func ToolBars(t store.ToolStats) []ToolBar {
+	var maxCalls int
+	for _, x := range t.Tools {
+		if x.Calls > maxCalls {
+			maxCalls = x.Calls
+		}
+	}
+	bars := make([]ToolBar, 0, len(t.Tools))
+	for _, x := range t.Tools {
+		pct := 0.0
+		if maxCalls > 0 {
+			pct = float64(x.Calls) / float64(maxCalls) * 100
+		}
+		if pct > 0 && pct < 2 {
+			pct = 2
+		}
+		errText := ""
+		if x.Failures > 0 {
+			errText = FmtErrorRate(x.ErrorRate())
+		}
+		bars = append(bars, ToolBar{Name: x.Name, Calls: x.Calls, Pct: pct, ErrText: errText, Color: toolBarColor(x.ErrorRate())})
+	}
+	return bars
+}
+
+// toolBarColor bands a tool's error rate into the report-card tones: clean tools read sage,
+// a moderate failure share peach, and a heavy one rose, so an unreliable tool stands out in
+// the mix without reading its exact rate.
+func toolBarColor(errRate float64) string {
+	switch {
+	case errRate <= 0:
+		return barSage
+	case errRate < 0.15:
+		return barPeach
+	default:
+		return barRose
+	}
+}
+
 // Distribution bar colours, drawn from the data-viz ramp and the status palette so the
 // Insights bars read in the same hues as the rest of the app. Grades and outcomes carry
 // a semantic tone (good / watch / poor); archetypes carry a categorical sequence. The
