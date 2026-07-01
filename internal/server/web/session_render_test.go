@@ -51,6 +51,36 @@ func sessionFixture() (store.SessionDetail, []store.Message, map[int][]store.Too
 	return d, msgs, tools
 }
 
+// TestSessionPageRendersSubagents pins that a parent session renders its linked subagents as
+// a nested list. The link that fills this (parent_session_id) is set at ingest; before it
+// was written the list was always empty, so this guards the now-live path. With no subagents
+// the heading is absent rather than an empty table.
+func TestSessionPageRendersSubagents(t *testing.T) {
+	p := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "jessoteric"}
+	d, msgs, tools := sessionFixture()
+	subs := []store.SessionSummary{
+		{ID: 4242, Agent: "claude", Username: "grace", Machine: "grace", GitBranch: "main", MessageCount: 11, TotalCostUSD: 0.42},
+		{ID: 4243, Agent: "claude", Username: "grace", Machine: "grace", GitBranch: "main", MessageCount: 7, TotalCostUSD: 0.19},
+	}
+
+	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, subs, HeaderStats{}, 0, false, true))
+	for _, want := range []string{
+		`<h2>Subagents</h2>`,
+		`class="subagents"`,
+		`#4242`, // each child links to its own session
+		`#4243`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("session page with subagents missing %q", want)
+		}
+	}
+
+	bare := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, HeaderStats{}, 0, false, true))
+	if strings.Contains(bare, "<h2>Subagents</h2>") {
+		t.Error("session page without subagents should omit the Subagents heading")
+	}
+}
+
 // The redesigned session header carries its controls inline and opens tool bodies
 // in a modal: an owner of an internal session gets a compact actions cluster with
 // Publish and Delete, the full-width page wrapper, and the modal overlay host. The

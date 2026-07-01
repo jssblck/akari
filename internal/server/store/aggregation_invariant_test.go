@@ -171,8 +171,8 @@ func assertRollupMatchesLedger(t *testing.T, st *store.Store, sessionID int64, w
 
 // adversarialUsage is a usage shape built to break a fold that is not careful:
 // a priced cache-dominant Claude row, the SAME row repeated under a colliding
-// dedup_key (Claude replays a usage block across sidechain and summary lines, so
-// the ledger keeps one and the rollup must count one), a second priced model, an
+// dedup_key (Claude streams one assistant message across several lines that share
+// it, so the ledger keeps one and the rollup must count one), a second priced model, an
 // undated row (NULL occurred_at, which the rollup counts but the analytics time
 // axis drops), and an unpriced model (tokens but no cost, which sets
 // cost_incomplete). If applyDelta folded pre-dedup rows, or zeroed a subset on

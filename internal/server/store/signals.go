@@ -42,10 +42,10 @@ type SessionSignals struct {
 	UnstructuredStart    bool
 	// Context-health figures describe resource load, not the agent's work, so like the
 	// hygiene counts they ride alongside the score without feeding it. Both are nil when
-	// the session had no main-thread usage to measure, so the UI can tell "unmeasured"
-	// apart from a measured zero. PeakContextTokens is the heaviest single-turn context
-	// the session reached; ContextResetCount is how many inferred context resets
-	// (compactions or clears) it went through.
+	// the session had no usage to measure, so the UI can tell "unmeasured" apart from a
+	// measured zero. PeakContextTokens is the heaviest single-turn context the session
+	// reached; ContextResetCount is how many inferred context resets (compactions or
+	// clears) it went through.
 	PeakContextTokens *int64
 	ContextResetCount *int
 }
@@ -66,9 +66,9 @@ func (s SessionSignals) HasHygieneSignal() bool {
 		s.NoCodeContextCount > 0 || s.UnstructuredStart
 }
 
-// HasContextHealth reports whether the session had main-thread usage to measure, so the
-// UI can show the context readout only when there is a real figure rather than a blank
-// stand-in. Peak and reset count are populated together, so testing the peak is enough.
+// HasContextHealth reports whether the session had usage to measure, so the UI can show the
+// context readout only when there is a real figure rather than a blank stand-in. Peak and
+// reset count are populated together, so testing the peak is enough.
 func (s SessionSignals) HasContextHealth() bool { return s.PeakContextTokens != nil }
 
 // signalFacts are the raw, projection-derived inputs a refresh gathers before scoring:
@@ -98,10 +98,10 @@ type signalFacts struct {
 	// came from rather than by user_message_count (which can include empty-text turns).
 	promptCount int
 
-	// Context-health facts, computed from the session's ordered main-thread usage. Both
-	// are nil when there was no main-thread usage to measure (so the row stores NULL, not
-	// a misleading zero); peakContextTokens is the heaviest single-turn context and
-	// contextResets is the inferred compaction/clear count.
+	// Context-health facts, computed from the session's ordered usage. Both are nil when
+	// there was no usage to measure (so the row stores NULL, not a misleading zero);
+	// peakContextTokens is the heaviest single-turn context and contextResets is the
+	// inferred compaction/clear count.
 	peakContextTokens *int64
 	contextResets     *int
 }
@@ -216,24 +216,23 @@ func gatherSignalFacts(ctx context.Context, tx pgx.Tx, sessionID int64) (signalF
 	return f, nil
 }
 
-// gatherContextHealth reads a session's ordered main-thread per-turn context sizes and
-// folds them into the facts via quality.ContextHealth. Context size is the whole prompt
-// presented that turn: uncached input plus cached read plus cache creation, so the figure
-// is robust to prompt caching (an expired cache moves tokens between those buckets without
-// changing their sum) and to an unknown model (it is a raw token count, never divided by a
-// window). Subagent turns are excluded (is_sidechain): a subagent grows its own smaller
-// context, and counting its turns would read as the main session shedding context. Order
-// is the transcript's own byte order (source_offset, source_index), which is the turns'
+// gatherContextHealth reads a session's ordered per-turn context sizes and folds them
+// into the facts via quality.ContextHealth. Context size is the whole prompt presented
+// that turn: uncached input plus cached read plus cache creation, so the figure is robust
+// to prompt caching (an expired cache moves tokens between those buckets without changing
+// their sum) and to an unknown model (it is a raw token count, never divided by a window).
+// A session's usage is one coherent context: a subagent runs in its own separate session
+// file, so its turns never land here and no per-turn carve-out is needed. Order is the
+// transcript's own byte order (source_offset, source_index), which is the turns'
 // chronological order in an append-only file; the row id is a final tiebreaker so the
 // order is total even for the (schema-permitted but parser-never-emitted) case of a NULL
 // or repeated source offset, keeping the reset count deterministic. A session with no
-// main-thread usage leaves both facts nil, so the row stores NULL rather than a
-// measured-looking zero.
+// usage leaves both facts nil, so the row stores NULL rather than a measured-looking zero.
 func gatherContextHealth(ctx context.Context, tx pgx.Tx, sessionID int64, f *signalFacts) error {
 	rows, err := tx.Query(ctx,
 		`SELECT input_tokens + cache_read_tokens + cache_write_tokens
 		   FROM usage_events
-		  WHERE session_id = $1 AND NOT is_sidechain
+		  WHERE session_id = $1
 		  ORDER BY source_offset, source_index, id`, sessionID)
 	if err != nil {
 		return fmt.Errorf("gather context health for session %d: %w", sessionID, err)
@@ -251,7 +250,7 @@ func gatherContextHealth(ctx context.Context, tx pgx.Tx, sessionID int64, f *sig
 		return fmt.Errorf("iterate context turns for session %d: %w", sessionID, err)
 	}
 	if len(perTurn) == 0 {
-		return nil // no main-thread usage: leave both facts nil so the row stores NULL
+		return nil // no usage to measure: leave both facts nil so the row stores NULL
 	}
 	peak, resets := quality.ContextHealth(perTurn)
 	f.peakContextTokens = &peak

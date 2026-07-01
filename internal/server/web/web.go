@@ -259,9 +259,8 @@ func QualityScoreLabel(s store.SessionSignals) string {
 }
 
 // PeakContextLabel renders the heaviest single-turn context the session reached, in full
-// tokens, for the Tokens tooltip. It is the main-thread peak (subagent turns excluded), a
-// window-independent measure of how loaded the session got. An unmeasured session (no
-// main-thread usage) reads a dash rather than a misleading zero.
+// tokens, for the Tokens tooltip. It is a window-independent measure of how loaded the
+// session got. An unmeasured session (no usage) reads a dash rather than a misleading zero.
 func PeakContextLabel(s store.SessionSignals) string {
 	if s.PeakContextTokens == nil {
 		return "-"

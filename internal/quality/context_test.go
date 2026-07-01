@@ -5,8 +5,8 @@ import "testing"
 // TestContextHealth pins the peak and the inferred-reset rule. Peak is the largest
 // single-turn context regardless of where it falls in the session; a reset is a sharp
 // drop (to at most half the prior turn) from a context that was already substantial, so
-// shallow dips and drops from a small early context do not count. The input is the
-// main-thread per-turn prompt sizes in transcript order, the same shape the store gathers.
+// shallow dips and drops from a small early context do not count. The input is the session's
+// per-turn prompt sizes in transcript order, the same shape the store gathers.
 func TestContextHealth(t *testing.T) {
 	cases := []struct {
 		name       string

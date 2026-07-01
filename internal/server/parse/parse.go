@@ -20,21 +20,23 @@ import (
 //
 // Version 2 changed how the session rollups are folded: they now count only the
 // usage and message rows that survive their ON CONFLICT dedup, where version 1
-// added every per-region occurrence and so inflated Claude sessions (which repeat
-// a usage block across sidechain and summary lines). A version-1 session keeps its
-// inflated rollup until a reparse rewinds it, which is why the fix ships with a
-// version bump: an incremental advance over a still version-1 session would fold a
-// correct delta onto a wrong base. Run `akari-server reparse` to correct the live
-// data.
+// added every per-region occurrence and so inflated Claude sessions (which stream
+// one assistant message across several lines that share a usage block). A version-1
+// session keeps its inflated rollup until a reparse rewinds it, which is why the fix
+// ships with a version bump: an incremental advance over a still version-1 session
+// would fold a correct delta onto a wrong base. Run `akari-server reparse` to
+// correct the live data.
 //
 // Version 3 added Codex custom_tool_call bodies and binary image attachments (image
 // generation results and pasted images) to the projection, so a reparse backfills
 // those rows on already-ingested sessions.
 //
-// Version 4 tags each usage event with is_sidechain (a Claude subagent turn's
-// accounting, written into the parent transcript), so a reparse backfills the flag
-// and context-health analysis can read main-thread turns alone.
-const Version = 4
+// Version 4 tagged each usage event with is_sidechain. Version 5 removes it: a
+// subagent is a separate transcript file, ingested as its own session, so a main
+// session's usage never carries subagent turns and context-health analysis reads a
+// session's own turns directly. The field left the projection delta, so a reparse
+// rewrites the usage rows without it.
+const Version = 5
 
 // Advance parses any not-yet-parsed bytes of a session and applies them to the
 // projection, looping until the parse cursor catches up to the stored length. It
@@ -191,7 +193,6 @@ func toProjectionDelta(p parser.Delta) store.ProjectionDelta {
 			DedupKey:       u.DedupKey,
 			SourceOffset:   u.SourceOffset,
 			SourceIndex:    u.SourceIndex,
-			IsSidechain:    u.IsSidechain,
 		}
 		// Price the event here; whether it counts toward the session total is decided
 		// at insert time, where a duplicate usage line is dropped and only the

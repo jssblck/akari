@@ -49,4 +49,12 @@ package parse
 // fixtures: the usage rows in the projection delta gain the new field, so the snapshots
 // are refreshed in the same commit. The reparse backfills the flag and recomputes every
 // signals row at the current version across the corpus.
-const Epoch = 4
+//
+// Epoch 4 -> 5: remove is_sidechain again (parse.Version 4 -> 5). A subagent is a
+// separate transcript file, ingested as its own session, so a main session's usage never
+// carried subagent turns and the flag guarded a case that never occurred. The field
+// leaves the projection delta, so this bump also moves the golden fixtures, and
+// context-health analysis now reads a session's own turns with no carve-out
+// (quality.Version 3 -> 4). The reparse rewrites the usage rows without the field and
+// recomputes every signals row at the current version.
+const Epoch = 5

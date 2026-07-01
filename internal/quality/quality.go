@@ -23,7 +23,13 @@ package quality
 // context-reset count; see ContextHealth). These describe resource load rather than
 // whether the session went well, so like hygiene they extend the stored signals but do
 // not change the score: a session's grade at version 3 equals its grade at version 2.
-const Version = 3
+// Version 4: context health now reads every one of a session's usage turns. Version 3
+// excluded turns flagged is_sidechain, but a subagent is a separate session in its own
+// transcript file, so a session's usage is already a single coherent context and the
+// carve-out only ever stripped a subagent session's own turns. Dropping it leaves the
+// grade unchanged (context health still does not feed the score) but remeasures the
+// context figures, so the signals are rebuilt at this version.
+const Version = 4
 
 // Outcome is how a session ended, inferred from its projection. It is a best effort:
 // without a terminal marker in the transcript the ending is a heuristic, so every

@@ -68,8 +68,7 @@
       "OccurredAt": "2024-01-01T10:00:05Z",
       "DedupKey": "msg_1",
       "SourceOffset": 137,
-      "SourceIndex": 0,
-      "IsSidechain": false
+      "SourceIndex": 0
     },
     {
       "MessageOrdinal": 2,
@@ -83,8 +82,7 @@
       "OccurredAt": "2024-01-01T10:00:09Z",
       "DedupKey": "msg_2",
       "SourceOffset": 663,
-      "SourceIndex": 0,
-      "IsSidechain": false
+      "SourceIndex": 0
     }
   ],
   "Attachments": null,

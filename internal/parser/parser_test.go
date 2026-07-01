@@ -84,30 +84,6 @@ func TestParseClaude(t *testing.T) {
 	}
 }
 
-// TestParseClaudeSidechain covers the isSidechain flag: a Claude Code subagent's turn
-// is written into the parent transcript flagged this way, and its usage must carry the
-// flag so context-health analysis can read the main thread alone. A main-thread turn
-// (no flag) reads false, and a flagged subagent turn reads true.
-func TestParseClaudeSidechain(t *testing.T) {
-	raw := []byte(`{"type":"user","timestamp":"2024-01-01T10:00:00Z","message":{"content":"do the thing"}}
-{"type":"assistant","timestamp":"2024-01-01T10:00:01Z","message":{"id":"main","model":"claude-sonnet-4-20250514","content":[{"type":"text","text":"on it"}],"usage":{"input_tokens":1000,"cache_read_input_tokens":5000}}}
-{"type":"assistant","isSidechain":true,"timestamp":"2024-01-01T10:00:02Z","message":{"id":"sub","model":"claude-sonnet-4-20250514","content":[{"type":"text","text":"subagent working"}],"usage":{"input_tokens":40,"cache_read_input_tokens":60}}}
-`)
-	s, err := Parse(AgentClaude, raw)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if len(s.UsageEvent) != 2 {
-		t.Fatalf("usage events = %d, want 2", len(s.UsageEvent))
-	}
-	if s.UsageEvent[0].IsSidechain {
-		t.Errorf("main-thread usage should not be a sidechain: %+v", s.UsageEvent[0])
-	}
-	if !s.UsageEvent[1].IsSidechain {
-		t.Errorf("subagent usage should be flagged as a sidechain: %+v", s.UsageEvent[1])
-	}
-}
-
 // TestParseClaudeToolError covers an error tool result delivered as an array of
 // text blocks: the status is "error", the body flattens to readable text, and the
 // size and media type describe the flattened body.

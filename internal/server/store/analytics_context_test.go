@@ -13,7 +13,7 @@ import (
 // insertContextSignal writes a session_signals row with the context-health columns set, so
 // a cohort test can pin the aggregate without driving the whole gather path (signals_context_test
 // already covers that). peak and resets are pointers so a test can store NULL (a session
-// with no main-thread usage), which the aggregate must exclude from its measured cohort.
+// with no usage), which the aggregate must exclude from its measured cohort.
 func insertContextSignal(t *testing.T, st *store.Store, ctx context.Context, sid int64, version int, peak *int64, resets *int) {
 	t.Helper()
 	if _, err := st.Pool.Exec(ctx,

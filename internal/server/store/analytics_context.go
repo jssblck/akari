@@ -12,8 +12,8 @@ import (
 // percentiles read straight off the stored per-session peaks (quality.ContextHealth,
 // refreshed on catch-up or reparse); the reset figures sum the inferred compaction/clear
 // counts. The cohort is the scoped sessions carrying a current-version signals row whose
-// peak is measured (a session with no main-thread usage stores NULL and is left out), so
-// every rate divides by the same measured set. A stale or missing signals row contributes
+// peak is measured (a session with no usage stores NULL and is left out), so every rate
+// divides by the same measured set. A stale or missing signals row contributes
 // nothing, the same way the quality distribution folds it into unknown, so the panel
 // never mixes a half-rebuilt view.
 type ContextHealthStats struct {

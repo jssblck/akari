@@ -103,13 +103,6 @@ type ToolCall struct {
 // totals not tied to a single message. SourceOffset and SourceIndex identify the
 // originating line (and its position within it) so incremental inserts are
 // idempotent even for agents whose usage carries no native dedup key.
-//
-// IsSidechain marks a turn that ran off the main conversation: a Claude Code
-// subagent's turns are written into the parent session's transcript flagged this
-// way. A subagent grows its own separate context, so its usage interleaves smaller
-// prompt sizes among the main thread's; context-health analysis excludes these so a
-// subagent's context is not mistaken for the main session shedding context. Agents
-// with no subagent concept (Codex, Pi) always leave it false.
 type Usage struct {
 	MessageOrdinal *int
 	Model          string
@@ -122,5 +115,4 @@ type Usage struct {
 	DedupKey       string
 	SourceOffset   int64
 	SourceIndex    int
-	IsSidechain    bool
 }
