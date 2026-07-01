@@ -29,6 +29,12 @@ type Breakdown struct {
 	Output     int64
 	CacheRead  int64
 	CacheWrite int64
+	// Reasoning is the slice's reasoning-token volume, the class some agents (codex, pi)
+	// report for the model's hidden deliberation. It is tracked and shown on its own but
+	// deliberately excluded from Tokens(): reasoning is neither a prompt nor a cache class,
+	// so folding it into the bar-sizing total would double-count against the billed classes
+	// and unsettle the headline-equals-sum reconciliation. It surfaces as its own figure.
+	Reasoning  int64
 	Sessions   int
 	// CostIncomplete is true when this slice folded in a usage event that carried
 	// real token volume but no price (an unpriced model), so the slice's cost is a
@@ -59,6 +65,11 @@ type Analytics struct {
 	TotalOut        int64
 	TotalCacheRead  int64
 	TotalCacheWrite int64
+	// TotalReasoning is the window's reasoning-token volume, summed from the by-agent split
+	// like the other totals. It sits beside TotalTokens rather than inside it (see
+	// Breakdown.Reasoning for why), so the Tokens tile shows it as a distinct class without
+	// disturbing the headline-equals-sum-of-series reconciliation the four billed classes hold.
+	TotalReasoning  int64
 	Sessions        int
 	// CostIncomplete is true when any usage event in the window carried token
 	// volume but no price, so TotalCost is a lower bound. The headline Cost tile
@@ -167,6 +178,7 @@ func (s *Store) Analytics(ctx context.Context, f AnalyticsFilter) (Analytics, er
 		a.TotalOut += ag.Output
 		a.TotalCacheRead += ag.CacheRead
 		a.TotalCacheWrite += ag.CacheWrite
+		a.TotalReasoning += ag.Reasoning
 		a.CostIncomplete = a.CostIncomplete || ag.CostIncomplete
 	}
 
@@ -290,6 +302,7 @@ func (s *Store) analyticsByModel(ctx context.Context, f AnalyticsFilter) ([]Brea
 		        coalesce(sum(ue.output_tokens), 0),
 		        coalesce(sum(ue.cache_read_tokens), 0),
 		        coalesce(sum(ue.cache_write_tokens), 0),
+		        coalesce(sum(ue.reasoning_tokens), 0),
 		        count(DISTINCT ue.session_id),
 		        coalesce(`+costIncompleteExpr+`, false)
 		   FROM usage_events ue
@@ -323,6 +336,7 @@ func (s *Store) analyticsByAgent(ctx context.Context, f AnalyticsFilter) ([]Brea
 		        coalesce(sum(ue.output_tokens), 0),
 		        coalesce(sum(ue.cache_read_tokens), 0),
 		        coalesce(sum(ue.cache_write_tokens), 0),
+		        coalesce(sum(ue.reasoning_tokens), 0),
 		        count(DISTINCT ue.session_id),
 		        coalesce(`+costIncompleteExpr+`, false)
 		   FROM usage_events ue
@@ -349,7 +363,7 @@ func scanBreakdowns(rows interface {
 	var out []Breakdown
 	for rows.Next() {
 		var b Breakdown
-		if err := rows.Scan(&b.Label, &b.CostUSD, &b.Input, &b.Output, &b.CacheRead, &b.CacheWrite, &b.Sessions, &b.CostIncomplete); err != nil {
+		if err := rows.Scan(&b.Label, &b.CostUSD, &b.Input, &b.Output, &b.CacheRead, &b.CacheWrite, &b.Reasoning, &b.Sessions, &b.CostIncomplete); err != nil {
 			return nil, err
 		}
 		out = append(out, b)

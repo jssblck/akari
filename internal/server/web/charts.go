@@ -70,6 +70,7 @@ type BreakdownRow struct {
 	Output     int64
 	CacheRead  int64
 	CacheWrite int64
+	Reasoning  int64
 	Sessions   int
 	Pct        float64
 	Color      string
@@ -107,6 +108,7 @@ func FoldUnknownModels(bs []store.Breakdown) []store.Breakdown {
 		other.Output += b.Output
 		other.CacheRead += b.CacheRead
 		other.CacheWrite += b.CacheWrite
+		other.Reasoning += b.Reasoning
 		other.Sessions += b.Sessions
 		other.CostIncomplete = other.CostIncomplete || b.CostIncomplete
 		folded = true
@@ -147,6 +149,7 @@ func BuildBreakdown(bs []store.Breakdown) []BreakdownRow {
 			Output:     b.Output,
 			CacheRead:  b.CacheRead,
 			CacheWrite: b.CacheWrite,
+			Reasoning:  b.Reasoning,
 			Sessions:   b.Sessions,
 			Pct:        pct,
 			Color:      VizColor(i),

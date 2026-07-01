@@ -58,10 +58,11 @@ templ analyticsPanel(a store.Analytics, chartID string, ranges []RangeOption, rn
 }
 
 // statTokens is the combined-token readout: one headline figure with the per-class
-// split (in, out, cache read, cache write) behind a hover tooltip. It shares the
-// session header's Tokens tile classes (tokens-stat, tokens-value, stat-tip), so a
-// single tooltip system styles both. Cost is omitted here since the overview strip
-// already carries its own Cost tile.
+// split (in, out, cache read, cache write) plus an optional reasoning line behind a hover
+// tooltip. The headline sums the four billed classes only; reasoning shows as its own line
+// when the window has it. It shares the session header's Tokens tile classes (tokens-stat,
+// tokens-value, stat-tip), so a single tooltip system styles both. Cost is omitted here
+// since the overview strip already carries its own Cost tile.
 templ statTokens(a store.Analytics) {
 	<div class="stat tokens-stat" tabindex="0">
 		<div class="label">Tokens</div>
@@ -76,6 +77,10 @@ templ statTokens(a store.Analytics) {
 				<dd>{ FmtTokens(a.TotalCacheRead) }</dd>
 				<dt>Cache write</dt>
 				<dd>{ FmtTokens(a.TotalCacheWrite) }</dd>
+				if a.TotalReasoning > 0 {
+					<dt>Reasoning</dt>
+					<dd>{ FmtTokens(a.TotalReasoning) }</dd>
+				}
 			</dl>
 		</div>
 	</div>
@@ -247,7 +252,7 @@ templ breakdownList(title string, rows []BreakdownRow) {
 						<div class="bar-sub muted small">
 							<span class="tok-cell" tabindex="0">
 								<span class="tok-total">{ FmtTokens(row.Tokens) }</span>
-								@tokenCard(row.Tokens, row.Input, row.Output, row.CacheRead, row.CacheWrite, row.CostUSD, row.Incomplete)
+								@tokenCard(row.Tokens, row.Input, row.Output, row.CacheRead, row.CacheWrite, row.Reasoning, row.CostUSD, row.Incomplete)
 							</span>
 							{ " tok " }&middot;{ fmt.Sprintf(" %d sessions", row.Sessions) }
 						</div>
