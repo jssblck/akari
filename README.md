@@ -167,7 +167,9 @@ yourself. It reads `AKARI_DATABASE_URL` and the upload target from `AKARI_URL`
 | `AKARI_DATABASE_URL` | (required) | Postgres connection string. |
 | `AKARI_LISTEN` | `:8080` | Address the HTTP server binds. |
 | `AKARI_COOKIE_INSECURE` | unset | Set truthy to drop the `Secure` flag on session cookies for plain-HTTP local development. |
+| `AKARI_PUBLIC_URL` | (derived) | The externally reachable base URL (`https://akari.example.com`), used as the OAuth issuer and the base of every URL the MCP authorization flow advertises. Falls back to `AKARI_URL`; when neither is set the server derives the origin from each request (correct for a single-origin deployment behind a sane proxy). |
 | `AKARI_SWEEP_INTERVAL` | `1h` | How often the server reclaims orphaned CAS blobs. A Go duration (`30m`, `2h`); `0` disables the background sweep. |
+| `AKARI_OG_REFRESH_INTERVAL` | `1h` | How often the server wakes to refresh the Open Graph preview cards of published overviews; on each wake it re-renders any card older than a day. A Go duration; `0` disables the background refresh (a card is still rendered when the overview is published). |
 
 Migrations are embedded and applied on startup, so the server is safe to restart.
 
@@ -261,7 +263,9 @@ Projects, Search, Account); the signed-in user and log-out sit at its foot.
 - **Charts** are rendered by a small dependency-free SVG module bundled as a
   static asset; the UI fonts (Geist and Geist Mono) are self-hosted, so the binary
   stays self-contained with no Node toolchain.
-- **Account**: API tokens (ingest or full scope), and invites for admins.
+- **Account**: API tokens (ingest, read, or full scope), connected MCP apps (with
+  a one-click disconnect that revokes their tokens), invites for admins, and a
+  Publicity control to publish your own usage overview (see below).
 
 ### Visibility and publishing
 
@@ -272,6 +276,24 @@ owner of a session can publish it, which mints an unguessable link at
 resolving. A public page never exposes the numeric session id, and a published
 session only links to subagents that are themselves public.
 
+A user can also publish their own usage overview from the account page's
+Publicity section, which exposes it at `/u/<username>` for logged-out viewing.
+The public page is the same aggregate panel the owner sees (totals, the activity
+grid, and the by-model and by-agent breakdowns), scoped to that one account: it
+carries no session links and no other user's usage, so publishing the overview
+shares neither sessions nor anyone else's numbers. The address is the username, so
+making it private hides the page without changing the link, and re-publishing
+brings the same URL back. When public, a badge on the owner's overview links to
+the page.
+
+A published overview also gets an Open Graph preview card at
+`/u/<username>/og.png`, so a shared link unfurls with an image: a simplified copy
+of the activity heatmap plus the total-token and session figures, rendered in the
+house style. The card is a pure-Go PNG (no headless browser), rendered once when
+the overview is published and refreshed about once a day by a background loop
+(`AKARI_OG_REFRESH_INTERVAL`), so the preview tracks the account's usage without
+re-rendering on every crawl.
+
 CAS blobs are served per session, not by bare hash: a viewer can fetch a tool
 body only through a session that references it and that they may see. This keeps
 the cross-session dedup from leaking an internal body through a public link.
@@ -281,6 +303,65 @@ the cross-session dedup from leaking an internal body through a public link.
 The owner of a session (or an admin) can delete it from the session page.
 Deleting cascades its transcript and raw bytes; any CAS blobs it referenced are
 reclaimed by the next sweep.
+
+## The MCP server
+
+akari serves a remote [Model Context Protocol](https://modelcontextprotocol.io)
+endpoint at `/mcp`, so a coding agent can read your whole session history without
+opening the UI. It exposes the same surface the web UI shows (the overview
+analytics, the projects index, the session feed, a session's full transcript) plus
+the raw underlying data behind it: tool-call bodies from the content store, and the
+lossless bytes a session was ingested from. It is read-only.
+
+Connect it once from your harness. In Claude Code:
+
+```sh
+claude mcp add --transport http akari https://akari.example.com/mcp
+```
+
+On first use the harness opens your browser to akari, which recognizes the session
+you are already signed in to and asks you to approve the connection. Nothing is
+copied into the agent and no password is typed into it: the browser sign-in is the
+authentication, and approving is one click. Behind that click is the OAuth 2.1 flow
+MCP defines, with akari acting as both the resource and the authorization server.
+The agent registers itself, redirects through a PKCE-protected authorization
+request, and exchanges the result for a read-only access token that refreshes on
+its own. Disconnect a connected app from the account page at any time; that revokes
+its tokens at once.
+
+For the flow to advertise correct URLs behind a proxy, set `AKARI_PUBLIC_URL` to
+the server's external origin (see [Server configuration](#server-configuration)).
+
+### Tools
+
+Every tool is read-only and sees every internal session, the same surface a
+logged-in user sees.
+
+| Tool | Returns |
+| --- | --- |
+| `whoami` | The account the credential authenticates as. |
+| `overview` | Fleet usage for a trailing window: cost, tokens by class, session count, a daily series, and by-model and by-agent breakdowns. |
+| `list_projects` | Every project, most recently active first, with session counts and token and cost totals. |
+| `get_project` | One project's identity, its windowed analytics (optionally narrowed by agent, user, or machine), and the agents, users, and machines that ran in it. |
+| `list_sessions` | The cross-project session feed with filters and sortable columns, plus the facet rail of busiest agents, users, machines, and projects. |
+| `get_session` | One session's header and full transcript: messages, thinking, tool-call metadata, attachments, and subagents. |
+| `read_tool_body` | A tool call's input or result body from the content store, by the hash a tool call carries. |
+| `get_session_raw` | The lossless bytes a session was ingested from, behind the parsed projection. |
+
+### Connecting without a browser
+
+A harness that cannot run the browser flow can authenticate with a read-scope API
+token instead. Create one on the account page (the `read` scope is read-only, the
+counterpart of the push-only `ingest` and the read-write `full`) and pass it as a
+bearer token:
+
+```sh
+claude mcp add --transport http akari https://akari.example.com/mcp \
+  --header "Authorization: Bearer <read-token>"
+```
+
+A read token reaches only the MCP endpoint: it cannot push sessions or drive the
+write surface.
 
 ## Development
 
@@ -344,7 +425,9 @@ Tests that need the database skip cleanly when `AKARI_TEST_DATABASE_URL` is unse
 - `cmd/akari` is the client CLI (`login`, `sync`, `watch`, `daemon`).
 - `internal/parser` holds the per-agent parsers and their fixtures.
 - `internal/pricing` is the compiled-in model rate table.
-- `internal/server` is the data layer, HTTP surface, parse pipeline, and web UI.
+- `internal/server` is the data layer, HTTP surface, parse pipeline, web UI, and
+  the remote MCP server (`internal/server/mcpserver`, with its OAuth flow in
+  `internal/server/httpapi`).
 - `internal/client` is discovery, git remote resolution, the upload protocol,
   and the watch/daemon machinery.
 - `migrations` holds the embedded SQL schema.

@@ -24,6 +24,23 @@ func TestSessionsPath(t *testing.T) {
 	}
 }
 
+func TestPublicOverviewPath(t *testing.T) {
+	cases := map[string]string{
+		"grace":        "/u/grace",
+		"ada lovelace": "/u/ada%20lovelace", // a space is escaped, never a raw segment break
+		"a/b":          "/u/a%2Fb",          // a slash cannot escape the /u/ segment
+	}
+	for in, want := range cases {
+		if got := PublicOverviewPath(in); got != want {
+			t.Errorf("PublicOverviewPath(%q) = %q, want %q", in, got, want)
+		}
+		// The href form is the same path, wrapped as a sanitized SafeURL.
+		if got := string(PublicOverviewHref(in)); got != want {
+			t.Errorf("PublicOverviewHref(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestFacetToggleHrefs(t *testing.T) {
 	// Selecting a facet from empty sets it.
 	if got := string(AgentFacetHref(store.SessionFilter{}, "claude")); got != "/sessions?agent=claude" {

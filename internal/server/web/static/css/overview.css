@@ -4,6 +4,17 @@
    grid is shared with the Sessions/Projects token card (.tok-tip, defined in
    sessions.css), so a token total reads the same across surfaces. */
 
+/* ---- Public overview ---- */
+/* The badge on the signed-in overview when the user has published it: a quiet
+   strip above the usage panel linking to the public page and the account control.
+   On the logged-out public page the same panel sits under a small project-style
+   head naming the account. */
+.overview-public-badge { display: flex; align-items: center; gap: var(--sp-sm); margin-bottom: var(--sp-md); }
+.overview-public-badge .share-link { font-family: var(--mono); }
+.public-overview-head { display: flex; align-items: center; gap: var(--sp-sm); margin-bottom: var(--sp-lg); }
+.public-overview-head h1 { display: flex; align-items: baseline; gap: var(--sp-sm); margin: 0; }
+.public-overview-head .sep { color: var(--border); }
+
 /* ---- KPI tiles (Overview) ---- */
 .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--sp-md); margin-bottom: var(--sp-lg); }
 .kpi { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); padding: var(--sp-md) var(--sp-lg); }

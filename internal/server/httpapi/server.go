@@ -17,6 +17,9 @@ type Server struct {
 	Cfg      config.Server
 	hub      *sseHub
 	reparser *reparse.Service
+	// mcp is the Streamable-HTTP handler for the remote MCP server, built once and
+	// shared across requests; handleMCP wraps it per request with the bearer check.
+	mcp http.Handler
 }
 
 // New builds a Server. The reparse service is shared with the startup auto-run and
@@ -24,6 +27,7 @@ type Server struct {
 // gating, and its progress is pushed to watching browsers over the SSE hub.
 func New(st *store.Store, cfg config.Server, reparser *reparse.Service) *Server {
 	s := &Server{Store: st, Cfg: cfg, hub: newSSEHub(), reparser: reparser}
+	s.mcp = newMCPHandler(s)
 	// Fan reparse progress out to any browser watching the status stream. The hub
 	// carries the status JSON as the payload, so a watcher updates its progress bar
 	// directly rather than round-tripping to the status endpoint.
@@ -51,6 +55,22 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/tokens/{id}/revoke", s.requireFull(s.handleRevokeToken))
 
 	mux.HandleFunc("POST /api/v1/invites", s.requireAdmin(s.handleCreateInvite))
+
+	// Remote MCP server and the OAuth 2.1 authorization surface that guards it. The
+	// discovery documents, dynamic client registration, and token endpoint are
+	// public; the authorize endpoint recognizes the browser session cookie so a user
+	// connects an agent with one consent click. See oauth.go and mcp.go.
+	mux.HandleFunc("GET /.well-known/oauth-protected-resource", s.handleProtectedResourceMetadata)
+	mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp", s.handleProtectedResourceMetadata)
+	mux.HandleFunc("GET /.well-known/oauth-authorization-server", s.handleAuthServerMetadata)
+	mux.HandleFunc("POST /oauth/register", s.handleOAuthRegister)
+	mux.HandleFunc("GET /oauth/authorize", s.handleOAuthAuthorize)
+	mux.HandleFunc("POST /oauth/authorize", s.handleOAuthDecision)
+	mux.HandleFunc("POST /oauth/token", s.handleOAuthToken)
+	// The MCP transport multiplexes POST (messages), GET (the SSE stream), and
+	// DELETE (session teardown) on one path, so it registers without a method filter
+	// and authenticates each request itself via the bearer check in handleMCP.
+	mux.Handle(mcpPath, http.HandlerFunc(s.handleMCP))
 
 	// Ingest.
 	mux.HandleFunc("POST /api/v1/ingest/session", s.requireIngest(s.handleAnnounce))
@@ -80,6 +100,14 @@ func (s *Server) Routes() http.Handler {
 	// Server-rendered UI: public, logged-out pages. The public session view shows
 	// parsed data, so it is gated while a reparse rebuilds the projection.
 	mux.HandleFunc("GET /s/{public_id}", s.gatePublicParsed(s.handlePublicSession))
+	// A user's published usage overview at /u/<username>: aggregate, scoped to that
+	// one account, and gated during a reparse like the public session view (it shows
+	// parsed data).
+	mux.HandleFunc("GET /u/{username}", s.gatePublicParsed(s.handlePublicOverview))
+	// The Open Graph preview card for that overview. It serves pre-rendered PNG
+	// bytes (rendered at publish and refreshed daily), so it is not reparse-gated:
+	// the more specific pattern wins over /u/{username} for this exact path.
+	mux.HandleFunc("GET /u/{username}/og.png", s.handlePublicOverviewOGImage)
 	mux.HandleFunc("GET /login", s.handleLoginPage)
 	mux.HandleFunc("POST /login", s.handleLoginForm)
 	mux.HandleFunc("GET /register", s.handleRegisterPage)
@@ -92,7 +120,7 @@ func (s *Server) Routes() http.Handler {
 	// half-rebuilt rows while a reparse runs. The session events SSE stream stays
 	// ungated: gating it would write HTML into the event stream, and the gated
 	// session page does not open it anyway.
-	mux.HandleFunc("GET /{$}", s.requireReadHTML(s.gateParsed(s.handleOverview)))
+	mux.HandleFunc("GET /{$}", s.handleRoot)
 	mux.HandleFunc("GET /projects", s.requireReadHTML(s.gateParsed(s.handleProjectsIndex)))
 	mux.HandleFunc("GET /sessions", s.requireReadHTML(s.gateParsed(s.handleSessions)))
 	mux.HandleFunc("GET /projects/{id}", s.requireReadHTML(s.gateParsed(s.handleProjectPage)))
@@ -108,8 +136,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /account", s.requireReadHTML(s.handleAccountPage))
 	mux.HandleFunc("POST /account/tokens", s.requireFull(s.handleCreateTokenForm))
 	mux.HandleFunc("POST /account/tokens/{id}/revoke", s.requireFull(s.handleRevokeTokenForm))
+	mux.HandleFunc("POST /account/connections/{client_id}/revoke", s.requireFull(s.handleRevokeConnectionForm))
 	mux.HandleFunc("POST /account/invites", s.requireAdmin(s.handleCreateInviteForm))
 	mux.HandleFunc("POST /account/reparse", s.requireAdmin(s.handleReparseForm))
+	mux.HandleFunc("POST /account/overview/publish", s.requireFull(s.handlePublishOverview))
+	mux.HandleFunc("POST /account/overview/unpublish", s.requireFull(s.handleUnpublishOverview))
 
 	return mux
 }
