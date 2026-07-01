@@ -378,6 +378,18 @@ func refreshSignalsTx(ctx context.Context, tx pgx.Tx, sessionID int64) error {
 	if err != nil {
 		return fmt.Errorf("upsert signals for session %d: %w", sessionID, err)
 	}
+	// Clear the settle-pass due flag now that the grade matches the projection, but only if
+	// the session has actually settled. A reparse runs refreshSignalsTx on whatever it
+	// rebuilds, including a still-live session whose outcome is not yet stable (abandoned
+	// versus unknown turns on the idle gap), so leaving signals_stale set there keeps the
+	// settle pass on the hook to re-grade once the session crosses the idle threshold. A
+	// settled session clears the flag and drops out of the settle index until its next
+	// projection change. now() is the transaction clock, so a settle refresh that just read
+	// idleLongEnough against it stays consistent with the clear.
+	if _, err := tx.Exec(ctx,
+		`UPDATE sessions SET signals_stale = $2 WHERE id = $1`, sessionID, !f.idleLongEnough); err != nil {
+		return fmt.Errorf("clear signals_stale for session %d: %w", sessionID, err)
+	}
 	return nil
 }
 
@@ -394,41 +406,47 @@ func (s *Store) RefreshSessionSignals(ctx context.Context, sessionID int64) erro
 	})
 }
 
-// RefreshSettledSignals recomputes signals for every settled session whose stored row is
-// missing, stamped at an older signals version, or older than its source. It is the
-// production path that materializes signals: the append path no longer refreshes on
-// catch-up (see AdvanceProjection), so a session's signals are computed once here, after it
-// has been idle past the abandoned threshold, off the ingest hot path.
+// RefreshSettledSignals recomputes signals for every settled session marked stale. It is the
+// production path that materializes signals: the append path no longer refreshes on catch-up
+// (see AdvanceProjection), so a session's signals are computed once here, after it has been
+// idle past the abandoned threshold, off the ingest hot path.
 //
-// A session is due when it is settled (ended_at at least abandonedIdleMinutes in the past)
-// AND its signals are not already current for that settled state. Three clauses catch every
-// way the stored row can disagree with a fresh recompute, so the derived row stays equal to
-// its source:
+// A session is due when it is settled (ended_at at least abandonedIdleMinutes in the past) AND
+// signals_stale is set. The flag is the single-table marker that replaces a cross-table due
+// predicate: applyAggregates and the reparse reset set it whenever the projection moves, and
+// refreshSignalsTx clears it only when it grades a settled session. So it captures every way a
+// stored grade can fall behind its source, without a join the settle scan would have to
+// evaluate per row:
 //
-//   - No row, or a stale signals_version: nothing current exists, so compute or re-stamp it.
-//   - Refreshed before the settle point (refreshed_at earlier than ended_at plus the idle
-//     window): a reparse that graded the session while it was still live left an outcome that
-//     was not yet stable (abandoned versus unknown turns on the idle gap). The idle window
-//     only grows from here, so recomputing once past the settle point pins the outcome.
-//   - Refreshed before the projection last changed (refreshed_at earlier than updated_at):
-//     the source grew after the row was computed. This is the one ended_at cannot catch,
-//     because ended_at is the transcript's own last-activity time, not the ingest time: a
-//     historical session uploaded in several chunks keeps an ended_at far in the past, so a
-//     later chunk does not move ended_at anywhere near now. applyAggregates stamps updated_at
-//     = now() on every appended region (and every reparse), so comparing it to refreshed_at
-//     catches a partial-projection grade that a late chunk would otherwise strand. Because
-//     both are the transaction clock, a reparse (which refreshes in the same transaction that
-//     bumps updated_at) reads them equal and does not re-trigger itself.
+//   - Never graded (a fresh ingest, or a session that predates signals): the column defaults
+//     true, so it is due from creation until the first settle grades it.
+//   - Graded before the projection last changed (a later chunk of a multi-upload historical
+//     session, whose ended_at stays far in the past so it looks long settled): the appended
+//     region set the flag again, so the stale partial grade is re-derived.
+//   - Graded before the session settled (a reparse that ran refreshSignalsTx while the session
+//     was still live, so its outcome was not yet stable): that refresh left the flag set
+//     because the session was not idleLongEnough, so the settle pass re-grades it once settled.
 //
-// It drains the whole due backlog in bounded batches, walking the settled tail once in
-// (ended_at, id) order via a keyset cursor: each batch resumes strictly after the last row
-// of the previous one, so a row it just refreshed is stepped over rather than rescanned.
-// Draining D due sessions is then one forward pass over the settled sessions, O(D_settled),
-// not a scan restarted per batch (which would reconsider the already-refreshed prefix every
-// time, O(D^2/batch)). Each session is refreshed in its own transaction so one slow session
-// never holds a broad lock, cancellation stops the drain between sessions, and it returns
-// how many it refreshed.
+// A stale signals_version is the one case the flag does not cover on its own (a version bump
+// changes no projection), so reconcileStaleVersionsIfNeeded marks those rows before the drain. It
+// runs the inequality scan once per quality.Version change, gated on a parse_meta marker, so a
+// steady-state wake never pays it.
+//
+// It drains the whole due backlog in bounded batches, keyset-paging the settled-and-stale tail
+// once in (ended_at, id) order: each batch resumes strictly after the last row of the previous
+// one, and a session drops out of the settle index the moment it is graded, so the pass reads
+// only the due rows via the partial index (idx_sessions_signals_stale), O(D_due) per wake
+// rather than O(settled history). Each session is refreshed in its own transaction so one slow
+// session never holds a broad lock, cancellation stops the drain between sessions, and it
+// returns how many it refreshed.
 func (s *Store) RefreshSettledSignals(ctx context.Context) (int, error) {
+	// A version bump leaves current signals_stale=false rows whose stored version is behind; mark
+	// them stale first so they drain through the same path as a projection change. This is gated
+	// to run once per quality.Version change (see reconcileStaleVersionsIfNeeded), so a normal
+	// wake with the marker already current pays one O(1) read, not the inequality scan.
+	if err := s.reconcileStaleVersionsIfNeeded(ctx); err != nil {
+		return 0, err
+	}
 	// The zero time sorts before every real ended_at, so the first batch starts at the
 	// oldest settled session and the cursor only moves forward from there.
 	var afterEnded time.Time
@@ -455,27 +473,76 @@ func (s *Store) RefreshSettledSignals(ctx context.Context) (int, error) {
 	}
 }
 
+// reconcileStaleVersionsIfNeeded runs the version reconcile at most once per quality.Version
+// change. The reconcile scans for signals_version <> current, an inequality no index can seek, so
+// running it on every settle wake would make idle maintenance grow with the whole signals table
+// rather than the due tail. A single-row marker in parse_meta records the version the corpus was
+// last reconciled at: in steady state this is one O(1) singleton read that finds the marker
+// current and skips the scan. A quality.Version bump ships in a new binary, so the first settle
+// pass after the upgrade sees the marker behind, runs the reconcile once to flag every
+// stale-version row, and advances the marker; every later pass drains those rows through the
+// signals_stale index without rescanning. The reconcile and the marker bump are separate
+// statements, but the reconcile is idempotent, so a crash between them just repeats it next pass.
+func (s *Store) reconcileStaleVersionsIfNeeded(ctx context.Context) error {
+	var reconciled int
+	if err := s.Pool.QueryRow(ctx,
+		`SELECT signals_reconciled_version FROM parse_meta WHERE id = TRUE`).Scan(&reconciled); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			reconciled = 0 // the migration seeds the row; a missing one means never reconciled
+		} else {
+			return fmt.Errorf("read signals_reconciled_version: %w", err)
+		}
+	}
+	if reconciled == quality.Version {
+		return nil
+	}
+	if err := s.reconcileStaleVersions(ctx); err != nil {
+		return err
+	}
+	if _, err := s.Pool.Exec(ctx,
+		`UPDATE parse_meta SET signals_reconciled_version = $1, updated_at = now() WHERE id = TRUE`,
+		quality.Version); err != nil {
+		return fmt.Errorf("mark signals reconciled at version %d: %w", quality.Version, err)
+	}
+	return nil
+}
+
+// reconcileStaleVersions marks any session whose stored signals row is at a superseded
+// quality.Version as stale, so a version bump re-grades incrementally through the same
+// signals_stale drain as a projection change would. A version bump changes no projection, so the
+// projection-maintained flag cannot catch it; this closes that one gap. reconcileStaleVersionsIfNeeded
+// gates it to run once per version change, since the signals_version <> current test is an
+// inequality scan the settle loop must not repeat on every wake.
+func (s *Store) reconcileStaleVersions(ctx context.Context) error {
+	if _, err := s.Pool.Exec(ctx,
+		`UPDATE sessions s SET signals_stale = true
+		   FROM session_signals sig
+		  WHERE sig.session_id = s.id
+		    AND sig.signals_version <> $1
+		    AND NOT s.signals_stale`, quality.Version); err != nil {
+		return fmt.Errorf("reconcile stale signal versions: %w", err)
+	}
+	return nil
+}
+
 // dueSettledBatch returns up to limit due settled session ids strictly after the
 // (afterEnded, afterID) keyset cursor, in (ended_at, id) order, with the cursor to resume
-// from (the last row's ended_at and id). "Due" is the four-case predicate documented on
-// RefreshSettledSignals. The ids are read up front and the query's connection is released
-// (deferred Close) before the caller refreshes them, so the scan does not contend with the
-// per-session refresh transactions.
+// from (the last row's ended_at and id). A session is due when it is settled and signals_stale
+// is set (see RefreshSettledSignals); both are columns of sessions, so the partial index
+// idx_sessions_signals_stale serves the whole predicate and the scan visits only due rows. The
+// ids are read up front and the query's connection is released (deferred Close) before the
+// caller refreshes them, so the scan does not contend with the per-session refresh transactions.
 func (s *Store) dueSettledBatch(ctx context.Context, afterEnded time.Time, afterID int64, limit int) ([]int64, time.Time, int64, error) {
 	rows, err := s.Pool.Query(ctx,
 		`SELECT s.id, s.ended_at
 		   FROM sessions s
-		   LEFT JOIN session_signals sig ON sig.session_id = s.id
-		  WHERE s.ended_at IS NOT NULL
+		  WHERE s.signals_stale
+		    AND s.ended_at IS NOT NULL
 		    AND s.ended_at < now() - make_interval(mins => $1)
-		    AND (s.ended_at, s.id) > ($4, $5)
-		    AND ( sig.session_id IS NULL
-		       OR sig.signals_version <> $2
-		       OR sig.refreshed_at < s.ended_at + make_interval(mins => $1)
-		       OR sig.refreshed_at < s.updated_at )
+		    AND (s.ended_at, s.id) > ($3, $4)
 		  ORDER BY s.ended_at, s.id
-		  LIMIT $3`,
-		abandonedIdleMinutes, quality.Version, limit, afterEnded, afterID)
+		  LIMIT $2`,
+		abandonedIdleMinutes, limit, afterEnded, afterID)
 	if err != nil {
 		return nil, afterEnded, afterID, fmt.Errorf("select settled sessions for signal refresh: %w", err)
 	}
@@ -502,21 +569,34 @@ func (s *Store) dueSettledBatch(ctx context.Context, afterEnded time.Time, after
 // without seeding thousands of sessions (see SetSettledSignalBatch).
 var settledSignalBatch = 500
 
-// SessionSignalsByID reads a session's current-version stored signals. A session with no
-// current-version row (one ingested before signals existed and not yet reparsed, still
-// mid-first-parse, or carrying only a stale-version row a running reparse has not yet
-// rewritten) reads as an unknown, unscored result rather than an error, so the session
-// page renders a neutral state instead of a stale grade. The signals_version filter keeps
-// this read in step with the Insights aggregates, which count only current-version rows: a
-// session never shows a graded header while the fleet view treats it as unscored.
+// SessionSignalsByID reads a session's current-version, up-to-date stored signals. A session
+// with no usable row reads as an unknown, unscored result rather than an error, so the session
+// page renders a neutral state instead of a stale or missing grade. A row is usable only when
+// it is at the current signals_version AND the session is not flagged signals_stale, so the
+// header and the fleet aggregates gate on the same flag and agree on exactly which grades count.
+// signals_stale is set whenever the projection moves (applyAggregates and the reparse reset), so
+// a session that gained an appended region after its last grade reads as unmeasured until the
+// settle pass re-grades it, rather than showing a grade for an earlier, smaller session. The
+// flag also covers the pre-settle case: refreshSignalsTx leaves it set when it grades a
+// still-live session, so a not-yet-stable outcome (abandoned versus unknown turns on the idle
+// gap) never reaches a reader before the settle pass pins it.
+//
+// Gating on the flag rather than a refreshed_at >= updated_at comparison is deliberate.
+// updated_at also moves on metadata-only writes (an announce re-announce, an owner
+// reassignment) that leave the grade valid, so keying reads on it would strand those grades
+// unread while the settle pass, which keys on the flag, never revisits them. The flag is set at
+// exactly the projection-change sites, so it is the precise "grade is behind its source" signal
+// that updated_at is not.
 func (s *Store) SessionSignalsByID(ctx context.Context, sessionID int64) (SessionSignals, error) {
 	var sig SessionSignals
 	err := s.Pool.QueryRow(ctx,
-		`SELECT session_id, signals_version, outcome, outcome_confidence, score, grade,
-		        tool_calls, tool_failures, tool_retries, edit_churn, longest_failure_streak,
-		        prompt_count, short_prompt_count, duplicate_prompt_count, no_code_context_count, unstructured_start,
-		        peak_context_tokens, context_reset_count
-		   FROM session_signals WHERE session_id = $1 AND signals_version = $2`, sessionID, quality.Version).Scan(
+		`SELECT sig.session_id, sig.signals_version, sig.outcome, sig.outcome_confidence, sig.score, sig.grade,
+		        sig.tool_calls, sig.tool_failures, sig.tool_retries, sig.edit_churn, sig.longest_failure_streak,
+		        sig.prompt_count, sig.short_prompt_count, sig.duplicate_prompt_count, sig.no_code_context_count, sig.unstructured_start,
+		        sig.peak_context_tokens, sig.context_reset_count
+		   FROM session_signals sig
+		   JOIN sessions s ON s.id = sig.session_id
+		  WHERE sig.session_id = $1 AND sig.signals_version = $2 AND NOT s.signals_stale`, sessionID, quality.Version).Scan(
 		&sig.SessionID, &sig.Version, &sig.Outcome, &sig.OutcomeConfidence, &sig.Score, &sig.Grade,
 		&sig.ToolCalls, &sig.ToolFailures, &sig.ToolRetries, &sig.EditChurn, &sig.LongestFailureStreak,
 		&sig.PromptCount, &sig.ShortPromptCount, &sig.DuplicatePromptCount, &sig.NoCodeContextCount, &sig.UnstructuredStart,

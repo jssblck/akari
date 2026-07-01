@@ -35,6 +35,7 @@ func TestSignalsContextHealth(t *testing.T) {
 		t.Fatalf("apply delta: %v", err)
 	}
 	setUserMessageCount(t, st, ctx, sid, 1)
+	settleSession(t, st, ctx, sid)
 	if err := st.RefreshSessionSignals(ctx, sid); err != nil {
 		t.Fatalf("refresh signals: %v", err)
 	}
@@ -73,6 +74,7 @@ func TestSignalsContextHealthUnmeasured(t *testing.T) {
 		t.Fatalf("apply delta: %v", err)
 	}
 	setUserMessageCount(t, st, ctx, sid, 1)
+	settleSession(t, st, ctx, sid)
 	if err := st.RefreshSessionSignals(ctx, sid); err != nil {
 		t.Fatalf("refresh signals: %v", err)
 	}

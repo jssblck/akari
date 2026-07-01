@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/jssblck/akari/internal/quality"
 	"github.com/jssblck/akari/internal/server/store"
@@ -34,6 +35,34 @@ func setUserMessageCount(t *testing.T, st *store.Store, ctx context.Context, sid
 	t.Helper()
 	if _, err := st.Pool.Exec(ctx, "UPDATE sessions SET user_message_count = $2 WHERE id = $1", sid, n); err != nil {
 		t.Fatalf("set user_message_count: %v", err)
+	}
+}
+
+// markSignalsFresh clears signals_stale on a session, the flag the read gate keys on. A test
+// that seeds a session_signals row directly is standing in for a settled, graded session, whose
+// flag the settle pass would have cleared, so the aggregates and the header must read the seeded
+// row rather than treat it as behind the projection. The signal-insert helpers call this so a
+// seeded grade is visible; a stale-version seed stays excluded through the version filter, not
+// the flag.
+func markSignalsFresh(t *testing.T, st *store.Store, ctx context.Context, sid int64) {
+	t.Helper()
+	if _, err := st.Pool.Exec(ctx, `UPDATE sessions SET signals_stale = false WHERE id = $1`, sid); err != nil {
+		t.Fatalf("clear signals_stale for session %d: %v", sid, err)
+	}
+}
+
+// settleSession backdates a session's last activity past the abandoned idle window so the grade
+// RefreshSessionSignals writes clears signals_stale and the per-session read returns it. In
+// production signals only materialize for settled sessions (the settle pass), and a grade taken
+// while a session is still live is held back as pre-settle (see SessionSignalsByID), so a reducer
+// test that reads its grade back must settle first. Backdating to an hour keeps an idle-sensitive
+// outcome (abandoned) settled while leaving a resolved session completed and a failing tail
+// errored, so it changes no asserted outcome.
+func settleSession(t *testing.T, st *store.Store, ctx context.Context, sid int64) {
+	t.Helper()
+	if _, err := st.Pool.Exec(ctx,
+		"UPDATE sessions SET ended_at = now() - interval '1 hour' WHERE id = $1", sid); err != nil {
+		t.Fatalf("settle session: %v", err)
 	}
 }
 
@@ -76,6 +105,7 @@ func TestSignalsToolHealthCounts(t *testing.T) {
 		t.Fatalf("apply delta: %v", err)
 	}
 	setUserMessageCount(t, st, ctx, sid, 1)
+	settleSession(t, st, ctx, sid)
 	if err := st.RefreshSessionSignals(ctx, sid); err != nil {
 		t.Fatalf("refresh signals: %v", err)
 	}
@@ -135,6 +165,7 @@ func TestSignalsDedupesReplayedCalls(t *testing.T) {
 		t.Fatalf("apply delta: %v", err)
 	}
 	setUserMessageCount(t, st, ctx, sid, 1)
+	settleSession(t, st, ctx, sid)
 	if err := st.RefreshSessionSignals(ctx, sid); err != nil {
 		t.Fatalf("refresh signals: %v", err)
 	}
@@ -173,6 +204,7 @@ func TestSignalsDistinctNullCallsNotCollapsed(t *testing.T) {
 		t.Fatalf("apply delta: %v", err)
 	}
 	setUserMessageCount(t, st, ctx, sid, 1)
+	settleSession(t, st, ctx, sid)
 	if err := st.RefreshSessionSignals(ctx, sid); err != nil {
 		t.Fatalf("refresh signals: %v", err)
 	}
@@ -214,6 +246,7 @@ func TestSignalsEditChurnIgnoresUnknownPath(t *testing.T) {
 		t.Fatalf("apply delta: %v", err)
 	}
 	setUserMessageCount(t, st, ctx, sid, 1)
+	settleSession(t, st, ctx, sid)
 	if err := st.RefreshSessionSignals(ctx, sid); err != nil {
 		t.Fatalf("refresh signals: %v", err)
 	}
@@ -254,6 +287,7 @@ func TestSignalsErroredOutcome(t *testing.T) {
 		t.Fatalf("apply delta: %v", err)
 	}
 	setUserMessageCount(t, st, ctx, sid, 1)
+	settleSession(t, st, ctx, sid)
 	if err := st.RefreshSessionSignals(ctx, sid); err != nil {
 		t.Fatalf("refresh signals: %v", err)
 	}
@@ -294,6 +328,7 @@ func TestSignalsAbandonedOutcome(t *testing.T) {
 		"UPDATE sessions SET user_message_count = 2, ended_at = now() - interval '1 hour' WHERE id = $1", sid); err != nil {
 		t.Fatalf("set session facts: %v", err)
 	}
+	settleSession(t, st, ctx, sid)
 	if err := st.RefreshSessionSignals(ctx, sid); err != nil {
 		t.Fatalf("refresh signals: %v", err)
 	}
@@ -327,6 +362,7 @@ func TestSignalsUnknownIsUnscored(t *testing.T) {
 	if err := st.ApplyProjectionDelta(ctx, sid, delta); err != nil {
 		t.Fatalf("apply delta: %v", err)
 	}
+	settleSession(t, st, ctx, sid)
 	if err := st.RefreshSessionSignals(ctx, sid); err != nil {
 		t.Fatalf("refresh signals: %v", err)
 	}
@@ -360,6 +396,7 @@ func TestSignalsClearedOnReset(t *testing.T) {
 		t.Fatalf("apply delta: %v", err)
 	}
 	setUserMessageCount(t, st, ctx, sid, 1)
+	settleSession(t, st, ctx, sid)
 	if err := st.RefreshSessionSignals(ctx, sid); err != nil {
 		t.Fatalf("refresh signals: %v", err)
 	}
@@ -418,6 +455,10 @@ func TestSignalsBuiltByReparse(t *testing.T) {
 				{CallUID: "r1", Status: "ok"},
 				{CallUID: "r2", Status: "ok"},
 			},
+			// Backdate the region past the abandoned idle window so the reparse's own grade
+			// lands settled (signals_stale cleared) and the read below returns it, the same
+			// way a real historical transcript carries past timestamps.
+			Ended: time.Now().Add(-time.Hour),
 		}, nil
 	}
 	if err := st.ReparseSession(ctx, sid, 3, emit); err != nil {
@@ -462,6 +503,7 @@ func TestSignalsPromptHygiene(t *testing.T) {
 		t.Fatalf("apply delta: %v", err)
 	}
 	setUserMessageCount(t, st, ctx, sid, 4)
+	settleSession(t, st, ctx, sid)
 	if err := st.RefreshSessionSignals(ctx, sid); err != nil {
 		t.Fatalf("refresh signals: %v", err)
 	}
@@ -515,11 +557,13 @@ func TestSessionSignalsByIDVersionFilter(t *testing.T) {
 			sig.Outcome, sig.OutcomeConfidence, sig.Scored())
 	}
 
-	// Re-stamp the row at the current version, as a reparse would. Now the read returns it.
+	// Re-stamp the row at the current version and clear signals_stale, as a reparse that grades
+	// a settled session would. Now the read returns it.
 	if _, err := st.Pool.Exec(ctx,
 		"UPDATE session_signals SET signals_version = $2 WHERE session_id = $1", sid, quality.Version); err != nil {
 		t.Fatalf("restamp signal: %v", err)
 	}
+	markSignalsFresh(t, st, ctx, sid)
 	sig, err = st.SessionSignalsByID(ctx, sid)
 	if err != nil {
 		t.Fatalf("read signals (current row): %v", err)

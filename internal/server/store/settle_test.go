@@ -32,16 +32,24 @@ func seedSettledSession(t *testing.T, st *store.Store, ctx context.Context, uid,
 	return sid
 }
 
-// insertSignalsRow writes a session_signals row directly, so a test can stand up a row as
-// if an earlier pass (or a reparse taken while the session was still live) had computed it,
-// with a chosen version and refreshed_at, then assert the settle pass revisits it.
-func insertSignalsRow(t *testing.T, st *store.Store, ctx context.Context, sid int64, version int, outcome, conf string, refreshedMinsAgo int) {
+// insertSignalsRow writes a session_signals row directly, so a test can stand up a row as if
+// an earlier pass (or a reparse taken while the session was still live) had computed it, with a
+// chosen version and refreshed_at, then assert the settle pass revisits it. It also sets the
+// session's signals_stale flag to the state a real grade would leave: a settled grade clears it
+// (stale=false), a grade taken while the session was still live leaves it set (stale=true), so
+// the caller says which case it is standing up. The settle pass drains on that flag, so the
+// test's flag value is what makes the row due or not.
+func insertSignalsRow(t *testing.T, st *store.Store, ctx context.Context, sid int64, version int, outcome, conf string, refreshedMinsAgo int, stale bool) {
 	t.Helper()
 	if _, err := st.Pool.Exec(ctx,
 		`INSERT INTO session_signals (session_id, signals_version, outcome, outcome_confidence, refreshed_at)
 		 VALUES ($1, $2, $3, $4, now() - make_interval(mins => $5))`,
 		sid, version, outcome, conf, refreshedMinsAgo); err != nil {
 		t.Fatalf("insert signals row: %v", err)
+	}
+	if _, err := st.Pool.Exec(ctx,
+		`UPDATE sessions SET signals_stale = $2 WHERE id = $1`, sid, stale); err != nil {
+		t.Fatalf("set signals_stale: %v", err)
 	}
 }
 
@@ -82,19 +90,18 @@ func TestRefreshSettledSignalsMaterializesSettledOnly(t *testing.T) {
 	}
 }
 
-// TestRefreshSettledSignalsReStampsStaleVersion confirms the version clause of the due
-// predicate: a settled session carrying a row at a different signals_version is recomputed
-// and re-stamped, even when that row was refreshed recently (so the refreshed_at clause does
-// not fire). This is the path a quality.Version bump rides, the same one the read filter
-// (SessionSignalsByID) and the Insights aggregates gate on.
+// TestRefreshSettledSignalsReStampsStaleVersion confirms the version reconcile: a settled
+// session carrying a clean (signals_stale=false) row at a superseded signals_version is marked
+// stale by reconcileStaleVersions and re-stamped, even though its projection never changed so
+// the flag alone would not catch it. This is the path a quality.Version bump rides, the same
+// version the read filter (SessionSignalsByID) and the Insights aggregates gate on.
 func TestRefreshSettledSignalsReStampsStaleVersion(t *testing.T) {
 	t.Parallel()
 	st, ctx, uid, pid := signalsEnv(t)
 	sid := seedSettledSession(t, st, ctx, uid, pid, "sess-stale", 120)
-	// A stale-version row refreshed just now: past both the settle point and the last
-	// projection change, so neither the idle-window clause nor the source-changed clause
-	// fires and only the version mismatch can make it due.
-	insertSignalsRow(t, st, ctx, sid, quality.Version+1, "completed", "high", 0)
+	// A stale-version row that a prior settled grade left clean: signals_stale=false, so only
+	// the version reconcile (not the projection-maintained flag) can make it due again.
+	insertSignalsRow(t, st, ctx, sid, quality.Version+1, "completed", "high", 0, false)
 
 	// Before the pass the current-version read finds no row and self-heals to unknown.
 	if sig, err := st.SessionSignalsByID(ctx, sid); err != nil {
@@ -119,28 +126,90 @@ func TestRefreshSettledSignalsReStampsStaleVersion(t *testing.T) {
 	}
 }
 
-// TestRefreshSettledSignalsCorrectsPreSettleRow pins the refreshed_at clause, the one that
-// fixes the drift the whole settle design exists to prevent. A row computed before the
-// session settled (a reparse taken while it was live, or a resume that advanced ended_at
-// past the old refresh) carries a not-yet-final outcome; because refreshed_at precedes
-// ended_at + the idle window, the pass revisits it and recomputes against the stable idle
-// gap. A second pass then finds nothing due, so the corrected outcome holds: it does not
-// oscillate every wake.
+// TestRefreshSettledSignalsReconcilesVersionOncePerBump pins the efficiency contract on the
+// version reconcile: the signals_version <> current scan runs once per quality.Version change,
+// gated on the parse_meta marker, not on every settle wake. A stale-version row present at the
+// first pass is reconciled and drained; a second stale-version row that appears after the marker
+// is current is left alone (a state production never reaches, since every fresh grade is written
+// at the current version), and only resetting the marker (as a version bump would) makes the
+// reconcile pick it up.
+func TestRefreshSettledSignalsReconcilesVersionOncePerBump(t *testing.T) {
+	t.Parallel()
+	st, ctx, uid, pid := signalsEnv(t)
+
+	a := seedSettledSession(t, st, ctx, uid, pid, "sess-ver-a", 120)
+	insertSignalsRow(t, st, ctx, a, quality.Version+1, "completed", "high", 0, false)
+
+	// First pass: the marker starts behind quality.Version, so the reconcile runs, marks the
+	// stale-version row due, and the drain re-stamps it. The marker advances to the current version.
+	if n, err := st.RefreshSettledSignals(ctx); err != nil {
+		t.Fatalf("first pass: %v", err)
+	} else if n != 1 {
+		t.Fatalf("first pass refreshed %d, want 1 (the stale-version row)", n)
+	}
+
+	// A second stale-version row appears after the marker is current. The reconcile is gated, so
+	// this pass must not scan it up: it stays at its stale version and reads as unknown.
+	b := seedSettledSession(t, st, ctx, uid, pid, "sess-ver-b", 121)
+	insertSignalsRow(t, st, ctx, b, quality.Version+1, "completed", "high", 0, false)
+	if n, err := st.RefreshSettledSignals(ctx); err != nil {
+		t.Fatalf("second pass: %v", err)
+	} else if n != 0 {
+		t.Errorf("second pass refreshed %d, want 0 (the reconcile is gated once per version)", n)
+	}
+	if sig, err := st.SessionSignalsByID(ctx, b); err != nil {
+		t.Fatalf("read b: %v", err)
+	} else if sig.Outcome != string(quality.OutcomeUnknown) {
+		t.Errorf("b outcome = %s, want unknown (its stale-version row stays unreconciled)", sig.Outcome)
+	}
+
+	// Reset the marker, as a quality.Version bump leaves it, and the next pass reconciles b.
+	if _, err := st.Pool.Exec(ctx,
+		"UPDATE parse_meta SET signals_reconciled_version = 0 WHERE id = TRUE"); err != nil {
+		t.Fatalf("reset marker: %v", err)
+	}
+	if n, err := st.RefreshSettledSignals(ctx); err != nil {
+		t.Fatalf("post-bump pass: %v", err)
+	} else if n != 1 {
+		t.Errorf("post-bump pass refreshed %d, want 1 (b reconciled after the marker reset)", n)
+	}
+	if sig, err := st.SessionSignalsByID(ctx, b); err != nil {
+		t.Fatalf("read b after bump: %v", err)
+	} else if sig.Outcome != string(quality.OutcomeAbandoned) {
+		t.Errorf("b outcome after bump = %s, want abandoned", sig.Outcome)
+	}
+}
+
+// TestRefreshSettledSignalsCorrectsPreSettleRow pins the correction the whole settle design
+// exists to prevent: a grade taken before the session settled carries a not-yet-final outcome,
+// and the settle pass must revisit it once the outcome stabilizes. refreshSignalsTx leaves
+// signals_stale set whenever it grades a session that is not yet idle long enough (a reparse
+// run while the session was still live), so the settle pass re-grades it once it settles. A
+// second pass then finds nothing due, so the corrected outcome holds and does not oscillate.
 func TestRefreshSettledSignalsCorrectsPreSettleRow(t *testing.T) {
 	t.Parallel()
 	st, ctx, uid, pid := signalsEnv(t)
-	sid := seedSettledSession(t, st, ctx, uid, pid, "sess-presettle", 120)
-	// A row as it would stand if refreshed ten minutes after the session's last turn, well
-	// inside the 30-minute window: the outcome then still reads unknown (not yet idle long
-	// enough), and refreshed_at (110 minutes ago) precedes ended_at + idle (90 minutes ago).
-	insertSignalsRow(t, st, ctx, sid, quality.Version, "unknown", "low", 110)
-	// Pin the projection's last-change time before that refresh (115 minutes ago), so the
-	// source-changed clause is off and only the idle-window clause can make this row due.
-	// This isolates the correction that fires purely because time crossed the settle point,
-	// with no new content: the reparse-graded-while-live case.
+	// Ended only minutes ago, so it is not yet settled: grading it now is the reparse-while-live
+	// case.
+	sid := seedSettledSession(t, st, ctx, uid, pid, "sess-presettle", 5)
+
+	// Grade it while still live (as a reparse would). The outcome is not yet abandoned (not idle
+	// long enough), and because the session is not settled the grade must leave signals_stale
+	// set, so the settle pass will revisit it.
+	if err := st.RefreshSessionSignals(ctx, sid); err != nil {
+		t.Fatalf("grade while live: %v", err)
+	}
+	if live, err := st.SessionSignalsByID(ctx, sid); err != nil {
+		t.Fatalf("read live grade: %v", err)
+	} else if live.Outcome != string(quality.OutcomeUnknown) {
+		t.Fatalf("live grade outcome = %s, want unknown (not yet idle long enough)", live.Outcome)
+	}
+
+	// Time passes: the session's last activity is now well past the idle window. The settle pass
+	// re-grades it because the pre-settle grade left it stale, and the stable outcome is abandoned.
 	if _, err := st.Pool.Exec(ctx,
-		"UPDATE sessions SET updated_at = now() - make_interval(mins => 115) WHERE id = $1", sid); err != nil {
-		t.Fatalf("pin updated_at: %v", err)
+		"UPDATE sessions SET ended_at = now() - make_interval(mins => 120) WHERE id = $1", sid); err != nil {
+		t.Fatalf("settle the session: %v", err)
 	}
 
 	n, err := st.RefreshSettledSignals(ctx)
@@ -157,8 +226,8 @@ func TestRefreshSettledSignalsCorrectsPreSettleRow(t *testing.T) {
 	if sig.Outcome != string(quality.OutcomeAbandoned) {
 		t.Errorf("pre-settle unknown not corrected: outcome = %s, want abandoned", sig.Outcome)
 	}
-	// The correction is stable: now settled and freshly refreshed, the session drops out of
-	// the due set rather than being recomputed on every pass.
+	// The correction is stable: now settled and graded, the session's flag is cleared and it
+	// drops out of the due set rather than being recomputed on every pass.
 	n2, err := st.RefreshSettledSignals(ctx)
 	if err != nil {
 		t.Fatalf("second refresh settled: %v", err)
@@ -234,14 +303,14 @@ func TestRefreshSettledSignalsBatchDrains(t *testing.T) {
 	}
 }
 
-// TestRefreshSettledSignalsReRefreshesOnLateProjectionChange covers the source-changed clause
-// of the due predicate. A historical transcript uploaded in several chunks keeps an ended_at
-// far in the past, so a later chunk appends more turns without moving ended_at anywhere near
-// now. If the settle pass graded the session between chunks, ended_at alone can never flag the
-// row as due again, and it would reflect only the partial upload forever. The clause that
-// compares refreshed_at against the projection's updated_at (bumped on every appended region)
-// catches exactly this: the row is recomputed once the late chunk lands, and reflects the
-// added content.
+// TestRefreshSettledSignalsReRefreshesOnLateProjectionChange covers the late-projection-change
+// case. A historical transcript uploaded in several chunks keeps an ended_at far in the past,
+// so a later chunk appends more turns without moving ended_at anywhere near now. If the settle
+// pass graded the session between chunks, ended_at alone can never flag the row as due again,
+// and it would reflect only the partial upload forever. applyAggregates sets signals_stale on
+// every appended region, so the late chunk re-marks the session stale and the pass recomputes
+// it, reflecting the added content. The test drives the append through the raw-delta seam and
+// stamps the flag the way applyAggregates would.
 func TestRefreshSettledSignalsReRefreshesOnLateProjectionChange(t *testing.T) {
 	t.Parallel()
 	st, ctx, uid, pid := signalsEnv(t)
@@ -261,8 +330,8 @@ func TestRefreshSettledSignalsReRefreshesOnLateProjectionChange(t *testing.T) {
 	}
 
 	// A later chunk of the same historical transcript appends another human turn. The append
-	// path leaves signals untouched (that is the whole point), but stamps updated_at = now()
-	// the way applyAggregates does; ended_at stays far in the past.
+	// path leaves signals untouched (that is the whole point), but stamps updated_at = now() and
+	// re-marks signals_stale the way applyAggregates does; ended_at stays far in the past.
 	if err := st.ApplyProjectionDelta(ctx, sid, store.ProjectionDelta{
 		Messages: []store.MessageDelta{
 			{Ordinal: 3, Role: "assistant", Content: "sure"},
@@ -272,7 +341,7 @@ func TestRefreshSettledSignalsReRefreshesOnLateProjectionChange(t *testing.T) {
 		t.Fatalf("apply late chunk: %v", err)
 	}
 	if _, err := st.Pool.Exec(ctx,
-		"UPDATE sessions SET user_message_count = 3, updated_at = now() WHERE id = $1", sid); err != nil {
+		"UPDATE sessions SET user_message_count = 3, updated_at = now(), signals_stale = true WHERE id = $1", sid); err != nil {
 		t.Fatalf("bump updated_at for late chunk: %v", err)
 	}
 
@@ -290,8 +359,8 @@ func TestRefreshSettledSignalsReRefreshesOnLateProjectionChange(t *testing.T) {
 	if after.PromptCount != 3 {
 		t.Errorf("prompt_count after late chunk = %d, want 3 (the added human turn)", after.PromptCount)
 	}
-	// The correction is stable: refreshed_at now trails updated_at no longer, so a further
-	// pass finds nothing due.
+	// The correction is stable: the re-grade cleared signals_stale, so a further pass finds
+	// nothing due.
 	if n2, err := st.RefreshSettledSignals(ctx); err != nil {
 		t.Fatalf("steady-state refresh: %v", err)
 	} else if n2 != 0 {

@@ -546,7 +546,12 @@ func applyAggregates(ctx context.Context, tx pgx.Tx, sessionID int64, parserVers
 		   started_at = LEAST(started_at, $12),
 		   ended_at = GREATEST(ended_at, $13),
 		   parser_version = $14,
-		   updated_at = now()
+		   updated_at = now(),
+		   -- The projection moved, so any stored grade is now behind it. Mark the session for
+		   -- the settle pass to re-grade; refreshSignalsTx clears this once it grades a settled
+		   -- session (see signals.go). This is what lets the settle pass find due sessions by an
+		   -- index seek instead of rescanning the settled tail every wake.
+		   signals_stale = true
 		 WHERE id = $1`,
 		sessionID, a.MessagesAdded, a.UserMessagesAdded,
 		a.Input, a.Output, a.CacheWrite, a.CacheRead,
@@ -717,7 +722,11 @@ func resetSessionAggregates(ctx context.Context, tx pgx.Tx, sessionID int64) err
 		   total_cost_usd = 0, cost_incomplete = FALSE,
 		   total_cache_savings_usd = 0, cache_savings_incomplete = FALSE,
 		   started_at = NULL, ended_at = NULL,
-		   updated_at = now()
+		   updated_at = now(),
+		   -- Clearing the projection moves it, so the stored grade is behind. The reparse
+		   -- replays and then refreshSignalsTx re-settles this flag (false only if the rebuilt
+		   -- session is settled), so a reparse of a still-live session leaves it due.
+		   signals_stale = true
 		 WHERE id = $1`, sessionID)
 	if err != nil {
 		return fmt.Errorf("reset aggregates for session %d: %w", sessionID, err)
