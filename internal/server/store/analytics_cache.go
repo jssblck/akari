@@ -151,5 +151,8 @@ func scanCacheModelRows(rows pgx.Rows) ([]cacheModelRow, error) {
 		}
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate cache model rows: %w", err)
+	}
+	return out, nil
 }

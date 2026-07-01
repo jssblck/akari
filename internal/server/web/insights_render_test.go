@@ -128,6 +128,7 @@ func TestInsightsPageRendersDistributions(t *testing.T) {
 		`>shed context<`,                     // the reset-rate figure label
 		`6 of 15 sessions`,                   // the shed-context sub-count (sessions that reset)
 		`>context resets<`,                   // the total-resets figure label
+		`A load measure, not spend.`,         // the caption scoping the peak to a single class, not a tokens total
 		`>File churn<`,                       // the churn panel
 		`internal/server/store/analytics.go`, // the churned path (full path in the label)
 		`6 edits`,                            // its edit count

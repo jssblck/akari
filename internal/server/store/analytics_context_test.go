@@ -90,6 +90,20 @@ func TestContextHealth(t *testing.T) {
 		adaOnly.TotalResets != 2 || adaOnly.SessionsWithReset != 1 {
 		t.Errorf("ada = %+v, want {Sessions 2, P50 100000, P90 200000, Max 200000, TotalResets 2, SessionsWithReset 1}", adaOnly)
 	}
+
+	// Until on a session-derived aggregate. The upper bound is compared against s.started_at,
+	// not usage_events.occurred_at (this cohort carries no usage_events to date), so a bound
+	// set 200 days back keeps only the old session (c4 at -400d) and drops the recent ones.
+	// A misrouted bound that named ue.occurred_at here would fail to compile the query at all,
+	// so this pins the clauseFor Until branch to the same time column its Since branch uses.
+	untilOld, err := st.ContextHealth(ctx, store.AnalyticsFilter{Until: time.Now().Add(-200 * 24 * time.Hour)})
+	if err != nil {
+		t.Fatalf("context health (until): %v", err)
+	}
+	if untilOld.Sessions != 1 || untilOld.PeakTokensP50 != 400000 || untilOld.PeakTokensP90 != 400000 || untilOld.PeakTokensMax != 400000 ||
+		untilOld.TotalResets != 3 || untilOld.SessionsWithReset != 1 {
+		t.Errorf("until = %+v, want {Sessions 1, P50 400000, P90 400000, Max 400000, TotalResets 3, SessionsWithReset 1}", untilOld)
+	}
 }
 
 // TestContextHealthEmpty confirms a scope with no measured session reports no data, so the

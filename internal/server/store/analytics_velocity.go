@@ -83,20 +83,27 @@ func (s *Store) VelocityStats(ctx context.Context, f AnalyticsFilter) (VelocityS
 		     JOIN sessions s ON s.id = m.session_id
 		    WHERE TRUE`+filter+`
 		 ),
-		 turns AS (
-		   SELECT session_id, turn,
-		          min(timestamp) FILTER (WHERE role = 'user') AS user_at,
-		          (array_agg(timestamp ORDER BY ordinal)
-		             FILTER (WHERE role = 'assistant' AND timestamp IS NOT NULL))[1] AS asst_at
+		 user_turns AS (
+		   SELECT session_id, turn, min(timestamp) FILTER (WHERE role = 'user') AS user_at
 		     FROM m
 		    WHERE turn >= 1
 		    GROUP BY session_id, turn
 		 ),
+		 asst_turns AS (
+		   -- The first assistant message by ordinal that carries a timestamp, picked with
+		   -- DISTINCT ON so one long turn does not materialize every assistant timestamp into
+		   -- an array just to read its head.
+		   SELECT DISTINCT ON (session_id, turn) session_id, turn, timestamp AS asst_at
+		     FROM m
+		    WHERE turn >= 1 AND role = 'assistant' AND timestamp IS NOT NULL
+		    ORDER BY session_id, turn, ordinal
+		 ),
 		 lat AS (
-		   SELECT session_id, turn,
-		          extract(epoch FROM (asst_at - user_at)) AS secs
-		     FROM turns
-		    WHERE user_at IS NOT NULL AND asst_at IS NOT NULL AND asst_at >= user_at
+		   SELECT u.session_id, u.turn,
+		          extract(epoch FROM (a.asst_at - u.user_at)) AS secs
+		     FROM user_turns u
+		     JOIN asst_turns a ON a.session_id = u.session_id AND a.turn = u.turn
+		    WHERE u.user_at IS NOT NULL AND a.asst_at >= u.user_at
 		 )
 		 SELECT
 		   coalesce(percentile_cont(0.5) WITHIN GROUP (ORDER BY secs), 0),

@@ -227,6 +227,11 @@ templ hygienePanel(h store.PromptHygiene) {
 // Peak is a raw token count, deliberately not divided by any model's window, so it reads
 // the same whether a model holds 200k tokens or a million: 180k in context is heavy either
 // way. Like hygiene these figures never feed the quality score; they describe resource load.
+// Each peak is one turn's occupancy (input plus cache read plus cache write, output
+// excluded), and these are order statistics over the per-session peaks, so there is no
+// per-class total to break down. They carry a plain caption of what a peak is made of
+// rather than the four-class spend card, the single-metric exemption the token-consistency
+// convention allows.
 templ contextPanel(c store.ContextHealthStats) {
 	<div class="ins-panel ins-context-panel">
 		<div class="ins-panel-head">
@@ -259,6 +264,7 @@ templ contextPanel(c store.ContextHealthStats) {
 					<div class="ins-fig-k">context resets</div>
 				</div>
 			</div>
+			<div class="ins-note muted small">Each peak is a single turn's context: input, cache read, and cache write, output excluded. A load measure, not spend.</div>
 		}
 	</div>
 }

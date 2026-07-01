@@ -146,7 +146,13 @@ func (s *Store) AnnounceWithProject(ctx context.Context, p AnnounceParams, proje
 // The remote-attribution guard is read-before-write, so a local announce that
 // started before a concurrent remote announce must wait and re-read the settled
 // project before deciding whether to keep or move attribution.
+//
+// It first takes the coarser family lock (see lockAnnounceFamilyTx), always before the
+// identity lock, so the two are acquired in one order and cannot deadlock.
 func lockAnnounceIdentityTx(ctx context.Context, tx pgx.Tx, p AnnounceParams) error {
+	if err := lockAnnounceFamilyTx(ctx, tx, p); err != nil {
+		return err
+	}
 	_, err := tx.Exec(ctx,
 		`SELECT pg_advisory_xact_lock(
 			hashtext(current_database() || ':announce-session'),
@@ -155,6 +161,35 @@ func lockAnnounceIdentityTx(ctx context.Context, tx pgx.Tx, p AnnounceParams) er
 		p.UserID, p.Agent, p.SourceSessionID)
 	if err != nil {
 		return fmt.Errorf("lock announce session identity: %w", err)
+	}
+	return nil
+}
+
+// lockAnnounceFamilyTx serializes a Claude session and all of its subagents on one key,
+// the parent's source id, so linkSubagentParentTx never runs concurrently for a parent
+// and one of its children. Without it the link is a check-then-act across two separately
+// announced rows: under READ COMMITTED a parent and a child announcing at once can each
+// run their link step before the other's session row commits, so neither sees the other,
+// both commit, and the child's parent_session_id stays NULL with no later announce to
+// retry it. A subagent's family key is its parent-source prefix, a top-level session's is
+// its own source id, so a parent and every child hash to the same lock. The identity lock
+// namespace differs ('announce-session'), so the two never false-share. Only Claude nests
+// subagents, so nothing else pays for this.
+func lockAnnounceFamilyTx(ctx context.Context, tx pgx.Tx, p AnnounceParams) error {
+	if p.Agent != "claude" {
+		return nil
+	}
+	family := p.SourceSessionID
+	if parentSource, ok := subagentParentSource(p.SourceSessionID); ok {
+		family = parentSource
+	}
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(
+			hashtext(current_database() || ':announce-family'),
+			hashtext($1::bigint::text || chr(31) || $2)
+		)`,
+		p.UserID, family); err != nil {
+		return fmt.Errorf("lock announce family: %w", err)
 	}
 	return nil
 }

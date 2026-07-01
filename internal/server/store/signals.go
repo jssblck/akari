@@ -365,10 +365,13 @@ func (s *Store) RefreshSessionSignals(ctx context.Context, sessionID int64) erro
 	})
 }
 
-// SessionSignalsByID reads a session's stored signals. A session with no row yet (one
-// ingested before signals existed and not yet reparsed, or still mid-first-parse) reads
-// as an unknown, unscored result rather than an error, so the session page renders a
-// neutral state instead of failing.
+// SessionSignalsByID reads a session's current-version stored signals. A session with no
+// current-version row (one ingested before signals existed and not yet reparsed, still
+// mid-first-parse, or carrying only a stale-version row a running reparse has not yet
+// rewritten) reads as an unknown, unscored result rather than an error, so the session
+// page renders a neutral state instead of a stale grade. The signals_version filter keeps
+// this read in step with the Insights aggregates, which count only current-version rows: a
+// session never shows a graded header while the fleet view treats it as unscored.
 func (s *Store) SessionSignalsByID(ctx context.Context, sessionID int64) (SessionSignals, error) {
 	var sig SessionSignals
 	err := s.Pool.QueryRow(ctx,
@@ -376,7 +379,7 @@ func (s *Store) SessionSignalsByID(ctx context.Context, sessionID int64) (Sessio
 		        tool_calls, tool_failures, tool_retries, edit_churn, longest_failure_streak,
 		        prompt_count, short_prompt_count, duplicate_prompt_count, no_code_context_count, unstructured_start,
 		        peak_context_tokens, context_reset_count
-		   FROM session_signals WHERE session_id = $1`, sessionID).Scan(
+		   FROM session_signals WHERE session_id = $1 AND signals_version = $2`, sessionID, quality.Version).Scan(
 		&sig.SessionID, &sig.Version, &sig.Outcome, &sig.OutcomeConfidence, &sig.Score, &sig.Grade,
 		&sig.ToolCalls, &sig.ToolFailures, &sig.ToolRetries, &sig.EditChurn, &sig.LongestFailureStreak,
 		&sig.PromptCount, &sig.ShortPromptCount, &sig.DuplicatePromptCount, &sig.NoCodeContextCount, &sig.UnstructuredStart,

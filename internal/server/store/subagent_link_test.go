@@ -2,6 +2,8 @@ package store_test
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/jssblck/akari/internal/server/store"
@@ -68,6 +70,61 @@ func TestAnnounceLinksSubagent(t *testing.T) {
 	lateParent := announce("late-parent")
 	if pp, rel := parentOf(orphan); pp == nil || *pp != lateParent || rel != "subagent" {
 		t.Fatalf("orphan adopted on parent announce = (%v, %q), want (%d, subagent)", pp, rel, lateParent)
+	}
+}
+
+// TestAnnounceLinksSubagentConcurrent pins the family lock (see lockAnnounceFamilyTx):
+// a parent and its child announced at the same instant still resolve to a link. The lock
+// serializes the two on the parent-source key, so whichever announce lands second reads the
+// first's committed row and the child ends adopted every time. Without it the link is a
+// check-then-act across two separately committed rows, and under READ COMMITTED each
+// announce can run its link step before the other's row is visible, leaving the child
+// unlinked with no later announce to retry it. Many rounds on distinct source ids give the
+// interleaving room to surface if the serialization regresses.
+func TestAnnounceLinksSubagentConcurrent(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	uid := seedUser(t, st, "grace")
+	pid, err := st.UpsertProject(ctx, "github.com/ada/engine", "github.com", "ada", "engine", "engine", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const rounds = 40
+	for i := 0; i < rounds; i++ {
+		parentSrc := fmt.Sprintf("cc-parent-%d", i)
+		childSrc := parentSrc + "/subagents/agent-abc"
+
+		// Race the parent and child announces against each other from two goroutines.
+		var wg sync.WaitGroup
+		var errs [2]error
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_, errs[0] = st.Announce(ctx, store.AnnounceParams{UserID: uid, Agent: "claude", SourceSessionID: parentSrc, ProjectID: pid})
+		}()
+		go func() {
+			defer wg.Done()
+			_, errs[1] = st.Announce(ctx, store.AnnounceParams{UserID: uid, Agent: "claude", SourceSessionID: childSrc, ProjectID: pid})
+		}()
+		wg.Wait()
+		if errs[0] != nil || errs[1] != nil {
+			t.Fatalf("round %d announce errors: parent=%v child=%v", i, errs[0], errs[1])
+		}
+
+		var pp *int64
+		var rel string
+		if err := st.Pool.QueryRow(ctx,
+			"SELECT parent_session_id, relationship_type FROM sessions WHERE user_id=$1 AND source_session_id=$2",
+			uid, childSrc).Scan(&pp, &rel); err != nil {
+			t.Fatalf("round %d read child: %v", i, err)
+		}
+		if pp == nil || rel != "subagent" {
+			t.Fatalf("round %d: child left unlinked under concurrency (parent=%v, rel=%q); the family lock should make the two announces order-independent",
+				i, pp, rel)
+		}
 	}
 }
 

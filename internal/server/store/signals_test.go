@@ -487,6 +487,48 @@ func TestSignalsPromptHygiene(t *testing.T) {
 	}
 }
 
+// TestSessionSignalsByIDVersionFilter pins the per-session read to the running quality
+// version: a session that carries only a stale-version row (one a running reparse has not
+// yet rewritten) reads as an unknown, unscored result rather than surfacing the old grade,
+// so the session header never shows a verdict the Insights aggregates (which count only
+// current-version rows) treat as unscored. Once the row is at the current version, the read
+// returns it verbatim.
+func TestSessionSignalsByIDVersionFilter(t *testing.T) {
+	t.Parallel()
+	st, ctx, uid, pid := signalsEnv(t)
+	sid := seedSession(t, st, uid, pid, "sess-stale-version")
+
+	// A stale row with a real grade. The version does not match the running one, so the read
+	// must ignore it rather than hand back the 'C'.
+	if _, err := st.Pool.Exec(ctx,
+		`INSERT INTO session_signals (session_id, signals_version, outcome, outcome_confidence, score, grade)
+		 VALUES ($1, $2, 'completed', 'high', 42, 'C')`,
+		sid, quality.Version+999); err != nil {
+		t.Fatalf("insert stale signal: %v", err)
+	}
+	sig, err := st.SessionSignalsByID(ctx, sid)
+	if err != nil {
+		t.Fatalf("read signals (stale row present): %v", err)
+	}
+	if sig.Scored() || sig.Outcome != string(quality.OutcomeUnknown) || sig.OutcomeConfidence != string(quality.ConfLow) {
+		t.Errorf("stale-only read = (%s, %s, scored=%v), want (unknown, low, false); a stale grade must not surface",
+			sig.Outcome, sig.OutcomeConfidence, sig.Scored())
+	}
+
+	// Re-stamp the row at the current version, as a reparse would. Now the read returns it.
+	if _, err := st.Pool.Exec(ctx,
+		"UPDATE session_signals SET signals_version = $2 WHERE session_id = $1", sid, quality.Version); err != nil {
+		t.Fatalf("restamp signal: %v", err)
+	}
+	sig, err = st.SessionSignalsByID(ctx, sid)
+	if err != nil {
+		t.Fatalf("read signals (current row): %v", err)
+	}
+	if !sig.Scored() || *sig.Score != 42 || *sig.Grade != "C" || sig.Outcome != string(quality.OutcomeCompleted) {
+		t.Errorf("current-version read = (%s, score %v, grade %v), want (completed, 42, C)", sig.Outcome, sig.Score, sig.Grade)
+	}
+}
+
 func signalsRowCount(t *testing.T, st *store.Store, ctx context.Context, sid int64) int {
 	t.Helper()
 	var n int

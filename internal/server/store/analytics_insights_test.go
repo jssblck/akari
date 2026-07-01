@@ -410,6 +410,23 @@ func TestVelocityStatsEdges(t *testing.T) {
 	} else if v.Turns != 1 || v.ResponseP50 != 7*time.Second || v.FirstResponseP50 != 7*time.Second {
 		t.Errorf("asstfirst = {turns %d, p50 %s, opening %s}, want {1, 7s, 7s}", v.Turns, v.ResponseP50, v.FirstResponseP50)
 	}
+
+	// Reply by ordinal, not by clock: one turn with two assistant messages, the first at 10s
+	// and a second whose clock drifted back to 4s. The latency is the FIRST reply by ordinal
+	// (10s), not the earliest timestamp (4s), so a drifted later row cannot understate the
+	// wait. This pins the asst_turns DISTINCT ON ... ORDER BY ordinal that replaced the old
+	// array_agg[1]: both pick the first reply by position, never the minimum instant.
+	drift := apply("drift", "e-drift", []store.MessageDelta{
+		{Ordinal: 0, Role: "user", Content: "go", Timestamp: at(0)},
+		{Ordinal: 1, Role: "assistant", Content: "first reply", Timestamp: at(10)},
+		{Ordinal: 2, Role: "assistant", Content: "second reply, clock drifted back", Timestamp: at(4)},
+	})
+	if v, err := st.VelocityStats(ctx, drift); err != nil {
+		t.Fatalf("drift velocity: %v", err)
+	} else if v.Turns != 1 || v.ResponseP50 != 10*time.Second || v.FirstResponseP50 != 10*time.Second {
+		t.Errorf("drift = {turns %d, p50 %s, opening %s}, want {1, 10s, 10s} (first reply by ordinal, not earliest clock)",
+			v.Turns, v.ResponseP50, v.FirstResponseP50)
+	}
 }
 
 // TestConcurrencyStats builds four overlapping spans with a known three-way peak and

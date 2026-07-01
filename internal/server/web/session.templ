@@ -254,7 +254,12 @@ templ statQuality(s store.SessionSignals) {
 // the overview heatmap surfaces for a day. When the session's context was measured, a
 // Context sub-group adds the heaviest single-turn context it held and how many times it
 // shed that context (a compaction or clear), token-flavored facts that sit naturally
-// beside the token totals but describe peak load rather than cumulative spend.
+// beside the token totals but describe peak load rather than cumulative spend. Peak
+// context is one occupancy figure (a single turn's input plus cache read plus cache
+// write, output excluded), not a general tokens total, so instead of the four-class
+// spend breakdown card it carries a plain caption of what it is made of: there is no
+// per-class total to break down. This is the deliberate single-metric exemption the
+// token-consistency convention allows, not a dropped class.
 templ tokenStat(d store.SessionDetail, s store.SessionSignals) {
 	<div class="stat tokens-stat" tabindex="0">
 		<div class="label">Tokens</div>
@@ -278,6 +283,7 @@ templ tokenStat(d store.SessionDetail, s store.SessionSignals) {
 					<dt>Resets</dt>
 					<dd>{ ContextResetsLabel(s) }</dd>
 				</dl>
+				<div class="tt-note muted small">Peak is the heaviest single turn's prompt: input, cache read, and cache write, output excluded. It measures context load, not spend.</div>
 			}
 			<div class="tt-cost">{ FmtCost(d.TotalCostUSD, d.CostIncomplete) }</div>
 		</div>

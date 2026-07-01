@@ -171,6 +171,7 @@ func TestSessionStatsTokensContext(t *testing.T) {
 		`class="tt-sub">Context</div>`,           // the context group under its own ruled label
 		`>Peak context</dt>`, `<dd>142,000</dd>`, // the peak, full thousands-separated tokens
 		`>Resets</dt>`, `<dd>2</dd>`, // the inferred reset count
+		`It measures context load, not spend.`, // the caption scoping the peak to a single class, not a tokens total
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("tokens context group missing %q", want)

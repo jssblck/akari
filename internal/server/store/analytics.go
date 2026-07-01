@@ -276,11 +276,12 @@ func (f AnalyticsFilter) clause() (string, []any) {
 // timestamp expression rather than ue.occurred_at, so a query over a session-derived
 // table (session_signals, or sessions alone, which carry no usage_events to date) can
 // reuse the identical project / user / agent / machine scoping with its own time
-// column. Only the Since column differs; every other predicate is the same, so the
-// Insights distributions narrow by the same filter the usage panel does. A session
-// whose time column is NULL falls outside a Since bound (the comparison is NULL, so
-// not true), which is the right call: an undated session has no place on a windowed
-// view, the same reasoning the usage base applies to undated usage.
+// column. Both trailing-window bounds (Since and Until) apply to timeExpr; every
+// other predicate is the same, so the Insights distributions narrow by the same
+// filter the usage panel does. A session whose time column is NULL falls outside
+// either bound (the comparison is NULL, so not true), which is the right call: an
+// undated session has no place on a windowed view, the same reasoning the usage
+// base applies to undated usage.
 func (f AnalyticsFilter) clauseFor(timeExpr string) (string, []any) {
 	var clauses string
 	var args []any
@@ -314,7 +315,7 @@ func (f AnalyticsFilter) clauseFor(timeExpr string) (string, []any) {
 	}
 	if !f.Until.IsZero() {
 		args = append(args, f.Until)
-		clauses += fmt.Sprintf(" AND ue.occurred_at < $%d", len(args))
+		clauses += fmt.Sprintf(" AND %s < $%d", timeExpr, len(args))
 	}
 	return clauses, args
 }
