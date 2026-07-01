@@ -35,6 +35,12 @@ type Server struct {
 	// (AKARI_SWEEP_INTERVAL, a Go duration like "1h"). Defaults to 1h; set "0" to
 	// disable the background sweep (for example to run it only via the subcommand).
 	SweepInterval time.Duration
+	// OGRefreshInterval is how often the server wakes to refresh the Open Graph
+	// preview cards of published overviews (AKARI_OG_REFRESH_INTERVAL). On each wake
+	// it re-renders any card older than a day, so a published overview's preview
+	// tracks its usage without a render on every page load. Defaults to 1h; set "0"
+	// to disable the background refresh (a card is still rendered at publish time).
+	OGRefreshInterval time.Duration
 }
 
 // LoadServer reads server configuration from the environment, applying defaults
@@ -54,6 +60,11 @@ func LoadServer() (Server, error) {
 		return Server{}, fmt.Errorf("AKARI_SWEEP_INTERVAL: %w", err)
 	}
 	s.SweepInterval = interval
+	ogInterval, err := parseDuration(os.Getenv("AKARI_OG_REFRESH_INTERVAL"), time.Hour)
+	if err != nil {
+		return Server{}, fmt.Errorf("AKARI_OG_REFRESH_INTERVAL: %w", err)
+	}
+	s.OGRefreshInterval = ogInterval
 	return s, nil
 }
 

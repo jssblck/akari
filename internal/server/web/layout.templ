@@ -123,13 +123,14 @@ templ brandMark() {
 	</span>
 }
 
-templ publicLayout(title string) {
+templ publicLayout(title string, og OGMeta) {
 	<!DOCTYPE html>
 	<html lang="en">
 		<head>
 			<meta charset="utf-8"/>
 			<meta name="viewport" content="width=device-width, initial-scale=1"/>
 			<title>{ title } - akari</title>
+			@ogTags(title, og)
 			<link rel="preload" href="/static/fonts/Geist-Regular.woff2" as="font" type="font/woff2" crossorigin/>
 			<link rel="preload" href="/static/fonts/GeistMono-Regular.woff2" as="font" type="font/woff2" crossorigin/>
 			@stylesheets()
@@ -152,4 +153,37 @@ templ publicLayout(title string) {
 			</main>
 		</body>
 	</html>
+}
+
+// ogTags emits the Open Graph and Twitter card metadata for a public page, so a
+// shared link unfurls with a title, description, and (when one is set) a preview
+// image. og:title falls back to the page title; og:image switches the Twitter card
+// to the large-image form. og:description, og:image, and og:url render only when
+// provided, so a page with no card (a public session or an error) still carries a
+// well-formed basic card.
+templ ogTags(title string, og OGMeta) {
+	{{ ogTitle := og.Title }}
+	if ogTitle == "" {
+		{{ ogTitle = title + " - akari" }}
+	}
+	<meta property="og:type" content="website"/>
+	<meta property="og:site_name" content="akari"/>
+	<meta property="og:title" content={ ogTitle }/>
+	<meta name="twitter:title" content={ ogTitle }/>
+	if og.Description != "" {
+		<meta property="og:description" content={ og.Description }/>
+		<meta name="twitter:description" content={ og.Description }/>
+	}
+	if og.URL != "" {
+		<meta property="og:url" content={ og.URL }/>
+	}
+	if og.Image != "" {
+		<meta property="og:image" content={ og.Image }/>
+		<meta property="og:image:width" content="1200"/>
+		<meta property="og:image:height" content="630"/>
+		<meta name="twitter:image" content={ og.Image }/>
+		<meta name="twitter:card" content="summary_large_image"/>
+	} else {
+		<meta name="twitter:card" content="summary"/>
+	}
 }

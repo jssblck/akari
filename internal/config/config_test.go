@@ -5,6 +5,39 @@ import (
 	"time"
 )
 
+func TestLoadServerOGRefreshInterval(t *testing.T) {
+	t.Setenv("AKARI_DATABASE_URL", "postgres://x/y")
+	// Isolate from any ambient value the harness may export.
+	t.Setenv("AKARI_OG_REFRESH_INTERVAL", "")
+
+	// Default when unset.
+	s, err := LoadServer()
+	if err != nil {
+		t.Fatalf("LoadServer: %v", err)
+	}
+	if s.OGRefreshInterval != time.Hour {
+		t.Fatalf("default OGRefreshInterval = %v, want 1h", s.OGRefreshInterval)
+	}
+
+	// Explicit duration.
+	t.Setenv("AKARI_OG_REFRESH_INTERVAL", "15m")
+	if s, err = LoadServer(); err != nil || s.OGRefreshInterval != 15*time.Minute {
+		t.Fatalf("OGRefreshInterval = %v (err %v), want 15m", s.OGRefreshInterval, err)
+	}
+
+	// "0" disables.
+	t.Setenv("AKARI_OG_REFRESH_INTERVAL", "0")
+	if s, err = LoadServer(); err != nil || s.OGRefreshInterval != 0 {
+		t.Fatalf("OGRefreshInterval = %v (err %v), want 0", s.OGRefreshInterval, err)
+	}
+
+	// A malformed value is a load error, not a silent default.
+	t.Setenv("AKARI_OG_REFRESH_INTERVAL", "banana")
+	if _, err = LoadServer(); err == nil {
+		t.Fatal("LoadServer accepted a malformed AKARI_OG_REFRESH_INTERVAL")
+	}
+}
+
 func TestParseDuration(t *testing.T) {
 	cases := []struct {
 		in       string

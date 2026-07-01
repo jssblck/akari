@@ -7,7 +7,7 @@ import (
 )
 
 templ PublicSessionPage(d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, publicSubs []store.SessionSummary) {
-	@publicLayout(SessionProjectLabel(d) + " session") {
+	@publicLayout(SessionProjectLabel(d)+" session", OGMeta{}) {
 		<div class="session-page">
 			<div class="session-head">
 				<div class="session-title">
@@ -66,8 +66,8 @@ templ PublicSessionPage(d store.SessionDetail, msgs []store.Message, tools map[i
 // the authed overview does), and the Tokens/Dollars toggle keeps working since it
 // is client-side. The panel carries no session links, so nothing here exposes a
 // session or another user.
-templ PublicOverviewPage(username string, a store.Analytics, rng string) {
-	@publicLayout(username + " usage") {
+templ PublicOverviewPage(username string, a store.Analytics, rng string, og OGMeta) {
+	@publicLayout(username+" usage", og) {
 		<div class="public-overview">
 			<div class="public-overview-head">
 				<h1>
@@ -83,7 +83,7 @@ templ PublicOverviewPage(username string, a store.Analytics, rng string) {
 }
 
 templ PublicErrorPage(code int, message string) {
-	@publicLayout(fmt.Sprintf("%d", code)) {
+	@publicLayout(fmt.Sprintf("%d", code), OGMeta{}) {
 		<div class="empty big">
 			<h1>{ fmt.Sprintf("%d", code) }</h1>
 			<p>{ message }</p>

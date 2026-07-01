@@ -169,6 +169,7 @@ yourself. It reads `AKARI_DATABASE_URL` and the upload target from `AKARI_URL`
 | `AKARI_COOKIE_INSECURE` | unset | Set truthy to drop the `Secure` flag on session cookies for plain-HTTP local development. |
 | `AKARI_PUBLIC_URL` | (derived) | The externally reachable base URL (`https://akari.example.com`), used as the OAuth issuer and the base of every URL the MCP authorization flow advertises. Falls back to `AKARI_URL`; when neither is set the server derives the origin from each request (correct for a single-origin deployment behind a sane proxy). |
 | `AKARI_SWEEP_INTERVAL` | `1h` | How often the server reclaims orphaned CAS blobs. A Go duration (`30m`, `2h`); `0` disables the background sweep. |
+| `AKARI_OG_REFRESH_INTERVAL` | `1h` | How often the server wakes to refresh the Open Graph preview cards of published overviews; on each wake it re-renders any card older than a day. A Go duration; `0` disables the background refresh (a card is still rendered when the overview is published). |
 
 Migrations are embedded and applied on startup, so the server is safe to restart.
 
@@ -284,6 +285,14 @@ shares neither sessions nor anyone else's numbers. The address is the username, 
 making it private hides the page without changing the link, and re-publishing
 brings the same URL back. When public, a badge on the owner's overview links to
 the page.
+
+A published overview also gets an Open Graph preview card at
+`/u/<username>/og.png`, so a shared link unfurls with an image: a simplified copy
+of the activity heatmap plus the total-token and session figures, rendered in the
+house style. The card is a pure-Go PNG (no headless browser), rendered once when
+the overview is published and refreshed about once a day by a background loop
+(`AKARI_OG_REFRESH_INTERVAL`), so the preview tracks the account's usage without
+re-rendering on every crawl.
 
 CAS blobs are served per session, not by bare hash: a viewer can fetch a tool
 body only through a session that references it and that they may see. This keeps
