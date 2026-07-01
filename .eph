@@ -48,7 +48,13 @@ healthcheck=pg_isready -U akari -d akari
 # applies its embedded migrations on boot, so no migrate step is needed here.
 run=go run ./cmd/akari-server
 port=auto
-env.AKARI_LISTEN=:${server.port}
+# Bind loopback only, not the wildcard `:${server.port}` (which is 0.0.0.0, every
+# interface). Local dev only reaches the server via localhost (AKARI_URL, the
+# healthcheck, dev-seed), so loopback is enough and it keeps Windows Defender
+# Firewall from prompting on every boot: `go run` compiles a fresh temp binary
+# each time, so a wildcard bind reads as a brand-new program and re-prompts,
+# stacking up dozens of dialogs across async agent runs.
+env.AKARI_LISTEN=127.0.0.1:${server.port}
 # `go run` may spend tens of seconds compiling on the first boot, so wait on the
 # real health endpoint rather than eph's brief default readiness pause.
 healthcheck=curl -sf http://localhost:${server.port}/healthz
