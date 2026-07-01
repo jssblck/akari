@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -107,4 +108,37 @@ func (s *Store) PublicOverviewUser(ctx context.Context, username string) (User, 
 		return User{}, ErrNotFound
 	}
 	return u, err
+}
+
+// PublicOverviewCard resolves a username to its account and reads that account's
+// cached Open Graph card in one query, gated on overview_public = TRUE. Folding the
+// public check, the user lookup, and the card read into a single statement is what
+// keeps the /u/<username>/og.png serve atomic: a split (resolve the user, then read
+// the card) leaves a window where a concurrent unpublish between the two steps could
+// serve a card for an overview that just went private. found is false when the name
+// is unknown or the overview is not public, so the caller 404s the link. When found
+// is true the account is public; card.PNG is nil when no card is cached yet (the
+// LEFT JOIN yields NULLs), which the caller renders on demand. Only the fields the
+// card path needs are loaded; the password hash is left zero.
+func (s *Store) PublicOverviewCard(ctx context.Context, username string) (User, OverviewOGImage, bool, error) {
+	var u User
+	var png []byte
+	var generatedAt *time.Time
+	err := s.Pool.QueryRow(ctx,
+		`SELECT u.id, u.username, u.overview_public, o.png, o.generated_at
+		   FROM users u
+		   LEFT JOIN overview_og_images o ON o.user_id = u.id
+		  WHERE u.username = $1 AND u.overview_public = TRUE`,
+		username).Scan(&u.ID, &u.Username, &u.OverviewPublic, &png, &generatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return User{}, OverviewOGImage{}, false, nil
+	}
+	if err != nil {
+		return User{}, OverviewOGImage{}, false, err
+	}
+	var card OverviewOGImage
+	if png != nil && generatedAt != nil {
+		card = OverviewOGImage{PNG: png, GeneratedAt: *generatedAt}
+	}
+	return u, card, true, nil
 }

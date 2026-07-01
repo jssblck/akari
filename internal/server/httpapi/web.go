@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -320,32 +321,14 @@ func (s *Server) handlePublishSession(w http.ResponseWriter, r *http.Request) {
 
 // handlePublishOverview marks the signed-in user's own usage overview public and
 // redirects back to the account page, where the Publicity section then shows the
-// /u/<username> link. It also renders the Open Graph preview card up front, so a
-// link shared the moment after publishing already unfurls; a render failure does
-// not fail the publish (the card 404s until the daily refresh fills it in).
+// /u/<username> link. The Open Graph preview card is not rendered here: it is
+// rendered lazily the first time the card URL is fetched (a share unfurl) and cached
+// from there, so publishing stays a single cheap write.
 func (s *Server) handlePublishOverview(w http.ResponseWriter, r *http.Request) {
 	p, _ := principalFrom(r.Context())
 	if err := s.Store.PublishOverview(r.Context(), p.UserID); err != nil {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not publish overview."))
 		return
-	}
-	// Render the card up front, logging any failure. A lookup or render error does
-	// not fail the publish (the overview is already public, and the daily refresh
-	// fills the card in), but it must not be swallowed silently, or a missing
-	// publish-time card would be undiagnosable. The user lookup and the render are
-	// logged distinctly so the cause is clear.
-	//
-	// Generate coordinates with reparse itself: it aborts (ErrReparseInProgress)
-	// rather than cache a card read across a projection rebuild, so a startup or
-	// admin reparse running concurrently with this publish yields a quiet skip here,
-	// not a stored mixed aggregate. The post-reparse daily refresh fills the card
-	// once the projection is whole.
-	if u, err := s.Store.UserByID(r.Context(), p.UserID); err != nil {
-		log.Printf("overview og: user lookup for %d failed, skipping publish-time render: %v", p.UserID, err)
-	} else if err := ogimage.Generate(r.Context(), s.Store, u, time.Now()); errors.Is(err, ogimage.ErrReparseInProgress) {
-		log.Printf("overview og: reparse in progress, skipping publish-time render for user %d", p.UserID)
-	} else if err != nil {
-		log.Printf("overview og: publish-time render for user %d failed: %v", p.UserID, err)
 	}
 	http.Redirect(w, r, "/account", http.StatusSeeOther)
 }
@@ -398,45 +381,172 @@ func (s *Server) handlePublicOverview(w http.ResponseWriter, r *http.Request) {
 		Description: "A snapshot of " + u.Username + "'s AI coding-agent usage on akari.",
 		URL:         s.baseURL(r) + web.PublicOverviewPath(u.Username),
 	}
-	// The preview card is a periodic snapshot (rendered at publish, refreshed about
-	// daily) of the default trailing-year window, cached per user rather than per
-	// range. It is an as-of snapshot, not a live mirror of the page: the card carries
-	// its own "as of <date>" stamp, so it may trail the live totals until the next
-	// refresh without claiming to equal them. It is advertised only on the default
-	// window (a narrower ?range is a different view the year-window card does not
-	// represent); the page still carries a well-formed summary card via its title and
-	// description when the image is omitted.
+	// The preview card is a snapshot of the default trailing-year window, rendered on
+	// demand and cached per user (not per range) for a short TTL, so it may trail the
+	// live totals until the cache expires. It is advertised only on the default window
+	// (a narrower ?range is a different view the year-window card does not represent);
+	// the page still carries a well-formed summary card via its title and description
+	// when the image is omitted.
 	if rng == web.DefaultRange {
 		og.Image = s.baseURL(r) + "/u/" + url.PathEscape(u.Username) + "/og.png"
 	}
 	render(w, r, http.StatusOK, web.PublicOverviewPage(u.Username, analytics, rng, og))
 }
 
-// handlePublicOverviewOGImage serves the pre-rendered Open Graph preview card for a
-// published overview at /u/<username>/og.png. The bytes are a stored snapshot
-// (rendered at publish time and refreshed daily), so this is a cheap byte-serve
-// with no analytics query and no reparse gate: it returns the same PNG whether or
-// not a reparse is rebuilding the projection. An unpublished or not-yet-rendered
-// account 404s, matching the page itself.
+// handlePublicOverviewOGImage serves the Open Graph preview card for a published
+// overview at /u/<username>/og.png. The card is rendered lazily and cached: a
+// request served a card younger than the TTL returns the cached bytes; a miss or an
+// expired card renders a fresh one on demand, stores it, and serves that. So a burst
+// of crawler fetches after a share costs one render, not one per fetch, and a card
+// nobody shares is never rendered at all. An unpublished or unknown account 404s,
+// matching how /u/<username> itself resolves.
 func (s *Server) handlePublicOverviewOGImage(w http.ResponseWriter, r *http.Request) {
 	username := r.PathValue("username")
-	img, err := s.Store.PublicOverviewOGImage(r.Context(), username)
-	if errors.Is(err, store.ErrNotFound) {
-		http.NotFound(w, r)
-		return
-	}
+	now := time.Now()
+
+	// One query resolves the user, checks the public gate, and reads any cached card
+	// together. Folding the public check into the card read keeps the serve atomic: a
+	// split (resolve the user, then read the card) would leave a window where a
+	// concurrent unpublish slips between the two steps and a card is served for an
+	// overview that just went private.
+	u, cached, found, err := s.Store.PublicOverviewCard(r.Context(), username)
 	if err != nil {
 		http.Error(w, "Could not load preview image.", http.StatusInternalServerError)
 		return
 	}
+	if !found {
+		http.NotFound(w, r)
+		return
+	}
+	haveCache := cached.PNG != nil
+	if haveCache && now.Sub(cached.GeneratedAt) < s.ogCacheTTL() {
+		s.writeOGImage(w, cached.PNG)
+		return
+	}
+
+	// Cache miss or expired: render on demand, store, and serve the fresh bytes.
+	// A reparse rebuilding the projection makes a consistent snapshot impossible;
+	// rather than cache a half-rebuilt total, Generate aborts. In that case serve the
+	// last good card if we still hold one, else 404 (transient, clears once the
+	// reparse finishes and a later request renders the card).
+	//
+	// Coalesce concurrent renders for this user through singleflight, so a burst of
+	// unfurls on a cold or expired cache runs the render once and the rest serve its
+	// result. renderOGImage detaches the shared render from any single request (so one
+	// crawler dropping its connection cannot cancel it for the others) but bounds it
+	// with a timeout, and lets this handler return early if its own request is
+	// cancelled while the render continues for whoever is still waiting.
+	png, genErr := s.renderOGImage(r.Context(), u, now)
+
+	// The client may have disconnected mid-render: renderOGImage returns the request
+	// context's error when it does. Nothing to serve and nothing broke, so return
+	// quietly (and skip the gate re-read below, which that cancelled context would fail
+	// anyway) rather than logging a spurious failure.
+	if r.Context().Err() != nil {
+		return
+	}
+
+	// Re-confirm the overview is still public before serving anything: an unpublish
+	// during the render must 404, not unfurl a card (fresh or stale) for a now-private
+	// overview. One gated read does double duty: it re-checks visibility and returns
+	// the canonical cached card the stale-fallback branches serve. A real lookup error
+	// is distinct from a closed gate: withhold the card either way, but surface the
+	// backend failure rather than disguising it as a missing card.
+	_, latest, stillPublic, gateErr := s.Store.PublicOverviewCard(r.Context(), username)
+	switch {
+	case gateErr != nil:
+		log.Printf("overview og: public re-check for user %d (%s) failed: %v", u.ID, u.Username, gateErr)
+		http.Error(w, "Could not load preview image.", http.StatusInternalServerError)
+		return
+	case !stillPublic:
+		http.NotFound(w, r)
+		return
+	}
+
+	switch {
+	case genErr == nil:
+		s.writeOGImage(w, png)
+	case errors.Is(genErr, ogimage.ErrReparseInProgress):
+		// A reparse blocked the fresh render. Serve the last good card if the gated
+		// re-read still holds one, else 404 (transient, clears once the reparse ends).
+		if latest.PNG != nil {
+			s.writeOGImage(w, latest.PNG)
+			return
+		}
+		http.NotFound(w, r)
+	default:
+		// A real render failure. Log it regardless of whether a stale card saves the
+		// response: serving stale masks the failure from the crawler, but the refresh
+		// still broke, and a persistently failing render must stay diagnosable rather
+		// than hiding behind an ever-staler card. Then serve the last good card if we
+		// hold one (it beats a 500 to a crawler), else report the error.
+		log.Printf("overview og: render for user %d (%s) failed: %v", u.ID, u.Username, genErr)
+		if latest.PNG != nil {
+			s.writeOGImage(w, latest.PNG)
+			return
+		}
+		http.Error(w, "Could not load preview image.", http.StatusInternalServerError)
+	}
+}
+
+// ogRenderTimeout bounds a single on-demand card render (its analytics snapshot, the
+// raster, and the cache write). The render is detached from the request that triggers
+// it so a dropped crawler connection cannot cancel it for the other waiters, so it
+// needs its own deadline: without one a stuck query would pin the singleflight leader
+// and every same-user waiter, and could stall shutdown. Rendering is normally
+// sub-second, so 30s is a generous safety ceiling well above the expected duration.
+const ogRenderTimeout = 30 * time.Second
+
+// renderOGImage renders and caches one user's preview card through the per-user
+// singleflight group, so concurrent misses for the same overview share a single
+// render rather than each running the full year-window analytics and raster. The
+// waiters receive the same bytes and error the leader produced; ogimage.Generate
+// already reconciles a losing guarded write to the canonical cached card, so every
+// caller here serves what the cache holds.
+//
+// The shared render runs under a bounded context detached from any single caller
+// (context.WithoutCancel plus a timeout), so one request disconnecting does not cancel
+// it for the others, yet it cannot run unbounded. Each caller still waits on its own
+// request context: a crawler that drops its connection returns promptly with that
+// context's error while the detached render continues for whoever remains.
+func (s *Server) renderOGImage(ctx context.Context, u store.User, now time.Time) ([]byte, error) {
+	ch := s.ogRender.DoChan(strconv.FormatInt(u.ID, 10), func() (any, error) {
+		renderCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ogRenderTimeout)
+		defer cancel()
+		return ogimage.Generate(renderCtx, s.Store, u, now)
+	})
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case res := <-ch:
+		if res.Err != nil {
+			return nil, res.Err
+		}
+		return res.Val.([]byte), nil
+	}
+}
+
+// ogCacheTTL is how long a rendered preview card is served before a request
+// re-renders it. It honors the configured value and falls back to a sane default, so
+// a zero-value config (as the tests construct) still caches rather than rendering on
+// every request.
+func (s *Server) ogCacheTTL() time.Duration {
+	if s.Cfg.OGCacheTTL > 0 {
+		return s.Cfg.OGCacheTTL
+	}
+	return time.Hour
+}
+
+// writeOGImage serves the card bytes as a PNG. The Cache-Control window mirrors the
+// server-side TTL, so a crawler's repeat unfurls stay off the render path for about
+// as long as the cached card is considered fresh, without pinning a stale card
+// longer.
+func (s *Server) writeOGImage(w http.ResponseWriter, png []byte) {
 	w.Header().Set("Content-Type", "image/png")
-	w.Header().Set("Content-Length", strconv.Itoa(len(img.PNG)))
-	// A crawler may re-fetch on every share; the card only changes about daily, so a
-	// modest cache keeps repeat unfurls off the database without pinning a stale card
-	// for long.
-	w.Header().Set("Cache-Control", "public, max-age=3600")
+	w.Header().Set("Content-Length", strconv.Itoa(len(png)))
+	w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", int(s.ogCacheTTL().Seconds())))
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(img.PNG)
+	_, _ = w.Write(png)
 }
 
 // handleUnpublishSession returns the owner's session to internal visibility.

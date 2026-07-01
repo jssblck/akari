@@ -19,9 +19,13 @@
 # token classes is worth checking wherever it lands; and a projection can drift from
 # its source in any package that maintains one. The token-consistency reviewer owns
 # token handling end to end: any operation on the four classes (parse, roll up,
-# persist, reset, price, aggregate) must carry all four, and any token figure in the
-# UI must show its breakdown and reconcile with the cost and rows beside it. It also
-# triggers on the web templates, where the figures render.
+# persist, reset, price, aggregate) must carry all four wherever it lands. Its display
+# rules are scoped to the interactive web UI: any token figure in the server-rendered
+# HTML must show its breakdown card and reconcile with the cost and rows beside it. It
+# also triggers on the web templates, where those figures render. Static render
+# surfaces (the Open Graph preview image, a raster with no hover or focus target) are
+# out of scope for the breakdown-card requirement, though the all-class operation rule
+# still governs how their numbers are computed.
 #
 # The projection-consistency reviewer owns the general shape behind that: any time
 # the code keeps more than one representation of the same fact (a denormalized rollup
@@ -293,22 +297,37 @@ reviewers:
           threaded through it; when an existing class is added or a fifth appears,
           check that every operation that should fold it in does. This is the
           general rule; the two below are its specific shapes in the UI.
-        - A single token number rendered in the UI with no per-class detail
-          attached. Every place a token count is shown as one figure must carry
-          the shared hover/focus breakdown card (the component that splits the
-          total into input, output, cache read, cache write, and the cost), so a
-          reader can always see what the number is made of. A new figure that
-          prints a count without that card is the regression. In this codebase the
-          card is the shared tokenCard component (the .tok-tip / .stat-tip
-          markup); a count rendered outside it, or a new figure that hand-rolls a
-          partial card, is the finding. The principle is general, not tied to one
-          template: any standalone token number needs its breakdown.
+        - A single token number rendered in the interactive web UI with no
+          per-class detail attached. This property governs the web UI only: the
+          server-rendered HTML pages and templ templates (internal/server/web),
+          where a reader can hover or focus a figure. Every token count shown as
+          one figure there must carry the shared hover/focus breakdown card (the
+          component that splits the total into input, output, cache read, cache
+          write, and the cost), so a reader can always see what the number is made
+          of. A new figure that prints a count without that card is the
+          regression. In this codebase the card is the shared tokenCard component
+          (the .tok-tip / .stat-tip markup); a count rendered outside it, or a new
+          figure that hand-rolls a partial card, is the finding. The principle is
+          general across the web templates, not tied to one of them: any standalone
+          token number in the HTML UI needs its breakdown.
+
+          Static, non-HTML render surfaces are out of scope for this property. An
+          Open Graph preview image (or any rendered raster) has no hover or focus
+          target to attach a breakdown card to, and a deliberately minimal
+          social-share card may show a headline total on its own. Do not block a
+          token figure on such a surface for lacking the breakdown card. The
+          all-class operation rule above still applies to how that number is
+          computed (it must be a genuine all-four-classes total, not a subset
+          mislabeled as the whole).
         - A headline or summary token total that is sourced or filtered
-          differently from the per-row breakdown shown in the same view, so the
-          total no longer equals the sum of its rows. The overview total and the
-          rows beneath it (by model, by agent, per day) must derive from one base
-          and reconcile: summing the visible rows must reproduce the headline, for
-          tokens and for cost. Block a change that reintroduces a divergent source
+          differently from the per-row breakdown shown in the same web UI view, so
+          the total no longer equals the sum of its rows. This too governs the
+          server-rendered HTML, where a headline and its rows render together; a
+          surface that shows only a headline with no rows beside it (a minimal
+          preview card) has nothing to reconcile against and is not in scope. The
+          overview total and the rows beneath it (by model, by agent, per day) must
+          derive from one base and reconcile: summing the visible rows must
+          reproduce the headline, for tokens and for cost. Block a change that reintroduces a divergent source
           (the total from one query, the rows from another), or a filter that
           drops a group from one side but not the other (an excluded unnamed or
           empty bucket, a dated-only total set against an all-time row set), or any

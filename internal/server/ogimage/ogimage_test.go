@@ -53,9 +53,8 @@ func TestRenderDimensionsAndDeterminism(t *testing.T) {
 		t.Fatalf("size = %dx%d, want %dx%d", b.Dx(), b.Dy(), Width, Height)
 	}
 
-	// Same inputs must render byte-identical output, so an unchanged overview does
-	// not thrash the stored card (and the daily refresh is a no-op when nothing
-	// changed but the clock).
+	// Same inputs must render byte-identical output, so an unchanged overview
+	// re-rendered after its cache expires yields the same card, not a churned one.
 	second, err := Render("grace", a, now)
 	if err != nil {
 		t.Fatalf("render again: %v", err)
