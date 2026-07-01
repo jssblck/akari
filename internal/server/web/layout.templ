@@ -78,10 +78,13 @@ templ sidebar(p Page) {
 			@navItem("/projects", "projects", "Projects", p.Active)
 			@navItem("/sessions", "sessions", "Sessions", p.Active)
 			@navItem("/account", "account", "Account", p.Active)
+			@navItem("/guide", "guide", "Guide", p.Active)
 		</nav>
 		<span class="spacer"></span>
 		<div class="sb-foot">
 			<span class="who">{ p.Username }</span>
+			<span class="spacer"></span>
+			<a class="sb-icon" href="https://github.com/jssblck/akari" aria-label="akari on GitHub" title="akari on GitHub" rel="noopener" target="_blank">@githubGlyph()</a>
 			<form method="post" action="/logout" class="inline">
 				<button class="ghost small" type="submit">Log out</button>
 			</form>
@@ -106,6 +109,9 @@ templ navIcon(key string) {
 			case "account":
 				<circle cx="8" cy="5.5" r="2.6"></circle>
 				<path d="M3 14c0-2.8 2.2-4.5 5-4.5s5 1.7 5 4.5"></path>
+			case "guide":
+				<path d="M3 3h6.5a1.5 1.5 0 0 1 1.5 1.5V14a1.2 1.2 0 0 0-1.2-1.2H3z"></path>
+				<path d="M13 3H9.5A1.5 1.5 0 0 0 8 4.5V14a1.2 1.2 0 0 1 1.2-1.2H13z"></path>
 		}
 	</svg>
 }
@@ -121,6 +127,14 @@ templ brandMark() {
 		<span>akari</span>
 		<span class="brandver">{ version.String() }</span>
 	</span>
+}
+
+// githubGlyph is the octocat mark used by the public topbar's repository link. It
+// inherits its color from the link, so it follows the topbar's hover state.
+templ githubGlyph() {
+	<svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true">
+		<path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"></path>
+	</svg>
 }
 
 templ publicLayout(title string, og OGMeta) {
@@ -146,7 +160,11 @@ templ publicLayout(title string, og OGMeta) {
 			<header class="topbar">
 				<a class="brand" href="/">@brandMark()</a>
 				<span class="spacer"></span>
-				<a href="/login">Log in</a>
+				<nav aria-label="Site">
+					<a href="/guide">Docs</a>
+					<a class="gh-link" href="https://github.com/jssblck/akari" aria-label="akari on GitHub" rel="noopener" target="_blank">@githubGlyph()</a>
+					<a href="/login">Log in</a>
+				</nav>
 			</header>
 			<main>
 				{ children... }

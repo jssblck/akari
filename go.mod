@@ -12,6 +12,7 @@ require (
 	github.com/platinummonkey/go-concurrency-limits v1.0.0
 	github.com/tidwall/gjson v1.19.0
 	github.com/tidwall/match v1.1.1
+	github.com/yuin/goldmark v1.8.2
 	golang.org/x/crypto v0.53.0
 	golang.org/x/image v0.43.0
 	golang.org/x/mod v0.37.0

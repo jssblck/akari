@@ -2,6 +2,9 @@
 
 /* ---- Auth ---- */
 .auth-wrap { max-width: 360px; margin: 64px auto; }
+/* The heading sits flush against the form by default (h1 carries no margin), so
+   give it a little breathing room above the first field. */
+.auth-wrap h1 { margin-bottom: var(--sp-lg); }
 .auth-wrap form { display: flex; flex-direction: column; gap: var(--sp-md); }
 .error { color: var(--err); margin: var(--sp-sm) 0; }
 
