@@ -13,7 +13,7 @@ header.topbar {
 .brand:hover { text-decoration: none; }
 .brandmark { display: inline-flex; align-items: center; gap: var(--sp-sm); }
 .brandglyph { color: var(--lilac); display: block; }
-.brandver { color: var(--muted); font-family: var(--mono); font-size: 0.6875rem; font-weight: 400; align-self: flex-end; }
+.brandver { color: var(--muted); font-family: var(--mono); font-size: 0.6875rem; font-weight: 400; align-self: center; }
 header.topbar nav { display: flex; align-items: center; gap: var(--sp-lg); }
 header.topbar nav a { color: var(--subtext); }
 header.topbar nav a:hover { color: var(--lilac); text-decoration: none; }
@@ -50,6 +50,8 @@ header.topbar .who { color: var(--muted); font-family: var(--mono); font-size: 0
 }
 .sidebar .who { color: var(--muted); font-family: var(--mono); font-size: 0.8125rem; }
 .sidebar .sb-foot .spacer { flex: 1; }
+.sidebar .sb-icon { display: inline-flex; color: var(--muted); }
+.sidebar .sb-icon:hover { color: var(--lilac); text-decoration: none; }
 
 /* ---- Responsive ---- */
 @media (max-width: 980px) {
