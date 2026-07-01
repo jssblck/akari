@@ -91,9 +91,22 @@ func cacheStatsFrom(rows []cacheModelRow) CacheStats {
 // rather than counting undated usage the panel drops off its time axis. Savings is
 // folded per model in Go because pricing is compiled into the binary, not in the
 // database, so the rate gap that defines a saving is not a column to sum.
+//
+// It reads on its own pooled connection. The snapshot path (AnalyticsSnapshot) instead
+// threads its transaction through cacheStats, so the Cache tile and the token totals come
+// from one MVCC snapshot and one connection rather than two.
 func (s *Store) CacheStats(ctx context.Context, f AnalyticsFilter) (CacheStats, error) {
+	return s.cacheStats(ctx, s.Pool, f)
+}
+
+// cacheStats runs the scoped cache aggregate on the given querier. Threading the querier is
+// what lets analyticsFrom read the Cache tile inside its snapshot transaction: reconciling
+// with the headline token classes requires the same snapshot (a second pooled connection
+// could straddle a concurrent ingest or reparse), and staying on the one connection avoids
+// a snapshot render holding two pool connections at once.
+func (s *Store) cacheStats(ctx context.Context, q querier, f AnalyticsFilter) (CacheStats, error) {
 	filter, args := f.clause()
-	rows, err := s.Pool.Query(ctx,
+	rows, err := q.Query(ctx,
 		`SELECT ue.model,
 		        coalesce(sum(ue.input_tokens), 0),
 		        coalesce(sum(ue.output_tokens), 0),

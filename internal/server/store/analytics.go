@@ -208,8 +208,11 @@ func (s *Store) analyticsFrom(ctx context.Context, q querier, f AnalyticsFilter)
 
 	// Cache effectiveness shares the same scoped dated-usage base, so its prompt
 	// totals reconcile with the headline token classes above (its Input/CacheRead/
-	// CacheWrite are the same sums, regrouped by model to price the saving).
-	cache, err := s.CacheStats(ctx, f)
+	// CacheWrite are the same sums, regrouped by model to price the saving). It reads
+	// through the same querier, so under AnalyticsSnapshot the Cache tile comes from the
+	// one repeatable-read snapshot as the totals (not a second pooled connection that
+	// could see a different MVCC snapshot, or deadlock a small pool by holding two).
+	cache, err := s.cacheStats(ctx, q, f)
 	if err != nil {
 		return a, err
 	}

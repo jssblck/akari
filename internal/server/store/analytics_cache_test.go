@@ -58,6 +58,60 @@ func TestCacheStats(t *testing.T) {
 	}
 }
 
+// TestCacheStatsReconcilesWithSnapshotTotals pins the Cache tile to the token totals under
+// the snapshot path. AnalyticsSnapshot reads the whole aggregate from one repeatable-read
+// transaction, and the cache aggregate now threads that same transaction rather than a
+// second pooled connection, so the Cache tile's prompt-token sums must equal the headline
+// token classes drawn from the same dated usage. If the cache tile read a different snapshot
+// or a different base, one of these equalities would break.
+func TestCacheStatsReconcilesWithSnapshotTotals(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	admin, err := st.Register(ctx, "grace", "h", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	proj, err := st.UpsertProject(ctx, "github.com/ada/recon", "github.com", "ada", "recon", "recon", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+
+	// Two agents, two models, all dated, with input, output, cache read, and cache write
+	// volume so every token class is non-zero on both sides of the reconciliation.
+	sA := seedSessionWithStats(t, st, admin.ID, proj, "claude", "a", 0, 0, 0)
+	seedUsageCache(t, st, sA, "claude-opus-4-8", 1, 200_000, 100_000, 800_000, 50_000, 1, "a-1")
+	sB := seedSessionWithStats(t, st, admin.ID, proj, "codex", "b", 0, 0, 0)
+	seedUsageCache(t, st, sB, "gpt-5.5", 1, 500_000, 300_000, 500_000, 20_000, 1, "b-1")
+
+	a, ok, err := st.AnalyticsSnapshot(ctx, store.AnalyticsFilter{ProjectID: proj})
+	if err != nil {
+		t.Fatalf("analytics snapshot: %v", err)
+	}
+	if !ok {
+		t.Fatal("snapshot returned ok=false with no reparse in flight")
+	}
+
+	if a.Cache.Input != a.TotalIn {
+		t.Errorf("cache input %d != total input %d", a.Cache.Input, a.TotalIn)
+	}
+	if a.Cache.Output != a.TotalOut {
+		t.Errorf("cache output %d != total output %d", a.Cache.Output, a.TotalOut)
+	}
+	if a.Cache.CacheRead != a.TotalCacheRead {
+		t.Errorf("cache read %d != total cache read %d", a.Cache.CacheRead, a.TotalCacheRead)
+	}
+	if a.Cache.CacheWrite != a.TotalCacheWrite {
+		t.Errorf("cache write %d != total cache write %d", a.Cache.CacheWrite, a.TotalCacheWrite)
+	}
+	// Guard against a vacuous 0 == 0: confirm the volume actually landed.
+	if a.TotalIn != 700_000 || a.TotalCacheRead != 1_300_000 || a.TotalCacheWrite != 70_000 {
+		t.Errorf("unexpected totals: in %d, read %d, write %d (want 700000 / 1300000 / 70000)",
+			a.TotalIn, a.TotalCacheRead, a.TotalCacheWrite)
+	}
+}
+
 // TestCacheStatsIncompleteAndUndated pins two boundaries: an unpriced model's cached
 // volume flags the saving incomplete (a lower bound) rather than dropping silently to
 // zero, and the scoped analytics path excludes undated usage (matching the panel's time
