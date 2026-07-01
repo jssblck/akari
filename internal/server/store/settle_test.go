@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/jssblck/akari/internal/quality"
 	"github.com/jssblck/akari/internal/server/store"
@@ -299,6 +300,85 @@ func TestRefreshSettledSignalsWriteGateSkipsSupersededGrade(t *testing.T) {
 	}
 	if outcome != string(quality.OutcomeAbandoned) {
 		t.Errorf("regraded outcome = %q, want abandoned (the settled fixture)", outcome)
+	}
+}
+
+// TestReconcileStaleVersionsLocksAlreadyDueRow pins the concurrency half of the version reconcile.
+// The reconcile marks EVERY stale-version session, with no NOT signals_stale skip, so it takes the
+// session row lock even on one that is already due. That lock is what serializes an old (N-1) settle
+// pass, mid-flight during a rolling deploy, against this binary's marker advance: without it, an old
+// pass that had already selected an already-due stale-version session could grade it at N-1 and clear
+// signals_stale in the window where the reconcile skipped the row, stranding it at a stale version no
+// reader counts and no drain re-grades. The test holds a stale-version, already-due session's row lock
+// and asserts the settle pass BLOCKS in its reconcile until the lock releases. The session is left
+// unsettled so the drain passes it over; the only thing that can block the pass is the reconcile
+// locking that row, so a reconcile that skipped it (the pre-fix behavior) would let the pass complete.
+func TestReconcileStaleVersionsLocksAlreadyDueRow(t *testing.T) {
+	t.Parallel()
+	st, ctx, uid, pid := signalsEnv(t)
+
+	// A stale-version row that is already due (signals_stale=true) but NOT settled (ended just now), so
+	// the settle drain passes it over. Only the version reconcile targets it, by its superseded version.
+	sid := seedSession(t, st, uid, pid, "sess-lockcontend")
+	if err := st.ApplyProjectionDelta(ctx, sid, store.ProjectionDelta{
+		Messages: []store.MessageDelta{{Ordinal: 0, Role: "user", Content: "first ask"}},
+	}); err != nil {
+		t.Fatalf("apply delta: %v", err)
+	}
+	if _, err := st.Pool.Exec(ctx,
+		"UPDATE sessions SET user_message_count = 1, ended_at = now() WHERE id = $1", sid); err != nil {
+		t.Fatalf("set unsettled ended_at: %v", err)
+	}
+	insertSignalsRow(t, st, ctx, sid, quality.Version+1, "completed", "high", 0, true)
+
+	// Hold the session row lock, standing in for an old settle pass that has selected this due session
+	// and is about to grade it under the pre-advance marker.
+	holdTx, err := st.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin hold tx: %v", err)
+	}
+	defer holdTx.Rollback(ctx)
+	if _, err := holdTx.Exec(ctx, "SELECT id FROM sessions WHERE id = $1 FOR UPDATE", sid); err != nil {
+		t.Fatalf("lock session row: %v", err)
+	}
+
+	// The settle pass runs concurrently. Its reconcile must try to lock this stale-version row, so it
+	// blocks on the held lock rather than completing.
+	done := make(chan error, 1)
+	go func() {
+		_, err := st.RefreshSettledSignals(ctx)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("settle pass completed while the stale-version row was locked (err=%v); the reconcile skipped the already-due row instead of locking it", err)
+	case <-time.After(time.Second):
+		// Still blocked after a generous window: the reconcile is waiting on the row lock, as intended.
+	}
+
+	// Release the lock; the reconcile now proceeds and the pass completes cleanly.
+	if err := holdTx.Rollback(ctx); err != nil {
+		t.Fatalf("release lock: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("settle pass after lock release: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("settle pass did not complete after the lock was released")
+	}
+
+	// The reconcile ran to completion, so the marker advanced to the running version (and the still
+	// unsettled row stays due for a later settled pass to re-grade).
+	var marker int
+	if err := st.Pool.QueryRow(ctx,
+		"SELECT signals_reconciled_version FROM parse_meta WHERE id = TRUE").Scan(&marker); err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	if marker != quality.Version {
+		t.Errorf("marker = %d after the pass, want %d (the reconcile advanced it)", marker, quality.Version)
 	}
 }
 

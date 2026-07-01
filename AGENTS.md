@@ -79,8 +79,12 @@ one leaves a half-migrated corpus:
   settle pass cannot fix such a session, `refreshSignalsTx` also clears its
   `signals_stale` flag so it drops out of the settle-due set rather than being
   re-scanned every wake (an unfixable transcript, one whose reparse fails
-  deterministically, would otherwise be polled forever). The reparse that fills the
-  facts re-marks it due through `applyAggregates` and grades it, so nothing is lost. The version
+  deterministically, would otherwise be polled forever). The clear is guarded by
+  `NOT EXISTS` a current-version `session_signals` row: a session that once graded
+  cleanly and later had its facts superseded keeps `signals_stale = true` so its now
+  pre-append row stays hidden instead of reading as current, and stays due until the
+  paired epoch reparse re-derives it. The reparse that fills the facts re-marks a
+  droppable session due through `applyAggregates` and grades it, so nothing is lost. The version
   is also stamped on the `session_signals` row (`prompt_facts_version`) and gated at
   the two hygiene read sites (`promptHygieneFrom` and the hygiene half of
   `SessionSignalsByID`), so a graded aggregate at a superseded classifier version

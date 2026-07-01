@@ -236,8 +236,10 @@ func (s *Store) BackfillCacheSavings(ctx context.Context) (int, error) {
 // The mark is committed on its own, independent of any reparse, which is the whole point: it survives
 // a failed reparse's rollback. A session that never re-parses is still re-priced from its (old)
 // usage_events at the new rates, exactly what SessionCacheStats computes live, so rollup and recompute
-// agree again. The clear only touches currently-backfilled cache-bearing sessions (an already-false
-// one is already a candidate), and the EXISTS probe skips sessions with no cache volume.
+// agree again. The clear touches every cache-bearing session, including ones already false: an
+// already-false row keeps the same value but is still locked, which is what serializes an old binary's
+// per-session backfill against this marker advance (see the UPDATE below). The EXISTS probe skips
+// sessions with no cache volume.
 //
 // It is gated on a parse_meta marker, mirroring reconcileStaleVersionsIfNeeded for quality.Version: a
 // steady-state startup reads the singleton (one O(1) read), finds the marker current, and skips the
@@ -269,10 +271,21 @@ func (s *Store) reconcileCacheSavingsPricingIfNeeded(ctx context.Context) error 
 		if priced >= pricing.Version {
 			return nil // already priced at this version or a newer one; never step the marker back
 		}
+		// Clear the authoritative flag on EVERY cache-bearing session, with no `s.cache_savings_backfilled`
+		// skip for rows already false. As in reconcileStaleVersions, the write to an already-false row is a
+		// no-op on the value but takes the row LOCK, which is what serializes an old binary's per-session
+		// backfill against this marker advance during a rolling deploy. Skipping already-false candidates
+		// would leave the same hole the signals reconcile closes: an old backfill that had selected such a
+		// candidate could lock it, read the pre-advance pricing marker, write an old-rate total, and set
+		// cache_savings_backfilled=true, all while this reconcile (having skipped that row) advances the
+		// marker and commits. The new drain then skips the now-true row and the session keeps an
+		// authoritative rollup priced at the superseded rates. Locking every cache-bearing row closes it:
+		// the old backfill either locks first (then this UPDATE waits and re-clears the flag after it
+		// commits, so the new drain re-prices) or this UPDATE locks first (then the old backfill's
+		// SELECT ... FOR UPDATE waits, reads the advanced marker, and bows out).
 		if _, err := tx.Exec(ctx,
 			`UPDATE sessions s SET cache_savings_backfilled = false
-			  WHERE s.cache_savings_backfilled
-			    AND EXISTS (SELECT 1 FROM usage_events u
+			  WHERE EXISTS (SELECT 1 FROM usage_events u
 			                 WHERE u.session_id = s.id
 			                   AND (u.cache_read_tokens > 0 OR u.cache_write_tokens > 0))`); err != nil {
 			return fmt.Errorf("mark cache-bearing sessions for reprice: %w", err)

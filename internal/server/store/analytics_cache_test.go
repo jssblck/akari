@@ -787,6 +787,87 @@ func TestCacheSavingsBackfillWriteGateSkipsWhenMarkerAhead(t *testing.T) {
 	}
 }
 
+// TestReconcileCacheSavingsLocksAlreadyCandidateRow pins the concurrency half of the pricing reconcile,
+// the cache analog of TestReconcileStaleVersionsLocksAlreadyDueRow. The reconcile clears the
+// authoritative flag on EVERY cache-bearing session, with no s.cache_savings_backfilled skip, so it
+// locks even an already-false candidate. That lock serializes an old binary's per-session backfill
+// against this binary's marker advance. The test proves the reconcile takes the lock BEFORE advancing
+// the marker: it holds an already-false cache-bearing candidate's row lock and asserts that while the
+// backfill pass is blocked, the pricing marker is still behind. Pre-fix, the reconcile would skip the
+// false candidate, commit its marker advance, then block in the drain, so the marker would already read
+// advanced while the pass was blocked.
+func TestReconcileCacheSavingsLocksAlreadyCandidateRow(t *testing.T) {
+	// Not parallel: it writes the singleton parse_meta pricing marker, shared process-wide state on
+	// this store's database.
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	admin, err := st.Register(ctx, "hamilton", "h", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	proj, err := st.UpsertProject(ctx, "github.com/hamilton/lockcontend", "github.com", "hamilton", "lockcontend", "lockcontend", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+
+	// A cache-bearing session already in the candidate set (cache_savings_backfilled=false), the row the
+	// pre-fix reconcile would skip because it filtered on s.cache_savings_backfilled.
+	s := seedSessionWithStats(t, st, admin.ID, proj, "claude", "lockcontend", 0, 0, 0)
+	seedUsageCache(t, st, s, "claude-opus-4-8", 1, 200_000, 100_000, 800_000, 0, 1, "lc-1")
+	markNeedsCacheBackfill(t, st, ctx, s)
+
+	// The pricing marker is behind, as the first startup after a pricing.Version bump sees it, so the
+	// reconcile runs rather than skipping on a current marker.
+	setCacheSavingsPricedVersion(t, st, ctx, pricing.Version-1)
+
+	// Hold the candidate's row lock, standing in for an old binary's per-session backfill mid-flight.
+	holdTx, err := st.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin hold tx: %v", err)
+	}
+	defer holdTx.Rollback(ctx)
+	if _, err := holdTx.Exec(ctx, "SELECT id FROM sessions WHERE id = $1 FOR UPDATE", s); err != nil {
+		t.Fatalf("lock candidate row: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := st.BackfillCacheSavings(ctx)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("backfill pass completed while the candidate row was locked (err=%v); the reconcile skipped the already-false candidate instead of locking it", err)
+	case <-time.After(time.Second):
+		// Still blocked: the reconcile is waiting on the row lock.
+	}
+
+	// While the pass is blocked, the pricing marker must still be behind: the reconcile takes the row
+	// lock BEFORE it advances the marker. A marker already at pricing.Version here would mean the
+	// reconcile skipped the row and committed its advance, then blocked in the drain, the pre-fix race.
+	if v := readCacheSavingsPricedVersion(t, st, ctx); v != pricing.Version-1 {
+		t.Errorf("pricing marker = %d while the reconcile is blocked, want %d (it must lock the candidate before advancing the marker)", v, pricing.Version-1)
+	}
+
+	// Release the lock; the reconcile advances the marker and the drain re-prices the candidate.
+	if err := holdTx.Rollback(ctx); err != nil {
+		t.Fatalf("release lock: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("backfill pass after lock release: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("backfill pass did not complete after the lock was released")
+	}
+	if v := readCacheSavingsPricedVersion(t, st, ctx); v != pricing.Version {
+		t.Errorf("pricing marker = %d after the pass, want %d (the reconcile advanced it)", v, pricing.Version)
+	}
+}
+
 // TestLiveFoldDropsBackfilledWhenPricingMarkerAhead pins the live-fold half of the pricing
 // rolling-deploy fix. applyAggregates prices a region's cache saving with the running binary's rate
 // table, so if a newer binary has advanced cache_savings_priced_version, an old binary that folds

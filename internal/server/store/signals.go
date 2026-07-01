@@ -388,18 +388,39 @@ func refreshSignalsTx(ctx context.Context, tx pgx.Tx, sessionID int64) error {
 		// change re-inserts every message through it (see epoch.go, projection.go), so it is the
 		// reparse, not this settle pass, that first records this session's hygiene.
 		//
-		// It also clears signals_stale so the session drops out of the settle-due set. Re-selecting it
-		// every wake would be pure waste: gatherSignalFacts has already scanned this session's messages,
-		// tool_calls, and usage_events before reaching this guard, and nothing the settle pass does can
-		// fill the facts (only a reparse re-inserts the messages), so a session stuck here, a
-		// deterministic parser failure the epoch cannot rebuild is the worst case, would be re-scanned on
-		// every tick forever, O(ticks * history) of unchanged work that grows with the ungradeable set.
-		// Clearing the flag is safe because the reparse that does fill the facts re-marks the session due
-		// through applyAggregates (the replay folds its region, setting signals_stale=true) and then
-		// grades it with facts now current; a later projection change (an append) re-marks it the same
-		// way. So the row is re-graded exactly when it becomes gradeable, not polled until then.
+		// It also drops the session out of the settle-due set, but ONLY when doing so cannot expose a
+		// stale grade. Re-selecting a permanently ungradeable session every wake would be pure waste:
+		// gatherSignalFacts has already scanned this session's messages, tool_calls, and usage_events
+		// before reaching this guard, and nothing the settle pass does can fill the facts (only a
+		// reparse re-inserts the messages), so a session stuck here, a deterministic parser failure the
+		// epoch cannot rebuild is the worst case, would be re-scanned on every tick forever,
+		// O(ticks * history) of unchanged work that grows with the ungradeable set.
+		//
+		// The clear is guarded by NOT EXISTS a current-version session_signals row, because clearing
+		// signals_stale unconditionally would break projection consistency. A session can hold a row at
+		// the current signals_version (it graded cleanly once) and later have its facts go stale, when a
+		// PromptFactsVersion bump supersedes the classifier its messages were tagged under, while new
+		// messages or tool calls or usage since that grade already set signals_stale = true through
+		// applyAggregates. That stored row now reflects the pre-append projection. If this guard cleared
+		// signals_stale, the row would pass the NOT signals_stale AND signals_version = quality.Version
+		// read gate again and serve a stale outcome, score, and tool-health as if current, until a
+		// reparse happened to re-derive it. So when such a row exists the clear affects zero rows: the
+		// flag stays true, the stale row stays hidden, and the session stays due, re-scanned until the
+		// paired epoch reparse re-derives its facts and re-grades it (a bounded rollout window, not the
+		// forever loop, because it ends when the reparse reaches the session).
+		//
+		// When no current-version row exists there is nothing to expose, so the clear fires and the
+		// session leaves the due set. That is the ungradeable case the guard exists for: a session that
+		// never graded (no row) or graded only under a superseded signals_version (which the read gate
+		// already hides) is safe to drop. The reparse that does fill the facts re-marks it due through
+		// applyAggregates and grades it with facts now current, and any later append re-marks it the same
+		// way, so a droppable session is re-graded exactly when it becomes gradeable, never polled until then.
 		if _, err := tx.Exec(ctx,
-			`UPDATE sessions SET signals_stale = false WHERE id = $1`, sessionID); err != nil {
+			`UPDATE sessions SET signals_stale = false
+			  WHERE id = $1
+			    AND NOT EXISTS (SELECT 1 FROM session_signals
+			                     WHERE session_id = $1 AND signals_version = $2)`,
+			sessionID, quality.Version); err != nil {
 			return fmt.Errorf("clear signals_stale for ungradeable session %d: %w", sessionID, err)
 		}
 		return nil
@@ -616,13 +637,27 @@ func (s *Store) reconcileStaleVersionsIfNeeded(ctx context.Context) error {
 // inequality scan the settle loop must not repeat on every wake. It runs on the caller's transaction
 // (tx) so the mark, the marker read that gated it, and the marker advance are one atomic, row-locked
 // unit; see reconcileStaleVersionsIfNeeded for why the lock, not just a marker CAS, is required.
+//
+// It deliberately marks EVERY stale-version session, with no `AND NOT s.signals_stale` skip, even
+// though re-marking an already-due session is a no-op on the flag value. The write is not for the
+// value, it is for the row LOCK: a rolling deploy runs an old settle pass at quality.Version N-1
+// against this new binary's N reconcile, and the serialization the marker gate in refreshSignalsTx
+// relies on only holds if the reconcile locks the session row. Skipping already-stale sessions would
+// leave a hole: an old pass that had already selected an already-due stale-version session could lock
+// it, read the pre-advance marker, write an N-1 row, and clear signals_stale, all while this reconcile
+// (having skipped that row) advances the marker and commits. The marker is then current so this
+// reconcile never runs again, and the session is left at a stale-version row that no reader counts
+// (the read gate wants quality.Version) and no drain re-grades (signals_stale is now false): stuck
+// ungraded until its next projection change. Locking every stale-version row closes that: an old pass
+// either locks first (then this UPDATE waits, re-reads the still-stale-version row after the old pass
+// commits its N-1 grade, and re-marks it, so the N drain re-grades) or this UPDATE locks first (then
+// the old pass's lockSession waits, reads the advanced marker, and bows out). Either order converges.
 func (s *Store) reconcileStaleVersions(ctx context.Context, tx pgx.Tx) error {
 	if _, err := tx.Exec(ctx,
 		`UPDATE sessions s SET signals_stale = true
 		   FROM session_signals sig
 		  WHERE sig.session_id = s.id
-		    AND sig.signals_version <> $1
-		    AND NOT s.signals_stale`, quality.Version); err != nil {
+		    AND sig.signals_version <> $1`, quality.Version); err != nil {
 		return fmt.Errorf("reconcile stale signal versions: %w", err)
 	}
 	return nil

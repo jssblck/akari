@@ -697,6 +697,108 @@ func TestSignalsSkipStalePromptFactsVersion(t *testing.T) {
 	}
 }
 
+// TestSignalsGuardKeepsStaleGradeHidden pins the projection-consistency half of the pre-reparse
+// guard. The guard drops an ungradeable session out of the settle-due set by clearing signals_stale,
+// but only when no current-version session_signals row could be re-exposed by the clear. A session
+// can grade cleanly (leaving a current-version row), then take new activity that marks it stale
+// through applyAggregates, and then have its prompt facts superseded by a quality.PromptFactsVersion
+// bump the reparse has not yet reached. That stored row now reflects the pre-activity projection, so
+// clearing signals_stale would let it pass the NOT signals_stale AND signals_version = quality.Version
+// read gate again and serve a stale grade as current. This walks a session through exactly that
+// sequence and asserts the guard leaves signals_stale set, then that the session recovers once the
+// facts are current again. It is the companion to the two guards above, which cover the never-graded
+// case where clearing IS safe.
+func TestSignalsGuardKeepsStaleGradeHidden(t *testing.T) {
+	t.Parallel()
+	st, ctx, uid, pid := signalsEnv(t)
+	sid := seedSession(t, st, uid, pid, "sess-stalegrade-hidden")
+
+	const opener = "please refactor the retry loop in internal/server/store/signals.go"
+	delta := store.ProjectionDelta{
+		Messages: []store.MessageDelta{
+			{Ordinal: 0, Role: "user", Content: opener},
+			{Ordinal: 1, Role: "assistant", Content: "done"},
+		},
+	}
+	if err := st.ApplyProjectionDelta(ctx, sid, delta); err != nil {
+		t.Fatalf("apply delta: %v", err)
+	}
+	setUserMessageCount(t, st, ctx, sid, 1)
+	settleSession(t, st, ctx, sid)
+
+	// Grade it cleanly first: facts are current at insert, so this writes a current-version row and
+	// clears signals_stale. This is the session that graded once, before its classifier is superseded.
+	if err := st.RefreshSessionSignals(ctx, sid); err != nil {
+		t.Fatalf("refresh signals (initial grade): %v", err)
+	}
+	sig, err := st.SessionSignalsByID(ctx, sid)
+	if err != nil {
+		t.Fatalf("read signals: %v", err)
+	}
+	if !sig.Scored() {
+		t.Fatalf("setup: the session must grade first; got unscored %+v", sig)
+	}
+
+	// New activity since that grade marked the session stale (applyAggregates does this on the live and
+	// reparse paths); set it directly here. Then supersede the classifier by rewinding the messages'
+	// prompt_facts_version, standing in for a PromptFactsVersion bump the reparse has not reached, so
+	// the next refresh reaches the pre-reparse guard with a current-version row already present.
+	if _, err := st.Pool.Exec(ctx, `UPDATE sessions SET signals_stale = true WHERE id = $1`, sid); err != nil {
+		t.Fatalf("mark stale: %v", err)
+	}
+	facts := quality.ClassifyPrompt(opener)
+	if _, err := st.Pool.Exec(ctx,
+		`UPDATE messages
+		    SET prompt_short = $2, prompt_no_code = $3, prompt_bare_greeting = $4, prompt_digest = $5,
+		        prompt_facts_version = $6
+		  WHERE session_id = $1 AND role = 'user'`,
+		sid, facts.Short, facts.NoCodeContext, facts.BareGreeting, facts.Digest, quality.PromptFactsVersion-1); err != nil {
+		t.Fatalf("rewind prompt facts version: %v", err)
+	}
+
+	if err := st.RefreshSessionSignals(ctx, sid); err != nil {
+		t.Fatalf("refresh signals (stale facts over graded row): %v", err)
+	}
+
+	// The guard must NOT have cleared signals_stale: a current-version row exists, so clearing it would
+	// re-expose a grade that predates the activity which marked the session stale. The flag stays set,
+	// which keeps the row out of every fleet read's NOT signals_stale gate, and the session stays due.
+	var stale bool
+	if err := st.Pool.QueryRow(ctx, `SELECT signals_stale FROM sessions WHERE id = $1`, sid).Scan(&stale); err != nil {
+		t.Fatalf("read signals_stale: %v", err)
+	}
+	if !stale {
+		t.Error("a graded session whose facts went stale must stay signals_stale=true so its pre-activity grade is not re-exposed")
+	}
+	// The prior grade row is left in place (the guard returns before the upsert), not deleted: it is
+	// hidden by the flag, then re-derived by the reparse, never dropped.
+	var rows int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM session_signals WHERE session_id = $1`, sid).Scan(&rows); err != nil {
+		t.Fatalf("count signals rows: %v", err)
+	}
+	if rows != 1 {
+		t.Errorf("the prior grade row must be left in place, not deleted; got %d row(s)", rows)
+	}
+
+	// When the reparse advances the facts to the current version, the next refresh grades normally and
+	// clears the flag: the session recovers rather than staying hidden forever.
+	if _, err := st.Pool.Exec(ctx,
+		`UPDATE messages SET prompt_facts_version = $2 WHERE session_id = $1 AND role = 'user'`,
+		sid, quality.PromptFactsVersion); err != nil {
+		t.Fatalf("advance prompt facts version: %v", err)
+	}
+	if err := st.RefreshSessionSignals(ctx, sid); err != nil {
+		t.Fatalf("refresh signals (recovered facts): %v", err)
+	}
+	var staleAfter bool
+	if err := st.Pool.QueryRow(ctx, `SELECT signals_stale FROM sessions WHERE id = $1`, sid).Scan(&staleAfter); err != nil {
+		t.Fatalf("read signals_stale after recovery: %v", err)
+	}
+	if staleAfter {
+		t.Error("once facts are current again the session must re-grade and drop out of the due set")
+	}
+}
+
 // setPromptFactsVersion overwrites a graded row's stored classifier version, standing in for a
 // session_signals aggregate that a ClassifyPrompt change (a quality.PromptFactsVersion bump) left at
 // a superseded classifier version before the paired epoch reparse re-derived it.
