@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jssblck/akari/internal/pricing"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/storetest"
 )
@@ -312,6 +313,12 @@ func TestCacheSavingsRollupMatchesRecompute(t *testing.T) {
 		t.Fatalf("project: %v", err)
 	}
 	msgs := []store.MessageDelta{{Ordinal: 0, Role: "user", Content: "go"}}
+
+	// The detail read serves the stored rollup as authoritative only while pricing is current
+	// (marker == pricing.Version), the state a booted server reaches once its startup reconcile has
+	// advanced the migration-seeded marker. Establish that precondition so the rollup matches the
+	// live recompute rather than being flagged partial by a rollout-in-flight.
+	setCacheSavingsPricedVersion(t, st, ctx, pricing.Version)
 
 	// reconcile pins the rollup to the independent recompute for one session, so a failure
 	// says which phase (ingest or reparse) and which session broke it.
