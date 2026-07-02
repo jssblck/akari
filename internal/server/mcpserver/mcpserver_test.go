@@ -391,6 +391,112 @@ func TestGetSessionTranscriptWindowPaging(t *testing.T) {
 	}
 }
 
+// TestModelFallbacksSurfaced pins the model-fallback surface end to end: the feed row
+// and the session header carry model_fallback_count, and get_session carries a
+// model_fallbacks list only when the count is above zero. A fully merged row reports
+// declined_tokens; a system-only row (no observed spend) omits that object and leaves the
+// nullable fields null. A session without fallbacks omits model_fallbacks entirely.
+func TestModelFallbacksSurfaced(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	fx := seedSession(t, st) // one session, no fallbacks
+	ctx := context.Background()
+	sess := connect(t, st)
+
+	// Seed a second session with two fallbacks: one fully merged (message ordinal, all
+	// four declined token classes, category and explanation) and one system-only (no
+	// ordinal, no spend), so the DTO's declined_tokens omitempty is exercised both ways.
+	var owner int64
+	if err := st.Pool.QueryRow(ctx, `SELECT user_id FROM sessions WHERE id = $1`, fx.sessionID).Scan(&owner); err != nil {
+		t.Fatalf("owner: %v", err)
+	}
+	var fbSession int64
+	if err := st.Pool.QueryRow(ctx,
+		`INSERT INTO sessions (user_id, project_id, agent, source_session_id, machine,
+		   message_count, user_message_count, model_fallback_count)
+		 VALUES ($1,$2,'claude','src-fb','box',1,1,2) RETURNING id`,
+		owner, fx.projectID).Scan(&fbSession); err != nil {
+		t.Fatalf("fallback session: %v", err)
+	}
+	if _, err := st.Pool.Exec(ctx,
+		`INSERT INTO model_fallbacks (session_id, message_ordinal, from_model, to_model, trigger,
+		   refusal_category, refusal_explanation,
+		   declined_input_tokens, declined_output_tokens, declined_cache_write_tokens, declined_cache_read_tokens,
+		   occurred_at, dedup_key)
+		 VALUES ($1, 3, 'claude-fable-5', 'claude-opus-4-8', 'fallback',
+		         'safety', 'declined for policy', 11, 22, 33, 44, now(), 'req-merged'),
+		        ($1, NULL, '', '', 'model_refusal_fallback',
+		         NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'req-system-only')`,
+		fbSession); err != nil {
+		t.Fatalf("model_fallbacks: %v", err)
+	}
+
+	// The seeded no-fallback session reports a zero count and omits the list.
+	none := callJSON(t, sess, "get_session", map[string]any{"session_id": fx.sessionID})
+	if c, ok := none["model_fallback_count"].(float64); !ok || c != 0 {
+		t.Fatalf("no-fallback session model_fallback_count = %v, want 0: %+v", none["model_fallback_count"], none)
+	}
+	if _, present := none["model_fallbacks"]; present {
+		t.Fatalf("no-fallback session must omit model_fallbacks: %+v", none)
+	}
+
+	// The fallback session's header carries the count and the ordered list.
+	det := callJSON(t, sess, "get_session", map[string]any{"session_id": fbSession})
+	if c, ok := det["model_fallback_count"].(float64); !ok || c != 2 {
+		t.Fatalf("fallback session model_fallback_count = %v, want 2: %+v", det["model_fallback_count"], det)
+	}
+	fbs, _ := det["model_fallbacks"].([]any)
+	if len(fbs) != 2 {
+		t.Fatalf("want 2 model_fallbacks, got %d: %+v", len(fbs), det["model_fallbacks"])
+	}
+	// Order is by occurred_at then dedup_key; the merged row (with a timestamp) sorts
+	// before the system-only row (a null timestamp sorts last).
+	merged := fbs[0].(map[string]any)
+	if merged["from_model"] != "claude-fable-5" || merged["to_model"] != "claude-opus-4-8" {
+		t.Fatalf("merged fallback models wrong: %+v", merged)
+	}
+	if int(merged["message_ordinal"].(float64)) != 3 || merged["refusal_category"] != "safety" {
+		t.Fatalf("merged fallback fields wrong: %+v", merged)
+	}
+	dt, ok := merged["declined_tokens"].(map[string]any)
+	if !ok {
+		t.Fatalf("merged fallback missing declined_tokens: %+v", merged)
+	}
+	if int(dt["input"].(float64)) != 11 || int(dt["output"].(float64)) != 22 ||
+		int(dt["cache_write"].(float64)) != 33 || int(dt["cache_read"].(float64)) != 44 {
+		t.Fatalf("declined_tokens wrong: %+v", dt)
+	}
+
+	// The system-only row omits declined_tokens and leaves the nullable fields null.
+	sysOnly := fbs[1].(map[string]any)
+	if _, present := sysOnly["declined_tokens"]; present {
+		t.Fatalf("system-only fallback must omit declined_tokens: %+v", sysOnly)
+	}
+	if mo, present := sysOnly["message_ordinal"]; !present || mo != nil {
+		t.Fatalf("system-only fallback message_ordinal should be null: %+v", sysOnly)
+	}
+	if sysOnly["trigger"] != "model_refusal_fallback" {
+		t.Fatalf("system-only fallback trigger wrong: %+v", sysOnly)
+	}
+
+	// The feed row carries the per-session count too.
+	feed := callJSON(t, sess, "list_sessions", map[string]any{})
+	rows, _ := feed["sessions"].([]any)
+	var seen bool
+	for _, r := range rows {
+		row := r.(map[string]any)
+		if int(row["id"].(float64)) == int(fbSession) {
+			seen = true
+			if c, ok := row["model_fallback_count"].(float64); !ok || c != 2 {
+				t.Fatalf("feed row model_fallback_count = %v, want 2: %+v", row["model_fallback_count"], row)
+			}
+		}
+	}
+	if !seen {
+		t.Fatalf("fallback session missing from feed: %+v", feed)
+	}
+}
+
 func TestReadToolBodyTruncates(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)

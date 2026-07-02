@@ -216,33 +216,38 @@ type sessionsDTO struct {
 }
 
 type sessionDTO struct {
-	ID               int64      `json:"id"`
-	Agent            string     `json:"agent"`
-	Machine          string     `json:"machine,omitempty"`
-	GitBranch        string     `json:"git_branch,omitempty"`
-	Username         string     `json:"username"`
-	MessageCount     int        `json:"message_count"`
-	UserMessageCount int        `json:"user_message_count"`
-	Tokens           tokens     `json:"tokens"`
-	CostUSD          float64    `json:"cost_usd"`
-	CostIncomplete   bool       `json:"cost_incomplete"`
-	Visibility       string     `json:"visibility"`
-	PublicID         *string    `json:"public_id,omitempty"`
-	StartedAt        *time.Time `json:"started_at,omitempty"`
-	EndedAt          *time.Time `json:"ended_at,omitempty"`
-	LastActiveAt     *time.Time `json:"last_active_at,omitempty"`
-	ProjectID        int64      `json:"project_id,omitempty"`
-	ProjectKey       string     `json:"project_key,omitempty"`
-	ProjectName      string     `json:"project_name,omitempty"`
-	ProjectKind      string     `json:"project_kind,omitempty"`
+	ID               int64  `json:"id"`
+	Agent            string `json:"agent"`
+	Machine          string `json:"machine,omitempty"`
+	GitBranch        string `json:"git_branch,omitempty"`
+	Username         string `json:"username"`
+	MessageCount     int    `json:"message_count"`
+	UserMessageCount int    `json:"user_message_count"`
+	// ModelFallbackCount is how many Claude Fable turns the safety classifier declined
+	// and re-served on a lower model. Always present; 0 means none. get_session pairs it
+	// with a model_fallbacks list; on the feed it is a per-row count only.
+	ModelFallbackCount int        `json:"model_fallback_count"`
+	Tokens             tokens     `json:"tokens"`
+	CostUSD            float64    `json:"cost_usd"`
+	CostIncomplete     bool       `json:"cost_incomplete"`
+	Visibility         string     `json:"visibility"`
+	PublicID           *string    `json:"public_id,omitempty"`
+	StartedAt          *time.Time `json:"started_at,omitempty"`
+	EndedAt            *time.Time `json:"ended_at,omitempty"`
+	LastActiveAt       *time.Time `json:"last_active_at,omitempty"`
+	ProjectID          int64      `json:"project_id,omitempty"`
+	ProjectKey         string     `json:"project_key,omitempty"`
+	ProjectName        string     `json:"project_name,omitempty"`
+	ProjectKind        string     `json:"project_kind,omitempty"`
 }
 
 func sessionSummaryToDTO(s store.SessionSummary) sessionDTO {
 	return sessionDTO{
 		ID: s.ID, Agent: s.Agent, Machine: s.Machine, GitBranch: s.GitBranch, Username: s.Username,
 		MessageCount: s.MessageCount, UserMessageCount: s.UserMessageCount,
-		Tokens:  toks(s.TotalInput, s.TotalOutput, s.TotalCacheRead, s.TotalCacheWrite),
-		CostUSD: s.TotalCostUSD, CostIncomplete: s.CostIncomplete,
+		ModelFallbackCount: s.ModelFallbackCount,
+		Tokens:             toks(s.TotalInput, s.TotalOutput, s.TotalCacheRead, s.TotalCacheWrite),
+		CostUSD:            s.TotalCostUSD, CostIncomplete: s.CostIncomplete,
 		Visibility: s.Visibility, PublicID: s.PublicID,
 		StartedAt: s.StartedAt, EndedAt: s.EndedAt, LastActiveAt: s.LastActiveAt,
 	}
@@ -315,9 +320,61 @@ type sessionDetailDTO struct {
 	// is a session-wide aggregate, returned only on the first view (the header-only call
 	// or the first transcript window) and omitted on later pages so paging a long
 	// session does not recompute it per page.
-	DuplicateToolCallIDs *int           `json:"duplicate_tool_call_ids,omitempty"`
-	Subagents            []sessionDTO   `json:"subagents,omitempty"`
-	Transcript           *transcriptDTO `json:"transcript,omitempty"`
+	DuplicateToolCallIDs *int         `json:"duplicate_tool_call_ids,omitempty"`
+	Subagents            []sessionDTO `json:"subagents,omitempty"`
+	// ModelFallbacks lists the session's model fallbacks (see model_fallback_count),
+	// one object per occurrence in order. Omitted entirely when the count is zero, so
+	// its presence alone signals the session fell back from a Fable model at least once.
+	ModelFallbacks []modelFallbackDTO `json:"model_fallbacks,omitempty"`
+	Transcript     *transcriptDTO     `json:"transcript,omitempty"`
+}
+
+// modelFallbackDTO is one recorded fallback: a Claude Fable turn the safety classifier
+// declined and re-served on a lower model. Strings are empty when the merged row never
+// saw the source line that carries them; declined_tokens is omitted when the declined
+// attempt's spend was not observed. from_model and to_model are the models the turn fell
+// FROM (Fable) and TO (the served lower model).
+type modelFallbackDTO struct {
+	MessageOrdinal     *int            `json:"message_ordinal"`
+	FromModel          string          `json:"from_model"`
+	ToModel            string          `json:"to_model"`
+	Trigger            string          `json:"trigger"`
+	RefusalCategory    string          `json:"refusal_category"`
+	RefusalExplanation string          `json:"refusal_explanation"`
+	DeclinedTokens     *declinedTokens `json:"declined_tokens,omitempty"`
+	OccurredAt         *time.Time      `json:"occurred_at"`
+}
+
+// declinedTokens is the token spend of the declined attempt. It is present only when
+// that attempt's usage was observed (all four counts merged in); a nil count leaves the
+// whole object omitted rather than reporting a partial, misleading zero.
+type declinedTokens struct {
+	Input      int64 `json:"input"`
+	Output     int64 `json:"output"`
+	CacheWrite int64 `json:"cache_write"`
+	CacheRead  int64 `json:"cache_read"`
+}
+
+func modelFallbackToDTO(f store.ModelFallback) modelFallbackDTO {
+	d := modelFallbackDTO{
+		MessageOrdinal:     f.MessageOrdinal,
+		FromModel:          f.FromModel,
+		ToModel:            f.ToModel,
+		Trigger:            f.Trigger,
+		RefusalCategory:    f.RefusalCategory,
+		RefusalExplanation: f.RefusalExplanation,
+		OccurredAt:         f.OccurredAt,
+	}
+	// Report the declined spend only when every class was observed: the counts merge
+	// in together from the assistant source line, so a single nil means the attempt's
+	// usage was not seen and a zeroed object would read as a real (free) attempt.
+	if f.DeclinedInput != nil && f.DeclinedOutput != nil && f.DeclinedCacheWrite != nil && f.DeclinedCacheRead != nil {
+		d.DeclinedTokens = &declinedTokens{
+			Input: *f.DeclinedInput, Output: *f.DeclinedOutput,
+			CacheWrite: *f.DeclinedCacheWrite, CacheRead: *f.DeclinedCacheRead,
+		}
+	}
+	return d
 }
 
 // transcriptDTO is one bounded window of a session's transcript. The tool calls and

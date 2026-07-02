@@ -440,7 +440,17 @@ func (s *Server) sessionHeaderStats(ctx context.Context, d store.SessionDetail) 
 	if err != nil {
 		return web.HeaderStats{}, err
 	}
-	return web.HeaderStats{Cache: cache, Signals: sig}, nil
+	// Only a session whose rollup counted a fallback pays for the fallbacks read; the
+	// common no-fallback session skips it, so the header tile and transcript notices cost
+	// nothing on the overwhelming majority of pages. The rollup is the O(1) gate.
+	var fallbacks []store.ModelFallback
+	if d.ModelFallbackCount > 0 {
+		fallbacks, err = s.Store.SessionModelFallbacks(ctx, d.ID)
+		if err != nil {
+			return web.HeaderStats{}, err
+		}
+	}
+	return web.HeaderStats{Cache: cache, Signals: sig, Fallbacks: fallbacks}, nil
 }
 
 func (s *Server) handleSessionPage(w http.ResponseWriter, r *http.Request) {

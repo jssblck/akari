@@ -77,7 +77,17 @@ import (
 // appended turns would classify under the new rules, blending two representations in one transcript;
 // bumping Version forces a rewind-and-replay so the whole session re-roles in one pass. The golden
 // fixtures move with this change.
-const Version = 8
+//
+// Version 9 pairs with the Epoch 8 -> 9 bump that adds the model_fallbacks projection row (a Claude
+// Fable turn the safety classifier declined and re-served on a lower model, see migration
+// 0034_model_fallbacks and the fallback upsert in store/projection.go). This is a real parser output
+// change: the reducer emits a new op type from the transcript's explicit fallback markers, so the
+// golden fixtures move. A session parsed at version 8 must not resume incrementally, because the
+// per-session model_fallback_count is accumulated as the fallback rows insert: an incremental advance
+// would count only the fallbacks in newly appended regions and leave the session's pre-change fallbacks
+// undetected. Bumping Version forces a rewind-and-replay so every region re-detects its fallbacks and the
+// count re-accumulates from the full session in one pass.
+const Version = 9
 
 // Advance parses any not-yet-parsed bytes of a session and applies them to the
 // projection, looping until the parse cursor catches up to the stored length. It
@@ -245,5 +255,40 @@ func toProjectionDelta(p parser.Delta) store.ProjectionDelta {
 		d.Usage = append(d.Usage, pu)
 	}
 
+	for _, fb := range p.Fallbacks {
+		d.Fallbacks = append(d.Fallbacks, store.ProjFallback{
+			MessageOrdinal:     fb.MessageOrdinal,
+			FromModel:          fb.FromModel,
+			ToModel:            fb.ToModel,
+			Trigger:            fb.Trigger,
+			RefusalCategory:    fb.RefusalCategory,
+			RefusalExplanation: fb.RefusalExplanation,
+			// The declined token counts are meaningful only on an assistant-side op that saw a
+			// fallback_message iteration entry. The reducer leaves them zero on a system-side op
+			// (and on an assistant op with no declined attempt), so only an assistant-side op that
+			// actually observed the declined spend carries a non-nil pointer here: a nil leaves the
+			// column NULL ("unmeasured") for the merge, rather than folding a spurious zero over a
+			// value the paired assistant line supplied.
+			DeclinedInput:      declinedTokens(fb.MessageOrdinal, fb.DeclinedInput),
+			DeclinedOutput:     declinedTokens(fb.MessageOrdinal, fb.DeclinedOutput),
+			DeclinedCacheWrite: declinedTokens(fb.MessageOrdinal, fb.DeclinedCacheWrite),
+			DeclinedCacheRead:  declinedTokens(fb.MessageOrdinal, fb.DeclinedCacheRead),
+			OccurredAt:         fb.OccurredAt,
+			DedupKey:           fb.DedupKey,
+		})
+	}
+
 	return d
+}
+
+// declinedTokens turns a reducer-side declined token count into the store's nullable
+// column: the assistant-side op (the only one with a MessageOrdinal) carries the declined
+// spend, so its count (even zero) is a measured value; the system-side op has no ordinal
+// and no declined attempt, so its zero is "unmeasured" and maps to NULL, leaving the column
+// for the paired assistant line to fill rather than pinning it to zero.
+func declinedTokens(ordinal *int, n int) *int {
+	if ordinal == nil {
+		return nil
+	}
+	return &n
 }

@@ -241,11 +241,16 @@ td.num, th.num, table.grid td.num, table.grid th.num { text-align: right; font-f
    tool-health counts into a third. All reveal their breakdown on hover or keyboard
    focus through the one .stat-tip system, the same detail the overview heatmap surfaces
    for a day. */
-.tokens-stat, .cache-stat, .quality-stat { position: relative; outline: none; }
-.tokens-value, .cache-value, .quality-value { text-decoration: underline dotted var(--faint); text-underline-offset: 3px; }
+.tokens-stat, .cache-stat, .quality-stat, .fallback-stat { position: relative; outline: none; }
+.tokens-value, .cache-value, .quality-value, .fallback-value { text-decoration: underline dotted var(--faint); text-underline-offset: 3px; }
 .tokens-stat:hover, .tokens-stat:focus-visible,
 .cache-stat:hover, .cache-stat:focus-visible,
-.quality-stat:hover, .quality-stat:focus-visible { background: var(--surface-2); }
+.quality-stat:hover, .quality-stat:focus-visible,
+.fallback-stat:hover, .fallback-stat:focus-visible { background: var(--surface-2); }
+/* The Fallbacks tile renders only when a session had one, so its presence is the signal;
+   the count sits in the warn band (the peach caution the sheet already uses for an
+   estimated or in-progress value), never the lilac accent, keeping to the One Voice Rule. */
+.fallback-value { color: var(--warn); }
 /* The grade banding reads like a report card off the existing status palette (no new
    hues, per the One Voice Rule): A and B sage, C peach, D and F rose, an unscored
    session left in the default text colour so a dash never looks like a verdict. */
@@ -262,7 +267,8 @@ td.num, th.num, table.grid td.num, table.grid th.num { text-align: right; font-f
 }
 .tokens-stat:hover .stat-tip, .tokens-stat:focus-within .stat-tip,
 .cache-stat:hover .stat-tip, .cache-stat:focus-within .stat-tip,
-.quality-stat:hover .stat-tip, .quality-stat:focus-within .stat-tip {
+.quality-stat:hover .stat-tip, .quality-stat:focus-within .stat-tip,
+.fallback-stat:hover .stat-tip, .fallback-stat:focus-within .stat-tip {
   opacity: 1; visibility: visible; transform: none; transition-delay: 0s;
 }
 .stat-tip .tt-grid { display: grid; grid-template-columns: auto auto; gap: 1px var(--sp-md); margin: 0; font: 450 0.75rem/1.6 var(--mono); }
@@ -359,7 +365,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--l
      viewport. The sticky session strip is already a containing block, so it
      keeps position: sticky. */
   .stats:not(.sticky) { position: relative; }
-  .tokens-stat, .cache-stat, .quality-stat { position: static; }
+  .tokens-stat, .cache-stat, .quality-stat, .fallback-stat { position: static; }
   .stat-tip { left: 0; right: 0; min-width: 0; }
 }
 

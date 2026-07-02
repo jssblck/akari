@@ -25,6 +25,7 @@ type Session struct {
 	ToolCalls   []ToolCall
 	UsageEvent  []Usage
 	Attachments []Attachment
+	Fallbacks   []FallbackOp
 }
 
 // Attachment is one binary blob attached to a message: today a lifted image (a Codex

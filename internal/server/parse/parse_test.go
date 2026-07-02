@@ -427,6 +427,150 @@ func TestClaudeDuplicateCallUIDDoesNotAbort(t *testing.T) {
 	assertDuplicateCallUID(t, "after reparse")
 }
 
+// TestClaudeModelFallbackMergesAndCounts ingests a full fallback sequence (two assistant
+// chunks sharing a message id and requestId, one carrying the fallback block and both the
+// iterations, then the system model_refusal_fallback entry sharing the requestId) and asserts
+// the three parser ops merge to exactly one model_fallbacks row with fields from both sides,
+// that sessions.model_fallback_count is 1, and that a reparse does not inflate either (still 1
+// row, count still 1). It also drives the two read paths that surface the count and the
+// SessionModelFallbacks ordered read.
+func TestClaudeModelFallbackMergesAndCounts(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	sid := seedSession(t, st, "claude-fallback")
+
+	iters := `"iterations":[{"input_tokens":900,"output_tokens":6,"cache_read_input_tokens":3200,"cache_creation_input_tokens":1500,"type":"message","model":"claude-fable-5"},{"input_tokens":900,"output_tokens":260,"cache_read_input_tokens":5000,"cache_creation_input_tokens":0,"type":"fallback_message","model":"claude-opus-4-8"}]`
+	// Whole sequence in one chunk: the block chunk, the text chunk (same id + requestId), and
+	// the system entry, exactly the shapes the specimen file carries.
+	chunk := `{"type":"assistant","timestamp":"2024-01-01T10:00:25Z","requestId":"req_fb","message":{"id":"msg_fb","model":"claude-opus-4-8","content":[{"type":"fallback","from":{"model":"claude-fable-5"},"to":{"model":"claude-opus-4-8"}}],"usage":{"input_tokens":900,"output_tokens":260,"cache_read_input_tokens":5000,` + iters + `}}}` + "\n" +
+		`{"type":"assistant","timestamp":"2024-01-01T10:00:26Z","requestId":"req_fb","message":{"id":"msg_fb","model":"claude-opus-4-8","content":[{"type":"text","text":"honest working"}],"usage":{"input_tokens":900,"output_tokens":260,"cache_read_input_tokens":5000,` + iters + `}}}` + "\n" +
+		`{"type":"system","subtype":"model_refusal_fallback","trigger":"refusal","originalModel":"claude-fable-5","fallbackModel":"claude-opus-4-8","requestId":"req_fb","apiRefusalCategory":"reasoning_extraction","apiRefusalExplanation":null,"timestamp":"2024-01-01T10:00:26Z"}` + "\n"
+
+	if _, err := st.AppendChunk(ctx, sid, 0, []byte(chunk)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Advance(ctx, st, sid, "claude"); err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+
+	assertFallback := func(t *testing.T, when string) {
+		t.Helper()
+		var rows, count int
+		if err := st.Pool.QueryRow(ctx, "SELECT count(*) FROM model_fallbacks WHERE session_id=$1", sid).Scan(&rows); err != nil {
+			t.Fatal(err)
+		}
+		if rows != 1 {
+			t.Fatalf("%s: model_fallbacks rows = %d, want 1 (three lines merge on the shared requestId)", when, rows)
+		}
+		if err := st.Pool.QueryRow(ctx, "SELECT model_fallback_count FROM sessions WHERE id=$1", sid).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("%s: model_fallback_count = %d, want 1", when, count)
+		}
+		// The one merged row carries fields from both sources: message_ordinal + declined
+		// tokens from the assistant side, trigger + category from the system side.
+		var ordinal, declIn, declCW *int
+		var fromM, toM, trigger, category string
+		if err := st.Pool.QueryRow(ctx,
+			`SELECT message_ordinal, from_model, to_model, trigger, refusal_category,
+			        declined_input_tokens, declined_cache_write_tokens
+			   FROM model_fallbacks WHERE session_id=$1`, sid).
+			Scan(&ordinal, &fromM, &toM, &trigger, &category, &declIn, &declCW); err != nil {
+			t.Fatal(err)
+		}
+		if fromM != "claude-fable-5" || toM != "claude-opus-4-8" {
+			t.Errorf("%s: models from=%q to=%q", when, fromM, toM)
+		}
+		if trigger != "refusal" || category != "reasoning_extraction" {
+			t.Errorf("%s: system-side fields trigger=%q category=%q (system entry did not merge)", when, trigger, category)
+		}
+		if ordinal == nil || declIn == nil || *declIn != 900 || declCW == nil || *declCW != 1500 {
+			t.Errorf("%s: assistant-side fields ordinal=%v declIn=%v declCW=%v (assistant side did not merge)", when, ordinal, declIn, declCW)
+		}
+
+		// The read path returns the one ordered row with the merged fields.
+		fbs, err := st.SessionModelFallbacks(ctx, sid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(fbs) != 1 {
+			t.Fatalf("%s: SessionModelFallbacks = %d rows, want 1", when, len(fbs))
+		}
+		if fbs[0].Trigger != "refusal" || fbs[0].RefusalCategory != "reasoning_extraction" || fbs[0].MessageOrdinal == nil {
+			t.Errorf("%s: read row = %+v", when, fbs[0])
+		}
+
+		// Both read paths that surface the count agree it is 1.
+		detail, err := st.SessionDetailByID(ctx, sid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if detail.ModelFallbackCount != 1 {
+			t.Errorf("%s: detail ModelFallbackCount = %d, want 1", when, detail.ModelFallbackCount)
+		}
+		feed, _, err := st.ListAllSessions(ctx, store.SessionFilter{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var found bool
+		for _, r := range feed {
+			if r.ID == sid {
+				found = true
+				if r.ModelFallbackCount != 1 {
+					t.Errorf("%s: feed row ModelFallbackCount = %d, want 1", when, r.ModelFallbackCount)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("%s: session not found in feed", when)
+		}
+	}
+
+	assertFallback(t, "after advance")
+
+	// A reparse must land the same one merged row and count, not double it.
+	if _, err := Reparse(ctx, st, sid, "claude"); err != nil {
+		t.Fatalf("reparse: %v", err)
+	}
+	assertFallback(t, "after reparse")
+}
+
+// TestClaudeModelSwitchIsNotAFallback is the negative control at the store level: two
+// assistant turns with different model strings and no explicit markers (an intentional
+// switch) produce zero model_fallbacks rows and leave model_fallback_count at 0.
+func TestClaudeModelSwitchIsNotAFallback(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	sid := seedSession(t, st, "claude-model-switch")
+
+	chunk := `{"type":"assistant","timestamp":"2024-01-01T10:00:00Z","requestId":"req_1","message":{"id":"m1","model":"claude-fable-5","content":[{"type":"text","text":"hello"}],"usage":{"input_tokens":5,"output_tokens":5,"iterations":[{"input_tokens":5,"output_tokens":5,"type":"message"}]}}}` + "\n" +
+		`{"type":"assistant","timestamp":"2024-01-01T10:00:01Z","requestId":"req_2","message":{"id":"m2","model":"claude-opus-4-8","content":[{"type":"text","text":"now on opus"}],"usage":{"input_tokens":5,"output_tokens":5}}}` + "\n"
+
+	if _, err := st.AppendChunk(ctx, sid, 0, []byte(chunk)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Advance(ctx, st, sid, "claude"); err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+
+	var rows, count int
+	if err := st.Pool.QueryRow(ctx, "SELECT count(*) FROM model_fallbacks WHERE session_id=$1", sid).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 0 {
+		t.Fatalf("model switch produced %d fallback rows, want 0", rows)
+	}
+	if err := st.Pool.QueryRow(ctx, "SELECT model_fallback_count FROM sessions WHERE id=$1", sid).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("model_fallback_count = %d, want 0", count)
+	}
+}
+
 // TestCostIncompleteForUnknownModel confirms an unpriced model flips the
 // session's cost_incomplete flag while still recording token totals.
 func TestCostIncompleteForUnknownModel(t *testing.T) {

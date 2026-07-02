@@ -221,6 +221,9 @@ templ feedRow(fr FeedRow) {
 				if fr.Row.Visibility == "public" {
 					<span class="tag public">public</span>
 				}
+				if fr.Row.ModelFallbackCount > 0 {
+					<span class="tag warn" title={ FallbackBadgeTitle(fr.Row.ModelFallbackCount) }>{ FallbackBadgeLabel(fr.Row.ModelFallbackCount) }</span>
+				}
 			</div>
 			if fr.Row.Search.Has() {
 				@snippetLine(fr.Row.Search)

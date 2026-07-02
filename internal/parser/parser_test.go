@@ -349,6 +349,135 @@ func TestParsePi(t *testing.T) {
 	}
 }
 
+// TestParseClaudeFallbackFromBlockAndIterations covers the first-message-fell-back shape:
+// several assistant entries share a message id and requestId, one carries the "fallback"
+// content block and all carry usage.iterations with a fallback_message entry. The reducer
+// emits one FallbackOp per entry (the store dedups them by requestId), each reading the
+// declined attempt's summed tokens from the type=="message" iteration entry and the served
+// model from the fallback_message entry.
+func TestParseClaudeFallbackFromBlockAndIterations(t *testing.T) {
+	iters := `"iterations":[{"input_tokens":7626,"output_tokens":5,"cache_read_input_tokens":21535,"cache_creation_input_tokens":9698,"type":"message","model":"claude-fable-5"},{"input_tokens":7626,"output_tokens":214,"cache_read_input_tokens":31233,"cache_creation_input_tokens":0,"type":"fallback_message","model":"claude-opus-4-8"}]`
+	raw := []byte(`{"type":"assistant","timestamp":"2026-07-02T07:42:34Z","requestId":"req_1","message":{"id":"msg_x","model":"claude-opus-4-8","content":[{"type":"fallback","from":{"model":"claude-fable-5"},"to":{"model":"claude-opus-4-8"}}],"usage":{"input_tokens":7626,"output_tokens":214,` + iters + `}}}
+{"type":"assistant","timestamp":"2026-07-02T07:42:36Z","requestId":"req_1","message":{"id":"msg_x","model":"claude-opus-4-8","content":[{"type":"text","text":"391"}],"usage":{"input_tokens":7626,"output_tokens":214,` + iters + `}}}
+`)
+	s, err := Parse(AgentClaude, raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	// Two assistant entries, so two ops, both keyed on the shared requestId: the store's
+	// merge collapses them to one logical event. The reducer itself does not dedup.
+	if len(s.Fallbacks) != 2 {
+		t.Fatalf("fallback ops = %d, want 2 (one per assistant entry, deduped downstream)", len(s.Fallbacks))
+	}
+	for i, f := range s.Fallbacks {
+		if f.DedupKey != "req_1" {
+			t.Errorf("op %d dedup key = %q, want req_1", i, f.DedupKey)
+		}
+		if f.FromModel != "claude-fable-5" || f.ToModel != "claude-opus-4-8" {
+			t.Errorf("op %d models: from=%q to=%q", i, f.FromModel, f.ToModel)
+		}
+		if f.DeclinedInput != 7626 || f.DeclinedOutput != 5 || f.DeclinedCacheWrite != 9698 || f.DeclinedCacheRead != 21535 {
+			t.Errorf("op %d declined tokens = %+v", i, f)
+		}
+		if f.MessageOrdinal == nil {
+			t.Errorf("op %d should carry the ordinal of the message it rode", i)
+		}
+	}
+	// The first entry produced ordinal 0, the second ordinal 1, and each op ties to its own.
+	if got := *s.Fallbacks[0].MessageOrdinal; got != 0 {
+		t.Errorf("op 0 ordinal = %d, want 0", got)
+	}
+	if got := *s.Fallbacks[1].MessageOrdinal; got != 1 {
+		t.Errorf("op 1 ordinal = %d, want 1", got)
+	}
+}
+
+// TestParseClaudeFallbackSystemEntry covers the system model_refusal_fallback entry: it
+// carries the refusal trigger, category, and (possibly null) explanation, shares the
+// assistant entry's requestId as its dedup key, and produces no message row so it does not
+// disturb ordinals. It is the only system subtype the reducer keeps.
+func TestParseClaudeFallbackSystemEntry(t *testing.T) {
+	raw := []byte(`{"type":"system","subtype":"model_refusal_fallback","trigger":"refusal","originalModel":"claude-fable-5","fallbackModel":"claude-opus-4-8","requestId":"req_1","apiRefusalCategory":"reasoning_extraction","apiRefusalExplanation":null,"timestamp":"2026-07-02T07:42:37Z"}
+{"type":"system","subtype":"some_other_notice","timestamp":"2026-07-02T07:42:38Z","content":"ignored"}
+`)
+	s, err := Parse(AgentClaude, raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(s.Messages) != 0 {
+		t.Fatalf("system entries produce no message rows, got %d", len(s.Messages))
+	}
+	if len(s.Fallbacks) != 1 {
+		t.Fatalf("fallback ops = %d, want 1 (only model_refusal_fallback is kept)", len(s.Fallbacks))
+	}
+	f := s.Fallbacks[0]
+	if f.DedupKey != "req_1" {
+		t.Errorf("dedup key = %q, want req_1", f.DedupKey)
+	}
+	if f.Trigger != "refusal" || f.RefusalCategory != "reasoning_extraction" {
+		t.Errorf("refusal fields: trigger=%q category=%q", f.Trigger, f.RefusalCategory)
+	}
+	if f.RefusalExplanation != "" {
+		t.Errorf("null explanation should read empty, got %q", f.RefusalExplanation)
+	}
+	if f.FromModel != "claude-fable-5" || f.ToModel != "claude-opus-4-8" {
+		t.Errorf("models: from=%q to=%q", f.FromModel, f.ToModel)
+	}
+	if f.MessageOrdinal != nil {
+		t.Errorf("system op must carry no ordinal, got %v", *f.MessageOrdinal)
+	}
+}
+
+// TestParseClaudeStickyFallbackNoBlock covers the sticky-served shape: a fallback_message
+// iteration entry is present but there is NO fallback content block. Detection must key on
+// the iterations independently of the block, so the op is still emitted, reading FromModel
+// from the type=="message" iteration entry and ToModel from the fallback_message entry.
+func TestParseClaudeStickyFallbackNoBlock(t *testing.T) {
+	raw := []byte(`{"type":"assistant","timestamp":"2026-07-02T08:00:00Z","requestId":"req_sticky","message":{"id":"msg_s","model":"claude-opus-4-8","content":[{"type":"text","text":"still on opus"}],"usage":{"input_tokens":10,"output_tokens":20,"iterations":[{"input_tokens":10,"output_tokens":3,"cache_read_input_tokens":40,"cache_creation_input_tokens":5,"type":"message","model":"claude-fable-5"},{"input_tokens":10,"output_tokens":20,"type":"fallback_message","model":"claude-opus-4-8"}]}}}
+`)
+	s, err := Parse(AgentClaude, raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(s.Fallbacks) != 1 {
+		t.Fatalf("fallback ops = %d, want 1 (iterations detected without a block)", len(s.Fallbacks))
+	}
+	f := s.Fallbacks[0]
+	if f.FromModel != "claude-fable-5" || f.ToModel != "claude-opus-4-8" {
+		t.Errorf("models: from=%q to=%q", f.FromModel, f.ToModel)
+	}
+	if f.DeclinedInput != 10 || f.DeclinedOutput != 3 || f.DeclinedCacheWrite != 5 || f.DeclinedCacheRead != 40 {
+		t.Errorf("declined tokens = %+v", f)
+	}
+	if f.DedupKey != "req_sticky" {
+		t.Errorf("dedup key = %q", f.DedupKey)
+	}
+}
+
+// TestParseClaudeNoFallbackNegativeControls confirms detection never fires without an
+// explicit marker: (a) an assistant turn whose iterations is a single type=="message" entry
+// with the model absent (an ordinary turn, the shape the spec warns reads like a fallback if
+// you key on iterations blindly), and (b) two assistant turns with different model strings and
+// no markers (an intentional model switch). Neither produces a fallback op.
+func TestParseClaudeNoFallbackNegativeControls(t *testing.T) {
+	// (a) An ordinary turn carrying iterations with one type=="message" entry, model absent.
+	ordinary := `{"type":"assistant","timestamp":"2026-07-02T09:00:00Z","requestId":"req_a","message":{"id":"m_a","model":"claude-fable-5","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":5,"output_tokens":5,"iterations":[{"input_tokens":5,"output_tokens":5,"cache_creation_input_tokens":1,"type":"message"}]}}}` + "\n"
+	// (b) A later turn on a different model, no markers at all: an intentional /model switch.
+	switched := `{"type":"assistant","timestamp":"2026-07-02T09:01:00Z","requestId":"req_b","message":{"id":"m_b","model":"claude-opus-4-8","content":[{"type":"text","text":"switched"}],"usage":{"input_tokens":5,"output_tokens":5}}}` + "\n"
+
+	s, err := Parse(AgentClaude, []byte(ordinary+switched))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(s.Fallbacks) != 0 {
+		t.Fatalf("no explicit marker means no fallback op, got %d: %+v", len(s.Fallbacks), s.Fallbacks)
+	}
+	// Both turns still parse as ordinary messages.
+	if len(s.Messages) != 2 {
+		t.Fatalf("messages = %d, want 2", len(s.Messages))
+	}
+}
+
 // TestParseUnknownAgent confirms an unrecognized agent is a hard error, not a
 // silently empty session.
 func TestParseUnknownAgent(t *testing.T) {

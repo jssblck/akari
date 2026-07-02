@@ -113,7 +113,7 @@ func registerTools(s *mcp.Server, st *store.Store) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "list_sessions",
-		Description: "The cross-project session feed, newest session first, with optional filters (project_id, agent, username, machine, and a trailing-day window on the session's start time). Each row carries its last-activity time (last_active_at, the session's last event time) so you can order a page by recency. Returns the facet rail too: the busiest agents, users, machines, and projects with counts, whose values are the exact strings to pass back as filters. Up to 500 rows per page; page forward with the returned next_cursor (a stable id keyset, so paging the whole feed is complete even as sessions are re-activated mid-walk).",
+		Description: "The cross-project session feed, newest session first, with optional filters (project_id, agent, username, machine, and a trailing-day window on the session's start time). Each row carries its last-activity time (last_active_at, the session's last event time) so you can order a page by recency, and a model_fallback_count (Claude Fable turns declined and re-served on a lower model; 0 for most sessions). Returns the facet rail too: the busiest agents, users, machines, and projects with counts, whose values are the exact strings to pass back as filters. Up to 500 rows per page; page forward with the returned next_cursor (a stable id keyset, so paging the whole feed is complete even as sessions are re-activated mid-walk).",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in listSessionsInput) (*mcp.CallToolResult, sessionsDTO, error) {
 		cursor, err := decodeCursor(in.Cursor)
 		if err != nil {
@@ -147,7 +147,7 @@ func registerTools(s *mcp.Server, st *store.Store) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "get_session",
-		Description: "One session: its header (project, agent, user, machine, branch, working directory, token and cost totals, timing) and subagents, plus, unless include_transcript is false, a bounded window of the transcript (messages with thinking and model, the tool-call metadata and attachments hanging on them). Tool bodies live in the CAS; fetch them with read_tool_body. The window is up to transcript_limit messages; page by passing the prior window's transcript.next_after as transcript_after until transcript.has_more is false.",
+		Description: "One session: its header (project, agent, user, machine, branch, working directory, token and cost totals, timing) and subagents, plus, unless include_transcript is false, a bounded window of the transcript (messages with thinking and model, the tool-call metadata and attachments hanging on them). A session that fell back from a Claude Fable model to a lower one (model_fallback_count above zero) also carries a model_fallbacks list, one entry per occurrence. Tool bodies live in the CAS; fetch them with read_tool_body. The window is up to transcript_limit messages; page by passing the prior window's transcript.next_after as transcript_after until transcript.has_more is false.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in getSessionInput) (*mcp.CallToolResult, sessionDetailDTO, error) {
 		d, err := st.SessionDetailByID(ctx, in.SessionID)
 		if err != nil {
@@ -175,6 +175,19 @@ func registerTools(s *mcp.Server, st *store.Store) {
 		}
 		for _, sub := range subs {
 			out.Subagents = append(out.Subagents, sessionSummaryToDTO(sub))
+		}
+
+		// The fallback rows are a separate read; skip it unless the O(1) rollup on the
+		// header says the session has at least one, so the common no-fallback case pays
+		// nothing.
+		if out.ModelFallbackCount > 0 {
+			fbs, err := st.SessionModelFallbacks(ctx, in.SessionID)
+			if err != nil {
+				return nil, sessionDetailDTO{}, err
+			}
+			for _, f := range fbs {
+				out.ModelFallbacks = append(out.ModelFallbacks, modelFallbackToDTO(f))
+			}
 		}
 
 		if includeTranscript {
