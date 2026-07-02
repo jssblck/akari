@@ -47,6 +47,7 @@ func (r *reducer) reduceCodex(region []byte, base int64) error {
 				}
 				if ref, ok := asCASRef(argsVal); ok {
 					tc.InputSHA256, tc.InputBytes, tc.InputMediaType = ref.SHA256, ref.Bytes, ref.MediaType
+					tc.FilePath = ref.FilePath
 				} else {
 					// Codex stores arguments as a JSON-encoded string; the body is the
 					// unquoted string value, matching what the client lifts to the CAS.

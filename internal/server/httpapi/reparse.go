@@ -2,9 +2,7 @@ package httpapi
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
-	"time"
 
 	"github.com/jssblck/akari/internal/server/reparse"
 	"github.com/jssblck/akari/internal/server/web"
@@ -66,54 +64,18 @@ func (s *Server) handleReparseForm(w http.ResponseWriter, r *http.Request) {
 
 // handleReparseEvents streams reparse progress to a watching browser over SSE,
 // pushing the status JSON as each frame so the page updates its progress bar
-// directly. It mirrors handleSessionEvents: a bounded per-write deadline turns a
-// stalled client into a write error so the subscription never leaks, and a periodic
-// comment keeps the connection alive through idle proxies.
+// directly.
 func (s *Server) handleReparseEvents(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-
-	rc := http.NewResponseController(w)
-	write := func(payload string) bool {
-		if rc.SetWriteDeadline(time.Now().Add(10*time.Second)) != nil {
-			return false
-		}
-		if _, err := fmt.Fprint(w, payload); err != nil {
-			return false
-		}
-		return rc.Flush() == nil
-	}
-
 	ch := s.hub.subscribeReparse()
 	defer s.hub.unsubscribeReparse(ch)
-
-	if !write(": connected\n\n") {
-		return
-	}
-	// Paint the current status immediately so a page that connects mid-reparse (or
-	// after it finished) does not wait for the next frame to learn the state.
-	if b, err := json.Marshal(s.reparser.FleetStatus(r.Context())); err == nil {
-		if !write("event: status\ndata: " + string(b) + "\n\n") {
-			return
+	statusFrame := func(payload string) string { return "event: status\ndata: " + payload + "\n\n" }
+	serveSSE(w, r, ch, statusFrame, func(write func(string) bool) bool {
+		// Paint the current status immediately so a page that connects mid-reparse
+		// (or after it finished) does not wait for the next frame to learn the state.
+		b, err := json.Marshal(s.reparser.FleetStatus(r.Context()))
+		if err != nil {
+			return true
 		}
-	}
-
-	keepalive := time.NewTicker(25 * time.Second)
-	defer keepalive.Stop()
-	ctx := r.Context()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case payload := <-ch:
-			if !write("event: status\ndata: " + payload + "\n\n") {
-				return
-			}
-		case <-keepalive.C:
-			if !write(": ping\n\n") {
-				return
-			}
-		}
-	}
+		return write(statusFrame(string(b)))
+	})
 }

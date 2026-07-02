@@ -1,0 +1,11 @@
+-- Feed-order index for the session lists. The project view, the global Sessions
+-- view, and the Overview's recent-activity feed all order by updated_at then id
+-- and take a bounded page (LIMIT). This composite index lets Postgres satisfy
+-- that order with an index scan and stop at the limit, instead of sorting the
+-- whole sessions table on every request as the corpus grows.
+--
+-- Originally shipped as 0004_session_feed_index.sql, colliding with the number
+-- of 0004_client_cas_upload.sql. Renumbered to restore unique prefixes; the
+-- migration runner keys on the full filename, so databases that applied the
+-- old name re-run this file, and IF NOT EXISTS makes that re-run a no-op.
+CREATE INDEX IF NOT EXISTS idx_sessions_feed ON sessions(updated_at DESC, id DESC);

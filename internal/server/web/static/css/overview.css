@@ -15,12 +15,6 @@
 .public-overview-head h1 { display: flex; align-items: baseline; gap: var(--sp-sm); margin: 0; }
 .public-overview-head .sep { color: var(--border); }
 
-/* ---- KPI tiles (Overview) ---- */
-.kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--sp-md); margin-bottom: var(--sp-lg); }
-.kpi { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); padding: var(--sp-md) var(--sp-lg); }
-.kpi .label { display: block; margin-bottom: var(--sp-sm); }
-.kpi .v { font-family: var(--mono); font-size: 1.5rem; font-variant-numeric: tabular-nums; color: var(--text); letter-spacing: -0.01em; }
-
 /* ---- Analytics ---- */
 .analytics { margin-top: var(--sp-md); }
 /* The panel's lead (totals strip + activity grid) holds a centered reading column
@@ -199,5 +193,4 @@
 /* ---- Responsive ---- */
 @media (max-width: 860px) {
   .breakdowns { grid-template-columns: 1fr; gap: var(--sp-lg); }
-  .kpis { grid-template-columns: repeat(2, 1fr); }
 }

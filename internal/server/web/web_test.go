@@ -142,3 +142,48 @@ func TestFmtRelTimeAbsent(t *testing.T) {
 		t.Errorf("FmtRelTime(zero) = %q, want %q", got, "-")
 	}
 }
+
+// TestFmtTokensCompact pins the magnitude buckets, which must mirror fmtTok in
+// static/charts.js so a figure reads the same server- and client-rendered. The
+// billions case exists for parity with the JS side even though today's sole
+// caller (the feed row) is unlikely to reach it.
+func TestFmtTokensCompact(t *testing.T) {
+	cases := []struct {
+		n    int64
+		want string
+	}{
+		{412, "412"},
+		{63_049, "63.0k"},
+		{1_700_000, "1.7M"},
+		{999_999_999, "1000.0M"},
+		{1_500_000_000, "1.5B"},
+	}
+	for _, c := range cases {
+		if got := FmtTokensCompact(c.n); got != c.want {
+			t.Errorf("FmtTokensCompact(%d) = %q, want %q", c.n, got, c.want)
+		}
+	}
+}
+
+// TestFmtCost pins the dollar rendering at every magnitude: two decimals from a
+// cent up with no whole-dollar rounding at any size, four decimals below a cent,
+// and the incomplete marker appended. fmtCost in static/charts.js mirrors these
+// rules; a change here needs the same change there.
+func TestFmtCost(t *testing.T) {
+	cases := []struct {
+		usd        float64
+		incomplete bool
+		want       string
+	}{
+		{0, false, "$0"},
+		{0.0042, false, "$0.0042"},
+		{3.5, false, "$3.50"},
+		{1234.567, false, "$1234.57"},
+		{12.3, true, "$12.30+"},
+	}
+	for _, c := range cases {
+		if got := FmtCost(c.usd, c.incomplete); got != c.want {
+			t.Errorf("FmtCost(%v, %v) = %q, want %q", c.usd, c.incomplete, got, c.want)
+		}
+	}
+}

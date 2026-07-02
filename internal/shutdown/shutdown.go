@@ -14,6 +14,7 @@ import (
 	"context"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 )
 
@@ -43,20 +44,34 @@ func Notify(ack func()) (ctx context.Context, stop func()) {
 // channel and exit function. Keeping it separate from Notify lets tests drive the
 // channel and observe the forced exit without sending real signals or killing the
 // test process.
-func watch(ch <-chan os.Signal, ack func(), exit func(int)) (context.Context, context.CancelFunc) {
+//
+// A dedicated stopped channel (not the context) releases the goroutine when the
+// returned stop runs, because after the first signal the context is already
+// cancelled and can no longer distinguish "stop() was called" from "graceful
+// shutdown underway"; without it the wait for a second signal would leak the
+// goroutine in any process that outlives its Notify scope.
+func watch(ch <-chan os.Signal, ack func(), exit func(int)) (context.Context, func()) {
 	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan struct{})
 	go func() {
 		select {
 		case <-ch:
 			ack()
 			cancel()
-		case <-ctx.Done():
+		case <-stopped:
 			return // stop() called before any signal; nothing to acknowledge
 		}
 		// Graceful shutdown is underway. The next signal means the operator is
 		// done waiting, so abandon the clean path and exit now.
-		<-ch
-		exit(forcedExitCode)
+		select {
+		case <-ch:
+			exit(forcedExitCode)
+		case <-stopped:
+		}
 	}()
-	return ctx, cancel
+	var once sync.Once
+	return ctx, func() {
+		once.Do(func() { close(stopped) })
+		cancel()
+	}
 }

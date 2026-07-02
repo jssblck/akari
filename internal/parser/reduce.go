@@ -89,7 +89,6 @@ type AttachmentOp struct {
 	MessageOrdinal int
 	SHA256         string
 	Content        string
-	ContentType    string
 	Bytes          int
 	MediaType      string
 	Filename       string
@@ -230,7 +229,6 @@ func (r *reducer) addAttachment(ord int, v gjson.Result, filename string) {
 			return
 		}
 		op.Content = string(decoded)
-		op.ContentType = ContentRaw
 		op.Bytes = len(decoded)
 		op.MediaType = imageMediaType(imageHead(s))
 		// The inline key is the hash of the raw decoded bytes, which equals the

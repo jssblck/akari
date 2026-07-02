@@ -4,8 +4,8 @@ A proposal to make akari's web UI easier to navigate and act on without
 abandoning the "Machinist's Bench" design system. The current UI is clean and
 on-brand, but the *information architecture* is thin: there is one flat top bar,
 every page is essentially one wide table, and the two things a reader actually
-comes for — **reading a single run deeply** and **seeing where spend and
-activity are going across the fleet** — are reachable only by drilling down from
+comes for (**reading a single run deeply** and **seeing where spend and
+activity are going across the fleet**) are reachable only by drilling down from
 a projects table. This proposal keeps every existing capability and reorganizes
 how you reach and scan it.
 
@@ -45,54 +45,54 @@ brief, the friction is structural, not cosmetic:
    blocked codex run on web-gateway" means knowing which project it's in first.
 4. **Live and "needs input" are invisible at the fleet level.** A session shows
    a `live` dot only once you're *inside* it. The most time-sensitive
-   information — which agents are running, which are blocked waiting on a human —
+   information (which agents are running, which are blocked waiting on a human)
    has nowhere to surface. (Both Claude Code's agent view and Datadog Lapdog
    make live status a first-class, top-level signal.)
 5. **The session view is genuinely minimal where it should be richest.** The
    deep-read view is the product's hero, but its only navigation aid is a 46px
-   rail of colored ticks, and tool bodies expand *inline* in the reading column —
+   rail of colored ticks, and tool bodies expand *inline* in the reading column,
    so inspecting a large diff shoves the transcript around and you lose your
    place. There's no persistent inspector, no per-step context-window/cost
    readout, no step outline.
 6. **Cross-cutting questions have no view.** "Which files did agents touch
    recently?", "what did this branch's runs cost?", "show me every Bash failure
-   this week" — none of these are answerable, because the only axis is
+   this week": none of these are answerable, because the only axis is
    project → session.
 
 ## 2. What comparable tools do well
 
 I looked at the tools you named and the broader tracing space.
 
-- **Datadog Lapdog** — a left session list, a per-session trace of prompts /
+- **Datadog Lapdog**: a left session list, a per-session trace of prompts /
   tool calls / responses, token+cost broken down by input/output/cache, a
   **context-window usage and cache-hit-rate chart over the session**, and a
   **live agent status** (running / idle / blocked) surfaced prominently.
   ([docs](https://docs.datadoghq.com/llm_observability/lapdog/),
   [walkthrough](https://chrisebert.net/see-what-your-ai-coding-agent-is-doing-with-datadog-lapdog/))
-- **AgentsView** (kenn-io) — local-first, multi-agent, and closest in spirit to
+- **AgentsView** (kenn-io): local-first, multi-agent, and closest in spirit to
   akari. Worth stealing from: a **dashboard landing** (spend, daily charts,
   per-model/per-session cost), an **activity heatmap**, a **"recently edited
   files" feed** that groups the files agents changed across every session and
   links to the message that made each change, **grouping by project / model /
   agent**, and **keyboard-first navigation** (`j`/`k`, `⌘K`, `?`).
   ([usage](https://www.agentsview.io/usage/))
-- **Claude Code's agent view** — sessions grouped by **state** ("Needs input /
+- **Claude Code's agent view**: sessions grouped by **state** ("Needs input /
   Working / Completed"), each row showing whether it needs you and its last
   response. State-first grouping is the key idea.
   ([docs](https://code.claude.com/docs/en/agent-view))
-- **LangSmith / Langfuse** — the canonical **master–detail trace view**: a
+- **LangSmith / Langfuse**: the canonical **master-detail trace view**: a
   hierarchical step/span tree on one side, and a **detail panel/drawer** on the
-  other showing the selected step's inputs, outputs, and metrics — so inspecting
+  other showing the selected step's inputs, outputs, and metrics, so inspecting
   a step never disturbs the overview. Langfuse recently unified this into a
   single resizable drawer.
   ([LangSmith](https://docs.langchain.com/langsmith/observability),
   [Langfuse](https://langfuse.com/docs/observability/overview))
 
 The common thread: a **real landing surface**, **persistent navigation with a
-command palette**, **state- and facet-driven lists**, and a **master–detail
+command palette**, **state- and facet-driven lists**, and a **master-detail
 inspector** for the deep read. akari has the data for all of this already (the
 parser produces messages, tool calls with input/result CAS bodies, token classes
-including cache, status, branch, machine, live SSE) — it's an organization gap,
+including cache, status, branch, machine, live SSE). It's an organization gap,
 not a data gap.
 
 ## 3. Proposed information architecture
@@ -115,10 +115,10 @@ Three structural moves do most of the work:
 1. **A landing Overview** so both front doors (deep read, fleet spend) are one
    click, and live/blocked runs are visible immediately.
 2. **A global Sessions view** with a faceted filter rail (status, agent,
-   project, machine — each with counts), grouping (by project / day / flat),
+   project, machine, each with counts), grouping (by project / day / flat),
    in-list content filter, and saved views. This is the missing "find a run"
    surface that doesn't require picking a project first.
-3. **A master–detail session inspector**: keep the transcript as the center of
+3. **A master-detail session inspector**: keep the transcript as the center of
    gravity, but replace the tick rail with a real **step outline** and add a
    **right-hand inspector drawer** for the selected tool call (bodies, diff,
    status, timing) plus a **context-window / cost readout at that step**. Tool
@@ -128,7 +128,7 @@ Three structural moves do most of the work:
 
 ![Overview mockup](./mockups/01-overview.png)
 
-- **KPI tiles** with deltas: spend, tokens, sessions, active-now — over a global
+- **KPI tiles** with deltas: spend, tokens, sessions, active-now, over a global
   time range toggle (24h / 7d / 30d / All).
 - **Live strip**: the running and blocked sessions as cards, each with a
   one-line "what it's doing", a context-window bar, and cost so far. Blocked
@@ -137,7 +137,7 @@ Three structural moves do most of the work:
 - **Spend over time** (reusing the existing SVG chart module) beside a
   **by-model / by-agent breakdown** (reusing the existing bar component).
 - **Recent activity** feed (sessions across *all* projects) and a **recently
-  edited files** feed — the AgentsView idea, and a genuinely new capability that
+  edited files** feed: the AgentsView idea, and a genuinely new capability that
   answers "what changed lately" without opening sessions one by one.
 
 ### Sessions (mockup 2)
@@ -149,12 +149,12 @@ Three structural moves do most of the work:
   show as removable chips above the table.
 - **Grouping** toggle (Project / Day / Flat) and **sort** (Recent / Cost), plus
   an in-list content/branch/tool filter.
-- **Status column** at last — `working`, `needs input`, `done`, `N errors` —
+- **Status column** at last (`working`, `needs input`, `done`, `N errors`),
   carried by label + hue, never color alone (per the a11y rules in `PRODUCT.md`).
 - **Saved views** in the sidebar ("Needs input", "Errored runs", "My expensive
   runs") are just persisted facet sets.
 - **⌘K command palette** (shown open): jump to a session/project, search message
-  content, or add a filter — Search promoted from a buried page to an
+  content, or add a filter: Search promoted from a buried page to an
   always-available action, with `j`/`k`/`?` keyboard nav to match the
   power-user, desktop-first audience.
 
@@ -164,22 +164,23 @@ Three structural moves do most of the work:
 
 - **Stat strip** unchanged in spirit (the instrument readouts), just consolidated
   into one bordered strip that still sticks on scroll.
-- **Left: step outline** replacing the 46px tick rail — turns are collapsible,
+- **Left: step outline** replacing the 46px tick rail. Turns are collapsible,
   tool steps nest under their turn with per-turn duration, and errored steps
   flag in rose. You can see the *shape* of the run and jump to any step. (The
-  existing rail's data — roles, tool counts, error flags — drives this directly.)
+  existing rail already carries the data for this: roles, tool counts, error
+  flags.)
 - **Center: the transcript**, essentially as today (messages, thinking, tool
   chips), but bodies no longer expand inline.
 - **Right: inspector drawer** for the selected tool call: file, status+timing,
   input/result sizes, a **Diff / Input / Result** body toggle (the editing-tool
   diff you already render, now in a stable panel), and a **context-window /
-  cache / cost readout at that step** — the Lapdog-style instrument, per-step.
-  This is the master–detail pattern from LangSmith/Langfuse: inspecting never
+  cache / cost readout at that step**: the Lapdog-style instrument, per-step.
+  This is the master-detail pattern from LangSmith/Langfuse: inspecting never
   disturbs reading.
 
 ## 4. What this preserves
 
-- The whole **design system** is untouched — these mockups use akari's exact
+- The whole **design system** is untouched: these mockups use akari's exact
   tokens, Geist/Geist Mono, hairline borders, tabular numerics, lilac-as-signal,
   machined-rectangle tags. The One Voice / Tag-is-not-a-pill / tabular rules all
   hold.
@@ -200,10 +201,10 @@ Roughly in order of value-to-effort:
 2. **Global Sessions view** reusing `SessionList` + the existing facet query,
    extended to multi-select facets with counts and a status column. Highest-
    value single change for "finding a run."
-3. **Overview landing** — assembled almost entirely from components that already
+3. **Overview landing**: assembled almost entirely from components that already
    exist (stat tiles, chart, breakdown bars, `SessionList`); the live strip and
    "recently edited files" feed are the only new queries.
-4. **Session inspector** — outline from the existing `BuildRail` data; move tool
+4. **Session inspector**: outline from the existing `BuildRail` data; move tool
    bodies into a right drawer. The biggest UX win for the deep read, and the
    most involved, so it lands last.
 

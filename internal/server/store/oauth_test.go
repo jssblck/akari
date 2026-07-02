@@ -281,6 +281,21 @@ func TestListOAuthGrants(t *testing.T) {
 		t.Fatalf("grants: %+v err=%v", grants, err)
 	}
 
+	// Authenticating with the access token counts as use: the grant's LastUsedAt
+	// must advance past the value recorded at creation. (It once mirrored
+	// created_at, which a refresh rewrites in place and never advances.)
+	firstUsed := grants[0].LastUsedAt
+	if _, _, _, err := st.OAuthAccessAuth(ctx, "a0"); err != nil {
+		t.Fatalf("access auth: %v", err)
+	}
+	grants, err = st.ListOAuthGrants(ctx, uid)
+	if err != nil || len(grants) != 1 {
+		t.Fatalf("grants after use: %+v err=%v", grants, err)
+	}
+	if !grants[0].LastUsedAt.After(firstUsed) {
+		t.Fatalf("LastUsedAt did not advance on use: before=%v after=%v", firstUsed, grants[0].LastUsedAt)
+	}
+
 	if err := st.RevokeOAuthGrant(ctx, uid, "c1"); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}

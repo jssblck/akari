@@ -91,14 +91,12 @@ func NewLimited(maxConcurrency int) *Encoder {
 
 // acquireComp blocks until a compression permit is free (or never, when unbounded),
 // returning a release func. ctx bounds the wait so a canceled sync stops waiting for a
-// permit; a nil ctx (the no-ctx EncodeBody path) waits uninterruptibly, which is safe
-// because the permitted work is a short CPU pass, not a network call.
+// permit; the no-ctx EncodeBody path passes context.Background() to wait
+// uninterruptibly, which is safe because the permitted work is a short CPU pass, not a
+// network call.
 func (e Encoder) acquireComp(ctx context.Context) (release func(), err error) {
 	if e.compSem == nil {
 		return func() {}, nil
-	}
-	if ctx == nil {
-		ctx = context.Background()
 	}
 	if err := e.compSem.Acquire(ctx, 1); err != nil {
 		return nil, err
@@ -137,7 +135,7 @@ func (e Encoder) EncodeBody(raw []byte) (sha string, stored []byte, contentType 
 	// Bound concurrent compression to keep many bodies hashing at once off all CPUs.
 	// EncodeBody has no context (it satisfies parser.BodyEncoder), so the wait is
 	// uninterruptible; the work it gates is a short, fully in-memory pass.
-	release, _ := e.acquireComp(nil)
+	release, _ := e.acquireComp(context.Background())
 	defer release()
 	var buf bytes.Buffer
 	// A compressed body is at least somewhat smaller than its input; preallocating a

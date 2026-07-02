@@ -59,15 +59,15 @@ func (s *Server) pageForNav(r *http.Request, title, active string) web.Page {
 	return pg
 }
 
-// render writes a templ component, mapping a render error to a 500.
+// render writes a templ component with the given status. The status is committed
+// before the body streams, so a mid-render failure cannot be remapped to a 500;
+// it only truncates the response, which the browser surfaces as a broken page.
+// Buffering the render to recover a clean 500 is deliberately not done: these
+// pages are cheap to render and effectively never fail.
 func render(w http.ResponseWriter, r *http.Request, status int, c templ.Component) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
-	if err := c.Render(r.Context(), w); err != nil {
-		// The header is already written; nothing left but to log via the default
-		// http error path is impossible, so swallow (the connection will close).
-		_ = err
-	}
+	_ = c.Render(r.Context(), w)
 }
 
 // handleRoot serves the site root at /. A signed-in reader (full-scope
@@ -730,51 +730,9 @@ func (s *Server) handleSessionEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-
-	rc := http.NewResponseController(w)
-
-	// Each write gets a bounded deadline rather than clearing the deadline for the
-	// whole stream: a client that stops reading would otherwise block the write
-	// forever, so the deferred unsubscribe never runs and the subscription leaks.
-	// A short deadline turns a stalled client into a write error, ending the loop.
-	write := func(payload string) bool {
-		if rc.SetWriteDeadline(time.Now().Add(10*time.Second)) != nil {
-			return false
-		}
-		if _, err := fmt.Fprint(w, payload); err != nil {
-			return false
-		}
-		return rc.Flush() == nil
-	}
-
 	ch := s.hub.subscribe(id)
 	defer s.hub.unsubscribe(id, ch)
-
-	// An initial comment opens the stream so the browser's EventSource fires open.
-	if !write(": connected\n\n") {
-		return
-	}
-
-	keepalive := time.NewTicker(25 * time.Second)
-	defer keepalive.Stop()
-	ctx := r.Context()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ch:
-			if !write("event: update\ndata: 1\n\n") {
-				return
-			}
-		case <-keepalive.C:
-			if !write(": ping\n\n") {
-				return
-			}
-		}
-	}
+	serveSSE(w, r, ch, func(struct{}) string { return "event: update\ndata: 1\n\n" }, nil)
 }
 
 func (s *Server) handleAccountPage(w http.ResponseWriter, r *http.Request) {
