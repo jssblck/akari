@@ -92,9 +92,14 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	p, ok := s.resolve(r)
 	if !ok || p.Scope != scopeFull {
 		base := s.baseURL(r)
+		// The meta copy derives from the ogimage package's canonical landing
+		// constants (the same strings the /og.png card draws), so a copy edit
+		// cannot leave the page's tags and its preview image saying different
+		// things. The title lowercases the headline into the product register the
+		// overview card's title uses ("<subject> · <what it is>").
 		og := web.OGMeta{
-			Title:       "akari · know what your agents actually did",
-			Description: "Every Claude Code, Codex, and pi session in one searchable, priced history.",
+			Title:       "akari · " + strings.ToLower(strings.TrimSuffix(ogimage.LandingHeadline, ".")),
+			Description: ogimage.LandingSubline,
 			URL:         base + "/",
 			Image:       base + "/og.png",
 		}

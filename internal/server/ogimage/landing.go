@@ -26,10 +26,21 @@ import (
 // fixed hash of each cell's coordinates (no clock, no unseeded randomness), so
 // renders stay byte-stable across runs and processes.
 
+// LandingHeadline and LandingSubline are the canonical homepage copy, written
+// down once here. The card draws them, and the httpapi root handler builds the
+// landing page's og:title and og:description from them, so those surfaces
+// follow a copy edit by construction. The templ hero (landing.templ) cannot
+// import this package from a template, so a reconciliation test in the web
+// package pins its h1 to LandingHeadline instead: an edit that lands in only
+// one place fails that test rather than shipping a homepage, meta tags, and
+// preview card that say different things.
 const (
-	landingPad      = 64
-	landingHeadline = "Know what your agents actually did."
-	landingSubline  = "Every Claude Code, Codex, and pi session in one searchable, priced history."
+	LandingHeadline = "Know what your agents actually did."
+	LandingSubline  = "Every Claude Code, Codex, and pi session in one searchable, priced history."
+)
+
+const (
+	landingPad = 64
 
 	// landingTextMargin is extra slack inside the padded column when fitting the
 	// text sizes, so a fitted line never runs flush to the right pad boundary.
@@ -63,10 +74,10 @@ func newLandingFaces() (*landingFaces, error) {
 		return nil, err
 	}
 	maxW := Width - 2*landingPad - landingTextMargin
-	if fc.head, err = fitFace(sans, landingHeadline, 68, 40, maxW); err != nil {
+	if fc.head, err = fitFace(sans, LandingHeadline, 68, 40, maxW); err != nil {
 		return nil, err
 	}
-	if fc.sub, err = fitFace(sans, landingSubline, 30, 20, maxW); err != nil {
+	if fc.sub, err = fitFace(sans, LandingSubline, 30, 20, maxW); err != nil {
 		return nil, err
 	}
 	return fc, nil
@@ -123,13 +134,12 @@ func renderLanding() ([]byte, error) {
 	drawAperture(img, pad+11, pad+11, 12)
 	drawText(img, fc.brand, pad+34, pad+22, colText, "akari")
 
-	// The product headline, the same sentence the hero leads with, set large in
-	// the display face as the card's focal line.
-	drawText(img, fc.head, pad, pad+164, colText, landingHeadline)
-
-	// One clause in the voice of the landing lede: the collect-and-price promise,
-	// muted so it reads as support to the headline rather than competing with it.
-	drawText(img, fc.sub, pad, pad+220, colMuted, landingSubline)
+	// The canonical headline and subline (shared with the root handler's meta
+	// tags and, via the web package's reconciliation test, the templ hero), the
+	// headline set large in the display face as the card's focal line and the
+	// subline muted beneath it as support.
+	drawText(img, fc.head, pad, pad+164, colText, LandingHeadline)
+	drawText(img, fc.sub, pad, pad+220, colMuted, LandingSubline)
 
 	// The decorative heatmap band along the foot, captioned like the overview
 	// card's own grid so the two read as the same instrument. Tall enough to

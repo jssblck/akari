@@ -56,8 +56,8 @@ func TestLandingTextFitsColumn(t *testing.T) {
 		face font.Face
 		text string
 	}{
-		{"headline", fc.head, landingHeadline},
-		{"subline", fc.sub, landingSubline},
+		{"headline", fc.head, LandingHeadline},
+		{"subline", fc.sub, LandingSubline},
 	} {
 		if w := font.MeasureString(line.face, line.text).Round(); w > budget {
 			t.Errorf("%s measures %dpx, exceeds the %dpx column (would clip)", line.name, w, budget)

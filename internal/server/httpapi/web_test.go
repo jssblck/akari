@@ -1256,12 +1256,18 @@ func TestLandingOGImage(t *testing.T) {
 	anon.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
 	// The logged-out root advertises the card via Open Graph and the large-image
-	// Twitter card, naming the /og.png URL the crawler will fetch.
+	// Twitter card, naming the /og.png URL the crawler will fetch. The title and
+	// description assert against the ogimage package's canonical landing copy
+	// (the strings the card itself draws), pinning the derivation in handleRoot:
+	// the meta tags cannot drift from the image without failing here.
+	wantTitle := "akari · " + strings.ToLower(strings.TrimSuffix(ogimage.LandingHeadline, "."))
 	body := readBody(t, mustGet(t, anon, srv.URL+"/"))
 	for _, want := range []string{
 		`property="og:image" content="`,
 		`/og.png"`,
 		`name="twitter:card" content="summary_large_image"`,
+		`property="og:title" content="` + wantTitle + `"`,
+		`property="og:description" content="` + ogimage.LandingSubline + `"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("landing root missing OG tag %q, got:\n%s", want, body)
