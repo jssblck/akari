@@ -92,7 +92,7 @@ jobs:
       - id: app-token
         name: Mint a GitHub App token (optional)
         if: ${{ always() && env.HAS_BASTION_APP == 'true' }}
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.BASTION_APP_ID }}
           private-key: ${{ secrets.BASTION_APP_PRIVATE_KEY }}
