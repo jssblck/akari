@@ -265,6 +265,34 @@ func TestParseCodexContext(t *testing.T) {
 	}
 }
 
+// TestIsCodexContext pins the marker detection directly: each wrapper Codex uses for
+// injected framing (the AGENTS.md header, the environment_context tag, and the
+// user_instructions tag some builds wrap AGENTS.md in) reads as context, leading
+// whitespace and all, while an ordinary prompt that merely mentions those words does
+// not. The user_instructions arm has no fixture of its own, so this is its guard.
+func TestIsCodexContext(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{"agents header", "# AGENTS.md instructions for /home/ada/akari\n\n<INSTRUCTIONS>\nx\n</INSTRUCTIONS>", true},
+		{"environment block", "<environment_context>\n  <cwd>/x</cwd>\n</environment_context>", true},
+		{"user_instructions block", "<user_instructions>\nRun the tests.\n</user_instructions>", true},
+		{"leading whitespace before marker", "\n  <environment_context>\n</environment_context>", true},
+		{"ordinary prompt", "Add rate limiting to the ingest endpoint", false},
+		{"prompt mentioning the file mid-sentence", "please update AGENTS.md instructions for the repo", false},
+		{"empty", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isCodexContext(c.text); got != c.want {
+				t.Errorf("isCodexContext(%q) = %v, want %v", c.text, got, c.want)
+			}
+		})
+	}
+}
+
 func TestParsePi(t *testing.T) {
 	s, err := Parse(AgentPi, loadFixture(t, "pi.jsonl"))
 	if err != nil {

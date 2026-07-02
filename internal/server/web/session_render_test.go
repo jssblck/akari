@@ -168,6 +168,36 @@ func TestTranscriptRendersContextTurn(t *testing.T) {
 	}
 }
 
+// TestContextLabelAndRoleClass pins the context helpers' branches directly: ContextLabel
+// names the framing by which markers its content carries (both, project-only,
+// environment-only, or an unrecognized fallback), and RoleClass maps the context role to
+// its own CSS class so a context message styled through the shared .msg path still reads
+// as context rather than falling through to the generic tone.
+func TestContextLabelAndRoleClass(t *testing.T) {
+	labelCases := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{"both markers", "# AGENTS.md instructions for /x\n<environment_context>\n</environment_context>", "project instructions + environment"},
+		{"user_instructions plus env", "<user_instructions>\ndo x\n</user_instructions>\n<environment_context></environment_context>", "project instructions + environment"},
+		{"project only", "# AGENTS.md instructions for /x\n\nRun make build.", "project instructions"},
+		{"environment only", "<environment_context>\n  <cwd>/x</cwd>\n</environment_context>", "environment"},
+		{"fallback", "some other injected framing", "agent context"},
+	}
+	for _, c := range labelCases {
+		t.Run("label/"+c.name, func(t *testing.T) {
+			if got := ContextLabel(c.content); got != c.want {
+				t.Errorf("ContextLabel(%q) = %q, want %q", c.content, got, c.want)
+			}
+		})
+	}
+
+	if got := RoleClass("context"); got != "msg-context" {
+		t.Errorf("RoleClass(\"context\") = %q, want msg-context", got)
+	}
+}
+
 // The redesigned session header carries its controls inline and opens tool bodies
 // in a modal: an owner of an internal session gets a compact actions cluster with
 // Publish and Delete, the full-width page wrapper, and the modal overlay host. The
