@@ -325,23 +325,16 @@ templ LandingPage() {
 					</div>
 				</dl>
 			</section>
-			<!-- Section 6: quickstart. A terminal block, with a plain-facts fit note. -->
-			<section class="landing-row landing-quickstart">
-				<div class="landing-copy">
-					<h2>Start with the history you already have</h2>
-					<p>
-						Point a client at your server and the backlog starts uploading. Agents
-						already left months of sessions on your disk; the first sync brings
-						them in.
-					</p>
-					<p class="landing-fit">
-						akari is early software. Registration is closed by default: the first
-						account is the admin, and later accounts join by invite. Everything is
-						stored in your own Postgres, so nothing locks you in.
-					</p>
-				</div>
-				<div class="landing-mock">
-					<div class="mock-term">
+			<!-- Section 6: quickstart. A standalone framed panel closing the page, the
+			     way bastion boxes its install steps, rather than another copy/mock fold. -->
+			<section class="landing-quickstart">
+				<h2>Start with the history you already have</h2>
+				<p>
+					Point a client at your server and the backlog starts uploading. Agents
+					already left months of sessions on your disk; the first sync brings
+					them in.
+				</p>
+				<div class="mock-term">
 						<div class="mock-term-bar">
 							<span class="mk-dot"></span>
 							<span class="mk-dot"></span>
@@ -352,7 +345,6 @@ templ LandingPage() {
 <span class="mk-ln"><span class="mk-prompt">$</span> akari login --server https://akari.example.com --token YOUR_INGEST_TOKEN</span>
 <span class="mk-ln"><span class="mk-prompt">$</span> akari sync</span>
 <span class="mk-ln mk-comment"># or: akari daemon start, to keep uploading as you work</span></pre>
-					</div>
 				</div>
 			</section>
 			<section class="landing-foot">

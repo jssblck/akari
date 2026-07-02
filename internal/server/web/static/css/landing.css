@@ -204,7 +204,22 @@
 .landing-def dt { font-weight: 600; color: var(--text); margin-bottom: 5px; }
 .landing-def dd { margin: 0; color: var(--subtext); line-height: 1.6; }
 
-/* ---- Quickstart: a terminal block + a plain-facts fit note ---- */
+/* ---- Quickstart: a standalone framed panel closing the page ----
+   The last section steps out of the copy/mock fold rhythm into one centered
+   bordered panel, the frame doing the separating work a top rule does for the
+   folds above it. The terminal keeps its left alignment inside centered prose. */
+.landing-quickstart {
+  max-width: 820px; margin: 72px auto 0;
+  padding: var(--sp-2xl);
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg);
+  text-align: center;
+}
+.landing-quickstart h2 { font-size: 1.375rem; margin-bottom: var(--sp-md); }
+.landing-quickstart > p { color: var(--subtext); line-height: 1.6; max-width: 52ch; margin: 0 auto; }
+/* One step up the tonal ladder, so the terminal bar does not blend into the
+   panel it sits on (the body keeps the page ground). */
+.landing-quickstart .mock-term { margin-top: var(--sp-xl); text-align: left; background: var(--surface-2); }
+
 .mock-term {
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md);
   overflow: hidden;
@@ -227,17 +242,6 @@
 .mk-ln { display: block; white-space: pre; }
 .mk-prompt { color: var(--lilac); margin-right: var(--sp-sm); }
 .mk-comment { color: var(--muted); }
-/* The honesty note: a quiet bordered block under the quickstart copy, the plain
-   facts a reader weighs before adopting. Muted, no heading, no accent. The
-   .landing-copy prefix outweighs the earlier `.landing-copy p` rule without
-   resorting to !important. */
-.landing-copy .landing-fit {
-  color: var(--muted); font-size: 0.8125rem; line-height: 1.6;
-  margin-top: var(--sp-lg);
-  padding: var(--sp-md); border: 1px solid var(--border); border-radius: var(--r-md);
-  max-width: none;
-}
-
 /* ---- Foot ---- */
 .landing-foot { margin-top: 72px; text-align: center; }
 
@@ -251,6 +255,7 @@
   .landing-copy p { max-width: none; }
   .landing-defs { grid-template-columns: 1fr; gap: var(--sp-lg); }
   .landing-hero h1 { font-size: 1.875rem; }
+  .landing-quickstart { margin-top: 56px; padding: var(--sp-xl) var(--sp-lg); }
   .landing-foot { margin-top: 56px; }
   /* The cost strip and its table can crowd at narrow widths; let them scroll inside
      their frame rather than clip a column or overflow the page. */
