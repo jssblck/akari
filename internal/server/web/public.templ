@@ -51,7 +51,7 @@ templ PublicSessionPage(d store.SessionDetail, msgs []store.Message, tools map[i
 							</div>
 						}
 						<h2>Transcript</h2>
-						@Transcript(msgs, tools, attachments, PublicBlobBase(*d.PublicID))
+						@Transcript(msgs, tools, attachments, FallbacksByOrdinal(hs.Fallbacks), PublicBlobBase(*d.PublicID))
 					</div>
 				</div>
 			</div>

@@ -107,4 +107,14 @@ package parse
 // and the golden fixtures move. The reparse also re-derives session_signals at the running
 // quality.Version, so the shifted prompt-hygiene grades (the opener is now the real prompt) roll
 // out in the same pass.
-const Epoch = 8
+//
+// Epoch 8 -> 9: add the model_fallbacks projection row and the sessions.model_fallback_count rollup
+// (see migration 0034_model_fallbacks and the fallback upsert in store/projection.go). A model fallback
+// is a Claude Fable turn the safety classifier declined and re-served on a lower model, detected only
+// from the transcript's explicit markers (a "fallback" content block, a usage.iterations
+// "fallback_message" entry, or a "model_refusal_fallback" system entry), never from a bare model-string
+// change. Like Epoch 8 this is a genuine parser output change: the reducer emits a new op type, so the
+// projection delta carries new rows and the golden fixtures move. It pairs with the parse.Version bump,
+// and the reparse it forces detects fallbacks across the already-ingested corpus in one pass, folding
+// model_fallback_count from the surviving inserts on each session.
+const Epoch = 9

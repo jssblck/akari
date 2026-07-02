@@ -397,6 +397,63 @@ func TestIngestFlow(t *testing.T) {
 	}
 }
 
+// TestResetRawClearsModelFallbacks pins that ResetRaw clears the model_fallbacks projection
+// rows alongside zeroing sessions.model_fallback_count, so the invariant
+// model_fallback_count == count(model_fallbacks) holds after a reset. Leaving the rows behind
+// would both diverge the count from the rollup and let a re-upload of the same raw merge into
+// the stale (session_id, dedup_key) rows instead of inserting, so the re-count never fires.
+func TestResetRawClearsModelFallbacks(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	u, err := st.Register(ctx, "grace", "hash", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := st.UpsertProject(ctx, "github.com/ada/reset", "github.com", "ada", "reset", "reset", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid := seedSession(t, st, u.ID, pid, "reset-fb")
+
+	// A chunk gives the session a session_raw row (ResetRaw is a no-op without one).
+	if _, err := st.AppendChunk(ctx, sid, 0, []byte(`{"type":"session"}`+"\n")); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	// Model the post-parse projection state directly: two fallback rows and the matching rollup.
+	if _, err := st.Pool.Exec(ctx,
+		`INSERT INTO model_fallbacks (session_id, message_ordinal, from_model, to_model, trigger, occurred_at, dedup_key)
+		 VALUES ($1, 1, 'claude-fable-5', 'claude-opus-4-8', 'refusal', now(), 'req-a'),
+		        ($1, 2, 'claude-fable-5', 'claude-opus-4-8', 'refusal', now(), 'req-b')`, sid); err != nil {
+		t.Fatalf("seed fallbacks: %v", err)
+	}
+	if _, err := st.Pool.Exec(ctx, "UPDATE sessions SET model_fallback_count = 2 WHERE id = $1", sid); err != nil {
+		t.Fatalf("stamp rollup: %v", err)
+	}
+
+	if err := st.ResetRaw(ctx, sid); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+
+	var rows, count int
+	if err := st.Pool.QueryRow(ctx, "SELECT count(*) FROM model_fallbacks WHERE session_id = $1", sid).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool.QueryRow(ctx, "SELECT model_fallback_count FROM sessions WHERE id = $1", sid).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 0 {
+		t.Errorf("model_fallbacks rows after reset = %d, want 0 (the reset must delete them)", rows)
+	}
+	if count != 0 {
+		t.Errorf("model_fallback_count after reset = %d, want 0", count)
+	}
+	if rows != count {
+		t.Errorf("invariant broken: count(model_fallbacks)=%d != model_fallback_count=%d", rows, count)
+	}
+}
+
 // TestAdvanceProjectionCursorAndVersionGate exercises the incremental applier
 // directly with a stub reducer: the parse cursor advances to the stored length
 // and folds the delta into the aggregates, a caught-up session is a no-op, and a

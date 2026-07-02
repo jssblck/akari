@@ -165,6 +165,18 @@ body.modal-open { overflow: hidden; }
 .msg-shed .shed-tip { left: 50%; right: auto; transform: translateX(-50%); }
 .tok-tip .tt-grid.shed-after { margin-top: 6px; padding-top: 5px; border-top: 1px solid var(--border); }
 
+/* The model-fallback notice sits above the turn a fallback landed on: a slim row in the
+   peach caution hue, its label backed by a faint warn wash and a hairline. Per the
+   Scribed-Line Rule it leans on a full hairline and a tonal fill, not a thick colored edge
+   stripe, so it reads as a marked line without shouting. */
+.msg-fallback { margin: var(--sp-xs) 0; }
+.msg-fallback .fallback-label {
+  display: inline-block; font-family: var(--mono); font-size: 0.6875rem; letter-spacing: 0.02em;
+  color: var(--warn); background: rgba(240, 197, 146, 0.08);
+  border: 1px solid rgba(240, 197, 146, 0.4); border-radius: var(--r-sm);
+  padding: 2px 8px;
+}
+
 /* The score-arithmetic rows in the quality tooltip: penalty points and the final score in mono,
    right-aligned in the tooltip's definition grid so the negatives stack into a readable column. */
 .tt-score .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
