@@ -9,6 +9,7 @@ templ layout(p Page) {
 			<meta charset="utf-8"/>
 			<meta name="viewport" content="width=device-width, initial-scale=1"/>
 			<title>{ p.Title } - akari</title>
+			@faviconLinks()
 			@tzCookieScript()
 			<link rel="preload" href="/static/fonts/Geist-Regular.woff2" as="font" type="font/woff2" crossorigin/>
 			<link rel="preload" href="/static/fonts/GeistMono-Regular.woff2" as="font" type="font/woff2" crossorigin/>
@@ -59,6 +60,17 @@ templ tzCookieScript() {
 			} catch (e) {}
 		})();
 	</script>
+}
+
+// faviconLinks declares the browser tab icon in the three forms current browsers
+// draw from: the scalable SVG (the akari aperture mark, so it stays crisp at any
+// density and follows the dark tile), the legacy .ico served at the root path
+// browsers auto-request, and the apple-touch PNG for an iOS home-screen tile. The
+// SVG is listed after the .ico so a browser that understands it prefers it.
+templ faviconLinks() {
+	<link rel="icon" href="/favicon.ico" sizes="32x32"/>
+	<link rel="icon" href="/static/favicon.svg" type="image/svg+xml"/>
+	<link rel="apple-touch-icon" href="/static/apple-touch-icon.png"/>
 }
 
 // stylesheets links the per-area stylesheets in cascade order: the shared base
@@ -191,6 +203,7 @@ templ publicLayout(title string, og OGMeta) {
 			<meta charset="utf-8"/>
 			<meta name="viewport" content="width=device-width, initial-scale=1"/>
 			<title>{ title } - akari</title>
+			@faviconLinks()
 			@tzCookieScript()
 			@ogTags(title, og)
 			<link rel="preload" href="/static/fonts/Geist-Regular.woff2" as="font" type="font/woff2" crossorigin/>
