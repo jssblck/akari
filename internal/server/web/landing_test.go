@@ -5,11 +5,13 @@ import (
 	"testing"
 )
 
-// The logged-out landing page rides the public layout, whose top bar carries the
-// wordmark plus the Docs, GitHub, and Log in links. The hero is explanation, not
-// a call to action. Pinning the wrapper and the top-bar entry points at the
-// source package guards the anonymous root independently of the httpapi route
-// wiring.
+// The logged-out landing page is a product landing page: a hero over alternating
+// copy-and-mock sections, a capabilities definition list, and a quickstart terminal
+// block, all riding the public layout. Its top bar carries the wordmark plus the
+// Docs, GitHub, and Log in links; the hero's CTAs are link-buttons to the guide and
+// the repository. Pinning the wrapper, the top-bar entry points, and the page's
+// spine at the source package guards the anonymous root independently of the httpapi
+// route wiring.
 func TestLandingPageRendersHeroAndEntryPoints(t *testing.T) {
 	html := renderComponent(t, LandingPage())
 
@@ -27,15 +29,35 @@ func TestLandingPageRendersHeroAndEntryPoints(t *testing.T) {
 		}
 	}
 
-	// The hero explains what akari is.
+	// The hero explains what akari is and keeps the pinned phrase.
+	if !strings.Contains(html, `Know what your agents actually did.`) {
+		t.Errorf("landing hero should carry its headline")
+	}
 	if !strings.Contains(html, `self-hosted instrument`) {
 		t.Errorf("landing hero should explain what akari is")
 	}
 
-	// The prominent hero buttons and the first-account note were removed, so the
-	// hero carries no call-to-action buttons and the foot makes no admin claim.
+	// The hero CTAs are link-buttons: the primary goes to the guide, the secondary to
+	// the repository. The guide CTA is the primary action, not a login button.
+	if !strings.Contains(html, `class="btn" href="/guide"`) {
+		t.Errorf("hero should carry the primary guide CTA")
+	}
+
+	// The spine: one section heading, the quickstart command, and a capabilities term
+	// prove the mock-driven sections rendered.
+	for _, want := range []string{
+		`Every machine, one history`,
+		`akari sync`,
+		`Read it from your agent`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("landing page should render its spine; missing %q", want)
+		}
+	}
+
+	// The old prominent register/login buttons and the first-account note were never
+	// carried over: the hero CTA goes to the guide, and the foot makes no admin claim.
 	for _, unwanted := range []string{
-		`class="btn" href="/login"`,
 		`class="btn secondary" href="/register"`,
 		`needs no invite and becomes the admin`,
 	} {
