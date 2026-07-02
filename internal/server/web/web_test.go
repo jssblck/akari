@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -151,7 +152,9 @@ func TestProjectSessionListRemainderFooter(t *testing.T) {
 }
 
 // relTime buckets the recent past into coarse phrases and falls back to an
-// absolute stamp once a relative one stops being useful.
+// absolute stamp once a relative one stops being useful. Day distance is measured in
+// the viewer's zone, so the same instant can bucket differently depending on the
+// reader's timezone.
 func TestRelTime(t *testing.T) {
 	now := time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC)
 	cases := []struct {
@@ -168,22 +171,73 @@ func TestRelTime(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := relTime(now, c.when); got != c.want {
+			if got := relTime(now, c.when, time.UTC); got != c.want {
 				t.Errorf("relTime(%s) = %q, want %q", c.when.Format(time.RFC3339), got, c.want)
 			}
 		})
+	}
+
+	// A viewer's zone can move an instant across the day boundary, changing the
+	// bucket. At 2026-06-29 03:00 UTC a stamp from 2026-06-29 01:00 UTC is "today" in
+	// UTC, but a viewer in a zone eight hours behind (US Pacific, PDT) is still on
+	// 2026-06-28 for both instants at their local wall clock: 03:00 UTC is 2026-06-28
+	// 20:00 local, so it reads "today" there too. Shift the reference clock forward to
+	// local midnight to make the two zones disagree.
+	pacific, err := time.LoadLocation("America/Los_Angeles")
+	if err != nil {
+		t.Skipf("America/Los_Angeles unavailable: %v", err)
+	}
+	// 2026-06-29 07:30 UTC is 2026-06-29 00:30 PDT (just past local midnight), while
+	// the stamp 2026-06-29 05:00 UTC is 2026-06-28 22:00 PDT (still the day before).
+	nowUTC := time.Date(2026, 6, 29, 7, 30, 0, 0, time.UTC)
+	stamp := time.Date(2026, 6, 29, 5, 0, 0, 0, time.UTC)
+	if got := relTime(nowUTC, stamp, time.UTC); got != "today" {
+		t.Errorf("in UTC both instants sit on 2026-06-29, want %q, got %q", "today", got)
+	}
+	if got := relTime(nowUTC, stamp, pacific); got != "1 day ago" {
+		t.Errorf("in Pacific the stamp is the previous local day, want %q, got %q", "1 day ago", got)
 	}
 }
 
 // FmtRelTime returns a dash for the absent timestamp rather than panicking on a
 // nil pointer or formatting the zero time.
 func TestFmtRelTimeAbsent(t *testing.T) {
-	if got := FmtRelTime(nil); got != "-" {
+	ctx := context.Background()
+	if got := FmtRelTime(ctx, nil); got != "-" {
 		t.Errorf("FmtRelTime(nil) = %q, want %q", got, "-")
 	}
 	var zero time.Time
-	if got := FmtRelTime(&zero); got != "-" {
+	if got := FmtRelTime(ctx, &zero); got != "-" {
 		t.Errorf("FmtRelTime(zero) = %q, want %q", got, "-")
+	}
+}
+
+// FmtTime and FmtTimeAt render in the viewer's zone carried on the context, and
+// FmtTimeLong appends the zone abbreviation so a hover title names its zone.
+func TestFmtTimeLocalizes(t *testing.T) {
+	pacific, err := time.LoadLocation("America/Los_Angeles")
+	if err != nil {
+		t.Skipf("America/Los_Angeles unavailable: %v", err)
+	}
+	// 2026-06-29 07:30 UTC is 2026-06-29 00:30 PDT.
+	ts := time.Date(2026, 6, 29, 7, 30, 0, 0, time.UTC)
+	utcCtx := context.Background()
+	laCtx := WithLoc(context.Background(), pacific)
+
+	if got := FmtTime(utcCtx, &ts); got != "2026-06-29 07:30" {
+		t.Errorf("FmtTime UTC = %q, want %q", got, "2026-06-29 07:30")
+	}
+	if got := FmtTime(laCtx, &ts); got != "2026-06-29 00:30" {
+		t.Errorf("FmtTime Pacific = %q, want %q", got, "2026-06-29 00:30")
+	}
+	if got := FmtTimeAt(laCtx, ts); got != "2026-06-29 00:30" {
+		t.Errorf("FmtTimeAt Pacific = %q, want %q", got, "2026-06-29 00:30")
+	}
+	if got := FmtTimeLong(utcCtx, &ts); got != "2026-06-29 07:30 UTC" {
+		t.Errorf("FmtTimeLong UTC = %q, want %q", got, "2026-06-29 07:30 UTC")
+	}
+	if got := FmtTimeLong(laCtx, &ts); got != "2026-06-29 00:30 PDT" {
+		t.Errorf("FmtTimeLong Pacific = %q, want %q", got, "2026-06-29 00:30 PDT")
 	}
 }
 

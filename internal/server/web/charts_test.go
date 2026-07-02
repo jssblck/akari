@@ -107,6 +107,22 @@ func TestBreakdownListTokenTooltip(t *testing.T) {
 	}
 }
 
+// A breakdown row with a single session reads "1 session", not "1 sessions": the count
+// runs through the shared plural() helper rather than an unconditional "sessions" suffix.
+func TestBreakdownListSingularSessionCount(t *testing.T) {
+	rows := BuildBreakdown([]store.Breakdown{
+		{Label: "claude-opus-4-8", CostUSD: 1.5, Input: 100, Output: 50, Sessions: 1},
+	})
+	html := renderComponent(t, breakdownList("By model", rows))
+
+	if !strings.Contains(html, "1 session<") {
+		t.Errorf("a single-session row should read \"1 session\", got: %s", html)
+	}
+	if strings.Contains(html, "1 sessions") {
+		t.Error("a single-session row should not read \"1 sessions\"")
+	}
+}
+
 func TestBuildBreakdownZeroTokens(t *testing.T) {
 	// Width is token-driven with no cost fallback: when no slice has tokens, every
 	// bar stays at 0% even though cost is present.

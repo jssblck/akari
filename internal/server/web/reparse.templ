@@ -2,18 +2,17 @@ package web
 
 import "fmt"
 
-// accountReparse is the Reparse section of the account page: a short explanation,
-// the live status, and (for admins) the force button. Its watch container reloads
-// the page when the in-progress state flips, so starting a reparse here swaps the
+// accountReparse is the Reparse section of the account page: a one-line
+// explanation, the live status, and the force button. It is admin-only
+// machinery, so the caller only renders it inside the account page's admin
+// zone; the button here needs no further gate. Its watch container reloads the
+// page when the in-progress state flips, so starting a reparse here swaps the
 // idle line for the progress bar and finishing swaps it back, with the button
 // re-enabled.
-templ accountReparse(p Page, rp ReparseView) {
+templ accountReparse(rp ReparseView) {
 	<section>
 		<div class="panel-head"><h2>Reparse</h2></div>
-		<p class="muted small">
-			Reparse rebuilds the parsed view of every stored session from its raw bytes. The
-			server runs it automatically after a parser change; force one here if you need to.
-		</p>
+		<p class="muted small">Rebuilds every parsed session from raw bytes.</p>
 		if rp.InProgress {
 			@reparseProgress(rp.Done, rp.Total, rp.Failed)
 		} else {
@@ -27,11 +26,9 @@ templ accountReparse(p Page, rp ReparseView) {
 				No reparse running.
 			</div>
 		}
-		if p.IsAdmin {
-			<form method="post" action="/account/reparse" class="reparse-form">
-				<button type="submit" disabled?={ rp.InProgress }>Reparse now</button>
-			</form>
-		}
+		<form method="post" action="/account/reparse" class="reparse-form">
+			<button type="submit" disabled?={ rp.InProgress }>Reparse now</button>
+		</form>
 	</section>
 }
 
@@ -95,7 +92,7 @@ templ PublicReparsePage(done, total, failed int) {
 	@publicLayout("Reparsing", OGMeta{}) {
 		<div class="empty big" data-reparse-public>
 			<h1>Reparsing</h1>
-			<p>This session is being rebuilt after a parser update. It will return shortly.</p>
+			<p>Rebuilding parsed sessions from raw bytes. The page reloads when it finishes.</p>
 			<div class="bar-track reparse-public-track">
 				<div class="bar-fill" data-pct={ fmt.Sprintf("%d", ReparsePercent(done, total)) }></div>
 			</div>

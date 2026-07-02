@@ -4,6 +4,7 @@
 package web
 
 import (
+	"context"
 	"embed"
 	"fmt"
 	"strings"
@@ -11,6 +12,58 @@ import (
 
 	"github.com/jssblck/akari/internal/server/store"
 )
+
+// locCtxKey keys the viewer's timezone in the render context. The httpapi layer
+// resolves it from the tz cookie and stashes it before rendering; the formatting
+// helpers below read it back through Loc. An unexported type keeps the key from
+// colliding with any other package's context values.
+type locCtxKey struct{}
+
+// WithLoc returns a context carrying the viewer's timezone, for the httpapi render
+// path to attach before a component renders. A nil location is ignored so the
+// accessor's UTC default still applies.
+func WithLoc(ctx context.Context, loc *time.Location) context.Context {
+	if loc == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, locCtxKey{}, loc)
+}
+
+// Loc is the viewer's timezone for the current render, or UTC when none was set.
+// The formatting helpers localize every stamp and day heading through it, so a
+// reader sees times in their own zone; a page rendered outside a request (or
+// before the cookie is set) reads UTC. templ exposes the render ctx implicitly, so
+// a template calls FmtTime(ctx, t) and this reads the zone off that ctx.
+func Loc(ctx context.Context) *time.Location {
+	if loc, ok := ctx.Value(locCtxKey{}).(*time.Location); ok && loc != nil {
+		return loc
+	}
+	return time.UTC
+}
+
+// noticeCtxKey keys the one-shot notice banner text in the render context, the
+// same seam Loc uses: the httpapi layer drains the notice cookie once, at the
+// render seam every page shares, and stashes the text here rather than
+// threading it through every pageFor/pageForNav call site. An unexported type
+// keeps the key from colliding with any other package's context values.
+type noticeCtxKey struct{}
+
+// WithNotice returns a context carrying a one-shot notice banner's text, for the
+// httpapi render path to attach before a component renders. An empty string is
+// ignored, so the accessor's no-notice default still applies.
+func WithNotice(ctx context.Context, notice string) context.Context {
+	if notice == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, noticeCtxKey{}, notice)
+}
+
+// Notice is the current render's one-shot notice banner text, or "" when none was
+// set. The authed layout renders it once at the top of main when non-empty.
+func Notice(ctx context.Context) string {
+	n, _ := ctx.Value(noticeCtxKey{}).(string)
+	return n
+}
 
 // Static holds the embedded static assets (htmx, stylesheet) served under
 // /static/.
@@ -333,12 +386,25 @@ func FmtTokensCompact(n int64) string {
 	}
 }
 
-// FmtTime renders a timestamp, or a dash when absent.
-func FmtTime(t *time.Time) string {
+// FmtTime renders a timestamp in the viewer's timezone (UTC when none is set), or a
+// dash when absent. It keeps the bare "2006-01-02 15:04" form for a visible cell;
+// FmtTimeLong adds the zone abbreviation for a hover title, where naming the zone
+// earns its width.
+func FmtTime(ctx context.Context, t *time.Time) string {
 	if t == nil || t.IsZero() {
 		return "-"
 	}
-	return t.UTC().Format("2006-01-02 15:04")
+	return t.In(Loc(ctx)).Format("2006-01-02 15:04")
+}
+
+// FmtTimeLong is FmtTime with the zone abbreviation appended, for the hover title
+// on a stamp shown short elsewhere. Naming the zone (PST, UTC, ...) lets a reader
+// tell which zone a full stamp is in without cluttering every visible cell with it.
+func FmtTimeLong(ctx context.Context, t *time.Time) string {
+	if t == nil || t.IsZero() {
+		return "-"
+	}
+	return t.In(Loc(ctx)).Format("2006-01-02 15:04 MST")
 }
 
 // RowTokens is a session's total token volume across all four classes (input,
@@ -363,21 +429,22 @@ func plural(n int) string {
 // the wall clock; relTime holds the testable core. It backs the "Updated" column
 // on both the projects index and the per-project session table, so the two read
 // alike (the global feed groups by day instead and uses FeedTime).
-func FmtRelTime(t *time.Time) string {
+func FmtRelTime(ctx context.Context, t *time.Time) string {
 	if t == nil || t.IsZero() {
 		return "-"
 	}
-	return relTime(time.Now(), *t)
+	return relTime(time.Now(), *t, Loc(ctx))
 }
 
 // relTime is FmtRelTime's clock-injected core. Day distance is measured between
-// UTC calendar dates (not 24-hour windows), so a session from late last night
-// reads "1 day ago" rather than "today" merely because fewer than 24 hours have
-// passed.
-func relTime(now, t time.Time) string {
-	now, t = now.UTC(), t.UTC()
-	nd := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
-	td := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+// calendar dates in the viewer's zone (not 24-hour windows), so a session from
+// late last night reads "1 day ago" rather than "today" merely because fewer than
+// 24 hours have passed, and the boundary is the reader's local midnight rather than
+// UTC's. The absolute-stamp fallback also renders in the viewer's zone.
+func relTime(now, t time.Time, loc *time.Location) string {
+	now, t = now.In(loc), t.In(loc)
+	nd := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	td := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, loc)
 	days := int(nd.Sub(td).Hours() / 24)
 	switch {
 	case days <= 0: // today, or a future stamp from clock skew
@@ -391,12 +458,13 @@ func relTime(now, t time.Time) string {
 	}
 }
 
-// FmtTimeAt renders a non-pointer timestamp, or a dash when zero.
-func FmtTimeAt(t time.Time) string {
+// FmtTimeAt renders a non-pointer timestamp in the viewer's timezone, or a dash
+// when zero.
+func FmtTimeAt(ctx context.Context, t time.Time) string {
 	if t.IsZero() {
 		return "-"
 	}
-	return t.UTC().Format("2006-01-02 15:04")
+	return t.In(Loc(ctx)).Format("2006-01-02 15:04")
 }
 
 // grantName renders a connected app's display name, falling back to a generic

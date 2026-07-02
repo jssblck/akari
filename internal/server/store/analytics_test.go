@@ -16,10 +16,13 @@ import (
 func seedSessionWithStats(t *testing.T, st *store.Store, userID, projectID int64, agent, src string, cost float64, in, out int64) int64 {
 	t.Helper()
 	var id int64
+	// message_count = 1 so the session is non-empty: the shared session-list conds
+	// hide zero-message sessions by default, and these represent real sessions with
+	// usage, not the empty ones the global feed suppresses.
 	err := st.Pool.QueryRow(context.Background(),
 		`INSERT INTO sessions (user_id, project_id, agent, source_session_id, machine,
-		        total_cost_usd, total_input_tokens, total_output_tokens)
-		 VALUES ($1,$2,$3,$4,'box',$5,$6,$7) RETURNING id`,
+		        message_count, total_cost_usd, total_input_tokens, total_output_tokens)
+		 VALUES ($1,$2,$3,$4,'box',1,$5,$6,$7) RETURNING id`,
 		userID, projectID, agent, src, cost, in, out).Scan(&id)
 	if err != nil {
 		t.Fatalf("seed session: %v", err)
@@ -801,6 +804,71 @@ func TestAnalyticsProjectAndUserScope(t *testing.T) {
 		t.Fatalf("all-time combined analytics: %v", err)
 	}
 	assertGraceProjA("all-time", all)
+}
+
+// analyticsByUser groups the same filtered usage base as the by-model and by-agent
+// splits by the session's owning user, ordered by cost desc like the other two. This
+// mirrors TestAnalyticsRollups' shape for the by-agent split, but keyed on the user
+// dimension instead.
+func TestAnalyticsByUser(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	graceID := seedUser(t, st, "grace")
+	adaID := seedUser(t, st, "ada")
+	proj, err := st.UpsertProject(ctx, "github.com/ada/engine", "github.com", "ada", "engine", "engine", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+
+	// grace: two sessions, higher total cost. ada: one session, lower cost.
+	sg1 := seedSessionWithStats(t, st, graceID, proj, "claude", "sg1", 3.0, 500, 100)
+	sg2 := seedSessionWithStats(t, st, graceID, proj, "codex", "sg2", 2.0, 300, 60)
+	sa := seedSessionWithStats(t, st, adaID, proj, "claude", "sa1", 1.0, 200, 40)
+	seedUsage(t, st, sg1, "claude-opus-4-8", 3.0, 500, 100, 0, "g1")
+	seedUsage(t, st, sg2, "gpt-5.5", 2.0, 300, 60, 0, "g2")
+	seedUsage(t, st, sa, "claude-opus-4-8", 1.0, 200, 40, 0, "a1")
+
+	a, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: proj})
+	if err != nil {
+		t.Fatalf("analytics: %v", err)
+	}
+
+	if len(a.Users) != 2 {
+		t.Fatalf("want 2 users in the breakdown, got %d: %+v", len(a.Users), a.Users)
+	}
+	// Ordered by cost desc: grace (5.0 across two sessions) leads ada (1.0).
+	if a.Users[0].Label != "grace" || a.Users[1].Label != "ada" {
+		t.Errorf("users breakdown should lead with grace (higher cost): %+v", a.Users)
+	}
+	if !costsEqual(a.Users[0].CostUSD, 5.0) {
+		t.Errorf("grace's cost = %.2f, want ~5.0 (both her sessions)", a.Users[0].CostUSD)
+	}
+	if a.Users[0].Sessions != 2 {
+		t.Errorf("grace's session count = %d, want 2 (grouping by user, not by agent)", a.Users[0].Sessions)
+	}
+	if !costsEqual(a.Users[1].CostUSD, 1.0) || a.Users[1].Sessions != 1 {
+		t.Errorf("ada's row = cost %.2f sessions %d, want 1.0/1", a.Users[1].CostUSD, a.Users[1].Sessions)
+	}
+	if a.Users[0].Input != 800 {
+		t.Errorf("grace's input tokens = %d, want 800 (500+300, summed across her two sessions)", a.Users[0].Input)
+	}
+
+	// The by-user split reconciles with the headline the same way by-model and
+	// by-agent do: it partitions the same usage_events base one user at a time.
+	var userTok int64
+	var userCost float64
+	for _, u := range a.Users {
+		userTok += u.Tokens()
+		userCost += u.CostUSD
+	}
+	if userTok != a.TotalTokens() {
+		t.Errorf("by-user token sum %d != headline %d", userTok, a.TotalTokens())
+	}
+	if !costsEqual(userCost, a.TotalCost) {
+		t.Errorf("by-user cost sum %.2f != headline %.2f", userCost, a.TotalCost)
+	}
 }
 
 // ListUsers returns every account ordered by username, carrying only the identity

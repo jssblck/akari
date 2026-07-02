@@ -223,3 +223,74 @@ func (s *Store) CreateInvite(ctx context.Context, tokenHash string, createdBy in
 		tokenHash, createdBy, note, expiresAt).Scan(&id)
 	return id, err
 }
+
+// Invite is an issued invite token as shown on the account page: enough to
+// judge its status (unused, expired, or redeemed by whom) without exposing the
+// token itself, which is never stored beyond its hash.
+type Invite struct {
+	ID         int64
+	Note       string
+	CreatedBy  string
+	CreatedAt  time.Time
+	ExpiresAt  *time.Time
+	RedeemedBy *string
+	RedeemedAt *time.Time
+}
+
+// ListInvites returns every invite token ever issued, newest first, joined to
+// the creator's and (if redeemed) the redeemer's username so the account page
+// can render status without a second lookup per row.
+func (s *Store) ListInvites(ctx context.Context) ([]Invite, error) {
+	rows, err := s.Pool.Query(ctx,
+		`SELECT i.id, i.note, creator.username, i.created_at, i.expires_at,
+		        redeemer.username, i.redeemed_at
+		   FROM invite_tokens i
+		   JOIN users creator ON creator.id = i.created_by
+		   LEFT JOIN users redeemer ON redeemer.id = i.redeemed_by
+		  ORDER BY i.created_at DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("query invites: %w", err)
+	}
+	defer rows.Close()
+	var out []Invite
+	for rows.Next() {
+		var inv Invite
+		if err := rows.Scan(&inv.ID, &inv.Note, &inv.CreatedBy, &inv.CreatedAt, &inv.ExpiresAt,
+			&inv.RedeemedBy, &inv.RedeemedAt); err != nil {
+			return nil, fmt.Errorf("scan invite: %w", err)
+		}
+		out = append(out, inv)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate invites: %w", err)
+	}
+	return out, nil
+}
+
+// RevokeInvite deletes a STILL-OPEN invite token by id: unredeemed and not past its
+// expiry. It is a no-op (not an error) if the id does not exist or the invite is no
+// longer open (redeemed or expired), matching RevokeAPIToken's idempotent shape; the
+// caller (an admin-only form handler) redirects either way.
+//
+// The predicate is exactly the one revocability policy the whole app shares: an invite
+// is revocable iff it is still redeemable. It matches classifyInvite in the account
+// view (which shows Revoke only for the still-open case) and Register's redemption
+// gate (redeemed_at IS NULL AND (expires_at IS NULL OR expires_at > now())), so the
+// page's control, this write path, and the redemption never disagree about which
+// invites can still be acted on. A direct POST to revoke an expired or redeemed invite
+// therefore does nothing, just as the missing Revoke button implies.
+//
+// Aligning on redeemed_at IS NULL also closes a race with Register: Register redeems an
+// invite inside its registration transaction and only then patches redeemed_by. Scoping
+// the delete to unredeemed rows makes the two mutually exclusive on the same row:
+// whichever commits first, the other matches nothing (Register sees the row deleted and
+// returns ErrInvalidInvite; the delete sees redeemed_at set and removes nothing).
+func (s *Store) RevokeInvite(ctx context.Context, id int64) error {
+	if _, err := s.Pool.Exec(ctx,
+		`DELETE FROM invite_tokens
+		  WHERE id = $1 AND redeemed_at IS NULL
+		    AND (expires_at IS NULL OR expires_at > now())`, id); err != nil {
+		return fmt.Errorf("revoke invite: %w", err)
+	}
+	return nil
+}

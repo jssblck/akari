@@ -23,11 +23,13 @@ func TestSessionFeedKeysetPaging(t *testing.T) {
 	if err != nil {
 		t.Fatalf("project: %v", err)
 	}
-	// Seven sessions, distinct recency so the feed order is total.
+	// Seven sessions, distinct recency so the feed order is total. message_count = 1
+	// so the shared conds' empty-hide default keeps them (these stand in for real
+	// sessions, not the zero-message ones the global feed suppresses).
 	for i := 0; i < 7; i++ {
 		if _, err := st.Pool.Exec(ctx,
-			`INSERT INTO sessions (user_id, project_id, agent, source_session_id, machine, updated_at)
-			 VALUES ($1,$2,'claude',$3,'box', now() - make_interval(mins => $4))`,
+			`INSERT INTO sessions (user_id, project_id, agent, source_session_id, machine, message_count, updated_at)
+			 VALUES ($1,$2,'claude',$3,'box', 1, now() - make_interval(mins => $4))`,
 			uid, pid, "s"+strconv.Itoa(i), i); err != nil {
 			t.Fatalf("insert session %d: %v", i, err)
 		}
@@ -83,8 +85,8 @@ func TestSessionFeedCompleteUnderUpdate(t *testing.T) {
 	for i := 0; i < 6; i++ {
 		var id int64
 		if err := st.Pool.QueryRow(ctx,
-			`INSERT INTO sessions (user_id, project_id, agent, source_session_id, machine, updated_at)
-			 VALUES ($1,$2,'claude',$3,'box', now() - make_interval(mins => $4)) RETURNING id`,
+			`INSERT INTO sessions (user_id, project_id, agent, source_session_id, machine, message_count, updated_at)
+			 VALUES ($1,$2,'claude',$3,'box', 1, now() - make_interval(mins => $4)) RETURNING id`,
 			uid, pid, "s"+strconv.Itoa(i), i+1).Scan(&id); err != nil {
 			t.Fatalf("insert session %d: %v", i, err)
 		}

@@ -231,6 +231,7 @@ Then push your sessions:
 akari sync                 # one-shot: scan and upload everything new
 akari sync --dry-run       # show what would upload, with skip reasons
 akari sync --time-limit 30s  # upload for up to 30s, finish the in-flight file, then exit
+akari sync --finalize      # ephemeral host (CI, cloud sandbox): flush every session's final turn now
 akari watch                # stay running, upload sessions as they change
 akari daemon start         # run watch in the background (per-OS)
 akari daemon status
@@ -246,6 +247,16 @@ can finish a little past the limit but never abandons an upload mid-stream. Beca
 uploads resume from the server's cursor, repeated short runs ingest a backlog in
 chunks. That is handy for trickling in data, or for grabbing a few seconds of
 sample sessions while a dev server is up.
+
+`akari sync --finalize` is for hosts that disappear right after the sync: a CI job
+or a cloud sandbox. A Codex session's final turn has no closing user line, so the
+client normally withholds it until the session file has been idle for a minute (the
+turn might still be streaming). On an ephemeral host that idle minute never arrives
+before teardown, so the last turn (usually the result) would never upload. `--finalize`
+asserts that every session being synced is terminal and flushes those trailing turns
+now. Reach for it only when every session is genuinely finished: on a live workstation
+a still-running session would be flushed mid-turn, so let the idle window do its job
+there instead. Claude and pi sessions are unaffected: they carry no withheld turn.
 
 The client discovers Claude, Codex, and pi sessions in their standard locations.
 A session whose working directory is not a git repository is skipped with a
