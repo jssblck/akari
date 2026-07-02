@@ -9,12 +9,12 @@
 @font-face { font-family: "Geist Mono"; src: url("fonts/GeistMono-Medium.woff2") format("woff2"); font-weight: 500; }
 
 :root {
-  --bg: #14131b; --surface: #1b1a24; --surface-2: #232230; --surface-3: #2b2939;
-  --border: #383548; --border-strong: #4a4660;
+  --bg: #0c0a0e; --surface: #18161b; --surface-2: #242228; --surface-3: #302e35;
+  --border: #3e3b44; --border-strong: #57535f;
   --text: #e6e3f0; --subtext: #c5c1d6; --muted: #9a94ad; --faint: #6f6987;
   --lilac: #c6a8f2; --lilac-strong: #b693ea; --ink: #1a1320;
   --ok: #9fd6a6; --err: #ef9aa9; --warn: #f0c592; --info: #92cfd4;
-  --msg-user: #272336; --msg-assistant: #1f1f2b;
+  --msg-user: #201e26; --msg-assistant: #1b1b1f;
   --v1:#c6a8f2; --v2:#88cfce; --v3:#f0bf92; --v4:#ec98b0; --v5:#a6d29e; --v6:#95c0ef; --v7:#ddc885; --v8:#a98ad4;
   --sans: "Geist", "Inter", system-ui, sans-serif;
   --mono: "Geist Mono", ui-monospace, Menlo, monospace;
