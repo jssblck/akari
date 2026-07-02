@@ -219,6 +219,11 @@ func TestSessionDetailBackfillsUnbackfilledCacheSavingsOnRead(t *testing.T) {
 		t.Fatalf("project: %v", err)
 	}
 
+	// The read prices from usage_events only while pricing is current (marker == pricing.Version), the
+	// state a booted server reaches once its startup reconcile has advanced the migration-seeded marker;
+	// a mismatch would instead serve the stored rollup flagged partial. Establish that precondition.
+	setCacheSavingsPricedVersion(t, st, ctx, pricing.Version)
+
 	s := seedSessionWithStats(t, st, admin.ID, proj, "claude", "readgate", 0, 0, 0)
 	seedUsageCache(t, st, s, "claude-opus-4-8", 1, 200_000, 100_000, 800_000, 0, 1, "rg-1")
 	recompute, err := st.SessionCacheStats(ctx, s)
@@ -934,8 +939,10 @@ func TestLiveFoldDropsBackfilledWhenPricingMarkerDiffers(t *testing.T) {
 	}
 	msgs := []store.MessageDelta{{Ordinal: 0, Role: "user", Content: "hi"}}
 
-	// Marker current (the migration default equals pricing.Version): a cache-bearing fold stays
+	// Marker current (set to this binary's pricing.Version, the state a booted server reaches once its
+	// startup reconcile has advanced the migration-seeded marker): a cache-bearing fold stays
 	// authoritative, so the session header serves the O(1) rollup.
+	setCacheSavingsPricedVersion(t, st, ctx, pricing.Version)
 	sCurrent, _ := ingestSession(t, st, admin.ID, proj, "claude", "lf-current", msgs, cacheUsage("lfc-1"))
 	if !backfilledFlag(t, st, ctx, sCurrent) {
 		t.Error("with the pricing marker current a cache-bearing fold must stay authoritative (backfilled=true)")

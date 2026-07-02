@@ -117,4 +117,13 @@ package parse
 // projection delta carries new rows and the golden fixtures move. It pairs with the parse.Version bump,
 // and the reparse it forces detects fallbacks across the already-ingested corpus in one pass, folding
 // model_fallback_count from the surviving inserts on each session.
-const Epoch = 9
+//
+// Epoch 9 -> 10: price claude-sonnet-5 (Sonnet 5 at the standard $3/$15 Sonnet rate; see
+// internal/pricing). Sonnet 5 usage was unknown to the pricing table before, so its usage_events rows
+// carry a NULL per-row cost and its sessions read cost_incomplete. This bump reparses the corpus so
+// every Sonnet 5 usage row re-prices through pricing.Cost in one pass, and pairs with the
+// pricing.Version 1 -> 2 bump that re-prices the per-session cache-savings rollup. It is a pricing
+// change, not a reducer-shape change, and no golden fixture uses Sonnet 5, so the projection delta for
+// the fixtures is byte-for-byte identical and the golden snapshots do not move; the bump is the reprice
+// signal and stands on its own.
+const Epoch = 10
