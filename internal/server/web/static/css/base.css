@@ -159,6 +159,18 @@ section { margin-top: var(--sp-2xl); }
 .panel-head { display: flex; align-items: baseline; gap: var(--sp-md); margin-bottom: var(--sp-md); }
 
 /* ---- Tables (the data grid) ---- */
+/* Every data table sits in a .table-scroll wrapper: a wide table scrolls inside
+   its own panel instead of forcing the whole page to scroll horizontally at
+   narrow viewports. The wrapper is a scroll container, so it also clips
+   vertically; the rule below flips the token hover card upward on bottom rows
+   (where the table guarantees room above) so the card stays readable instead of
+   spilling past the clipped bottom edge. Rows near the top keep the downward
+   card, since a short table has no room above the row either way. */
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.table-scroll tfoot .tok-tip,
+.table-scroll tbody tr:nth-last-child(-n+2):not(:nth-child(-n+3)) .tok-tip {
+  top: auto; bottom: calc(100% + 6px);
+}
 table.grid { width: 100%; border-collapse: collapse; }
 table.grid th, table.grid td {
   text-align: left; padding: var(--sp-sm) var(--sp-md);
@@ -333,6 +345,18 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--l
 /* ---- Responsive ---- */
 @media (max-width: 860px) {
   main { padding: var(--sp-lg); }
+  /* The stat tips anchor left on their tile with a 190px floor, so a tile in the
+     right half of a narrow strip pushes its card past the viewport; the card is
+     visibility-hidden rather than display-none (the hide transition needs it in
+     layout), so even unhovered it widens document.scrollWidth and the whole page
+     scrolls horizontally. Re-anchor the card to the strip itself (tiles go
+     static, the strip is the positioned ancestor) and span it edge to edge, so
+     the breakdown drops below the strip like a panel and can never leave the
+     viewport. The sticky session strip is already a containing block, so it
+     keeps position: sticky. */
+  .stats:not(.sticky) { position: relative; }
+  .tokens-stat, .cache-stat, .quality-stat { position: static; }
+  .stat-tip { left: 0; right: 0; min-width: 0; }
 }
 
 /* ---- Reduced motion ---- */

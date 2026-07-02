@@ -33,30 +33,32 @@ templ AccountPage(p Page, tokens []store.APIToken, grants []store.OAuthGrant, in
 			if len(tokens) == 0 {
 				<div class="empty">No tokens yet.</div>
 			} else {
-				<table class="grid">
-					<thead>
-						<tr><th>Name</th><th>Scope</th><th>Created</th><th>Last used</th><th></th></tr>
-					</thead>
-					<tbody>
-						for _, t := range tokens {
-							<tr>
-								<td>{ t.Name }</td>
-								<td><span class="tag">{ t.Scope }</span></td>
-								<td class="muted">{ FmtTimeAt(ctx, t.CreatedAt) }</td>
-								<td class="muted">{ FmtTime(ctx, t.LastUsedAt) }</td>
-								<td>
-									if t.RevokedAt != nil {
-										<span class="muted">revoked</span>
-									} else {
-										<form method="post" action={ templ.SafeURL(fmt.Sprintf("/account/tokens/%d/revoke", t.ID)) } class="inline">
-											<button class="secondary" type="submit">Revoke</button>
-										</form>
-									}
-								</td>
-							</tr>
-						}
-					</tbody>
-				</table>
+				<div class="table-scroll">
+					<table class="grid">
+						<thead>
+							<tr><th>Name</th><th>Scope</th><th>Created</th><th>Last used</th><th></th></tr>
+						</thead>
+						<tbody>
+							for _, t := range tokens {
+								<tr>
+									<td>{ t.Name }</td>
+									<td><span class="tag">{ t.Scope }</span></td>
+									<td class="muted">{ FmtTimeAt(ctx, t.CreatedAt) }</td>
+									<td class="muted">{ FmtTime(ctx, t.LastUsedAt) }</td>
+									<td>
+										if t.RevokedAt != nil {
+											<span class="muted">revoked</span>
+										} else {
+											<form method="post" action={ templ.SafeURL(fmt.Sprintf("/account/tokens/%d/revoke", t.ID)) } class="inline">
+												<button class="secondary" type="submit">Revoke</button>
+											</form>
+										}
+									</td>
+								</tr>
+							}
+						</tbody>
+					</table>
+				</div>
 			}
 		</section>
 		<section>
@@ -65,26 +67,28 @@ templ AccountPage(p Page, tokens []store.APIToken, grants []store.OAuthGrant, in
 			if len(grants) == 0 {
 				<div class="empty">None connected.</div>
 			} else {
-				<table class="grid">
-					<thead>
-						<tr><th>App</th><th>Access</th><th>Connected</th><th>Last used</th><th></th></tr>
-					</thead>
-					<tbody>
-						for _, g := range grants {
-							<tr>
-								<td>{ grantName(g.ClientName) }</td>
-								<td><span class="tag">{ g.Scope }</span></td>
-								<td class="muted">{ FmtTimeAt(ctx, g.ConnectedAt) }</td>
-								<td class="muted">{ FmtTimeAt(ctx, g.LastUsedAt) }</td>
-								<td>
-									<form method="post" action={ templ.SafeURL(fmt.Sprintf("/account/connections/%s/revoke", g.ClientID)) } class="inline">
-										<button class="secondary" type="submit">Disconnect</button>
-									</form>
-								</td>
-							</tr>
-						}
-					</tbody>
-				</table>
+				<div class="table-scroll">
+					<table class="grid">
+						<thead>
+							<tr><th>App</th><th>Access</th><th>Connected</th><th>Last used</th><th></th></tr>
+						</thead>
+						<tbody>
+							for _, g := range grants {
+								<tr>
+									<td>{ grantName(g.ClientName) }</td>
+									<td><span class="tag">{ g.Scope }</span></td>
+									<td class="muted">{ FmtTimeAt(ctx, g.ConnectedAt) }</td>
+									<td class="muted">{ FmtTimeAt(ctx, g.LastUsedAt) }</td>
+									<td>
+										<form method="post" action={ templ.SafeURL(fmt.Sprintf("/account/connections/%s/revoke", g.ClientID)) } class="inline">
+											<button class="secondary" type="submit">Disconnect</button>
+										</form>
+									</td>
+								</tr>
+							}
+						</tbody>
+					</table>
+				</div>
 			}
 		</section>
 		@accountPublicity(p)
@@ -113,34 +117,36 @@ templ accountInvites(invites []store.Invite, newInvite string) {
 		if len(invites) == 0 {
 			<div class="empty">No invites.</div>
 		} else {
-			<table class="grid">
-				<thead>
-					<tr><th>Note</th><th>Created</th><th>Status</th><th></th></tr>
-				</thead>
-				<tbody>
-					for _, inv := range invites {
-						{{ view := inviteViewOf(inv) }}
-						<tr>
-							<td>
-								if inv.Note != "" {
-									{ inv.Note }
-								} else {
-									<span class="muted">-</span>
-								}
-							</td>
-							<td class="muted">{ FmtTimeAt(ctx, inv.CreatedAt) }</td>
-							<td>{ view.Status }</td>
-							<td>
-								if view.Revocable {
-									<form method="post" action={ templ.SafeURL(fmt.Sprintf("/account/invites/%d/revoke", inv.ID)) } class="inline">
-										<button class="secondary" type="submit">Revoke</button>
-									</form>
-								}
-							</td>
-						</tr>
-					}
-				</tbody>
-			</table>
+			<div class="table-scroll">
+				<table class="grid">
+					<thead>
+						<tr><th>Note</th><th>Created</th><th>Status</th><th></th></tr>
+					</thead>
+					<tbody>
+						for _, inv := range invites {
+							{{ view := inviteViewOf(inv) }}
+							<tr>
+								<td>
+									if inv.Note != "" {
+										{ inv.Note }
+									} else {
+										<span class="muted">-</span>
+									}
+								</td>
+								<td class="muted">{ FmtTimeAt(ctx, inv.CreatedAt) }</td>
+								<td>{ view.Status }</td>
+								<td>
+									if view.Revocable {
+										<form method="post" action={ templ.SafeURL(fmt.Sprintf("/account/invites/%d/revoke", inv.ID)) } class="inline">
+											<button class="secondary" type="submit">Revoke</button>
+										</form>
+									}
+								</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			</div>
 		}
 	</section>
 }
