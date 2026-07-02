@@ -22,7 +22,8 @@ func TestLookupDatedSnapshotsAndAliases(t *testing.T) {
 		{"claude-opus-4-6", 5, 25},
 		{"claude-opus-4-7", 5, 25},
 		{"claude-opus-4-8", 5, 25},
-		// Sonnet at $3/$15 from 3.5 through 4.6.
+		// Sonnet at $3/$15 from 3.5 through 5.
+		{"claude-sonnet-5", 3, 15},
 		{"claude-sonnet-4-20250514", 3, 15},
 		{"claude-sonnet-4-0", 3, 15},
 		{"claude-sonnet-4-5-20250929", 3, 15},
@@ -108,7 +109,7 @@ func TestUnlistedModelsAreUnknown(t *testing.T) {
 	// matching could not guard.
 	for _, model := range []string{
 		"claude-opus-4-9", "claude-opus-5", "claude-opus-5-0",
-		"claude-sonnet-4-7", "claude-sonnet-5",
+		"claude-sonnet-4-7",
 		"claude-haiku-4-9", "claude-haiku-5",
 		"claude-fable-6", "claude-mythos-6",
 		"gpt-5.6", "gpt-6", "gpt-7",

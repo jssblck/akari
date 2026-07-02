@@ -87,7 +87,15 @@ import (
 // would count only the fallbacks in newly appended regions and leave the session's pre-change fallbacks
 // undetected. Bumping Version forces a rewind-and-replay so every region re-detects its fallbacks and the
 // count re-accumulates from the full session in one pass.
-const Version = 9
+//
+// Version 10 pairs with the Epoch 9 -> 10 reprice that adds claude-sonnet-5 to the pricing table.
+// Per-row cost is stored on each usage_events row at parse time (see the pricing.Cost call in
+// reduceFunc), so a Sonnet 5 session parsed at version 9 holds NULL-cost rows. An incremental resume
+// would price only newly appended rows and leave the earlier ones unpriced, blending two pricings in
+// one session; bumping Version forces a rewind-and-replay so the whole session re-prices uniformly.
+// The reduce delta is otherwise unchanged and no golden fixture uses Sonnet 5, so the golden fixtures
+// do not move.
+const Version = 10
 
 // Advance parses any not-yet-parsed bytes of a session and applies them to the
 // projection, looping until the parse cursor catches up to the stored length. It

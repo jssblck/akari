@@ -30,7 +30,12 @@ import (
 // A dedicated pricing Version fires that reconcile only on an actual rate change. Pair a Version
 // bump with a parse.Epoch bump, as any reprice already must, so per-row cost and the cache-savings
 // rollup are both rebuilt on the same deploy.
-const Version = 1
+//
+// Version 1 -> 2: add claude-sonnet-5 (Sonnet 5 at the standard $3/$15 Sonnet rate). Sonnet 5
+// priced as unknown before, so a cache-bearing Sonnet 5 session carried an unpriced cache-savings
+// rollup; this bump fires reconcileCacheSavingsPricingIfNeeded to re-price the cache-bearing corpus,
+// paired with the parse.Epoch 9 -> 10 reparse that rewrites each Sonnet 5 usage row's per-row cost.
+const Version = 2
 
 // Rate holds per-million-token prices for one model family.
 type Rate struct {
@@ -75,8 +80,12 @@ var table = map[string]Rate{
 	"claude-opus-4-7": {Input: 5, Output: 25, CacheWrite: 6.25, CacheRead: 0.50},
 	"claude-opus-4-8": {Input: 5, Output: 25, CacheWrite: 6.25, CacheRead: 0.50},
 
-	// Sonnet: $3/$15 from 3.5 through 4.6. "claude-sonnet-4" is Sonnet 4.0's
-	// dateless ID (claude-sonnet-4-20250514 normalizes to it).
+	// Sonnet: $3/$15 from 3.5 through 5. Sonnet 5 keeps the $3/$15 sticker; its
+	// introductory $2/$10 promo (through 2026-08-31) is deliberately not encoded,
+	// since the table carries one durable rate per model, not a time-windowed one.
+	// "claude-sonnet-4" is Sonnet 4.0's dateless ID (claude-sonnet-4-20250514
+	// normalizes to it).
+	"claude-sonnet-5":   {Input: 3, Output: 15, CacheWrite: 3.75, CacheRead: 0.30},
 	"claude-sonnet-4":   {Input: 3, Output: 15, CacheWrite: 3.75, CacheRead: 0.30},
 	"claude-sonnet-4-0": {Input: 3, Output: 15, CacheWrite: 3.75, CacheRead: 0.30},
 	"claude-sonnet-4-5": {Input: 3, Output: 15, CacheWrite: 3.75, CacheRead: 0.30},
