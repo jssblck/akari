@@ -3,6 +3,7 @@ package parse
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/jssblck/akari/internal/parser"
 	"github.com/jssblck/akari/internal/server/store"
@@ -536,6 +537,191 @@ func TestClaudeModelFallbackMergesAndCounts(t *testing.T) {
 		t.Fatalf("reparse: %v", err)
 	}
 	assertFallback(t, "after reparse")
+}
+
+// TestClaudeModelFallbackTurnIdentityMatchesUsage pins the reconciliation between the two
+// projections a split fallback feeds: usage_events (via ON CONFLICT DO NOTHING, first line
+// wins) and model_fallbacks (via ON CONFLICT DO UPDATE). The merged fallback row must keep
+// the FIRST line's message_ordinal and occurred_at, the same turn identity usage_events
+// pins, so the fallback notice never lands on a different turn than the usage it describes.
+// The trap is a later line carrying a later timestamp: the first assistant chunk arrives at
+// 10:00:25, and a separate later append brings the system model_refusal_fallback entry at
+// 10:00:40. If the merge let a later non-null value overwrite, the fallback row would drift
+// to 10:00:40 while the usage row stayed at 10:00:25. The test also pins the other half of
+// the merge: the later system entry still fills trigger and category, the fill-toward-complete
+// columns the assistant line lacks.
+func TestClaudeModelFallbackTurnIdentityMatchesUsage(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	sid := seedSession(t, st, "claude-fallback-turn-identity")
+
+	iters := `"iterations":[{"input_tokens":900,"output_tokens":6,"cache_read_input_tokens":3200,"cache_creation_input_tokens":1500,"type":"message","model":"claude-fable-5"},{"input_tokens":900,"output_tokens":260,"cache_read_input_tokens":5000,"cache_creation_input_tokens":0,"type":"fallback_message","model":"claude-opus-4-8"}]`
+	// First region: the two assistant chunks of one API message (shared id + requestId). The
+	// block chunk at 10:00:25 inserts the fallback row and pins the usage row's turn identity;
+	// the text chunk at 10:00:26 is the same message. This is the first (and only) assistant
+	// turn, so it takes the earliest message ordinal.
+	assistant := `{"type":"assistant","timestamp":"2024-01-01T10:00:25Z","requestId":"req_canon","message":{"id":"msg_canon","model":"claude-opus-4-8","content":[{"type":"fallback","from":{"model":"claude-fable-5"},"to":{"model":"claude-opus-4-8"}}],"usage":{"input_tokens":900,"output_tokens":260,"cache_read_input_tokens":5000,` + iters + `}}}` + "\n" +
+		`{"type":"assistant","timestamp":"2024-01-01T10:00:26Z","requestId":"req_canon","message":{"id":"msg_canon","model":"claude-opus-4-8","content":[{"type":"text","text":"honest working"}],"usage":{"input_tokens":900,"output_tokens":260,"cache_read_input_tokens":5000,` + iters + `}}}` + "\n"
+	if _, err := st.AppendChunk(ctx, sid, 0, []byte(assistant)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Advance(ctx, st, sid, "claude"); err != nil {
+		t.Fatalf("advance assistant: %v", err)
+	}
+
+	// Second region: the system model_refusal_fallback entry, sharing the requestId but
+	// carrying a strictly LATER timestamp (10:00:40) and a NULL ordinal. The merge must not
+	// let either overwrite the pinned turn identity, even though it runs across region
+	// boundaries (a separate append + advance).
+	systemLine := `{"type":"system","subtype":"model_refusal_fallback","trigger":"refusal","originalModel":"claude-fable-5","fallbackModel":"claude-opus-4-8","requestId":"req_canon","apiRefusalCategory":"reasoning_extraction","apiRefusalExplanation":null,"timestamp":"2024-01-01T10:00:40Z"}` + "\n"
+	if _, err := st.AppendChunk(ctx, sid, int64(len(assistant)), []byte(systemLine)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Advance(ctx, st, sid, "claude"); err != nil {
+		t.Fatalf("advance system: %v", err)
+	}
+
+	assertTurnIdentity := func(t *testing.T, when string) {
+		t.Helper()
+
+		// The one merged fallback row: read its turn identity and the fill-toward-complete
+		// columns the system entry carries.
+		var fbOrdinal *int
+		var fbOccurred time.Time
+		var trigger, category string
+		if err := st.Pool.QueryRow(ctx,
+			`SELECT message_ordinal, occurred_at, trigger, refusal_category
+			   FROM model_fallbacks WHERE session_id=$1`, sid).
+			Scan(&fbOrdinal, &fbOccurred, &trigger, &category); err != nil {
+			t.Fatal(err)
+		}
+		if fbOrdinal == nil {
+			t.Fatalf("%s: fallback message_ordinal is NULL, want the assistant turn's ordinal", when)
+		}
+		// The fill-toward-complete half: the later system entry still filled trigger and
+		// category, the fields the assistant line lacked.
+		if trigger != "refusal" || category != "reasoning_extraction" {
+			t.Errorf("%s: system entry did not fill descriptive columns: trigger=%q category=%q", when, trigger, category)
+		}
+
+		// The usage row for that same turn: found by the ordinal the assistant line took.
+		// Its identity is pinned by usage_events' ON CONFLICT DO NOTHING to the first line.
+		var usageOrdinal int
+		var usageOccurred time.Time
+		if err := st.Pool.QueryRow(ctx,
+			`SELECT message_ordinal, occurred_at
+			   FROM usage_events WHERE session_id=$1 AND message_ordinal=$2`, sid, *fbOrdinal).
+			Scan(&usageOrdinal, &usageOccurred); err != nil {
+			t.Fatalf("%s: no usage_events row at fallback ordinal %d: %v", when, *fbOrdinal, err)
+		}
+
+		// The invariant: both projections share one canonical turn identity. The fallback
+		// row's ordinal and timestamp equal the usage row's, and the timestamp is the FIRST
+		// assistant line's (10:00:25), never the later system entry's (10:00:40).
+		if *fbOrdinal != usageOrdinal {
+			t.Errorf("%s: ordinal drift: fallback=%d usage=%d", when, *fbOrdinal, usageOrdinal)
+		}
+		if !fbOccurred.Equal(usageOccurred) {
+			t.Errorf("%s: occurred_at drift: fallback=%s usage=%s", when, fbOccurred, usageOccurred)
+		}
+		wantOccurred := time.Date(2024, 1, 1, 10, 0, 25, 0, time.UTC)
+		if !fbOccurred.Equal(wantOccurred) {
+			t.Errorf("%s: fallback occurred_at = %s, want the first assistant line's %s (a later line overwrote it)", when, fbOccurred.UTC(), wantOccurred)
+		}
+	}
+
+	assertTurnIdentity(t, "after cross-region merge")
+
+	// A reparse rebuilds both projections from scratch; the turn identity must still line up.
+	if _, err := Reparse(ctx, st, sid, "claude"); err != nil {
+		t.Fatalf("reparse: %v", err)
+	}
+	assertTurnIdentity(t, "after reparse")
+}
+
+// TestClaudeModelFallbackSystemFirstTurnIdentityMatchesUsage is the system-first companion to
+// TestClaudeModelFallbackTurnIdentityMatchesUsage. When the model_refusal_fallback system
+// entry lands BEFORE the assistant entries, its NULL-ordinal row inserts first with its own
+// (earlier here) timestamp as a placeholder. The later assistant line owns the turn: it fills
+// message_ordinal, and the fallback row's occurred_at must adopt the assistant line's
+// timestamp so it matches the usage_events row pinned at that ordinal, not stay on the system
+// entry's placeholder. A first-non-null merge would freeze the system timestamp and drift the
+// two projections apart, so this pins the CASE that rebinds occurred_at to the ordinal owner.
+func TestClaudeModelFallbackSystemFirstTurnIdentityMatchesUsage(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	sid := seedSession(t, st, "claude-fallback-system-first-identity")
+
+	iters := `"iterations":[{"input_tokens":900,"output_tokens":6,"cache_read_input_tokens":3200,"cache_creation_input_tokens":1500,"type":"message","model":"claude-fable-5"},{"input_tokens":900,"output_tokens":260,"cache_read_input_tokens":5000,"cache_creation_input_tokens":0,"type":"fallback_message","model":"claude-opus-4-8"}]`
+	// First region: only the system entry, at 10:00:20. Its row inserts with a NULL ordinal and
+	// this timestamp as a placeholder, before any assistant line (or usage row) exists.
+	systemLine := `{"type":"system","subtype":"model_refusal_fallback","trigger":"refusal","originalModel":"claude-fable-5","fallbackModel":"claude-opus-4-8","requestId":"req_sf_id","apiRefusalCategory":"reasoning_extraction","apiRefusalExplanation":null,"timestamp":"2024-01-01T10:00:20Z"}` + "\n"
+	if _, err := st.AppendChunk(ctx, sid, 0, []byte(systemLine)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Advance(ctx, st, sid, "claude"); err != nil {
+		t.Fatalf("advance system: %v", err)
+	}
+
+	// Second region: the assistant entries sharing the requestId, at 10:00:25 (LATER than the
+	// system placeholder). This is the line usage_events pins to, so the fallback row must move
+	// its occurred_at here even though the placeholder was earlier.
+	assistant := `{"type":"assistant","timestamp":"2024-01-01T10:00:25Z","requestId":"req_sf_id","message":{"id":"msg_sf_id","model":"claude-opus-4-8","content":[{"type":"fallback","from":{"model":"claude-fable-5"},"to":{"model":"claude-opus-4-8"}}],"usage":{"input_tokens":900,"output_tokens":260,"cache_read_input_tokens":5000,` + iters + `}}}` + "\n" +
+		`{"type":"assistant","timestamp":"2024-01-01T10:00:26Z","requestId":"req_sf_id","message":{"id":"msg_sf_id","model":"claude-opus-4-8","content":[{"type":"text","text":"honest working"}],"usage":{"input_tokens":900,"output_tokens":260,"cache_read_input_tokens":5000,` + iters + `}}}` + "\n"
+	if _, err := st.AppendChunk(ctx, sid, int64(len(systemLine)), []byte(assistant)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Advance(ctx, st, sid, "claude"); err != nil {
+		t.Fatalf("advance assistant: %v", err)
+	}
+
+	assertTurnIdentity := func(t *testing.T, when string) {
+		t.Helper()
+		var fbOrdinal *int
+		var fbOccurred time.Time
+		var trigger, category string
+		if err := st.Pool.QueryRow(ctx,
+			`SELECT message_ordinal, occurred_at, trigger, refusal_category
+			   FROM model_fallbacks WHERE session_id=$1`, sid).
+			Scan(&fbOrdinal, &fbOccurred, &trigger, &category); err != nil {
+			t.Fatal(err)
+		}
+		if fbOrdinal == nil {
+			t.Fatalf("%s: fallback message_ordinal is NULL after the assistant line arrived", when)
+		}
+		// The system entry inserted first, so its descriptive columns must survive the assistant
+		// merge (fill-toward-complete does not clear a filled value).
+		if trigger != "refusal" || category != "reasoning_extraction" {
+			t.Errorf("%s: system-side fields lost across merge: trigger=%q category=%q", when, trigger, category)
+		}
+
+		var usageOccurred time.Time
+		if err := st.Pool.QueryRow(ctx,
+			`SELECT occurred_at FROM usage_events WHERE session_id=$1 AND message_ordinal=$2`, sid, *fbOrdinal).
+			Scan(&usageOccurred); err != nil {
+			t.Fatalf("%s: no usage_events row at fallback ordinal %d: %v", when, *fbOrdinal, err)
+		}
+
+		// The invariant: the fallback row rebound its timestamp to the assistant line that owns
+		// the ordinal (10:00:25), matching usage_events, not the earlier system placeholder
+		// (10:00:20).
+		if !fbOccurred.Equal(usageOccurred) {
+			t.Errorf("%s: occurred_at drift: fallback=%s usage=%s", when, fbOccurred, usageOccurred)
+		}
+		wantOccurred := time.Date(2024, 1, 1, 10, 0, 25, 0, time.UTC)
+		if !fbOccurred.Equal(wantOccurred) {
+			t.Errorf("%s: fallback occurred_at = %s, want the assistant line's %s (stuck on the system placeholder)", when, fbOccurred.UTC(), wantOccurred)
+		}
+	}
+
+	assertTurnIdentity(t, "after system-first merge")
+
+	if _, err := Reparse(ctx, st, sid, "claude"); err != nil {
+		t.Fatalf("reparse: %v", err)
+	}
+	assertTurnIdentity(t, "after reparse")
 }
 
 // TestClaudeModelSwitchIsNotAFallback is the negative control at the store level: two

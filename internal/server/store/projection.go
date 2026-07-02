@@ -665,12 +665,34 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 	// Model fallbacks merge on (session_id, dedup_key): the several transcript lines of one
 	// logical fallback share a dedup_key (Claude's split assistant entries plus the system
 	// entry), so the first line inserts the row and the rest fill the columns their line
-	// carries. The DO UPDATE merges toward "filled": a non-empty string wins over an empty
-	// one and a non-null value over NULL (via COALESCE, EXCLUDED first so a new value
-	// overrides a prior NULL but a NULL never clears a filled value), so trigger/category/
-	// explanation from the system side and message_ordinal/token counts from the assistant
-	// side both survive whichever arrived first. Only a fresh insert counts toward
-	// model_fallback_count: `xmax = 0` is true exactly for the row this statement inserted
+	// carries. Two kinds of column merge here, and they resolve conflicts in opposite
+	// directions on purpose.
+	//
+	// message_ordinal and occurred_at are turn identity, and both bind to the assistant line
+	// that owns the turn, so they stay in lockstep with the usage projection. usage_events
+	// only ever exists for an assistant line (its insert is ON CONFLICT DO NOTHING, pinning
+	// the first assistant line's ordinal and timestamp), so the fallback row must read the
+	// same turn: the assistant line's ordinal and the assistant line's timestamp. The system
+	// entry carries a NULL ordinal and its own, often later, timestamp, and must never move
+	// the fallback notice onto a different turn time than the usage it describes.
+	//
+	// message_ordinal is first-wins (the existing value leads the COALESCE), so once an
+	// assistant line sets it, no later line moves it. occurred_at then tracks whichever line
+	// owns that ordinal, not merely whichever arrived first: once the row has an ordinal its
+	// timestamp is frozen (the assistant line's, matching usage_events), so a later system
+	// merge cannot overwrite it. Ordering matters because the system entry can arrive first:
+	// with only its NULL-ordinal row present the timestamp is a placeholder, and when the
+	// assistant line later fills the ordinal the CASE adopts that line's timestamp too,
+	// replacing the placeholder so both projections land on the one canonical turn time.
+	//
+	// The descriptive columns are the opposite, fill-toward-complete: a non-empty string
+	// wins over an empty one and a non-null value over NULL (via COALESCE, EXCLUDED first so
+	// a new value overrides a prior NULL but a NULL never clears a filled value). These are
+	// fields one side carries and the other lacks (trigger/category/explanation live only on
+	// the system entry, the declined token counts only on the specific assistant line), so
+	// whichever line arrives first, the later lines still fill in what it was missing.
+	//
+	// Only a fresh insert counts toward model_fallback_count: `xmax = 0` is true exactly for the row this statement inserted
 	// (a row updated by ON CONFLICT has a non-zero xmax), which distinguishes insert from
 	// merge where RowsAffected cannot (it is 1 for both). The nullable refusal columns pass
 	// through nullString so an assistant-first row stores NULL, not '', and a later system
@@ -700,7 +722,7 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 			    declined_cache_write_tokens, declined_cache_read_tokens, occurred_at, dedup_key)
 			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 			 ON CONFLICT (session_id, dedup_key) DO UPDATE SET
-			   message_ordinal     = COALESCE(EXCLUDED.message_ordinal, model_fallbacks.message_ordinal),
+			   message_ordinal     = COALESCE(model_fallbacks.message_ordinal, EXCLUDED.message_ordinal),
 			   from_model          = CASE WHEN EXCLUDED.from_model <> '' THEN EXCLUDED.from_model ELSE model_fallbacks.from_model END,
 			   to_model            = CASE WHEN EXCLUDED.to_model   <> '' THEN EXCLUDED.to_model   ELSE model_fallbacks.to_model   END,
 			   trigger             = CASE WHEN EXCLUDED.trigger    <> '' THEN EXCLUDED.trigger    ELSE model_fallbacks.trigger    END,
@@ -710,7 +732,11 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 			   declined_output_tokens      = COALESCE(EXCLUDED.declined_output_tokens, model_fallbacks.declined_output_tokens),
 			   declined_cache_write_tokens = COALESCE(EXCLUDED.declined_cache_write_tokens, model_fallbacks.declined_cache_write_tokens),
 			   declined_cache_read_tokens  = COALESCE(EXCLUDED.declined_cache_read_tokens, model_fallbacks.declined_cache_read_tokens),
-			   occurred_at         = COALESCE(EXCLUDED.occurred_at, model_fallbacks.occurred_at)
+			   occurred_at         = CASE
+			       WHEN model_fallbacks.message_ordinal IS NOT NULL THEN model_fallbacks.occurred_at
+			       WHEN EXCLUDED.message_ordinal IS NOT NULL THEN EXCLUDED.occurred_at
+			       ELSE COALESCE(model_fallbacks.occurred_at, EXCLUDED.occurred_at)
+			   END
 			 RETURNING (xmax = 0)`,
 			sessionID, ord, sanitizeText(fb.FromModel), sanitizeText(fb.ToModel), sanitizeText(fb.Trigger),
 			nullString(sanitizeText(fb.RefusalCategory)), nullString(sanitizeText(fb.RefusalExplanation)),
