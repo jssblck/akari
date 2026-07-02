@@ -285,11 +285,10 @@ Projects, Sessions, Account); the signed-in user and log-out sit at its foot.
   maps the turns and flags errored tools. The Quality and Tokens tiles reveal
   their drivers on hover: the tool-health counts and prompt-hygiene flags behind
   the grade, and the peak context and reset count behind the tokens. Tool input
-  and result bodies show as size/type chips that expand inline on click, fetched
-  from the CAS; an editing tool's input expands as a rendered diff. A density
-  toggle switches between a comfortable and a compact reading mode. Subagent
-  sessions are listed under the session that spawned them. In-progress sessions
-  update live over server-sent events.
+  and result bodies show as size/type chips; clicking one opens the body in an
+  inspector modal, fetched from the CAS, and an editing tool's input opens as a
+  rendered diff. Subagent sessions are listed under the session that spawned
+  them. In-progress sessions update live over server-sent events.
 - **Charts** are rendered by a small dependency-free SVG module bundled as a
   static asset; the UI fonts (Geist and Geist Mono) are self-hosted, so the binary
   stays self-contained with no Node toolchain.
