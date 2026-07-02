@@ -1232,6 +1232,12 @@ func TestPublicProjectFlow(t *testing.T) {
 	if !strings.Contains(body, `hx-get="`+pubPath+`?range=`) {
 		t.Fatalf("public project range buttons should target the public path, got:\n%s", body)
 	}
+	// The range control swaps the whole usage-and-quality region, not just the usage
+	// panel, so a range click moves the quality band to the new window in step with the
+	// panel rather than leaving it on the previous one.
+	if !strings.Contains(body, `id="public-project-view"`) || !strings.Contains(body, `hx-target="#public-project-view"`) {
+		t.Fatalf("public project range control should target #public-project-view, got:\n%s", body)
+	}
 
 	// Make private: the link 404s.
 	if _, err := c.PostForm(srv.URL+web.ProjectUnpublishPath(projectID), url.Values{}); err != nil {

@@ -94,8 +94,9 @@ templ PublicOverviewPage(username string, a store.Analytics, rng string, og OGMe
 // accounts that ran in the repo are not named). The quality band's grade and outcome
 // bars render plain rather than linking into the private session feed, so nothing here
 // exposes a session or a username. The panel's per-user filter is absent (users is
-// nil), and the range buttons refetch the public path, htmx-swapping #usage just as the
-// authed overview does.
+// nil), and the range buttons refetch the public path and htmx-swap the whole
+// #public-project-view region, so the usage panel and the quality band (both scoped to
+// the range) move to the new window together.
 templ PublicProjectPage(proj store.ProjectSummary, a store.Analytics, ins store.Insights, rng string, og OGMeta) {
 	@publicLayout(ProjectTitle(proj)+" usage", og) {
 		<div class="public-overview">
@@ -107,8 +108,16 @@ templ PublicProjectPage(proj store.ProjectSummary, a store.Analytics, ins store.
 				</h1>
 				<span class="tag public">public</span>
 			</div>
-			@analyticsPanel(a, "chart-public", RangeOptions(PublicProjectPath(proj.ID), nil, rng), rng, nil, nil, "#usage", false)
-			@publicProjectQuality(ins, rng)
+			// The usage panel and the quality band are both scoped to the active range, so
+			// they share one swap target: a range click refetches the public page and swaps
+			// this whole region, refreshing both together. Targeting only #usage (as the
+			// single-panel public user overview does) would leave the quality band on the old
+			// window while the panel moved. This mirrors the signed-in project page's
+			// #project-view wrapper for the same reason.
+			<div id="public-project-view">
+				@analyticsPanel(a, "chart-public", RangeOptions(PublicProjectPath(proj.ID), nil, rng), rng, nil, nil, "#public-project-view", false)
+				@publicProjectQuality(ins, rng)
+			</div>
 		</div>
 	}
 }
