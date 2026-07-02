@@ -342,6 +342,21 @@ func TestUserQuality(t *testing.T) {
 	if grace0.Sessions != 1 || grace0.Graded != 1 || grace0.Abandoned != 1 {
 		t.Errorf("grace = {sessions %d, graded %d, abandoned %d}, want {1, 1, 1}", grace0.Sessions, grace0.Graded, grace0.Abandoned)
 	}
+
+	// OmitUsers drops the per-author leaderboard (the public project band sets it, since
+	// it renders no People panel) while every other panel stays populated: the flag skips
+	// only userQualityFrom, which sits outside the other panels' totals.
+	omit, err := st.Insights(ctx, store.AnalyticsFilter{Since: since, OmitUsers: true})
+	if err != nil {
+		t.Fatalf("insights OmitUsers: %v", err)
+	}
+	if len(omit.Users.Users) != 0 {
+		t.Errorf("OmitUsers should drop the People leaderboard, got %d rows: %+v", len(omit.Users.Users), omit.Users.Users)
+	}
+	if omit.Quality.Sessions != ins.Quality.Sessions || omit.Quality.Graded != ins.Quality.Graded {
+		t.Errorf("OmitUsers changed the quality distribution: sessions %d/%d graded %d/%d",
+			omit.Quality.Sessions, ins.Quality.Sessions, omit.Quality.Graded, ins.Quality.Graded)
+	}
 }
 
 // TestUserQualityAvgScoreNilWhenUnscored confirms an author with sessions but no scored
