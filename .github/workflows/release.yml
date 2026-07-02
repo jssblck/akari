@@ -171,13 +171,16 @@ jobs:
             "$CMD"
 
           # Package: tar.gz for Unix, zip for Windows, named like a goreleaser
-          # build (<bin>_<version>_<os>_<arch>). README rides along for context.
+          # build (<bin>_<version>_<os>_<arch>). README rides along for context;
+          # LICENSE and NOTICE ride along because akari ships under AGPL-3.0.
           stem="${BIN}_${VERSION}_${GOOS}_${GOARCH}"
           cp README.md build/README.md
+          cp LICENSE build/LICENSE
+          cp NOTICE build/NOTICE
           if [[ "$GOOS" == "windows" ]]; then
-            (cd build && zip -q "../dist/${stem}.zip" "${BIN}${ext}" README.md)
+            (cd build && zip -q "../dist/${stem}.zip" "${BIN}${ext}" README.md LICENSE NOTICE)
           else
-            tar -czf "dist/${stem}.tar.gz" -C build "${BIN}${ext}" README.md
+            tar -czf "dist/${stem}.tar.gz" -C build "${BIN}${ext}" README.md LICENSE NOTICE
           fi
 
           echo "Packaged:"
