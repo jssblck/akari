@@ -3,6 +3,7 @@ package parser
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -207,6 +208,88 @@ func TestParseCodex(t *testing.T) {
 	}
 	if u2.MessageOrdinal == nil || *u2.MessageOrdinal != 3 {
 		t.Errorf("usage 1 ordinal = %v, want 3", u2.MessageOrdinal)
+	}
+}
+
+// TestParseCodexContext pins that Codex's injected framing is classified as context,
+// not as a human prompt: the AGENTS.md-plus-environment turn Codex prepends, and the
+// environment block it re-injects mid-session after a compaction, both take
+// RoleContext, while the real prompts stay RoleUser. This is what keeps the framing
+// out of the session title, the user-message count, and prompt hygiene downstream.
+func TestParseCodexContext(t *testing.T) {
+	s, err := Parse(AgentCodex, loadFixture(t, "codex_context.jsonl"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	// developer instructions are dropped; the two framing turns and two prompts and one
+	// assistant reply remain: context, user, assistant, context, user.
+	if len(s.Messages) != 5 {
+		t.Fatalf("messages = %d, want 5", len(s.Messages))
+	}
+
+	// The prepended AGENTS.md + environment_context turn is context, not the opening prompt.
+	if s.Messages[0].Role != RoleContext {
+		t.Errorf("message 0 role = %q, want context", s.Messages[0].Role)
+	}
+	if !strings.HasPrefix(s.Messages[0].Content, "# AGENTS.md instructions for ") {
+		t.Errorf("message 0 content = %q", s.Messages[0].Content)
+	}
+
+	// The real first prompt follows and keeps the user role, so it is the session's opener.
+	if s.Messages[1].Role != RoleUser || s.Messages[1].Content != "Add rate limiting" {
+		t.Errorf("message 1 = %+v", s.Messages[1])
+	}
+	if s.Messages[2].Role != RoleAssistant {
+		t.Errorf("message 2 role = %q, want assistant", s.Messages[2].Role)
+	}
+
+	// The environment block re-injected after a compaction is context too, matched by content
+	// rather than position, and the prompt that follows it is still a user turn.
+	if s.Messages[3].Role != RoleContext {
+		t.Errorf("message 3 role = %q, want context", s.Messages[3].Role)
+	}
+	if s.Messages[4].Role != RoleUser || s.Messages[4].Content != "Now add tests" {
+		t.Errorf("message 4 = %+v", s.Messages[4])
+	}
+
+	// Exactly two turns are real human prompts; the two framing turns are excluded.
+	users := 0
+	for _, m := range s.Messages {
+		if m.Role == RoleUser {
+			users++
+		}
+	}
+	if users != 2 {
+		t.Errorf("user messages = %d, want 2", users)
+	}
+}
+
+// TestIsCodexContext pins the marker detection directly: each wrapper Codex uses for
+// injected framing (the AGENTS.md header, the environment_context tag, and the
+// user_instructions tag some builds wrap AGENTS.md in) reads as context, leading
+// whitespace and all, while an ordinary prompt that merely mentions those words does
+// not. The user_instructions arm has no fixture of its own, so this is its guard.
+func TestIsCodexContext(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{"agents header", "# AGENTS.md instructions for /home/ada/akari\n\n<INSTRUCTIONS>\nx\n</INSTRUCTIONS>", true},
+		{"environment block", "<environment_context>\n  <cwd>/x</cwd>\n</environment_context>", true},
+		{"user_instructions block", "<user_instructions>\nRun the tests.\n</user_instructions>", true},
+		{"leading whitespace before marker", "\n  <environment_context>\n</environment_context>", true},
+		{"ordinary prompt", "Add rate limiting to the ingest endpoint", false},
+		{"prompt mentioning the file mid-sentence", "please update AGENTS.md instructions for the repo", false},
+		{"empty", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isCodexContext(c.text); got != c.want {
+				t.Errorf("isCodexContext(%q) = %v, want %v", c.text, got, c.want)
+			}
+		})
 	}
 }
 

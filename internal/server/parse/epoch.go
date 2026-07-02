@@ -94,4 +94,17 @@ package parse
 // re-folds into its per-turn rows in one pass. The rollup is a store-side fold OF usage_events, not
 // parser output (the reducer's delta is unchanged), so the projection delta is byte-for-byte identical
 // and the golden fixtures do not move; the bump is the backfill signal and stands on its own.
-const Epoch = 7
+//
+// Epoch 7 -> 8: reclassify a Codex session's injected framing (the AGENTS.md project
+// instructions and the environment_context block prepended before the first prompt, and
+// re-injected after a compaction) from the user role to the "context" role (see
+// internal/parser/codex.go isCodexContext and parser.RoleContext). Before this change the
+// framing was the session's first user message, so it became the session title everywhere,
+// inflated user_message_count, and was judged as the opening human prompt by prompt hygiene.
+// Re-roling it drops it from every role='user' reader for free (the title lateral, the count,
+// the hygiene aggregate) and moves it into the transcript's own Context section. This is a
+// parser output change (a message row's role differs), so it pairs with the parse.Version bump
+// and the golden fixtures move. The reparse also re-derives session_signals at the running
+// quality.Version, so the shifted prompt-hygiene grades (the opener is now the real prompt) roll
+// out in the same pass.
+const Epoch = 8

@@ -242,6 +242,78 @@ func TestCodexTurnFoldedInOneChunk(t *testing.T) {
 	}
 }
 
+// TestCodexContextExcludedFromCounts drives a Codex session's injected framing (the
+// AGENTS.md-plus-environment turn Codex prepends before the real prompt) through the
+// full ingest and parse path and confirms it is recorded as context, not a human
+// prompt: it counts toward message_count but not user_message_count, and the session
+// title reads the real opening prompt rather than the AGENTS.md block. This is the
+// end-to-end guard for the parse.Epoch 7 -> 8 re-roling, exercising the aggregate fold
+// (applyAggregates) that ApplyProjectionDelta alone does not run.
+func TestCodexContextExcludedFromCounts(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	uid := firstUser(t, st)
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ann, err := st.Announce(ctx, store.AnnounceParams{
+		UserID: uid, Agent: "codex", SourceSessionID: "codex-context", ProjectID: projectID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid := ann.SessionID
+
+	// session_meta, the developer instructions (dropped), the AGENTS.md + environment_context turn
+	// (context), the real prompt, and an assistant reply, all in one chunk.
+	chunk := `{"type":"session_meta","timestamp":"2024-01-01T10:00:00Z","payload":{"cwd":"/home/ada/akari","git":{"branch":"main"},"model":"gpt-5-codex"}}` + "\n" +
+		`{"type":"response_item","timestamp":"2024-01-01T10:00:00Z","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<permissions instructions>never</permissions instructions>"}]}}` + "\n" +
+		`{"type":"response_item","timestamp":"2024-01-01T10:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /home/ada/akari\n\n<INSTRUCTIONS>\nRun make build.\n</INSTRUCTIONS>"},{"type":"input_text","text":"<environment_context>\n  <cwd>/home/ada/akari</cwd>\n</environment_context>"}]}}` + "\n" +
+		`{"type":"response_item","timestamp":"2024-01-01T10:00:01Z","payload":{"role":"user","content":[{"type":"input_text","text":"Add rate limiting"}]}}` + "\n" +
+		`{"type":"response_item","timestamp":"2024-01-01T10:00:05Z","payload":{"role":"assistant","content":[{"type":"output_text","text":"On it."}]}}` + "\n"
+
+	if _, err := st.AppendChunk(ctx, sid, 0, []byte(chunk)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Advance(ctx, st, sid, "codex"); err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+
+	// The context turn, the prompt, and the assistant reply are all messages; only the prompt is a
+	// human turn. The developer instructions are dropped.
+	var mc, umc int
+	if err := st.Pool.QueryRow(ctx,
+		"SELECT message_count, user_message_count FROM sessions WHERE id=$1", sid).Scan(&mc, &umc); err != nil {
+		t.Fatal(err)
+	}
+	if mc != 3 {
+		t.Errorf("message_count = %d, want 3 (context, prompt, assistant)", mc)
+	}
+	if umc != 1 {
+		t.Errorf("user_message_count = %d, want 1 (only the real prompt; the context turn must not count)", umc)
+	}
+
+	// The role of ordinal 0 is context, and the title reads the real prompt, not the AGENTS.md block.
+	var role string
+	if err := st.Pool.QueryRow(ctx,
+		"SELECT role FROM messages WHERE session_id=$1 AND ordinal=0", sid).Scan(&role); err != nil {
+		t.Fatal(err)
+	}
+	if role != "context" {
+		t.Errorf("ordinal 0 role = %q, want context", role)
+	}
+	d, err := st.SessionDetailByID(ctx, sid)
+	if err != nil {
+		t.Fatalf("session detail: %v", err)
+	}
+	if d.Title != "Add rate limiting" {
+		t.Errorf("title = %q, want the real opening prompt", d.Title)
+	}
+}
+
 // TestCodexTrailingTurnFlushedWhole confirms the final turn of a session, which
 // has no closing user line, still parses as one complete message: the protocol
 // flushes it whole in the last chunk, and the reducer emits the open turn at the

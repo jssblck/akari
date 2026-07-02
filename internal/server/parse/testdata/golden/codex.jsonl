@@ -1,4 +1,6 @@
 {"type":"session_meta","timestamp":"2024-01-01T10:00:00Z","payload":{"cwd":"/home/ada/akari","git":{"branch":"main"},"model":"gpt-5-codex"}}
+{"type":"response_item","timestamp":"2024-01-01T10:00:00Z","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<permissions instructions>\nApproval policy is never.\n</permissions instructions>"}]}}
+{"type":"response_item","timestamp":"2024-01-01T10:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /home/ada/akari\n\n<INSTRUCTIONS>\nRun make build before you commit.\n</INSTRUCTIONS>"},{"type":"input_text","text":"<environment_context>\n  <cwd>/home/ada/akari</cwd>\n  <shell>bash</shell>\n</environment_context>"}]}}
 {"type":"response_item","timestamp":"2024-01-01T10:00:01Z","payload":{"type":"reasoning","content":[{"type":"text","text":"Plan the shell command."}]}}
 {"type":"response_item","timestamp":"2024-01-01T10:00:02Z","payload":{"type":"function_call","name":"shell_command","arguments":"{\"command\":\"ls\"}","call_id":"call_1"}}
 {"type":"response_item","timestamp":"2024-01-01T10:00:03Z","payload":{"type":"function_call_output","call_id":"call_1","output":"auth.go\nmain.go"}}

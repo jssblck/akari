@@ -130,6 +130,74 @@ func TestToolCallDetailRendersOnChipAndOutline(t *testing.T) {
 	}
 }
 
+// TestTranscriptRendersContextTurn pins that an injected-context message renders as a
+// collapsed disclosure (its own Context section) rather than an open user turn: the
+// framing is available but folded away, the outline labels it by kind instead of
+// dumping the raw AGENTS.md text, and the real prompt after it is the first open turn.
+func TestTranscriptRendersContextTurn(t *testing.T) {
+	p := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "jessoteric"}
+	d, _, _ := sessionFixture()
+	base := time.Date(2026, 6, 28, 9, 0, 0, 0, time.UTC)
+	ts := func(secs int) *time.Time { u := base.Add(time.Duration(secs) * time.Second); return &u }
+
+	agents := "# AGENTS.md instructions for /home/ada/akari\n\nRun make build.\n<environment_context>\n  <cwd>/home/ada/akari</cwd>\n</environment_context>"
+	msgs := []store.Message{
+		{Ordinal: 0, Role: "context", Content: agents, Timestamp: ts(0)},
+		{Ordinal: 1, Role: "user", Content: "Add rate limiting", Timestamp: ts(1)},
+		{Ordinal: 2, Role: "assistant", Content: "On it.", Model: "gpt-5", Timestamp: ts(6)},
+	}
+	html := renderComponent(t, SessionPage(p, d, msgs, nil, nil, nil, HeaderStats{}, 0, false, true))
+
+	for _, want := range []string{
+		// The context turn renders as a collapsed <details>, not an open .msg-user block.
+		`class="msg msg-context context-turn"`,
+		`id="msg-0"`,
+		// Its summary names the kind rather than showing the raw framing text.
+		`class="tag context-kind">project instructions + environment</span>`,
+		// The outline row for the context turn is labeled by kind and carries the context tone.
+		`class="ol-turn ol-context"`,
+		`project instructions + environment`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("context transcript missing %q", want)
+		}
+	}
+	// The framing must not be rendered as a user turn: no msg-user block carries the AGENTS.md text.
+	if strings.Contains(html, `class="msg msg-user"`) && strings.Contains(html, `>msg-0<`) {
+		t.Error("the context turn must not render as a user message")
+	}
+}
+
+// TestContextLabelAndRoleClass pins the context helpers' branches directly: ContextLabel
+// names the framing by which markers its content carries (both, project-only,
+// environment-only, or an unrecognized fallback), and RoleClass maps the context role to
+// its own CSS class so a context message styled through the shared .msg path still reads
+// as context rather than falling through to the generic tone.
+func TestContextLabelAndRoleClass(t *testing.T) {
+	labelCases := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{"both markers", "# AGENTS.md instructions for /x\n<environment_context>\n</environment_context>", "project instructions + environment"},
+		{"user_instructions plus env", "<user_instructions>\ndo x\n</user_instructions>\n<environment_context></environment_context>", "project instructions + environment"},
+		{"project only", "# AGENTS.md instructions for /x\n\nRun make build.", "project instructions"},
+		{"environment only", "<environment_context>\n  <cwd>/x</cwd>\n</environment_context>", "environment"},
+		{"fallback", "some other injected framing", "agent context"},
+	}
+	for _, c := range labelCases {
+		t.Run("label/"+c.name, func(t *testing.T) {
+			if got := ContextLabel(c.content); got != c.want {
+				t.Errorf("ContextLabel(%q) = %q, want %q", c.content, got, c.want)
+			}
+		})
+	}
+
+	if got := RoleClass("context"); got != "msg-context" {
+		t.Errorf("RoleClass(\"context\") = %q, want msg-context", got)
+	}
+}
+
 // The redesigned session header carries its controls inline and opens tool bodies
 // in a modal: an owner of an internal session gets a compact actions cluster with
 // Publish and Delete, the full-width page wrapper, and the modal overlay host. The

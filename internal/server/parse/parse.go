@@ -66,7 +66,18 @@ import (
 // earlier turns carried none, so the transcript would read a zero turn load for every pre-change
 // message. Bumping Version forces a rewind-and-replay so every surviving usage row re-folds into its
 // turn in one pass, keeping a session's per-turn loads consistent rather than blended across the change.
-const Version = 7
+//
+// Version 8 pairs with the Epoch 7 -> 8 bump that reclassifies a Codex session's injected framing (the
+// AGENTS.md project instructions and the environment_context block Codex prepends before the real
+// prompt) from the user role to the new "context" role (see internal/parser/codex.go isCodexContext).
+// This is a parser output change: a message row's role now differs, which cascades into every store
+// reader that keys on role='user' (the session title lateral, user_message_count, and the prompt-hygiene
+// aggregate all now read the real opening prompt instead of the framing). A session parsed at version 7
+// must not resume incrementally, since its already-written framing row keeps the user role while newly
+// appended turns would classify under the new rules, blending two representations in one transcript;
+// bumping Version forces a rewind-and-replay so the whole session re-roles in one pass. The golden
+// fixtures move with this change.
+const Version = 8
 
 // Advance parses any not-yet-parsed bytes of a session and applies them to the
 // projection, looping until the parse cursor catches up to the stored length. It

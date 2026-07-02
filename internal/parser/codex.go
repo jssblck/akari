@@ -1,6 +1,10 @@
 package parser
 
-import "github.com/tidwall/gjson"
+import (
+	"strings"
+
+	"github.com/tidwall/gjson"
+)
 
 // reduceCodex advances a Codex session over one raw region. Lines wrap a payload:
 // session_meta carries cwd and branch; response_item carries user/assistant
@@ -102,7 +106,19 @@ func (r *reducer) reduceCodex(region []byte, base int64) error {
 
 			case p.Get("role").String() == "user":
 				r.closeTurn() // a user turn ends the current assistant turn
-				ord := r.addUser(blockText(p.Get("content")), ts)
+				text := blockText(p.Get("content"))
+				if isCodexContext(text) {
+					// Codex prepends the project's AGENTS.md instructions and an
+					// environment_context block as a synthetic user turn before the real
+					// prompt (and re-injects the environment after a compaction). It is
+					// framing, not a human prompt, so record it as context: the session
+					// title, user_message_count, and prompt hygiene then read the real
+					// opening prompt instead of this block. Such a turn carries no pasted
+					// images, so there is nothing to attach.
+					r.addContext(text, ts)
+					return nil
+				}
+				ord := r.addUser(text, ts)
 				// A user message can paste images as input_image blocks; lift each as an
 				// attachment on this message. Non-image blocks are ignored by addAttachment.
 				for _, b := range p.Get("content").Array() {
@@ -164,6 +180,21 @@ func (r *reducer) reduceCodex(region []byte, base int64) error {
 	// Keep any still-open turn open so the next region continues its row.
 	r.flushRegion()
 	return nil
+}
+
+// isCodexContext reports whether a Codex user turn is injected framing rather than a
+// human prompt. Codex wraps each piece it prepends in a stable marker: the project
+// memory as "# AGENTS.md instructions for <cwd>" (older builds wrap it in a
+// <user_instructions> tag) and the runtime facts in an <environment_context> block.
+// A turn whose text opens with one of those markers is context; a real prompt
+// effectively never begins with these exact tokens. Matching on content rather than
+// position also catches the environment_context Codex re-injects mid-session after a
+// compaction, not only the first turn.
+func isCodexContext(text string) bool {
+	t := strings.TrimSpace(text)
+	return strings.HasPrefix(t, "# AGENTS.md instructions for ") ||
+		strings.HasPrefix(t, "<environment_context>") ||
+		strings.HasPrefix(t, "<user_instructions>")
 }
 
 func joinNonEmpty(a, b string) string {

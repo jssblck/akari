@@ -50,6 +50,16 @@ const (
 	RoleAssistant Role = "assistant"
 	RoleSystem    Role = "system"
 	RoleTool      Role = "tool"
+	// RoleContext marks an injected-context turn: agent framing (project
+	// instructions, the environment block) that an agent prepends to a session
+	// rather than a human prompt. It is a distinct role so every role='user'
+	// reader (the session title, user_message_count, the prompt-hygiene
+	// aggregate) excludes it, and the transcript renders it in its own Context
+	// section instead of as the opening turn. Only Codex records such framing as a
+	// transcript message today (Claude and pi keep their framing in the system
+	// prompt, which akari never ingests); the role is agent-agnostic so any
+	// reducer can classify into it.
+	RoleContext Role = "context"
 )
 
 // Message is one turn. Content holds the conversational text (stored inline and

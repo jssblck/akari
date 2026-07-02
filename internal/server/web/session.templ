@@ -350,6 +350,9 @@ templ Transcript(msgs []store.Message, tools map[int][]store.ToolCallView, attac
 				if metrics.Shed != nil {
 					@shedDivider(*metrics.Shed)
 				}
+				if m.Role == "context" {
+					@contextTurn(m)
+				} else {
 				<div class={ "msg " + RoleClass(m.Role) } id={ fmt.Sprintf("msg-%d", m.Ordinal) } data-ordinal={ fmt.Sprintf("%d", m.Ordinal) }>
 					<div class="meta">
 						<span class="role">{ m.Role }</span>
@@ -413,9 +416,31 @@ templ Transcript(msgs []store.Message, tools map[int][]store.ToolCallView, attac
 						</div>
 					}
 				</div>
+				}
 			}
 		</div>
 	}
+}
+
+// contextTurn renders an injected-context message (agent framing: project
+// instructions, the environment block) as a collapsed disclosure at its place in
+// the transcript, so the session's real opening prompt reads first and the framing
+// stays available but out of the way. It carries no reply latency, token load,
+// tools, or hygiene tags: it is not a human turn, so none of those instruments
+// apply. The id matches the outline's #msg-<ordinal> anchor so the Context outline
+// row still scrolls to it.
+templ contextTurn(m store.Message) {
+	<details class="msg msg-context context-turn" id={ fmt.Sprintf("msg-%d", m.Ordinal) } data-ordinal={ fmt.Sprintf("%d", m.Ordinal) }>
+		<summary class="context-summary">
+			<span class="role">context</span>
+			<span class="tag context-kind">{ ContextLabel(m.Content) }</span>
+			<span class="spacer"></span>
+			<span class="muted small">{ FmtTime(ctx, m.Timestamp) }</span>
+		</summary>
+		if m.Content != "" {
+			<div class="content">{ m.Content }</div>
+		}
+	</details>
 }
 
 // shedDivider draws the context-shed divider above the turn that first ran on the shed-down
