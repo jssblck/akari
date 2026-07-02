@@ -92,6 +92,9 @@ func (s *Server) Routes() http.Handler {
 
 	// Static assets.
 	mux.Handle("GET /static/", staticHandler())
+	// Browsers request /favicon.ico at the root unprompted; serve the embedded
+	// icon there so that automatic hit does not 404.
+	mux.HandleFunc("GET /favicon.ico", s.handleFaviconICO)
 
 	// The user guide: public documentation, readable logged out and served to a
 	// coding agent as raw Markdown and as one concatenated file. It is static

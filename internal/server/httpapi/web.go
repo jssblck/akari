@@ -1167,3 +1167,27 @@ func staticHandler() http.Handler {
 	}
 	return http.StripPrefix("/static/", http.FileServer(http.FS(sub)))
 }
+
+// faviconICO is the embedded favicon read once at startup: browsers request
+// /favicon.ico at the site root unprompted (before, and regardless of, the
+// <link> tags), so serving it there keeps that automatic hit from 404ing. It is
+// the same bytes as /static/favicon.ico; a missing file is a build error, so the
+// read panics rather than degrading silently.
+var faviconICO = func() []byte {
+	b, err := web.Static.ReadFile("static/favicon.ico")
+	if err != nil {
+		panic(err)
+	}
+	return b
+}()
+
+// handleFaviconICO serves the legacy .ico at the root path browsers probe for a
+// tab icon. The bytes are static per binary, so the response is aggressively
+// cacheable like the landing card.
+func (s *Server) handleFaviconICO(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "image/x-icon")
+	w.Header().Set("Content-Length", strconv.Itoa(len(faviconICO)))
+	w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", landingOGCacheMaxAge))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(faviconICO)
+}
