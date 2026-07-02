@@ -14,7 +14,8 @@ import (
 // OverviewPath builds the overview URL for a range key and a set of selected user
 // ids: the shared target the range buttons link to and the user filter submits, so
 // the two controls always round-trip the full window-and-users state together
-// rather than each clobbering the other's selection.
+// rather than each clobbering the other's selection. It is rooted at /overview
+// (the app home), not "/" (the public homepage).
 func OverviewPath(rng string, userIDs []int64) string {
 	q := url.Values{}
 	if rng != "" {
@@ -24,9 +25,9 @@ func OverviewPath(rng string, userIDs []int64) string {
 		q.Add("user", strconv.FormatInt(id, 10))
 	}
 	if s := q.Encode(); s != "" {
-		return "/?" + s
+		return "/overview?" + s
 	}
-	return "/"
+	return "/overview"
 }
 
 // userValues encodes selected user ids as repeated ?user= params for the range

@@ -132,7 +132,7 @@ func TestSidebarLinksGuide(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	body := readBody(t, mustGet(t, c, srv.URL+"/"))
+	body := readBody(t, mustGet(t, c, srv.URL+"/overview"))
 	if !strings.Contains(body, `href="/guide"`) {
 		t.Fatalf("signed-in sidebar should link the guide, got:\n%s", body)
 	}

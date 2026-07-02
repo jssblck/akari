@@ -15,7 +15,7 @@ import (
 // spine at the source package guards the anonymous root independently of the httpapi
 // route wiring.
 func TestLandingPageRendersHeroAndEntryPoints(t *testing.T) {
-	html := renderComponent(t, LandingPage(OGMeta{}))
+	html := renderComponent(t, LandingPage(OGMeta{}, Page{}))
 
 	// The public layout wraps it: the top bar's brand, the Docs and GitHub links,
 	// the Log in link, and the product name in the page title.
@@ -89,6 +89,37 @@ func TestLandingPageRendersHeroAndEntryPoints(t *testing.T) {
 	}
 }
 
+// A signed-in reader can reach the homepage too (the root no longer bounces them
+// into the app), so the page must adapt its entry points: the public layout's
+// topbar and the page foot point back into the app (Overview) instead of offering
+// "Log in", and the marketing spine still renders. Passing a logged-out Page keeps
+// the original "Log in" affordances, pinned by the test above.
+func TestLandingPageLoggedInPointsIntoApp(t *testing.T) {
+	viewer := Page{LoggedIn: true, Username: "grace"}
+	html := renderComponent(t, LandingPage(OGMeta{}, viewer))
+
+	// The topbar swaps "Log in" for a link into the app.
+	if !strings.Contains(html, `<a href="/overview">Overview</a>`) {
+		t.Errorf("signed-in landing topbar should link into the app; got:\n%s", html)
+	}
+	if strings.Contains(html, `<a href="/login">Log in</a>`) {
+		t.Errorf("signed-in landing should not offer the Log in link")
+	}
+	// The foot points to the overview (lowercase link text) rather than asking the
+	// reader to log in.
+	if !strings.Contains(html, `<a href="/overview">overview</a>`) {
+		t.Errorf("signed-in landing foot should point to the overview; got:\n%s", html)
+	}
+	// It is still the marketing page, not the app shell: the hero and spine render
+	// and the signed-in sidebar does not.
+	if !strings.Contains(html, `self-hosted instrument`) {
+		t.Errorf("signed-in landing should still render the marketing hero")
+	}
+	if strings.Contains(html, `class="sidebar"`) {
+		t.Errorf("landing page should never render the signed-in sidebar")
+	}
+}
+
 // TestLandingMockDataReconciles pins the projection-consistency property the
 // landing mock is required to have even though nothing behind it is a real
 // row: the facet rail's three groups, the project table, and the strip all
@@ -132,7 +163,7 @@ func TestLandingMockDataReconciles(t *testing.T) {
 // card say different things. Importing ogimage from a web test is cycle-safe:
 // neither package imports the other.
 func TestLandingHeroMatchesCardCopy(t *testing.T) {
-	html := renderComponent(t, LandingPage(OGMeta{}))
+	html := renderComponent(t, LandingPage(OGMeta{}, Page{}))
 	if want := "<h1>" + ogimage.LandingHeadline + "</h1>"; !strings.Contains(html, want) {
 		t.Errorf("landing hero h1 does not carry ogimage.LandingHeadline; want %q in the rendered page", want)
 	}

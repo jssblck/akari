@@ -83,15 +83,16 @@ func TestParsedEndpointsGateDuringReparse(t *testing.T) {
 	c := registerAdmin(t, srv.URL)
 
 	// Before any reparse, the overview renders normally.
-	if body := getBody(t, c, srv.URL+"/"); !strings.Contains(body, "Overview") {
+	if body := getBody(t, c, srv.URL+"/overview"); !strings.Contains(body, "Overview") {
 		t.Fatalf("overview should render normally before a reparse, got:\n%s", body)
 	}
 
 	// Force an in-progress reparse without running one.
 	rp.SetStatusForTest(reparse.Status{InProgress: true, Done: 2, Total: 5, Failed: 1})
 
-	// Parsed pages are gated: they show the progress stand-in.
-	for _, path := range []string{"/", "/sessions", "/projects"} {
+	// Parsed pages are gated: they show the progress stand-in. The public homepage
+	// at "/" is not parsed data, so it is not in this set.
+	for _, path := range []string{"/overview", "/sessions", "/projects"} {
 		body := getBody(t, c, srv.URL+path)
 		if !strings.Contains(body, "Reparse in progress") {
 			t.Fatalf("%s should be gated during a reparse, got:\n%s", path, body)
@@ -120,7 +121,7 @@ func TestParsedEndpointsGateDuringReparse(t *testing.T) {
 
 	// Once the reparse clears, the parsed pages return.
 	rp.SetStatusForTest(reparse.Status{})
-	if body := getBody(t, c, srv.URL+"/"); !strings.Contains(body, "Overview") || strings.Contains(body, "Reparse in progress") {
+	if body := getBody(t, c, srv.URL+"/overview"); !strings.Contains(body, "Overview") || strings.Contains(body, "Reparse in progress") {
 		t.Fatalf("overview should render normally after the reparse clears, got:\n%s", body)
 	}
 }
