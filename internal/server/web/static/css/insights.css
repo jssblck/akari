@@ -127,13 +127,17 @@
 /* Each row names the file as a project tag then the path: the two share the label side of the
    bar head, and the path keeps its left-truncation (direction: rtl) so the filename stays visible
    while the leading directories give way. The project tag reads as a small muted prefix, not a
-   pill, so it labels the bar without competing with the path. */
-.churn-name { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+   pill, so it labels the bar without competing with the path. The name box grows to fill the row
+   (flex: 1) so the path can use every pixel up to the edit count; the label overrides the shared
+   .bar-label percentage cap (which would resolve against this shrink-to-fit box and elide the path
+   to nothing despite the empty room) and instead truncates only when it genuinely runs out. */
+.churn-name { display: flex; align-items: baseline; gap: 8px; min-width: 0; flex: 1; }
 .churn-proj {
   flex: none; color: var(--muted); font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
-.churn-bars .bar-label { direction: rtl; text-align: left; max-width: 65%; }
+.churn-bars .bar-label { direction: rtl; text-align: left; flex: 1; min-width: 0; max-width: none; }
+.churn-bars .bar-val { flex: none; white-space: nowrap; }
 .churn-sess { color: var(--muted); margin-left: 8px; }
 
 /* The People panel is a full-width leaderboard between the context band and the distribution
