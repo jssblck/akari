@@ -537,6 +537,125 @@ func (s *Server) handleUnpublishOverview(w http.ResponseWriter, r *http.Request)
 	http.Redirect(w, r, "/account", http.StatusSeeOther)
 }
 
+// handlePublishProjectOverview marks a project's usage overview public and redirects
+// back to the project page. Projects are fleet-global rather than owned, so any
+// full-scope caller may publish (the route's requireFull guard); unlike a session
+// publish there is no owner check. A missing project is a 404.
+func (s *Server) handlePublishProjectOverview(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if err := s.Store.PublishProjectOverview(r.Context(), id); err != nil {
+		// A missing project is a 404; a backend failure is a 500, so a database error
+		// is not misreported as "project not found" (which would read as the caller's
+		// mistake rather than the server's).
+		if errors.Is(err, store.ErrNotFound) {
+			render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(r, "Not found"), http.StatusNotFound, "Project not found."))
+			return
+		}
+		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not publish overview."))
+		return
+	}
+	s.setNotice(w, "Overview published")
+	http.Redirect(w, r, fmt.Sprintf("/projects/%d", id), http.StatusSeeOther)
+}
+
+// handleUnpublishProjectOverview hides a project's public overview. The URL is the
+// project id and never changes, so re-publishing later restores the same /p/<id>.
+func (s *Server) handleUnpublishProjectOverview(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if err := s.Store.UnpublishProjectOverview(r.Context(), id); err != nil {
+		// Split ErrNotFound (a 404) from a backend failure (a 500), so a database error
+		// while making a project private is not disguised as a missing project.
+		if errors.Is(err, store.ErrNotFound) {
+			render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(r, "Not found"), http.StatusNotFound, "Project not found."))
+			return
+		}
+		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not update overview."))
+		return
+	}
+	s.setNotice(w, "Overview unpublished")
+	http.Redirect(w, r, fmt.Sprintf("/projects/%d", id), http.StatusSeeOther)
+}
+
+// handlePublicProject serves a project's published usage overview to logged-out
+// viewers at /p/<id>. Every figure is scoped to that one project (ProjectID) across
+// every account, so the page exposes the repo's aggregate usage and quality shape but
+// neither a session nor which accounts ran in it: the session list and the by-user
+// breakdown are dropped (see PublicProjectPage). An unknown or unpublished id is a
+// 404; a backend failure is a 500, not a "link expired", so a database hiccup is not
+// misreported as a private page.
+func (s *Server) handlePublicProject(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		render(w, r, http.StatusNotFound, web.PublicErrorPage(http.StatusNotFound, "This project overview is not published, or the link has expired."))
+		return
+	}
+	// The public gate and the aggregate reads below are deliberately not one atomic
+	// transaction. This matches handlePublicOverview: a concurrent unpublish landing
+	// between the gate read and the aggregate reads at worst serves one more
+	// already-in-flight aggregate page (no session, no secret, just usage totals the
+	// owner made public moments ago) before the next request 404s. The atomic
+	// gate-and-read fold is reserved for the cached OG card (PublicOverviewCard), where
+	// a stale read would persist in a TTL cache rather than vanishing on the next load.
+	proj, err := s.Store.PublicProjectOverview(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		render(w, r, http.StatusNotFound, web.PublicErrorPage(http.StatusNotFound, "This project overview is not published, or the link has expired."))
+		return
+	}
+	if err != nil {
+		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load project overview."))
+		return
+	}
+	// The window bounds both the usage panel and the quality band, exactly as the
+	// signed-in project page pairs them; the public page carries no filter toolbar, so
+	// the scope is the whole project (no agent/user/machine narrowing).
+	rng := web.ParseRange(r.URL.Query().Get("range"))
+	now := time.Now()
+	since := web.RangeSince(rng, now)
+	// One filter scopes both projections the public page renders (the usage panel and the
+	// quality band), so they cannot drift on the same page: same project, same window, same
+	// end-of-today upper bound, same OmitUsers. The upper bound (matching the public user
+	// overview) makes the usage headline cover exactly the days the trailing-year heatmap
+	// draws (the grid stops at today), and applying it to the quality band too keeps the two
+	// on one window rather than letting a future-started session count in the band while its
+	// future usage is excluded from the panel. OmitUsers skips the per-user aggregates the
+	// public page never renders (the by-user cost split and the People leaderboard), so the
+	// reads do not build per-user results proportional to the project's user count only to
+	// discard them.
+	//
+	// This shared upper bound is the one intentional gap from the signed-in project page,
+	// which leaves both projections unbounded above so its usage panel reconciles with its
+	// live session table (windowed on the same unbounded dated-usage base). The two surfaces
+	// therefore agree for all real, past-dated data and can differ only by a future-dated
+	// event, a malformed-transcript case that does not occur in practice (occurred_at and
+	// started_at are stamped from the transcript's own turns). See
+	// TestPublicAndAuthedProjectAnalyticsReconcile, which pins that gap.
+	af := store.AnalyticsFilter{ProjectID: id, Since: since, Until: ogimage.DefaultUntil(now), OmitUsers: true}
+	analytics, err := s.Store.Analytics(r.Context(), af)
+	if err != nil {
+		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load project overview."))
+		return
+	}
+	insights, err := s.Store.Insights(r.Context(), af)
+	if err != nil {
+		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load project overview."))
+		return
+	}
+	og := web.OGMeta{
+		Title:       web.ProjectTitle(proj) + " · usage overview",
+		Description: "A snapshot of AI coding-agent usage on " + web.ProjectTitle(proj) + " on akari.",
+		URL:         s.baseURL(r) + web.PublicProjectPath(proj.ID),
+	}
+	render(w, r, http.StatusOK, web.PublicProjectPage(proj, analytics, insights, rng, og))
+}
+
 // handlePublicOverview serves a user's published usage overview to logged-out
 // viewers at /u/<username>. Every figure is scoped to that one account (UserIDs),
 // so the page exposes neither another user's usage nor any session: it is the same

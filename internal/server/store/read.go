@@ -53,6 +53,12 @@ type ProjectSummary struct {
 	// so a reparse of the project's sessions does not float it to the top of the
 	// projects index. NULL for a project with no sessions.
 	LastActivity *time.Time
+	// OverviewPublic gates whether the project's usage overview resolves for
+	// logged-out viewers at /p/<id>. Every read that returns a ProjectSummary
+	// populates it from projects.overview_public (Project, PublicProjectOverview, and
+	// the ListProjects rollup), so the flag reads the same for a given project across
+	// surfaces rather than one projection carrying a stale false the others contradict.
+	OverviewPublic bool
 }
 
 // TotalTokens is the sum of every token class for a project: input, output, and
@@ -476,7 +482,7 @@ func (s SearchSnippet) Has() bool { return s.Text != "" }
 // first.
 func (s *Store) ListProjects(ctx context.Context) ([]ProjectSummary, error) {
 	rows, err := s.Pool.Query(ctx,
-		`SELECT p.id, p.remote_key, p.host, p.owner, p.repo, p.display_name, p.kind,
+		`SELECT p.id, p.remote_key, p.host, p.owner, p.repo, p.display_name, p.kind, p.overview_public,
 		        count(s.id),
 		        coalesce(sum(s.total_cost_usd), 0),
 		        coalesce(sum(s.total_input_tokens), 0),
@@ -496,7 +502,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]ProjectSummary, error) {
 	var out []ProjectSummary
 	for rows.Next() {
 		var p ProjectSummary
-		if err := rows.Scan(&p.ID, &p.RemoteKey, &p.Host, &p.Owner, &p.Repo, &p.DisplayName, &p.Kind,
+		if err := rows.Scan(&p.ID, &p.RemoteKey, &p.Host, &p.Owner, &p.Repo, &p.DisplayName, &p.Kind, &p.OverviewPublic,
 			&p.SessionCount, &p.TotalCostUSD, &p.TotalInput, &p.TotalOutput,
 			&p.TotalCacheRead, &p.TotalCacheWrite, &p.CostIncomplete, &p.LastActivity); err != nil {
 			return nil, err
@@ -506,12 +512,14 @@ func (s *Store) ListProjects(ctx context.Context) ([]ProjectSummary, error) {
 	return out, rows.Err()
 }
 
-// Project returns one project's identity (without rollups).
+// Project returns one project's identity (without rollups), including whether its
+// overview is published, so the signed-in project page can render the publicity
+// control's current state without a second query.
 func (s *Store) Project(ctx context.Context, id int64) (ProjectSummary, error) {
 	var p ProjectSummary
 	err := s.Pool.QueryRow(ctx,
-		`SELECT id, remote_key, host, owner, repo, display_name, kind FROM projects WHERE id = $1`, id).
-		Scan(&p.ID, &p.RemoteKey, &p.Host, &p.Owner, &p.Repo, &p.DisplayName, &p.Kind)
+		`SELECT id, remote_key, host, owner, repo, display_name, kind, overview_public FROM projects WHERE id = $1`, id).
+		Scan(&p.ID, &p.RemoteKey, &p.Host, &p.Owner, &p.Repo, &p.DisplayName, &p.Kind, &p.OverviewPublic)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ProjectSummary{}, ErrNotFound
 	}

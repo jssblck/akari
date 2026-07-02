@@ -141,6 +141,74 @@ func TestPublishUnpublishOverview(t *testing.T) {
 	}
 }
 
+func TestPublishUnpublishProjectOverview(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A fresh project is not public; Project reports the gate as false and the public
+	// lookup finds nothing.
+	if p, err := st.Project(ctx, projectID); err != nil || p.OverviewPublic {
+		t.Fatalf("fresh project err=%v public=%v, want false", err, p.OverviewPublic)
+	}
+	if _, err := st.PublicProjectOverview(ctx, projectID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("lookup before publish = %v, want ErrNotFound", err)
+	}
+
+	// Publishing flips the gate; the page resolves by id and Project reflects it.
+	if err := st.PublishProjectOverview(ctx, projectID); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	if p, err := st.PublicProjectOverview(ctx, projectID); err != nil || p.ID != projectID || !p.OverviewPublic {
+		t.Fatalf("lookup by id: p.ID=%d public=%v err=%v", p.ID, p.OverviewPublic, err)
+	}
+	if p, err := st.Project(ctx, projectID); err != nil || !p.OverviewPublic {
+		t.Fatalf("Project after publish err=%v public=%v, want true", err, p.OverviewPublic)
+	}
+	// The projects-index rollup reports the same flag as the single-project read, so the
+	// two projections of the public gate cannot drift.
+	if got := projectFromList(t, st, projectID); !got.OverviewPublic {
+		t.Fatalf("ListProjects OverviewPublic = false after publish, want true (drift from Project)")
+	}
+
+	// Disabling hides the page (the link stops resolving).
+	if err := st.UnpublishProjectOverview(ctx, projectID); err != nil {
+		t.Fatalf("unpublish: %v", err)
+	}
+	if _, err := st.PublicProjectOverview(ctx, projectID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("lookup after unpublish = %v, want ErrNotFound", err)
+	}
+	if p, err := st.Project(ctx, projectID); err != nil || p.OverviewPublic {
+		t.Fatalf("after unpublish err=%v public=%v, want false", err, p.OverviewPublic)
+	}
+	if got := projectFromList(t, st, projectID); got.OverviewPublic {
+		t.Fatalf("ListProjects OverviewPublic = true after unpublish, want false")
+	}
+
+	// Re-publishing brings the same /p/<id> back.
+	if err := st.PublishProjectOverview(ctx, projectID); err != nil {
+		t.Fatalf("re-publish: %v", err)
+	}
+	if p, err := st.PublicProjectOverview(ctx, projectID); err != nil || p.ID != projectID {
+		t.Fatalf("lookup after re-publish: p.ID=%d err=%v", p.ID, err)
+	}
+
+	// Toggling a project that does not exist touches no row and is ErrNotFound rather
+	// than a silent no-op, so a caller cannot mistake "nothing happened" for success.
+	missing := projectID + 9999
+	if err := st.PublishProjectOverview(ctx, missing); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("publish missing project = %v, want ErrNotFound", err)
+	}
+	if err := st.UnpublishProjectOverview(ctx, missing); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("unpublish missing project = %v, want ErrNotFound", err)
+	}
+}
+
 func TestDeleteSessionCascadesAndOrphansBlob(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -194,6 +262,24 @@ func TestDeleteSessionCascadesAndOrphansBlob(t *testing.T) {
 	if err := st.DeleteSession(ctx, sid); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("delete missing = %v, want ErrNotFound", err)
 	}
+}
+
+// projectFromList finds a project's rollup row in ListProjects, so a test can
+// reconcile the index projection of a field (OverviewPublic here) against the
+// single-project read and catch the two drifting.
+func projectFromList(t *testing.T, st *store.Store, id int64) store.ProjectSummary {
+	t.Helper()
+	projects, err := st.ListProjects(context.Background())
+	if err != nil {
+		t.Fatalf("list projects: %v", err)
+	}
+	for _, p := range projects {
+		if p.ID == id {
+			return p
+		}
+	}
+	t.Fatalf("project %d not found in ListProjects", id)
+	return store.ProjectSummary{}
 }
 
 // mintInvite creates a redeemable invite and returns the secret's hash, so a

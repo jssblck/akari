@@ -1202,6 +1202,247 @@ func TestPublicOverviewFlow(t *testing.T) {
 	resp.Body.Close()
 }
 
+// TestPublicProjectFlow drives a project's public overview end to end: it is
+// unreachable before publishing, the project page's control publishes it and surfaces
+// the share link (and the page gains its badge), an anonymous viewer then reads only
+// that project's aggregate usage (never a session, never the by-user breakdown that
+// would name the accounts that ran in it), and making it private 404s the link while a
+// re-publish restores the same URL.
+func TestPublicProjectFlow(t *testing.T) {
+	t.Parallel()
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+	c := newClient(t)
+
+	if _, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), ""); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	// A second account so the project is multi-user: the signed-in page carries a
+	// by-user breakdown that the public page must drop.
+	var graceID, adaID int64
+	if err := st.Pool.QueryRow(ctx, `SELECT id FROM users WHERE username = 'grace'`).Scan(&graceID); err != nil {
+		t.Fatalf("grace id: %v", err)
+	}
+	if err := st.Pool.QueryRow(ctx,
+		`INSERT INTO users (username, password_hash, is_admin) VALUES ('ada', 'x', FALSE) RETURNING id`).Scan(&adaID); err != nil {
+		t.Fatalf("seed ada: %v", err)
+	}
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	// grace runs claude, ada runs codex; one in-window usage event each, so the panel
+	// has data and the by-user breakdown has two accounts to name.
+	seed := func(userID int64, agent, src, model string) int64 {
+		ann, err := st.Announce(ctx, store.AnnounceParams{
+			UserID: userID, Agent: agent, SourceSessionID: src,
+			ProjectID: projectID, Cwd: "/home/x/akari", Machine: "laptop",
+		})
+		if err != nil {
+			t.Fatalf("announce %s: %v", src, err)
+		}
+		if _, err := st.Pool.Exec(ctx,
+			`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cost_usd, occurred_at, dedup_key)
+			 VALUES ($1, $2, 100, 50, 1.0, now() - make_interval(days => 1), $3)`,
+			ann.SessionID, model, src+"-u"); err != nil {
+			t.Fatalf("seed usage %s: %v", src, err)
+		}
+		return ann.SessionID
+	}
+	graceSession := seed(graceID, "claude", "sess-grace", "claude-opus-4-8")
+	seed(adaID, "codex", "sess-ada", "gpt-5.5")
+
+	pubPath := web.PublicProjectPath(projectID)
+
+	// Before publishing, the id 404s (the public page never redirects to login).
+	anon := newClient(t)
+	anon.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp := mustGet(t, anon, srv.URL+pubPath)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("anon %s before publish = %d, want 404", pubPath, resp.StatusCode)
+	}
+	resp.Body.Close()
+	anon.CheckRedirect = nil
+
+	if _, err := c.PostForm(srv.URL+"/login", url.Values{
+		"username": {"grace"}, "password": {"hopper-1906"},
+	}); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+
+	projPath := fmt.Sprintf("/projects/%d", projectID)
+
+	// Before publishing, the project page offers the publish control, not a link, and
+	// carries the by-user breakdown (two accounts ran in the repo).
+	body := readBody(t, mustGet(t, c, srv.URL+projPath))
+	if !strings.Contains(body, "Make overview public") {
+		t.Fatalf("project page should offer the publicity control, got:\n%s", body)
+	}
+	if !strings.Contains(body, "By user") {
+		t.Fatalf("signed-in project page should carry the by-user breakdown, got:\n%s", body)
+	}
+	if strings.Contains(body, "View public page") {
+		t.Fatalf("project page should not show the public badge before publishing, got:\n%s", body)
+	}
+
+	// Publish via the project page control.
+	if _, err := c.PostForm(srv.URL+web.ProjectPublishPath(projectID), url.Values{}); err != nil {
+		t.Fatalf("publish project overview: %v", err)
+	}
+	if p, err := st.Project(ctx, projectID); err != nil || !p.OverviewPublic {
+		t.Fatalf("project not public after publish: err=%v public=%v", err, p.OverviewPublic)
+	}
+
+	// The project page now shows the public link and the make-private control.
+	body = readBody(t, mustGet(t, c, srv.URL+projPath))
+	if !strings.Contains(body, pubPath) || !strings.Contains(body, "Make private") {
+		t.Fatalf("project page should show the public link and make-private control, got:\n%s", body)
+	}
+
+	// An anonymous viewer reads the project's aggregate usage: both agents (claude and
+	// codex ran in the repo) and the by-model/by-agent breakdowns, but never a session
+	// path and never the by-user breakdown that would name the accounts.
+	resp = mustGet(t, anon, srv.URL+pubPath)
+	body = readBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("anon public project status = %d, want 200", resp.StatusCode)
+	}
+	for _, want := range []string{"github.com/jssblck/akari", "By model", "By agent", ">claude</span>", ">codex</span>"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("public project overview missing %q, got:\n%s", want, body)
+		}
+	}
+	// The public project overview is aggregate only: no session list and no by-user
+	// breakdown, so it exposes neither a session path nor which accounts ran in the repo.
+	if strings.Contains(body, fmt.Sprintf("/sessions/%d", graceSession)) {
+		t.Fatalf("public project overview leaked a session path, got:\n%s", body)
+	}
+	if strings.Contains(body, "By user") {
+		t.Fatalf("public project overview leaked the by-user breakdown, got:\n%s", body)
+	}
+	// Its range buttons refetch the public path, not the authed project page.
+	if !strings.Contains(body, `hx-get="`+pubPath+`?range=`) {
+		t.Fatalf("public project range buttons should target the public path, got:\n%s", body)
+	}
+	// The range control swaps the whole usage-and-quality region, not just the usage
+	// panel, so a range click moves the quality band to the new window in step with the
+	// panel rather than leaving it on the previous one.
+	if !strings.Contains(body, `id="public-project-view"`) || !strings.Contains(body, `hx-target="#public-project-view"`) {
+		t.Fatalf("public project range control should target #public-project-view, got:\n%s", body)
+	}
+
+	// Make private: the link 404s.
+	if _, err := c.PostForm(srv.URL+web.ProjectUnpublishPath(projectID), url.Values{}); err != nil {
+		t.Fatalf("unpublish project overview: %v", err)
+	}
+	anon.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp = mustGet(t, anon, srv.URL+pubPath)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("public project after make-private = %d, want 404", resp.StatusCode)
+	}
+	resp.Body.Close()
+	anon.CheckRedirect = nil
+
+	// Re-publishing brings the same /p/<id> back.
+	if _, err := c.PostForm(srv.URL+web.ProjectPublishPath(projectID), url.Values{}); err != nil {
+		t.Fatalf("re-publish project overview: %v", err)
+	}
+	resp = mustGet(t, anon, srv.URL+pubPath)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("public project after re-publish = %d, want 200", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+// TestProjectOverviewPublishRequiresAuth confirms the project publicity toggles are
+// gated by a full-scope credential: a logged-out client cannot publish or unpublish a
+// project overview, so the public page is opt-in by a signed-in user and not flippable
+// by anyone who finds the route.
+func TestProjectOverviewPublishRequiresAuth(t *testing.T) {
+	t.Parallel()
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+
+	anon := newClient(t)
+	anon.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	for _, path := range []string{web.ProjectPublishPath(projectID), web.ProjectUnpublishPath(projectID)} {
+		resp, err := anon.PostForm(srv.URL+path, url.Values{})
+		if err != nil {
+			t.Fatalf("anon post %s: %v", path, err)
+		}
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("anon POST %s = %d, want 401", path, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+	if p, err := st.Project(ctx, projectID); err != nil || p.OverviewPublic {
+		t.Fatalf("project public after rejected anon publish (err=%v), want still private", err)
+	}
+}
+
+// TestProjectOverviewToggleEdgeCases covers the toggle and public routes' failure
+// branches: a malformed id 404s, a toggle for a missing project renders the
+// not-found page, and the public page 404s for both a non-numeric and an unknown id
+// (never redirecting a logged-out viewer to login).
+func TestProjectOverviewToggleEdgeCases(t *testing.T) {
+	t.Parallel()
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+
+	if _, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), ""); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	c := newClient(t)
+	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	if _, err := c.PostForm(srv.URL+"/login", url.Values{
+		"username": {"grace"}, "password": {"hopper-1906"},
+	}); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+
+	// A malformed id on a toggle route is a 404 (ParseInt fails before any store call).
+	for _, path := range []string{"/projects/not-a-number/overview/publish", "/projects/not-a-number/overview/unpublish"} {
+		resp, err := c.PostForm(srv.URL+path, url.Values{})
+		if err != nil {
+			t.Fatalf("post %s: %v", path, err)
+		}
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("POST %s = %d, want 404", path, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+
+	// Toggling a project that does not exist surfaces store.ErrNotFound as the
+	// not-found page (a 404), not a redirect or a 500.
+	for _, path := range []string{web.ProjectPublishPath(999999), web.ProjectUnpublishPath(999999)} {
+		resp, err := c.PostForm(srv.URL+path, url.Values{})
+		if err != nil {
+			t.Fatalf("post %s: %v", path, err)
+		}
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("POST %s (missing project) = %d, want 404", path, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+
+	// The public page 404s for a non-numeric id and for an unknown/unpublished id, and
+	// never redirects a logged-out viewer to login.
+	anon := newClient(t)
+	anon.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	for _, path := range []string{"/p/not-a-number", "/p/999999"} {
+		resp := mustGet(t, anon, srv.URL+path)
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("GET %s = %d, want 404", path, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+}
+
 // TestPublicOverviewOGImage drives the Open Graph preview card end to end: the
 // public page advertises it via og:image meta tags, the /og.png route renders a
 // valid 1200x630 PNG on demand and caches it, a repeat fetch within the TTL is

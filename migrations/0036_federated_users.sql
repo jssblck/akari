@@ -21,8 +21,20 @@
 
 ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL;
 
-ALTER TABLE users ADD COLUMN auth_source TEXT NOT NULL DEFAULT 'password'
-  CHECK (auth_source IN ('password', 'proxy'));
+ALTER TABLE users ADD COLUMN IF NOT EXISTS auth_source TEXT NOT NULL DEFAULT 'password';
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'users'::regclass
+      AND conname = 'users_auth_source_valid'
+  ) THEN
+    ALTER TABLE users ADD CONSTRAINT users_auth_source_valid
+      CHECK (auth_source IN ('password', 'proxy'));
+  END IF;
+END
+$$;
 
 -- Keep the two representations of "does this account have a local password" from
 -- drifting. password_hash NULLness is what the login path gates on (User.HasPassword),
@@ -33,8 +45,18 @@ ALTER TABLE users ADD COLUMN auth_source TEXT NOT NULL DEFAULT 'password'
 -- sources OIDC and SCIM will add (all passwordless): any non-'password' source must
 -- have a NULL hash. Existing rows all satisfy it (they default to 'password' and kept
 -- their NOT NULL hashes), so the constraint adds without a rewrite.
-ALTER TABLE users ADD CONSTRAINT users_password_matches_source
-  CHECK ((auth_source = 'password') = (password_hash IS NOT NULL));
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'users'::regclass
+      AND conname = 'users_password_matches_source'
+  ) THEN
+    ALTER TABLE users ADD CONSTRAINT users_password_matches_source
+      CHECK ((auth_source = 'password') = (password_hash IS NOT NULL));
+  END IF;
+END
+$$;
 
 -- NULL is the one representation of "no local password". The read path COALESCEs a
 -- NULL hash to "" and User.HasPassword treats "" as no password, so an empty-string
@@ -42,5 +64,15 @@ ALTER TABLE users ADD CONSTRAINT users_password_matches_source
 -- (it IS NOT NULL) yet HasPassword reads it as passwordless and the login path
 -- refuses it. Forbid it, so password_hash is either NULL or a real hash and the DB
 -- invariant matches the Go projection exactly.
-ALTER TABLE users ADD CONSTRAINT users_password_hash_nonempty
-  CHECK (password_hash IS NULL OR password_hash <> '');
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'users'::regclass
+      AND conname = 'users_password_hash_nonempty'
+  ) THEN
+    ALTER TABLE users ADD CONSTRAINT users_password_hash_nonempty
+      CHECK (password_hash IS NULL OR password_hash <> '');
+  END IF;
+END
+$$;

@@ -75,8 +75,15 @@ func (s *Store) Insights(ctx context.Context, f AnalyticsFilter) (Insights, erro
 			if out.Context, err = s.contextHealthFrom(ctx, tx, f); err != nil {
 				return err
 			}
-			if out.Users, err = s.userQualityFrom(ctx, tx, f); err != nil {
-				return err
+			// The per-author leaderboard is skipped when the caller will not render it
+			// (OmitUsers, set by the public project overview, whose quality band carries no
+			// People panel), so the read does not group every session by user and build an
+			// aggregate proportional to the scope's user count only to discard it. It sits
+			// outside every other panel's totals, so leaving Users zero changes nothing else.
+			if !f.OmitUsers {
+				if out.Users, err = s.userQualityFrom(ctx, tx, f); err != nil {
+					return err
+				}
 			}
 			return nil
 		})

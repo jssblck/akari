@@ -27,7 +27,7 @@ templ OverviewPage(p Page, a store.Analytics, rng string, users []store.User, se
 				<a class="muted small" href="/account#publicity">Manage</a>
 			</div>
 		}
-		@analyticsPanel(a, "chart-global", RangeOptions("/overview", userValues(selected), rng), rng, users, selected, "#usage")
+		@analyticsPanel(a, "chart-global", RangeOptions("/overview", userValues(selected), rng), rng, users, selected, "#usage", true)
 	}
 }
 
@@ -40,8 +40,11 @@ templ OverviewPage(p Page, a store.Analytics, rng string, users []store.User, se
 // id="usage" so the range selector can swap the whole panel (stats, grid, and
 // breakdowns all reflect the window) in one shot. ranges is the prebuilt selector;
 // rng marks the active window, and users/selected drive the per-user filter, which
-// renders only when users is non-empty (the project page passes nil).
-templ analyticsPanel(a store.Analytics, chartID string, ranges []RangeOption, rng string, users []store.User, selected []int64, swap string) {
+// renders only when users is non-empty (the project page passes nil). showUsers gates
+// the by-user cost breakdown: the signed-in surfaces pass true (it self-hides on a
+// single-user scope), while the public project overview passes false to keep the
+// accounts that ran in the repo private.
+templ analyticsPanel(a store.Analytics, chartID string, ranges []RangeOption, rng string, users []store.User, selected []int64, swap string, showUsers bool) {
 	<section class="analytics" id="usage">
 		if !a.HasData() {
 			<div class="empty">No usage recorded yet.</div>
@@ -64,7 +67,7 @@ templ analyticsPanel(a store.Analytics, chartID string, ranges []RangeOption, rn
 			<div class="breakdowns">
 				@breakdownList("By model", BuildBreakdown(FoldUnknownModels(a.Models)))
 				@breakdownList("By agent", BuildBreakdown(a.Agents))
-				if len(a.Users) > 1 {
+				if showUsers && len(a.Users) > 1 {
 					@breakdownList("By user", BuildBreakdown(a.Users))
 				}
 			</div>
