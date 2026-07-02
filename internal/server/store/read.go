@@ -196,18 +196,6 @@ type SessionFilter struct {
 	// matching the analytics window so a project page's session list and its usage
 	// panel cover the same range. The zero time means no lower bound.
 	Since time.Time
-	// StartedSince bounds the list to sessions that STARTED at or after this instant
-	// (s.started_at), the same time basis the Insights and People analytics window on
-	// (AnalyticsFilter.clauseFor("s.started_at")). It exists so a quality drill-down
-	// arriving from one of those windowed bars scopes the feed to the identical cohort
-	// the count described: a grade or outcome bar counts sessions by when they started,
-	// so its destination list must too, or a session started before the window but
-	// re-activated inside it (updated_at in range, started_at out) would show in the
-	// list yet never in the count. Since keeps its distinct last-active semantics for
-	// the project page, where the session table reconciles with a dated-usage panel;
-	// the two bounds are independent and only one is set on any given filter. The zero
-	// time means no lower bound.
-	StartedSince time.Time
 	// Grade narrows by the Insights Grades panel's buckets: a letter "A".."F" matches
 	// sessions with a usable current-version signals row carrying that grade, and the
 	// sentinel "unscored" matches the panel's catch-all (explicit NULL-grade row, stale
@@ -284,14 +272,6 @@ func (f SessionFilter) conds(sinceCol string) (conds []string, args []any) {
 	}
 	if !f.Since.IsZero() {
 		add(sinceCol+" >=", f.Since)
-	}
-	// StartedSince always bounds s.started_at, independent of sinceCol: it exists so a
-	// quality drill-down windows the feed on the same started_at basis the analytics bar
-	// it came from used, regardless of which last-active column this list otherwise scopes
-	// Since to. Applying it here reaches every session-list query through the one shared
-	// builder.
-	if !f.StartedSince.IsZero() {
-		add("s.started_at >=", f.StartedSince)
 	}
 	if f.RequireSpan {
 		// The exact predicate the concurrency sweep uses (spanFilter in

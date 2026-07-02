@@ -100,6 +100,41 @@ func TestBarsHrefDropsAllRange(t *testing.T) {
 	}
 }
 
+// TestIsGrade pins the session list's grade whitelist: the five letters and the unscored
+// sentinel are accepted, and anything else (a lowercase letter, an unknown word, or the
+// empty string) is rejected. The accepted set must match what handleSessions validates a
+// ?grade= query param against (internal/server/httpapi/web.go), since the handler and this
+// whitelist gate the same value.
+func TestIsGrade(t *testing.T) {
+	for _, v := range []string{"A", "B", "C", "D", "F", UnscoredKey} {
+		if !IsGrade(v) {
+			t.Errorf("IsGrade(%q) = false, want true", v)
+		}
+	}
+	for _, v := range []string{"", "a", "Z", "unscored ", "unknown", "AB"} {
+		if IsGrade(v) {
+			t.Errorf("IsGrade(%q) = true, want false", v)
+		}
+	}
+}
+
+// TestIsOutcome pins the session list's outcome whitelist: the three concrete outcomes and
+// the unknown catch-all are accepted, and anything else is rejected. The accepted set must
+// match what handleSessions validates a ?outcome= query param against
+// (internal/server/httpapi/web.go).
+func TestIsOutcome(t *testing.T) {
+	for _, v := range []string{"completed", "abandoned", "errored", "unknown"} {
+		if !IsOutcome(v) {
+			t.Errorf("IsOutcome(%q) = false, want true", v)
+		}
+	}
+	for _, v := range []string{"", "Completed", "pending", "unscored"} {
+		if IsOutcome(v) {
+			t.Errorf("IsOutcome(%q) = true, want false", v)
+		}
+	}
+}
+
 // TestConcurrencyBusiestHref pins the busiest-user drill: it carries the user, the
 // window, empty=1, and spanned=1 so the feed matches the concurrency panel's cohort
 // (which counts every message_count but only measured-span sessions).

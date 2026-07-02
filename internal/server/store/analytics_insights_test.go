@@ -130,12 +130,12 @@ func TestQualityDistribution(t *testing.T) {
 // TestQualityDrilldownWindowsOnStartedAt pins that a windowed quality bar and its drill-down
 // list describe the identical session set. The bar counts sessions by when they started
 // (QualityDistribution over AnalyticsFilter.Since on s.started_at); the feed reaches that list
-// through SessionFilter.StartedSince, which conds() applies to the same s.started_at column. The
-// footgun this guards is the two windowing on different columns: a session started before the
-// window but re-activated inside it (updated_at in range, started_at out) would list under the
-// feed's old updated_at bound while the bar never counted it, so the bar and its destination
-// would disagree. With both bounding started_at they agree, and the early-started session is
-// excluded from both.
+// through ListAllSessions, which binds SessionFilter.Since to that same s.started_at column
+// (conds("s.started_at")). The footgun this guards is the two windowing on different columns: a
+// session started before the window but re-activated inside it (updated_at in range, started_at
+// out) would list under an updated_at bound while the bar never counted it, so the bar and its
+// destination would disagree. With both bounding started_at they agree, and the early-started
+// session is excluded from both.
 func TestQualityDrilldownWindowsOnStartedAt(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -158,8 +158,8 @@ func TestQualityDrilldownWindowsOnStartedAt(t *testing.T) {
 	insertSignal(t, st, ctx, inside, quality.Version, "completed", "A")
 
 	// A session started BEFORE the window but re-activated inside it: updated_at lands in range
-	// while started_at does not. A feed bound on updated_at would surface it; one bound on
-	// started_at (StartedSince) must not, matching the bar that counts by started_at.
+	// while started_at does not. A feed bound on updated_at would surface it; ListAllSessions,
+	// which binds Since to started_at, must not, matching the bar that counts by started_at.
 	early := seedSession(t, st, ada, pid, "started-before")
 	setSessionShape(t, st, ctx, early, beforeWindow, beforeWindow.Add(10*time.Minute), 20, 2)
 	insertSignal(t, st, ctx, early, quality.Version, "completed", "A")
@@ -178,12 +178,11 @@ func TestQualityDrilldownWindowsOnStartedAt(t *testing.T) {
 		t.Fatalf("windowed bar counted %d sessions, want 1 (only the started-inside session)", dist.Sessions)
 	}
 
-	// The drill-down list: the global feed under the equivalent StartedSince bound. Its length
-	// must equal the bar's count, and it must not include the early-started session. The global
-	// feed's Since bounds started_at too, so a plain range drill lands on the same set; StartedSince
-	// is the explicit started_at bound that holds regardless of which column a given list scopes
-	// Since to.
-	rows, _, err := st.ListAllSessions(ctx, store.SessionFilter{StartedSince: since, IncludeEmpty: true})
+	// The drill-down list: ListAllSessions binds Since to s.started_at (unlike ListSessions, which
+	// binds it to s.updated_at), so the same Since value lands on the identical started_at window
+	// the bar counted. Its length must equal the bar's count, and it must not include the
+	// early-started session.
+	rows, _, err := st.ListAllSessions(ctx, store.SessionFilter{Since: since, IncludeEmpty: true})
 	if err != nil {
 		t.Fatalf("list sessions: %v", err)
 	}

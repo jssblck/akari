@@ -696,9 +696,9 @@ func TestSessionsFeedRangeWindow(t *testing.T) {
 		t.Fatalf("project: %v", err)
 	}
 	// A recent session (started yesterday) and an old one (started 60 days ago), so a 30-day window
-	// keeps the recent one and drops the old one. The feed's ?range drill-down windows on
-	// started_at (StartedSince), matching the Insights/People bars it arrives from, so this stamps
-	// the recent session's started_at inside the window and ages the old one's out of it.
+	// keeps the recent one and drops the old one. The feed's ?range drill-down windows on started_at,
+	// matching the Insights/People bars it arrives from, so this stamps the recent session's
+	// started_at inside the window and ages the old one's out of it.
 	annNew, err := st.Announce(ctx, store.AnnounceParams{
 		UserID: owner.ID, Agent: "claude", SourceSessionID: "sess-new",
 		ProjectID: projectID, Cwd: "/home/grace/akari", Machine: "laptop",
@@ -766,6 +766,50 @@ func TestSessionsFeedRangeWindow(t *testing.T) {
 	}
 	if strings.Contains(body, `<span class="fchip-k">range</span>`) {
 		t.Fatalf("an unknown range value should show no range chip, got:\n%s", body)
+	}
+}
+
+// TestSessionsFeedGradeOutcomeParams drives handleSessions' ?grade and ?outcome whitelist
+// validation: a known grade or outcome renders the feed (200), and an unrecognized value of
+// either is rejected as a bad request rather than silently falling through to the unfiltered
+// list, matching the project-filter precedent the handler already applies for ?project. The
+// handler validates both params through web.IsGrade and web.IsOutcome directly, the same
+// functions the drill-through links themselves are built to satisfy, so a valid case here
+// also pins that the two ends cannot disagree.
+func TestSessionsFeedGradeOutcomeParams(t *testing.T) {
+	t.Parallel()
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+	c := newClient(t)
+
+	if _, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), ""); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if _, err := c.PostForm(srv.URL+"/login", url.Values{
+		"username": {"grace"}, "password": {"hopper-1906"},
+	}); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+
+	cases := []struct {
+		name       string
+		query      string
+		wantStatus int
+	}{
+		{"valid grade", "grade=A", http.StatusOK},
+		{"valid unscored grade", "grade=" + web.UnscoredKey, http.StatusOK},
+		{"valid outcome", "outcome=completed", http.StatusOK},
+		{"invalid grade", "grade=bogus", http.StatusBadRequest},
+		{"invalid outcome", "outcome=bogus", http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := mustGet(t, c, srv.URL+"/sessions?"+tc.query)
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.wantStatus {
+				t.Errorf("GET /sessions?%s = %d, want %d", tc.query, resp.StatusCode, tc.wantStatus)
+			}
+		})
 	}
 }
 

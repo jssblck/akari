@@ -497,6 +497,45 @@ func TestMessagesPromptFacts(t *testing.T) {
 	}
 }
 
+// TestMessagesAfterPromptFactsVersionGate pins that the bounded keyset reader applies the same
+// prompt-facts version gate the whole-transcript read does (TestMessagesPromptFacts): a message
+// row stamped at a superseded quality.PromptFactsVersion must read PromptFactsCurrent = false
+// through MessagesAfter, not just Messages, since both share messageReadColumns but the gate is
+// re-evaluated per query against the running version. A row at the current version, by contrast,
+// reads current.
+func TestMessagesAfterPromptFactsVersionGate(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	sid := seedForReads(t, st)
+
+	if err := st.ApplyProjectionDelta(ctx, sid, store.ProjectionDelta{
+		Messages: []store.MessageDelta{{Ordinal: 0, Role: "user", Content: "fix it"}},
+	}); err != nil {
+		t.Fatalf("apply delta: %v", err)
+	}
+	// Stamp a second message directly at a superseded facts version, mirroring
+	// TestMessagesPromptFacts' stale row but read here through the bounded window instead.
+	if _, err := st.Pool.Exec(ctx,
+		`INSERT INTO messages (session_id, ordinal, role, content, prompt_short, prompt_no_code, prompt_digest, prompt_facts_version)
+		 VALUES ($1, 1, 'user', 'stale prompt', true, false, 424242, $2)`,
+		sid, quality.PromptFactsVersion-1); err != nil {
+		t.Fatalf("insert stale-version message: %v", err)
+	}
+
+	msgs, err := st.MessagesAfter(ctx, sid, nil, 10)
+	if err != nil {
+		t.Fatalf("MessagesAfter: %v", err)
+	}
+	byOrd := msgByOrdinal(msgs)
+	if !byOrd[0].PromptFactsCurrent {
+		t.Error("a message classified at the current facts version should read PromptFactsCurrent = true through MessagesAfter")
+	}
+	if byOrd[1].PromptFactsCurrent {
+		t.Error("a message at a superseded facts version should read PromptFactsCurrent = false through MessagesAfter, not the stale facts")
+	}
+}
+
 // TestToolCallsFileRelPath pins that the ToolCalls read surfaces the worktree-relative path the
 // projection derived from the session's cwd, alongside the absolute file_path.
 func TestToolCallsFileRelPath(t *testing.T) {
@@ -528,6 +567,74 @@ func TestToolCallsFileRelPath(t *testing.T) {
 	}
 	if got, want := calls[0].FilePath, "/home/grace/akari/internal/auth.go"; got != want {
 		t.Errorf("file_path = %q, want %q (absolute path preserved)", got, want)
+	}
+}
+
+// TestToolCallsInRangeFileRelPath pins that the bounded ToolCallsInRange read carries the same
+// worktree-relative path ToolCalls does (TestToolCallsFileRelPath): a tool call inserted under a
+// session with a known cwd yields its path relative to that cwd, and one inserted under a session
+// with no cwd yields an empty FileRelPath (the projection had no anchor to derive a relative form
+// against, so file_rel_path stored NULL and the read coalesces it to "").
+func TestToolCallsInRangeFileRelPath(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	// A session with a known cwd: the edit under it derives a relative path.
+	withCwd := seedForReads(t, st) // cwd is /home/grace/akari
+	if err := st.ApplyProjectionDelta(ctx, withCwd, store.ProjectionDelta{
+		Messages: []store.MessageDelta{{Ordinal: 0, Role: "assistant", HasToolUse: true}},
+		ToolCalls: []store.ProjToolCall{{
+			MessageOrdinal: 0, CallIndex: 0, ToolName: "Edit", Category: "edit",
+			FilePath:  "/home/grace/akari/internal/auth.go",
+			InputBody: `{"file_path":"internal/auth.go"}`, InputMediaType: "application/json", CallUID: "c1",
+		}},
+	}); err != nil {
+		t.Fatalf("apply delta (with cwd): %v", err)
+	}
+	calls, err := st.ToolCallsInRange(ctx, withCwd, 0, 0)
+	if err != nil {
+		t.Fatalf("tool calls in range (with cwd): %v", err)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("read %d tool calls, want 1", len(calls))
+	}
+	if got, want := calls[0].FileRelPath, "internal/auth.go"; got != want {
+		t.Errorf("with cwd: file_rel_path = %q, want %q", got, want)
+	}
+
+	// A session announced with no cwd: the same edit has no anchor to derive a relative
+	// path against, so file_rel_path reads empty rather than a guessed value.
+	uid := seedUser(t, st, "ada")
+	pid, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ann, err := st.Announce(ctx, store.AnnounceParams{
+		UserID: uid, Agent: "claude", SourceSessionID: "sess-no-cwd", ProjectID: pid, Machine: "box",
+	})
+	if err != nil {
+		t.Fatalf("announce without cwd: %v", err)
+	}
+	noCwd := ann.SessionID
+	if err := st.ApplyProjectionDelta(ctx, noCwd, store.ProjectionDelta{
+		Messages: []store.MessageDelta{{Ordinal: 0, Role: "assistant", HasToolUse: true}},
+		ToolCalls: []store.ProjToolCall{{
+			MessageOrdinal: 0, CallIndex: 0, ToolName: "Edit", Category: "edit",
+			FilePath: "/home/ada/somewhere/db.go", CallUID: "c2",
+		}},
+	}); err != nil {
+		t.Fatalf("apply delta (no cwd): %v", err)
+	}
+	noCwdCalls, err := st.ToolCallsInRange(ctx, noCwd, 0, 0)
+	if err != nil {
+		t.Fatalf("tool calls in range (no cwd): %v", err)
+	}
+	if len(noCwdCalls) != 1 {
+		t.Fatalf("read %d tool calls, want 1", len(noCwdCalls))
+	}
+	if got := noCwdCalls[0].FileRelPath; got != "" {
+		t.Errorf("without cwd: file_rel_path = %q, want empty", got)
 	}
 }
 
