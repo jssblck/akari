@@ -265,6 +265,84 @@ func TestRootNonFullCredentialGetsLanding(t *testing.T) {
 		if strings.Contains(body, `class="sidebar"`) {
 			t.Fatalf("%s-scope root should not render the signed-in overview shell, got:\n%s", tc.scope, body)
 		}
+		// A non-full credential is treated as logged out, so the homepage topbar must
+		// offer "Log in" and never the signed-in Overview link: the credential cannot
+		// read the app, so the page must not invite it in.
+		if !strings.Contains(body, `<a href="/login">Log in</a>`) {
+			t.Fatalf("%s-scope homepage should show the logged-out topbar, got:\n%s", tc.scope, body)
+		}
+		if strings.Contains(body, `<a href="/overview">Overview</a>`) {
+			t.Fatalf("%s-scope homepage should not offer the signed-in app link, got:\n%s", tc.scope, body)
+		}
+	}
+}
+
+// TestAuthRedirectsTargetOverview pins the redirect Locations the route split
+// changed, each with redirects disabled so the assertion is on the 3xx target
+// itself rather than the followed page (which the homepage and overview can share
+// text with). An anonymous read page bounces to login carrying the path as next;
+// registration, an already-signed-in visit to /login, and a bare login all land on
+// the app home rather than the public root.
+func TestAuthRedirectsTargetOverview(t *testing.T) {
+	t.Parallel()
+	srv, _ := newTestServer(t)
+
+	noFollow := func() *http.Client {
+		c := newClient(t)
+		c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		return c
+	}
+
+	// An anonymous request for the gated overview redirects to login carrying the
+	// requested path as next, so signing in returns the reader to /overview.
+	anon := noFollow()
+	resp, err := anon.Get(srv.URL + "/overview")
+	if err != nil {
+		t.Fatalf("anon get /overview: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("anon /overview = %d, want 303 to login", resp.StatusCode)
+	}
+	if loc := resp.Header.Get("Location"); loc != "/login?next=%2Foverview" {
+		t.Fatalf("anon /overview redirect = %q, want /login?next=%%2Foverview", loc)
+	}
+
+	// Registration starts a session and lands on the app home, not the marketing root.
+	reg := noFollow()
+	resp, err = reg.PostForm(srv.URL+"/register", url.Values{
+		"username": {"grace"}, "password": {"hopper-1906"},
+	})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther || resp.Header.Get("Location") != overviewPath {
+		t.Fatalf("register redirect = %d %q, want 303 %q", resp.StatusCode, resp.Header.Get("Location"), overviewPath)
+	}
+
+	// The register client now holds a session; visiting /login while signed in
+	// bounces straight into the app rather than showing the form.
+	resp, err = reg.Get(srv.URL + "/login")
+	if err != nil {
+		t.Fatalf("signed-in get /login: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther || resp.Header.Get("Location") != overviewPath {
+		t.Fatalf("signed-in /login redirect = %d %q, want 303 %q", resp.StatusCode, resp.Header.Get("Location"), overviewPath)
+	}
+
+	// A fresh login with no saved next also defaults to the app home.
+	login := noFollow()
+	resp, err = login.PostForm(srv.URL+"/login", url.Values{
+		"username": {"grace"}, "password": {"hopper-1906"},
+	})
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther || resp.Header.Get("Location") != overviewPath {
+		t.Fatalf("login redirect = %d %q, want 303 %q", resp.StatusCode, resp.Header.Get("Location"), overviewPath)
 	}
 }
 

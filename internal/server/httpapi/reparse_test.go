@@ -99,6 +99,13 @@ func TestParsedEndpointsGateDuringReparse(t *testing.T) {
 		}
 	}
 
+	// The homepage renders no parsed data, so it stays available during a reparse
+	// rather than showing the progress stand-in: the root is deliberately off the
+	// gated set.
+	if body := getBody(t, c, srv.URL+"/"); !strings.Contains(body, "self-hosted instrument") || strings.Contains(body, "Reparse in progress") {
+		t.Fatalf("homepage should render normally during a reparse, got:\n%s", body)
+	}
+
 	// The account page is not parsed data, so it stays available (and shows the
 	// reparse section).
 	if body := getBody(t, c, srv.URL+"/account"); !strings.Contains(body, "Account") {

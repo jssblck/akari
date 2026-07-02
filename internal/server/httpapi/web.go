@@ -116,10 +116,6 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 // and swaps the usage panel (hx-select="#usage"), so a plain load and an htmx swap
 // render from one path; the window also rides the URL via ?range=.
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/overview" {
-		render(w, r, http.StatusNotFound, web.ErrorPage(s.pageForNav(r, "Not found", ""), http.StatusNotFound, "Page not found."))
-		return
-	}
 	rng := web.ParseRange(r.URL.Query().Get("range"))
 	users, err := s.Store.ListUsers(r.Context())
 	if err != nil {
