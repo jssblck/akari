@@ -103,7 +103,7 @@ func (s *Store) PublishProjectOverview(ctx context.Context, projectID int64) err
 	tag, err := s.Pool.Exec(ctx,
 		`UPDATE projects SET overview_public = TRUE WHERE id = $1`, projectID)
 	if err != nil {
-		return err
+		return fmt.Errorf("publish project overview for project %d: %w", projectID, err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
@@ -118,7 +118,7 @@ func (s *Store) UnpublishProjectOverview(ctx context.Context, projectID int64) e
 	tag, err := s.Pool.Exec(ctx,
 		`UPDATE projects SET overview_public = FALSE WHERE id = $1`, projectID)
 	if err != nil {
-		return err
+		return fmt.Errorf("unpublish project overview for project %d: %w", projectID, err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
@@ -141,7 +141,10 @@ func (s *Store) PublicProjectOverview(ctx context.Context, id int64) (ProjectSum
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ProjectSummary{}, ErrNotFound
 	}
-	return p, err
+	if err != nil {
+		return ProjectSummary{}, fmt.Errorf("read public project overview for project %d: %w", id, err)
+	}
+	return p, nil
 }
 
 // PublicOverviewUser resolves a username to its account for the logged-out

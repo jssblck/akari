@@ -178,8 +178,8 @@ func TestPublishUnpublishProjectOverview(t *testing.T) {
 	if _, err := st.PublicProjectOverview(ctx, projectID); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("lookup after unpublish = %v, want ErrNotFound", err)
 	}
-	if p, _ := st.Project(ctx, projectID); p.OverviewPublic {
-		t.Fatalf("after unpublish public=%v, want false", p.OverviewPublic)
+	if p, err := st.Project(ctx, projectID); err != nil || p.OverviewPublic {
+		t.Fatalf("after unpublish err=%v public=%v, want false", err, p.OverviewPublic)
 	}
 
 	// Re-publishing brings the same /p/<id> back.

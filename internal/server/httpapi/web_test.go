@@ -1160,7 +1160,7 @@ func TestPublicProjectFlow(t *testing.T) {
 	graceSession := seed(graceID, "claude", "sess-grace", "claude-opus-4-8")
 	seed(adaID, "codex", "sess-ada", "gpt-5.5")
 
-	pubPath := fmt.Sprintf("/p/%d", projectID)
+	pubPath := web.PublicProjectPath(projectID)
 
 	// Before publishing, the id 404s (the public page never redirects to login).
 	anon := newClient(t)
@@ -1194,7 +1194,7 @@ func TestPublicProjectFlow(t *testing.T) {
 	}
 
 	// Publish via the project page control.
-	if _, err := c.PostForm(srv.URL+pubPublish(projectID), url.Values{}); err != nil {
+	if _, err := c.PostForm(srv.URL+web.ProjectPublishPath(projectID), url.Values{}); err != nil {
 		t.Fatalf("publish project overview: %v", err)
 	}
 	if p, err := st.Project(ctx, projectID); err != nil || !p.OverviewPublic {
@@ -1234,7 +1234,7 @@ func TestPublicProjectFlow(t *testing.T) {
 	}
 
 	// Make private: the link 404s.
-	if _, err := c.PostForm(srv.URL+pubUnpublish(projectID), url.Values{}); err != nil {
+	if _, err := c.PostForm(srv.URL+web.ProjectUnpublishPath(projectID), url.Values{}); err != nil {
 		t.Fatalf("unpublish project overview: %v", err)
 	}
 	anon.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
@@ -1246,7 +1246,7 @@ func TestPublicProjectFlow(t *testing.T) {
 	anon.CheckRedirect = nil
 
 	// Re-publishing brings the same /p/<id> back.
-	if _, err := c.PostForm(srv.URL+pubPublish(projectID), url.Values{}); err != nil {
+	if _, err := c.PostForm(srv.URL+web.ProjectPublishPath(projectID), url.Values{}); err != nil {
 		t.Fatalf("re-publish project overview: %v", err)
 	}
 	resp = mustGet(t, anon, srv.URL+pubPath)
@@ -1272,7 +1272,7 @@ func TestProjectOverviewPublishRequiresAuth(t *testing.T) {
 
 	anon := newClient(t)
 	anon.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	for _, path := range []string{pubPublish(projectID), pubUnpublish(projectID)} {
+	for _, path := range []string{web.ProjectPublishPath(projectID), web.ProjectUnpublishPath(projectID)} {
 		resp, err := anon.PostForm(srv.URL+path, url.Values{})
 		if err != nil {
 			t.Fatalf("anon post %s: %v", path, err)
@@ -1282,15 +1282,10 @@ func TestProjectOverviewPublishRequiresAuth(t *testing.T) {
 		}
 		resp.Body.Close()
 	}
-	if p, _ := st.Project(ctx, projectID); p.OverviewPublic {
-		t.Fatalf("project public after rejected anon publish, want still private")
+	if p, err := st.Project(ctx, projectID); err != nil || p.OverviewPublic {
+		t.Fatalf("project public after rejected anon publish (err=%v), want still private", err)
 	}
 }
-
-// pubPublish and pubUnpublish build the project publicity toggle POST paths, matching
-// the routes registered in server.go.
-func pubPublish(id int64) string   { return fmt.Sprintf("/projects/%d/overview/publish", id) }
-func pubUnpublish(id int64) string { return fmt.Sprintf("/projects/%d/overview/unpublish", id) }
 
 // TestPublicOverviewOGImage drives the Open Graph preview card end to end: the
 // public page advertises it via og:image meta tags, the /og.png route renders a

@@ -120,6 +120,14 @@ type AnalyticsFilter struct {
 	Username string
 	Agent    string
 	Machine  string
+	// OmitUsers skips the by-owning-user breakdown (analyticsByUser), leaving
+	// Analytics.Users nil. The by-user split materializes one Breakdown per distinct
+	// user in scope, so its size grows with the project's user count; a caller that
+	// never renders it (the public project overview, whose panel passes showUsers
+	// false) sets this so GET /p/<id> does not build a per-user aggregate it throws
+	// away. The live authed surfaces leave it false, since they render the split once
+	// a scope has more than one user.
+	OmitUsers bool
 }
 
 // HasData reports whether there is anything worth charting, so the view can show
@@ -218,11 +226,17 @@ func (s *Store) analyticsFrom(ctx context.Context, q querier, f AnalyticsFilter)
 	}
 	a.Agents = agents
 
-	users, err := s.analyticsByUser(ctx, q, f)
-	if err != nil {
-		return a, err
+	// The by-user split is skipped when the caller will not render it (OmitUsers), so a
+	// public project overview does not build a per-user aggregate proportional to the
+	// project's user count only to discard it. It sits outside the headline arithmetic
+	// below (that sums the by-agent split), so leaving Users nil changes no total.
+	if !f.OmitUsers {
+		users, err := s.analyticsByUser(ctx, q, f)
+		if err != nil {
+			return a, err
+		}
+		a.Users = users
 	}
-	a.Users = users
 
 	// Sum the headline from the by-agent split so the total and the rows beneath it
 	// are the same arithmetic. Agents partition sessions one-to-one, so the session

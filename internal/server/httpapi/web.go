@@ -537,7 +537,14 @@ func (s *Server) handlePublishProjectOverview(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if err := s.Store.PublishProjectOverview(r.Context(), id); err != nil {
-		render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(r, "Not found"), http.StatusNotFound, "Project not found."))
+		// A missing project is a 404; a backend failure is a 500, so a database error
+		// is not misreported as "project not found" (which would read as the caller's
+		// mistake rather than the server's).
+		if errors.Is(err, store.ErrNotFound) {
+			render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(r, "Not found"), http.StatusNotFound, "Project not found."))
+			return
+		}
+		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not publish overview."))
 		return
 	}
 	s.setNotice(w, "Overview published")
@@ -553,7 +560,13 @@ func (s *Server) handleUnpublishProjectOverview(w http.ResponseWriter, r *http.R
 		return
 	}
 	if err := s.Store.UnpublishProjectOverview(r.Context(), id); err != nil {
-		render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(r, "Not found"), http.StatusNotFound, "Project not found."))
+		// Split ErrNotFound (a 404) from a backend failure (a 500), so a database error
+		// while making a project private is not disguised as a missing project.
+		if errors.Is(err, store.ErrNotFound) {
+			render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(r, "Not found"), http.StatusNotFound, "Project not found."))
+			return
+		}
+		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not update overview."))
 		return
 	}
 	s.setNotice(w, "Overview unpublished")
@@ -573,6 +586,13 @@ func (s *Server) handlePublicProject(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusNotFound, web.PublicErrorPage(http.StatusNotFound, "This project overview is not published, or the link has expired."))
 		return
 	}
+	// The public gate and the aggregate reads below are deliberately not one atomic
+	// transaction. This matches handlePublicOverview: a concurrent unpublish landing
+	// between the gate read and the aggregate reads at worst serves one more
+	// already-in-flight aggregate page (no session, no secret, just usage totals the
+	// owner made public moments ago) before the next request 404s. The atomic
+	// gate-and-read fold is reserved for the cached OG card (PublicOverviewCard), where
+	// a stale read would persist in a TTL cache rather than vanishing on the next load.
 	proj, err := s.Store.PublicProjectOverview(r.Context(), id)
 	if errors.Is(err, store.ErrNotFound) {
 		render(w, r, http.StatusNotFound, web.PublicErrorPage(http.StatusNotFound, "This project overview is not published, or the link has expired."))
@@ -586,13 +606,25 @@ func (s *Server) handlePublicProject(w http.ResponseWriter, r *http.Request) {
 	// signed-in project page pairs them; the public page carries no filter toolbar, so
 	// the scope is the whole project (no agent/user/machine narrowing).
 	rng := web.ParseRange(r.URL.Query().Get("range"))
-	af := store.AnalyticsFilter{ProjectID: id, Since: web.RangeSince(rng, time.Now())}
-	analytics, err := s.Store.Analytics(r.Context(), af)
+	now := time.Now()
+	since := web.RangeSince(rng, now)
+	// The usage panel's upper bound is the end of today (matching the public overview),
+	// so the headline totals cover exactly the days the heatmap draws (the grid stops at
+	// today) rather than folding a future-dated event into a total no visible cell shows.
+	// OmitUsers skips the by-user breakdown the public panel never renders (showUsers is
+	// false), so the read does not build a per-user aggregate proportional to the
+	// project's user count only to discard it.
+	analytics, err := s.Store.Analytics(r.Context(), store.AnalyticsFilter{
+		ProjectID: id, Since: since, Until: ogimage.DefaultUntil(now), OmitUsers: true,
+	})
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load project overview."))
 		return
 	}
-	insights, err := s.Store.Insights(r.Context(), af)
+	// The quality band follows the Insights convention (sessions counted by started_at
+	// from Since, no upper bound), matching the signed-in project page's band and the
+	// fleet Insights surface, so its window semantics read the same across surfaces.
+	insights, err := s.Store.Insights(r.Context(), store.AnalyticsFilter{ProjectID: id, Since: since})
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load project overview."))
 		return
