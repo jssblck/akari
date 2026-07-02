@@ -120,13 +120,16 @@ type AnalyticsFilter struct {
 	Username string
 	Agent    string
 	Machine  string
-	// OmitUsers skips the by-owning-user breakdown (analyticsByUser), leaving
-	// Analytics.Users nil. The by-user split materializes one Breakdown per distinct
-	// user in scope, so its size grows with the project's user count; a caller that
-	// never renders it (the public project overview, whose panel passes showUsers
-	// false) sets this so GET /p/<id> does not build a per-user aggregate it throws
-	// away. The live authed surfaces leave it false, since they render the split once
-	// a scope has more than one user.
+	// OmitUsers skips the per-user aggregates neither the caller renders: the
+	// by-owning-user cost split in Analytics (analyticsByUser, leaving Analytics.Users
+	// nil) and the per-author quality leaderboard in Insights (userQualityFrom, leaving
+	// Insights.Users zero). Both group every matching row by user and materialize one
+	// aggregate per distinct user, so their size grows with the scope's user count; a
+	// caller that renders neither (the public project overview, whose panel passes
+	// showUsers false and whose quality band has no People panel) sets this so GET
+	// /p/<id> does not build per-user aggregates it throws away. The live authed
+	// surfaces leave it false, since they render the by-user split once a scope has more
+	// than one user.
 	OmitUsers bool
 }
 

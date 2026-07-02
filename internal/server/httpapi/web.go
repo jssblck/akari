@@ -611,6 +611,12 @@ func (s *Server) handlePublicProject(w http.ResponseWriter, r *http.Request) {
 	// The usage panel's upper bound is the end of today (matching the public overview),
 	// so the headline totals cover exactly the days the heatmap draws (the grid stops at
 	// today) rather than folding a future-dated event into a total no visible cell shows.
+	// This is the one intentional gap from the signed-in project page, which leaves the
+	// panel unbounded above so it reconciles with its session table (windowed on the same
+	// unbounded dated-usage base). The two project surfaces therefore agree for all real
+	// (past-dated) usage and can differ only by a future-dated usage_event, which is a
+	// malformed-transcript case that does not occur in practice (occurred_at is always the
+	// turn time). See TestPublicAndAuthedProjectAnalyticsReconcile, which pins that gap.
 	// OmitUsers skips the by-user breakdown the public panel never renders (showUsers is
 	// false), so the read does not build a per-user aggregate proportional to the
 	// project's user count only to discard it.
@@ -624,7 +630,8 @@ func (s *Server) handlePublicProject(w http.ResponseWriter, r *http.Request) {
 	// The quality band follows the Insights convention (sessions counted by started_at
 	// from Since, no upper bound), matching the signed-in project page's band and the
 	// fleet Insights surface, so its window semantics read the same across surfaces.
-	insights, err := s.Store.Insights(r.Context(), store.AnalyticsFilter{ProjectID: id, Since: since})
+	// OmitUsers skips the People leaderboard the public band never renders.
+	insights, err := s.Store.Insights(r.Context(), store.AnalyticsFilter{ProjectID: id, Since: since, OmitUsers: true})
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load project overview."))
 		return
