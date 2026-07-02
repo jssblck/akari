@@ -38,7 +38,7 @@ visible.
 | --- | --- | --- | --- |
 | Push sessions and blobs | yes | no | yes |
 | Read the web UI | no | no | yes |
-| Reach the [MCP](./agent-access.md) endpoint | no | yes | no |
+| Reach the [MCP](./agent-access.md) endpoint | no | yes | yes |
 | Publish / unpublish / delete, mint tokens | no | no | yes |
 
 The intent behind each:
@@ -48,8 +48,9 @@ The intent behind each:
   laptop or bake into a deployment.
 - **`read`** is read-only. It sees everything a signed-in user sees but can mutate
   nothing (no publish, delete, or token creation), which is exactly what you want
-  to hand an untrusted coding agent. It is the only scope that reaches the MCP
-  endpoint, and the scope the OAuth connect flow issues.
+  to hand an untrusted coding agent. It is the scope the OAuth connect flow
+  issues. A full-scope token also reaches the MCP endpoint, but it carries the
+  whole write surface with it, so `read` is the one to hand out.
 - **`full`** is read and write: the browser session's level of access, as a token.
   Treat it as a real credential; it is rarely the right thing to hand a third
   party.
@@ -94,9 +95,11 @@ re-publishing brings the same URL back.
 A published overview also gets an Open Graph preview card at `/u/<username>/og.png`,
 so a shared link unfurls with an image: a simplified copy of your activity heatmap
 plus the headline figures, rendered in the house style as a pure-Go PNG (no
-headless browser). The card is a periodic snapshot, rendered when you publish and
-refreshed about daily, and it carries its own "as of" date, so it may trail the
-live page briefly without claiming to equal it.
+headless browser). The card is rendered on demand, the first time it is fetched
+(typically when a share unfurls), then served from cache until the TTL expires
+([Self-hosting](./self-hosting.md#configuration) documents it, an hour by
+default); the next fetch after that renders a fresh one. A background sweep
+prunes expired cards. The card may trail the live page by up to the TTL.
 
 ## Connected agents
 

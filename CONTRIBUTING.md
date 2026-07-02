@@ -21,11 +21,11 @@ make fmt          # report files that are not gofmt-clean
 ```
 
 Integration tests that touch Postgres skip cleanly unless
-`AKARI_TEST_DATABASE_URL` is set. Under [eph](README.md#worktree-based-development-with-eph)
+`AKARI_TEST_DATABASE_URL` is set. Under [eph](docs/development.md#worktree-based-development-with-eph)
 the variable is already set, so `eph run go test ./...` covers the store, parse,
 and web tests too. Without eph, point it at any Postgres whose role may create
-databases; each test provisions and drops its own database. See the README
-"Development" section for the full loop.
+databases; each test provisions and drops its own database. See
+[docs/development.md](docs/development.md) for the full loop.
 
 ## Working style
 

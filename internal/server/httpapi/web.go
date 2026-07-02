@@ -91,7 +91,19 @@ func render(w http.ResponseWriter, r *http.Request, status int, c templ.Componen
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	p, ok := s.resolve(r)
 	if !ok || p.Scope != scopeFull {
-		render(w, r, http.StatusOK, web.LandingPage())
+		base := s.baseURL(r)
+		// The meta copy derives from the ogimage package's canonical landing
+		// constants (the same strings the /og.png card draws), so a copy edit
+		// cannot leave the page's tags and its preview image saying different
+		// things. The title lowercases the headline into the product register the
+		// overview card's title uses ("<subject> · <what it is>").
+		og := web.OGMeta{
+			Title:       "akari · " + strings.ToLower(strings.TrimSuffix(ogimage.LandingHeadline, ".")),
+			Description: ogimage.LandingSubline,
+			URL:         base + "/",
+			Image:       base + "/og.png",
+		}
+		render(w, r, http.StatusOK, web.LandingPage(og))
 		return
 	}
 	s.gateParsed(s.handleOverview)(w, s.withPrincipal(r, p))
@@ -657,6 +669,32 @@ func (s *Server) handlePublicOverviewOGImage(w http.ResponseWriter, r *http.Requ
 		}
 		http.Error(w, "Could not load preview image.", http.StatusInternalServerError)
 	}
+}
+
+// landingOGCacheMaxAge is the Cache-Control window for the homepage card at
+// /og.png. The card is static per binary (it reads no parsed data), so it only
+// changes on deploy: a full day of crawler caching is safe, and mirrors the
+// "changes only on deploy" lifetime the overview card gets through its TTL.
+const landingOGCacheMaxAge = 86400
+
+// handleLandingOGImage serves the Open Graph preview card for the instance root
+// ("/") at /og.png. Unlike the per-user overview card, it carries no account data
+// (just the wordmark, the product headline, and a decorative band), so it is
+// static per binary: ogimage.Landing renders it once and memoizes the bytes, and
+// there is nothing to gate on a reparse or scope to a user. A render failure is a
+// missing font asset in the binary, an internal error, not a 404.
+func (s *Server) handleLandingOGImage(w http.ResponseWriter, r *http.Request) {
+	png, err := ogimage.Landing()
+	if err != nil {
+		log.Printf("landing og: render failed: %v", err)
+		http.Error(w, "Could not load preview image.", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Content-Length", strconv.Itoa(len(png)))
+	w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", landingOGCacheMaxAge))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(png)
 }
 
 // ogRenderTimeout bounds a single on-demand card render (its analytics snapshot, the

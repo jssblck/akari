@@ -71,7 +71,7 @@ func buildSessionFeed(now time.Time, loc *time.Location, rows []store.SessionRow
 		fr := FeedRow{Row: r, TokenPct: tokenPct(RowTokens(r.SessionSummary), maxTok)}
 
 		if grouped {
-			key, label := dayBucket(now, loc, r.UpdatedAt)
+			key, label := dayBucket(now, loc, r.LastActiveAt)
 			if !started || key != curKey {
 				groups = append(groups, SessionDayGroup{Label: label})
 				curKey = key

@@ -24,8 +24,8 @@ templ landingTokensCell(p landingMockProject) {
 	</span>
 }
 
-templ LandingPage() {
-	@publicLayout("akari", OGMeta{}) {
+templ LandingPage(og OGMeta) {
+	@publicLayout("akari", og) {
 		<div class="landing">
 			<section class="landing-hero">
 				<span class="landing-glyph">

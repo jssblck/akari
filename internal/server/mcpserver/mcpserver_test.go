@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jssblck/akari/internal/server/mcpserver"
 	"github.com/jssblck/akari/internal/server/store"
@@ -229,12 +230,15 @@ func TestGetProjectOmitsZeroRollups(t *testing.T) {
 }
 
 // insertSession adds a session with an explicit age (minutes in the past) so feed
-// ordering is deterministic. A larger ageMin is a less recently active session.
+// ordering is deterministic. A larger ageMin is a less recently active session. The
+// age is set on ended_at, which the generated last_active_at column reads and the
+// feed orders by, rather than on updated_at (the row-write time the feed no longer
+// sorts on since migration 0033).
 func insertSession(t *testing.T, st *store.Store, userID, projectID int64, src string, ageMin int) int64 {
 	t.Helper()
 	var id int64
 	if err := st.Pool.QueryRow(context.Background(),
-		`INSERT INTO sessions (user_id, project_id, agent, source_session_id, machine, updated_at)
+		`INSERT INTO sessions (user_id, project_id, agent, source_session_id, machine, ended_at)
 		 VALUES ($1,$2,'claude',$3,'box', now() - make_interval(mins => $4)) RETURNING id`,
 		userID, projectID, src, ageMin).Scan(&id); err != nil {
 		t.Fatalf("insert session: %v", err)
@@ -288,6 +292,54 @@ func TestListSessionsCursorPaging(t *testing.T) {
 	}
 	if len(seen) != 5 {
 		t.Fatalf("cursor paging saw %d sessions, want 5", len(seen))
+	}
+}
+
+// TestListSessionsExposesLastActiveAt pins the MCP session DTO's recency field: it is
+// spelled last_active_at (the session's last-event time, which insertSession sets on
+// ended_at), and the old updated_at spelling is gone. A client ordering a page by
+// recency then reads the same value the web feed shows, not the row-write time a
+// reparse restamps.
+func TestListSessionsExposesLastActiveAt(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	u, err := st.Register(ctx, "grace", "hash", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	pid, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	insertSession(t, st, u.ID, pid, "s1", 60) // ended_at ~60 minutes ago
+	sess := connect(t, st)
+
+	// The literal wire JSON carries the new field name and not the old one.
+	raw := rawToolResult(t, sess, "list_sessions", map[string]any{})
+	if !strings.Contains(raw, `"last_active_at"`) {
+		t.Errorf("list_sessions JSON missing last_active_at field: %s", raw)
+	}
+	if strings.Contains(raw, `"updated_at"`) {
+		t.Errorf("list_sessions JSON still carries the retired updated_at field: %s", raw)
+	}
+
+	// The value is the session's ended_at (~60m ago), the same recency the feed shows.
+	out := callJSON(t, sess, "list_sessions", map[string]any{})
+	rows, _ := out["sessions"].([]any)
+	if len(rows) != 1 {
+		t.Fatalf("want 1 session, got %d: %+v", len(rows), out)
+	}
+	la, ok := rows[0].(map[string]any)["last_active_at"].(string)
+	if !ok || la == "" {
+		t.Fatalf("row missing last_active_at: %+v", rows[0])
+	}
+	ts, err := time.Parse(time.RFC3339, la)
+	if err != nil {
+		t.Fatalf("parse last_active_at %q: %v", la, err)
+	}
+	if d := time.Since(ts); d < 30*time.Minute || d > 3*time.Hour {
+		t.Errorf("last_active_at = %v (%.0fm ago), want ~60m (the session's ended_at)", ts, d.Minutes())
 	}
 }
 

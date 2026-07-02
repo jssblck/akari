@@ -231,7 +231,7 @@ templ ProjectSessionList(sessions []store.SessionSummary, rem store.SessionRemai
 							<td class="num">{ fmt.Sprintf("%d", s.MessageCount) }</td>
 							<td class="num">@sessionTokensCell(s)</td>
 							<td class="num">{ FmtCost(s.TotalCostUSD, s.CostIncomplete) }</td>
-							<td class="muted nowrap" title={ FmtTimeLong(ctx, s.UpdatedAt) }>{ FmtRelTime(ctx, s.UpdatedAt) }</td>
+							<td class="muted nowrap" title={ FmtTimeLong(ctx, s.LastActiveAt) }>{ FmtRelTime(ctx, s.LastActiveAt) }</td>
 						</tr>
 					}
 				</tbody>
@@ -308,7 +308,7 @@ templ SessionList(sessions []store.SessionSummary) {
 							<td class="muted">{ s.GitBranch }</td>
 							<td class="num">{ fmt.Sprintf("%d", s.MessageCount) }</td>
 							<td class="num">{ FmtCost(s.TotalCostUSD, s.CostIncomplete) }</td>
-							<td class="muted">{ FmtTime(ctx, s.UpdatedAt) }</td>
+							<td class="muted">{ FmtTime(ctx, s.LastActiveAt) }</td>
 						</tr>
 					}
 				</tbody>

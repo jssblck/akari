@@ -1,7 +1,7 @@
 # Agent notes for akari
 
 Short orientation for coding agents. The full story lives in
-[README.md](README.md) (see "Development") and [DESIGN.md](DESIGN.md); this file
+[docs/development.md](docs/development.md) and [DESIGN.md](DESIGN.md); this file
 just front-loads the three things that bite if you skip them.
 
 ## Generate templ before you build
@@ -40,8 +40,9 @@ AKARI_TEST_DATABASE_URL=postgres://akari:akari@localhost:5432/akari go test ./..
 ## Running the app locally
 
 `eph up` brings up Postgres plus the server and seeds demo data; sign in as
-`grace` (admin) with password `akari-dev`. See README "Worktree-based development
-with eph" and "Example data for development".
+`grace` (admin) with password `akari-dev`. See
+[docs/development.md](docs/development.md) "Worktree-based development with eph"
+and "Example data for development".
 
 ## Signals and the reparse epoch
 
