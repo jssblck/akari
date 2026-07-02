@@ -31,35 +31,42 @@ import (
 // generation results and pasted images) to the projection, so a reparse backfills
 // those rows on already-ingested sessions.
 //
-// Version 4 pairs with the Epoch 3 -> 4 bump that materializes tool_calls.file_rel_path
+// Version 4 added a per-tool-call detail: a bounded, human-scannable summary of the
+// input (a shell command, a search pattern, a fetched URL, or an agent's
+// description) the UI shows when a call has no file_path. It is derived from the
+// input's top-level JSON keys where the body is inline, and rides the CAS sentinel
+// where the client already lifted the body, so a reparse backfills it on
+// inline-bodied sessions while a client-stripped one keeps an empty detail.
+//
+// Version 5 pairs with the Epoch 4 -> 5 bump that materializes tool_calls.file_rel_path
 // (the store-side session-relative path, see epoch.go and store/projection.go). The
 // column is filled at insert and cannot backfill on its own, so a session already parsed
-// at version 3 must not resume incrementally: an incremental advance would insert new
+// at version 4 must not resume incrementally: an incremental advance would insert new
 // tool_calls rows with file_rel_path filled while its pre-change rows keep NULL, and file
 // churn would carry two representations of one file (NULL and the relative path) until the
 // epoch reparse reached that session. Bumping Version forces a rewind-and-replay so every
 // row of a session fills the column in one pass, keeping a session's tool_calls internally
 // consistent rather than blended across the change.
 //
-// Version 5 pairs with the Epoch 4 -> 5 bump that materializes messages.duplicate_prompt
+// Version 6 pairs with the Epoch 5 -> 6 bump that materializes messages.duplicate_prompt
 // (the store-side per-user-turn repeat verdict, see epoch.go and store/projection.go). The
 // flag is filled at insert from the ordered prefix of earlier messages, so it cannot backfill
-// on its own AND an incremental resume would misjudge it: a session parsed at version 4 that
+// on its own AND an incremental resume would misjudge it: a session parsed at version 5 that
 // resumed incrementally would fill the flag only on newly appended rows (leaving its earlier
 // rows NULL), and a later duplicate would be judged against a prefix whose own flags were
 // never derived. Bumping Version forces a rewind-and-replay so every user turn re-derives its
 // flag against the full ordered prefix in one pass, keeping a session's transcript badges
 // internally consistent rather than blended across the change.
 //
-// Version 6 pairs with the Epoch 5 -> 6 bump that materializes the message_turn_usage rollup (the
-// per-turn usage fold the transcript reads, see migration 0030_message_turn_usage and the usage
+// Version 7 pairs with the Epoch 6 -> 7 bump that materializes the message_turn_usage rollup (the
+// per-turn usage fold the transcript reads, see migration 0032_message_turn_usage and the usage
 // insert loop in store/projection.go). The rollup is accumulated as usage rows insert, so it cannot
-// backfill on its own AND an incremental resume would leave it partial: a session parsed at version 5
+// backfill on its own AND an incremental resume would leave it partial: a session parsed at version 6
 // that resumed incrementally would fold only newly appended usage rows into the rollup while its
 // earlier turns carried none, so the transcript would read a zero turn load for every pre-change
 // message. Bumping Version forces a rewind-and-replay so every surviving usage row re-folds into its
 // turn in one pass, keeping a session's per-turn loads consistent rather than blended across the change.
-const Version = 6
+const Version = 7
 
 // Advance parses any not-yet-parsed bytes of a session and applies them to the
 // projection, looping until the parse cursor catches up to the stored length. It
@@ -156,6 +163,7 @@ func toProjectionDelta(p parser.Delta) store.ProjectionDelta {
 			ToolName:       t.ToolName,
 			Category:       t.Category,
 			FilePath:       t.FilePath,
+			Detail:         t.Detail,
 			CallUID:        t.CallUID,
 		}
 		switch {

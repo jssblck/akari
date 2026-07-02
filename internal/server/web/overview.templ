@@ -64,6 +64,9 @@ templ analyticsPanel(a store.Analytics, chartID string, ranges []RangeOption, rn
 			<div class="breakdowns">
 				@breakdownList("By model", BuildBreakdown(FoldUnknownModels(a.Models)))
 				@breakdownList("By agent", BuildBreakdown(a.Agents))
+				if len(a.Users) > 1 {
+					@breakdownList("By user", BuildBreakdown(a.Users))
+				}
 			</div>
 		}
 	</section>
@@ -266,7 +269,7 @@ templ breakdownList(title string, rows []BreakdownRow) {
 								<span class="tok-total">{ FmtTokens(row.Tokens) }</span>
 								@tokenCard(row.Tokens, row.Input, row.Output, row.CacheRead, row.CacheWrite, row.Reasoning, row.CostUSD, row.Incomplete)
 							</span>
-							{ " tok " }&middot;{ fmt.Sprintf(" %d sessions", row.Sessions) }
+							{ " tok " }&middot;{ fmt.Sprintf(" %d session%s", row.Sessions, plural(row.Sessions)) }
 						</div>
 					</li>
 				}

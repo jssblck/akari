@@ -28,6 +28,7 @@
       "ToolName": "shell_command",
       "Category": "bash",
       "FilePath": "",
+      "Detail": "ls",
       "InputBody": "{\"command\":\"ls\"}",
       "InputSHA256": "",
       "InputBytes": 16,

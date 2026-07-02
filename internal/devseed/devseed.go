@@ -256,7 +256,7 @@ func ingest(ctx context.Context, opts Options, token string) (ingestStats, error
 
 	resolver := resolve.New()
 	client := upload.New(&http.Client{Timeout: 60 * time.Second}, opts.ServerURL, token)
-	sy := syncer.New(resolver, client, machine)
+	sy := syncer.New(resolver, client, machine, false)
 
 	runCtx := ctx
 	if opts.TimeLimit > 0 {

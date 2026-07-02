@@ -178,9 +178,12 @@ func TestQualityDrilldownWindowsOnStartedAt(t *testing.T) {
 		t.Fatalf("windowed bar counted %d sessions, want 1 (only the started-inside session)", dist.Sessions)
 	}
 
-	// The drill-down list: the feed under the equivalent StartedSince bound. Its length must
-	// equal the bar's count, and it must not include the early-started session.
-	rows, err := st.ListAllSessions(ctx, store.SessionFilter{StartedSince: since})
+	// The drill-down list: the global feed under the equivalent StartedSince bound. Its length
+	// must equal the bar's count, and it must not include the early-started session. The global
+	// feed's Since bounds started_at too, so a plain range drill lands on the same set; StartedSince
+	// is the explicit started_at bound that holds regardless of which column a given list scopes
+	// Since to.
+	rows, _, err := st.ListAllSessions(ctx, store.SessionFilter{StartedSince: since, IncludeEmpty: true})
 	if err != nil {
 		t.Fatalf("list sessions: %v", err)
 	}
@@ -196,15 +199,15 @@ func TestQualityDrilldownWindowsOnStartedAt(t *testing.T) {
 		t.Errorf("feed = %v, want just the started-inside session %d", rows, inside)
 	}
 
-	// A feed bound on last-active (Since on updated_at, the project-page basis) DOES surface the
-	// re-activated early session, confirming the two bounds carry distinct semantics and the
-	// drill-down deliberately uses started_at, not updated_at.
-	byActivity, err := st.ListAllSessions(ctx, store.SessionFilter{Since: since})
+	// A list bound on last-active (Since on updated_at, the project-page basis via ListSessions)
+	// DOES surface the re-activated early session, confirming the two bounds carry distinct
+	// semantics and the started_at drill-down deliberately uses started_at, not updated_at.
+	byActivity, err := st.ListSessions(ctx, store.SessionFilter{Since: since, IncludeEmpty: true})
 	if err != nil {
 		t.Fatalf("list sessions by activity: %v", err)
 	}
 	if len(byActivity) != 2 {
-		t.Errorf("last-active feed listed %d sessions, want 2 (both the inside and the re-activated early session)", len(byActivity))
+		t.Errorf("last-active list showed %d sessions, want 2 (both the inside and the re-activated early session)", len(byActivity))
 	}
 }
 

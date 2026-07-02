@@ -104,6 +104,7 @@ func TestInsightsPageRendersDistributions(t *testing.T) {
 		`id="insights"`,                          // the swap target
 		`>Concurrency<`,                          // the headline band
 		`>Grades<`, `>Outcomes<`, `>Archetypes<`, // the three distribution panels
+		`title="A to F; unscored means the session was never graded"`, // the Grades definition moved to a tooltip
 		`15 sessions in window`,              // the summary count
 		`>4</div>`,                           // the fleet peak figure
 		`>peak at once<`,                     // its label
@@ -139,7 +140,7 @@ func TestInsightsPageRendersDistributions(t *testing.T) {
 		`>shed context<`,                     // the reset-rate figure label
 		`6 of 15 sessions`,                   // the shed-context sub-count (sessions that reset)
 		`>context resets<`,                   // the total-resets figure label
-		`A load measure, not spend.`,         // the caption scoping the peak to a single class, not a tokens total
+		`Load, not spend.`,                   // the peak definition now lives on the figure label's title tooltip
 		`>File churn<`,                       // the churn panel
 		`internal/server/store/analytics.go`, // the churned path (full path in the label)
 		`6 edits`,                            // its edit count
@@ -151,18 +152,17 @@ func TestInsightsPageRendersDistributions(t *testing.T) {
 		`class="bar-fill"`,                   // reuses the breakdown bar markup
 		`data-color="` + barSage + `"`,       // a graded bar carries its tone
 		`73% graded`,                         // the Grades panel coverage note (11 of 15)
-		`class="dist-link"`,                  // a distribution bar renders as a drill-down link
-		// The drill-downs carry the active window (range=30d) so a bar's count and the feed it
-		// opens describe the same trailing window rather than the bar counting 30 days while the
-		// link opens the all-time feed.
-		`href="/sessions?outcome=completed&amp;range=30d"`, // the outcome bar drills into the windowed feed
-		`href="/sessions?grade=A&amp;range=30d"`,           // a grade bar drills into its letter, windowed
-		`href="/sessions?grade=unscored&amp;range=30d"`,    // the unscored bucket uses the sentinel
-		`title="View completed sessions"`,                  // the terse link hover title
-		`>People<`,                                         // the per-user quality panel
-		`href="/sessions?range=30d&amp;user=ada"`,          // a username drills into that author's windowed sessions
-		`class="mix-bar"`,                                  // the per-row stacked outcome bar
-		`6 completed, 1 abandoned, 1 errored, 1 unknown`,   // the mix hover title spells out the counts
+		`class="bar-link"`,                   // a distribution bar renders as a drill-down link (the whole-row link)
+		// The drill-downs carry the active window (range=30d) and empty=1 so a bar's count and the
+		// feed it opens describe the same trailing window and the same empty-session policy the panel
+		// counted under, rather than the bar counting 30 days while the link opens the all-time feed.
+		`href="/sessions?empty=1&amp;outcome=completed&amp;range=30d"`, // the outcome bar drills into the windowed feed
+		`href="/sessions?empty=1&amp;grade=A&amp;range=30d"`,           // a grade bar drills into its letter, windowed
+		`href="/sessions?empty=1&amp;grade=unscored&amp;range=30d"`,    // the unscored bucket uses the sentinel
+		`>People<`, // the per-user quality panel
+		`href="/sessions?empty=1&amp;range=30d&amp;user=ada"`, // a username drills into that author's windowed sessions
+		`class="mix-bar"`, // the per-row stacked outcome bar
+		`6 completed, 1 abandoned, 1 errored, 1 unknown`, // the mix hover title spells out the counts
 		`7 of 9`,                      // ada's graded coverage
 		`>82.5<`,                      // ada's average score, one decimal
 		`+1 more user not shown`,      // the clipped-tail note
@@ -187,8 +187,9 @@ func TestInsightsPagePeoplePanel(t *testing.T) {
 		t.Error("people panel should render for two authors")
 	}
 	// Grace's Avg score cell is a dash (nil AvgScore), in the last column of her row. Her link
-	// carries the active window (range=30d) so it opens her windowed sessions.
-	if !strings.Contains(two, `href="/sessions?range=30d&amp;user=grace"`) {
+	// carries the active window (range=30d) and empty=1 so it opens her windowed sessions under
+	// the same empty-session policy the panel counted them under.
+	if !strings.Contains(two, `href="/sessions?empty=1&amp;range=30d&amp;user=grace"`) {
 		t.Error("grace's row should link to her windowed sessions")
 	}
 

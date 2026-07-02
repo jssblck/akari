@@ -10,23 +10,15 @@ func TestSessionsPath(t *testing.T) {
 	cases := []struct {
 		name string
 		f    store.SessionFilter
-		rng  string
 		want string
 	}{
-		{"empty", store.SessionFilter{}, "", "/sessions"},
-		{"agent", store.SessionFilter{Agent: "claude"}, "", "/sessions?agent=claude"},
-		{"project", store.SessionFilter{ProjectID: 7}, "", "/sessions?project=7"},
-		{"multi", store.SessionFilter{Agent: "claude", Username: "jess", ProjectID: 7}, "", "/sessions?agent=claude&project=7&user=jess"},
-		// A bounded range key rides the query so a drill-down opens the same window it counted.
-		{"bounded range", store.SessionFilter{Agent: "claude"}, "30d", "/sessions?agent=claude&range=30d"},
-		// The all-history window, the empty key, and any unknown value add no bound: the feed's
-		// natural form is unbounded, so the bare path (plus other filters) is what round-trips.
-		{"all range unbounded", store.SessionFilter{Agent: "claude"}, "all", "/sessions?agent=claude"},
-		{"unknown range unbounded", store.SessionFilter{Agent: "claude"}, "bogus", "/sessions?agent=claude"},
-		{"range only", store.SessionFilter{}, "7d", "/sessions?range=7d"},
+		{"empty", store.SessionFilter{}, "/sessions"},
+		{"agent", store.SessionFilter{Agent: "claude"}, "/sessions?agent=claude"},
+		{"project", store.SessionFilter{ProjectID: 7}, "/sessions?project=7"},
+		{"multi", store.SessionFilter{Agent: "claude", Username: "jess", ProjectID: 7}, "/sessions?agent=claude&project=7&user=jess"},
 	}
 	for _, c := range cases {
-		if got := SessionsPath(c.f, c.rng); got != c.want {
+		if got := SessionsPath(c.f); got != c.want {
 			t.Errorf("SessionsPath(%s) = %q, want %q", c.name, got, c.want)
 		}
 	}
@@ -51,27 +43,23 @@ func TestPublicOverviewPath(t *testing.T) {
 
 func TestFacetToggleHrefs(t *testing.T) {
 	// Selecting a facet from empty sets it.
-	if got := string(AgentFacetHref(store.SessionFilter{}, "claude", "")); got != "/sessions?agent=claude" {
+	if got := string(AgentFacetHref(store.SessionFilter{}, "claude")); got != "/sessions?agent=claude" {
 		t.Errorf("select agent = %q", got)
 	}
 	// Toggling the active value clears it.
-	if got := string(AgentFacetHref(store.SessionFilter{Agent: "claude"}, "claude", "")); got != "/sessions" {
+	if got := string(AgentFacetHref(store.SessionFilter{Agent: "claude"}, "claude")); got != "/sessions" {
 		t.Errorf("clear agent = %q", got)
 	}
 	// Toggling a facet preserves the rest of the selection.
-	if got := string(AgentFacetHref(store.SessionFilter{Username: "jess"}, "claude", "")); got != "/sessions?agent=claude&user=jess" {
+	if got := string(AgentFacetHref(store.SessionFilter{Username: "jess"}, "claude")); got != "/sessions?agent=claude&user=jess" {
 		t.Errorf("preserve other = %q", got)
 	}
 	// Project toggles by id and preserves other fields.
-	if got := string(ProjectFacetHref(store.SessionFilter{Agent: "codex"}, 3, "")); got != "/sessions?agent=codex&project=3" {
+	if got := string(ProjectFacetHref(store.SessionFilter{Agent: "codex"}, 3)); got != "/sessions?agent=codex&project=3" {
 		t.Errorf("select project = %q", got)
 	}
-	if got := string(ProjectFacetHref(store.SessionFilter{Agent: "codex", ProjectID: 3}, 3, "")); got != "/sessions?agent=codex" {
+	if got := string(ProjectFacetHref(store.SessionFilter{Agent: "codex", ProjectID: 3}, 3)); got != "/sessions?agent=codex" {
 		t.Errorf("clear project = %q", got)
-	}
-	// A facet toggle holds the active bounded window so clearing one filter keeps the scope.
-	if got := string(AgentFacetHref(store.SessionFilter{Username: "jess"}, "claude", "30d")); got != "/sessions?agent=claude&range=30d&user=jess" {
-		t.Errorf("facet toggle should preserve range, got %q", got)
 	}
 }
 
@@ -79,7 +67,7 @@ func TestFacetHrefPreservesSort(t *testing.T) {
 	// A facet toggle holds the active sort so filtering does not silently reset the
 	// reader's chosen order.
 	f := store.SessionFilter{Sort: "tokens", Desc: true}
-	if got := string(AgentFacetHref(f, "claude", "")); got != "/sessions?agent=claude&dir=desc&sort=tokens" {
+	if got := string(AgentFacetHref(f, "claude")); got != "/sessions?agent=claude&dir=desc&sort=tokens" {
 		t.Errorf("facet toggle should preserve sort, got %q", got)
 	}
 }
@@ -93,22 +81,6 @@ func TestAnyFilterActive(t *testing.T) {
 	} {
 		if !AnyFilterActive(f) {
 			t.Errorf("filter %+v should be active", f)
-		}
-	}
-}
-
-// TestRangeBounds pins the sessions-feed range whitelist: only a known bounded key (a positive
-// day span) bounds the feed; "all", the empty string, and any unknown value read as unbounded so
-// the bare feed stays all-history.
-func TestRangeBounds(t *testing.T) {
-	for _, k := range []string{"7d", "30d", "90d", "year"} {
-		if !RangeBounds(k) {
-			t.Errorf("RangeBounds(%q) = false, want true (bounded window)", k)
-		}
-	}
-	for _, k := range []string{"all", "", "bogus", "month"} {
-		if RangeBounds(k) {
-			t.Errorf("RangeBounds(%q) = true, want false (unbounded)", k)
 		}
 	}
 }

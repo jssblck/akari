@@ -5,6 +5,12 @@
 
 .reveal { animation: fadein var(--dur-slow) var(--ease-settle); }
 
+/* ---- Admin zone divider ---- */
+/* Marks off the admin-only tail of the page (invites, reparse) from the
+   daily-use sections above with a knurled-caps label, not a card or a second
+   heading: the .label type already reads as a section marker elsewhere. */
+.admin-divider { margin-top: var(--sp-2xl); padding-top: var(--sp-lg); border-top: 1px solid var(--border); }
+
 /* ---- Reparse progress ---- */
 /* The reparse status surfaces on the account page and as full-page/public
    stand-ins while a reparse runs (see reparse.templ); the progress bar reuses

@@ -47,6 +47,18 @@ func locateParity(t *testing.T, agent Agent, line string) {
 		if got[i].Media != want[i].media {
 			t.Errorf("%s body %d: media = %q, want %q", agent, i, got[i].Media, want[i].media)
 		}
+		// The two projection fields the streaming path extracts (file_path and detail)
+		// must equal what the buffered rule derives from the same body, so a big-line
+		// lift builds a byte-identical sentinel. The oracle is sentinelFilePath /
+		// sentinelDetail over the canonical body.
+		wantFP := sentinelFilePath(want[i].kind, want[i].media, canon)
+		if got[i].FilePath != wantFP {
+			t.Errorf("%s body %d: file_path = %q, want %q", agent, i, got[i].FilePath, wantFP)
+		}
+		wantDetail := sentinelDetail(want[i].kind, want[i].media, canon)
+		if got[i].Detail != wantDetail {
+			t.Errorf("%s body %d: detail = %q, want %q", agent, i, got[i].Detail, wantDetail)
+		}
 	}
 }
 
@@ -61,6 +73,9 @@ func TestLocateClaudeBodies(t *testing.T) {
 		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":"line one"},{"type":"text","text":"line two"}]}]}}`,
 		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":{"nested":"object"}}]}}`,
 		`{"type":"user","message":{"content":"just a string, no tool body"}}`,
+		// A Bash input carries a command detail (a raw-body input, exercising the
+		// BodyRaw span read); the sentinel must carry it.
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"go build ./..."}}]}}`,
 	}
 	for _, c := range cases {
 		locateParity(t, AgentClaude, c)
@@ -73,6 +88,10 @@ func TestLocateCodexBodies(t *testing.T) {
 	img := fakePNGBase64()
 	cases := []string{
 		`{"type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"cmd\":\"ls -la\"}"}}`,
+		// A function_call whose JSON-encoded arguments carry a string command exercises
+		// the BodyJSONString detail path (the value is read by re-streaming the decoded
+		// body), so the sentinel must carry the command.
+		`{"type":"response_item","payload":{"type":"function_call","name":"Bash","arguments":"{\"command\":\"make test\"}"}}`,
 		`{"type":"response_item","payload":{"type":"function_call_output","output":"total 0\n"}}`,
 		`{"type":"response_item","payload":{"type":"function_call_output","output":{"stdout":"x"}}}`,
 		`{"type":"response_item","payload":{"role":"user","content":[{"type":"input_text","text":"hi"}]}}`,

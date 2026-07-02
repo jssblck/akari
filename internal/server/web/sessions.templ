@@ -10,24 +10,25 @@ import (
 // day-grouped feed of every session. It is the surface for "find a run" without
 // first picking a project. The page carries no heading: the sidebar already marks
 // this section as Sessions, so the toolbar and feed fill the surface.
-templ SessionsPage(p Page, rows []store.SessionRow, facets store.GlobalFacetValues, sel store.SessionFilter, rng string) {
+templ SessionsPage(p Page, rows []store.SessionRow, facets store.GlobalFacetValues, sel store.SessionFilter, footer SessionFooter) {
 	@layout(p) {
 		<div class="sessions">
-			@sessionsToolbar(facets, sel, rng)
-			if AnyFilterActive(sel) || RangeBounds(rng) {
+			@sessionsToolbar(facets, sel)
+			if AnyFilterActive(sel) {
 				<div class="active-filters">
-					@activeChip("agent", sel.Agent, sel, rng)
-					@activeChip("machine", sel.Machine, sel, rng)
-					@activeChip("user", sel.Username, sel, rng)
-					@activeChip("outcome", sel.Outcome, sel, rng)
-					@activeChip("grade", sel.Grade, sel, rng)
-					@activeProjectChip(facets.Projects, sel, rng)
-					@activeRangeChip(sel, rng)
+					@activeChip("agent", sel.Agent, sel)
+					@activeChip("machine", sel.Machine, sel)
+					@activeChip("user", sel.Username, sel)
+					@activeProjectChip(facets.Projects, sel)
+					@activeSearchChip(sel)
+					@activeGradeChip(sel)
+					@activeOutcomeChip(sel)
+					@activeRangeChip(sel)
 					<a class="small clear" href="/sessions">Clear all</a>
 				</div>
 			}
 			<div id="session-list">
-				@GlobalSessionList(rows, sel)
+				@GlobalSessionList(rows, sel, footer)
 			</div>
 		</div>
 	}
@@ -40,15 +41,20 @@ templ SessionsPage(p Page, rows []store.SessionRow, facets store.GlobalFacetValu
 // and keeps the selects, chips, and feed in agreement. It replaces the tall
 // faceted rail, whose single-value User group and thirty-row Project list were
 // most of the old page's clutter.
-templ sessionsToolbar(facets store.GlobalFacetValues, sel store.SessionFilter, rng string) {
+templ sessionsToolbar(facets store.GlobalFacetValues, sel store.SessionFilter) {
 	<form class="toolbar" method="get" action="/sessions">
-		if RangeBounds(rng) {
-			// The selects drive the form, so the active range rides along as a hidden input:
-			// changing a filter re-submits and holds the window rather than dropping back to
-			// all-history. Only a bounded window is carried; an all/empty range is the feed's
-			// natural unbounded form and needs no field.
-			<input type="hidden" name="range" value={ rng }/>
-		}
+		<label class="tb-field tb-search">
+			<span class="tb-k label">Search</span>
+			<input
+				type="search"
+				name="q"
+				value={ sel.Query }
+				placeholder="Search transcripts"
+				aria-label="Search transcripts"
+				autocomplete="off"
+				spellcheck="false"
+			/>
+		</label>
 		@tbSelect("Agent", "agent") {
 			<option value="" selected?={ sel.Agent == "" }>All agents</option>
 			for _, a := range facets.Agents {
@@ -77,22 +83,6 @@ templ sessionsToolbar(facets store.GlobalFacetValues, sel store.SessionFilter, r
 				}
 			}
 		}
-		// Outcome and grade drill in from the Insights distributions: their option lists are
-		// the same fixed buckets the bars split on (the four outcomes, the five letters, plus
-		// the unscored bucket for a session with no gated grade), so a bar's link lands on a
-		// value this select already carries and the two surfaces stay in agreement.
-		@tbSelect("Outcome", "outcome") {
-			<option value="" selected?={ sel.Outcome == "" }>All outcomes</option>
-			for _, o := range OutcomeFilterOptions() {
-				<option value={ o.Key } selected?={ sel.Outcome == o.Key }>{ o.Label }</option>
-			}
-		}
-		@tbSelect("Grade", "grade") {
-			<option value="" selected?={ sel.Grade == "" }>All grades</option>
-			for _, g := range GradeFilterOptions() {
-				<option value={ g.Key } selected?={ sel.Grade == g.Key }>{ g.Label }</option>
-			}
-		}
 		<span class="spacer"></span>
 		@tbSelect("Sort", "sort") {
 			for _, o := range SessionSortOptions() {
@@ -115,11 +105,10 @@ templ tbSelect(label, name string) {
 }
 
 // activeChip renders a removable chip for a selected text facet (agent / machine /
-// user); it renders nothing when that facet is unset. The remove link holds the active range so
-// clearing one facet keeps the window.
-templ activeChip(field, value string, sel store.SessionFilter, rng string) {
+// user); it renders nothing when that facet is unset.
+templ activeChip(field, value string, sel store.SessionFilter) {
 	if value != "" {
-		<a class="fchip" href={ facetHref(field, value, sel, rng) }>
+		<a class="fchip" href={ facetHref(field, value, sel) }>
 			<span class="fchip-k">{ field }</span>
 			<span>{ value }</span>
 			<span class="fchip-x">&times;</span>
@@ -127,10 +116,10 @@ templ activeChip(field, value string, sel store.SessionFilter, rng string) {
 	}
 }
 
-// activeProjectChip renders the removable chip for a selected project, holding the active range.
-templ activeProjectChip(opts []store.ProjectFacet, sel store.SessionFilter, rng string) {
+// activeProjectChip renders the removable chip for a selected project.
+templ activeProjectChip(opts []store.ProjectFacet, sel store.SessionFilter) {
 	if sel.ProjectID != 0 {
-		<a class="fchip" href={ ProjectFacetHref(sel, sel.ProjectID, rng) }>
+		<a class="fchip" href={ ProjectFacetHref(sel, sel.ProjectID) }>
 			<span class="fchip-k">project</span>
 			<span>{ projectLabelByID(opts, sel.ProjectID) }</span>
 			<span class="fchip-x">&times;</span>
@@ -138,16 +127,48 @@ templ activeProjectChip(opts []store.ProjectFacet, sel store.SessionFilter, rng 
 	}
 }
 
-// activeRangeChip renders the removable chip for an active trailing-window scope, shown when a
-// drill-down arrived with a bounded ?range so the reader sees the feed is windowed and can clear
-// it. Removing it drops the range param (SessionsHref with an empty key), returning the feed to
-// all-history while holding every other active filter. It renders nothing for the unbounded
-// all/empty range, which needs no chip.
-templ activeRangeChip(sel store.SessionFilter, rng string) {
-	if RangeBounds(rng) {
-		<a class="fchip" href={ SessionsHref(sel, "") }>
+// activeSearchChip renders the removable chip for an active content search, so a
+// query reads as a narrowing like the facets and clears the same way. Its link
+// drops just the query, holding the other filters.
+templ activeSearchChip(sel store.SessionFilter) {
+	if sel.Query != "" {
+		<a class="fchip" href={ SearchClearHref(sel) }>
+			<span class="fchip-k">search</span>
+			<span>{ sel.Query }</span>
+			<span class="fchip-x">&times;</span>
+		</a>
+	}
+}
+
+// activeGradeChip, activeOutcomeChip, and activeRangeChip render the removable chips for
+// the grade, outcome, and window filters an Insights drill-through carries. Each renders
+// nothing when its field is unset, and its link drops just that one param, holding the
+// rest, exactly like the facet chips above.
+templ activeGradeChip(sel store.SessionFilter) {
+	if sel.Grade != "" {
+		<a class="fchip" href={ GradeClearHref(sel) }>
+			<span class="fchip-k">grade</span>
+			<span>{ GradeChipLabel(sel.Grade) }</span>
+			<span class="fchip-x">&times;</span>
+		</a>
+	}
+}
+
+templ activeOutcomeChip(sel store.SessionFilter) {
+	if sel.Outcome != "" {
+		<a class="fchip" href={ OutcomeClearHref(sel) }>
+			<span class="fchip-k">outcome</span>
+			<span>{ OutcomeChipLabel(sel.Outcome) }</span>
+			<span class="fchip-x">&times;</span>
+		</a>
+	}
+}
+
+templ activeRangeChip(sel store.SessionFilter) {
+	if sel.Range != "" {
+		<a class="fchip" href={ RangeClearHref(sel) }>
 			<span class="fchip-k">range</span>
-			<span>{ RangeLabel(rng) }</span>
+			<span>{ RangeChipLabel(sel.Range) }</span>
 			<span class="fchip-x">&times;</span>
 		</a>
 	}
@@ -158,12 +179,13 @@ templ activeRangeChip(sel store.SessionFilter, rng string) {
 // sort). It is the body of the Sessions page. Each row carries the session's
 // metadata (project, branch, agent, message count, token volume, time); lilac is
 // reserved for the active filter, never spent per row.
-templ GlobalSessionList(rows []store.SessionRow, sel store.SessionFilter) {
+templ GlobalSessionList(rows []store.SessionRow, sel store.SessionFilter, footer SessionFooter) {
 	if len(rows) == 0 {
 		<div class="empty">No sessions match these filters.</div>
+		@sessionFooter(footer)
 	} else {
 		<div class="feed">
-			for _, g := range BuildSessionFeed(rows, FeedIsGrouped(sel)) {
+			for _, g := range BuildSessionFeed(ctx, rows, FeedIsGrouped(sel)) {
 				if g.Label != "" {
 					<div class="day-head">
 						<span class="day-label label">{ g.Label }</span>
@@ -176,30 +198,82 @@ templ GlobalSessionList(rows []store.SessionRow, sel store.SessionFilter) {
 				}
 			}
 		</div>
+		@sessionFooter(footer)
 	}
 }
 
-// feedRow renders one session as a single metadata line. The whole row is the
-// click target (the data attribute, wired in app.js), so the project and branch
-// read as plain text rather than competing links. With no prompt-derived title,
-// the project leads as the recognizable anchor and the branch carries the detail
-// that tells two same-project runs apart.
+// feedRow renders one session as a metadata line over a muted second line. The
+// second line is the search snippet (with the match wrapped in a subtle highlight)
+// when a search produced one, else the session's first-prompt title; a row with
+// neither renders no second line. The whole row is the click target (the data
+// attribute, wired in app.js), so the project and branch read as plain text rather
+// than competing links.
 templ feedRow(fr FeedRow) {
 	<div class="srow" data-row-href={ SessionPath(fr.Row.ID) }>
 		<span class="srow-agent mono small">{ fr.Row.Agent }</span>
 		<div class="srow-main">
-			<span class={ projClass(fr.FadeProject) }>{ SessionRowProject(fr.Row) }</span>
-			if fr.Row.GitBranch != "" {
-				<span class="srow-branch mono">{ fr.Row.GitBranch }</span>
-			}
-			@kindTag(fr.Row.ProjectKind)
-			if fr.Row.Visibility == "public" {
-				<span class="tag public">public</span>
+			<div class="srow-line">
+				<span class={ projClass(fr.FadeProject) }>{ SessionRowProject(fr.Row) }</span>
+				if fr.Row.GitBranch != "" {
+					<span class="srow-branch mono">{ fr.Row.GitBranch }</span>
+				}
+				@kindTag(fr.Row.ProjectKind)
+				if fr.Row.Visibility == "public" {
+					<span class="tag public">public</span>
+				}
+			</div>
+			if fr.Row.Search.Has() {
+				@snippetLine(fr.Row.Search)
+			} else if fr.Row.Title != "" {
+				<div class="srow-sub" title={ fr.Row.Title }>{ fr.Row.Title }</div>
 			}
 		</div>
 		<span class="srow-msgs mono small" title="messages">{ fmt.Sprintf("%d", fr.Row.MessageCount) }</span>
 		@feedTokens(fr)
-		<span class="srow-time mono small" title={ FmtTime(fr.Row.UpdatedAt) }>{ FeedTime(fr.Row.UpdatedAt) }</span>
+		<span class="srow-time mono small" title={ FmtTimeLong(ctx, fr.Row.UpdatedAt) }>{ FeedTime(ctx, fr.Row.UpdatedAt) }</span>
+	</div>
+}
+
+// snippetLine renders a search snippet as the row's second line, wrapping the match
+// in <mark>. The three text runs come from SplitSnippet as plain strings, so templ
+// escapes each as a text node and the <mark> element is template structure around
+// them: user content (query or message) can never inject markup here.
+templ snippetLine(s store.SearchSnippet) {
+	{{ parts := SplitSnippet(s) }}
+	<div class="srow-sub srow-snippet" title={ s.Text }>
+		{ parts.Before }<mark>{ parts.Match }</mark>{ parts.After }
+	</div>
+}
+
+// sessionFooter is the line under the feed: the "N of M" count on the left, and on
+// the right a "Show more" button (or the at-cap note), with the empty-hidden toggle
+// when the scope holds an empty session. It is terse by rule: figures and one-word
+// verbs, nuance in titles.
+templ sessionFooter(ft SessionFooter) {
+	<div class="feed-footer">
+		<span class="feed-count mono small">{ ft.CountLabel() }</span>
+		<span class="spacer"></span>
+		if ft.HasEmptyToggle() {
+			{{ text, verb := ft.EmptyToggleLabel() }}
+			<span class="feed-empty small">
+				<span class="muted">{ text }</span>
+				<span class="dot">·</span>
+				<a href={ templ.SafeURL(ft.EmptyHref) }>{ verb }</a>
+			</span>
+		}
+		if ft.MoreHref != "" {
+			<a
+				class="small showmore"
+				href={ templ.SafeURL(ft.MoreHref) }
+				hx-get={ ft.MoreHref }
+				hx-target="#session-list"
+				hx-select="#session-list"
+				hx-swap="outerHTML"
+				hx-push-url="true"
+			>Show more</a>
+		} else if ft.AtCap {
+			<span class="feed-cap muted small" title="Narrow by filter or search to see more">at cap</span>
+		}
 	</div>
 }
 

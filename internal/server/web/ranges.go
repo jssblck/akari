@@ -56,7 +56,7 @@ func RangeLabel(key string) string {
 // RangeBounds reports whether a range key names a bounded trailing window (a known key with a
 // positive day span). It is false for "all", the empty string, and any unknown value, which the
 // sessions feed treats as all-history: those add no ?range param, keeping the bare feed unbounded.
-// It is the whitelist the feed's range param passes through (like ValidOutcome / ValidGrade for
+// It is the whitelist the feed's range param passes through (like IsOutcome / IsGrade for
 // their params), so a stale or hand-edited ?range never bounds the list to a made-up window.
 func RangeBounds(key string) bool {
 	for _, r := range DateRanges {

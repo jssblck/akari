@@ -6,6 +6,13 @@
 th.trend, td.trend { width: 108px; }
 .sparkline { width: 96px; height: 24px; display: block; }
 
+/* A table row's first-prompt subtitle: one muted, clamped line under the session
+   link, so the per-project table reads a session by what it was about, not only its
+   id. It ellipsizes rather than growing the row. */
+.grid td .row-sub {
+  margin-top: 2px; max-width: 52ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
 /* ---- Projects index: a full-bleed table whose columns grow to their content ---- */
 /* The projects index is the page's only surface, so it drops the centered
    max-width and runs the table the full content width. */
@@ -35,3 +42,7 @@ table.grid.projects td.num { overflow: visible; }
    the row above the same as the Insights bands. */
 .proj-quality-tools { margin-top: var(--sp-xl); }
 .proj-quality-churn { margin-top: var(--sp-xl); }
+
+/* The footnote pointing local folders at Sessions: one quiet line under the
+   table, not a second heading. */
+.projects-footnote { margin-top: var(--sp-sm); }

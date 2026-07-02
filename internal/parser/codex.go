@@ -48,6 +48,7 @@ func (r *reducer) reduceCodex(region []byte, base int64) error {
 				if ref, ok := asCASRef(argsVal); ok {
 					tc.InputSHA256, tc.InputBytes, tc.InputMediaType = ref.SHA256, ref.Bytes, ref.MediaType
 					tc.FilePath = ref.FilePath
+					tc.Detail = ref.Detail
 				} else {
 					// Codex stores arguments as a JSON-encoded string; the body is the
 					// unquoted string value, matching what the client lifts to the CAS.
@@ -55,6 +56,7 @@ func (r *reducer) reduceCodex(region []byte, base int64) error {
 					tc.InputJSON = args
 					if gjson.Valid(args) {
 						tc.FilePath = gjson.Get(args, "file_path").String()
+						tc.Detail = inputDetail(args)
 					}
 				}
 				r.d.ToolCalls = append(r.d.ToolCalls, tc)

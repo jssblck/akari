@@ -3,9 +3,10 @@
 The web UI is where a human reads what the agents did. It is server-rendered: a
 persistent left sidebar carries the primary sections (Overview, Insights,
 Projects, Sessions, Account), with the signed-in user and a log-out control at
-its foot.
-Reading the UI needs a full-scope credential, which in practice is a browser
-session; signing in gives you that.
+its foot. Reading the UI needs a full-scope credential, which in practice is a
+browser session; signing in gives you that. Every timestamp renders in your own
+timezone: the browser reports its zone in a cookie once, and the server formats
+against it from the next page on.
 
 ## Overview
 
@@ -18,7 +19,8 @@ figure on the panel follows it:
   price) shows a trailing `+`.
 - **A daily-activity heatmap**, one cell per day, so a busy stretch or a quiet one
   is visible at a glance.
-- **By-model and by-agent breakdowns** of where the usage went.
+- **By-model and by-agent breakdowns** of where the usage went, plus a by-user
+  breakdown once more than one account has usage in the window.
 
 You can also scope the overview to specific accounts.
 
@@ -27,6 +29,7 @@ You can also scope the overview to specific accounts.
 **Insights** reads how the window's sessions went, where the Overview reads what
 they cost. The same trailing-window selector bounds every panel, and the toolbar
 shows how many sessions the window holds. Top to bottom:
+
 
 - **Concurrency and velocity**: how many sessions ran at once at the fleet's peak
   (and when), the busiest single user, and the average; then how fast turns
@@ -78,10 +81,15 @@ unscored (and its outcome as unknown) until then.
 ## Sessions
 
 **Sessions** is every session across every project in one feed, so you can find a
-run without first picking its project. A faceted filter rail down the side lets you
-narrow by **agent**, **project**, **user**, and **machine**, each option carrying
-a count, and a project column shows where each row belongs. Column headers sort the
-feed. This is the place to answer "where is that run I did last Tuesday."
+run without first picking its project. A slim toolbar narrows the feed by
+**agent**, **project**, **user**, and **machine**, and sorts it by recency, token
+volume, message count, or cost; active filters show as removable chips. A search
+box narrows to sessions whose transcript contains the query, composing with every
+other filter; a matching row shows a snippet with the hit highlighted. Every other
+row carries its **first-prompt title**, the opening line of what the session was
+asked to do. The feed loads a page at a time with a **Show more** control, and
+sessions that parsed to no messages are hidden behind a toggle. This is the place
+to answer "where is that run I did last Tuesday."
 
 A toolbar above the feed adds **outcome** and **grade** filters (how a session
 ended, and its letter grade), the same buckets the [Insights](#insights)
@@ -95,7 +103,7 @@ carries the project's session count, a single token total (hover it for the
 input/output/cache-read/cache-write breakdown), its cost, a 30-day cost
 **sparkline**, and a relative "updated" time. Fleet-wide usage lives on the
 Overview, and standalone or orphaned local folders reach you through the Sessions
-filter rail, so neither crowds this table.
+project filter, so neither crowds this table.
 
 Click a project for the **project view**: that project's sessions across all users
 and machines, with agent, user, and machine filters and the same analytics panel
@@ -120,10 +128,13 @@ it is the transcript itself:
   or a clear. A user message carries a prompt-hygiene badge (terse, no code
   pointer, repeat) where it applies.
 - **Tool bodies as chips.** A tool call's input and result show as
-  size-and-type chips (for example "36 KB json") that expand inline when you click
-  them, fetched from content-addressed storage on demand. An editing tool's input
-  expands as a rendered **diff** rather than raw JSON, and a chip's file path shows
-  worktree-relative rather than absolute.
+  size-and-type chips (for example "36 KB json"). Clicking one opens the body in
+  the inspector modal, fetched from content-addressed storage on demand, so a
+  large body gets real room without pushing the transcript around. An editing
+  tool's input opens as a rendered **diff** rather than raw JSON. A chip's file
+  path shows worktree-relative rather than absolute; a tool with no file path,
+  such as a shell command or a search pattern, instead carries a one-line summary
+  of its input on the chip, with the full text on hover.
 - **Subagents** spawned by the session are listed under it, so a run that launched
   helpers reads as a tree rather than scattered rows.
 - **Live updates.** A session still being written updates in place over
@@ -143,7 +154,9 @@ The **Account** page is your control surface:
   [MCP](./agent-access.md), each with a one-click disconnect that revokes its
   tokens at once.
 - **Publicity**: publish or unpublish your own usage overview at `/u/<username>`.
-- **Invites** (admins only): mint an invite token for a new teammate.
+- **Invites** (admins only): mint an invite token for a new teammate, and see
+  every invite ever issued with its status (unused, redeemed by whom, or
+  expired) and a revoke control for the ones still open.
 - **Reparse** (admins only): force a rebuild of the parsed projection, with a live
   progress bar. The Account page stays available during a reparse, since it is not
   parsed data and it hosts this control.

@@ -46,13 +46,17 @@ type MessageDelta struct {
 // reference is recorded with no blob write. Exactly one of InputBody / InputSHA256
 // is set when there is an input. CallUID is the agent's call id, used to
 // back-patch the result that arrives on a later line (and possibly a later
-// region, for Claude).
+// region, for Claude). Detail is the bounded human-scannable summary of the input
+// (a command, pattern, URL, or description) the UI shows when a call has no
+// file_path; it is empty when the input has no summarizable key or was lifted
+// before the field existed.
 type ProjToolCall struct {
 	MessageOrdinal int
 	CallIndex      int
 	ToolName       string
 	Category       string
 	FilePath       string
+	Detail         string
 	InputBody      string
 	InputSHA256    string
 	InputBytes     int64
@@ -350,7 +354,7 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 		// row the flag is a scalar subquery: does an earlier eligible user row in this session already
 		// carry the same digest? Messages apply in ordinal order and the reparse re-inserts them in
 		// that same order, so the subquery sees exactly the earlier prefix the old window counted; the
-		// idx_messages_session_digest partial index (migration 0029) makes it a bounded probe, not a
+		// idx_messages_session_digest partial index (migration 0031) makes it a bounded probe, not a
 		// per-insert session rescan, so ingest stays linear. The first occurrence of a digest reads
 		// false (the original); every later eligible occurrence reads true. An ineligible row passes
 		// NULL so the column stays unset (no badge).
@@ -447,12 +451,13 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO tool_calls
 			   (session_id, message_ordinal, call_index, tool_name, category, file_path, file_rel_path,
-			    input_sha256, input_bytes, input_media_type, call_uid)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+			    input_sha256, input_bytes, input_media_type, call_uid, detail)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 			 ON CONFLICT (session_id, message_ordinal, call_index) DO NOTHING`,
 			sessionID, t.MessageOrdinal, t.CallIndex, sanitizeText(t.ToolName), sanitizeText(t.Category),
 			nullString(sanitizeText(t.FilePath)), relPath,
-			inputSHA, t.InputBytes, inputMedia, nullString(sanitizeText(t.CallUID))); err != nil {
+			inputSHA, t.InputBytes, inputMedia, nullString(sanitizeText(t.CallUID)),
+			nullString(sanitizeText(t.Detail))); err != nil {
 			return appliedDelta{}, fmt.Errorf("insert tool call %d/%d for session %d: %w", t.MessageOrdinal, t.CallIndex, sessionID, err)
 		}
 	}

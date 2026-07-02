@@ -231,6 +231,7 @@ Then push your sessions:
 akari sync                 # one-shot: scan and upload everything new
 akari sync --dry-run       # show what would upload, with skip reasons
 akari sync --time-limit 30s  # upload for up to 30s, finish the in-flight file, then exit
+akari sync --finalize      # ephemeral host (CI, cloud sandbox): flush every session's final turn now
 akari watch                # stay running, upload sessions as they change
 akari daemon start         # run watch in the background (per-OS)
 akari daemon status
@@ -246,6 +247,16 @@ can finish a little past the limit but never abandons an upload mid-stream. Beca
 uploads resume from the server's cursor, repeated short runs ingest a backlog in
 chunks. That is handy for trickling in data, or for grabbing a few seconds of
 sample sessions while a dev server is up.
+
+`akari sync --finalize` is for hosts that disappear right after the sync: a CI job
+or a cloud sandbox. A Codex session's final turn has no closing user line, so the
+client normally withholds it until the session file has been idle for a minute (the
+turn might still be streaming). On an ephemeral host that idle minute never arrives
+before teardown, so the last turn (usually the result) would never upload. `--finalize`
+asserts that every session being synced is terminal and flushes those trailing turns
+now. Reach for it only when every session is genuinely finished: on a live workstation
+a still-running session would be flushed mid-turn, so let the idle window do its job
+there instead. Claude and pi sessions are unaffected: they carry no withheld turn.
 
 The client discovers Claude, Codex, and pi sessions in their standard locations.
 A session whose working directory is not a git repository is skipped with a
@@ -296,11 +307,13 @@ Projects, Sessions, Account); the signed-in user and log-out sit at its foot.
   pointer, repeat) where they apply. The Quality and Tokens tiles reveal their
   drivers on hover: a score-arithmetic breakdown and the prompt-hygiene flags
   behind the grade, and the peak context and reset count behind the tokens. Tool
-  input and result bodies show as size/type chips that expand inline on click,
-  fetched from the CAS, and a tool chip's file path reads worktree-relative; an
-  editing tool's input expands as a rendered diff. Subagent sessions are listed
-  under the session that spawned them. In-progress sessions update live over
-  server-sent events.
+  input and result bodies show as size/type chips; clicking one opens the body in
+  an inspector modal, fetched from the CAS, and an editing tool's input opens as a
+  rendered diff. A tool chip's file path reads worktree-relative, or, when a call
+  has no file path, a bounded one-line summary of its input (a shell command, a
+  search pattern, a fetched URL) shows beside the chip and the matching outline
+  step, with the full text on hover. Subagent sessions are listed under the session
+  that spawned them. In-progress sessions update live over server-sent events.
 - **Charts** are rendered by a small dependency-free SVG module bundled as a
   static asset; the UI fonts (Geist and Geist Mono) are self-hosted, so the binary
   stays self-contained with no Node toolchain.

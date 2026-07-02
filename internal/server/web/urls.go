@@ -121,41 +121,9 @@ func SessionPath(id int64) string { return fmt.Sprintf("/sessions/%d", id) }
 // SessionsBasePath is the global (cross-project) session list.
 const SessionsBasePath = "/sessions"
 
-// validOutcomes and validGrades are the trust boundaries for the two signals filters:
-// only a value present here reaches SessionFilter, so a tampered or stale ?outcome / ?grade
-// falls through to "" (no filter) rather than into the query. They mirror the Insights
-// distribution buckets exactly (the four outcomes, the five letters, plus the "unscored"
-// sentinel for the empty grade bucket), so every drill-down link the page emits round-trips.
-var validOutcomes = map[string]bool{"completed": true, "abandoned": true, "errored": true, "unknown": true}
-var validGrades = map[string]bool{"A": true, "B": true, "C": true, "D": true, "F": true, "unscored": true}
-
-// ValidOutcome returns v when it names a real outcome bucket, else "" (no filter). It is the
-// handler's guard on the ?outcome param, the counterpart to store.IsSortKey for the sort param.
-func ValidOutcome(v string) string {
-	if validOutcomes[v] {
-		return v
-	}
-	return ""
-}
-
-// ValidGrade returns v when it names a real grade bucket (a letter or the "unscored"
-// sentinel), else "" (no filter). It is the handler's guard on the ?grade param.
-func ValidGrade(v string) string {
-	if validGrades[v] {
-		return v
-	}
-	return ""
-}
-
-// sessionsQuery builds the query string for the global session list from a filter and an active
-// range key, omitting empty fields, so facet links and the htmx swap target agree. rng is threaded
-// separately rather than reverse-engineered from the filter's Since (a time carries no key), so a
-// drill-down link and the toolbar's chip round-trip the same ?range value the handler parsed.
-//
-// rng is encoded only when it names a bounded window (a known key that is not "all"): the sessions
-// feed's natural form is all-history, so an "all" or empty range adds no param and the bare
-// /sessions path stays unbounded, matching how the default order omits its sort param.
-func sessionsQuery(f store.SessionFilter, rng string) string {
+// sessionsQuery builds the query string for the global session list from a
+// filter, omitting empty fields, so facet links and the htmx swap target agree.
+func sessionsQuery(f store.SessionFilter) string {
 	q := url.Values{}
 	if f.Agent != "" {
 		q.Set("agent", f.Agent)
@@ -166,17 +134,39 @@ func sessionsQuery(f store.SessionFilter, rng string) string {
 	if f.Machine != "" {
 		q.Set("machine", f.Machine)
 	}
-	if f.Outcome != "" {
-		q.Set("outcome", f.Outcome)
-	}
-	if f.Grade != "" {
-		q.Set("grade", f.Grade)
-	}
 	if f.ProjectID != 0 {
 		q.Set("project", fmt.Sprintf("%d", f.ProjectID))
 	}
-	if RangeBounds(rng) {
-		q.Set("range", rng)
+	if f.Query != "" {
+		q.Set("q", f.Query)
+	}
+	// Grade, outcome, and range arrive from an Insights drill-through link and ride the
+	// URL so a chip-removal or "Show more" swap round-trips them, exactly like the other
+	// facets. Range is the window key that produced Since (Since itself is not URL-serialized).
+	if f.Grade != "" {
+		q.Set("grade", f.Grade)
+	}
+	if f.Outcome != "" {
+		q.Set("outcome", f.Outcome)
+	}
+	if f.Range != "" {
+		q.Set("range", f.Range)
+	}
+	// Empty sessions are hidden by default, so the flag rides the URL only when the
+	// reader has opted to show them, keeping the bare path the common case.
+	if f.IncludeEmpty {
+		q.Set("empty", "1")
+	}
+	// The span constraint rides the URL only when set (the busiest-user drill), so the
+	// linked feed round-trips the same spanned cohort the concurrency panel counted.
+	if f.RequireSpan {
+		q.Set("spanned", "1")
+	}
+	// The paging limit rides the URL only when it has grown past the default page, so
+	// a "Show more" swap and a reload land on the same expanded feed while the first
+	// page stays a bare path.
+	if f.Limit > 0 && f.Limit != DefaultSessionLimit {
+		q.Set("limit", fmt.Sprintf("%d", f.Limit))
 	}
 	// The default order (most recent first) is the bare URL; any other column or
 	// direction is encoded so the sort link round-trips and survives a reload.
@@ -192,6 +182,28 @@ func sessionsQuery(f store.SessionFilter, rng string) string {
 		return "?" + s
 	}
 	return ""
+}
+
+// DefaultSessionLimit is the global feed's first-page size, matching the store's
+// default cap. "Show more" doubles the limit from here (100 -> 200 -> 400 -> 500).
+const DefaultSessionLimit = 100
+
+// MaxSessionLimit is the largest page the feed will request; past it the footer
+// drops the "Show more" button and asks the reader to narrow by filter or search.
+const MaxSessionLimit = 500
+
+// NextSessionLimit doubles the current page size for the "Show more" control,
+// clamped to MaxSessionLimit, so the feed grows 100 -> 200 -> 400 -> 500 rather
+// than jumping straight to the cap.
+func NextSessionLimit(cur int) int {
+	if cur <= 0 {
+		cur = DefaultSessionLimit
+	}
+	n := cur * 2
+	if n > MaxSessionLimit {
+		return MaxSessionLimit
+	}
+	return n
 }
 
 // effSort resolves a filter's effective sort column, treating the empty string
@@ -211,17 +223,15 @@ func isDefaultOrder(f store.SessionFilter) bool {
 	return f.Sort == "" || (f.Sort == store.DefaultSort && f.Desc)
 }
 
-// SessionsPath is the full global session-list path for the current selection and active range,
-// used as the htmx swap target so a facet click updates the URL coherently. rng is the active
-// range key (7d/30d/90d/year/all); it is encoded only for a bounded window, so the unscoped feed
-// stays the bare /sessions path.
-func SessionsPath(f store.SessionFilter, rng string) string {
-	return SessionsBasePath + sessionsQuery(f, rng)
+// SessionsPath is the full global session-list path for the current selection,
+// used as the htmx swap target so a facet click updates the URL coherently.
+func SessionsPath(f store.SessionFilter) string {
+	return SessionsBasePath + sessionsQuery(f)
 }
 
 // SessionsHref is the sanitized href form of SessionsPath, for anchor tags.
-func SessionsHref(f store.SessionFilter, rng string) templ.SafeURL {
-	return templ.URL(SessionsPath(f, rng))
+func SessionsHref(f store.SessionFilter) templ.SafeURL {
+	return templ.URL(SessionsPath(f))
 }
 
 // facetToggle returns a copy of the filter with one field set to value, or
@@ -247,60 +257,44 @@ func facetToggle(f store.SessionFilter, field, value string) store.SessionFilter
 		} else {
 			f.Machine = value
 		}
-	case "outcome":
-		if f.Outcome == value {
-			f.Outcome = ""
-		} else {
-			f.Outcome = value
-		}
-	case "grade":
-		if f.Grade == value {
-			f.Grade = ""
-		} else {
-			f.Grade = value
-		}
 	}
 	return f
 }
 
-// AgentFacetHref and friends return the toggle href for a facet option, holding the rest of the
-// current selection and the active range so removing one filter does not drop the window.
-func AgentFacetHref(f store.SessionFilter, value, rng string) templ.SafeURL {
-	return SessionsHref(facetToggle(f, "agent", value), rng)
+// AgentFacetHref and friends return the toggle href for a facet option, holding
+// the rest of the current selection.
+func AgentFacetHref(f store.SessionFilter, value string) templ.SafeURL {
+	return SessionsHref(facetToggle(f, "agent", value))
 }
-func UserFacetHref(f store.SessionFilter, value, rng string) templ.SafeURL {
-	return SessionsHref(facetToggle(f, "user", value), rng)
+func UserFacetHref(f store.SessionFilter, value string) templ.SafeURL {
+	return SessionsHref(facetToggle(f, "user", value))
 }
-func MachineFacetHref(f store.SessionFilter, value, rng string) templ.SafeURL {
-	return SessionsHref(facetToggle(f, "machine", value), rng)
+func MachineFacetHref(f store.SessionFilter, value string) templ.SafeURL {
+	return SessionsHref(facetToggle(f, "machine", value))
 }
 
 // ProjectFacetHref toggles the project selection for a facet row, holding the
-// rest of the current selection and the active range.
-func ProjectFacetHref(f store.SessionFilter, id int64, rng string) templ.SafeURL {
+// rest of the current selection.
+func ProjectFacetHref(f store.SessionFilter, id int64) templ.SafeURL {
 	if f.ProjectID == id {
 		f.ProjectID = 0
 	} else {
 		f.ProjectID = id
 	}
-	return SessionsHref(f, rng)
+	return SessionsHref(f)
 }
 
-// facetHref dispatches a text facet's toggle link to the right field helper, carrying the range.
-func facetHref(field, value string, f store.SessionFilter, rng string) templ.SafeURL {
+// facetHref dispatches a text facet's toggle link to the right field helper.
+func facetHref(field, value string, f store.SessionFilter) templ.SafeURL {
 	switch field {
 	case "agent":
-		return AgentFacetHref(f, value, rng)
+		return AgentFacetHref(f, value)
 	case "user":
-		return UserFacetHref(f, value, rng)
+		return UserFacetHref(f, value)
 	case "machine":
-		return MachineFacetHref(f, value, rng)
-	case "outcome":
-		return SessionsHref(facetToggle(f, "outcome", value), rng)
-	case "grade":
-		return SessionsHref(facetToggle(f, "grade", value), rng)
+		return MachineFacetHref(f, value)
 	}
-	return SessionsHref(f, rng)
+	return SessionsHref(f)
 }
 
 // projectLabelByID finds a project facet's display label by id, for the active
@@ -316,9 +310,80 @@ func projectLabelByID(opts []store.ProjectFacet, id int64) string {
 
 // AnyFilterActive reports whether the global session list is currently narrowed,
 // so the view can show a "clear all" affordance only when it would do something.
+// The content search counts: it is a removable narrowing like the facets, and its
+// chip clears alongside them.
 func AnyFilterActive(f store.SessionFilter) bool {
-	return f.Agent != "" || f.Username != "" || f.Machine != "" || f.ProjectID != 0 ||
-		f.Outcome != "" || f.Grade != ""
+	return f.Agent != "" || f.Username != "" || f.Machine != "" || f.ProjectID != 0 || f.Query != "" ||
+		f.Grade != "" || f.Outcome != "" || f.Range != ""
+}
+
+// GradeClearHref, OutcomeClearHref, and RangeClearHref are the removal links for the
+// grade, outcome, and range chips: each drops just its own param while holding every
+// other facet, search, sort, and window, matching the agent/user chip behavior.
+func GradeClearHref(f store.SessionFilter) templ.SafeURL {
+	f.Grade = ""
+	return SessionsHref(f)
+}
+
+func OutcomeClearHref(f store.SessionFilter) templ.SafeURL {
+	f.Outcome = ""
+	return SessionsHref(f)
+}
+
+func RangeClearHref(f store.SessionFilter) templ.SafeURL {
+	f.Range = ""
+	return SessionsHref(f)
+}
+
+// RangeChipLabel is the active-filter chip value for the window, reusing the range
+// selector's own option wording ("30 days", "Year") so the chip reads the same as the
+// button that could have set it. It falls back to the raw key for an unknown value,
+// though the handler validates the key before it reaches here.
+func RangeChipLabel(key string) string {
+	for _, dr := range DateRanges {
+		if dr.Key == key {
+			return dr.Label
+		}
+	}
+	return key
+}
+
+// SearchClearHref is the toggle link for the active search chip: it drops the query
+// while holding every other facet, sort, and the empty toggle, so removing a search
+// leaves the rest of the narrowing in place.
+func SearchClearHref(f store.SessionFilter) templ.SafeURL {
+	f.Query = ""
+	// Clearing the search returns the feed to its first page: the expanded limit was
+	// scoped to the search results and would otherwise persist into a broader list.
+	f.Limit = 0
+	return SessionsHref(f)
+}
+
+// EmptyToggleHref flips the include-empty state for the footer's toggle, holding
+// every other facet, search, and sort. It resets the page to the default size for
+// the same reason "Show more" carries the limit: the visible count changes, so the
+// paging restarts rather than keeping a limit sized for the other visibility.
+func EmptyToggleHref(f store.SessionFilter) templ.SafeURL {
+	f.IncludeEmpty = !f.IncludeEmpty
+	f.Limit = 0
+	return SessionsHref(f)
+}
+
+// ShowMorePath is the plain-string path the "Show more" button fetches: the same
+// filter with the page size doubled, used as the htmx GET target so the swap
+// re-renders the whole list (day grouping and footer included) at the larger page.
+func ShowMorePath(f store.SessionFilter) string {
+	f.Limit = NextSessionLimit(effLimit(f))
+	return SessionsPath(f)
+}
+
+// effLimit resolves a filter's effective page size, treating a zero (unset) limit
+// as the default so the "Show more" math starts from the right base.
+func effLimit(f store.SessionFilter) int {
+	if f.Limit <= 0 {
+		return DefaultSessionLimit
+	}
+	return f.Limit
 }
 
 // PublicPath is the plain-string public URL, shown to the owner as the shareable

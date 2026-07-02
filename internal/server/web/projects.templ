@@ -47,11 +47,12 @@ templ ProjectsPage(p Page, projects []store.ProjectSummary, spark map[int64][]fl
 							<td class="num">{ fmt.Sprintf("%d", pr.SessionCount) }</td>
 							<td class="num">@tokensCell(pr)</td>
 							<td class="num">{ FmtCost(pr.TotalCostUSD, pr.CostIncomplete) }</td>
-							<td class="muted nowrap">{ FmtRelTime(pr.LastActivity) }</td>
+							<td class="muted nowrap">{ FmtRelTime(ctx, pr.LastActivity) }</td>
 						</tr>
 					}
 				</tbody>
 			</table>
+			<p class="muted small projects-footnote">Local folders are under <a href="/sessions">Sessions</a>.</p>
 		}
 	}
 }
@@ -216,6 +217,9 @@ templ ProjectSessionList(sessions []store.SessionSummary, rem store.SessionRemai
 							if s.Visibility == "public" {
 								<span class="tag public">public</span>
 							}
+							if s.Title != "" {
+								<div class="row-sub muted small" title={ s.Title }>{ s.Title }</div>
+							}
 						</td>
 						<td><span class="tag agent">{ s.Agent }</span></td>
 						<td>{ s.Username }</td>
@@ -224,7 +228,7 @@ templ ProjectSessionList(sessions []store.SessionSummary, rem store.SessionRemai
 						<td class="num">{ fmt.Sprintf("%d", s.MessageCount) }</td>
 						<td class="num">@sessionTokensCell(s)</td>
 						<td class="num">{ FmtCost(s.TotalCostUSD, s.CostIncomplete) }</td>
-						<td class="muted nowrap" title={ FmtTime(s.UpdatedAt) }>{ FmtRelTime(s.UpdatedAt) }</td>
+						<td class="muted nowrap" title={ FmtTimeLong(ctx, s.UpdatedAt) }>{ FmtRelTime(ctx, s.UpdatedAt) }</td>
 					</tr>
 				}
 			</tbody>
@@ -299,7 +303,7 @@ templ SessionList(sessions []store.SessionSummary) {
 						<td class="muted">{ s.GitBranch }</td>
 						<td class="num">{ fmt.Sprintf("%d", s.MessageCount) }</td>
 						<td class="num">{ FmtCost(s.TotalCostUSD, s.CostIncomplete) }</td>
-						<td class="muted">{ FmtTime(s.UpdatedAt) }</td>
+						<td class="muted">{ FmtTime(ctx, s.UpdatedAt) }</td>
 					</tr>
 				}
 			</tbody>

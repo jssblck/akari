@@ -392,6 +392,50 @@ func TestFoldResolve(t *testing.T) {
 	})
 }
 
+// TestParseSyncArgs pins the flag wiring, in particular that --finalize is parsed and
+// carried into syncOptions so runSync can hand it to syncer.New. A dropped or
+// misspelled flag would leave finalize false; the syncer's own test then covers that
+// the flag, once carried, reaches the upload Target. It also guards the validation
+// gates that must fire before any config or discovery work.
+func TestParseSyncArgs(t *testing.T) {
+	t.Run("finalize defaults off", func(t *testing.T) {
+		opts, err := parseSyncArgs(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if opts.finalize {
+			t.Fatal("finalize defaulted to true, want false")
+		}
+	})
+
+	t.Run("finalize flag sets it and nothing else", func(t *testing.T) {
+		opts, err := parseSyncArgs([]string{"--finalize"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !opts.finalize {
+			t.Fatal("--finalize did not set finalize")
+		}
+		if opts.dryRun {
+			t.Fatal("--finalize should not have flipped dry-run")
+		}
+	})
+
+	t.Run("rejects an unparseable or negative time-limit", func(t *testing.T) {
+		for _, v := range []string{"nonsense", "-1s"} {
+			if _, err := parseSyncArgs([]string{"--time-limit", v}); err == nil {
+				t.Fatalf("time-limit %q: expected an error", v)
+			}
+		}
+	})
+
+	t.Run("rejects concurrency below one", func(t *testing.T) {
+		if _, err := parseSyncArgs([]string{"--concurrency", "0"}); err == nil {
+			t.Fatal("concurrency 0: expected an error")
+		}
+	})
+}
+
 // TestRunSyncRejectsBadConcurrency confirms the flag is validated before any
 // config or discovery work, so a bad value fails fast with a clear message.
 func TestRunSyncRejectsBadConcurrency(t *testing.T) {

@@ -362,8 +362,11 @@ chip. It shows the tool name in Lilac, an optional file path in Muted, and the
 input/output bodies as size-and-type stamps (for example "in: 36 KB json"). A
 stamp backed by a stored body is a button; clicking expands the body inline as a
 Geist Mono code block fetched from the content store, with a 180ms height-and-fade
-reveal. The result status reads in its signal hue (Sage ok, Rose error). The chip
-is the bench's calipers: small and exact, and it opens to show the measurement.
+reveal. The result status reads in its signal hue (Sage ok, Rose error). A tool
+with no file path (a shell command, a search pattern, a fetched URL) instead shows
+a bounded, one-line summary of its input in Muted, truncated with an ellipsis and
+carrying the full text on hover. The chip is the bench's calipers: small and
+exact, and it opens to show the measurement.
 
 ### Charts (signature direction)
 akari has no charts yet; this is the brief for adding them. Render time series

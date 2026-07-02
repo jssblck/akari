@@ -50,8 +50,8 @@ The chapters build on each other.
    `watch`, and the `daemon`; how it discovers sessions on disk; and the
    resumable, append-only upload.
 4. **[The web UI](./the-web-ui.md)**: reading your history. The overview and its
-   trailing windows, the Insights analytics, the session feed, projects, and the
-   transcript view with its tool bodies and live updates.
+   trailing windows, the Insights quality surface, the session feed with search and
+   filters, projects, and the transcript view with its tool bodies and live updates.
 5. **[Accounts and sharing](./accounts-and-sharing.md)**: registration and
    invites, the three token scopes (`ingest`, `read`, `full`), session visibility,
    and publishing a session or your usage overview.

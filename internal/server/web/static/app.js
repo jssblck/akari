@@ -319,17 +319,20 @@
     if (selectedEl) { selectedEl.classList.remove("inspect-selected"); selectedEl = null; }
   }
 
-  // describe builds {tool, file, status, views:[{key,label,url,render}], initial}
+  // describe builds {tool, file, detail, status, views:[{key,label,url,render}], initial}
   // from either a chip stamp or an outline step.
   function describe(trigger) {
     var views = [];
-    var tool = "", file = "", status = "", initial = "";
+    var tool = "", file = "", detail = "", status = "", initial = "";
     var diff = trigger.getAttribute("data-diff") === "1";
     if (trigger.classList.contains("body-toggle")) {
       var chip = trigger.closest(".tool-chip");
       if (chip) {
         var tn = chip.querySelector(".tname"); tool = tn ? tn.textContent : "";
         var tp = chip.querySelector(".tpath"); file = tp ? tp.textContent : "";
+        // The chip's title attribute carries the full Detail text; the span's
+        // own textContent is the truncated display label, not what we want here.
+        var td = chip.querySelector(".tdetail"); detail = td ? td.getAttribute("title") : "";
         var ts = chip.querySelector(".tstatus"); status = ts ? ts.textContent : "";
         var input = chip.querySelector('.body-toggle[data-slot="input"]');
         var result = chip.querySelector('.body-toggle[data-slot="result"]');
@@ -342,12 +345,13 @@
     } else {
       tool = trigger.getAttribute("data-tool") || "";
       file = trigger.getAttribute("data-file") || "";
+      detail = trigger.getAttribute("data-detail") || "";
       status = trigger.getAttribute("data-status") || "";
       views = buildViews(trigger.getAttribute("data-input-url") || "", trigger.getAttribute("data-result-url") || "", diff);
     }
     if (!views.length) return null;
     if (!initial || !views.some(function (v) { return v.key === initial; })) initial = views[0].key;
-    return { tool: tool, file: file, status: status, views: views, initial: initial };
+    return { tool: tool, file: file, detail: detail, status: status, views: views, initial: initial };
   }
   function buildViews(inputUrl, resultUrl, inputDiff) {
     var views = [];
@@ -444,6 +448,7 @@
     var head = el("div", "insp-head");
     head.appendChild(el("span", "insp-tn", desc.tool));
     if (desc.file) head.appendChild(el("span", "insp-file mono", desc.file));
+    if (desc.detail) head.appendChild(el("span", "insp-detail mono", desc.detail));
     head.appendChild(el("span", "insp-spacer"));
     // The status reads in the header rather than on its own row: a small signal
     // word (Sage ok, Rose error) sat beside the close control.
@@ -579,6 +584,34 @@
     else form.submit();
   });
 
+  // ---------------- Notice banner ----------------
+  // The one-shot success banner (see layout.templ) removes itself on a dismiss
+  // click and auto-removes after a few seconds. Under prefers-reduced-motion the
+  // fade transition is disabled in CSS (.notice-out), so adding the class there
+  // removes it instantly instead of animating; either way the DOM removal itself
+  // is immediate once the fade (or lack of one) has had a frame to apply.
+  var NOTICE_AUTO_DISMISS_MS = 6000;
+  function dismissNotice(el) {
+    if (!el || el._dismissed) return;
+    el._dismissed = true;
+    el.classList.add("notice-out");
+    var reduced = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    var remove = function () { if (el.parentNode) el.parentNode.removeChild(el); };
+    if (reduced) { remove(); return; }
+    el.addEventListener("transitionend", remove, { once: true });
+    setTimeout(remove, 400); // fallback in case transitionend never fires
+  }
+  function initNotice() {
+    var el = document.querySelector("[data-notice]");
+    if (!el) return;
+    setTimeout(function () { dismissNotice(el); }, NOTICE_AUTO_DISMISS_MS);
+  }
+  document.addEventListener("click", function (ev) {
+    var btn = ev.target.closest ? ev.target.closest("[data-notice-dismiss]") : null;
+    if (!btn) return;
+    dismissNotice(btn.closest("[data-notice]"));
+  });
+
   // ---------------- Init ----------------
   function init() {
     animateBars();
@@ -586,6 +619,7 @@
     initLive();
     initReparseWatch();
     initReparsePublic();
+    initNotice();
   }
   // ---------------- Overview user filter ----------------
   // The per-user filter is a <details> that lives inside #usage, so every range or

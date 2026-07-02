@@ -713,13 +713,16 @@ func TestSessionsFeedRangeWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("announce old: %v", err)
 	}
+	// Stamp a message on each so they clear the feed's default empty-session hide (a bare
+	// announce parses no message), then set their started_at so the 30-day window keeps one
+	// and drops the other.
 	if _, err := st.Pool.Exec(ctx,
-		`UPDATE sessions SET started_at = now() - make_interval(days => 1) WHERE id = $1`,
+		`UPDATE sessions SET started_at = now() - make_interval(days => 1), message_count = 1 WHERE id = $1`,
 		annNew.SessionID); err != nil {
 		t.Fatalf("date new session: %v", err)
 	}
 	if _, err := st.Pool.Exec(ctx,
-		`UPDATE sessions SET started_at = now() - make_interval(days => 60) WHERE id = $1`,
+		`UPDATE sessions SET started_at = now() - make_interval(days => 60), message_count = 1 WHERE id = $1`,
 		annOld.SessionID); err != nil {
 		t.Fatalf("age old session: %v", err)
 	}
@@ -1420,6 +1423,125 @@ func TestPublicOverviewPublishRequiresAuth(t *testing.T) {
 	}
 	if u, _ := st.UserByID(ctx, owner.ID); u.OverviewPublic {
 		t.Fatalf("overview public after rejected anon publish, want still private")
+	}
+}
+
+// TestSessionsSearchAndPaging exercises the global Sessions surface end to end
+// over HTTP: a content search narrows the feed and renders the match in <mark>
+// (escaped, from the template), a query like <script> renders escaped rather than
+// injected, the empty toggle hides zero-message sessions by default and shows them
+// on ?empty=1, and the limit param is clamped.
+func TestSessionsSearchAndPaging(t *testing.T) {
+	t.Parallel()
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+
+	// Register the first account over HTTP so the cookie-carrying client is signed in
+	// (the first account becomes admin, no invite needed); the sessions are seeded
+	// under it so the reader can view them.
+	c := newClient(t)
+	if _, err := c.PostForm(srv.URL+"/register", url.Values{"username": {"grace"}, "password": {"hopper-1906"}}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	owner, err := st.UserByUsername(ctx, "grace")
+	if err != nil {
+		t.Fatalf("lookup owner: %v", err)
+	}
+	proj, err := st.UpsertProject(ctx, "github.com/x/a", "github.com", "x", "a", "a", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	// Seed sessions with messages directly (bypassing ingest), bumping message_count
+	// so the default empty-hide keeps them. One empty session (no message) exercises
+	// the toggle.
+	seedSess := func(src string) int64 {
+		t.Helper()
+		var id int64
+		if err := st.Pool.QueryRow(ctx,
+			`INSERT INTO sessions (user_id, project_id, agent, source_session_id, machine)
+			 VALUES ($1,$2,'claude',$3,'box') RETURNING id`, owner.ID, proj, src).Scan(&id); err != nil {
+			t.Fatalf("seed session %s: %v", src, err)
+		}
+		return id
+	}
+	seedMsg := func(sid int64, ord int, role, content string) {
+		t.Helper()
+		if _, err := st.Pool.Exec(ctx,
+			`INSERT INTO messages (session_id, ordinal, role, content) VALUES ($1,$2,$3,$4)`,
+			sid, ord, role, content); err != nil {
+			t.Fatalf("seed message: %v", err)
+		}
+		if _, err := st.Pool.Exec(ctx,
+			`UPDATE sessions SET message_count = message_count + 1 WHERE id = $1`, sid); err != nil {
+			t.Fatalf("bump count: %v", err)
+		}
+	}
+	hit := seedSess("hit")
+	seedMsg(hit, 0, "user", "Refactor the pricing reconcile pass, please.")
+	xss := seedSess("xss")
+	seedMsg(xss, 0, "user", "Look at <script>danger</script> in the pricing table.")
+	other := seedSess("other")
+	seedMsg(other, 0, "user", "Unrelated conversation about the weather.")
+	seedSess("empty") // no message: message_count stays 0
+
+	// A content search narrows to the two pricing sessions and renders a <mark>.
+	body := readBody(t, mustGet(t, c, srv.URL+"/sessions?q=pricing"))
+	if !strings.Contains(body, "<mark>") {
+		t.Errorf("search should render a highlighted match, got:\n%s", body)
+	}
+	if strings.Contains(body, "weather") {
+		t.Error("search 'pricing' should not include the unrelated session")
+	}
+	// The search chip is present and removable.
+	if !strings.Contains(body, `<span class="fchip-k">search</span>`) {
+		t.Error("an active search should show a removable chip")
+	}
+
+	// A query containing markup renders escaped, never injected: the raw <script>
+	// from the message must not appear as an element.
+	xssBody := readBody(t, mustGet(t, c, srv.URL+"/sessions?q=script"))
+	if strings.Contains(xssBody, "<script>danger</script>") {
+		t.Errorf("message content must be escaped, not injected, got:\n%s", xssBody)
+	}
+	if !strings.Contains(xssBody, "&lt;script&gt;danger&lt;/script&gt;") {
+		t.Errorf("message content should render as escaped text, got:\n%s", xssBody)
+	}
+
+	// A query that is itself markup is escaped in the chip (a text node), not run.
+	tagBody := readBody(t, mustGet(t, c, srv.URL+"/sessions?q=%3Cscript%3E"))
+	if strings.Contains(tagBody, "<script>") && !strings.Contains(tagBody, "&lt;script&gt;") {
+		t.Errorf("a <script> query must render escaped, got:\n%s", tagBody)
+	}
+
+	// Default hides the empty session: its "empty" source-derived row is absent, and
+	// the footer offers to show it.
+	def := readBody(t, mustGet(t, c, srv.URL+"/sessions"))
+	if !strings.Contains(def, "empty hidden") {
+		t.Errorf("default feed should offer to show hidden empties, got footer-less:\n%s", def)
+	}
+	// ?empty=1 includes it and the toggle flips to "showing empty".
+	withEmpty := readBody(t, mustGet(t, c, srv.URL+"/sessions?empty=1"))
+	if !strings.Contains(withEmpty, "showing empty") {
+		t.Errorf("empty=1 should read 'showing empty', got:\n%s", withEmpty)
+	}
+}
+
+// TestSessionsLimitClamp asserts the limit param is clamped to the store's window
+// and that an over-cap request does not error.
+func TestSessionsLimitClamp(t *testing.T) {
+	t.Parallel()
+	srv, _ := newTestServer(t)
+	c := newClient(t)
+	if _, err := c.PostForm(srv.URL+"/register", url.Values{"username": {"grace"}, "password": {"hopper-1906"}}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	// A wildly over-cap limit and a garbage limit both render a 200, not a 500.
+	for _, q := range []string{"?limit=99999", "?limit=abc", "?limit=-5"} {
+		resp := mustGet(t, c, srv.URL+"/sessions"+q)
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("/sessions%s = %d, want 200 (limit should clamp, not error)", q, resp.StatusCode)
+		}
+		resp.Body.Close()
 	}
 }
 

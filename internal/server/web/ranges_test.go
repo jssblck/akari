@@ -43,6 +43,22 @@ func TestRangeSince(t *testing.T) {
 	}
 }
 
+// RangeBounds is the sessions feed's whitelist: only a known trailing window bounds the
+// list, so an "all", empty, or hand-typed junk key leaves the feed unbounded rather than
+// falling to ParseRange's trailing-year default.
+func TestRangeBounds(t *testing.T) {
+	for _, k := range []string{"7d", "30d", "90d", "year"} {
+		if !RangeBounds(k) {
+			t.Errorf("RangeBounds(%q) = false, want true (bounded window)", k)
+		}
+	}
+	for _, k := range []string{"all", "", "bogus", "month"} {
+		if RangeBounds(k) {
+			t.Errorf("RangeBounds(%q) = true, want false (unbounded)", k)
+		}
+	}
+}
+
 // RangeOptions builds one button per window, each refetching basePath at its own
 // range. Anything in preserve rides along except an incoming range (each button
 // sets its own) and empty values (dropped), so a stray ?range= or a blank filter

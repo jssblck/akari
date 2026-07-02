@@ -75,6 +75,7 @@ func TestApplyDeltaSanitizesText(t *testing.T) {
 			ToolName:       "Re\x00ad",
 			Category:       "read",
 			FilePath:       "src/\xffauth.ts",
+			Detail:         "grep \xffpattern",
 			InputBody:      `{"file_path":"src/auth.ts"}`,
 			InputMediaType: "application/json",
 			CallUID:        "call-1",
@@ -110,5 +111,8 @@ func TestApplyDeltaSanitizesText(t *testing.T) {
 	}
 	if got, want := calls[0].FilePath, "src/"+repl+"auth.ts"; got != want {
 		t.Errorf("file_path = %q, want %q", got, want)
+	}
+	if got, want := calls[0].Detail, "grep "+repl+"pattern"; got != want {
+		t.Errorf("detail = %q, want %q", got, want)
 	}
 }

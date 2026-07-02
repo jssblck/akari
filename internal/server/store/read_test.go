@@ -16,15 +16,35 @@ import (
 // seedSess inserts a session with a chosen agent and machine under a user and
 // project, bypassing ingest so the cross-project read paths can be asserted
 // against known inputs. Rows are returned newest-id last.
+//
+// It seeds message_count = 1 so the session is non-empty: the global feed hides
+// zero-message sessions by default, so a plain seeded session must read as a real
+// one. Tests that want an EMPTY session (to exercise the hide/toggle) seed one
+// directly with message_count left at its 0 default rather than through here.
 func seedSess(t *testing.T, st *store.Store, userID, projectID int64, agent, machine, src string) int64 {
 	t.Helper()
 	var id int64
 	err := st.Pool.QueryRow(context.Background(),
-		`INSERT INTO sessions (user_id, project_id, agent, source_session_id, machine)
-		 VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+		`INSERT INTO sessions (user_id, project_id, agent, source_session_id, machine, message_count)
+		 VALUES ($1,$2,$3,$4,$5,1) RETURNING id`,
 		userID, projectID, agent, src, machine).Scan(&id)
 	if err != nil {
 		t.Fatalf("seed session: %v", err)
+	}
+	return id
+}
+
+// seedEmptySess inserts a zero-message session (message_count stays 0), the kind
+// the global feed hides by default. It is the counterpart to seedSess for the
+// empty-hide and toggle assertions.
+func seedEmptySess(t *testing.T, st *store.Store, userID, projectID int64, src string) int64 {
+	t.Helper()
+	var id int64
+	if err := st.Pool.QueryRow(context.Background(),
+		`INSERT INTO sessions (user_id, project_id, agent, source_session_id, machine)
+		 VALUES ($1,$2,'claude',$3,'box') RETURNING id`,
+		userID, projectID, src).Scan(&id); err != nil {
+		t.Fatalf("seed empty session: %v", err)
 	}
 	return id
 }
@@ -149,7 +169,7 @@ func TestListAllSessions(t *testing.T) {
 	ctx := context.Background()
 	_, remoteID, _ := seedGlobalCorpus(t, st)
 
-	all, err := st.ListAllSessions(ctx, store.SessionFilter{})
+	all, _, err := st.ListAllSessions(ctx, store.SessionFilter{})
 	if err != nil {
 		t.Fatalf("list all: %v", err)
 	}
@@ -168,21 +188,21 @@ func TestListAllSessions(t *testing.T) {
 	}
 
 	// Filters narrow the set.
-	claude, err := st.ListAllSessions(ctx, store.SessionFilter{Agent: "claude"})
+	claude, _, err := st.ListAllSessions(ctx, store.SessionFilter{Agent: "claude"})
 	if err != nil || len(claude) != 4 {
 		t.Fatalf("agent filter: len=%d err=%v, want 4", len(claude), err)
 	}
-	inRemote, err := st.ListAllSessions(ctx, store.SessionFilter{ProjectID: remoteID})
+	inRemote, _, err := st.ListAllSessions(ctx, store.SessionFilter{ProjectID: remoteID})
 	if err != nil || len(inRemote) != 3 {
 		t.Fatalf("project filter: len=%d err=%v, want 3", len(inRemote), err)
 	}
-	byMachine, err := st.ListAllSessions(ctx, store.SessionFilter{Machine: "rig"})
+	byMachine, _, err := st.ListAllSessions(ctx, store.SessionFilter{Machine: "rig"})
 	if err != nil || len(byMachine) != 2 {
 		t.Fatalf("machine filter: len=%d err=%v, want 2", len(byMachine), err)
 	}
 
 	// Limit caps the page.
-	capped, err := st.ListAllSessions(ctx, store.SessionFilter{Limit: 2})
+	capped, _, err := st.ListAllSessions(ctx, store.SessionFilter{Limit: 2})
 	if err != nil || len(capped) != 2 {
 		t.Fatalf("limit: len=%d err=%v, want 2", len(capped), err)
 	}
@@ -274,7 +294,7 @@ func TestListAllSessionsSort(t *testing.T) {
 
 	assertOrdered := func(t *testing.T, key string, cmp func(a, b store.SessionRow) int, desc bool) {
 		t.Helper()
-		rows, err := st.ListAllSessions(ctx, store.SessionFilter{Sort: key, Desc: desc})
+		rows, _, err := st.ListAllSessions(ctx, store.SessionFilter{Sort: key, Desc: desc})
 		if err != nil {
 			t.Fatalf("sort %s desc=%v: %v", key, desc, err)
 		}
@@ -308,11 +328,11 @@ func TestListAllSessionsSort(t *testing.T) {
 
 	// An unknown sort key falls back to the default order (most recent first, id
 	// descending on ties), identical to the zero-value filter.
-	bogus, err := st.ListAllSessions(ctx, store.SessionFilter{Sort: "; drop table sessions"})
+	bogus, _, err := st.ListAllSessions(ctx, store.SessionFilter{Sort: "; drop table sessions"})
 	if err != nil {
 		t.Fatalf("bogus sort should fall back, not error: %v", err)
 	}
-	def, err := st.ListAllSessions(ctx, store.SessionFilter{})
+	def, _, err := st.ListAllSessions(ctx, store.SessionFilter{})
 	if err != nil {
 		t.Fatalf("default list: %v", err)
 	}
@@ -349,9 +369,13 @@ func TestListAllSessionsOutcomeGradeFilter(t *testing.T) {
 	insertSignal(t, st, ctx, graded, quality.Version, "completed", "B")
 	ungraded := seedSession(t, st, ada, pid, "ungraded")
 
+	// The seeded sessions carry no message, so each filter sets IncludeEmpty to see them, the
+	// same empty=1 the real quality drill-downs carry so a bar's count and its feed agree
+	// regardless of message_count (a zero-message session can still carry a grade).
 	only := func(t *testing.T, f store.SessionFilter, want int64, label string) {
 		t.Helper()
-		rows, err := st.ListAllSessions(ctx, f)
+		f.IncludeEmpty = true
+		rows, _, err := st.ListAllSessions(ctx, f)
 		if err != nil {
 			t.Fatalf("%s: %v", label, err)
 		}
@@ -375,12 +399,12 @@ func TestListAllSessionsOutcomeGradeFilter(t *testing.T) {
 	if _, err := st.Pool.Exec(ctx, `UPDATE sessions SET signals_stale = true WHERE id = $1`, graded); err != nil {
 		t.Fatalf("mark graded stale: %v", err)
 	}
-	if rows, err := st.ListAllSessions(ctx, store.SessionFilter{Outcome: "completed"}); err != nil {
+	if rows, _, err := st.ListAllSessions(ctx, store.SessionFilter{Outcome: "completed", IncludeEmpty: true}); err != nil {
 		t.Fatalf("stale outcome=completed: %v", err)
 	} else if len(rows) != 0 {
 		t.Errorf("stale graded session should not match outcome=completed, got %d rows", len(rows))
 	}
-	if rows, err := st.ListAllSessions(ctx, store.SessionFilter{Grade: "unscored"}); err != nil {
+	if rows, _, err := st.ListAllSessions(ctx, store.SessionFilter{Grade: "unscored", IncludeEmpty: true}); err != nil {
 		t.Fatalf("stale grade=unscored: %v", err)
 	} else if len(rows) != 2 {
 		t.Errorf("both sessions should read unscored once the graded one is stale, got %d rows", len(rows))
@@ -418,9 +442,14 @@ func TestListSessionsSince(t *testing.T) {
 	}
 	recent := seedSess(t, st, u.ID, projectID, "claude", "box", "recent")
 	old := seedSess(t, st, u.ID, projectID, "claude", "box", "old")
+	// Age both timestamps together: the per-project ListSessions windows by updated_at
+	// while the global ListAllSessions windows by started_at (matching the Insights
+	// panels), so the test moves both to keep the recent-vs-old split valid for both
+	// queries it exercises below.
 	age := func(id int64, days int) {
 		if _, err := st.Pool.Exec(ctx,
-			`UPDATE sessions SET updated_at = now() - make_interval(days => $2) WHERE id = $1`,
+			`UPDATE sessions SET updated_at = now() - make_interval(days => $2),
+			        started_at = now() - make_interval(days => $2) WHERE id = $1`,
 			id, days); err != nil {
 			t.Fatalf("age session %d: %v", id, err)
 		}
@@ -447,11 +476,11 @@ func TestListSessionsSince(t *testing.T) {
 
 	// The cross-project query honors Since the same way: unbounded lists both, a
 	// 30-day window drops the 40-day-old session.
-	allRows, err := st.ListAllSessions(ctx, store.SessionFilter{})
+	allRows, _, err := st.ListAllSessions(ctx, store.SessionFilter{})
 	if err != nil || len(allRows) != 2 {
 		t.Fatalf("global unbounded: len=%d err=%v, want 2", len(allRows), err)
 	}
-	winRows, err := st.ListAllSessions(ctx, store.SessionFilter{Since: time.Now().AddDate(0, 0, -30)})
+	winRows, _, err := st.ListAllSessions(ctx, store.SessionFilter{Since: time.Now().AddDate(0, 0, -30)})
 	if err != nil {
 		t.Fatalf("global windowed: %v", err)
 	}

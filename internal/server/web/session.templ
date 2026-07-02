@@ -16,6 +16,9 @@ templ SessionPage(p Page, d store.SessionDetail, msgs []store.Message, tools map
 						<span class="sep">/</span>
 						<span class="muted">session #{ fmt.Sprintf("%d", d.ID) }</span>
 					</h1>
+					if d.Title != "" {
+						<div class="session-subtitle muted" title={ d.Title }>{ d.Title }</div>
+					}
 					<div class="session-meta">
 						<span class="tag agent">{ d.Agent }</span>
 						@kindTag(d.ProjectKind)
@@ -23,7 +26,7 @@ templ SessionPage(p Page, d store.SessionDetail, msgs []store.Message, tools map
 							<span class="tag public">public</span>
 						}
 						if dupIDs > 0 {
-							<span class="tag warn" title="This session repeats a tool-call id across rows (a resumed or compacted transcript replaying earlier turns). Each copy is shown with the same result. A high count across many sessions may signal genuinely malformed ids.">{ DuplicateIDsLabel(dupIDs) }</span>
+							<span class="tag warn" title="Repeated tool-call ids: a resumed or compacted transcript replaying earlier turns.">{ DuplicateIDsLabel(dupIDs) }</span>
 						}
 						if d.GitBranch != "" {
 							<span class="muted">{ d.GitBranch }</span>
@@ -70,16 +73,12 @@ templ sessionActions(d store.SessionDetail, owner bool) {
 				</form>
 			} else {
 				<form method="post" action={ templ.SafeURL(fmt.Sprintf("/sessions/%d/publish", d.ID)) } class="inline">
-					<button class="small" type="submit" title="This session is internal: visible to logged-in users only. Publish to share a public link.">Publish</button>
+					<button class="small" type="submit" title="Mint a public share link.">Publish</button>
 				</form>
 			}
 		}
 		<form method="post" action={ templ.SafeURL(fmt.Sprintf("/sessions/%d/delete", d.ID)) } class="inline" onsubmit="return confirm('Delete this session and its transcript permanently?')">
-			if owner {
-				<button class="danger small" type="submit" title="Deleting removes this session and its transcript permanently.">Delete</button>
-			} else {
-				<button class="danger small" type="submit" title="Admin: deleting removes this session and its transcript permanently.">Delete</button>
-			}
+			<button class="danger small" type="submit" title="Deletes this session permanently.">Delete</button>
 		</form>
 	</div>
 }
@@ -136,6 +135,9 @@ templ Outline(msgs []store.Message, tools map[int][]store.ToolCallView, blobBase
 									data-tool={ s.ToolName }
 									data-file={ s.FilePath }
 									data-status={ s.ResultStatus }
+									if s.Detail != "" {
+										data-detail={ s.Detail }
+									}
 									if DiffTool(s.ToolName) {
 										data-diff="1"
 									}
@@ -150,10 +152,16 @@ templ Outline(msgs []store.Message, tools map[int][]store.ToolCallView, blobBase
 									if p := ToolFilePath(s); p != "" {
 										<span class="ol-file" title={ ToolFileTitle(s) }>{ BaseName(p) }</span>
 									}
+									if s.Detail != "" {
+										<span class="ol-detail" title={ s.Detail }>{ DetailLabel(s.Detail) }</span>
+									}
 								</a>
 							} else {
 								<a class={ OutlineStepClass(s) } href={ templ.SafeURL(fmt.Sprintf("#msg-%d", m.Ordinal)) }>
 									<span class="ol-tn">{ s.ToolName }</span>
+									if s.Detail != "" {
+										<span class="ol-detail" title={ s.Detail }>{ DetailLabel(s.Detail) }</span>
+									}
 								</a>
 							}
 						}
@@ -379,7 +387,7 @@ templ Transcript(msgs []store.Message, tools map[int][]store.ToolCallView, attac
 								</span>
 							}
 						</span>
-						<span class="muted small">{ FmtTime(m.Timestamp) }</span>
+						<span class="muted small">{ FmtTime(ctx, m.Timestamp) }</span>
 					</div>
 					if m.HasThinking && m.ThinkingText != "" {
 						<details class="thinking">
@@ -489,6 +497,9 @@ templ ToolChip(t store.ToolCallView, blobBase string) {
 		<span class="tname">{ t.ToolName }</span>
 		if p := ToolFilePath(t); p != "" {
 			<span class="tpath muted" title={ ToolFileTitle(t) }>{ p }</span>
+		}
+		if t.Detail != "" {
+			<span class="tdetail muted" title={ t.Detail }>{ DetailLabel(t.Detail) }</span>
 		}
 		if t.InputSHA != "" {
 			<button

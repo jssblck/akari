@@ -11,6 +11,11 @@ import (
 // floatPtr returns a pointer to a float, for the nullable per-turn cost in TurnUsage fixtures.
 func floatPtr(f float64) *float64 { return &f }
 
+// fixtureDetail is a codex shell_command's Detail: a realistic invocation longer
+// than DetailLabel's 80-rune cap, so the fixture exercises truncation rather than
+// a string that happens to fit.
+const fixtureDetail = "./scripts/stop-slop.sh --check --format=jsonl --input transcript.jsonl --output findings.jsonl"
+
 // sessionFixture is a representative session detail for render assertions: a
 // remote project session with a couple of turns and a tool call whose bodies live
 // in the CAS, so the chip renders its stamps as body-opening buttons.
@@ -46,7 +51,7 @@ func sessionFixture() (store.SessionDetail, []store.Message, map[int][]store.Too
 	}
 	tools := map[int][]store.ToolCallView{
 		1: {{
-			MessageOrdinal: 1, ToolName: "shell_command", FilePath: "scripts/stop-slop.sh",
+			MessageOrdinal: 1, ToolName: "shell_command", FilePath: "scripts/stop-slop.sh", Detail: fixtureDetail,
 			InputSHA: "aaaa", InputBytes: 143, InputMediaType: "json",
 			ResultSHA: "bbbb", ResultBytes: 5800, ResultMediaType: "text", ResultStatus: "ok",
 		}},
@@ -81,6 +86,47 @@ func TestSessionPageRendersSubagents(t *testing.T) {
 	bare := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, HeaderStats{}, 0, false, true))
 	if strings.Contains(bare, "<h2>Subagents</h2>") {
 		t.Error("session page without subagents should omit the Subagents heading")
+	}
+}
+
+// A tool call's Detail (the bounded, human-scannable summary of its input) renders
+// on both surfaces that show a tool call: the transcript chip and the outline step
+// nested under its turn. Outline renders from the same tools map SessionPage passes
+// it, so this asserts against SessionPage's output rather than calling Outline
+// directly. templ HTML-escapes attribute values, so the title assertion checks the
+// escaped form; the fixture detail has no characters that need escaping, so the
+// raw and escaped forms coincide here.
+func TestToolCallDetailRendersOnChipAndOutline(t *testing.T) {
+	p := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "jessoteric"}
+	d, msgs, tools := sessionFixture()
+	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, HeaderStats{}, 0, false, true))
+
+	label := DetailLabel(fixtureDetail)
+	if label == fixtureDetail {
+		t.Fatalf("fixture detail must exceed the 80-rune cap to exercise truncation, got label %q", label)
+	}
+
+	for _, want := range []string{
+		`class="tdetail muted" title="` + fixtureDetail + `"` + `>` + label + `<`, // the chip
+		`data-detail="` + fixtureDetail + `"`,                                     // the inspect-open outline step carries the full text for app.js
+		`class="ol-detail" title="` + fixtureDetail + `"` + `>` + label + `<`,     // the outline step's own label
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("session page missing %q", want)
+		}
+	}
+
+	// A call with no Detail (an old CAS-stripped session, or a tool like Read whose
+	// chip already shows FilePath) renders neither span, so the page degrades to
+	// today's output exactly.
+	bareTools := map[int][]store.ToolCallView{
+		1: {{MessageOrdinal: 1, ToolName: "Read", FilePath: "internal/server/web/session.templ"}},
+	}
+	bare := renderComponent(t, SessionPage(p, d, msgs, bareTools, nil, nil, HeaderStats{}, 0, false, true))
+	for _, unwant := range []string{`class="tdetail`, `class="ol-detail`, `data-detail`} {
+		if strings.Contains(bare, unwant) {
+			t.Errorf("a tool call with no Detail should render no %q", unwant)
+		}
 	}
 }
 

@@ -1,12 +1,57 @@
 package web
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jssblck/akari/internal/server/store"
 )
+
+// TestDetailLabel pins the chip-summary rendering for store.ToolCallView.Detail:
+// whitespace of any kind collapses to single spaces so a multi-line shell
+// command reads as one scannable line, and the output is capped at 80 runes
+// with a trailing ellipsis so a chip never grows to the size of its input. The
+// full text still reaches the reader through the element's title attribute, so
+// the cap here is purely a display concern.
+func TestDetailLabel(t *testing.T) {
+	if got := DetailLabel(""); got != "" {
+		t.Errorf("empty detail = %q, want empty", got)
+	}
+	if got := DetailLabel("go test ./..."); got != "go test ./..." {
+		t.Errorf("plain detail = %q", got)
+	}
+	// A multi-line command (tabs, newlines, repeated spaces) collapses to one
+	// space-separated line, the same rendering an OutlineTitle turn gets.
+	if got := DetailLabel("go build \\\n\t./...  &&\ngo test ./..."); got != "go build \\ ./... && go test ./..." {
+		t.Errorf("multiline detail = %q", got)
+	}
+	// Content beyond the cap is truncated with a single trailing ellipsis rune
+	// and never longer than the cap plus that rune, regardless of input size.
+	long := ""
+	for i := 0; i < 40; i++ {
+		long += "word "
+	}
+	got := DetailLabel(long)
+	runes := []rune(got)
+	if runes[len(runes)-1] != '…' {
+		t.Errorf("a long detail should end with an ellipsis: %q", got)
+	}
+	if n := len(runes); n != 81 {
+		t.Errorf("a long detail should be exactly cap+ellipsis runes, got %d: %q", n, got)
+	}
+	// A multi-byte rune sitting right at the 80-rune boundary must be emitted
+	// whole, never split mid-sequence: the cap counts runes, not bytes.
+	boundary := strings.Repeat("a", 79) + "€word"
+	got = DetailLabel(boundary)
+	if !strings.HasPrefix(got, strings.Repeat("a", 79)+"€") {
+		t.Errorf("a multi-byte rune at the boundary should be emitted intact: %q", got)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("truncation past the boundary rune should still end in an ellipsis: %q", got)
+	}
+}
 
 func TestDuplicateIDsLabel(t *testing.T) {
 	if got := DuplicateIDsLabel(1); got != "1 duplicate id" {
@@ -107,7 +152,9 @@ func TestProjectSessionListRemainderFooter(t *testing.T) {
 }
 
 // relTime buckets the recent past into coarse phrases and falls back to an
-// absolute stamp once a relative one stops being useful.
+// absolute stamp once a relative one stops being useful. Day distance is measured in
+// the viewer's zone, so the same instant can bucket differently depending on the
+// reader's timezone.
 func TestRelTime(t *testing.T) {
 	now := time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC)
 	cases := []struct {
@@ -124,22 +171,73 @@ func TestRelTime(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := relTime(now, c.when); got != c.want {
+			if got := relTime(now, c.when, time.UTC); got != c.want {
 				t.Errorf("relTime(%s) = %q, want %q", c.when.Format(time.RFC3339), got, c.want)
 			}
 		})
+	}
+
+	// A viewer's zone can move an instant across the day boundary, changing the
+	// bucket. At 2026-06-29 03:00 UTC a stamp from 2026-06-29 01:00 UTC is "today" in
+	// UTC, but a viewer in a zone eight hours behind (US Pacific, PDT) is still on
+	// 2026-06-28 for both instants at their local wall clock: 03:00 UTC is 2026-06-28
+	// 20:00 local, so it reads "today" there too. Shift the reference clock forward to
+	// local midnight to make the two zones disagree.
+	pacific, err := time.LoadLocation("America/Los_Angeles")
+	if err != nil {
+		t.Skipf("America/Los_Angeles unavailable: %v", err)
+	}
+	// 2026-06-29 07:30 UTC is 2026-06-29 00:30 PDT (just past local midnight), while
+	// the stamp 2026-06-29 05:00 UTC is 2026-06-28 22:00 PDT (still the day before).
+	nowUTC := time.Date(2026, 6, 29, 7, 30, 0, 0, time.UTC)
+	stamp := time.Date(2026, 6, 29, 5, 0, 0, 0, time.UTC)
+	if got := relTime(nowUTC, stamp, time.UTC); got != "today" {
+		t.Errorf("in UTC both instants sit on 2026-06-29, want %q, got %q", "today", got)
+	}
+	if got := relTime(nowUTC, stamp, pacific); got != "1 day ago" {
+		t.Errorf("in Pacific the stamp is the previous local day, want %q, got %q", "1 day ago", got)
 	}
 }
 
 // FmtRelTime returns a dash for the absent timestamp rather than panicking on a
 // nil pointer or formatting the zero time.
 func TestFmtRelTimeAbsent(t *testing.T) {
-	if got := FmtRelTime(nil); got != "-" {
+	ctx := context.Background()
+	if got := FmtRelTime(ctx, nil); got != "-" {
 		t.Errorf("FmtRelTime(nil) = %q, want %q", got, "-")
 	}
 	var zero time.Time
-	if got := FmtRelTime(&zero); got != "-" {
+	if got := FmtRelTime(ctx, &zero); got != "-" {
 		t.Errorf("FmtRelTime(zero) = %q, want %q", got, "-")
+	}
+}
+
+// FmtTime and FmtTimeAt render in the viewer's zone carried on the context, and
+// FmtTimeLong appends the zone abbreviation so a hover title names its zone.
+func TestFmtTimeLocalizes(t *testing.T) {
+	pacific, err := time.LoadLocation("America/Los_Angeles")
+	if err != nil {
+		t.Skipf("America/Los_Angeles unavailable: %v", err)
+	}
+	// 2026-06-29 07:30 UTC is 2026-06-29 00:30 PDT.
+	ts := time.Date(2026, 6, 29, 7, 30, 0, 0, time.UTC)
+	utcCtx := context.Background()
+	laCtx := WithLoc(context.Background(), pacific)
+
+	if got := FmtTime(utcCtx, &ts); got != "2026-06-29 07:30" {
+		t.Errorf("FmtTime UTC = %q, want %q", got, "2026-06-29 07:30")
+	}
+	if got := FmtTime(laCtx, &ts); got != "2026-06-29 00:30" {
+		t.Errorf("FmtTime Pacific = %q, want %q", got, "2026-06-29 00:30")
+	}
+	if got := FmtTimeAt(laCtx, ts); got != "2026-06-29 00:30" {
+		t.Errorf("FmtTimeAt Pacific = %q, want %q", got, "2026-06-29 00:30")
+	}
+	if got := FmtTimeLong(utcCtx, &ts); got != "2026-06-29 07:30 UTC" {
+		t.Errorf("FmtTimeLong UTC = %q, want %q", got, "2026-06-29 07:30 UTC")
+	}
+	if got := FmtTimeLong(laCtx, &ts); got != "2026-06-29 00:30 PDT" {
+		t.Errorf("FmtTimeLong Pacific = %q, want %q", got, "2026-06-29 00:30 PDT")
 	}
 }
 

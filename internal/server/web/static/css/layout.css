@@ -52,6 +52,29 @@ header.topbar nav .gh-link { display: inline-flex; }
 .sidebar .sb-icon { display: inline-flex; color: var(--muted); }
 .sidebar .sb-icon:hover { color: var(--lilac); text-decoration: none; }
 
+/* ---- Notice banner ----
+   A one-shot confirmation strip ("Published", "Session deleted", ...) set by an
+   action handler and rendered once at the top of main. Surface Raised fill and a
+   hairline keep it quiet rather than alarmed; it fades out on its own after a few
+   seconds or on a click of its dismiss control (app.js). */
+.notice {
+  display: flex; align-items: center; gap: var(--sp-md);
+  margin-bottom: var(--sp-lg); padding: var(--sp-sm) var(--sp-md);
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--r-md); color: var(--text);
+  animation: fadein var(--dur-base) var(--ease-state);
+}
+.notice.notice-out { opacity: 0; transition: opacity var(--dur-slow) var(--ease-state); }
+.notice-text { flex: 1; }
+.notice-dismiss {
+  background: transparent; color: var(--muted); border: none;
+  border-radius: var(--r-sm); padding: 2px 6px; font-size: 1rem; line-height: 1;
+}
+.notice-dismiss:hover { background: var(--surface-3); color: var(--text); }
+@media (prefers-reduced-motion: reduce) {
+  .notice.notice-out { opacity: 0; transition: none; }
+}
+
 /* ---- Responsive ---- */
 @media (max-width: 980px) {
   /* Collapse the sidebar into a horizontal top strip so the content gets the
