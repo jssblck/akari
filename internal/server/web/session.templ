@@ -136,6 +136,9 @@ templ Outline(msgs []store.Message, tools map[int][]store.ToolCallView, blobBase
 									data-tool={ s.ToolName }
 									data-file={ s.FilePath }
 									data-status={ s.ResultStatus }
+									if s.Detail != "" {
+										data-detail={ s.Detail }
+									}
 									if DiffTool(s.ToolName) {
 										data-diff="1"
 									}
@@ -150,10 +153,16 @@ templ Outline(msgs []store.Message, tools map[int][]store.ToolCallView, blobBase
 									if s.FilePath != "" {
 										<span class="ol-file">{ BaseName(s.FilePath) }</span>
 									}
+									if s.Detail != "" {
+										<span class="ol-detail" title={ s.Detail }>{ DetailLabel(s.Detail) }</span>
+									}
 								</a>
 							} else {
 								<a class={ OutlineStepClass(s) } href={ templ.SafeURL(fmt.Sprintf("#msg-%d", m.Ordinal)) }>
 									<span class="ol-tn">{ s.ToolName }</span>
+									if s.Detail != "" {
+										<span class="ol-detail" title={ s.Detail }>{ DetailLabel(s.Detail) }</span>
+									}
 								</a>
 							}
 						}
@@ -379,6 +388,9 @@ templ ToolChip(t store.ToolCallView, blobBase string) {
 		<span class="tname">{ t.ToolName }</span>
 		if t.FilePath != "" {
 			<span class="tpath muted">{ t.FilePath }</span>
+		}
+		if t.Detail != "" {
+			<span class="tdetail muted" title={ t.Detail }>{ DetailLabel(t.Detail) }</span>
 		}
 		if t.InputSHA != "" {
 			<button

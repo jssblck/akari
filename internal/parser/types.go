@@ -81,12 +81,20 @@ type Message struct {
 // the server records the reference instead of re-storing the body. InputJSON is
 // empty in that case. When the body travels inline, InputJSON holds it and the
 // SHA/bytes/media fields are unset (the server hashes and sizes the inline body).
+//
+// Detail is a bounded, human-scannable summary of the input the UI shows when a
+// call has no file_path: a shell command, a search pattern, a fetched URL, or an
+// agent's description, derived from the input's top-level JSON keys. On the inline
+// path it is derived here from the raw input; on the sentinel path the body is no
+// longer readable, so it rides the sentinel and comes back through the casRef,
+// exactly the way FilePath does.
 type ToolCall struct {
 	MessageOrdinal  int
 	CallIndex       int
 	ToolName        string
 	Category        string
 	FilePath        string
+	Detail          string
 	InputJSON       string
 	InputSHA256     string
 	InputBytes      int

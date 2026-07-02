@@ -124,6 +124,7 @@ type ToolCallView struct {
 	ToolName        string
 	Category        string
 	FilePath        string
+	Detail          string
 	InputSHA        string
 	InputBytes      int64
 	InputMediaType  string
@@ -1003,7 +1004,7 @@ func (s *Store) scanMessages(ctx context.Context, query string, args ...any) ([]
 // renderer. Bounded readers pass a message-ordinal range to ToolCallsInRange.
 func (s *Store) ToolCalls(ctx context.Context, sessionID int64) ([]ToolCallView, error) {
 	return s.scanToolCalls(ctx,
-		`SELECT message_ordinal, call_index, tool_name, coalesce(category,''), coalesce(file_path,''),
+		`SELECT message_ordinal, call_index, tool_name, coalesce(category,''), coalesce(file_path,''), coalesce(detail,''),
 		        coalesce(input_sha256,''), coalesce(input_bytes,0), coalesce(input_media_type,''),
 		        coalesce(result_sha256,''), coalesce(result_bytes,0), coalesce(result_media_type,''), coalesce(result_status,'')
 		   FROM tool_calls WHERE session_id = $1 ORDER BY message_ordinal, call_index`, sessionID)
@@ -1014,7 +1015,7 @@ func (s *Store) ToolCalls(ctx context.Context, sessionID int64) ([]ToolCallView,
 // only the calls for the messages it returned rather than the whole session.
 func (s *Store) ToolCallsInRange(ctx context.Context, sessionID int64, minOrdinal, maxOrdinal int) ([]ToolCallView, error) {
 	return s.scanToolCalls(ctx,
-		`SELECT message_ordinal, call_index, tool_name, coalesce(category,''), coalesce(file_path,''),
+		`SELECT message_ordinal, call_index, tool_name, coalesce(category,''), coalesce(file_path,''), coalesce(detail,''),
 		        coalesce(input_sha256,''), coalesce(input_bytes,0), coalesce(input_media_type,''),
 		        coalesce(result_sha256,''), coalesce(result_bytes,0), coalesce(result_media_type,''), coalesce(result_status,'')
 		   FROM tool_calls WHERE session_id = $1 AND message_ordinal BETWEEN $2 AND $3
@@ -1030,7 +1031,7 @@ func (s *Store) scanToolCalls(ctx context.Context, query string, args ...any) ([
 	var out []ToolCallView
 	for rows.Next() {
 		var t ToolCallView
-		if err := rows.Scan(&t.MessageOrdinal, &t.CallIndex, &t.ToolName, &t.Category, &t.FilePath,
+		if err := rows.Scan(&t.MessageOrdinal, &t.CallIndex, &t.ToolName, &t.Category, &t.FilePath, &t.Detail,
 			&t.InputSHA, &t.InputBytes, &t.InputMediaType,
 			&t.ResultSHA, &t.ResultBytes, &t.ResultMediaType, &t.ResultStatus); err != nil {
 			return nil, err

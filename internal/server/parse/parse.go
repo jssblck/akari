@@ -30,7 +30,14 @@ import (
 // Version 3 added Codex custom_tool_call bodies and binary image attachments (image
 // generation results and pasted images) to the projection, so a reparse backfills
 // those rows on already-ingested sessions.
-const Version = 3
+//
+// Version 4 added a per-tool-call detail: a bounded, human-scannable summary of the
+// input (a shell command, a search pattern, a fetched URL, or an agent's
+// description) the UI shows when a call has no file_path. It is derived from the
+// input's top-level JSON keys where the body is inline, and rides the CAS sentinel
+// where the client already lifted the body, so a reparse backfills it on
+// inline-bodied sessions while a client-stripped one keeps an empty detail.
+const Version = 4
 
 // Advance parses any not-yet-parsed bytes of a session and applies them to the
 // projection, looping until the parse cursor catches up to the stored length. It
@@ -127,6 +134,7 @@ func toProjectionDelta(p parser.Delta) store.ProjectionDelta {
 			ToolName:       t.ToolName,
 			Category:       t.Category,
 			FilePath:       t.FilePath,
+			Detail:         t.Detail,
 			CallUID:        t.CallUID,
 		}
 		switch {

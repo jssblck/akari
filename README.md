@@ -287,8 +287,11 @@ Projects, Sessions, Account); the signed-in user and log-out sit at its foot.
   the grade, and the peak context and reset count behind the tokens. Tool input
   and result bodies show as size/type chips; clicking one opens the body in an
   inspector modal, fetched from the CAS, and an editing tool's input opens as a
-  rendered diff. Subagent sessions are listed under the session that spawned
-  them. In-progress sessions update live over server-sent events.
+  rendered diff. A call's file path, or a bounded one-line summary of its input
+  when it has none (a shell command, a search pattern, a fetched URL), shows
+  beside the chip and the matching outline step, with the full text on hover.
+  Subagent sessions are listed under the session that spawned them. In-progress
+  sessions update live over server-sent events.
 - **Charts** are rendered by a small dependency-free SVG module bundled as a
   static asset; the UI fonts (Geist and Geist Mono) are self-hosted, so the binary
   stays self-contained with no Node toolchain.

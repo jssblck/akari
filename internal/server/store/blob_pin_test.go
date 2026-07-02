@@ -252,6 +252,75 @@ func TestApplyDeltaReferencesUploadedBlob(t *testing.T) {
 	}
 }
 
+// TestToolCallDetailRoundTrip confirms a tool call's detail (the bounded input
+// summary the UI shows when a call has no file_path) is stored and read back on
+// both projection paths: the inline body path (the server writes the blob) and the
+// client-lifted sentinel path (the reference is recorded with the detail already
+// derived off the sentinel). It is DB-gated and skips cleanly without a test
+// database, like the other store tests.
+func TestToolCallDetailRoundTrip(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	u, err := st.Register(ctx, "ada", "hash", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid := seedSession(t, st, u.ID, projectID, "detail-sess")
+
+	// A client-lifted input: the blob is uploaded first, and the parsed delta carries
+	// the reference plus the detail the client derived off the sentinel.
+	liftedBody := `{"command":"go build ./..."}`
+	liftedSHA := store.HashString(liftedBody)
+	if err := st.PutBlob(ctx, liftedSHA, "application/json", "application/octet-stream", strings.NewReader(liftedBody)); err != nil {
+		t.Fatal(err)
+	}
+
+	delta := store.ProjectionDelta{
+		Messages: []store.MessageDelta{{Ordinal: 0, Role: "assistant", Content: "x", HasToolUse: true}},
+		ToolCalls: []store.ProjToolCall{
+			{
+				MessageOrdinal: 0, CallIndex: 0, ToolName: "Grep", Category: "search",
+				Detail:         "func Reduce",
+				InputBody:      `{"pattern":"func Reduce"}`,
+				InputMediaType: "application/json", CallUID: "c-inline",
+			},
+			{
+				MessageOrdinal: 0, CallIndex: 1, ToolName: "Bash", Category: "bash",
+				Detail:      "go build ./...",
+				InputSHA256: liftedSHA, InputBytes: int64(len(liftedBody)), InputMediaType: "application/json", CallUID: "c-sentinel",
+			},
+		},
+	}
+	if err := st.ApplyProjectionDelta(ctx, sid, delta); err != nil {
+		t.Fatalf("apply projection: %v", err)
+	}
+
+	calls, err := st.ToolCalls(ctx, sid)
+	if err != nil {
+		t.Fatalf("read tool calls: %v", err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("read %d tool calls, want 2", len(calls))
+	}
+	if got, want := calls[0].Detail, "func Reduce"; got != want {
+		t.Errorf("inline-path detail = %q, want %q", got, want)
+	}
+	if got, want := calls[1].Detail, "go build ./..."; got != want {
+		t.Errorf("sentinel-path detail = %q, want %q", got, want)
+	}
+	// The sentinel-path call also carries its reference, so the detail rides beside
+	// the CAS reference rather than an inline body.
+	if calls[1].InputSHA != liftedSHA {
+		t.Errorf("sentinel-path input sha = %q, want %q", calls[1].InputSHA, liftedSHA)
+	}
+}
+
 // TestApplyDeltaMissingUploadedBlobFails confirms a transcript referencing a body
 // the CAS does not hold is refused rather than recording a dangling reference.
 func TestApplyDeltaMissingUploadedBlobFails(t *testing.T) {

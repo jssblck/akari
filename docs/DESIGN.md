@@ -283,10 +283,14 @@ turn aligned. `sha256` is the CAS key, the hash of the STORED bytes the CAS hold
 Compression under CAS), not the raw body, so the transcript references exactly the
 bytes the CAS serves. `bytes` is the RAW body length, the size the row and UI
 report, kept independent of how the bytes are stored. `media_type` is the body's
-semantic type. The extraction and the sentinel have one definition in
-`internal/parser`, used by both the client (to lift and rewrite) and the server
-reducer (to interpret), so the client-uploaded body set can never drift from what
-the server records.
+semantic type. A tool-input sentinel also carries two optional fields the reducer
+projects onto the tool call, because lifting the body would otherwise erase them:
+`file_path` (the input's top-level file path), and `detail` (a bounded
+human-scannable summary of the input: a command, pattern, URL, or description the
+UI shows when a call has no file_path). The extraction and the sentinel have one
+definition in `internal/parser`, used by both the client (to lift and rewrite) and
+the server reducer (to interpret), so the client-uploaded body set can never drift
+from what the server records.
 
 **Resume model.** The client still resumes by the ORIGINAL on-disk file, because
 that is all it can recompute statelessly (offset plus prefix hash). But the bytes
@@ -705,6 +709,7 @@ CREATE TABLE tool_calls (
   tool_name         TEXT NOT NULL,
   category          TEXT NOT NULL DEFAULT '',
   file_path         TEXT,                  -- convenience, parsed from input
+  detail            TEXT,                  -- bounded input summary (command/pattern/url/description); NULL is unmeasured
   -- Bulky bodies live in the CAS; the row keeps only references and metadata.
   input_sha256      CHAR(64) REFERENCES blobs(sha256),
   input_bytes       BIGINT,
@@ -884,8 +889,10 @@ Pages:
   attachments), with a stats header (tokens in/out/cache-read/cache-write,
   cost, duration, message counts). Tool inputs and results render as metadata
   chips (for example "36 KB json") that expand on click to fetch the body from
-  the CAS. Any subagent sessions are shown nested under the call that spawned
-  them. A publish/unpublish control for the owner.
+  the CAS, and a call's file path or, absent one, its bounded detail summary
+  (a command, pattern, or URL) shows alongside the chip and in the outline
+  step for that call. Any subagent sessions are shown nested under the call
+  that spawned them. A publish/unpublish control for the owner.
 - **Public session view**: the same session view at `/s/{public_id}` (the
   unguessable id minted on publish), served without auth. Unpublishing clears the
   id and the link dies.

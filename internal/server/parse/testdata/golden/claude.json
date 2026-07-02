@@ -38,6 +38,7 @@
       "ToolName": "Read",
       "Category": "read",
       "FilePath": "auth.go",
+      "Detail": "",
       "InputBody": "{\"file_path\":\"auth.go\"}",
       "InputSHA256": "",
       "InputBytes": 23,

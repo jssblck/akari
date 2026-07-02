@@ -301,7 +301,7 @@ func (t *transformer) handleBigLine(ctx context.Context, origOff, origLen int64)
 		if err != nil {
 			return err
 		}
-		rewritten = append(rewritten, sentinelFor(body, loc.FilePath)...)
+		rewritten = append(rewritten, sentinelFor(body, loc.FilePath, loc.Detail)...)
 		cursor = loc.Span.End
 		if int64(len(rewritten)) > hardCap {
 			return errMessageTooBig(t.agent)
@@ -394,10 +394,10 @@ func appendFileSpan(dst []byte, f *os.File, agent string, off, n int64) ([]byte,
 
 // sentinelFor renders the CAS reference that replaces a body, reusing the parser's
 // canonical encoding so the bytes match what RewriteLine produces for a small line.
-// filePath comes from the body's BodyLocation (a JSON tool input's top-level
-// file_path), empty for everything else.
-func sentinelFor(b parser.Body, filePath string) []byte {
-	return parser.SentinelBytes(b.SHA256, b.Bytes, b.MediaType, filePath)
+// filePath and detail come from the body's BodyLocation (a JSON tool input's
+// top-level file_path and its short summary), empty for everything else.
+func sentinelFor(b parser.Body, filePath, detail string) []byte {
+	return parser.SentinelBytes(b.SHA256, b.Bytes, b.MediaType, filePath, detail)
 }
 
 // lineContentLen returns the byte length of a line's content (its bytes minus a
@@ -502,7 +502,7 @@ func rewriteForDigest(ctx context.Context, f *os.File, agent string, line []byte
 		if err != nil {
 			return err
 		}
-		rewritten = append(rewritten, parser.SentinelBytes(sha, rawLen, loc.Media, loc.FilePath)...)
+		rewritten = append(rewritten, parser.SentinelBytes(sha, rawLen, loc.Media, loc.FilePath, loc.Detail)...)
 		cursor = loc.Span.End
 		return nil
 	}

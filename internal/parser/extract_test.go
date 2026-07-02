@@ -237,6 +237,12 @@ func TestRoundTripProjection(t *testing.T) {
 				if o.FilePath != n.FilePath {
 					t.Errorf("call %d file path = %q, want %q", i, n.FilePath, o.FilePath)
 				}
+				// The detail is derived the same way: the inline parse derives it from
+				// the raw input, and the sentinel carries it once the body is lifted, so
+				// the two must agree exactly.
+				if o.Detail != n.Detail {
+					t.Errorf("call %d detail = %q, want %q", i, n.Detail, o.Detail)
+				}
 			}
 
 			if len(orig.UsageEvent) != len(roundTripped.UsageEvent) {
@@ -267,6 +273,92 @@ func TestSentinelFilePathInputsOnly(t *testing.T) {
 	rewritten, _ = RewriteLine(AgentCodex, []byte(patch), idEncoder{})
 	if strings.Contains(string(rewritten), `"file_path"`) {
 		t.Errorf("non-JSON input sentinel must not carry a file_path: %s", rewritten)
+	}
+}
+
+// TestSentinelDetail pins the sentinel detail rule: a JSON tool input's first
+// candidate key (in the command, pattern, url, query, description, skill priority
+// order) rides on its sentinel, an over-cap command falls back to the description,
+// and the field is denied to everything the rule excludes (a result body, a
+// non-JSON input, a non-string command). It exercises the buffered RewriteLine
+// path; the streaming twin's parity is covered by the locate tests.
+func TestSentinelDetail(t *testing.T) {
+	overCap := strings.Repeat("x", maxSentinelDetail+1)
+	cases := []struct {
+		name    string
+		agent   Agent
+		line    string
+		want    string // exact detail substring expected in the sentinel
+		wantNo  bool   // when true, assert no "detail" field appears at all
+		absentS string // a value that must NOT appear (a skipped/lower-priority candidate)
+	}{
+		{
+			name:  "bash command",
+			agent: AgentClaude,
+			line:  `{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"go test ./...","description":"run the tests"}}]}}`,
+			want:  `"detail":"go test ./..."`,
+		},
+		{
+			name:    "over-cap command falls back to description",
+			agent:   AgentClaude,
+			line:    `{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"` + overCap + `","description":"a heredoc"}}]}}`,
+			want:    `"detail":"a heredoc"`,
+			absentS: overCap,
+		},
+		{
+			name:  "grep pattern",
+			agent: AgentClaude,
+			line:  `{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Grep","input":{"pattern":"func Reduce"}}]}}`,
+			want:  `"detail":"func Reduce"`,
+		},
+		{
+			name:  "webfetch url",
+			agent: AgentClaude,
+			line:  `{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"WebFetch","input":{"url":"https://ada.example/spec"}}]}}`,
+			want:  `"detail":"https://ada.example/spec"`,
+		},
+		{
+			name:  "agent description",
+			agent: AgentClaude,
+			line:  `{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Agent","input":{"description":"explore the store layer"}}]}}`,
+			want:  `"detail":"explore the store layer"`,
+		},
+		{
+			name:   "tool result never gets a detail",
+			agent:  AgentClaude,
+			line:   `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":{"command":"rm -rf /","ok":true}}]}}`,
+			wantNo: true,
+		},
+		{
+			name:   "non-JSON custom_tool_call input gets none",
+			agent:  AgentCodex,
+			line:   `{"type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","call_id":"c1","input":"*** a patch with a command: word"}}`,
+			wantNo: true,
+		},
+		{
+			name:   "non-string command (Codex shell array) is skipped",
+			agent:  AgentCodex,
+			line:   `{"type":"response_item","payload":{"type":"function_call","name":"shell","call_id":"c1","arguments":"{\"command\":[\"bash\",\"-lc\",\"ls\"]}"}}`,
+			wantNo: true,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rewritten, _ := RewriteLine(c.agent, []byte(c.line+"\n"), idEncoder{})
+			got := string(rewritten)
+			if c.wantNo {
+				if strings.Contains(got, `"detail"`) {
+					t.Errorf("expected no detail, got: %s", got)
+				}
+				return
+			}
+			if !strings.Contains(got, c.want) {
+				t.Errorf("detail %q not in sentinel: %s", c.want, got)
+			}
+			if c.absentS != "" && strings.Contains(got, c.absentS) {
+				t.Errorf("skipped candidate %q leaked into sentinel: %s", c.absentS, got)
+			}
+		})
 	}
 }
 

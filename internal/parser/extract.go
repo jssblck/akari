@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -29,10 +30,11 @@ func HashString(content string) string {
 // server reducer, on seeing the sentinel, records the reference (sha256, byte
 // length, media type) without re-storing the body.
 //
-// A tool-input sentinel also carries the input's top-level file_path string when
-// it has one. The reducer projects that field onto the tool call (it drives the
-// file names the UI shows per call), and lifting the input would otherwise erase
-// it: the reducer reads the transcript, and the body is no longer there.
+// A tool-input sentinel also carries two derived-from-the-body fields the reducer
+// projects onto the tool call: the input's top-level file_path string when it has
+// one, and a short human-scannable detail (a command, pattern, URL, or
+// description). The reducer reads both from the transcript, so lifting the input
+// would otherwise erase them: the body is no longer there to read.
 //
 // The key is deliberately namespaced so it cannot collide with a real tool body:
 // no agent emits a tool input or result whose top-level shape is a JSON object
@@ -98,13 +100,16 @@ type Body struct {
 
 // casRef is the parsed sentinel: the reference the server records in place of a
 // body it no longer has to store. FilePath is the top-level file_path string the
-// lifted tool input carried, preserved on the sentinel because the reducer reads
-// it from the transcript and the body itself is no longer there to read.
+// lifted tool input carried, and Detail is the input's short human-scannable
+// summary (a command, pattern, URL, or description); both are preserved on the
+// sentinel because the reducer reads them from the transcript and the body itself
+// is no longer there to read.
 type casRef struct {
 	SHA256    string
 	Bytes     int
 	MediaType string
 	FilePath  string
+	Detail    string
 }
 
 // maxSentinelFilePath caps the file_path a sentinel carries. A path longer than
@@ -113,14 +118,32 @@ type casRef struct {
 // paths, which must produce byte-identical sentinels for the same body.
 const maxSentinelFilePath = 4096
 
+// maxSentinelDetail caps the detail a sentinel carries. A value longer than this
+// is not a scannable one-liner; dropping it (rather than truncating) keeps the
+// sentinel small and the derivation rule trivially identical between the buffered
+// and streaming rewrite paths, which must produce byte-identical sentinels for the
+// same body. Over-cap drops fall through to the next candidate, so a Bash heredoc
+// whose command exceeds the cap still yields its description.
+const maxSentinelDetail = 2048
+
+// detailKeys is the priority order for deriving a tool input's detail: the first
+// candidate present as a non-empty JSON string within the cap wins. It is
+// tool-name-agnostic, keyed only on the input's shape, so it covers the wanted
+// tools without naming them: Bash and PowerShell carry command (with description
+// as the fallback when a heredoc command exceeds the cap), Grep and Glob carry
+// pattern, WebFetch carries url, WebSearch carries query, Agent carries
+// description, and Skill carries skill. Read, Edit, and Write have none of these
+// keys and keep an empty detail (their chip already shows file_path).
+var detailKeys = []string{"command", "pattern", "url", "query", "description", "skill"}
+
 // SentinelBytes renders the CAS reference that replaces a tool body, for callers
 // outside the package (the client's streaming big-line path) that build a rewritten
 // line from located spans rather than from a parsed line. It is the same encoding
 // RewriteLine uses, so a body lifted by streaming produces a byte-identical sentinel
-// to one lifted by the buffered path. filePath is empty for anything that is not a
-// tool input carrying one.
-func SentinelBytes(sha string, n int, media, filePath string) []byte {
-	return sentinelBytes(sha, n, media, filePath)
+// to one lifted by the buffered path. filePath and detail are empty for anything
+// that is not a tool input carrying them.
+func SentinelBytes(sha string, n int, media, filePath, detail string) []byte {
+	return sentinelBytes(sha, n, media, filePath, detail)
 }
 
 // sentinelBytes renders the compact reference that replaces a body in the
@@ -128,26 +151,32 @@ func SentinelBytes(sha string, n int, media, filePath string) []byte {
 // valid JSONL and a Codex line keeps its turn-boundary shape: the client's chunk
 // boundary detection and the server's line parser both see the same line count
 // and the same newline positions as the original.
-func sentinelBytes(sha string, n int, media, filePath string) []byte {
+func sentinelBytes(sha string, n int, media, filePath, detail string) []byte {
 	// Hand-build the object so the field order and escaping are fixed and
 	// independent of map iteration: the rewritten transcript must be byte stable
 	// across runs so a re-sync of an unchanged file produces identical bytes and
-	// uploads nothing.
+	// uploads nothing. The order is sha256, bytes, media_type, then file_path when
+	// non-empty, then detail when non-empty, so both optional fields append at a
+	// fixed position and never reorder.
 	b, _ := json.Marshal(media)
-	if filePath == "" {
-		return []byte(fmt.Sprintf(`{"%s":1,"sha256":%q,"bytes":%d,"media_type":%s}`,
-			sentinelKey, sha, n, string(b)))
+	out := fmt.Sprintf(`{"%s":1,"sha256":%q,"bytes":%d,"media_type":%s`,
+		sentinelKey, sha, n, string(b))
+	if filePath != "" {
+		fp, _ := json.Marshal(filePath)
+		out += `,"file_path":` + string(fp)
 	}
-	fp, _ := json.Marshal(filePath)
-	return []byte(fmt.Sprintf(`{"%s":1,"sha256":%q,"bytes":%d,"media_type":%s,"file_path":%s}`,
-		sentinelKey, sha, n, string(b), string(fp)))
+	if detail != "" {
+		dt, _ := json.Marshal(detail)
+		out += `,"detail":` + string(dt)
+	}
+	return []byte(out + "}")
 }
 
 // sentinelFilePath decides what file_path a body's sentinel carries: the top-level
 // file_path string of a JSON tool input, or "" for everything else (results,
 // non-JSON inputs, a non-string or absurdly long value). Lifting the whole input to
 // the CAS would otherwise destroy the one input field the reducer projects onto
-// every tool call, so the sentinel keeps it. The streaming path's bodyFilePath
+// every tool call, so the sentinel keeps it. The streaming path's inputProjections
 // applies this same rule over spans; the two must stay in lockstep so a line
 // rewrites to identical bytes on either path.
 func sentinelFilePath(kind, media, content string) string {
@@ -159,6 +188,102 @@ func sentinelFilePath(kind, media, content string) string {
 		return ""
 	}
 	return v.String()
+}
+
+// sentinelDetail decides what detail a body's sentinel carries: the derived
+// one-liner for a JSON tool input, or "" for everything else (results, non-JSON
+// inputs). It gates on the same conditions as sentinelFilePath (a tool input whose
+// media is application/json) so a result whose JSON happens to carry a command key
+// never gets one. The streaming path's inputDetail-over-spans applies the same
+// derivation rule; the two must stay in lockstep so a line rewrites to identical
+// bytes on either path.
+func sentinelDetail(kind, media, content string) string {
+	if kind != bodyKindInput || media != "application/json" {
+		return ""
+	}
+	return inputDetail(content)
+}
+
+// inputDetail derives a tool input's short human-scannable detail from its
+// top-level JSON keys, taking the first candidate in detailKeys whose value is a
+// JSON string with decoded length in (0, maxSentinelDetail]. An absent, non-string,
+// empty, or over-cap value is skipped and the next candidate is tried, so a Bash
+// heredoc whose command exceeds the cap still yields its description. It returns ""
+// for non-JSON content (a Codex custom_tool_call patch, a text/plain body), which
+// is why callers that may pass non-JSON guard on gjson.Valid; claude passes an
+// object's Raw, which is always valid.
+//
+// The candidates are located as spans (one LocateValues pass, the same matcher the
+// streaming path uses) rather than pulled through gjson, and a value's raw span is
+// bounded before it is decoded: gjson materializes an escaped string's decoded form
+// on match, so a giant over-cap command would be allocated in full just to be
+// dropped. Bounding first caps the decode at the sentinel limit, and sharing the
+// matcher keeps the two rewrite paths agreeing by construction.
+func inputDetail(content string) string {
+	if !gjson.Valid(content) {
+		return ""
+	}
+	paths := make([][]Step, len(detailKeys))
+	for i, key := range detailKeys {
+		paths[i] = []Step{Key(key)}
+	}
+	located, err := LocateValues(context.Background(), paths, stringWindows(content))
+	if err != nil {
+		return ""
+	}
+	spans := make(map[int]ValueSpan, len(located))
+	for _, ls := range located {
+		spans[ls.PathIndex] = ls.Span
+	}
+	for i := range detailKeys {
+		sp, ok := spans[i]
+		if !ok {
+			continue
+		}
+		// A JSON string of decoded length <= maxSentinelDetail occupies at most 6
+		// bytes per character (a \uXXXX escape) plus the quotes, so a raw span past
+		// that bound cannot decode under the cap and is skipped without decoding.
+		n := sp.End - sp.Start
+		if n < 2 || n > int64(6*maxSentinelDetail+2) {
+			continue
+		}
+		var s string
+		if json.Unmarshal([]byte(content[sp.Start:sp.End]), &s) != nil {
+			continue // not a string value; the rule wants strings only
+		}
+		if s == "" || len(s) > maxSentinelDetail {
+			continue
+		}
+		return s
+	}
+	return ""
+}
+
+// stringWindows adapts an in-memory document to the chunked next() a streaming
+// scan consumes, copying one bounded window per call so the scan never duplicates
+// the whole content just to feed the scanner.
+func stringWindows(content string) func() ([]byte, error) {
+	const window = 64 << 10
+	pos := 0
+	var buf []byte
+	return func() ([]byte, error) {
+		if pos >= len(content) {
+			return nil, io.EOF
+		}
+		end := pos + window
+		if end > len(content) {
+			end = len(content)
+		}
+		if buf == nil {
+			buf = make([]byte, 0, end-pos)
+		}
+		buf = append(buf[:0], content[pos:end]...)
+		pos = end
+		if pos >= len(content) {
+			return buf, io.EOF
+		}
+		return buf, nil
+	}
 }
 
 // asCASRef reports whether a parsed tool body is a CAS sentinel, returning the
@@ -177,6 +302,7 @@ func asCASRef(v gjson.Result) (casRef, bool) {
 		Bytes:     int(v.Get("bytes").Int()),
 		MediaType: v.Get("media_type").String(),
 		FilePath:  v.Get("file_path").String(),
+		Detail:    v.Get("detail").String(),
 	}, true
 }
 
@@ -498,7 +624,8 @@ func RewriteLine(agent Agent, line []byte, enc BodyEncoder) ([]byte, []Body) {
 		sha, stored, contentType := enc.EncodeBody([]byte(f.content))
 		rewritten = append(rewritten, trimmed[cursor:f.start]...)
 		rewritten = append(rewritten, sentinelBytes(sha, len(f.content), f.media,
-			sentinelFilePath(f.kind, f.media, f.content))...)
+			sentinelFilePath(f.kind, f.media, f.content),
+			sentinelDetail(f.kind, f.media, f.content))...)
 		cursor = f.end
 		bodies = append(bodies, Body{
 			SHA256:      sha,

@@ -54,7 +54,9 @@ message counts. Below it is the transcript itself:
   size-and-type chips (for example "36 KB json"). Clicking one opens the body in
   the inspector modal, fetched from content-addressed storage on demand, so a
   large body gets real room without pushing the transcript around. An editing
-  tool's input opens as a rendered **diff** rather than raw JSON.
+  tool's input opens as a rendered **diff** rather than raw JSON. A tool with no
+  file path, such as a shell command or a search pattern, instead carries a
+  one-line summary of its input on the chip, with the full text on hover.
 - **Subagents** spawned by the session are listed under it, so a run that launched
   helpers reads as a tree rather than scattered rows.
 - **Live updates.** A session still being written updates in place over
