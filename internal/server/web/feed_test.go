@@ -107,6 +107,57 @@ func TestBuildSessionFeed(t *testing.T) {
 	}
 }
 
+// TestOutcomeFilterOptions pins the outcome toolbar select's option set: the canonical
+// best-to-worst order the distribution bars use, each key paired with OutcomeLabel's
+// display text, and that FilterOption.Key round-trips as the value a handler would
+// receive back from the select.
+func TestOutcomeFilterOptions(t *testing.T) {
+	opts := OutcomeFilterOptions()
+	wantKeys := []string{"completed", "errored", "abandoned", "unknown"}
+	if len(opts) != len(wantKeys) {
+		t.Fatalf("got %d options, want %d", len(opts), len(wantKeys))
+	}
+	for i, want := range wantKeys {
+		if opts[i].Key != want {
+			t.Errorf("option[%d].Key = %q, want %q", i, opts[i].Key, want)
+		}
+		if opts[i].Label != OutcomeLabel(want) {
+			t.Errorf("option[%d].Label = %q, want OutcomeLabel(%q) = %q", i, opts[i].Label, want, OutcomeLabel(want))
+		}
+		// The key is exactly what a selected option would submit back on the query
+		// string, so a round-trip through IsOutcome (the handler's whitelist) must accept
+		// it.
+		if !IsOutcome(opts[i].Key) {
+			t.Errorf("option key %q should round-trip through IsOutcome", opts[i].Key)
+		}
+	}
+}
+
+// TestGradeFilterOptions pins the grade toolbar select's option set: the five letters
+// best to worst, then the unscored sentinel last, each label matching the letter itself
+// (or "Unscored" for the sentinel), and every key round-tripping through IsGrade.
+func TestGradeFilterOptions(t *testing.T) {
+	opts := GradeFilterOptions()
+	wantKeys := []string{"A", "B", "C", "D", "F", "unscored"}
+	if len(opts) != len(wantKeys) {
+		t.Fatalf("got %d options, want %d", len(opts), len(wantKeys))
+	}
+	for i, want := range wantKeys {
+		if opts[i].Key != want {
+			t.Errorf("option[%d].Key = %q, want %q", i, opts[i].Key, want)
+		}
+		if !IsGrade(opts[i].Key) {
+			t.Errorf("option key %q should round-trip through IsGrade", opts[i].Key)
+		}
+	}
+	wantLabels := []string{"A", "B", "C", "D", "F", "Unscored"}
+	for i, want := range wantLabels {
+		if opts[i].Label != want {
+			t.Errorf("option[%d].Label = %q, want %q", i, opts[i].Label, want)
+		}
+	}
+}
+
 // FeedTime renders the clock time of day in the viewer's zone, with a placeholder
 // for a missing stamp.
 func TestFeedTime(t *testing.T) {

@@ -277,32 +277,43 @@ Projects, Sessions, Account); the signed-in user and log-out sit at its foot.
   latency percentiles and throughput); a tools band (call volume, error rate, and
   the busiest tools banded by reliability); a prompt-hygiene band (how clearly the
   window's prompts set the agent up); a context-health band (how heavy sessions
-  got and how often they shed context); distributions of quality grades, outcomes,
-  and session archetypes; and a file-churn list of paths edited more than once.
+  got and how often they shed context); a People panel (per-user sessions,
+  outcome mix, graded count, and average score; hidden on single-user instances);
+  distributions of quality grades (with a "N% graded" coverage note), outcomes,
+  and session archetypes, the grade and outcome bars drilling into the Sessions
+  feed filtered to that bucket; and a file-churn list of paths edited more than
+  once, grouped per project across worktrees.
 - **Sessions**: every session across all projects in one place, with a faceted
-  filter rail (agent, project, user, and machine, each with counts) and a project
-  column, so a run is findable without first choosing its project.
+  filter rail (agent, project, user, and machine, each with counts), outcome and
+  grade filters, and a project column, so a run is findable without first
+  choosing its project.
 - **Projects index**: one full-width table of git-remote projects, each row with
   its session count, a single token total (hover it for the in/out/cache-read/
   cache-write breakdown), cost, a 30-day cost sparkline, and a relative "updated"
   time. Fleet usage lives on the Overview; local folders reach you through the
   Sessions filter rail, so neither crowds this surface.
 - **Project view**: that project's sessions across all users and machines, with
-  agent, user, and machine filters, and the same analytics panel scoped to the
-  project.
+  agent, user, and machine filters, the same analytics panel scoped to the
+  project, and a Quality band (grades with the same coverage note, outcomes,
+  archetypes, tools reliability, and project-scoped churn) whose grade and
+  outcome bars drill into that project's filtered sessions.
 - **Session view**: a sticky stats header (tokens in/out/cache, cost, duration,
   message counts, and a Quality tile carrying the session's grade and outcome) and
   the transcript: messages, thinking, and tool calls, with a timeline rail that
-  maps the turns and flags errored tools. The Quality and Tokens tiles reveal
-  their drivers on hover: the tool-health counts and prompt-hygiene flags behind
-  the grade, and the peak context and reset count behind the tokens. Tool input
-  and result bodies show as size/type chips; clicking one opens the body in an
-  inspector modal, fetched from the CAS, and an editing tool's input opens as a
-  rendered diff. A call's file path, or a bounded one-line summary of its input
-  when it has none (a shell command, a search pattern, a fetched URL), shows
-  beside the chip and the matching outline step, with the full text on hover.
-  Subagent sessions are listed under the session that spawned them. In-progress
-  sessions update live over server-sent events.
+  maps the turns and flags errored tools. Each turn carries a reply-latency stamp,
+  a per-message context size ("ctx 82k"), and a cost stamp whose tooltip breaks
+  the cost down by token class; a divider marks an inferred context shed ("context
+  shed: 356k -> 66k"). User messages carry prompt-hygiene badges (terse, no code
+  pointer, repeat) where they apply. The Quality and Tokens tiles reveal their
+  drivers on hover: a score-arithmetic breakdown and the prompt-hygiene flags
+  behind the grade, and the peak context and reset count behind the tokens. Tool
+  input and result bodies show as size/type chips; clicking one opens the body in
+  an inspector modal, fetched from the CAS, and an editing tool's input opens as a
+  rendered diff. A tool chip's file path reads worktree-relative, or, when a call
+  has no file path, a bounded one-line summary of its input (a shell command, a
+  search pattern, a fetched URL) shows beside the chip and the matching outline
+  step, with the full text on hover. Subagent sessions are listed under the session
+  that spawned them. In-progress sessions update live over server-sent events.
 - **Charts** are rendered by a small dependency-free SVG module bundled as a
   static asset; the UI fonts (Geist and Geist Mono) are self-hosted, so the binary
   stays self-contained with no Node toolchain.
@@ -315,15 +326,26 @@ Projects, Sessions, Account); the signed-in user and log-out sit at its foot.
 Every session carries derived signals computed from its own projection, never
 from a label the agent emits. An outcome (completed, abandoned, errored, or
 unknown, each with a confidence) is inferred from the last substantive turn,
-unresolved tool calls, and any trailing failures. A 0-100 quality score and an
-A-F grade come from a penalty model over tool health: failures, immediate
-retries, edit churn, and the longest failure streak, weighed with the outcome.
-Two further signal sets are informational and never move the grade. Prompt
-hygiene reads the human's input (terse, repeated, or no-code-context prompts, and
-unstructured openings); context health reads resource load (the heaviest
-single-turn context a session held, as a raw token count independent of any
-model's window, and the number of inferred context resets, the sharp drops that
-read as a compaction or a clear).
+unresolved tool calls, and any trailing failures. Trailing failures win first: a
+run of three or more failing tool calls at the tail reads errored regardless of
+who was in the loop. A settled automation run (no human turn) that reached a
+substantive assistant last word now reads completed at medium confidence rather
+than unknown, and a session that goes idle while stuck mid-tool reads errored for
+automation or abandoned for a human, so a session that has actually settled gets
+a verdict where the first version of the classifier gave up. A 0-100 quality
+score and an A-F grade come from a penalty model over tool health: failures,
+immediate retries, edit churn, and the longest failure streak, weighed with the
+outcome. Two further signal sets are informational and never move the grade.
+Prompt hygiene reads the human's input (terse, repeated, or no-code-context
+prompts, and unstructured openings); context health reads resource load (the
+heaviest single-turn context a session held, as a raw token count independent of
+any model's window, and the number of inferred context resets, the sharp drops
+that read as a compaction or a clear).
+
+File churn is worktree-invariant: each tool call's file path is stored both as
+given and as a session-relative path with the working directory stripped and
+separators normalized, so the same repo file edited from several worktrees or
+machines groups into one churn row, labeled with its project.
 
 The signals live in their own table, rebuilt from the session's stored messages,
 tool calls, and usage on catch-up or reparse. They sit outside the token-rollup

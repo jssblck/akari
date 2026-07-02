@@ -22,6 +22,10 @@ type Insights struct {
 	Hygiene     PromptHygiene
 	Churn       FileChurn
 	Context     ContextHealthStats
+	// Users is the per-author quality leaderboard: who ran the window's sessions and how
+	// their work graded. It shares the snapshot so its per-user session counts reconcile
+	// with the quality total the distributions read.
+	Users UserQualityStats
 }
 
 // HasData reports whether any scoped session carried signals, so the page can show an
@@ -69,6 +73,9 @@ func (s *Store) Insights(ctx context.Context, f AnalyticsFilter) (Insights, erro
 				return err
 			}
 			if out.Context, err = s.contextHealthFrom(ctx, tx, f); err != nil {
+				return err
+			}
+			if out.Users, err = s.userQualityFrom(ctx, tx, f); err != nil {
 				return err
 			}
 			return nil

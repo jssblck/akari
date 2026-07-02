@@ -125,6 +125,151 @@ func TestFileChurn(t *testing.T) {
 	}
 }
 
+// setSessionCwd sets a session's announced working directory, so a churn test can place two
+// sessions in different git worktrees of one repo and confirm their edits collapse on the
+// worktree-invariant relative path.
+func setSessionCwd(t *testing.T, st *store.Store, ctx context.Context, sid int64, cwd string) {
+	t.Helper()
+	if _, err := st.Pool.Exec(ctx, `UPDATE sessions SET cwd = $2 WHERE id = $1`, sid, cwd); err != nil {
+		t.Fatalf("set cwd for %d: %v", sid, err)
+	}
+}
+
+// TestFileChurnCollapsesWorktrees is the reason file_rel_path exists: two sessions in the SAME
+// project but different working directories (two git worktrees of one repo) edit the same
+// repo-relative file with different absolute paths, and the churn aggregate must fold them into a
+// single row keyed on the relative path with Sessions = 2, not two per-worktree rows. The
+// projection derives file_rel_path from each session's cwd at apply time, so the absolute paths
+// differ while the stored relative path matches.
+func TestFileChurnCollapsesWorktrees(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	ada := seedUser(t, st, "ada")
+	pid, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recent := time.Now().Add(-1 * time.Hour)
+
+	// Worktree A at C:\proj\akari edits internal\x.go twice.
+	sA := seedSession(t, st, ada, pid, "wtA")
+	setSessionCwd(t, st, ctx, sA, `C:\proj\akari`)
+	if err := st.ApplyProjectionDelta(ctx, sA, store.ProjectionDelta{
+		Messages: []store.MessageDelta{
+			{Ordinal: 0, Role: "user", Content: "edit"},
+			{Ordinal: 1, Role: "assistant", Content: "editing", HasToolUse: true},
+		},
+		ToolCalls: []store.ProjToolCall{
+			{MessageOrdinal: 1, CallIndex: 0, ToolName: "Edit", Category: "edit", FilePath: `C:\proj\akari\internal\x.go`, InputBody: "a1", CallUID: "a1"},
+			{MessageOrdinal: 1, CallIndex: 1, ToolName: "Edit", Category: "edit", FilePath: `C:\proj\akari\internal\x.go`, InputBody: "a2", CallUID: "a2"},
+		},
+		ToolResults: []store.ToolResultDelta{{CallUID: "a1", Status: "ok"}, {CallUID: "a2", Status: "ok"}},
+	}); err != nil {
+		t.Fatalf("apply sA: %v", err)
+	}
+	setSessionShape(t, st, ctx, sA, recent, recent.Add(5*time.Minute), 2, 1)
+
+	// Worktree B at C:\worktrees\akari\foo (differing drive-letter case too) edits the same
+	// repo-relative file twice, from a different absolute path.
+	sB := seedSession(t, st, ada, pid, "wtB")
+	setSessionCwd(t, st, ctx, sB, `C:\worktrees\akari\foo`)
+	if err := st.ApplyProjectionDelta(ctx, sB, store.ProjectionDelta{
+		Messages: []store.MessageDelta{
+			{Ordinal: 0, Role: "user", Content: "edit"},
+			{Ordinal: 1, Role: "assistant", Content: "editing", HasToolUse: true},
+		},
+		ToolCalls: []store.ProjToolCall{
+			{MessageOrdinal: 1, CallIndex: 0, ToolName: "Edit", Category: "edit", FilePath: `c:\worktrees\akari\foo\internal\x.go`, InputBody: "b1", CallUID: "b1"},
+			{MessageOrdinal: 1, CallIndex: 1, ToolName: "Edit", Category: "edit", FilePath: `c:\worktrees\akari\foo\internal\x.go`, InputBody: "b2", CallUID: "b2"},
+		},
+		ToolResults: []store.ToolResultDelta{{CallUID: "b1", Status: "ok"}, {CallUID: "b2", Status: "ok"}},
+	}); err != nil {
+		t.Fatalf("apply sB: %v", err)
+	}
+	setSessionShape(t, st, ctx, sB, recent, recent.Add(5*time.Minute), 2, 1)
+
+	fc, err := st.FileChurn(ctx, store.AnalyticsFilter{})
+	if err != nil {
+		t.Fatalf("file churn: %v", err)
+	}
+	if len(fc.Files) != 1 {
+		t.Fatalf("churn files = %d, want 1 (both worktrees collapse on internal/x.go): %+v", len(fc.Files), fc.Files)
+	}
+	f := fc.Files[0]
+	if f.Path != "internal/x.go" {
+		t.Errorf("churn path = %q, want the relative internal/x.go", f.Path)
+	}
+	if f.Edits != 4 || f.Sessions != 2 {
+		t.Errorf("churn = {edits %d, sessions %d}, want {4, 2} (collapsed across worktrees)", f.Edits, f.Sessions)
+	}
+	if f.Project != "github.com/jssblck/akari" {
+		t.Errorf("churn project = %q, want the remote_key label github.com/jssblck/akari", f.Project)
+	}
+}
+
+// TestFileChurnKeepsProjectsDistinct confirms the same relative path in two DIFFERENT projects
+// stays two rows: the grouping key is (project, relative path), so a file named identically in two
+// repos does not merge into a single misleading total.
+func TestFileChurnKeepsProjectsDistinct(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	ada := seedUser(t, st, "ada")
+	p1, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p2, err := st.UpsertProject(ctx, "github.com/ada/engine", "github.com", "ada", "engine", "engine", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recent := time.Now().Add(-1 * time.Hour)
+
+	edit := func(sid int64, cwd, path, prefix string) {
+		setSessionCwd(t, st, ctx, sid, cwd)
+		if err := st.ApplyProjectionDelta(ctx, sid, store.ProjectionDelta{
+			Messages: []store.MessageDelta{
+				{Ordinal: 0, Role: "user", Content: "edit"},
+				{Ordinal: 1, Role: "assistant", Content: "editing", HasToolUse: true},
+			},
+			ToolCalls: []store.ProjToolCall{
+				{MessageOrdinal: 1, CallIndex: 0, ToolName: "Edit", Category: "edit", FilePath: path, InputBody: prefix + "1", CallUID: prefix + "1"},
+				{MessageOrdinal: 1, CallIndex: 1, ToolName: "Edit", Category: "edit", FilePath: path, InputBody: prefix + "2", CallUID: prefix + "2"},
+			},
+			ToolResults: []store.ToolResultDelta{{CallUID: prefix + "1", Status: "ok"}, {CallUID: prefix + "2", Status: "ok"}},
+		}); err != nil {
+			t.Fatalf("apply %s: %v", prefix, err)
+		}
+		setSessionShape(t, st, ctx, sid, recent, recent.Add(5*time.Minute), 2, 1)
+	}
+
+	s1 := seedSession(t, st, ada, p1, "proj1")
+	edit(s1, "/home/ada/akari", "/home/ada/akari/README.md", "one")
+	s2 := seedSession(t, st, ada, p2, "proj2")
+	edit(s2, "/home/ada/engine", "/home/ada/engine/README.md", "two")
+
+	fc, err := st.FileChurn(ctx, store.AnalyticsFilter{})
+	if err != nil {
+		t.Fatalf("file churn: %v", err)
+	}
+	if len(fc.Files) != 2 {
+		t.Fatalf("churn files = %d, want 2 (README.md in two projects stays distinct): %+v", len(fc.Files), fc.Files)
+	}
+	for _, f := range fc.Files {
+		if f.Path != "README.md" {
+			t.Errorf("churn path = %q, want README.md", f.Path)
+		}
+		if f.Edits != 2 || f.Sessions != 1 {
+			t.Errorf("churn %+v, want {edits 2, sessions 1}", f)
+		}
+	}
+	labels := map[string]bool{fc.Files[0].Project: true, fc.Files[1].Project: true}
+	if !labels["github.com/jssblck/akari"] || !labels["github.com/ada/engine"] {
+		t.Errorf("churn projects = %v, want both akari and engine remote_key labels", labels)
+	}
+}
+
 // TestFileChurnClips confirms the list caps at maxChurnFiles with the overflow in Clipped.
 func TestFileChurnClips(t *testing.T) {
 	t.Parallel()

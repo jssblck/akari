@@ -149,8 +149,8 @@ templ Outline(msgs []store.Message, tools map[int][]store.ToolCallView, blobBase
 									}
 								>
 									<span class="ol-tn">{ s.ToolName }</span>
-									if s.FilePath != "" {
-										<span class="ol-file">{ BaseName(s.FilePath) }</span>
+									if p := ToolFilePath(s); p != "" {
+										<span class="ol-file" title={ ToolFileTitle(s) }>{ BaseName(p) }</span>
 									}
 									if s.Detail != "" {
 										<span class="ol-detail" title={ s.Detail }>{ DetailLabel(s.Detail) }</span>
@@ -252,6 +252,27 @@ templ statQuality(s store.SessionSignals) {
 					}
 				</dl>
 			}
+			if s.Scored() {
+				// The score arithmetic explains the grade rather than asserting it: one row per
+				// penalty (label left, the negative points it subtracted right), then the final
+				// score. A clean scored run has no penalties, so it reads "no penalties" instead of
+				// an empty group.
+				{{ breakdown := ScoreBreakdownItems(s) }}
+				<div class="tt-sub">Score arithmetic</div>
+				<dl class="tt-grid tt-score">
+					if len(breakdown) == 0 {
+						<dt>No penalties</dt>
+						<dd class="mono">-0</dd>
+					} else {
+						for _, item := range breakdown {
+							<dt>{ item.Label }</dt>
+							<dd class="mono">{ fmt.Sprintf("-%d", item.Points) }</dd>
+						}
+					}
+					<dt>Score</dt>
+					<dd class="mono">{ fmt.Sprintf("%d", *s.Score) }</dd>
+				</dl>
+			}
 		</div>
 	</div>
 }
@@ -309,19 +330,63 @@ templ stat(label, value, key string) {
 	</div>
 }
 
+// Transcript renders the session's messages as an instrumented trace. The two carried per-message
+// instruments (reply latency and context sheds) are derived while walking the message slice with a
+// TranscriptWalker holding only bounded state (see session_metrics.go), so the render path holds no
+// session-sized structure beyond the message slice the page already renders; the duplicate-prompt
+// verdict rides on each message (m.DuplicatePrompt), and each turn's usage rides on m.Usage, both
+// folded in the message read. The meta line carries a right-aligned cluster of stamps (latency,
+// then a context+cost stamp group that hosts a per-turn token breakdown card); a shed divider
+// hosting its own before/after breakdown card is drawn above the marked message; muted hygiene tags
+// sit after a user message's role tag.
 templ Transcript(msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, blobBase string) {
 	if len(msgs) == 0 {
 		<div class="empty">No messages parsed yet.</div>
 	} else {
+		{{ walker := &TranscriptWalker{} }}
 		<div class="transcript">
 			for _, m := range msgs {
+				{{ metrics := walker.Next(m) }}
+				if metrics.Shed != nil {
+					@shedDivider(*metrics.Shed)
+				}
 				<div class={ "msg " + RoleClass(m.Role) } id={ fmt.Sprintf("msg-%d", m.Ordinal) } data-ordinal={ fmt.Sprintf("%d", m.Ordinal) }>
 					<div class="meta">
 						<span class="role">{ m.Role }</span>
 						if m.Model != "" {
 							<span class="tag model">{ m.Model }</span>
 						}
+						if m.Role == "user" && m.PromptFactsCurrent {
+							if m.PromptShort {
+								<span class="tag hygiene" title="under 4 words: give the agent something to grip">terse</span>
+							}
+							if m.PromptNoCode {
+								<span class="tag hygiene" title="a change request with no file, path, or code anchor">no code pointer</span>
+							}
+							if m.DuplicatePrompt {
+								<span class="tag hygiene" title="verbatim repeat of an earlier prompt">repeat</span>
+							}
+						}
 						<span class="spacer"></span>
+						<span class="meta-metrics">
+							if metrics.Latency > 0 {
+								<span class="stamp-latency mono" title="time from the prompt to this reply">{ FmtTurnLatency(metrics.Latency) }</span>
+							}
+							if m.Usage != nil {
+								// One focusable host wraps the ctx and cost stamps and carries a single
+								// per-turn breakdown card (the four token classes, reasoning if present, the
+								// context total, and the turn cost or "unpriced"). The visible stamps stay as
+								// compact as before; the card is the detail, so no bare token figure renders
+								// without its breakdown.
+								<span class="tok-cell turn-metrics" tabindex="0">
+									<span class="stamp-ctx mono">{ FmtContextStamp(*m.Usage) }</span>
+									if m.Usage.CostUSD != nil {
+										<span class="stamp-cost mono">{ FmtCost(*m.Usage.CostUSD, m.Usage.CostIncomplete) }</span>
+									}
+									@turnCard(*m.Usage)
+								</span>
+							}
+						</span>
 						<span class="muted small">{ FmtTime(ctx, m.Timestamp) }</span>
 					</div>
 					if m.HasThinking && m.ThinkingText != "" {
@@ -351,6 +416,51 @@ templ Transcript(msgs []store.Message, tools map[int][]store.ToolCallView, attac
 			}
 		</div>
 	}
+}
+
+// shedDivider draws the context-shed divider above the turn that first ran on the shed-down
+// context: the centered "context shed: <from> -> <to>" label, hosting a focusable breakdown card
+// that splits the before turn and the after turn into their token classes and cost. The label's
+// two figures are context occupancy (input + cache read + cache write), so each bare figure gets
+// its full per-class detail in the card rather than standing alone, the same treatment every other
+// token figure in the transcript carries. Each side carries its own cost line (the turn's cost, or
+// "unpriced" when it never got a rate) through the same TurnCostLabel and .tt-cost idiom the turn
+// card uses, so the two occupancy figures never render without the spend behind them. The divider
+// is focusable (tabindex) so the card opens on keyboard focus as well as hover, matching the turn
+// stamp beside it.
+templ shedDivider(shed ShedMark) {
+	<div class="msg-shed tok-cell" role="separator" tabindex="0" aria-label={ ShedLabel(shed) }>
+		<span class="shed-label mono">{ ShedLabel(shed) }</span>
+		<span class="tok-tip shed-tip" role="tooltip">
+			<span class="tt-total">context shed</span>
+			<dl class="tt-grid">
+				<dt>Before</dt>
+				<dd>{ FmtTokens(shed.FromTokens) }</dd>
+				<dt>In</dt>
+				<dd>{ FmtTokens(shed.FromUsage.Input) }</dd>
+				<dt>Cache read</dt>
+				<dd>{ FmtTokens(shed.FromUsage.CacheRead) }</dd>
+				<dt>Cache write</dt>
+				<dd>{ FmtTokens(shed.FromUsage.CacheWrite) }</dd>
+				<dt>Output</dt>
+				<dd>{ FmtTokens(shed.FromUsage.Output) }</dd>
+			</dl>
+			<span class="tt-cost">{ TurnCostLabel(shed.FromUsage) }</span>
+			<dl class="tt-grid shed-after">
+				<dt>After</dt>
+				<dd>{ FmtTokens(shed.ToTokens) }</dd>
+				<dt>In</dt>
+				<dd>{ FmtTokens(shed.ToUsage.Input) }</dd>
+				<dt>Cache read</dt>
+				<dd>{ FmtTokens(shed.ToUsage.CacheRead) }</dd>
+				<dt>Cache write</dt>
+				<dd>{ FmtTokens(shed.ToUsage.CacheWrite) }</dd>
+				<dt>Output</dt>
+				<dd>{ FmtTokens(shed.ToUsage.Output) }</dd>
+			</dl>
+			<span class="tt-cost">{ TurnCostLabel(shed.ToUsage) }</span>
+		</span>
+	</div>
 }
 
 // AttachmentTile renders one binary attachment. An image is shown inline from its
@@ -385,8 +495,8 @@ templ AttachmentTile(a store.AttachmentView, blobBase string) {
 templ ToolChip(t store.ToolCallView, blobBase string) {
 	<div class="tool-chip">
 		<span class="tname">{ t.ToolName }</span>
-		if t.FilePath != "" {
-			<span class="tpath muted">{ t.FilePath }</span>
+		if p := ToolFilePath(t); p != "" {
+			<span class="tpath muted" title={ ToolFileTitle(t) }>{ p }</span>
 		}
 		if t.Detail != "" {
 			<span class="tdetail muted" title={ t.Detail }>{ DetailLabel(t.Detail) }</span>

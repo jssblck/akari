@@ -111,7 +111,17 @@ type SessionDetail struct {
 	CacheSavingsIncomplete bool
 }
 
-// Message is one transcript row for rendering.
+// Message is one transcript row for rendering. The prompt-hygiene facts (PromptShort,
+// PromptNoCode, PromptDigest) are the fixed-size verdicts quality.ClassifyPrompt materialized
+// on the row when the message was written (migration 0022); they carry no prompt body, so the
+// full-transcript read stays fixed-size per row and never re-reads content to classify it.
+//
+// PromptFactsCurrent gates them: it is true only when the row's stored prompt_facts_version
+// matches the running quality.PromptFactsVersion AND the digest is non-NULL (a real classified
+// human turn). The version gate is why the renderer keys off this flag rather than the raw
+// booleans: a message classified under a superseded classifier (or a pre-migration row that
+// never carried facts) must render as nothing (no badge) rather than as a stale, possibly-wrong
+// badge. An epoch reparse re-derives the facts at the current version and flips this back on.
 type Message struct {
 	Ordinal      int
 	Role         string
@@ -121,16 +131,39 @@ type Message struct {
 	HasThinking  bool
 	HasToolUse   bool
 	Timestamp    *time.Time
+	// Prompt-hygiene facts, meaningful only when PromptFactsCurrent is true.
+	PromptShort        bool
+	PromptNoCode       bool
+	PromptDigest       int64
+	PromptFactsCurrent bool
+	// Usage is this turn's rolled-up token load and cost, folded per message ordinal from the
+	// session's usage_events in the same read (a LEFT JOIN, not a second query), so the transcript
+	// stamps a message with its own context and cost without holding a second session-sized map
+	// beside the message slice. It is nil when the ordinal carried no attributed usage_events row
+	// (an ordinal with no dated usage has no turn load to show), the same "no entry" the old
+	// per-ordinal usage map expressed by a missing key.
+	Usage *TurnUsage
+	// DuplicatePrompt is true when this user turn repeats an earlier eligible prompt's digest
+	// verbatim, computed in SQL over the same eligible set gatherPromptHygiene's duplicate count
+	// uses (role user, content_length > 0, current prompt facts, a non-null digest, and NOT
+	// prompt_short), so a transcript "repeat" badge and the stored duplicate_prompt_count read the
+	// same set. The first occurrence of a digest is never marked (it is the original); every later
+	// eligible occurrence is. An ineligible row is never marked.
+	DuplicatePrompt bool
 }
 
 // ToolCallView is one tool call rendered as metadata (the body lives in the CAS,
 // fetched on demand by its sha256).
 type ToolCallView struct {
-	MessageOrdinal  int
-	CallIndex       int
-	ToolName        string
-	Category        string
-	FilePath        string
+	MessageOrdinal int
+	CallIndex      int
+	ToolName       string
+	Category       string
+	FilePath       string
+	// FileRelPath is the worktree-relative form of FilePath (migration 0030), empty when the
+	// path sits outside the session's workspace or no cwd was known. The transcript shows it in
+	// preference to the absolute FilePath: the same repo file reads the same across worktrees.
+	FileRelPath     string
 	Detail          string
 	InputSHA        string
 	InputBytes      int64
@@ -1338,13 +1371,91 @@ func (s *Store) MessageCount(ctx context.Context, sessionID int64) (int, error) 
 	return n, nil
 }
 
-// Messages returns a session's whole transcript in order. The web renderer wants
-// the full session in one pass; bounded readers (the MCP transcript window) use
-// MessagesPage instead so peak memory does not scale with session size.
+// messageReadColumns is the transcript-row column list shared by the full read and the bounded
+// window read, so both scan into the same Message shape through scanMessages. It selects the
+// message row's own columns, the prompt-hygiene facts gated by content_length > 0 and the current
+// classifier version (PromptFactsCurrent), and the stored duplicate-prompt verdict. gatherPromptHygiene
+// in signals.go counts only user turns with content_length > 0 (an empty or attachment-only turn is
+// tool plumbing, not a prompt), so an empty user row must not render a transcript badge the aggregate
+// excluded. duplicate_prompt is materialized at insert over that same eligible set (projection.go),
+// so the transcript "repeat" badge and the stored duplicate_prompt_count read one set; it is read
+// here as a bounded column rather than folded from a whole-session window on every render. The
+// remaining scanned columns (the per-turn usage fold) are supplied by whichever query wraps this
+// list: the full read folds them from the session's usage_events (messagesFullQuery), the bounded
+// window read leaves them empty (messagesWindowQuery), because its only caller, the MCP transcript
+// window, renders no per-turn usage. $2 is quality.PromptFactsVersion.
+const messageReadColumns = `m.ordinal, m.role, m.content, m.thinking_text, m.model, m.has_thinking, m.has_tool_use, m.timestamp,
+	coalesce(m.prompt_short, false), coalesce(m.prompt_no_code, false), coalesce(m.prompt_digest, 0),
+	(m.prompt_facts_version = $2 AND m.prompt_digest IS NOT NULL AND m.content_length > 0),
+	coalesce(m.duplicate_prompt, false)`
+
+// messagesFullQuery is the whole-transcript read behind Messages. It LEFT JOINs the materialized
+// per-turn usage rollup (message_turn_usage) so each returned row carries its own turn load without
+// re-aggregating the session's usage_events on every render, and the render path holds no second
+// session-sized structure beside the message slice it already renders:
+//
+//   - message_turn_usage holds one row per (session, message_ordinal) with the per-turn sums each
+//     message carries on Message.Usage: input, output, cache read, cache write, reasoning, and the
+//     cost. It is maintained at insert (projection.go) as each surviving usage row lands, so this
+//     read joins one indexed row per message rather than scanning and grouping usage_events. The
+//     context occupancy (input + cache read + cache write, output excluded) is computed here from
+//     the joined sums. cost_count (the number of priced rows folded into the turn) rides along so
+//     the scan can apply the all-unpriced-is-nil rule (a turn with no priced row reads nil cost, not
+//     a summed zero that would misread as free; a mixed turn keeps its priced partial), and
+//     cost_incomplete flags a turn that folded a token-bearing but unpriced row so the priced cost
+//     reads as a lower bound. That cost_incomplete rule mirrors costIncompleteExpr (analytics.go),
+//     so a turn's "$X+" marker and the session and analytics cost markers agree. Only turn-attributed
+//     usage contributes to the rollup: a NULL-ordinal usage row belongs to the session totals, not
+//     to any one message, so it is never folded here (projection.go skips it). This is the deliberate
+//     divergence from the stored context signal (gatherContextHealth), which folds every raw
+//     usage_events row in source order (NULL-ordinal rows included) and never collapses two rows
+//     sharing an ordinal: the two agree whenever each ordinal carries exactly one dated usage row
+//     (the shape a real agent produces) and can differ only for a multi-row turn or an unattributed
+//     row, cases the schema permits but the parser does not emit. TestMessagesTurnUsageDivergesFromContextFold
+//     pins the difference; TestMessageTurnUsageMatchesUsageEvents pins that the rollup equals the
+//     GROUP BY over usage_events it replaced.
+//
+// The duplicate-prompt verdict is read from the stored duplicate_prompt column (materialized once at
+// insert, see projection.go) rather than folded from a whole-session window here. Both the per-turn
+// usage and the duplicate flag are now stored per row, so the live body refresh (handleSessionBody
+// re-fetching this on every SSE append) reads bounded indexed rows and does no growing whole-session
+// usage scan or message window. $1 is the session id and $2 is quality.PromptFactsVersion.
+const messagesFullQuery = `
+	SELECT ` + messageReadColumns + `,
+	       mtu.message_ordinal IS NOT NULL,
+	       coalesce(mtu.input_tokens,0), coalesce(mtu.output_tokens,0), coalesce(mtu.cache_read_tokens,0), coalesce(mtu.cache_write_tokens,0),
+	       coalesce(mtu.reasoning_tokens,0),
+	       coalesce(mtu.input_tokens,0) + coalesce(mtu.cache_read_tokens,0) + coalesce(mtu.cache_write_tokens,0),
+	       mtu.cost_sum, coalesce(mtu.cost_count,0), coalesce(mtu.cost_incomplete, false)
+	  FROM messages m
+	  LEFT JOIN message_turn_usage mtu ON mtu.session_id = m.session_id AND mtu.message_ordinal = m.ordinal
+	 WHERE m.session_id = $1
+	 ORDER BY m.ordinal`
+
+// messagesWindowQuery is the bounded transcript read behind MessagesAfter. It selects the message
+// row's columns (including the stored duplicate_prompt, a bounded column read) and emits the usage
+// columns as empty constants (no usage), so it does no whole-session usage scan: its only caller,
+// the MCP transcript window, renders no per-turn usage stamps. The keyset predicate and LIMIT the
+// caller appends keep each page bounded to the requested ordinal range. $1 is the session id, $2 is
+// quality.PromptFactsVersion; the caller's window args start at $3.
+const messagesWindowQuery = `
+	SELECT ` + messageReadColumns + `,
+	       false, 0::bigint, 0::bigint, 0::bigint, 0::bigint, 0::bigint, 0::bigint, NULL::double precision, 0::bigint, false
+	  FROM messages m
+	 WHERE m.session_id = $1`
+
+// Messages returns a session's whole transcript in order, each row carrying its per-turn usage
+// (Usage) and duplicate-prompt verdict (DuplicatePrompt) folded in the same read. The web renderer
+// wants the full session in one pass; bounded readers (the MCP transcript window) use MessagesAfter
+// instead so peak memory does not scale with session size.
+//
+// Both the duplicate-prompt verdict and the per-turn usage are read from stored per-message rows
+// (duplicate_prompt on the messages row and the message_turn_usage rollup, both materialized at
+// insert, see projection.go), not folded from whole-session windows here. So the live body fragment
+// (handleSessionBody) re-fetching this on every SSE append reads bounded indexed rows and does no
+// growing whole-session usage aggregation or message-window scan for either.
 func (s *Store) Messages(ctx context.Context, sessionID int64) ([]Message, error) {
-	return s.scanMessages(ctx,
-		`SELECT ordinal, role, content, thinking_text, model, has_thinking, has_tool_use, timestamp
-		   FROM messages WHERE session_id = $1 ORDER BY ordinal`, sessionID)
+	return s.scanMessages(ctx, sessionID, messagesFullQuery, sessionID, quality.PromptFactsVersion)
 }
 
 // MessagesAfter returns the next window of a session's transcript ordered by
@@ -1354,45 +1465,73 @@ func (s *Store) Messages(ctx context.Context, sessionID int64) ([]Message, error
 // only the next `limit` rows, so reading a whole session window by window costs
 // O(N), not the O(N^2/limit) an OFFSET walk would (Postgres re-skips the already
 // returned prefix on every page). limit is clamped to [1, 2000].
+//
+// It deliberately does NOT fold the per-turn usage or the duplicate-prompt flag (both left empty on
+// the returned messages): those require a whole-session scan, and running them here per page would
+// make a client paging a long transcript pay O(N) whole-session work on each of O(N/limit) pages.
+// The MCP transcript window (its only caller) renders neither, so the bounded read stays bounded.
 func (s *Store) MessagesAfter(ctx context.Context, sessionID int64, after *int, limit int) ([]Message, error) {
 	if limit <= 0 || limit > 2000 {
 		limit = 2000
 	}
 	if after == nil {
-		return s.scanMessages(ctx,
-			`SELECT ordinal, role, content, thinking_text, model, has_thinking, has_tool_use, timestamp
-			   FROM messages WHERE session_id = $1 ORDER BY ordinal LIMIT $2`,
-			sessionID, limit)
+		return s.scanMessages(ctx, sessionID,
+			messagesWindowQuery+` ORDER BY m.ordinal LIMIT $3`,
+			sessionID, quality.PromptFactsVersion, limit)
 	}
-	return s.scanMessages(ctx,
-		`SELECT ordinal, role, content, thinking_text, model, has_thinking, has_tool_use, timestamp
-		   FROM messages WHERE session_id = $1 AND ordinal > $2 ORDER BY ordinal LIMIT $3`,
-		sessionID, *after, limit)
+	return s.scanMessages(ctx, sessionID,
+		messagesWindowQuery+` AND m.ordinal > $3 ORDER BY m.ordinal LIMIT $4`,
+		sessionID, quality.PromptFactsVersion, *after, limit)
 }
 
-func (s *Store) scanMessages(ctx context.Context, query string, args ...any) ([]Message, error) {
+// scanMessages runs a transcript read and scans its rows into Messages. sessionID is carried only
+// to give the error path context: a cursor, network, or cancellation failure mid-read then names
+// the session and the operation rather than surfacing a bare driver error to the handler.
+func (s *Store) scanMessages(ctx context.Context, sessionID int64, query string, args ...any) ([]Message, error) {
 	rows, err := s.Pool.Query(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("query messages for session %d: %w", sessionID, err)
 	}
 	defer rows.Close()
 	var out []Message
 	for rows.Next() {
 		var m Message
+		var hasUsage bool
+		var u TurnUsage
+		var costSum *float64
+		var costCount int64
 		if err := rows.Scan(&m.Ordinal, &m.Role, &m.Content, &m.ThinkingText, &m.Model,
-			&m.HasThinking, &m.HasToolUse, &m.Timestamp); err != nil {
-			return nil, err
+			&m.HasThinking, &m.HasToolUse, &m.Timestamp,
+			&m.PromptShort, &m.PromptNoCode, &m.PromptDigest, &m.PromptFactsCurrent,
+			&m.DuplicatePrompt,
+			&hasUsage, &u.Input, &u.Output, &u.CacheRead, &u.CacheWrite, &u.Reasoning, &u.ContextTokens,
+			&costSum, &costCount, &u.CostIncomplete); err != nil {
+			return nil, fmt.Errorf("scan message for session %d: %w", sessionID, err)
+		}
+		if hasUsage {
+			// count(cost_usd) == 0 means every contributing row was unpriced, so the summed cost is
+			// meaningless: leave CostUSD nil rather than show a summed zero that reads as free. A mixed
+			// group keeps its priced partial (sum ignores NULLs), the all-unpriced-is-nil rule; the
+			// cost_incomplete flag then marks that partial as a lower bound.
+			if costCount > 0 {
+				u.CostUSD = costSum
+			}
+			usage := u
+			m.Usage = &usage
 		}
 		out = append(out, m)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate messages for session %d: %w", sessionID, err)
+	}
+	return out, nil
 }
 
 // ToolCalls returns all of a session's tool calls as metadata, for the web
 // renderer. Bounded readers pass a message-ordinal range to ToolCallsInRange.
 func (s *Store) ToolCalls(ctx context.Context, sessionID int64) ([]ToolCallView, error) {
 	return s.scanToolCalls(ctx,
-		`SELECT message_ordinal, call_index, tool_name, coalesce(category,''), coalesce(file_path,''), coalesce(detail,''),
+		`SELECT message_ordinal, call_index, tool_name, coalesce(category,''), coalesce(file_path,''), coalesce(file_rel_path,''), coalesce(detail,''),
 		        coalesce(input_sha256,''), coalesce(input_bytes,0), coalesce(input_media_type,''),
 		        coalesce(result_sha256,''), coalesce(result_bytes,0), coalesce(result_media_type,''), coalesce(result_status,'')
 		   FROM tool_calls WHERE session_id = $1 ORDER BY message_ordinal, call_index`, sessionID)
@@ -1403,7 +1542,7 @@ func (s *Store) ToolCalls(ctx context.Context, sessionID int64) ([]ToolCallView,
 // only the calls for the messages it returned rather than the whole session.
 func (s *Store) ToolCallsInRange(ctx context.Context, sessionID int64, minOrdinal, maxOrdinal int) ([]ToolCallView, error) {
 	return s.scanToolCalls(ctx,
-		`SELECT message_ordinal, call_index, tool_name, coalesce(category,''), coalesce(file_path,''), coalesce(detail,''),
+		`SELECT message_ordinal, call_index, tool_name, coalesce(category,''), coalesce(file_path,''), coalesce(file_rel_path,''), coalesce(detail,''),
 		        coalesce(input_sha256,''), coalesce(input_bytes,0), coalesce(input_media_type,''),
 		        coalesce(result_sha256,''), coalesce(result_bytes,0), coalesce(result_media_type,''), coalesce(result_status,'')
 		   FROM tool_calls WHERE session_id = $1 AND message_ordinal BETWEEN $2 AND $3
@@ -1419,7 +1558,7 @@ func (s *Store) scanToolCalls(ctx context.Context, query string, args ...any) ([
 	var out []ToolCallView
 	for rows.Next() {
 		var t ToolCallView
-		if err := rows.Scan(&t.MessageOrdinal, &t.CallIndex, &t.ToolName, &t.Category, &t.FilePath, &t.Detail,
+		if err := rows.Scan(&t.MessageOrdinal, &t.CallIndex, &t.ToolName, &t.Category, &t.FilePath, &t.FileRelPath, &t.Detail,
 			&t.InputSHA, &t.InputBytes, &t.InputMediaType,
 			&t.ResultSHA, &t.ResultBytes, &t.ResultMediaType, &t.ResultStatus); err != nil {
 			return nil, err
@@ -1427,6 +1566,41 @@ func (s *Store) scanToolCalls(ctx context.Context, query string, args ...any) ([
 		out = append(out, t)
 	}
 	return out, rows.Err()
+}
+
+// TurnUsage is one message-turn's rolled-up usage, folded across the (possibly several,
+// streamed) usage_events rows that share a message_ordinal. It rides on Message.Usage, folded
+// in the transcript read's usage_agg CTE (see messageReadCTEs) rather than fetched as a separate
+// per-ordinal map. Input, Output, CacheRead, CacheWrite, and Reasoning are the summed token
+// classes.
+//
+// CostUSD is the summed cost, but nil when EVERY contributing row's cost_usd was NULL: an
+// unpriced model has no cost to show, and a summed zero would read as "this turn was free"
+// rather than "we could not price it". A turn that mixes priced and unpriced rows returns the
+// priced partial (a lower bound), matching how the session-level cost total treats an
+// incomplete price.
+//
+// CostIncomplete is true when the turn folded in a usage row that carried real token volume but no
+// price, so CostUSD (when present) is a lower bound: the summed cost covers only the priced subset
+// of the token classes the card shows beside it. It is the per-turn shape of the session and
+// analytics costIncompleteExpr, so the turn's cost stamp gets the same "$X+" lower-bound marker
+// those figures do rather than an exact-looking cost next to unpriced tokens. It is false for a
+// fully-priced turn and for a fully-unpriced one (where CostUSD is nil and the card reads
+// "unpriced" instead).
+//
+// ContextTokens is the turn's context occupancy: Input + CacheRead + CacheWrite, output
+// EXCLUDED. It is the size of the prompt presented that turn (what the model had to read),
+// not the cumulative spend: output tokens are what the model produced, so they are not part of
+// the context it carried in. This mirrors gatherContextHealth's definition exactly (the same
+// three-class sum), so the per-message context stamp and the session's peak-context signal are
+// measuring the same thing at two granularities. The divergence between this ordinal-grouped,
+// attributed-only fold and the signal's raw fold is documented on the usage_agg CTE in
+// messageReadCTEs and pinned by TestMessagesTurnUsageDivergesFromContextFold.
+type TurnUsage struct {
+	Input, Output, CacheRead, CacheWrite, Reasoning int64
+	CostUSD                                         *float64
+	CostIncomplete                                  bool
+	ContextTokens                                   int64
 }
 
 // DuplicateCallUIDCount returns how many of a session's tool-call ids appear on more

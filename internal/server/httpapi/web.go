@@ -198,7 +198,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		}
 		filter.Query = v
 	}
-	// Grade, outcome, and range arrive from an Insights drill-through link. Each is
+	// Grade and outcome arrive from an Insights drill-through link. Each is
 	// whitelist-validated: a present-but-unknown value is a bad request, not a silent
 	// fall-through to the unfiltered list, matching the project-filter precedent above.
 	if v := strings.TrimSpace(q.Get("grade")); v != "" {
@@ -215,19 +215,19 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		}
 		filter.Outcome = v
 	}
-	// The window rides ?range= just as it does on Insights, so a drill-through link
-	// carries its window through. Unlike Insights, the bare /sessions list has no
-	// window by default (it is the whole feed), so a Since bound applies only when the
-	// param is actually present: an absent range leaves the list unwindowed rather than
-	// silently trimming it to the default year. An unknown value normalizes to the
-	// default via ParseRange rather than erroring, matching the sort-key precedent.
-	//
-	// ListAllSessions bounds this Since on s.started_at, the column the Insights panels
-	// window their cohorts by, so a drill-through from a panel bar opens exactly the
-	// sessions that bar counted rather than a differently windowed feed.
-	if raw := strings.TrimSpace(q.Get("range")); raw != "" {
-		filter.Range = web.ParseRange(raw)
-		filter.Since = web.RangeSince(filter.Range, time.Now())
+	// The feed accepts a ?range drill-down bound (7d/30d/90d/year, the RangeBounds keys), so a
+	// bar or People link from the windowed Insights/project analytics opens a feed scoped to the
+	// same trailing window its count described. Unlike the analytics surfaces, the feed's default
+	// is all-history, not the trailing year: web.RangeBounds is the whitelist, so an absent, "all",
+	// or hand-typed junk value reads as unbounded rather than falling to ParseRange's trailing-year
+	// default. Only an explicitly bounded key sets the window. The window binds s.started_at:
+	// ListAllSessions scopes Since to started_at, the column the Insights and People panels window
+	// their cohorts by, so a drill-through from a panel bar opens exactly the sessions that bar
+	// counted rather than a session that merely re-activated inside the window. filter.Range carries
+	// the key so the URL round-trips ?range= and the active-range chip can label and clear the window.
+	if rng := strings.TrimSpace(q.Get("range")); web.RangeBounds(rng) {
+		filter.Range = rng
+		filter.Since = web.RangeSince(rng, time.Now())
 	}
 	// Empty sessions (message_count = 0) are hidden by default; empty=1 shows them.
 	filter.IncludeEmpty = q.Get("empty") == "1"
@@ -346,20 +346,41 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 	// matches the username through the analytics base (an unknown name scopes to
 	// nothing, matching the empty table) rather than a separate lookup whose error
 	// would have to be invented away.
-	analytics, err := s.Store.Analytics(r.Context(), store.AnalyticsFilter{
+	af := store.AnalyticsFilter{
 		ProjectID: id, Since: since, Username: filter.Username, Agent: filter.Agent, Machine: filter.Machine,
-	})
+	}
+	analytics, err := s.Store.Analytics(r.Context(), af)
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load analytics."))
 		return
 	}
+	// The quality band draws from the same scope as the usage panel and the table (the same
+	// AnalyticsFilter: project, window, and any active user/agent/machine narrowing), so the
+	// grades, outcomes, tools, and churn describe exactly the sessions the rows below list
+	// rather than a project-wide read that would drift from the filtered table.
+	//
+	// Two windows meet here on purpose. Insights counts sessions by started_at falling in the
+	// trailing window; the usage panel and the session table above window on dated usage_events.
+	// The gap is intentional and not reconciled: a quality verdict is a per-session fact keyed to
+	// when the session ran, so the band follows the Insights (started_at) convention, while spend
+	// is per-usage-event and windows on the event dates. Forcing one onto the other would misdate
+	// whichever it borrows, so the band's section head names its window ("sessions that started in
+	// this window") instead. See projectQuality for the matching caption.
+	insights, err := s.Store.Insights(r.Context(), af)
+	if err != nil {
+		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load quality signals."))
+		return
+	}
 	wf := web.Facets{Agents: facets.Agents, Machines: facets.Machines, Users: facets.Users}
-	render(w, r, http.StatusOK, web.ProjectPage(s.pageForNav(r, proj.RemoteKey, "projects"), proj, page.Sessions, page.Remainder, wf, filter, analytics, rng))
+	render(w, r, http.StatusOK, web.ProjectPage(s.pageForNav(r, proj.RemoteKey, "projects"), proj, page.Sessions, page.Remainder, wf, filter, analytics, insights, rng))
 }
 
 // sessionView loads everything the session page (and its live body fragment)
 // needs: detail, transcript, tool metadata and attachments grouped by message, and
-// subagents.
+// subagents. Each message carries its own per-turn usage (Message.Usage) and duplicate-prompt
+// verdict (Message.DuplicatePrompt), folded in the Messages read itself, so the transcript's
+// context/cost stamps and repeat badges need no second session-sized structure beside the message
+// slice the page already renders.
 func (s *Server) sessionView(r *http.Request, id int64) (store.SessionDetail, []store.Message, map[int][]store.ToolCallView, map[int][]store.AttachmentView, []store.SessionSummary, error) {
 	d, err := s.Store.SessionDetailByID(r.Context(), id)
 	if err != nil {

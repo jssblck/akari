@@ -22,6 +22,25 @@ const (
 	resetKeepFloorTokens = 20000
 )
 
+// IsContextReset reports whether the move from a prior turn's context occupancy (prev) to
+// this turn's (cur) reads as an inferred context reset: a compaction or a manual clear. The
+// rule is the single tested definition two surfaces share: the ContextHealthFolder folds it
+// into a session's reset count, and the transcript's per-message shed markers call it to
+// decide where to draw a "context shed" divider. Both must agree on exactly which turn shed
+// context, so neither open-codes the arithmetic.
+//
+// A reset fires when this turn's occupancy falls to at most resetDropFraction of the prior
+// turn's (the drop is at least half) AND the prior turn was already at least
+// resetKeepFloorTokens large. The floor keeps an early swing, while the context is still
+// warming up and small, from reading as a shed; a real compaction always sheds a substantial
+// context, so the prior turn sits well past the floor. Both bounds are absolute token counts,
+// deliberately independent of any model's context window, so the signal holds for a model
+// akari has never priced. Changing either constant changes the stored reset counts, so a
+// change must bump Version.
+func IsContextReset(prev, cur int64) bool {
+	return prev >= resetKeepFloorTokens && float64(cur) <= float64(prev)*resetDropFraction
+}
+
 // ContextHealthFolder computes a session's context-health figures in one streaming pass,
 // holding O(1) state (the running peak, the reset count, and the previous turn's size)
 // rather than buffering the whole session. The store folds usage rows as they arrive from
@@ -43,7 +62,7 @@ func (f *ContextHealthFolder) Add(tokens int64) {
 	if tokens > f.peak {
 		f.peak = tokens
 	}
-	if f.seen && f.prev >= resetKeepFloorTokens && float64(tokens) <= float64(f.prev)*resetDropFraction {
+	if f.seen && IsContextReset(f.prev, tokens) {
 		f.resets++
 	}
 	f.prev = tokens

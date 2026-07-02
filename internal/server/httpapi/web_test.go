@@ -674,6 +674,145 @@ func TestProjectPageRangeWindow(t *testing.T) {
 	}
 }
 
+// TestSessionsFeedRangeWindow drives the sessions feed's ?range drill-down bound: a bounded key
+// (30d) drops a session whose only activity predates the window, while the bare feed and an
+// unknown range value both stay all-history and list it. This pins handleSessions' range parse:
+// web.RangeBounds is the whitelist, so a bounded key sets SessionFilter.Since and anything else
+// (absent, "all", or a hand-typed junk value) leaves the feed unbounded rather than falling to
+// ParseRange's trailing-year default. The active-range chip renders for the bounded case so the
+// reader sees the feed is scoped.
+func TestSessionsFeedRangeWindow(t *testing.T) {
+	t.Parallel()
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+	c := newClient(t)
+
+	owner, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	// A recent session (started yesterday) and an old one (started 60 days ago), so a 30-day window
+	// keeps the recent one and drops the old one. The feed's ?range drill-down windows on started_at,
+	// matching the Insights/People bars it arrives from, so this stamps the recent session's
+	// started_at inside the window and ages the old one's out of it.
+	annNew, err := st.Announce(ctx, store.AnnounceParams{
+		UserID: owner.ID, Agent: "claude", SourceSessionID: "sess-new",
+		ProjectID: projectID, Cwd: "/home/grace/akari", Machine: "laptop",
+	})
+	if err != nil {
+		t.Fatalf("announce new: %v", err)
+	}
+	annOld, err := st.Announce(ctx, store.AnnounceParams{
+		UserID: owner.ID, Agent: "claude", SourceSessionID: "sess-old",
+		ProjectID: projectID, Cwd: "/home/grace/akari", Machine: "laptop",
+	})
+	if err != nil {
+		t.Fatalf("announce old: %v", err)
+	}
+	// Stamp a message on each so they clear the feed's default empty-session hide (a bare
+	// announce parses no message), then set their started_at so the 30-day window keeps one
+	// and drops the other.
+	if _, err := st.Pool.Exec(ctx,
+		`UPDATE sessions SET started_at = now() - make_interval(days => 1), message_count = 1 WHERE id = $1`,
+		annNew.SessionID); err != nil {
+		t.Fatalf("date new session: %v", err)
+	}
+	if _, err := st.Pool.Exec(ctx,
+		`UPDATE sessions SET started_at = now() - make_interval(days => 60), message_count = 1 WHERE id = $1`,
+		annOld.SessionID); err != nil {
+		t.Fatalf("age old session: %v", err)
+	}
+	recentPath := fmt.Sprintf("/sessions/%d", annNew.SessionID)
+	oldPath := fmt.Sprintf("/sessions/%d", annOld.SessionID)
+
+	if _, err := c.PostForm(srv.URL+"/login", url.Values{
+		"username": {"grace"}, "password": {"hopper-1906"},
+	}); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+
+	// A bounded window (30d) keeps the recent session and drops the 60-day-old one, and the feed
+	// shows the active-range chip so the scope is visible and removable.
+	body := readBody(t, mustGet(t, c, srv.URL+"/sessions?range=30d"))
+	if !strings.Contains(body, recentPath) {
+		t.Fatalf("range=30d should list the recent session, got:\n%s", body)
+	}
+	if strings.Contains(body, oldPath) {
+		t.Fatalf("range=30d should drop the 60-day-old session, got:\n%s", body)
+	}
+	if !strings.Contains(body, `<span class="fchip-k">range</span>`) {
+		t.Fatalf("range=30d feed should show the active-range chip, got:\n%s", body)
+	}
+
+	// The bare feed is unbounded (all-history), so it lists the old session too, and shows no
+	// range chip.
+	body = readBody(t, mustGet(t, c, srv.URL+"/sessions"))
+	if !strings.Contains(body, oldPath) {
+		t.Fatalf("the bare feed should be all-history and list the old session, got:\n%s", body)
+	}
+	if strings.Contains(body, `<span class="fchip-k">range</span>`) {
+		t.Fatalf("the unbounded feed should show no range chip, got:\n%s", body)
+	}
+
+	// An unknown range value is not a bound: it reads as all-history rather than falling to a
+	// trailing-year default, so the old session still lists and no chip appears.
+	body = readBody(t, mustGet(t, c, srv.URL+"/sessions?range=bogus"))
+	if !strings.Contains(body, oldPath) {
+		t.Fatalf("an unknown range value should leave the feed unbounded, got:\n%s", body)
+	}
+	if strings.Contains(body, `<span class="fchip-k">range</span>`) {
+		t.Fatalf("an unknown range value should show no range chip, got:\n%s", body)
+	}
+}
+
+// TestSessionsFeedGradeOutcomeParams drives handleSessions' ?grade and ?outcome whitelist
+// validation: a known grade or outcome renders the feed (200), and an unrecognized value of
+// either is rejected as a bad request rather than silently falling through to the unfiltered
+// list, matching the project-filter precedent the handler already applies for ?project. The
+// handler validates both params through web.IsGrade and web.IsOutcome directly, the same
+// functions the drill-through links themselves are built to satisfy, so a valid case here
+// also pins that the two ends cannot disagree.
+func TestSessionsFeedGradeOutcomeParams(t *testing.T) {
+	t.Parallel()
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+	c := newClient(t)
+
+	if _, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), ""); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if _, err := c.PostForm(srv.URL+"/login", url.Values{
+		"username": {"grace"}, "password": {"hopper-1906"},
+	}); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+
+	cases := []struct {
+		name       string
+		query      string
+		wantStatus int
+	}{
+		{"valid grade", "grade=A", http.StatusOK},
+		{"valid unscored grade", "grade=" + web.UnscoredKey, http.StatusOK},
+		{"valid outcome", "outcome=completed", http.StatusOK},
+		{"invalid grade", "grade=bogus", http.StatusBadRequest},
+		{"invalid outcome", "outcome=bogus", http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := mustGet(t, c, srv.URL+"/sessions?"+tc.query)
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.wantStatus {
+				t.Errorf("GET /sessions?%s = %d, want %d", tc.query, resp.StatusCode, tc.wantStatus)
+			}
+		})
+	}
+}
+
 // TestOverviewUserFilter drives the overview's per-user scope end to end: an
 // unscoped load aggregates every user (both agents show in the breakdown) and
 // lists each account as a filter option; ?user=<id> narrows the analytics to that

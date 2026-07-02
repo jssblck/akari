@@ -13,11 +13,17 @@ const maxChurnFiles = 10
 // ChurnFile is one file's edit thrash over a scope: how many times it was edited and across
 // how many sessions. The edits are deduped (a replayed transcript re-emits prior edits, so
 // the raw rows over-count), the same dedup the tool analytics and the per-session signals
-// apply.
+// apply. The file is keyed per project on its worktree-invariant relative path (the
+// projection's file_rel_path, coalesced onto the absolute file_path when no relative form
+// exists), so one repo file edited from several git worktrees reads as a single row rather
+// than one per checkout. Project and ProjectID carry the owning project so the panel can
+// label each bar and two projects that share a relative path stay distinct.
 type ChurnFile struct {
-	Path     string
-	Edits    int
-	Sessions int
+	ProjectID int64
+	Project   string // the project's display label (remote_key, or display_name for a standalone/orphaned project)
+	Path      string
+	Edits     int
+	Sessions  int
 }
 
 // FileChurn is the cohort's edit-thrash picture: the files edited more than once in the
@@ -44,8 +50,18 @@ func (s *Store) FileChurn(ctx context.Context, f AnalyticsFilter) (FileChurn, er
 // with the shared cohort partition (see dedupToolCallsPartition), keeps only edits that
 // carry a parsed file path (the projection stores an edit whose path did not parse as NULL
 // via nullString, so file_path IS NOT NULL drops them, the same guard the per-session
-// edit_churn signal uses so an unattributable edit invents no thrash), groups by path, and
-// keeps the paths edited more than once.
+// edit_churn signal uses so an unattributable edit invents no thrash), groups by
+// (project, path), and keeps the pairs edited more than once.
+//
+// The grouping key is (s.project_id, coalesce(tc.file_rel_path, tc.file_path)): file_path is
+// absolute, so the same repo file edited from several git worktrees of one repo fragments into
+// a row per checkout and the aggregate reads as noise. Projects already collapse worktrees (they
+// key on the canonical git remote), and file_rel_path is the worktree-invariant session-relative
+// path, so pairing the two collapses those rows back into one. A path with no relative form
+// (edited outside the workspace, or from a session with no announced cwd) coalesces onto its
+// absolute file_path, so it still counts under its own name rather than vanishing; it just does
+// not merge across worktrees. The project is joined for its display label (remote_key, or
+// display_name for a standalone/orphaned project), the same CASE the session list sorts on.
 //
 // The panel shows only the busiest maxChurnFiles, so the cap belongs in SQL, not in Go: the
 // query LIMITs to that many rows and Postgres returns just the top slice by a bounded top-N sort
@@ -63,13 +79,15 @@ func (s *Store) fileChurnFrom(ctx context.Context, q querier, f AnalyticsFilter)
 	rows, err := q.Query(ctx,
 		`WITH scoped AS (
 		   SELECT tc.session_id, tc.message_ordinal, tc.call_index, tc.tool_name,
-		          tc.file_path, tc.input_sha256, tc.result_status, tc.call_uid
+		          s.project_id,
+		          COALESCE(tc.file_rel_path, tc.file_path) AS churn_path,
+		          tc.input_sha256, tc.result_status, tc.call_uid
 		     FROM tool_calls tc
 		     JOIN sessions s ON s.id = tc.session_id
 		    WHERE tc.category = 'edit' AND tc.file_path IS NOT NULL`+filter+`
 		 ),
 		 ranked AS (
-		   SELECT file_path, session_id,
+		   SELECT project_id, churn_path, session_id,
 		          row_number() OVER (
 		            PARTITION BY `+dedupToolCallsPartition+`
 		            ORDER BY message_ordinal, call_index
@@ -77,16 +95,20 @@ func (s *Store) fileChurnFrom(ctx context.Context, q querier, f AnalyticsFilter)
 		     FROM scoped
 		 ),
 		 agg AS (
-		   SELECT file_path,
+		   SELECT project_id, churn_path,
 		          count(*) AS edits,
 		          count(DISTINCT session_id) AS sessions
 		     FROM ranked WHERE rn = 1
-		    GROUP BY file_path
+		    GROUP BY project_id, churn_path
 		   HAVING count(*) > 1
 		 )
-		 SELECT file_path, edits, sessions, (SELECT count(*) FROM agg) AS churned
+		 SELECT agg.project_id,
+		        CASE WHEN p.kind IN ('standalone', 'orphaned') THEN p.display_name ELSE p.remote_key END AS project,
+		        agg.churn_path, agg.edits, agg.sessions,
+		        (SELECT count(*) FROM agg) AS churned
 		   FROM agg
-		  ORDER BY edits DESC, file_path
+		   JOIN projects p ON p.id = agg.project_id
+		  ORDER BY agg.edits DESC, project, agg.churn_path
 		  LIMIT `+limitArg, args...)
 	if err != nil {
 		return FileChurn{}, fmt.Errorf("query file churn: %w", err)
@@ -96,7 +118,7 @@ func (s *Store) fileChurnFrom(ctx context.Context, q querier, f AnalyticsFilter)
 	var churned int
 	for rows.Next() {
 		var cf ChurnFile
-		if err := rows.Scan(&cf.Path, &cf.Edits, &cf.Sessions, &churned); err != nil {
+		if err := rows.Scan(&cf.ProjectID, &cf.Project, &cf.Path, &cf.Edits, &cf.Sessions, &churned); err != nil {
 			return FileChurn{}, fmt.Errorf("scan file churn: %w", err)
 		}
 		fc.Files = append(fc.Files, cf)

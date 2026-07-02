@@ -33,7 +33,7 @@ func TestGradeBarsHrefs(t *testing.T) {
 		{Key: "D", Count: 0}, // zero-count: no link
 		{Key: "", Count: 4},  // the unscored bucket
 	}
-	rows := GradeBars(counts, "30d")
+	rows := GradeBars(counts, store.SessionFilter{}, "30d")
 
 	byLabel := map[string]DistRow{}
 	for _, r := range rows {
@@ -70,7 +70,7 @@ func TestOutcomeBarsHrefs(t *testing.T) {
 		{Key: "completed", Count: 8},
 		{Key: "errored", Count: 0}, // zero-count: no link
 	}
-	rows := OutcomeBars(counts, "7d")
+	rows := OutcomeBars(counts, store.SessionFilter{}, "7d")
 
 	if rows[0].Href == "" {
 		t.Fatal("the completed bar should link")
@@ -89,13 +89,48 @@ func TestOutcomeBarsHrefs(t *testing.T) {
 // unwindowed feed is what "all" means. empty=1 still rides through.
 func TestBarsHrefDropsAllRange(t *testing.T) {
 	for _, rng := range []string{"", "all"} {
-		rows := GradeBars([]store.LabeledCount{{Key: "A", Count: 1}}, rng)
+		rows := GradeBars([]store.LabeledCount{{Key: "A", Count: 1}}, store.SessionFilter{}, rng)
 		q := hrefQuery(t, rows[0].Href)
 		if q.Get("range") != "" {
 			t.Errorf("range=%q should drop the window from the drill, got range=%q", rng, q.Get("range"))
 		}
 		if q.Get("empty") != "1" {
 			t.Errorf("range=%q drill should still carry empty=1, got %v", rng, q)
+		}
+	}
+}
+
+// TestIsGrade pins the session list's grade whitelist: the five letters and the unscored
+// sentinel are accepted, and anything else (a lowercase letter, an unknown word, or the
+// empty string) is rejected. The accepted set must match what handleSessions validates a
+// ?grade= query param against (internal/server/httpapi/web.go), since the handler and this
+// whitelist gate the same value.
+func TestIsGrade(t *testing.T) {
+	for _, v := range []string{"A", "B", "C", "D", "F", UnscoredKey} {
+		if !IsGrade(v) {
+			t.Errorf("IsGrade(%q) = false, want true", v)
+		}
+	}
+	for _, v := range []string{"", "a", "Z", "unscored ", "unknown", "AB"} {
+		if IsGrade(v) {
+			t.Errorf("IsGrade(%q) = true, want false", v)
+		}
+	}
+}
+
+// TestIsOutcome pins the session list's outcome whitelist: the three concrete outcomes and
+// the unknown catch-all are accepted, and anything else is rejected. The accepted set must
+// match what handleSessions validates a ?outcome= query param against
+// (internal/server/httpapi/web.go).
+func TestIsOutcome(t *testing.T) {
+	for _, v := range []string{"completed", "abandoned", "errored", "unknown"} {
+		if !IsOutcome(v) {
+			t.Errorf("IsOutcome(%q) = false, want true", v)
+		}
+	}
+	for _, v := range []string{"", "Completed", "pending", "unscored"} {
+		if IsOutcome(v) {
+			t.Errorf("IsOutcome(%q) = true, want false", v)
 		}
 	}
 }
