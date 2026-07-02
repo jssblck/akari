@@ -1,34 +1,280 @@
-/* Landing page: the logged-out root. A centered hero over a grid of feature
-   cards, on the same dark-steel-under-lilac system as the app. */
+/* Landing page: the logged-out root. A product landing page that shows akari
+   through inline mockups built from the app's own visual language, on the same
+   dark-steel-under-lilac system (see DESIGN.md). The hero carries a framed
+   transcript demo directly under the lede; the sections below alternate copy and
+   mock sides, each opening on a scribed 1px top rule that gives the page a steady
+   fold rhythm. The mocks reuse base.css primitives (.tag, table.grid, .label) and
+   add landing-scoped classes here for the rest. Lilac stays scarce: the one
+   primary button, the hero glyph, and the tool-name and agent accents the real
+   transcript already spends it on. Everything else is steel and ink. */
 
-.landing { max-width: 960px; margin: 0 auto; }
+.landing { max-width: var(--maxw); margin: 0 auto; }
 
 /* ---- Hero ---- */
 .landing-hero { text-align: center; padding: var(--sp-2xl) 0 var(--sp-xl); }
 .landing-glyph { color: var(--lilac); display: inline-flex; margin-bottom: var(--sp-lg); }
-.landing-hero h1 { font-size: 2.25rem; line-height: 1.1; margin: 0 auto; max-width: 18ch; }
+.landing-hero h1 { font-size: 2.25rem; line-height: 1.1; margin: 0 auto; max-width: 20ch; }
 .landing-lede {
   color: var(--subtext); font-size: 1rem; line-height: 1.6;
-  max-width: 60ch; margin: var(--sp-lg) auto 0;
+  max-width: 62ch; margin: var(--sp-lg) auto 0;
 }
+.landing-cta { display: flex; gap: var(--sp-md); justify-content: center; margin-top: var(--sp-xl); flex-wrap: wrap; }
+/* The CTAs are link-buttons: base.css styles .btn as an element, but these are
+   anchors, so restate the layout bits (inline-flex, line-height) an <a> does not
+   inherit and drop the underline the global anchor rule would add. */
+.landing-cta .btn { display: inline-flex; align-items: center; line-height: 1; text-decoration: none; }
+.landing-cta .btn:hover { text-decoration: none; }
+/* base.css scopes the secondary treatment to the `button` element, so an anchor
+   carrying .btn.secondary keeps the filled-lilac base. Restate the secondary
+   surface for the link form: this is the One Voice Rule, the primary CTA is the
+   only filled-lilac element in the hero. */
+.landing-cta .btn.secondary { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); }
+.landing-cta .btn.secondary:hover { background: var(--surface-3); }
 
-/* ---- Feature grid ---- */
-.landing-features {
-  margin-top: var(--sp-2xl);
-  display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--sp-lg);
+/* The hero demo sits under the CTAs at a wider column than the hero text, framed
+   like a session-page fragment, so the page leads with a real akari surface. */
+.landing-hero-demo { max-width: 720px; margin: var(--sp-2xl) auto 0; text-align: left; }
+.landing-caption { margin: var(--sp-sm) 0 0; text-align: center; font-size: 0.8125rem; }
+
+/* ---- Alternating copy/mock rows ---- */
+/* Each fold opens on a scribed top rule across the content column, the recurring
+   beat that ties the varied section internals together. The hero and the foot sit
+   outside this rhythm. */
+.landing-row, .landing-band {
+  border-top: 1px solid var(--border);
+  padding-top: var(--sp-2xl);
+  margin-top: 72px;
 }
-.landing-feature { padding: var(--sp-lg); }
-.landing-feature h2 { font-size: 1.0625rem; margin-bottom: var(--sp-sm); }
-.landing-feature p { color: var(--subtext); margin: 0; line-height: 1.6; }
+.landing-row {
+  display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+  gap: var(--sp-2xl); align-items: center;
+}
+/* Reverse rows place the mock first in the source (so it reads left) while the
+   copy stays semantically second; on a single column both fall back to source
+   order, copy above mock. */
+.landing-row.reverse .landing-copy { order: 2; }
+.landing-row.reverse .landing-mock { order: 1; }
+.landing-copy h2 { font-size: 1.375rem; margin-bottom: var(--sp-md); }
+.landing-copy p { color: var(--subtext); margin: 0; line-height: 1.6; max-width: 46ch; }
+.landing-copy p + p { margin-top: var(--sp-md); }
+.landing-mock { min-width: 0; }
 
+/* ---- Mock frame: a bordered surface echoing the app's panels ---- */
+.mock-frame {
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md);
+  overflow: hidden;
+}
+.mock-frame.mk-tight { padding: var(--sp-sm); }
+/* Slim header bar reading like the app's session head. */
+.mock-bar {
+  display: flex; align-items: center; gap: var(--sp-sm);
+  padding: var(--sp-sm) var(--sp-md); border-bottom: 1px solid var(--border);
+  font-size: 0.8125rem;
+}
+.mock-crumb { color: var(--subtext); }
+.mock-crumb .sep { color: var(--faint); margin: 0 4px; }
+.mock-body { padding: var(--sp-md); display: flex; flex-direction: column; gap: var(--sp-sm); }
+
+/* ---- Transcript mock: message bubbles and tool chips ---- */
+.mk-msg { border: 1px solid var(--border); border-radius: var(--r-md); padding: var(--sp-sm) var(--sp-md); }
+.mk-msg-user { background: var(--msg-user); }
+.mk-msg-assistant { background: var(--msg-assistant); }
+.mk-role {
+  display: block; margin-bottom: 5px;
+  font-weight: 500; font-size: 0.6875rem; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--muted);
+}
+.mk-text { margin: 0; color: var(--text); line-height: 1.5; font-size: 0.8125rem; }
+.mk-text-final { margin-top: var(--sp-sm); color: var(--subtext); }
+.mk-tools { display: flex; flex-direction: column; gap: var(--sp-xs); margin-top: var(--sp-sm); }
+.mk-chip {
+  display: inline-flex; gap: var(--sp-sm); align-items: center; flex-wrap: wrap;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-sm);
+  padding: 4px 9px; font: 450 0.75rem/1.4 var(--mono); max-width: 100%;
+}
+.mk-tn { color: var(--lilac); font-weight: 500; }
+.mk-file { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 34ch; }
+.mk-stamp {
+  background: var(--surface-2); color: var(--subtext);
+  border: 1px solid var(--border); border-radius: var(--r-sm); padding: 1px 6px;
+  font-variant-numeric: tabular-nums;
+}
+.mk-st { font-weight: 500; }
+.mk-st.ok { color: var(--ok); }
+.mk-st.err { color: var(--err); }
+
+/* Grade chip: a machined rectangle banded off the status palette, matching the
+   app's report-card banding (A/B sage, C peach, D/F rose). Reuses .tag for the
+   rectangle; these classes carry only the banded text color. */
+.mk-grade { font-family: var(--mono); letter-spacing: 0; font-weight: 500; }
+.mk-grade-a, .mk-grade-b { color: var(--ok); border-color: rgba(159, 214, 166, 0.4); }
+.mk-grade-c { color: var(--warn); border-color: rgba(240, 197, 146, 0.4); }
+.mk-grade-f { color: var(--err); border-color: rgba(239, 154, 169, 0.4); }
+
+/* ---- Drill-in detail mock (section 1): a chip opened to its body and a diff ----
+   Shows the expand-the-evidence interaction the copy describes: an errored chip
+   over its captured output, then an Edit chip over a one-line rendered diff. Echoes
+   the app's pre.tool-body and .diff surfaces (bg ground, hairline, mono). */
+.mk-detail { display: flex; flex-direction: column; gap: var(--sp-sm); }
+.mk-chip-open { border-color: var(--lilac); }
+.mk-body {
+  margin: 0; padding: var(--sp-sm) var(--sp-md);
+  background: var(--bg); border: 1px solid var(--border); border-radius: var(--r-sm);
+  font: 400 0.6875rem/1.55 var(--mono); color: var(--subtext);
+  white-space: normal; overflow-x: auto;
+}
+/* One output line: a block span, because templ collapses the newlines a plain
+   multiline pre would rely on. Indent steps stand in for the source whitespace
+   the same collapse would eat. */
+.mk-bl { display: block; white-space: pre; }
+.mk-bl.ind1 { padding-left: 2ch; }
+.mk-bl.ind2 { padding-left: 6ch; }
+.mk-body-err { color: var(--err); }
+.mk-diff { border: 1px solid var(--border); border-radius: var(--r-sm); overflow: hidden; }
+.mk-diff-file { background: var(--surface-2); color: var(--subtext); font: 450 0.6875rem/1.6 var(--mono); padding: 3px var(--sp-md); border-bottom: 1px solid var(--border); }
+.mk-diff-body { margin: 0; padding: var(--sp-xs) 0; background: var(--bg); font: 400 0.6875rem/1.6 var(--mono); }
+.mk-dl { display: block; padding: 0 var(--sp-md) 0 var(--sp-xl); position: relative; white-space: pre-wrap; word-break: break-word; }
+.mk-dl::before { position: absolute; left: var(--sp-sm); color: var(--faint); }
+.mk-del { background: rgba(239, 154, 169, 0.10); color: var(--err); }
+.mk-del::before { content: "-"; }
+.mk-add { background: rgba(159, 214, 166, 0.10); color: var(--ok); }
+.mk-add::before { content: "+"; }
+
+/* ---- Cost mock: fused instrument strip + a small grid ---- */
+/* overflow stays visible so the Tokens readout's tok-tip hover card can drop
+   below the strip instead of being clipped, the same concession base.css makes
+   for the analytics strip. */
+.mock-strip {
+  display: flex; border: 1px solid var(--border); border-radius: var(--r-md);
+  background: var(--surface); margin-bottom: var(--sp-md); overflow: visible;
+}
+.mk-stat { flex: 1; min-width: 0; padding: 10px var(--sp-lg); }
+.mk-stat + .mk-stat { border-left: 1px solid var(--border); }
+.mk-stat .label { display: block; margin-bottom: 3px; }
+.mk-val { font-family: var(--mono); font-size: 1.125rem; font-variant-numeric: tabular-nums; color: var(--text); }
+.mk-grid th, .mk-grid td { padding: var(--sp-xs) var(--sp-sm); font-size: 0.8125rem; }
+.mk-grid td { color: var(--subtext); }
+.mk-grid tbody tr:last-child td { border-bottom: none; }
+.mk-grid tbody tr:hover td { background: var(--surface-2); }
+.mk-grid tfoot td { border-bottom: none; }
+/* The cost table's frame lets the token hover cards escape; its inset padding
+   already keeps the table clear of the rounded corners, so nothing needed the
+   clip. The mobile media query below still scrolls it horizontally. */
+.landing-mock .mock-frame:has(.mk-grid) { overflow: visible; }
+/* The sparkline is a quiet steel trend, not a lilac accent (lilac is spent on the
+   tool names and the one primary button); it takes the border-strong tone. */
+.mk-spark { color: var(--border-strong); display: inline-block; vertical-align: middle; width: 64px; height: 16px; }
+
+/* ---- History mock: facet rail beside session rows ---- */
+.mk-list { display: grid; grid-template-columns: 148px minmax(0, 1fr); }
+.mk-facets {
+  border-right: 1px solid var(--border); padding: var(--sp-md);
+  display: flex; flex-direction: column; gap: var(--sp-md);
+}
+.mk-facet { display: flex; flex-direction: column; gap: 3px; }
+.mk-facet .label { margin-bottom: 3px; }
+.mk-frow { display: flex; justify-content: space-between; gap: var(--sp-sm); font-size: 0.8125rem; color: var(--subtext); }
+.mk-fc { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--muted); }
+/* The facet rail is the taller column, so the rows center against it instead of
+   leaving dead space beneath the last session. */
+.mk-rows { padding: var(--sp-sm); display: flex; flex-direction: column; justify-content: center; }
+.mk-srow {
+  display: flex; align-items: center; gap: var(--sp-sm);
+  padding: var(--sp-sm); border-bottom: 1px solid var(--border);
+}
+.mk-srow:last-child { border-bottom: none; }
+.mk-sproj { flex: none; color: var(--text); font-size: 0.8125rem; white-space: nowrap; }
+.mk-ssnip {
+  flex: 1; min-width: 0; color: var(--muted); font-size: 0.75rem;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mk-stime { flex: none; color: var(--muted); font-family: var(--mono); font-size: 0.75rem; font-variant-numeric: tabular-nums; }
+.mk-scost { flex: none; color: var(--subtext); font-family: var(--mono); font-size: 0.75rem; font-variant-numeric: tabular-nums; min-width: 44px; text-align: right; }
+
+/* ---- Quality mock: graded session rows ---- */
+.mk-qrows { display: flex; flex-direction: column; }
+.mk-qrow {
+  display: flex; align-items: center; gap: var(--sp-md);
+  padding: var(--sp-sm) var(--sp-sm); border-bottom: 1px solid var(--border);
+}
+.mk-qrow:last-child { border-bottom: none; }
+.mk-qout { font-size: 0.8125rem; font-weight: 500; flex: none; min-width: 84px; }
+.mk-qout.ok { color: var(--ok); }
+.mk-qout.warn { color: var(--warn); }
+.mk-qout.err { color: var(--err); }
+.mk-qnote { color: var(--muted); font-size: 0.8125rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---- Capabilities band: a two-column definition list, never cards ---- */
+.landing-defs {
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: var(--sp-xl) var(--sp-2xl); margin: 0;
+}
+.landing-def dt { font-weight: 600; color: var(--text); margin-bottom: 5px; }
+.landing-def dd { margin: 0; color: var(--subtext); line-height: 1.6; }
+
+/* ---- Quickstart: a standalone framed panel closing the page ----
+   The last section steps out of the copy/mock fold rhythm into one centered
+   bordered panel, the frame doing the separating work a top rule does for the
+   folds above it. The terminal keeps its left alignment inside centered prose. */
+.landing-quickstart {
+  max-width: 820px; margin: 72px auto 0;
+  padding: var(--sp-2xl);
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg);
+  text-align: center;
+}
+.landing-quickstart h2 { font-size: 1.375rem; margin-bottom: var(--sp-md); }
+.landing-quickstart > p { color: var(--subtext); line-height: 1.6; max-width: 52ch; margin: 0 auto; }
+/* One step up the tonal ladder, so the terminal bar does not blend into the
+   panel it sits on (the body keeps the page ground). */
+.landing-quickstart .mock-term { margin-top: var(--sp-xl); text-align: left; background: var(--surface-2); }
+
+.mock-term {
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md);
+  overflow: hidden;
+}
+.mock-term-bar {
+  display: flex; align-items: center; gap: 6px;
+  padding: var(--sp-sm) var(--sp-md); border-bottom: 1px solid var(--border);
+}
+.mk-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--surface-3); flex: none; }
+.mk-term-label { margin-left: 6px; color: var(--muted); font-size: 0.6875rem; letter-spacing: 0.08em; text-transform: uppercase; }
+/* white-space normal, not pre: the newlines between the per-line spans in the
+   template source would otherwise render as doubled blank lines. Each .mk-ln
+   keeps pre for its own inner spacing. */
+.mock-term-body {
+  margin: 0; padding: var(--sp-md);
+  background: var(--bg); color: var(--subtext);
+  font: 400 0.75rem/1.7 var(--mono);
+  white-space: normal; overflow-x: auto;
+}
+.mk-ln { display: block; white-space: pre; }
+.mk-prompt { color: var(--lilac); margin-right: var(--sp-sm); }
+.mk-comment { color: var(--muted); }
 /* ---- Foot ---- */
-.landing-foot { margin-top: var(--sp-2xl); text-align: center; }
+.landing-foot { margin-top: 72px; text-align: center; }
 
 /* ---- Responsive ---- */
 @media (max-width: 860px) {
-  .landing-features { grid-template-columns: 1fr; }
+  .landing-row { grid-template-columns: 1fr; gap: var(--sp-lg); }
+  .landing-row, .landing-band { margin-top: 56px; padding-top: var(--sp-xl); }
+  /* Single column: copy always leads, mock follows, even on reversed rows. */
+  .landing-row.reverse .landing-copy { order: 1; }
+  .landing-row.reverse .landing-mock { order: 2; }
+  .landing-copy p { max-width: none; }
+  .landing-defs { grid-template-columns: 1fr; gap: var(--sp-lg); }
   .landing-hero h1 { font-size: 1.875rem; }
+  .landing-quickstart { margin-top: 56px; padding: var(--sp-xl) var(--sp-lg); }
+  .landing-foot { margin-top: 56px; }
+  /* The cost strip and its table can crowd at narrow widths; let them scroll inside
+     their frame rather than clip a column or overflow the page. */
+  .mock-strip { overflow-x: auto; }
+  .mk-stat { min-width: 116px; }
+  .mk-grid { min-width: 420px; }
+  .landing-mock .mock-frame:has(.mk-grid) { overflow-x: auto; }
 }
-@media (min-width: 861px) and (max-width: 1080px) {
-  .landing-features { grid-template-columns: repeat(2, 1fr); }
+@media (max-width: 520px) {
+  /* The history facet rail folds away below the rows on the smallest screens so the
+     session list keeps a readable width. */
+  .mk-list { grid-template-columns: 1fr; }
+  .mk-facets { border-right: none; border-bottom: 1px solid var(--border); flex-direction: row; flex-wrap: wrap; gap: var(--sp-lg); }
 }

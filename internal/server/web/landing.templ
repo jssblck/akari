@@ -1,9 +1,29 @@
 package web
 
-// LandingPage is the logged-out root at "/": a short explanation of what akari
-// is, shown instead of bouncing an anonymous visitor straight to the login form.
-// It rides the public layout, so the top bar carries the wordmark plus the Docs,
-// GitHub, and Log in links; the hero itself is explanation, not a call to action.
+// LandingPage is the logged-out root at "/": a product landing page that answers
+// "why do I care" by showing akari through inline mockups built from the app's own
+// visual language (transcript chips, the instrument stat strip, a session feed, and
+// grade banding), rather than a grid of feature cards. It rides the public layout,
+// so the top bar carries the wordmark plus the Docs, GitHub, and Log in links. The
+// hero carries a framed transcript demo directly under the lede, the way a
+// developer-tool landing page leads with a real surface. The mocks are static HTML
+// and CSS only: no JavaScript hydration, since charts.js is not available to a
+// resting mock.
+
+// landingTokensCell renders one of the landing mock's token figures through the
+// same tok-cell + tokenCard treatment every real surface uses, so even a demo
+// number carries the four-class breakdown and its cost behind hover or focus
+// rather than reading as a bare figure. The figures live in landing.go, one
+// landingMockProject reconciled by construction (Tokens sums the four classes
+// this renders), so the headline total and the hover breakdown can never
+// disagree with each other.
+templ landingTokensCell(p landingMockProject) {
+	<span class="tok-cell" tabindex="0">
+		<span class="tok-total">{ FmtTokensCompact(p.Tokens()) }</span>
+		@tokenCard(p.Tokens(), p.In, p.Out, p.CacheRead, p.CacheWrite, 0, p.Cost, false)
+	</span>
+}
+
 templ LandingPage() {
 	@publicLayout("akari", OGMeta{}) {
 		<div class="landing">
@@ -14,68 +34,332 @@ templ LandingPage() {
 						<circle cx="8" cy="8" r="2.2" fill="currentColor"></circle>
 					</svg>
 				</span>
-				<h1>Read every AI coding-agent session in one place.</h1>
+				<h1>Know what your agents actually did.</h1>
 				<p class="landing-lede">
-					akari is a self-hosted instrument for your coding agents. It collects the
-					local session logs of Claude Code, Codex, and pi, parses them on the
-					server, and shows them as a searchable history across all your machines,
-					grouped by git project, with token usage and cost on every run.
+					Claude Code, Codex, and pi leave a transcript on every machine they run
+					on. akari is a self-hosted instrument that collects those sessions into
+					one searchable history: every run readable end to end, every token
+					priced, every project's spend on one screen.
 				</p>
+				<div class="landing-cta">
+					<a class="btn" href="/guide">Read the guide</a>
+					<a class="btn secondary" href="https://github.com/jssblck/akari" rel="noopener" target="_blank">View on GitHub</a>
+				</div>
+				<!-- The hero demo: a framed session fragment, the way a developer-tool
+				     landing leads with a real surface rather than a screenshot. -->
+				<div class="landing-hero-demo">
+					<div class="mock-frame">
+						<div class="mock-bar">
+							<span class="mock-crumb">jssblck/akari <span class="sep">/</span> session</span>
+							<span class="spacer"></span>
+							<span class="tag agent">claude</span>
+							<span class="tag mk-grade mk-grade-b">B</span>
+						</div>
+						<div class="mock-body">
+							<div class="mk-msg mk-msg-user">
+								<span class="mk-role">User</span>
+								<p class="mk-text">the tests in internal/store are flaky under -race, find out why</p>
+							</div>
+							<div class="mk-msg mk-msg-assistant">
+								<span class="mk-role">Assistant</span>
+								<p class="mk-text">Reproducing under -race, then bisecting the shared state.</p>
+								<div class="mk-tools">
+									<span class="mk-chip">
+										<span class="mk-tn">Read</span>
+										<span class="mk-file">internal/store/store_test.go</span>
+										<span class="mk-stamp">out: 4.2 KB</span>
+										<span class="mk-st ok">ok</span>
+									</span>
+									<span class="mk-chip">
+										<span class="mk-tn">Bash</span>
+										<span class="mk-file">go test -race -count=20 ./internal/store</span>
+										<span class="mk-stamp">out: 1.8 KB</span>
+										<span class="mk-st err">err</span>
+									</span>
+									<span class="mk-chip">
+										<span class="mk-tn">Edit</span>
+										<span class="mk-file">internal/store/pool.go</span>
+										<span class="mk-stamp">in: 612 B diff</span>
+										<span class="mk-st ok">ok</span>
+									</span>
+								</div>
+								<p class="mk-text mk-text-final">The pool test shares a fixture across parallel runs; pinned it per test.</p>
+							</div>
+						</div>
+					</div>
+					<p class="landing-caption muted">A session as akari shows it, from the prompt to the fix.</p>
+				</div>
 			</section>
-			<section class="landing-features">
-				<div class="card landing-feature">
-					<h2>One history, every machine</h2>
+			<!-- Section 1: the transcript. Copy left, drill-in mock right on wide screens. -->
+			<section class="landing-row">
+				<div class="landing-copy">
+					<h2>When a run goes sideways, read the evidence</h2>
 					<p>
-						Thin clients push raw session bytes from every laptop and workstation to
-						one server. The same repo cloned into several worktrees collapses into a
-						single project, so a run is findable no matter where it happened.
+						Open any session and see what the agent did: the prompts, the
+						thinking, and every tool call with its input and result, timed and in
+						order. Errored tools are flagged on a timeline rail, so the turn where
+						things went wrong is one glance away. Live sessions stream in as they
+						run.
 					</p>
 				</div>
-				<div class="card landing-feature">
-					<h2>Tokens and cost, priced in</h2>
+				<div class="landing-mock">
+					<div class="mock-frame mk-tight">
+						<div class="mk-detail">
+							<span class="mk-chip mk-chip-open">
+								<span class="mk-tn">Bash</span>
+								<span class="mk-file">go test -race -count=20 ./internal/store</span>
+								<span class="mk-stamp">out: 1.8 KB</span>
+								<span class="mk-st err">err</span>
+							</span>
+							// templ normalizes the whitespace inside a text node, so a plain multiline
+							// pre collapses to one line; per-line block spans keep the line structure
+							// (the terminal mock below and the diff body use the same trick).
+							<pre class="mk-body mk-body-err"><span class="mk-bl">==================</span><span class="mk-bl">WARNING: DATA RACE</span><span class="mk-bl">Read at 0x00c0002a4130 by goroutine 41:</span><span class="mk-bl ind1">store.(*Pool).acquire()</span><span class="mk-bl ind2">internal/store/pool.go:88 +0x64</span><span class="mk-bl">FAIL github.com/jssblck/akari/internal/store 2.104s</span></pre>
+							<span class="mk-chip">
+								<span class="mk-tn">Edit</span>
+								<span class="mk-file">internal/store/pool.go</span>
+								<span class="mk-stamp">in: 612 B diff</span>
+								<span class="mk-st ok">ok</span>
+							</span>
+							<div class="mk-diff">
+								<div class="mk-diff-file">internal/store/pool.go</div>
+								<pre class="mk-diff-body"><span class="mk-dl mk-del">fixture := sharedFixture</span><span class="mk-dl mk-add">fixture := newFixture(t)</span></pre>
+							</div>
+						</div>
+					</div>
+				</div>
+			</section>
+			<!-- Section 2: cost. Mock left, copy right on wide screens. -->
+			<section class="landing-row reverse">
+				<div class="landing-copy">
+					<h2>See what it costs, per project and per model</h2>
 					<p>
-						Each session carries its input, output, and cache tokens and a dollar
-						cost from a compiled-in rate table. Fleet-wide usage rolls up on the
-						overview, bounded to a trailing window you choose.
+						Every session carries its token usage and what it cost. Usage rolls up
+						by project, model, agent, and machine over a trailing window you
+						choose, so the answer to where the month's spend went is a lookup, not
+						a spreadsheet.
 					</p>
 				</div>
-				<div class="card landing-feature">
-					<h2>Parsing lives on the server</h2>
+				<div class="landing-mock">
+					{{ totals := landingMockTotals() }}
+					<div class="mock-strip">
+						<div class="mk-stat">
+							<span class="label">Cost</span>
+							<span class="mk-val">{ FmtCost(totals.Cost, false) }</span>
+						</div>
+						<div class="mk-stat">
+							<span class="label">Tokens</span>
+							<span class="mk-val">
+								@landingTokensCell(totals)
+							</span>
+						</div>
+						<div class="mk-stat">
+							<span class="label">Sessions</span>
+							<span class="mk-val">{ FmtTokens(totals.Sessions) }</span>
+						</div>
+						<div class="mk-stat">
+							<span class="label">Cache hit</span>
+							<span class="mk-val">{ FmtPercent(landingMockCacheHit()) }</span>
+						</div>
+					</div>
+					<div class="mock-frame mk-tight">
+						<table class="grid mk-grid">
+							<thead>
+								<tr>
+									<th>Project</th>
+									<th class="num">Sessions</th>
+									<th class="num">Tokens</th>
+									<th class="num">Trend</th>
+									<th class="num">Cost</th>
+								</tr>
+							</thead>
+							<tbody>
+								for _, p := range landingMockProjects {
+									<tr>
+										<td>{ p.Name }</td>
+										<td class="num">{ FmtTokens(p.Sessions) }</td>
+										<td class="num">
+											@landingTokensCell(p)
+										</td>
+										<td class="num">
+											if p.Spark != "" {
+												<svg class="mk-spark" viewBox="0 0 64 16" width="64" height="16" preserveAspectRatio="none" aria-hidden="true">
+													<polyline points={ p.Spark } fill="none" stroke="currentColor" stroke-width="1.3"></polyline>
+												</svg>
+											}
+										</td>
+										<td class="num">{ FmtCost(p.Cost, false) }</td>
+									</tr>
+								}
+							</tbody>
+							// The remainder footer carries everything beyond the three visible
+							// rows (the app's own capped-table idiom). Both this row and the
+							// strip above it derive from the same landingMockProjects and
+							// landingMockRemainder in landing.go, so their totals reconcile by
+							// construction rather than by a comment promising the arithmetic
+							// works out.
+							<tfoot>
+								<tr class="remainder">
+									<td>{ landingMockRemainder.Name }</td>
+									<td class="num">{ FmtTokens(landingMockRemainder.Sessions) }</td>
+									<td class="num">
+										@landingTokensCell(landingMockRemainder)
+									</td>
+									<td class="num"></td>
+									<td class="num">{ FmtCost(landingMockRemainder.Cost, false) }</td>
+								</tr>
+							</tfoot>
+						</table>
+					</div>
+				</div>
+			</section>
+			<!-- Section 3: one history. Copy left, mock right. -->
+			<section class="landing-row">
+				<div class="landing-copy">
+					<h2>Every machine, one history</h2>
 					<p>
-						Clients keep no derived state; the server does all the parsing and
-						storage. A parser improvement reaches old sessions by re-parsing in
-						place, with nothing re-uploaded.
+						A small client on each laptop and workstation uploads new sessions to
+						one server. Projects are keyed by git remote, so the same repo across
+						clones, worktrees, and machines collapses into one project. Full-text
+						search across every transcript recovers the run you half remember.
 					</p>
 				</div>
-				<div class="card landing-feature">
-					<h2>Publish a session</h2>
+				<div class="landing-mock">
+					<div class="mock-frame mk-list">
+						<div class="mk-facets">
+							for _, group := range landingMockFacets {
+								<div class="mk-facet">
+									<span class="label">{ group.Label }</span>
+									for _, row := range group.Rows {
+										<span class="mk-frow"><span>{ row.Name }</span><span class="mk-fc">{ FmtTokens(row.Count) }</span></span>
+									}
+								</div>
+							}
+						</div>
+						<div class="mk-rows">
+							<div class="mk-srow">
+								<span class="mk-sproj">jssblck/akari</span>
+								<span class="mk-ssnip">wire the settle pass into cmd/akari-server</span>
+								<span class="tag agent">claude</span>
+								<span class="mk-stime">2h ago</span>
+								<span class="mk-scost">$3.11</span>
+							</div>
+							<div class="mk-srow">
+								<span class="mk-sproj">jssblck/tapestry</span>
+								<span class="mk-ssnip">why does the loom render twice on first paint</span>
+								<span class="tag agent">codex</span>
+								<span class="mk-stime">5h ago</span>
+								<span class="mk-scost">$0.94</span>
+							</div>
+							<div class="mk-srow">
+								<span class="mk-sproj">hopper/subroutines</span>
+								<span class="mk-ssnip">port the A-0 compiler notes into the readme</span>
+								<span class="tag agent">pi</span>
+								<span class="mk-stime">yesterday</span>
+								<span class="mk-scost">$1.27</span>
+							</div>
+						</div>
+					</div>
+				</div>
+			</section>
+			<!-- Section 4: quality signals. Mock left, copy right. -->
+			<section class="landing-row reverse">
+				<div class="landing-copy">
+					<h2>Every settled run gets a grade</h2>
 					<p>
-						Sessions are visible to any signed-in user by default. Publish one to
-						mint an unguessable link for logged-out viewing, or publish your own
-						usage overview at a stable per-user address.
+						Once a run is over, akari grades it from the transcript itself, never
+						from the agent's own report: an outcome with a confidence, an A to F
+						grade from tool failures, retries, and edit churn, and measures of
+						prompt hygiene and context health. Insights aggregates the signals
+						across the fleet, so you can see which projects burn retries and which
+						prompts set the agent up well.
 					</p>
 				</div>
-				<div class="card landing-feature">
-					<h2>Read it from your agent</h2>
-					<p>
-						A read-only Model Context Protocol endpoint exposes the same surface the
-						UI shows (overview, projects, sessions, and full transcripts), so a
-						coding agent can read your history without opening a browser.
-					</p>
+				<div class="landing-mock">
+					<div class="mock-frame mk-tight">
+						<div class="mk-qrows">
+							<div class="mk-qrow">
+								<span class="tag mk-grade mk-grade-a">A</span>
+								<span class="mk-qout ok">completed</span>
+								<span class="mk-qnote">clean tool record</span>
+							</div>
+							<div class="mk-qrow">
+								<span class="tag mk-grade mk-grade-c">C</span>
+								<span class="mk-qout warn">completed</span>
+								<span class="mk-qnote">9 retries on Bash</span>
+							</div>
+							<div class="mk-qrow">
+								<span class="tag mk-grade mk-grade-f">F</span>
+								<span class="mk-qout err">abandoned</span>
+								<span class="mk-qnote">failure streak of 6, context reset x3</span>
+							</div>
+						</div>
+					</div>
 				</div>
-				<div class="card landing-feature">
-					<h2>Self-contained and self-hosted</h2>
-					<p>
-						One server binary with an embedded UI, self-hosted fonts, and no Node
-						toolchain, backed by Postgres. Run it with the bundled Docker Compose
-						file and own every byte of your agent history.
-					</p>
+			</section>
+			<!-- Section 5: capabilities band. A two-column definition list, not cards. -->
+			<section class="landing-band">
+				<dl class="landing-defs">
+					<div class="landing-def">
+						<dt>Share a run</dt>
+						<dd>
+							Publishing a session mints an unguessable link anyone can view
+							without an account. Your usage overview can go public at a stable
+							address too; both revoke instantly.
+						</dd>
+					</div>
+					<div class="landing-def">
+						<dt>Read it from your agent</dt>
+						<dd>
+							A read-only MCP endpoint exposes everything the UI shows: overview,
+							projects, sessions, and full transcripts. One command connects Claude
+							Code.
+						</dd>
+					</div>
+					<div class="landing-def">
+						<dt>Old sessions get better</dt>
+						<dd>
+							When akari's parsing improves, the server reprocesses what it already
+							stored, and old sessions gain the new fields with nothing
+							re-uploaded.
+						</dd>
+					</div>
+					<div class="landing-def">
+						<dt>Own every byte</dt>
+						<dd>
+							One server binary with an embedded UI, backed by Postgres. No
+							telemetry, open source under the AGPL. Run it with the bundled Docker
+							Compose file.
+						</dd>
+					</div>
+				</dl>
+			</section>
+			<!-- Section 6: quickstart. A standalone framed panel closing the page, the
+			     way bastion boxes its install steps, rather than another copy/mock fold. -->
+			<section class="landing-quickstart">
+				<h2>Start with the history you already have</h2>
+				<p>
+					Point a client at your server and the backlog starts uploading. Agents
+					already left months of sessions on your disk; the first sync brings
+					them in.
+				</p>
+				<div class="mock-term">
+						<div class="mock-term-bar">
+							<span class="mk-dot"></span>
+							<span class="mk-dot"></span>
+							<span class="mk-dot"></span>
+							<span class="mk-term-label">sh</span>
+						</div>
+						<pre class="mock-term-body"><span class="mk-ln"><span class="mk-prompt">$</span> curl -fsSL https://raw.githubusercontent.com/jssblck/akari/main/scripts/install.sh | sh</span>
+<span class="mk-ln"><span class="mk-prompt">$</span> akari login --server https://akari.example.com --token YOUR_INGEST_TOKEN</span>
+<span class="mk-ln"><span class="mk-prompt">$</span> akari sync</span>
+<span class="mk-ln mk-comment"># or: akari daemon start, to keep uploading as you work</span></pre>
 				</div>
 			</section>
 			<section class="landing-foot">
 				<p class="muted">
 					New to akari? Read the <a href="/guide">user guide</a>. Already have an
-						account? <a href="/login">Log in</a>.
+					account? <a href="/login">Log in</a>.
 				</p>
 			</section>
 		</div>
