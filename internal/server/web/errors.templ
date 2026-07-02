@@ -7,7 +7,7 @@ templ ErrorPage(p Page, code int, message string) {
 		<div class="empty big">
 			<h1>{ fmt.Sprintf("%d", code) }</h1>
 			<p>{ message }</p>
-			<p><a href="/">Back to projects</a></p>
+			<p><a href="/overview">Back to overview</a></p>
 		</div>
 	}
 }

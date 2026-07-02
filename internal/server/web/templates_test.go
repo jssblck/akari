@@ -68,7 +68,7 @@ func TestOverviewPageRangeSelector(t *testing.T) {
 	p := Page{Title: "Overview", LoggedIn: true, Active: "overview", Username: "Grace Hopper"}
 	html := renderComponent(t, OverviewPage(p, analyticsWithData(), "90d", nil, nil))
 
-	for _, want := range []string{`id="usage"`, `aria-label="Date range"`, `hx-get="/?range=7d"`, `hx-get="/?range=all"`, `hx-target="#usage"`, `hx-select="#usage"`} {
+	for _, want := range []string{`id="usage"`, `aria-label="Date range"`, `hx-get="/overview?range=7d"`, `hx-get="/overview?range=all"`, `hx-target="#usage"`, `hx-select="#usage"`} {
 		if !strings.Contains(html, want) {
 			t.Errorf("range selector missing %q", want)
 		}
@@ -79,7 +79,7 @@ func TestOverviewPageRangeSelector(t *testing.T) {
 		}
 	}
 	// The active window (90d) is the one marked.
-	if !strings.Contains(html, `class="seg active" hx-get="/?range=90d"`) {
+	if !strings.Contains(html, `class="seg active" hx-get="/overview?range=90d"`) {
 		t.Error("the active range button should carry the active class")
 	}
 }
@@ -97,7 +97,7 @@ func TestOverviewPageUserFilter(t *testing.T) {
 	for _, want := range []string{
 		`class="userfilter"`,
 		`class="userfilter-opt userfilter-reset"`,
-		`hx-get="/?range=7d"`, // the reset clears users while holding the window
+		`hx-get="/overview?range=7d"`, // the reset clears users while holding the window
 		`name="user" value="2"`,
 		`name="user" value="5"`,
 		`hx-include="closest .userfilter-menu"`,
@@ -116,7 +116,7 @@ func TestOverviewPageUserFilter(t *testing.T) {
 	}
 	// The range buttons preserve the selection, so switching the window keeps it.
 	// templ HTML-escapes the & in the attribute value (htmx decodes it back).
-	if !strings.Contains(html, `hx-get="/?range=30d&amp;user=5"`) {
+	if !strings.Contains(html, `hx-get="/overview?range=30d&amp;user=5"`) {
 		t.Error("range buttons should carry the active user selection")
 	}
 }
@@ -177,8 +177,8 @@ func TestOverviewPageHidesZeroReasoning(t *testing.T) {
 	}
 }
 
-// The landing surface drops the recent-activity feed and the redundant scope
-// subtitle: the panel is the page.
+// The overview drops the recent-activity feed and the redundant scope subtitle:
+// the panel is the page.
 func TestOverviewPageDropsRecentActivity(t *testing.T) {
 	p := Page{Title: "Overview", LoggedIn: true, Active: "overview", Username: "Grace Hopper"}
 	html := renderComponent(t, OverviewPage(p, analyticsWithData(), DefaultRange, nil, nil))

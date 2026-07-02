@@ -1,14 +1,15 @@
 package web
 
-// LandingPage is the logged-out root at "/": a product landing page that answers
-// "why do I care" by showing akari through inline mockups built from the app's own
-// visual language (transcript chips, the instrument stat strip, a session feed, and
-// grade banding), rather than a grid of feature cards. It rides the public layout,
-// so the top bar carries the wordmark plus the Docs, GitHub, and Log in links. The
-// hero carries a framed transcript demo directly under the lede, the way a
-// developer-tool landing page leads with a real surface. The mocks are static HTML
-// and CSS only: no JavaScript hydration, since charts.js is not available to a
-// resting mock.
+// LandingPage is the root at "/": a product landing page that answers "why do I
+// care" by showing akari through inline mockups built from the app's own visual
+// language (transcript chips, the instrument stat strip, a session feed, and grade
+// banding), rather than a grid of feature cards. It is served to every visitor, not
+// just logged-out ones: viewer carries the reader's sign-in state so the public
+// layout's topbar and the page foot point a signed-in reader back into the app
+// (Overview) instead of offering "Log in". The hero carries a framed transcript
+// demo directly under the lede, the way a developer-tool landing page leads with a
+// real surface. The mocks are static HTML and CSS only: no JavaScript hydration,
+// since charts.js is not available to a resting mock.
 
 // landingTokensCell renders one of the landing mock's token figures through the
 // same tok-cell + tokenCard treatment every real surface uses, so even a demo
@@ -24,8 +25,8 @@ templ landingTokensCell(p landingMockProject) {
 	</span>
 }
 
-templ LandingPage(og OGMeta) {
-	@publicLayout("akari", og) {
+templ LandingPage(og OGMeta, viewer Page) {
+	@publicLayout("akari", og, viewer) {
 		<div class="landing">
 			<section class="landing-hero">
 				<span class="landing-glyph">
@@ -357,10 +358,17 @@ templ LandingPage(og OGMeta) {
 				</div>
 			</section>
 			<section class="landing-foot">
-				<p class="muted">
-					New to akari? Read the <a href="/guide">user guide</a>. Already have an
-					account? <a href="/login">Log in</a>.
-				</p>
+				if viewer.LoggedIn {
+					<p class="muted">
+						New to akari? Read the <a href="/guide">user guide</a>. Or head to your
+						<a href="/overview">overview</a>.
+					</p>
+				} else {
+					<p class="muted">
+						New to akari? Read the <a href="/guide">user guide</a>. Already have an
+						account? <a href="/login">Log in</a>.
+					</p>
+				}
 			</section>
 		</div>
 	}

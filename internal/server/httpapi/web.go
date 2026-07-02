@@ -81,43 +81,41 @@ func render(w http.ResponseWriter, r *http.Request, status int, c templ.Componen
 	_ = c.Render(r.Context(), w)
 }
 
-// handleRoot serves the site root at /. A signed-in reader (full-scope
-// credential, a browser session in practice) gets the overview, the app's
-// landing surface, gated during a reparse like the rest of the parsed UI. A
-// logged-out visitor gets the marketing landing page explaining what akari is,
-// rather than an immediate bounce to the login form. A non-full credential (an
-// ingest- or read-scope token pointed at the browser UI) is treated as
-// logged-out here, matching requireReadHTML's gate on the rest of the UI.
+// handleRoot serves the site root at /: the marketing landing page explaining
+// what akari is, shown to every visitor regardless of sign-in state. A signed-in
+// reader gets the same page with a topbar that points back into the app (an
+// Overview link in place of "Log in"), so the homepage stays reachable while
+// logged in; the app itself lives at /overview. The page is never gated during a
+// reparse, since it renders no parsed data.
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
-	p, ok := s.resolve(r)
-	if !ok || p.Scope != scopeFull {
-		base := s.baseURL(r)
-		// The meta copy derives from the ogimage package's canonical landing
-		// constants (the same strings the /og.png card draws), so a copy edit
-		// cannot leave the page's tags and its preview image saying different
-		// things. The title lowercases the headline into the product register the
-		// overview card's title uses ("<subject> · <what it is>").
-		og := web.OGMeta{
-			Title:       "akari · " + strings.ToLower(strings.TrimSuffix(ogimage.LandingHeadline, ".")),
-			Description: ogimage.LandingSubline,
-			URL:         base + "/",
-			Image:       base + "/og.png",
-		}
-		render(w, r, http.StatusOK, web.LandingPage(og))
-		return
+	base := s.baseURL(r)
+	// The meta copy derives from the ogimage package's canonical landing
+	// constants (the same strings the /og.png card draws), so a copy edit
+	// cannot leave the page's tags and its preview image saying different
+	// things. The title lowercases the headline into the product register the
+	// overview card's title uses ("<subject> · <what it is>").
+	og := web.OGMeta{
+		Title:       "akari · " + strings.ToLower(strings.TrimSuffix(ogimage.LandingHeadline, ".")),
+		Description: ogimage.LandingSubline,
+		URL:         base + "/",
+		Image:       base + "/og.png",
 	}
-	s.gateParsed(s.handleOverview)(w, s.withPrincipal(r, p))
+	// Resolve the viewer so a full-scope reader (a browser session in practice)
+	// gets the signed-in topbar; a logged-out visitor or a non-full credential (an
+	// ingest- or read-scope token pointed at the UI) gets the logged-out variant,
+	// matching requireReadHTML's gate on the rest of the UI.
+	var viewer web.Page
+	if p, ok := s.resolve(r); ok && p.Scope == scopeFull {
+		viewer = s.pageFor(s.withPrincipal(r, p), "akari")
+	}
+	render(w, r, http.StatusOK, web.LandingPage(og, viewer))
 }
 
-// handleOverview is the landing surface at /: fleet-wide usage bounded to the
-// selected trailing window. The range selector refetches this same handler and
-// swaps the usage panel (hx-select="#usage"), so a plain load and an htmx swap
+// handleOverview is the app's home surface at /overview: fleet-wide usage bounded
+// to the selected trailing window. The range selector refetches this same handler
+// and swaps the usage panel (hx-select="#usage"), so a plain load and an htmx swap
 // render from one path; the window also rides the URL via ?range=.
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		render(w, r, http.StatusNotFound, web.ErrorPage(s.pageForNav(r, "Not found", ""), http.StatusNotFound, "Page not found."))
-		return
-	}
 	rng := web.ParseRange(r.URL.Query().Get("range"))
 	users, err := s.Store.ListUsers(r.Context())
 	if err != nil {
@@ -149,8 +147,8 @@ func (s *Server) handleInsights(w http.ResponseWriter, r *http.Request) {
 	render(w, r, http.StatusOK, web.InsightsPage(s.pageForNav(r, "Insights", "insights"), ins, rng, ranges))
 }
 
-// handleProjectsIndex is the projects table (moved off the root to /projects when
-// Overview became the landing surface).
+// handleProjectsIndex is the projects table at /projects (moved off the root when
+// Overview became the app's home surface).
 func (s *Server) handleProjectsIndex(w http.ResponseWriter, r *http.Request) {
 	projects, err := s.Store.ListProjects(r.Context())
 	if err != nil {
@@ -948,7 +946,7 @@ func (s *Server) handleAccountPage(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	if p, ok := s.resolve(r); ok && p.Scope == scopeFull {
-		http.Redirect(w, r, "/", http.StatusSeeOther)
+		http.Redirect(w, r, overviewPath, http.StatusSeeOther)
 		return
 	}
 	next := safeNext(r.URL.Query().Get("next"))
@@ -1021,7 +1019,7 @@ func (s *Server) handleRegisterForm(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.RegisterPage(web.Page{Title: "Register"}, "Could not start session."))
 		return
 	}
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	http.Redirect(w, r, overviewPath, http.StatusSeeOther)
 }
 
 func (s *Server) handleLogoutForm(w http.ResponseWriter, r *http.Request) {
@@ -1136,9 +1134,19 @@ func (s *Server) handleRevokeInviteForm(w http.ResponseWriter, r *http.Request) 
 
 // safeNext bounds a post-login redirect target to a local path, so a crafted
 // next= cannot bounce the user to another origin.
+// overviewPath is the app's home surface: where a fresh sign-in lands and the
+// fallback for a login with no saved destination. The root "/" is the public
+// homepage now, so post-auth flows aim here rather than dropping the user back on
+// the marketing page.
+const overviewPath = "/overview"
+
+// safeNext sanitizes a post-login redirect target, rejecting anything that is not
+// a same-origin absolute path (so a crafted next cannot bounce the user off-site).
+// An empty or rejected value falls back to the app home rather than the public
+// root, so a bare visit to /login still lands in the app after signing in.
 func safeNext(next string) string {
 	if next == "" || !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") {
-		return "/"
+		return overviewPath
 	}
 	return next
 }

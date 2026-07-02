@@ -115,11 +115,11 @@ func TestWebFlow(t *testing.T) {
 		t.Fatalf("after register should land on the overview, got:\n%s", body)
 	}
 
-	// The overview is now the landing surface, reachable directly with the
-	// session cookie; it shows the signed-in user in the sidebar.
-	resp, err = c.Get(srv.URL + "/")
+	// The overview moved to /overview, reachable directly with the session cookie;
+	// it shows the signed-in user in the sidebar.
+	resp, err = c.Get(srv.URL + "/overview")
 	if err != nil {
-		t.Fatalf("get / authed: %v", err)
+		t.Fatalf("get /overview authed: %v", err)
 	}
 	body = readBody(t, resp)
 	if !strings.Contains(body, "grace") || !strings.Contains(body, "Overview") {
@@ -128,6 +128,20 @@ func TestWebFlow(t *testing.T) {
 	// The standalone search page was retired, so the sidebar must not link to it.
 	if strings.Contains(body, `href="/search"`) {
 		t.Fatalf("sidebar still links to the removed search page, got:\n%s", body)
+	}
+
+	// The root now serves the public homepage even to a signed-in reader, with a
+	// topbar that points back into the app rather than offering "Log in".
+	resp, err = c.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("get / authed: %v", err)
+	}
+	body = readBody(t, resp)
+	if !strings.Contains(body, "self-hosted instrument") {
+		t.Fatalf("authed / should render the homepage, got:\n%s", body)
+	}
+	if !strings.Contains(body, `<a href="/overview">Overview</a>`) || strings.Contains(body, `<a href="/login">Log in</a>`) {
+		t.Fatalf("authed homepage topbar should link into the app, not offer Log in, got:\n%s", body)
 	}
 
 	// The projects table moved to /projects; with no projects yet it shows its
@@ -251,6 +265,84 @@ func TestRootNonFullCredentialGetsLanding(t *testing.T) {
 		if strings.Contains(body, `class="sidebar"`) {
 			t.Fatalf("%s-scope root should not render the signed-in overview shell, got:\n%s", tc.scope, body)
 		}
+		// A non-full credential is treated as logged out, so the homepage topbar must
+		// offer "Log in" and never the signed-in Overview link: the credential cannot
+		// read the app, so the page must not invite it in.
+		if !strings.Contains(body, `<a href="/login">Log in</a>`) {
+			t.Fatalf("%s-scope homepage should show the logged-out topbar, got:\n%s", tc.scope, body)
+		}
+		if strings.Contains(body, `<a href="/overview">Overview</a>`) {
+			t.Fatalf("%s-scope homepage should not offer the signed-in app link, got:\n%s", tc.scope, body)
+		}
+	}
+}
+
+// TestAuthRedirectsTargetOverview pins the redirect Locations the route split
+// changed, each with redirects disabled so the assertion is on the 3xx target
+// itself rather than the followed page (which the homepage and overview can share
+// text with). An anonymous read page bounces to login carrying the path as next;
+// registration, an already-signed-in visit to /login, and a bare login all land on
+// the app home rather than the public root.
+func TestAuthRedirectsTargetOverview(t *testing.T) {
+	t.Parallel()
+	srv, _ := newTestServer(t)
+
+	noFollow := func() *http.Client {
+		c := newClient(t)
+		c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		return c
+	}
+
+	// An anonymous request for the gated overview redirects to login carrying the
+	// requested path as next, so signing in returns the reader to /overview.
+	anon := noFollow()
+	resp, err := anon.Get(srv.URL + "/overview")
+	if err != nil {
+		t.Fatalf("anon get /overview: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("anon /overview = %d, want 303 to login", resp.StatusCode)
+	}
+	if loc := resp.Header.Get("Location"); loc != "/login?next=%2Foverview" {
+		t.Fatalf("anon /overview redirect = %q, want /login?next=%%2Foverview", loc)
+	}
+
+	// Registration starts a session and lands on the app home, not the marketing root.
+	reg := noFollow()
+	resp, err = reg.PostForm(srv.URL+"/register", url.Values{
+		"username": {"grace"}, "password": {"hopper-1906"},
+	})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther || resp.Header.Get("Location") != overviewPath {
+		t.Fatalf("register redirect = %d %q, want 303 %q", resp.StatusCode, resp.Header.Get("Location"), overviewPath)
+	}
+
+	// The register client now holds a session; visiting /login while signed in
+	// bounces straight into the app rather than showing the form.
+	resp, err = reg.Get(srv.URL + "/login")
+	if err != nil {
+		t.Fatalf("signed-in get /login: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther || resp.Header.Get("Location") != overviewPath {
+		t.Fatalf("signed-in /login redirect = %d %q, want 303 %q", resp.StatusCode, resp.Header.Get("Location"), overviewPath)
+	}
+
+	// A fresh login with no saved next also defaults to the app home.
+	login := noFollow()
+	resp, err = login.PostForm(srv.URL+"/login", url.Values{
+		"username": {"grace"}, "password": {"hopper-1906"},
+	})
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther || resp.Header.Get("Location") != overviewPath {
+		t.Fatalf("login redirect = %d %q, want 303 %q", resp.StatusCode, resp.Header.Get("Location"), overviewPath)
 	}
 }
 
@@ -536,17 +628,17 @@ func TestOverviewRangeWindow(t *testing.T) {
 	}
 
 	// The default load opens on the year window.
-	body := readBody(t, mustGet(t, c, srv.URL+"/"))
-	if !strings.Contains(body, `class="seg active" hx-get="/?range=year"`) {
+	body := readBody(t, mustGet(t, c, srv.URL+"/overview"))
+	if !strings.Contains(body, `class="seg active" hx-get="/overview?range=year"`) {
 		t.Fatalf("default overview should mark the year window active, got:\n%s", body)
 	}
 
 	// ?range=90d moves the active window and leaves the default unmarked.
-	body = readBody(t, mustGet(t, c, srv.URL+"/?range=90d"))
-	if !strings.Contains(body, `class="seg active" hx-get="/?range=90d"`) {
+	body = readBody(t, mustGet(t, c, srv.URL+"/overview?range=90d"))
+	if !strings.Contains(body, `class="seg active" hx-get="/overview?range=90d"`) {
 		t.Fatalf("range=90d should mark the 90-day window active, got:\n%s", body)
 	}
-	if strings.Contains(body, `class="seg active" hx-get="/?range=year"`) {
+	if strings.Contains(body, `class="seg active" hx-get="/overview?range=year"`) {
 		t.Fatalf("range=90d should not also mark the default window active, got:\n%s", body)
 	}
 }
@@ -868,7 +960,7 @@ func TestOverviewUserFilter(t *testing.T) {
 
 	// Unscoped: both users are offered, the collapsed control reads All Users, and
 	// codex (ada's agent) appears in the breakdown alongside claude.
-	body := readBody(t, mustGet(t, c, srv.URL+"/"))
+	body := readBody(t, mustGet(t, c, srv.URL+"/overview"))
 	for _, want := range []string{
 		fmt.Sprintf(`name="user" value="%d"`, owner.ID),
 		fmt.Sprintf(`name="user" value="%d"`, adaID),
@@ -882,14 +974,14 @@ func TestOverviewUserFilter(t *testing.T) {
 
 	// Scoped to grace: her checkbox is checked, ada's codex usage drops out of the
 	// breakdown, and the range buttons carry ?user=<grace> forward.
-	body = readBody(t, mustGet(t, c, srv.URL+fmt.Sprintf("/?user=%d", owner.ID)))
+	body = readBody(t, mustGet(t, c, srv.URL+fmt.Sprintf("/overview?user=%d", owner.ID)))
 	if !strings.Contains(body, fmt.Sprintf(`value="%d" checked`, owner.ID)) {
 		t.Fatalf("grace scope should check her box, got:\n%s", body)
 	}
 	if strings.Contains(body, `>codex</span>`) {
 		t.Fatalf("grace scope should exclude ada's codex usage, got:\n%s", body)
 	}
-	if !strings.Contains(body, fmt.Sprintf(`hx-get="/?range=30d&amp;user=%d"`, owner.ID)) {
+	if !strings.Contains(body, fmt.Sprintf(`hx-get="/overview?range=30d&amp;user=%d"`, owner.ID)) {
 		t.Fatalf("range buttons should carry the user scope, got:\n%s", body)
 	}
 }
@@ -1025,7 +1117,7 @@ func TestPublicOverviewFlow(t *testing.T) {
 		t.Fatalf("account page should offer the publicity control, got:\n%s", body)
 	}
 	// The signed-in overview carries no public badge while private.
-	body = readBody(t, mustGet(t, c, srv.URL+"/"))
+	body = readBody(t, mustGet(t, c, srv.URL+"/overview"))
 	if strings.Contains(body, "View public page") {
 		t.Fatalf("overview should not show the public badge before publishing, got:\n%s", body)
 	}
@@ -1044,7 +1136,7 @@ func TestPublicOverviewFlow(t *testing.T) {
 	if !strings.Contains(body, pubPath) || !strings.Contains(body, "Make private") {
 		t.Fatalf("account page should show the username link and make-private control, got:\n%s", body)
 	}
-	body = readBody(t, mustGet(t, c, srv.URL+"/"))
+	body = readBody(t, mustGet(t, c, srv.URL+"/overview"))
 	if !strings.Contains(body, "View public page") || !strings.Contains(body, pubPath) {
 		t.Fatalf("overview should show the public badge after publishing, got:\n%s", body)
 	}
@@ -1638,12 +1730,12 @@ func TestSessionsLimitClamp(t *testing.T) {
 
 func TestSafeNext(t *testing.T) {
 	cases := map[string]string{
-		"":                  "/",
+		"":                  "/overview",
 		"/projects/1":       "/projects/1",
-		"//evil.example":    "/",
-		"https://evil/x":    "/",
+		"//evil.example":    "/overview",
+		"https://evil/x":    "/overview",
 		"/sessions?q=a":     "/sessions?q=a",
-		"javascript:alert1": "/",
+		"javascript:alert1": "/overview",
 	}
 	for in, want := range cases {
 		if got := safeNext(in); got != want {
