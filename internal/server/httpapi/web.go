@@ -160,6 +160,12 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		Agent:    strings.TrimSpace(q.Get("agent")),
 		Machine:  strings.TrimSpace(q.Get("machine")),
 		Username: strings.TrimSpace(q.Get("user")),
+		// Outcome and grade are whitelisted to the buckets the Insights distributions
+		// drill into: an unrecognized value (a tampered or stale link) drops to "" (no
+		// filter) rather than erroring, matching how the sort param falls back rather
+		// than 400s. web.ValidOutcome / web.ValidGrade are the trust boundary.
+		Outcome: web.ValidOutcome(strings.TrimSpace(q.Get("outcome"))),
+		Grade:   web.ValidGrade(strings.TrimSpace(q.Get("grade"))),
 	}
 	// A present-but-malformed project filter is a bad request, not a silent
 	// fall-through to the unfiltered list (which would mislead the caller).
@@ -247,42 +253,59 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 	// matches the username through the analytics base (an unknown name scopes to
 	// nothing, matching the empty table) rather than a separate lookup whose error
 	// would have to be invented away.
-	analytics, err := s.Store.Analytics(r.Context(), store.AnalyticsFilter{
+	af := store.AnalyticsFilter{
 		ProjectID: id, Since: since, Username: filter.Username, Agent: filter.Agent, Machine: filter.Machine,
-	})
+	}
+	analytics, err := s.Store.Analytics(r.Context(), af)
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load analytics."))
 		return
 	}
+	// The quality band draws from the same scope as the usage panel and the table (the same
+	// AnalyticsFilter: project, window, and any active user/agent/machine narrowing), so the
+	// grades, outcomes, tools, and churn describe exactly the sessions the rows below list
+	// rather than a project-wide read that would drift from the filtered table.
+	insights, err := s.Store.Insights(r.Context(), af)
+	if err != nil {
+		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load quality signals."))
+		return
+	}
 	wf := web.Facets{Agents: facets.Agents, Machines: facets.Machines, Users: facets.Users}
-	render(w, r, http.StatusOK, web.ProjectPage(s.pageForNav(r, proj.RemoteKey, "projects"), proj, page.Sessions, page.Remainder, wf, filter, analytics, rng))
+	render(w, r, http.StatusOK, web.ProjectPage(s.pageForNav(r, proj.RemoteKey, "projects"), proj, page.Sessions, page.Remainder, wf, filter, analytics, insights, rng))
 }
 
 // sessionView loads everything the session page (and its live body fragment)
 // needs: detail, transcript, tool metadata and attachments grouped by message, and
 // subagents.
-func (s *Server) sessionView(r *http.Request, id int64) (store.SessionDetail, []store.Message, map[int][]store.ToolCallView, map[int][]store.AttachmentView, []store.SessionSummary, error) {
+func (s *Server) sessionView(r *http.Request, id int64) (store.SessionDetail, []store.Message, map[int][]store.ToolCallView, map[int][]store.AttachmentView, map[int]store.TurnUsage, []store.SessionSummary, error) {
 	d, err := s.Store.SessionDetailByID(r.Context(), id)
 	if err != nil {
-		return d, nil, nil, nil, nil, err
+		return d, nil, nil, nil, nil, nil, err
 	}
 	msgs, err := s.Store.Messages(r.Context(), id)
 	if err != nil {
-		return d, nil, nil, nil, nil, err
+		return d, nil, nil, nil, nil, nil, err
 	}
 	tools, err := s.Store.ToolCalls(r.Context(), id)
 	if err != nil {
-		return d, nil, nil, nil, nil, err
+		return d, nil, nil, nil, nil, nil, err
 	}
 	atts, err := s.Store.Attachments(r.Context(), id)
 	if err != nil {
-		return d, nil, nil, nil, nil, err
+		return d, nil, nil, nil, nil, nil, err
+	}
+	// The per-turn usage backs the transcript's per-message context and cost stamps. It is one
+	// GROUP BY over the session's usage_events (O(session), one query), folded here alongside the
+	// other session-sized reads so both the first render and every SSE body refresh carry it.
+	usage, err := s.Store.SessionTurnUsage(r.Context(), id)
+	if err != nil {
+		return d, nil, nil, nil, nil, nil, err
 	}
 	subs, err := s.Store.Subagents(r.Context(), id)
 	if err != nil {
-		return d, nil, nil, nil, nil, err
+		return d, nil, nil, nil, nil, nil, err
 	}
-	return d, msgs, web.ToolsByOrdinal(tools), web.AttachmentsByOrdinal(atts), subs, nil
+	return d, msgs, web.ToolsByOrdinal(tools), web.AttachmentsByOrdinal(atts), usage, subs, nil
 }
 
 // sessionHeaderStats builds the derived stat-tile inputs the session instrument header
@@ -317,7 +340,7 @@ func (s *Server) handleSessionPage(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(r, "Not found"), http.StatusNotFound, "Session not found."))
 		return
 	}
-	d, msgs, tools, atts, subs, err := s.sessionView(r, id)
+	d, msgs, tools, atts, usage, subs, err := s.sessionView(r, id)
 	if errors.Is(err, store.ErrNotFound) {
 		render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(r, "Not found"), http.StatusNotFound, "Session not found."))
 		return
@@ -341,7 +364,7 @@ func (s *Server) handleSessionPage(w http.ResponseWriter, r *http.Request) {
 	title := fmt.Sprintf("Session #%d", d.ID)
 	p, _ := principalFrom(r.Context())
 	owner := p.UserID == d.OwnerID
-	render(w, r, http.StatusOK, web.SessionPage(s.pageForNav(r, title, "sessions"), d, msgs, tools, atts, subs, hs, dupIDs, true, owner))
+	render(w, r, http.StatusOK, web.SessionPage(s.pageForNav(r, title, "sessions"), d, msgs, tools, atts, usage, subs, hs, dupIDs, true, owner))
 }
 
 // handlePublishSession marks the owner's session public and redirects back to it.
@@ -664,6 +687,13 @@ func (s *Server) handlePublicSession(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load session."))
 		return
 	}
+	// The per-message context and cost stamps leak nothing the public transcript does not already
+	// show (they are derived from the same token totals), so the public page carries them too.
+	usage, err := s.Store.SessionTurnUsage(r.Context(), d.ID)
+	if err != nil {
+		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load session."))
+		return
+	}
 	subs, err := s.Store.Subagents(r.Context(), d.ID)
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load session."))
@@ -682,7 +712,7 @@ func (s *Server) handlePublicSession(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load session."))
 		return
 	}
-	render(w, r, http.StatusOK, web.PublicSessionPage(d, msgs, web.ToolsByOrdinal(tools), web.AttachmentsByOrdinal(atts), publicSubs, hs))
+	render(w, r, http.StatusOK, web.PublicSessionPage(d, msgs, web.ToolsByOrdinal(tools), web.AttachmentsByOrdinal(atts), usage, publicSubs, hs))
 }
 
 // handleSessionBody serves just the live-updating body fragment, re-fetched by
@@ -693,7 +723,7 @@ func (s *Server) handleSessionBody(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	d, msgs, tools, atts, subs, err := s.sessionView(r, id)
+	d, msgs, tools, atts, usage, subs, err := s.sessionView(r, id)
 	if errors.Is(err, store.ErrNotFound) {
 		http.NotFound(w, r)
 		return
@@ -713,7 +743,7 @@ func (s *Server) handleSessionBody(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Could not load session.", http.StatusInternalServerError)
 		return
 	}
-	render(w, r, http.StatusOK, web.SessionMain(d, msgs, tools, atts, subs, hs))
+	render(w, r, http.StatusOK, web.SessionMain(d, msgs, tools, atts, usage, subs, hs))
 }
 
 // handleSessionEvents is the SSE endpoint that signals a watching browser to

@@ -175,7 +175,11 @@ table.grid tbody tr:hover td { background: var(--surface-2); }
    firmer top rule to set it off from the rows it totals. */
 table.grid tfoot tr.remainder td { color: var(--muted); border-top: 2px solid var(--border); border-bottom: none; }
 table.grid tfoot tr.remainder:hover td { background: none; }
-td.num, th.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+/* The table.grid variants repeat the selectors at higher specificity: the grid's own
+   th/td rule (table.grid th, table.grid td) sets text-align: left and would out-specify
+   a bare td.num, leaving every numeric column left-aligned against the design system's
+   right-aligned-numerics rule. */
+td.num, th.num, table.grid td.num, table.grid th.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .nowrap { white-space: nowrap; }
 
 /* ---- Cards ---- */

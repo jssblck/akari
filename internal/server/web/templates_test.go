@@ -304,7 +304,7 @@ func TestProjectPageRendersHeatmap(t *testing.T) {
 	p := Page{Title: "akari", LoggedIn: true, Active: "projects", Username: "Anna Winlock"}
 	proj := store.ProjectSummary{ID: 7, RemoteKey: "hopper/akari", Kind: "remote", SessionCount: 1}
 	sel := store.SessionFilter{ProjectID: 7, Agent: "claude"}
-	html := renderComponent(t, ProjectPage(p, proj, nil, store.SessionRemainder{}, Facets{}, sel, analyticsWithData(), "90d"))
+	html := renderComponent(t, ProjectPage(p, proj, nil, store.SessionRemainder{}, Facets{}, sel, analyticsWithData(), store.Insights{}, "90d"))
 
 	for _, want := range []string{
 		`data-heatmap`, `data-heatmap-target="chart-project"`, `>Tokens</button>`, `>Dollars</button>`,
@@ -330,6 +330,12 @@ func TestProjectPageRendersHeatmap(t *testing.T) {
 	if strings.Contains(html, `<h2>Usage</h2>`) {
 		t.Error("project page should drop the redundant Usage panel header")
 	}
+	// An empty Insights (no graded sessions in the window) renders no Quality band, so
+	// a project with nothing to grade shows the usage panel and the table with no empty
+	// row of zero bars between them.
+	if strings.Contains(html, `class="proj-quality"`) {
+		t.Error("project page with empty Insights should render no Quality band")
+	}
 	// The totals strip and activity grid sit in the centered lead column so the
 	// calendar grid reads at the Overview's width on this full-bleed page; the
 	// breakdowns stay a full-width sibling after the lead closes.
@@ -338,5 +344,51 @@ func TestProjectPageRendersHeatmap(t *testing.T) {
 	breakdowns := strings.Index(html, `class="breakdowns"`)
 	if lead < 0 || !(lead < grid && grid < breakdowns) {
 		t.Errorf("activity grid should sit inside the centered usage-lead, breakdowns after it; got lead=%d grid=%d breakdowns=%d", lead, grid, breakdowns)
+	}
+}
+
+// With a populated Insights the project page grows a Quality band: the section label, the
+// three distribution panels, and the tools and churn panels, with the grade and outcome
+// drill-downs scoped to the project (and any active filter). The band is a lean subset of
+// /insights, so it deliberately omits the velocity, concurrency, hygiene, and context bands,
+// and its churn rows drop the per-bar project tag since every row is this one project.
+func TestProjectPageRendersQualityBand(t *testing.T) {
+	p := Page{Title: "akari", LoggedIn: true, Active: "projects", Username: "Anna Winlock"}
+	proj := store.ProjectSummary{ID: 7, RemoteKey: "hopper/akari", Kind: "remote", SessionCount: 15}
+	// The base scope carries the project and an active agent filter, so the drill-down
+	// hrefs must fold both in beside the bucket.
+	sel := store.SessionFilter{ProjectID: 7, Agent: "claude"}
+	html := renderComponent(t, ProjectPage(p, proj, nil, store.SessionRemainder{}, Facets{}, sel, analyticsWithData(), sampleInsights(), "90d"))
+
+	for _, want := range []string{
+		// The band and its section label.
+		`class="proj-quality"`, `>Quality</span>`,
+		// The three distribution panels reuse the Insights grid.
+		`class="ins-grid"`, `>Grades<`, `>Outcomes<`, `>Archetypes<`,
+		// The coverage note rides the Grades head (11 of 15 graded reads 73%).
+		`73% graded`,
+		// A grade drill-down carries the project scope, the active agent filter, and the
+		// bucket, so it lands on the same sessions the bar counts.
+		`href="/sessions?agent=claude&amp;grade=A&amp;project=7"`,
+		// An outcome drill-down likewise carries the project scope and the filter.
+		`href="/sessions?agent=claude&amp;outcome=completed&amp;project=7"`,
+		// The tools and churn panels round out the band.
+		`>Tools<`, `>File churn<`, `>Read<`,
+		// The churn caption drops the fleet page's "grouped per project" clause.
+		`files edited more than once in this window<`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("project quality band missing %q", want)
+		}
+	}
+	// The band stays lean: none of the fleet-only bands appear on the project page.
+	for _, unwanted := range []string{`>Velocity<`, `>Concurrency<`, `>Prompt hygiene<`, `>Context health<`} {
+		if strings.Contains(html, unwanted) {
+			t.Errorf("project quality band should omit the fleet-only band %q", unwanted)
+		}
+	}
+	// Every churn row is this one project, so the per-bar project tag is dropped as noise.
+	if strings.Contains(html, `class="churn-proj"`) {
+		t.Error("project quality churn should drop the per-bar project tag")
 	}
 }

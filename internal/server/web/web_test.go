@@ -33,12 +33,12 @@ func TestSessionPageShowsDuplicateIDChip(t *testing.T) {
 		1: {{MessageOrdinal: 1, ToolName: "Read"}},
 	}
 
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, HeaderStats{}, 1, false, false))
+	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, nil, HeaderStats{}, 1, false, false))
 	if !strings.Contains(html, "1 duplicate id") {
 		t.Error("session page should show the duplicate-id chip when the count is non-zero")
 	}
 
-	html = renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, HeaderStats{}, 0, false, false))
+	html = renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, nil, HeaderStats{}, 0, false, false))
 	if strings.Contains(html, "duplicate id") {
 		t.Error("session page should not show the chip when the count is zero")
 	}

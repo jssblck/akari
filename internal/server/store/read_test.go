@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jssblck/akari/internal/quality"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/storetest"
 )
@@ -322,6 +323,67 @@ func TestListAllSessionsSort(t *testing.T) {
 		if bogus[i].ID != def[i].ID {
 			t.Fatalf("bogus sort did not fall back to default order at %d: %d vs %d", i, bogus[i].ID, def[i].ID)
 		}
+	}
+}
+
+// TestListAllSessionsOutcomeGradeFilter confirms the SessionFilter outcome and grade
+// narrowing mirrors the Insights distribution buckets: a graded, completed session matches
+// outcome=completed and its letter; an ungraded session (no gated signals row) matches only
+// outcome=unknown and grade=unscored, since the filter coalesces a missing row to those
+// buckets exactly as the distribution LEFT JOIN does. This is the property that keeps a
+// distribution bar's count and its drill-down list in agreement.
+func TestListAllSessionsOutcomeGradeFilter(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	ada := seedUser(t, st, "ada")
+	pid, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A graded, completed session (grade B) and an ungraded one (no signals row at all, so it
+	// coalesces to unknown/unscored). markSignalsFresh inside insertSignal clears signals_stale
+	// so the graded row reads through the version-and-stale gate the filter applies.
+	graded := seedSession(t, st, ada, pid, "graded")
+	insertSignal(t, st, ctx, graded, quality.Version, "completed", "B")
+	ungraded := seedSession(t, st, ada, pid, "ungraded")
+
+	only := func(t *testing.T, f store.SessionFilter, want int64, label string) {
+		t.Helper()
+		rows, err := st.ListAllSessions(ctx, f)
+		if err != nil {
+			t.Fatalf("%s: %v", label, err)
+		}
+		if len(rows) != 1 || rows[0].ID != want {
+			ids := make([]int64, len(rows))
+			for i, r := range rows {
+				ids[i] = r.ID
+			}
+			t.Fatalf("%s = %v, want just [%d]", label, ids, want)
+		}
+	}
+
+	only(t, store.SessionFilter{Outcome: "completed"}, graded, "outcome=completed")
+	only(t, store.SessionFilter{Outcome: "unknown"}, ungraded, "outcome=unknown")
+	only(t, store.SessionFilter{Grade: "B"}, graded, "grade=B")
+	only(t, store.SessionFilter{Grade: "unscored"}, ungraded, "grade=unscored")
+
+	// A stale graded row folds into the missing bucket: mark the graded session stale and it
+	// now matches unknown/unscored rather than its stored outcome and grade, the read-side
+	// mirror of the settle pass's staleness flag.
+	if _, err := st.Pool.Exec(ctx, `UPDATE sessions SET signals_stale = true WHERE id = $1`, graded); err != nil {
+		t.Fatalf("mark graded stale: %v", err)
+	}
+	if rows, err := st.ListAllSessions(ctx, store.SessionFilter{Outcome: "completed"}); err != nil {
+		t.Fatalf("stale outcome=completed: %v", err)
+	} else if len(rows) != 0 {
+		t.Errorf("stale graded session should not match outcome=completed, got %d rows", len(rows))
+	}
+	if rows, err := st.ListAllSessions(ctx, store.SessionFilter{Grade: "unscored"}); err != nil {
+		t.Fatalf("stale grade=unscored: %v", err)
+	} else if len(rows) != 2 {
+		t.Errorf("both sessions should read unscored once the graded one is stale, got %d rows", len(rows))
 	}
 }
 

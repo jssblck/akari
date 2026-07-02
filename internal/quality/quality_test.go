@@ -4,8 +4,11 @@ import "testing"
 
 // TestClassify pins the outcome rule and the precedence between its cases. The
 // ordering matters: a session that ends badly must not read "completed" merely
-// because the assistant happened to speak last, so the strong signals (no human,
-// mid-tool, an errored tail) are checked before the last-word heuristic.
+// because the assistant happened to speak last, so the strong signals (an errored
+// tail, a settled mid-tool ending) are checked before the last-word heuristic. The
+// table also pins v2's new resolutions: a settled automation run reads as completed,
+// and an idle mid-tool ending reads as errored (automation) or abandoned (human)
+// rather than staying unknown.
 func TestClassify(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -14,13 +17,38 @@ func TestClassify(t *testing.T) {
 		conf    Confidence
 	}{
 		{
-			name:    "no human turn is unknown",
-			facts:   Facts{UserMessages: 0, LastAssistantOrd: 5, LastUserOrd: -1},
+			name:    "trailing failures win over a pending tool call",
+			facts:   Facts{UserMessages: 2, LastAssistantOrd: 9, LastUserOrd: 4, ToolCallPending: true, TrailingFailures: 3, IdleLongEnough: true},
+			outcome: OutcomeErrored, conf: ConfHigh,
+		},
+		{
+			name:    "pending tool call on a still-recent session holds the verdict",
+			facts:   Facts{UserMessages: 2, LastAssistantOrd: 9, LastUserOrd: 4, ToolCallPending: true, IdleLongEnough: false},
 			outcome: OutcomeUnknown, conf: ConfLow,
 		},
 		{
-			name:    "pending tool call holds the verdict even past the last word",
-			facts:   Facts{UserMessages: 2, LastAssistantOrd: 9, LastUserOrd: 4, ToolCallPending: true},
+			name:    "idle mid-tool automation run is errored at medium confidence",
+			facts:   Facts{UserMessages: 0, LastAssistantOrd: 6, LastUserOrd: -1, ToolCallPending: true, IdleLongEnough: true},
+			outcome: OutcomeErrored, conf: ConfMedium,
+		},
+		{
+			name:    "idle mid-tool human session is abandoned at medium confidence",
+			facts:   Facts{UserMessages: 3, LastAssistantOrd: 6, LastUserOrd: 10, ToolCallPending: true, IdleLongEnough: true},
+			outcome: OutcomeAbandoned, conf: ConfMedium,
+		},
+		{
+			name:    "settled automation with a substantive assistant word is completed at medium confidence",
+			facts:   Facts{UserMessages: 0, LastAssistantOrd: 5, LastUserOrd: -1, IdleLongEnough: true},
+			outcome: OutcomeCompleted, conf: ConfMedium,
+		},
+		{
+			name:    "automation not yet idle stays unknown so a live subagent is not graded early",
+			facts:   Facts{UserMessages: 0, LastAssistantOrd: 5, LastUserOrd: -1, IdleLongEnough: false},
+			outcome: OutcomeUnknown, conf: ConfLow,
+		},
+		{
+			name:    "settled automation with no assistant word is unknown",
+			facts:   Facts{UserMessages: 0, LastAssistantOrd: -1, LastUserOrd: -1, IdleLongEnough: true},
 			outcome: OutcomeUnknown, conf: ConfLow,
 		},
 		{
@@ -152,6 +180,127 @@ func TestScore(t *testing.T) {
 			if score != c.score || grade != c.grade || scored != c.scored {
 				t.Errorf("Score(%+v) = (%d, %q, %v), want (%d, %q, %v)",
 					c.signals, score, grade, scored, c.score, c.grade, c.scored)
+			}
+		})
+	}
+}
+
+// TestScoreBreakdown cross-checks that the breakdown's arithmetic mirrors Score's: the
+// sum of the returned penalty points must equal 100 minus the score (before Score's clamp
+// at zero), the ordering must match Score's (outcome, failures, retries, churn, streak),
+// and the labels must carry the right count with correct singular/plural. It also pins the
+// unscored case (nil) and the clean case (nil, nothing to explain).
+func TestScoreBreakdown(t *testing.T) {
+	cases := []struct {
+		name    string
+		signals Signals
+		labels  []string
+		points  []int
+	}{
+		{
+			name:    "clean completed session has no penalties",
+			signals: Signals{Outcome: OutcomeCompleted, ToolCalls: 10},
+			labels:  nil, points: nil,
+		},
+		{
+			name:    "unknown outcome with no tool signal is unscored",
+			signals: Signals{Outcome: OutcomeUnknown},
+			labels:  nil, points: nil,
+		},
+		{
+			name:    "errored ending is the first line",
+			signals: Signals{Outcome: OutcomeErrored, ToolCalls: 5},
+			labels:  []string{"errored ending"}, points: []int{30},
+		},
+		{
+			name:    "abandoned ending is the first line",
+			signals: Signals{Outcome: OutcomeAbandoned, ToolCalls: 5},
+			labels:  []string{"abandoned"}, points: []int{15},
+		},
+		{
+			name:    "a single failure is singular",
+			signals: Signals{Outcome: OutcomeCompleted, ToolFailures: 1},
+			labels:  []string{"1 tool failure"}, points: []int{3},
+		},
+		{
+			name:    "multiple failures are pluralized",
+			signals: Signals{Outcome: OutcomeCompleted, ToolFailures: 2},
+			labels:  []string{"2 tool failures"}, points: []int{6},
+		},
+		{
+			name:    "a single retry is singular",
+			signals: Signals{Outcome: OutcomeCompleted, ToolRetries: 1},
+			labels:  []string{"1 retry"}, points: []int{5},
+		},
+		{
+			name:    "multiple retries pluralize retry to retries",
+			signals: Signals{Outcome: OutcomeCompleted, ToolRetries: 3},
+			labels:  []string{"3 retries"}, points: []int{15},
+		},
+		{
+			name:    "churned edits carry the count",
+			signals: Signals{Outcome: OutcomeCompleted, EditChurn: 3},
+			labels:  []string{"3 churned edits"}, points: []int{12},
+		},
+		{
+			name:    "a failure streak is a flat line",
+			signals: Signals{Outcome: OutcomeCompleted, LongestFailureStreak: 4},
+			labels:  []string{"failure streak"}, points: []int{10},
+		},
+		{
+			name: "all lines appear in Score's order",
+			signals: Signals{
+				Outcome: OutcomeErrored, ToolFailures: 2, ToolRetries: 1,
+				EditChurn: 3, LongestFailureStreak: 5,
+			},
+			labels: []string{"errored ending", "2 tool failures", "1 retry", "3 churned edits", "failure streak"},
+			points: []int{30, 6, 5, 12, 10},
+		},
+		{
+			name: "every dimension saturates its cap",
+			signals: Signals{
+				Outcome: OutcomeErrored, ToolFailures: 40, ToolRetries: 20,
+				EditChurn: 20, LongestFailureStreak: 10,
+			},
+			labels: []string{"errored ending", "40 tool failures", "20 retries", "20 churned edits", "failure streak"},
+			points: []int{30, 30, 25, 20, 10},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			items := ScoreBreakdown(c.signals)
+			if len(items) != len(c.labels) {
+				t.Fatalf("ScoreBreakdown(%+v) = %d items, want %d: %+v", c.signals, len(items), len(c.labels), items)
+			}
+			total := 0
+			for i, it := range items {
+				if it.Label != c.labels[i] {
+					t.Errorf("item %d label = %q, want %q", i, it.Label, c.labels[i])
+				}
+				if it.Points != c.points[i] {
+					t.Errorf("item %d points = %d, want %d", i, it.Points, c.points[i])
+				}
+				if it.Points <= 0 {
+					t.Errorf("item %d points = %d, want > 0", i, it.Points)
+				}
+				total += it.Points
+			}
+			// The breakdown must reconstruct Score's arithmetic exactly. Score clamps a
+			// score below zero to zero, so compare against the pre-clamp penalty (100 minus
+			// the reported score) only while the penalties stay under 100; past that the
+			// clamp hides the excess and the sum legitimately overshoots 100 minus score.
+			score, _, scored := Score(c.signals)
+			if !scored {
+				if items != nil {
+					t.Errorf("unscored session should have nil breakdown, got %+v", items)
+				}
+				return
+			}
+			if score > 0 && total != 100-score {
+				t.Errorf("breakdown total = %d, want %d (100 - score %d)", total, 100-score, score)
+			}
+			if score == 0 && total < 100 {
+				t.Errorf("breakdown total = %d, want >= 100 for a floored score", total)
 			}
 		})
 	}

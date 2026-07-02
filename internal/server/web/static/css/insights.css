@@ -25,10 +25,35 @@
 .ins-panel-head { margin-bottom: var(--sp-md); }
 .ins-caption { display: block; margin-top: 3px; line-height: 1.4; }
 
+/* A panel head that carries a right-aligned coverage note (the Grades panel's "N% graded")
+   lays the label/caption block and the note on one baseline row, note pushed to the far
+   right. The note is muted mono, so it reads as an instrument figure beside the title rather
+   than competing with it. */
+.ins-panel-head-row {
+  display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-sm);
+}
+.ins-head-note { flex: none; }
+
 /* The distribution bars carry their value beside the label and never truncate it (the
    labels are short, fixed buckets), unlike the breakdown bars whose model ids can run
    long. */
 .dist-bars .bar-label { max-width: none; }
+
+/* A distribution bar that drills into the sessions feed wraps its head and track in a link
+   spanning the whole row (the hit target is the row, like the data-row-href tables). It must
+   not read as lilac link text: the label keeps its normal colour and the row gains a hover
+   tint and pointer instead, so a column of bars never floods the page with the accent. The
+   label underlines subtly on hover as the only text affordance, and a keyboard focus lands a
+   lilac focus ring on the row (reusing the app's --ring), so the drill-down is reachable
+   without a mouse. */
+.dist-link {
+  display: block; color: inherit; text-decoration: none;
+  margin: 0 calc(-1 * var(--sp-sm)); padding: 2px var(--sp-sm);
+  border-radius: var(--r-sm); cursor: pointer;
+}
+.dist-link:hover { background: var(--surface-2); }
+.dist-link:hover .bar-label { text-decoration: underline; text-underline-offset: 2px; }
+.dist-link:focus-visible { outline: none; box-shadow: var(--ring); }
 
 /* The headline holds the two measured-rate bands (concurrency and velocity) side by side
    above the distribution grid; each band lays its figures out in a wrapping row that reads
@@ -76,8 +101,33 @@
    opposite of the default end-ellipsis that would hide the part that identifies the file. */
 .ins-churn { margin-top: var(--sp-xl); }
 .churn-bars { margin-top: var(--sp-sm); }
+/* Each row names the file as a project tag then the path: the two share the label side of the
+   bar head, and the path keeps its left-truncation (direction: rtl) so the filename stays visible
+   while the leading directories give way. The project tag reads as a small muted prefix, not a
+   pill, so it labels the bar without competing with the path. */
+.churn-name { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.churn-proj {
+  flex: none; color: var(--muted); font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
 .churn-bars .bar-label { direction: rtl; text-align: left; max-width: 65%; }
 .churn-sess { color: var(--muted); margin-left: 8px; }
+
+/* The People panel is a full-width leaderboard between the context band and the distribution
+   grid: a grid table of authors with a slim stacked outcome bar per row. It sits with the
+   fleet distributions it drills into, one band above them. */
+.ins-people { margin-bottom: var(--sp-xl); }
+.ins-people-table { margin-top: var(--sp-md); }
+
+/* The outcome mix is a slim static stacked bar: four coloured spans whose widths are each
+   outcome's share of the row's sessions, so the split reads at a glance while the exact counts
+   ride the hover title. A hairline radius and a fixed height keep it an instrument stripe, not
+   a chart; it takes a minimum width so a row with few sessions still shows a readable bar. */
+.mix-bar {
+  display: flex; height: 8px; width: 100%; min-width: 120px;
+  border-radius: 2px; overflow: hidden; background: var(--surface-2);
+}
+.mix-seg { height: 100%; }
 
 @media (max-width: 1100px) {
   .ins-headline { grid-template-columns: 1fr; gap: var(--sp-lg); }

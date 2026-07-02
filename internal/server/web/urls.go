@@ -121,6 +121,32 @@ func SessionPath(id int64) string { return fmt.Sprintf("/sessions/%d", id) }
 // SessionsBasePath is the global (cross-project) session list.
 const SessionsBasePath = "/sessions"
 
+// validOutcomes and validGrades are the trust boundaries for the two signals filters:
+// only a value present here reaches SessionFilter, so a tampered or stale ?outcome / ?grade
+// falls through to "" (no filter) rather than into the query. They mirror the Insights
+// distribution buckets exactly (the four outcomes, the five letters, plus the "unscored"
+// sentinel for the empty grade bucket), so every drill-down link the page emits round-trips.
+var validOutcomes = map[string]bool{"completed": true, "abandoned": true, "errored": true, "unknown": true}
+var validGrades = map[string]bool{"A": true, "B": true, "C": true, "D": true, "F": true, "unscored": true}
+
+// ValidOutcome returns v when it names a real outcome bucket, else "" (no filter). It is the
+// handler's guard on the ?outcome param, the counterpart to store.IsSortKey for the sort param.
+func ValidOutcome(v string) string {
+	if validOutcomes[v] {
+		return v
+	}
+	return ""
+}
+
+// ValidGrade returns v when it names a real grade bucket (a letter or the "unscored"
+// sentinel), else "" (no filter). It is the handler's guard on the ?grade param.
+func ValidGrade(v string) string {
+	if validGrades[v] {
+		return v
+	}
+	return ""
+}
+
 // sessionsQuery builds the query string for the global session list from a
 // filter, omitting empty fields, so facet links and the htmx swap target agree.
 func sessionsQuery(f store.SessionFilter) string {
@@ -133,6 +159,12 @@ func sessionsQuery(f store.SessionFilter) string {
 	}
 	if f.Machine != "" {
 		q.Set("machine", f.Machine)
+	}
+	if f.Outcome != "" {
+		q.Set("outcome", f.Outcome)
+	}
+	if f.Grade != "" {
+		q.Set("grade", f.Grade)
 	}
 	if f.ProjectID != 0 {
 		q.Set("project", fmt.Sprintf("%d", f.ProjectID))
@@ -204,6 +236,18 @@ func facetToggle(f store.SessionFilter, field, value string) store.SessionFilter
 		} else {
 			f.Machine = value
 		}
+	case "outcome":
+		if f.Outcome == value {
+			f.Outcome = ""
+		} else {
+			f.Outcome = value
+		}
+	case "grade":
+		if f.Grade == value {
+			f.Grade = ""
+		} else {
+			f.Grade = value
+		}
 	}
 	return f
 }
@@ -240,6 +284,10 @@ func facetHref(field, value string, f store.SessionFilter) templ.SafeURL {
 		return UserFacetHref(f, value)
 	case "machine":
 		return MachineFacetHref(f, value)
+	case "outcome":
+		return SessionsHref(facetToggle(f, "outcome", value))
+	case "grade":
+		return SessionsHref(facetToggle(f, "grade", value))
 	}
 	return SessionsHref(f)
 }
@@ -258,7 +306,8 @@ func projectLabelByID(opts []store.ProjectFacet, id int64) string {
 // AnyFilterActive reports whether the global session list is currently narrowed,
 // so the view can show a "clear all" affordance only when it would do something.
 func AnyFilterActive(f store.SessionFilter) bool {
-	return f.Agent != "" || f.Username != "" || f.Machine != "" || f.ProjectID != 0
+	return f.Agent != "" || f.Username != "" || f.Machine != "" || f.ProjectID != 0 ||
+		f.Outcome != "" || f.Grade != ""
 }
 
 // PublicPath is the plain-string public URL, shown to the owner as the shareable

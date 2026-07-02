@@ -159,6 +159,44 @@ func SessionSortOptions() []SessionSortOption {
 	}
 }
 
+// FilterOption is one choice in a toolbar filter select: the canonical key that rides
+// the query string and its display label. Outcome and grade both use it, so the two
+// selects render from one shape.
+type FilterOption struct {
+	Key   string
+	Label string
+}
+
+// OutcomeFilterOptions are the outcome filter's choices, in the distribution's canonical
+// order (best to worst, unknown last), so the toolbar select reads the same order the
+// Insights outcome bars do. The labels reuse OutcomeLabel, so the select and the session
+// detail's Outcome field name a bucket identically.
+func OutcomeFilterOptions() []FilterOption {
+	keys := []string{"completed", "errored", "abandoned", "unknown"}
+	out := make([]FilterOption, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, FilterOption{Key: k, Label: OutcomeLabel(k)})
+	}
+	return out
+}
+
+// GradeFilterOptions are the grade filter's choices: the five letters best to worst, then
+// the "unscored" sentinel that matches a session with no gated grade (the Insights Grades
+// panel's empty bucket). The letter labels are the letters themselves; the sentinel reuses
+// gradeLabel so it reads "Unscored", the same word the grade bar carries.
+func GradeFilterOptions() []FilterOption {
+	keys := []string{"A", "B", "C", "D", "F", "unscored"}
+	out := make([]FilterOption, 0, len(keys))
+	for _, k := range keys {
+		label := k
+		if k == "unscored" {
+			label = gradeLabel("")
+		}
+		out = append(out, FilterOption{Key: k, Label: label})
+	}
+	return out
+}
+
 // FeedIsGrouped reports whether the feed for this filter is split into day
 // headings, which it is only in the default most-recent order.
 func FeedIsGrouped(f store.SessionFilter) bool {

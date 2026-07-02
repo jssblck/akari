@@ -40,13 +40,21 @@ templ InsightsPage(p Page, ins store.Insights, rng string, ranges []RangeOption)
 				<div class="ins-context">
 					@contextPanel(ins.Context)
 				</div>
+				if len(ins.Users.Users) >= 2 {
+					// The People panel is a per-author leaderboard, so it earns its width only on a
+					// multi-user instance: a single-user instance's one row would just restate the
+					// fleet distributions under a name, so the panel hides below two authors.
+					<div class="ins-people" id="ins-people">
+						@peoplePanel(ins.Users)
+					</div>
+				}
 				<div class="ins-grid">
-					@distributionPanel("Grades", "the quality score banded A to F, unscored for an ungraded session", GradeBars(ins.Quality.Grades))
-					@distributionPanel("Outcomes", "how each session ended", OutcomeBars(ins.Quality.Outcomes))
-					@distributionPanel("Archetypes", "session shape by length and turns", ArchetypeBars(ins.Archetypes))
+					@distributionPanel("Grades", "the quality score banded A to F, unscored for an ungraded session", GradedNote(ins.Quality), GradeBars(ins.Quality.Grades, store.SessionFilter{}))
+					@distributionPanel("Outcomes", "how each session ended", "", OutcomeBars(ins.Quality.Outcomes, store.SessionFilter{}))
+					@distributionPanel("Archetypes", "session shape by length and turns", "", ArchetypeBars(ins.Archetypes))
 				</div>
 				<div class="ins-churn">
-					@churnPanel(ins.Churn)
+					@churnPanel(ins.Churn, "files edited more than once in this window, grouped per project across worktrees", true)
 				</div>
 			}
 		</section>
@@ -273,11 +281,18 @@ templ contextPanel(c store.ContextHealthStats) {
 // most-edited first, each bar sized by edit count and annotated with how many sessions
 // returned to the path. It sits last, after the distributions, since a file path needs the
 // full width to read without truncating to nothing.
-templ churnPanel(c store.FileChurn) {
+//
+// caption is passed in rather than fixed so the panel reads right on both surfaces: the
+// fleet /insights page groups churn per project ("grouped per project across worktrees"),
+// while a single project's page drops that clause since every row is the same project.
+// showProject gates the per-bar project tag for the same reason: on the project page the
+// tag would repeat the page's own project on every row (noise), so the project page passes
+// false and the tag disappears, leaving the path to fill the label.
+templ churnPanel(c store.FileChurn, caption string, showProject bool) {
 	<div class="ins-panel ins-churn-panel">
 		<div class="ins-panel-head">
 			<span class="label">File churn</span>
-			<span class="muted small ins-caption">files edited more than once in this window</span>
+			<span class="muted small ins-caption">{ caption }</span>
 		</div>
 		if !c.HasData() {
 			<div class="muted small">No files were edited more than once in this window.</div>
@@ -286,7 +301,12 @@ templ churnPanel(c store.FileChurn) {
 				for _, b := range ChurnBars(c) {
 					<li class="bar-row">
 						<div class="bar-head">
-							<span class="bar-label" title={ b.Path }>{ b.Path }</span>
+							<span class="churn-name">
+								if showProject {
+									<span class="churn-proj">{ b.Project }</span>
+								}
+								<span class="bar-label" title={ b.Path }>{ b.Path }</span>
+							</span>
 							<span class="bar-val">
 								{ fmt.Sprintf("%d edits", b.Edits) }
 								<span class="churn-sess">{ ChurnSessions(b.Sessions) }</span>
@@ -305,29 +325,100 @@ templ churnPanel(c store.FileChurn) {
 	</div>
 }
 
+// peoplePanel is the full-width per-author leaderboard: one row per author who ran sessions
+// in the window, ordered busiest first, showing their session count, a slim stacked outcome
+// bar, how many of their sessions carry a grade, and their average score. It is the IC's
+// self-check ("how is my work grading") and the lead's per-person read, the human counterpart
+// to the fleet distributions below it. Each name drills into that author's sessions. It renders
+// only for two or more authors (the caller gates on len), so the table always has rows to show.
+templ peoplePanel(us store.UserQualityStats) {
+	<div class="ins-panel ins-people-panel">
+		<div class="ins-panel-head">
+			<span class="label">People</span>
+			<span class="muted small ins-caption">how each author's sessions in this window graded</span>
+		</div>
+		<table class="grid ins-people-table">
+			<thead>
+				<tr>
+					<th>User</th>
+					<th class="num">Sessions</th>
+					<th>Outcome mix</th>
+					<th class="num">Graded</th>
+					<th class="num">Avg score</th>
+				</tr>
+			</thead>
+			<tbody>
+				for _, u := range us.Users {
+					<tr>
+						<td><a href={ UserQualityHref(u) }>{ u.Username }</a></td>
+						<td class="num">{ fmt.Sprintf("%d", u.Sessions) }</td>
+						<td>
+							<span class="mix-bar" title={ OutcomeMixTitle(u) }>
+								for _, seg := range OutcomeSegments(u) {
+									<span class="mix-seg" style={ SegmentStyle(seg) }></span>
+								}
+							</span>
+						</td>
+						<td class="num muted">{ UserGradedLabel(u) }</td>
+						<td class="num">{ UserAvgScore(u) }</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+		if us.Clipped > 0 {
+			<div class="muted small tool-clip">{ fmt.Sprintf("+%d more user%s not shown", us.Clipped, plural(us.Clipped)) }</div>
+		}
+	</div>
+}
+
 // distributionPanel renders one labeled set of horizontal bars: a title, a one-line
-// caption, and a bar per bucket sized to the largest in the set. It reuses the
+// caption, an optional right-aligned head note (a coverage figure like "62% graded"; empty
+// renders nothing), and a bar per bucket sized to the largest in the set. It reuses the
 // breakdown bars' markup (.bars / .bar-row / .bar-fill[data-pct][data-color]), so the
 // shared animateBars handler grows the fills in on load and after an htmx swap, and the
 // existing bar styling applies without new chart code.
-templ distributionPanel(title, caption string, rows []DistRow) {
+//
+// A row whose DistRow carries an Href wraps its head and track in an <a> so the whole row is
+// the drill-down target (like the data-row-href tables elsewhere), landing on the sessions
+// feed filtered to that bucket. The link is deliberately NOT styled as lilac link text: the
+// label keeps its normal colour and the row gains a hover tint and a focus ring instead
+// (.dist-link in insights.css), so a column of bars does not flood the page with the accent.
+// A row without an Href (the archetype bars) renders as a plain, non-interactive row.
+templ distributionPanel(title, caption, note string, rows []DistRow) {
 	<div class="ins-panel">
-		<div class="ins-panel-head">
-			<span class="label">{ title }</span>
-			if caption != "" {
-				<span class="muted small ins-caption">{ caption }</span>
+		<div class="ins-panel-head ins-panel-head-row">
+			<span class="ins-head-text">
+				<span class="label">{ title }</span>
+				if caption != "" {
+					<span class="muted small ins-caption">{ caption }</span>
+				}
+			</span>
+			if note != "" {
+				<span class="muted small mono ins-head-note">{ note }</span>
 			}
 		</div>
 		<ul class="bars dist-bars">
 			for _, r := range rows {
 				<li class="bar-row">
-					<div class="bar-head">
-						<span class="bar-label">{ r.Label }</span>
-						<span class="bar-val">{ fmt.Sprintf("%d", r.Count) }</span>
-					</div>
-					<div class="bar-track">
-						<div class="bar-fill" data-pct={ fmt.Sprintf("%.2f", r.Pct) } data-color={ r.Color }></div>
-					</div>
+					if r.Href != "" {
+						<a class="dist-link" href={ templ.SafeURL(r.Href) } title={ r.Title }>
+							<div class="bar-head">
+								<span class="bar-label">{ r.Label }</span>
+								<span class="bar-val">{ fmt.Sprintf("%d", r.Count) }</span>
+							</div>
+							<div class="bar-track">
+								<div class="bar-fill" data-pct={ fmt.Sprintf("%.2f", r.Pct) } data-color={ r.Color }></div>
+							</div>
+						</a>
+					} else {
+						<div class="bar-head">
+							<span class="bar-label">{ r.Label }</span>
+							<span class="bar-val">{ fmt.Sprintf("%d", r.Count) }</span>
+						</div>
+						<div class="bar-track">
+							<div class="bar-fill" data-pct={ fmt.Sprintf("%.2f", r.Pct) } data-color={ r.Color }></div>
+						</div>
+					}
 				</li>
 			}
 		</ul>

@@ -8,6 +8,9 @@ import (
 	"github.com/jssblck/akari/internal/server/store"
 )
 
+// floatPtr returns a pointer to a float, for the nullable per-turn cost in TurnUsage fixtures.
+func floatPtr(f float64) *float64 { return &f }
+
 // sessionFixture is a representative session detail for render assertions: a
 // remote project session with a couple of turns and a tool call whose bodies live
 // in the CAS, so the chip renders its stamps as body-opening buttons.
@@ -63,7 +66,7 @@ func TestSessionPageRendersSubagents(t *testing.T) {
 		{ID: 4243, Agent: "claude", Username: "grace", Machine: "grace", GitBranch: "main", MessageCount: 7, TotalCostUSD: 0.19},
 	}
 
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, subs, HeaderStats{}, 0, false, true))
+	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, subs, HeaderStats{}, 0, false, true))
 	for _, want := range []string{
 		`<h2>Subagents</h2>`,
 		`class="subagents"`,
@@ -75,7 +78,7 @@ func TestSessionPageRendersSubagents(t *testing.T) {
 		}
 	}
 
-	bare := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, HeaderStats{}, 0, false, true))
+	bare := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, nil, HeaderStats{}, 0, false, true))
 	if strings.Contains(bare, "<h2>Subagents</h2>") {
 		t.Error("session page without subagents should omit the Subagents heading")
 	}
@@ -88,7 +91,7 @@ func TestSessionPageRendersSubagents(t *testing.T) {
 func TestSessionPageCompactHeaderAndModal(t *testing.T) {
 	p := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "jessoteric"}
 	d, msgs, tools := sessionFixture()
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, HeaderStats{}, 0, false, true))
+	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, nil, HeaderStats{}, 0, false, true))
 
 	for _, want := range []string{
 		`class="session-page"`,    // full-width wrapper drives main:has(> .session-page)
@@ -123,7 +126,7 @@ func TestSessionPageCompactHeaderAndModal(t *testing.T) {
 func TestSessionStatsFoldTokensAndDropLive(t *testing.T) {
 	p := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "jessoteric"}
 	d, msgs, tools := sessionFixture()
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, HeaderStats{}, 0, true, true))
+	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, nil, HeaderStats{}, 0, true, true))
 
 	// The tile must show the aggregate of all four token classes, and the tooltip
 	// must carry each class value plus the cost, run through the same formatters
@@ -165,7 +168,7 @@ func TestSessionStatsTokensContext(t *testing.T) {
 		Outcome: "completed", OutcomeConfidence: "high",
 		PeakContextTokens: &peak, ContextResetCount: &resets,
 	}}
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, hs, 0, false, true))
+	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, nil, hs, 0, false, true))
 
 	for _, want := range []string{
 		`class="tt-sub">Context</div>`,           // the context group under its own ruled label
@@ -179,7 +182,7 @@ func TestSessionStatsTokensContext(t *testing.T) {
 	}
 
 	// A session with no measured context draws no Context group at all.
-	bare := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, HeaderStats{}, 0, false, true))
+	bare := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, nil, HeaderStats{}, 0, false, true))
 	if strings.Contains(bare, `class="tt-sub">Context</div>`) {
 		t.Error("an unmeasured session should draw no Context group in the Tokens tile")
 	}
@@ -201,7 +204,7 @@ func TestSessionStatsQualityTileScored(t *testing.T) {
 		ToolCalls: 12, ToolFailures: 2, ToolRetries: 1, EditChurn: 3, LongestFailureStreak: 1,
 		ShortPromptCount: 4, NoCodeContextCount: 2, UnstructuredStart: true, HygieneMeasured: true,
 	}}
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, hs, 0, false, true))
+	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, nil, hs, 0, false, true))
 
 	for _, want := range []string{
 		`class="stat quality-stat q-good"`,    // a B bands as "good"
@@ -231,7 +234,7 @@ func TestSessionStatsQualityTileUnscored(t *testing.T) {
 	p := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "jessoteric"}
 	d, msgs, tools := sessionFixture()
 	hs := HeaderStats{Signals: store.SessionSignals{Outcome: "unknown", OutcomeConfidence: "low"}}
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, hs, 0, false, true))
+	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, nil, hs, 0, false, true))
 
 	for _, want := range []string{
 		`class="stat quality-stat q-none"`,
@@ -248,6 +251,109 @@ func TestSessionStatsQualityTileUnscored(t *testing.T) {
 	}
 }
 
+// The transcript reads as an instrumented trace: an answered turn carries a latency stamp, a
+// user message renders its hygiene tags, a context-shed divider draws above the shed-down turn,
+// a message with usage carries its context and cost stamps, and a tool chip prefers the
+// worktree-relative path with the absolute one in its title. This drives the per-message
+// instruments end to end through the transcript template.
+func TestTranscriptInstruments(t *testing.T) {
+	p := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "jessoteric"}
+	d, _, _ := sessionFixture()
+	base := time.Date(2026, 6, 28, 9, 0, 0, 0, time.UTC)
+	ts := func(secs int) *time.Time { u := base.Add(time.Duration(secs) * time.Second); return &u }
+
+	// A prompt (terse and code-pointerless), its reply 6s later, then a heavy turn and a
+	// shed-down turn so a context divider draws between ordinals 2 and 3.
+	msgs := []store.Message{
+		{Ordinal: 0, Role: "user", Content: "fix it", Timestamp: ts(0),
+			PromptShort: true, PromptNoCode: true, PromptDigest: 4242, PromptFactsCurrent: true},
+		{Ordinal: 1, Role: "assistant", Content: "On it.", Model: "gpt-5", Timestamp: ts(6)},
+		{Ordinal: 2, Role: "user", Content: "and the tests too please, thorough pass", Timestamp: ts(20),
+			PromptDigest: 7, PromptFactsCurrent: true},
+		{Ordinal: 3, Role: "assistant", Content: "Compacted.", Model: "gpt-5", Timestamp: ts(31)},
+	}
+	usage := map[int]store.TurnUsage{
+		1: {Input: 1200, Output: 950, CacheRead: 78000, CacheWrite: 3100, ContextTokens: 82300, CostUSD: floatPtr(0.31)},
+		2: {Input: 1000, CacheRead: 159000, CacheWrite: 0, ContextTokens: 160000},
+		3: {Input: 500, CacheRead: 11500, CacheWrite: 0, ContextTokens: 12000},
+	}
+	tools := map[int][]store.ToolCallView{
+		1: {{
+			MessageOrdinal: 1, ToolName: "Edit",
+			FilePath: "C:\\Users\\me\\projects\\worktrees\\akari\\x\\internal\\auth.go", FileRelPath: "internal/auth.go",
+			InputSHA: "aaaa", InputBytes: 143, InputMediaType: "json",
+		}},
+	}
+
+	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, usage, nil, HeaderStats{}, 0, false, true))
+
+	for _, want := range []string{
+		// (a) the answered turn's latency stamp, prompt-to-reply
+		`class="stamp-latency mono" title="time from the prompt to this reply">+6s</span>`,
+		// (b) the hygiene tags on the terse, no-code prompt
+		`class="tag hygiene" title="under 4 words: give the agent something to grip">terse</span>`,
+		`class="tag hygiene" title="a change request with no file, path, or code anchor">no code pointer</span>`,
+		// (c) the shed divider between the heavy turn and the shed-down turn
+		`class="msg-shed"`,
+		`context shed: 160.0k → 12.0k`,
+		// (d) the context and cost stamps on a turn with usage
+		`class="stamp-ctx mono"`, `ctx 82.3k`,
+		`input 1.2k, cache read 78.0k, cache write 3.1k, output 950`, // the class breakdown in the title
+		`class="stamp-cost mono"`, `$0.31`,
+		// (e) the tool chip prefers the relative path, absolute in the title
+		`title="C:\Users\me\projects\worktrees\akari\x\internal\auth.go">internal/auth.go</span>`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("instrumented transcript missing %q", want)
+		}
+	}
+	// The unpriced turn (ordinal 2, nil cost) still shows its ctx stamp.
+	if !strings.Contains(html, `ctx 160.0k`) {
+		t.Error("a turn with usage but no priced cost should still show its context stamp")
+	}
+}
+
+// The quality tooltip appends a score-arithmetic group when the session is scored: one row per
+// penalty (label plus the negative points), then the final score. A clean scored run (no
+// penalties) reads "no penalties" instead of an empty group; an unscored session draws no group.
+func TestSessionQualityScoreArithmetic(t *testing.T) {
+	p := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "jessoteric"}
+	d, msgs, tools := sessionFixture()
+	score := 61
+	grade := "D"
+	hs := HeaderStats{Signals: store.SessionSignals{
+		Outcome: "errored", OutcomeConfidence: "high",
+		Score: &score, Grade: &grade,
+		ToolCalls: 10, ToolFailures: 3, // 30 errored + 9 failures = 39, score 61
+	}}
+	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, nil, hs, 0, false, true))
+	for _, want := range []string{
+		`class="tt-sub">Score arithmetic</div>`,
+		`>errored ending</dt>`, `<dd class="mono">-30</dd>`,
+		`>3 tool failures</dt>`, `<dd class="mono">-9</dd>`,
+		`>Score</dt>`, `<dd class="mono">61</dd>`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("score arithmetic missing %q", want)
+		}
+	}
+
+	cs, cg := 100, "A"
+	clean := HeaderStats{Signals: store.SessionSignals{
+		Outcome: "completed", OutcomeConfidence: "high", Score: &cs, Grade: &cg,
+	}}
+	cleanHTML := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, nil, clean, 0, false, true))
+	if !strings.Contains(cleanHTML, `>No penalties</dt>`) {
+		t.Error("a clean scored run should show a No penalties row in the score arithmetic")
+	}
+
+	unscored := HeaderStats{Signals: store.SessionSignals{Outcome: "unknown", OutcomeConfidence: "low"}}
+	unscoredHTML := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, nil, unscored, 0, false, true))
+	if strings.Contains(unscoredHTML, `Score arithmetic`) {
+		t.Error("an unscored session should draw no score-arithmetic group")
+	}
+}
+
 // A published session owned by the viewer swaps Publish for Unpublish and surfaces
 // the public share path as a link.
 func TestSessionPagePublicShowsUnpublish(t *testing.T) {
@@ -256,7 +362,7 @@ func TestSessionPagePublicShowsUnpublish(t *testing.T) {
 	pub := "k3y"
 	d.Visibility = "public"
 	d.PublicID = &pub
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, HeaderStats{}, 0, false, true))
+	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, nil, HeaderStats{}, 0, false, true))
 
 	for _, want := range []string{`>Unpublish</button>`, `class="share-link`, PublicPath(pub)} {
 		if !strings.Contains(html, want) {
@@ -274,7 +380,7 @@ func TestSessionPageActionsGating(t *testing.T) {
 	d, msgs, tools := sessionFixture()
 
 	admin := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "ada", IsAdmin: true}
-	adminHTML := renderComponent(t, SessionPage(admin, d, msgs, tools, nil, nil, HeaderStats{}, 0, false, false))
+	adminHTML := renderComponent(t, SessionPage(admin, d, msgs, tools, nil, nil, nil, HeaderStats{}, 0, false, false))
 	if !strings.Contains(adminHTML, `>Delete</button>`) {
 		t.Error("admin should be able to delete a session they do not own")
 	}
@@ -283,7 +389,7 @@ func TestSessionPageActionsGating(t *testing.T) {
 	}
 
 	viewer := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "anna"}
-	viewerHTML := renderComponent(t, SessionPage(viewer, d, msgs, tools, nil, nil, HeaderStats{}, 0, false, false))
+	viewerHTML := renderComponent(t, SessionPage(viewer, d, msgs, tools, nil, nil, nil, HeaderStats{}, 0, false, false))
 	if strings.Contains(viewerHTML, `class="session-actions"`) {
 		t.Error("a plain viewer should see no actions cluster")
 	}
@@ -297,7 +403,7 @@ func TestPublicSessionPageWrapperAndModal(t *testing.T) {
 	pub := "k3y"
 	d.Visibility = "public"
 	d.PublicID = &pub
-	html := renderComponent(t, PublicSessionPage(d, msgs, tools, nil, nil, HeaderStats{}))
+	html := renderComponent(t, PublicSessionPage(d, msgs, tools, nil, nil, nil, HeaderStats{}))
 
 	for _, want := range []string{`class="session-page"`, `id="session-modal"`, `id="session-inspector"`} {
 		if !strings.Contains(html, want) {

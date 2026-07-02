@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/jssblck/akari/internal/pricing"
+	"github.com/jssblck/akari/internal/quality"
 )
 
 // ProjectSummary is one row of the projects index: a project plus rolled-up
@@ -104,7 +105,17 @@ type SessionDetail struct {
 	CacheSavingsIncomplete bool
 }
 
-// Message is one transcript row for rendering.
+// Message is one transcript row for rendering. The prompt-hygiene facts (PromptShort,
+// PromptNoCode, PromptDigest) are the fixed-size verdicts quality.ClassifyPrompt materialized
+// on the row when the message was written (migration 0022); they carry no prompt body, so the
+// full-transcript read stays fixed-size per row and never re-reads content to classify it.
+//
+// PromptFactsCurrent gates them: it is true only when the row's stored prompt_facts_version
+// matches the running quality.PromptFactsVersion AND the digest is non-NULL (a real classified
+// human turn). The version gate is why the renderer keys off this flag rather than the raw
+// booleans: a message classified under a superseded classifier (or a pre-migration row that
+// never carried facts) must render as nothing (no badge) rather than as a stale, possibly-wrong
+// badge. An epoch reparse re-derives the facts at the current version and flips this back on.
 type Message struct {
 	Ordinal      int
 	Role         string
@@ -114,16 +125,25 @@ type Message struct {
 	HasThinking  bool
 	HasToolUse   bool
 	Timestamp    *time.Time
+	// Prompt-hygiene facts, meaningful only when PromptFactsCurrent is true.
+	PromptShort        bool
+	PromptNoCode       bool
+	PromptDigest       int64
+	PromptFactsCurrent bool
 }
 
 // ToolCallView is one tool call rendered as metadata (the body lives in the CAS,
 // fetched on demand by its sha256).
 type ToolCallView struct {
-	MessageOrdinal  int
-	CallIndex       int
-	ToolName        string
-	Category        string
-	FilePath        string
+	MessageOrdinal int
+	CallIndex      int
+	ToolName       string
+	Category       string
+	FilePath       string
+	// FileRelPath is the worktree-relative form of FilePath (migration 0028), empty when the
+	// path sits outside the session's workspace or no cwd was known. The transcript shows it in
+	// preference to the absolute FilePath: the same repo file reads the same across worktrees.
+	FileRelPath     string
 	InputSHA        string
 	InputBytes      int64
 	InputMediaType  string
@@ -139,6 +159,19 @@ type SessionFilter struct {
 	Agent     string
 	Machine   string
 	Username  string
+	// Outcome narrows the list to sessions that ended a given way (completed,
+	// abandoned, errored, or unknown). The bucket a session falls in mirrors the
+	// Insights outcome distribution exactly: it reads the session's current-version,
+	// non-stale signals row and coalesces a missing or superseded row to 'unknown', so
+	// the count on an Insights outcome bar and the length of its drill-down list agree.
+	// Empty means no outcome filter.
+	Outcome string
+	// Grade narrows the list to sessions carrying a given letter grade (A, B, C, D, F),
+	// or, for the sentinel "unscored", to the sessions the Insights Grades panel counts
+	// in its empty bucket: those whose gated grade is NULL or absent. It mirrors the
+	// grade distribution's coalesce the same way Outcome mirrors the outcome one, so a
+	// grade bar's count matches its drill-down list. Empty means no grade filter.
+	Grade string
 	// Since bounds the list to sessions last active at or after this instant,
 	// matching the analytics window so a project page's session list and its usage
 	// panel cover the same range. The zero time means no lower bound.
@@ -164,6 +197,15 @@ func (f SessionFilter) conds(sinceCol string) (conds []string, args []any) {
 		args = append(args, val)
 		conds = append(conds, cond+" $"+itoa(len(args)))
 	}
+	// addRaw appends a caller-formatted condition plus its own args, for the signals
+	// filters whose correlated subquery carries two placeholders (the compared value
+	// and quality.Version) rather than the single trailing one add() assumes. The
+	// caller builds the SQL with the placeholder numbers the appended args will land
+	// at, so the two stay in lockstep.
+	addRaw := func(cond string, vals ...any) {
+		conds = append(conds, cond)
+		args = append(args, vals...)
+	}
 	if f.ProjectID != 0 {
 		add("s.project_id =", f.ProjectID)
 	}
@@ -175,6 +217,37 @@ func (f SessionFilter) conds(sinceCol string) (conds []string, args []any) {
 	}
 	if f.Username != "" {
 		add("u.username =", f.Username)
+	}
+	// Outcome and grade read the same gated signals subquery the Insights distributions
+	// LEFT JOIN, coalesced to the same missing bucket, so a bar's count and the rows this
+	// filter returns describe the identical session set. The gate is sig.signals_version =
+	// quality.Version AND NOT s.signals_stale: a session whose row is missing, at a
+	// superseded version, or stale (appended-to or graded while live) folds into the
+	// missing bucket ('unknown' for outcome, '' for grade) rather than matching a graded
+	// value. Each subquery carries two args (the compared value, then quality.Version), so
+	// they go through addRaw rather than the single-arg add().
+	if f.Outcome != "" {
+		p := len(args) + 1
+		addRaw(fmt.Sprintf(
+			`coalesce((SELECT sig.outcome FROM session_signals sig`+
+				` WHERE sig.session_id = s.id AND sig.signals_version = $%d AND NOT s.signals_stale), 'unknown') = $%d`,
+			p+1, p),
+			f.Outcome, quality.Version)
+	}
+	if f.Grade != "" {
+		// The "unscored" sentinel selects the sessions with no gated grade, matching the
+		// distribution's empty bucket (coalesce to ''); a letter selects equality on the same
+		// gated subquery. Both compare against '' or the letter, so the coalesce default is ''.
+		want := f.Grade
+		if want == "unscored" {
+			want = ""
+		}
+		p := len(args) + 1
+		addRaw(fmt.Sprintf(
+			`coalesce((SELECT sig.grade FROM session_signals sig`+
+				` WHERE sig.session_id = s.id AND sig.signals_version = $%d AND NOT s.signals_stale), '') = $%d`,
+			p+1, p),
+			want, quality.Version)
 	}
 	if !f.Since.IsZero() {
 		add(sinceCol+" >=", f.Since)
@@ -954,8 +1027,10 @@ func (s *Store) MessageCount(ctx context.Context, sessionID int64) (int, error) 
 // MessagesPage instead so peak memory does not scale with session size.
 func (s *Store) Messages(ctx context.Context, sessionID int64) ([]Message, error) {
 	return s.scanMessages(ctx,
-		`SELECT ordinal, role, content, thinking_text, model, has_thinking, has_tool_use, timestamp
-		   FROM messages WHERE session_id = $1 ORDER BY ordinal`, sessionID)
+		`SELECT ordinal, role, content, thinking_text, model, has_thinking, has_tool_use, timestamp,
+		        coalesce(prompt_short, false), coalesce(prompt_no_code, false), coalesce(prompt_digest, 0),
+		        (prompt_facts_version = $2 AND prompt_digest IS NOT NULL)
+		   FROM messages WHERE session_id = $1 ORDER BY ordinal`, sessionID, quality.PromptFactsVersion)
 }
 
 // MessagesAfter returns the next window of a session's transcript ordered by
@@ -971,14 +1046,18 @@ func (s *Store) MessagesAfter(ctx context.Context, sessionID int64, after *int, 
 	}
 	if after == nil {
 		return s.scanMessages(ctx,
-			`SELECT ordinal, role, content, thinking_text, model, has_thinking, has_tool_use, timestamp
+			`SELECT ordinal, role, content, thinking_text, model, has_thinking, has_tool_use, timestamp,
+			        coalesce(prompt_short, false), coalesce(prompt_no_code, false), coalesce(prompt_digest, 0),
+			        (prompt_facts_version = $3 AND prompt_digest IS NOT NULL)
 			   FROM messages WHERE session_id = $1 ORDER BY ordinal LIMIT $2`,
-			sessionID, limit)
+			sessionID, limit, quality.PromptFactsVersion)
 	}
 	return s.scanMessages(ctx,
-		`SELECT ordinal, role, content, thinking_text, model, has_thinking, has_tool_use, timestamp
+		`SELECT ordinal, role, content, thinking_text, model, has_thinking, has_tool_use, timestamp,
+		        coalesce(prompt_short, false), coalesce(prompt_no_code, false), coalesce(prompt_digest, 0),
+		        (prompt_facts_version = $4 AND prompt_digest IS NOT NULL)
 		   FROM messages WHERE session_id = $1 AND ordinal > $2 ORDER BY ordinal LIMIT $3`,
-		sessionID, *after, limit)
+		sessionID, *after, limit, quality.PromptFactsVersion)
 }
 
 func (s *Store) scanMessages(ctx context.Context, query string, args ...any) ([]Message, error) {
@@ -991,7 +1070,8 @@ func (s *Store) scanMessages(ctx context.Context, query string, args ...any) ([]
 	for rows.Next() {
 		var m Message
 		if err := rows.Scan(&m.Ordinal, &m.Role, &m.Content, &m.ThinkingText, &m.Model,
-			&m.HasThinking, &m.HasToolUse, &m.Timestamp); err != nil {
+			&m.HasThinking, &m.HasToolUse, &m.Timestamp,
+			&m.PromptShort, &m.PromptNoCode, &m.PromptDigest, &m.PromptFactsCurrent); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -1003,7 +1083,7 @@ func (s *Store) scanMessages(ctx context.Context, query string, args ...any) ([]
 // renderer. Bounded readers pass a message-ordinal range to ToolCallsInRange.
 func (s *Store) ToolCalls(ctx context.Context, sessionID int64) ([]ToolCallView, error) {
 	return s.scanToolCalls(ctx,
-		`SELECT message_ordinal, call_index, tool_name, coalesce(category,''), coalesce(file_path,''),
+		`SELECT message_ordinal, call_index, tool_name, coalesce(category,''), coalesce(file_path,''), coalesce(file_rel_path,''),
 		        coalesce(input_sha256,''), coalesce(input_bytes,0), coalesce(input_media_type,''),
 		        coalesce(result_sha256,''), coalesce(result_bytes,0), coalesce(result_media_type,''), coalesce(result_status,'')
 		   FROM tool_calls WHERE session_id = $1 ORDER BY message_ordinal, call_index`, sessionID)
@@ -1014,7 +1094,7 @@ func (s *Store) ToolCalls(ctx context.Context, sessionID int64) ([]ToolCallView,
 // only the calls for the messages it returned rather than the whole session.
 func (s *Store) ToolCallsInRange(ctx context.Context, sessionID int64, minOrdinal, maxOrdinal int) ([]ToolCallView, error) {
 	return s.scanToolCalls(ctx,
-		`SELECT message_ordinal, call_index, tool_name, coalesce(category,''), coalesce(file_path,''),
+		`SELECT message_ordinal, call_index, tool_name, coalesce(category,''), coalesce(file_path,''), coalesce(file_rel_path,''),
 		        coalesce(input_sha256,''), coalesce(input_bytes,0), coalesce(input_media_type,''),
 		        coalesce(result_sha256,''), coalesce(result_bytes,0), coalesce(result_media_type,''), coalesce(result_status,'')
 		   FROM tool_calls WHERE session_id = $1 AND message_ordinal BETWEEN $2 AND $3
@@ -1030,12 +1110,78 @@ func (s *Store) scanToolCalls(ctx context.Context, query string, args ...any) ([
 	var out []ToolCallView
 	for rows.Next() {
 		var t ToolCallView
-		if err := rows.Scan(&t.MessageOrdinal, &t.CallIndex, &t.ToolName, &t.Category, &t.FilePath,
+		if err := rows.Scan(&t.MessageOrdinal, &t.CallIndex, &t.ToolName, &t.Category, &t.FilePath, &t.FileRelPath,
 			&t.InputSHA, &t.InputBytes, &t.InputMediaType,
 			&t.ResultSHA, &t.ResultBytes, &t.ResultMediaType, &t.ResultStatus); err != nil {
 			return nil, err
 		}
 		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// TurnUsage is one message-turn's rolled-up usage, folded across the (possibly several,
+// streamed) usage_events rows that share a message_ordinal. Input, Output, CacheRead,
+// CacheWrite, and Reasoning are the summed token classes.
+//
+// CostUSD is the summed cost, but nil when EVERY contributing row's cost_usd was NULL: an
+// unpriced model has no cost to show, and a summed zero would read as "this turn was free"
+// rather than "we could not price it". A turn that mixes priced and unpriced rows returns the
+// priced partial (a lower bound), matching how the session-level cost total treats an
+// incomplete price.
+//
+// ContextTokens is the turn's context occupancy: Input + CacheRead + CacheWrite, output
+// EXCLUDED. It is the size of the prompt presented that turn (what the model had to read),
+// not the cumulative spend: output tokens are what the model produced, so they are not part of
+// the context it carried in. This mirrors gatherContextHealth's definition exactly (the same
+// three-class sum), so the per-message context stamp and the session's peak-context signal are
+// measuring the same thing at two granularities.
+type TurnUsage struct {
+	Input, Output, CacheRead, CacheWrite, Reasoning int64
+	CostUSD                                         *float64
+	ContextTokens                                   int64
+}
+
+// SessionTurnUsage folds a session's usage_events into one TurnUsage per message ordinal, so
+// the transcript can stamp each message with its own token load and cost. Rows with a NULL
+// message_ordinal are skipped: they cannot be attributed to a turn, so they belong to the
+// session totals (which fold every row) rather than to any one message. The aggregation runs
+// in the database (one GROUP BY over the session's rows), so the read is O(session) in one
+// query regardless of how many streamed chunks a turn carried. Order is irrelevant: the caller
+// keys the returned map by ordinal.
+func (s *Store) SessionTurnUsage(ctx context.Context, sessionID int64) (map[int]TurnUsage, error) {
+	rows, err := s.Pool.Query(ctx,
+		// count(cost_usd) is the number of non-NULL costs in the group; when it is zero every
+		// contributing row was unpriced, so the summed cost is meaningless and the read returns
+		// NULL rather than a summed 0. sum(cost_usd) already ignores NULLs, so a mixed group sums
+		// only its priced rows (the lower-bound partial).
+		`SELECT message_ordinal,
+		        coalesce(sum(input_tokens),0), coalesce(sum(output_tokens),0),
+		        coalesce(sum(cache_read_tokens),0), coalesce(sum(cache_write_tokens),0),
+		        coalesce(sum(reasoning_tokens),0),
+		        sum(cost_usd), count(cost_usd)
+		   FROM usage_events
+		  WHERE session_id = $1 AND message_ordinal IS NOT NULL
+		  GROUP BY message_ordinal`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("read turn usage for session %d: %w", sessionID, err)
+	}
+	defer rows.Close()
+	out := make(map[int]TurnUsage)
+	for rows.Next() {
+		var ord int
+		var u TurnUsage
+		var costSum *float64
+		var costCount int64
+		if err := rows.Scan(&ord, &u.Input, &u.Output, &u.CacheRead, &u.CacheWrite, &u.Reasoning,
+			&costSum, &costCount); err != nil {
+			return nil, fmt.Errorf("scan turn usage for session %d: %w", sessionID, err)
+		}
+		if costCount > 0 {
+			u.CostUSD = costSum
+		}
+		u.ContextTokens = u.Input + u.CacheRead + u.CacheWrite
+		out[ord] = u
 	}
 	return out, rows.Err()
 }

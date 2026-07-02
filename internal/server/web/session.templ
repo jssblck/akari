@@ -6,7 +6,7 @@ import (
 	"github.com/jssblck/akari/internal/server/store"
 )
 
-templ SessionPage(p Page, d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, subagents []store.SessionSummary, hs HeaderStats, dupIDs int, live, owner bool) {
+templ SessionPage(p Page, d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, usage map[int]store.TurnUsage, subagents []store.SessionSummary, hs HeaderStats, dupIDs int, live, owner bool) {
 	@layout(p) {
 		<div class="session-page">
 			<div class="session-head">
@@ -42,11 +42,11 @@ templ SessionPage(p Page, d store.SessionDetail, msgs []store.Message, tools map
 				</aside>
 				if live {
 					<div id="session-body" class="session-main" data-sse={ SSEPath(d.ID) } data-body={ BodyPath(d.ID) }>
-						@SessionMain(d, msgs, tools, attachments, subagents, hs)
+						@SessionMain(d, msgs, tools, attachments, usage, subagents, hs)
 					</div>
 				} else {
 					<div id="session-body" class="session-main">
-						@SessionMain(d, msgs, tools, attachments, subagents, hs)
+						@SessionMain(d, msgs, tools, attachments, usage, subagents, hs)
 					</div>
 				}
 			</div>
@@ -88,7 +88,7 @@ templ sessionActions(d store.SessionDetail, owner bool) {
 // subagents, and the transcript. Only this fragment is re-fetched and swapped on
 // a live SSE update, so the outline and inspector (its siblings in the grid)
 // persist across updates and are not re-rendered per refresh.
-templ SessionMain(d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, subagents []store.SessionSummary, hs HeaderStats) {
+templ SessionMain(d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, usage map[int]store.TurnUsage, subagents []store.SessionSummary, hs HeaderStats) {
 	@sessionStats(d, hs)
 	if len(subagents) > 0 {
 		<h2>Subagents</h2>
@@ -97,7 +97,7 @@ templ SessionMain(d store.SessionDetail, msgs []store.Message, tools map[int][]s
 		</div>
 	}
 	<h2>Transcript</h2>
-	@Transcript(msgs, tools, attachments, SessionBlobBase(d.ID))
+	@Transcript(msgs, tools, attachments, usage, SessionBlobBase(d.ID))
 }
 
 // Outline is the left pane of the session view: one entry per turn, with its
@@ -147,8 +147,8 @@ templ Outline(msgs []store.Message, tools map[int][]store.ToolCallView, blobBase
 									}
 								>
 									<span class="ol-tn">{ s.ToolName }</span>
-									if s.FilePath != "" {
-										<span class="ol-file">{ BaseName(s.FilePath) }</span>
+									if p := ToolFilePath(s); p != "" {
+										<span class="ol-file" title={ ToolFileTitle(s) }>{ BaseName(p) }</span>
 									}
 								</a>
 							} else {
@@ -244,6 +244,27 @@ templ statQuality(s store.SessionSignals) {
 					}
 				</dl>
 			}
+			if s.Scored() {
+				// The score arithmetic explains the grade rather than asserting it: one row per
+				// penalty (label left, the negative points it subtracted right), then the final
+				// score. A clean scored run has no penalties, so it reads "no penalties" instead of
+				// an empty group.
+				{{ breakdown := ScoreBreakdownItems(s) }}
+				<div class="tt-sub">Score arithmetic</div>
+				<dl class="tt-grid tt-score">
+					if len(breakdown) == 0 {
+						<dt>No penalties</dt>
+						<dd class="mono">-0</dd>
+					} else {
+						for _, item := range breakdown {
+							<dt>{ item.Label }</dt>
+							<dd class="mono">{ fmt.Sprintf("-%d", item.Points) }</dd>
+						}
+					}
+					<dt>Score</dt>
+					<dd class="mono">{ fmt.Sprintf("%d", *s.Score) }</dd>
+				</dl>
+			}
 		</div>
 	</div>
 }
@@ -301,19 +322,56 @@ templ stat(label, value, key string) {
 	</div>
 }
 
-templ Transcript(msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, blobBase string) {
+// Transcript renders the session's messages as an instrumented trace. Three per-message
+// instrument maps are derived once from the messages and their per-turn usage (all pure, see
+// session_metrics.go), then read by ordinal as each message renders: reply latency keyed by the
+// answering assistant's ordinal, context-shed marks keyed by the shed-down turn's ordinal, and
+// the ordinals of user prompts that repeat an earlier one. The meta line carries a right-aligned
+// cluster of stamps (latency, context load, cost); a shed divider is drawn above the marked
+// message; muted hygiene tags sit after a user message's role tag.
+templ Transcript(msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, usage map[int]store.TurnUsage, blobBase string) {
 	if len(msgs) == 0 {
 		<div class="empty">No messages parsed yet.</div>
 	} else {
+		{{ latencies := TurnLatencies(msgs) }}
+		{{ sheds := ContextSheds(msgs, usage) }}
+		{{ dups := DuplicatePromptOrdinals(msgs) }}
 		<div class="transcript">
 			for _, m := range msgs {
+				if shed, ok := sheds[m.Ordinal]; ok {
+					<div class="msg-shed" role="separator" aria-label={ ShedLabel(shed) }>
+						<span class="shed-label mono">{ ShedLabel(shed) }</span>
+					</div>
+				}
 				<div class={ "msg " + RoleClass(m.Role) } id={ fmt.Sprintf("msg-%d", m.Ordinal) } data-ordinal={ fmt.Sprintf("%d", m.Ordinal) }>
 					<div class="meta">
 						<span class="role">{ m.Role }</span>
 						if m.Model != "" {
 							<span class="tag model">{ m.Model }</span>
 						}
+						if m.Role == "user" && m.PromptFactsCurrent {
+							if m.PromptShort {
+								<span class="tag hygiene" title="under 4 words: give the agent something to grip">terse</span>
+							}
+							if m.PromptNoCode {
+								<span class="tag hygiene" title="a change request with no file, path, or code anchor">no code pointer</span>
+							}
+							if dups[m.Ordinal] {
+								<span class="tag hygiene" title="verbatim repeat of an earlier prompt">repeat</span>
+							}
+						}
 						<span class="spacer"></span>
+						<span class="meta-metrics">
+							if lat, ok := latencies[m.Ordinal]; ok {
+								<span class="stamp-latency mono" title="time from the prompt to this reply">{ FmtTurnLatency(lat) }</span>
+							}
+							if u, ok := usage[m.Ordinal]; ok {
+								<span class="stamp-ctx mono" title={ ContextStampTitle(u) }>{ FmtContextStamp(u) }</span>
+								if u.CostUSD != nil {
+									<span class="stamp-cost mono" title="cost of this turn's usage">{ FmtCost(*u.CostUSD, false) }</span>
+								}
+							}
+						</span>
 						<span class="muted small">{ FmtTime(m.Timestamp) }</span>
 					</div>
 					if m.HasThinking && m.ThinkingText != "" {
@@ -377,8 +435,8 @@ templ AttachmentTile(a store.AttachmentView, blobBase string) {
 templ ToolChip(t store.ToolCallView, blobBase string) {
 	<div class="tool-chip">
 		<span class="tname">{ t.ToolName }</span>
-		if t.FilePath != "" {
-			<span class="tpath muted">{ t.FilePath }</span>
+		if p := ToolFilePath(t); p != "" {
+			<span class="tpath muted" title={ ToolFileTitle(t) }>{ p }</span>
 		}
 		if t.InputSHA != "" {
 			<button

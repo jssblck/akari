@@ -102,9 +102,9 @@ func TestRefreshSettledSignalsReStampsStaleVersion(t *testing.T) {
 	sid := seedSettledSession(t, st, ctx, uid, pid, "sess-stale", 120)
 	// A stale-version row that a prior settled grade left clean: signals_stale=false, so only
 	// the version reconcile (not the projection-maintained flag) can make it due again. It is seeded
-	// at quality.Version+1 because the session_signals_version_ck constraint forbids a version below 1
-	// and the running quality.Version is 1, so the only seedable version that reads as stale (<> the
-	// running version, which the reconcile re-stamps to current) is one above it.
+	// at quality.Version+1 (one past the running version) so it always reads as stale (<> the running
+	// version, which the reconcile re-stamps to current) while staying at or above the version-check
+	// constraint's floor, regardless of the running version's value.
 	insertSignalsRow(t, st, ctx, sid, quality.Version+1, "completed", "high", 0, false)
 
 	// Before the pass the current-version read finds no row and self-heals to unknown.

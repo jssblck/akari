@@ -19,3 +19,19 @@ table.grid.projects th.proj-name, table.grid.projects td.proj-name { width: 100%
    styling (and the shared heatmap-tooltip rules) already apply here. The cell
    only needs to let the card overflow the row, the same as the sessions table. */
 table.grid.projects td.num { overflow: visible; }
+
+/* ---- Project details: the per-project quality band ---- */
+/* The Quality band sits between the usage panel and the session list, reusing the
+   Insights panels (.ins-panel), their three-column grid (.ins-grid), and the shared
+   breakdown bars. This sheet adds only the band's own spacing and its section label,
+   since insights.css already scopes the panels globally (not under .insights), so the
+   grid collapses at narrow widths here the same way it does on /insights. */
+.proj-quality { margin: var(--sp-xl) 0; }
+/* The band leads with an 11px uppercase muted label (base .label), the same tone the
+   Insights panels head with, so "Quality" reads as a section marker rather than a heading
+   competing with the page title. */
+.proj-quality-head { margin-bottom: var(--sp-lg); }
+/* The tools and churn panels sit full width below the distribution grid, each spaced off
+   the row above the same as the Insights bands. */
+.proj-quality-tools { margin-top: var(--sp-xl); }
+.proj-quality-churn { margin-top: var(--sp-xl); }

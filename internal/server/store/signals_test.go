@@ -345,10 +345,13 @@ func TestSignalsAbandonedOutcome(t *testing.T) {
 	}
 }
 
-// TestSignalsUnknownIsUnscored confirms a session with no human turn (a subagent or an
-// automated run) and no tool signal is left unscored: the read returns an unknown
-// outcome with nil score and grade, the same restraint the UI shows rather than
-// inventing a verdict.
+// TestSignalsUnknownIsUnscored confirms a session that stays unknown even once settled, an
+// automation run (no human turn) whose only assistant turn carried no substantive content
+// (tool plumbing, not a delivered answer), and with no tool signal, is left unscored: the
+// read returns an unknown outcome with nil score and grade, the same restraint the UI shows
+// rather than inventing a verdict. Under the v2 classifier a settled automation run with a
+// substantive assistant last word reads as completed, so this fixture deliberately gives no
+// substantive assistant turn (content_length 0), the case v2 still leaves unknown.
 func TestSignalsUnknownIsUnscored(t *testing.T) {
 	t.Parallel()
 	st, ctx, uid, pid := signalsEnv(t)
@@ -356,7 +359,9 @@ func TestSignalsUnknownIsUnscored(t *testing.T) {
 
 	delta := store.ProjectionDelta{
 		Messages: []store.MessageDelta{
-			{Ordinal: 0, Role: "assistant", Content: "automated summary"},
+			// An empty assistant turn: it carried a tool call but no prose, so content_length
+			// is 0 and LastAssistantOrd stays -1, leaving nothing substantive to read.
+			{Ordinal: 0, Role: "assistant", Content: "", HasToolUse: true},
 		},
 	}
 	if err := st.ApplyProjectionDelta(ctx, sid, delta); err != nil {

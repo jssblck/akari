@@ -54,4 +54,15 @@ package parse
 // fill in one pass. The facts are store-side derived columns, not parser output, so the reducer's
 // projection delta is byte-for-byte identical and the golden fixtures do not move; the bump is the
 // backfill signal and stands on its own.
-const Epoch = 3
+//
+// Epoch 3 -> 4: materialize tool_calls.file_rel_path, the session-relative form of a tool call's
+// file_path (see migration 0028_tool_call_rel_path and the tool-call insert in store/projection.go).
+// It exists so file churn can aggregate one repo file across the git worktrees it was edited from:
+// file_path is absolute and fragments the same file into per-worktree rows, while the relative path
+// paired with the project is worktree-invariant. Like the prompt-hygiene facts, migration 0028 adds
+// the column but cannot backfill it; this bump reparses the corpus so every existing tool call
+// re-inserts through sessionRelPath and the column fills in one pass. The column is a store-side
+// derived value, not parser output (the reducer's delta is unchanged), so the projection delta is
+// byte-for-byte identical and the golden fixtures do not move; the bump is the backfill signal and
+// stands on its own.
+const Epoch = 4

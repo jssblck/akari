@@ -359,6 +359,17 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 		}
 	}
 
+	// Load the session's cwd once for the whole delta, not per tool call, so deriving each
+	// call's worktree-invariant relative path (see below) costs one SELECT per region rather
+	// than one per edit. It is empty when the session announced no cwd, which sessionRelPath
+	// treats as "no anchor" and leaves the relative path NULL for absolute paths.
+	var sessionCwd string
+	if len(d.ToolCalls) > 0 {
+		if err := tx.QueryRow(ctx, `SELECT COALESCE(cwd, '') FROM sessions WHERE id = $1`, sessionID).Scan(&sessionCwd); err != nil {
+			return appliedDelta{}, fmt.Errorf("load cwd for session %d: %w", sessionID, err)
+		}
+	}
+
 	for _, t := range d.ToolCalls {
 		var inputSHA, inputMedia any
 		switch {
@@ -390,14 +401,27 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 		// that carries a duplicate id is surfaced in the UI (DuplicateCallUIDCount), so a
 		// genuinely malformed id reuse, the only case where stamping both rows is wrong,
 		// is visible rather than silent.
+		// Store the session-relative form of the path beside the absolute one. file_path is
+		// absolute, so the same repo file edited from two worktrees of one repo fragments into
+		// separate churn rows; file_rel_path is the worktree-invariant key that (paired with the
+		// project, which already collapses worktrees on the canonical remote) collapses them back
+		// together. The projection is the one place that sees both the session's cwd and the parsed
+		// path, so it is where the two are reconciled. It is NULL when no stable relative form
+		// exists (a path outside the workspace, or an absolute path with no announced cwd), which
+		// churn coalesces back onto file_path so an unanchored edit still counts under its absolute
+		// name rather than vanishing.
+		var relPath any
+		if rel, ok := sessionRelPath(sessionCwd, sanitizeText(t.FilePath)); ok {
+			relPath = rel
+		}
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO tool_calls
-			   (session_id, message_ordinal, call_index, tool_name, category, file_path,
+			   (session_id, message_ordinal, call_index, tool_name, category, file_path, file_rel_path,
 			    input_sha256, input_bytes, input_media_type, call_uid)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 			 ON CONFLICT (session_id, message_ordinal, call_index) DO NOTHING`,
 			sessionID, t.MessageOrdinal, t.CallIndex, sanitizeText(t.ToolName), sanitizeText(t.Category),
-			nullString(sanitizeText(t.FilePath)),
+			nullString(sanitizeText(t.FilePath)), relPath,
 			inputSHA, t.InputBytes, inputMedia, nullString(sanitizeText(t.CallUID))); err != nil {
 			return appliedDelta{}, fmt.Errorf("insert tool call %d/%d for session %d: %w", t.MessageOrdinal, t.CallIndex, sessionID, err)
 		}

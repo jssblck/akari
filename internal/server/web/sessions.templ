@@ -19,6 +19,8 @@ templ SessionsPage(p Page, rows []store.SessionRow, facets store.GlobalFacetValu
 					@activeChip("agent", sel.Agent, sel)
 					@activeChip("machine", sel.Machine, sel)
 					@activeChip("user", sel.Username, sel)
+					@activeChip("outcome", sel.Outcome, sel)
+					@activeChip("grade", sel.Grade, sel)
 					@activeProjectChip(facets.Projects, sel)
 					<a class="small clear" href="/sessions">Clear all</a>
 				</div>
@@ -65,6 +67,22 @@ templ sessionsToolbar(facets store.GlobalFacetValues, sel store.SessionFilter) {
 				for _, u := range facets.Users {
 					<option value={ u.Value } selected?={ sel.Username == u.Value }>{ u.Value }</option>
 				}
+			}
+		}
+		// Outcome and grade drill in from the Insights distributions: their option lists are
+		// the same fixed buckets the bars split on (the four outcomes, the five letters, plus
+		// the unscored bucket for a session with no gated grade), so a bar's link lands on a
+		// value this select already carries and the two surfaces stay in agreement.
+		@tbSelect("Outcome", "outcome") {
+			<option value="" selected?={ sel.Outcome == "" }>All outcomes</option>
+			for _, o := range OutcomeFilterOptions() {
+				<option value={ o.Key } selected?={ sel.Outcome == o.Key }>{ o.Label }</option>
+			}
+		}
+		@tbSelect("Grade", "grade") {
+			<option value="" selected?={ sel.Grade == "" }>All grades</option>
+			for _, g := range GradeFilterOptions() {
+				<option value={ g.Key } selected?={ sel.Grade == g.Key }>{ g.Label }</option>
 			}
 		}
 		<span class="spacer"></span>

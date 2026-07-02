@@ -127,6 +127,131 @@ func TestQualityDistribution(t *testing.T) {
 	}
 }
 
+// TestUserQuality confirms the per-user leaderboard the Insights People panel reads: the
+// per-author session counts, the outcome partition (Unknown as the residue), the graded
+// coverage, the average score over scored rows only, and the busiest-first ordering. It goes
+// through the Insights snapshot (userQualityFrom is unexported and threaded only there), which
+// also exercises that the panel shares the quality total's cohort. It confirms the same run's
+// QualityDistribution.Graded, the coverage figure the Grades panel notes.
+func TestUserQuality(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	ada := seedUser(t, st, "ada")
+	grace := seedUser(t, st, "grace")
+	pid, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recent := time.Now().Add(-24 * time.Hour)
+
+	// Score comes from insertSignal's fixed 80 for any graded row, so the average over a user's
+	// graded sessions is 80 when they have any and nil when they have none. mk stamps a shape so
+	// the session is windowed, then a signals row (empty grade = the unscored/unknown bucket).
+	mk := func(user int64, src, outcome, grade string) int64 {
+		sid := seedSession(t, st, user, pid, src)
+		setSessionShape(t, st, ctx, sid, recent, recent.Add(10*time.Minute), 20, 2)
+		insertSignal(t, st, ctx, sid, quality.Version, outcome, grade)
+		return sid
+	}
+	// Ada: three graded (two completed A/B, one errored C) plus one ungraded/unknown session,
+	// so four sessions, three graded, and an outcome mix of 2 completed / 1 errored / 1 unknown.
+	mk(ada, "a1", "completed", "A")
+	mk(ada, "a2", "completed", "B")
+	mk(ada, "a3", "errored", "C")
+	// An ungraded session (no signals row at all): still counted under Ada, unknown outcome.
+	noneID := seedSession(t, st, ada, pid, "a4none")
+	setSessionShape(t, st, ctx, noneID, recent, recent.Add(10*time.Minute), 20, 2)
+	// Grace: one abandoned, graded D.
+	mk(grace, "g1", "abandoned", "D")
+
+	since := time.Now().Add(-90 * 24 * time.Hour)
+	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: since})
+	if err != nil {
+		t.Fatalf("insights: %v", err)
+	}
+
+	// Graded coverage on the distribution: 4 of 5 sessions carry a grade (Ada's a4none is the
+	// one unscored), so Graded is 4 against Sessions 5.
+	if ins.Quality.Sessions != 5 || ins.Quality.Graded != 4 {
+		t.Errorf("quality sessions/graded = %d/%d, want 5/4", ins.Quality.Sessions, ins.Quality.Graded)
+	}
+
+	users := ins.Users.Users
+	if len(users) != 2 {
+		t.Fatalf("users = %d, want 2", len(users))
+	}
+	// Busiest first: Ada (4) before Grace (1).
+	if users[0].Username != "ada" || users[1].Username != "grace" {
+		t.Fatalf("order = %s, %s, want ada, grace", users[0].Username, users[1].Username)
+	}
+	ada0 := users[0]
+	if ada0.Sessions != 4 || ada0.Graded != 3 {
+		t.Errorf("ada sessions/graded = %d/%d, want 4/3", ada0.Sessions, ada0.Graded)
+	}
+	if ada0.Completed != 2 || ada0.Errored != 1 || ada0.Abandoned != 0 || ada0.Unknown != 1 {
+		t.Errorf("ada outcome mix = c%d a%d e%d u%d, want c2 a0 e1 u1",
+			ada0.Completed, ada0.Abandoned, ada0.Errored, ada0.Unknown)
+	}
+	if ada0.Completed+ada0.Abandoned+ada0.Errored+ada0.Unknown != ada0.Sessions {
+		t.Errorf("ada outcome counts do not partition sessions: %+v", ada0)
+	}
+	if ada0.AvgScore == nil || *ada0.AvgScore != 80.0 {
+		t.Errorf("ada avg score = %v, want 80.0", ada0.AvgScore)
+	}
+	grace0 := users[1]
+	if grace0.Sessions != 1 || grace0.Graded != 1 || grace0.Abandoned != 1 {
+		t.Errorf("grace = {sessions %d, graded %d, abandoned %d}, want {1, 1, 1}", grace0.Sessions, grace0.Graded, grace0.Abandoned)
+	}
+}
+
+// TestUserQualityAvgScoreNilWhenUnscored confirms an author with sessions but no scored
+// session in scope reports a nil AvgScore (the "unmeasured" default the panel dashes), not a
+// zero that would read as a real failing average.
+func TestUserQualityAvgScoreNilWhenUnscored(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	ada := seedUser(t, st, "ada")
+	grace := seedUser(t, st, "grace")
+	pid, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recent := time.Now().Add(-24 * time.Hour)
+
+	// Ada: two ungraded/unknown sessions (explicit unscored rows). Grace: one graded so the
+	// panel has two authors and renders.
+	for _, src := range []string{"a1", "a2"} {
+		sid := seedSession(t, st, ada, pid, src)
+		setSessionShape(t, st, ctx, sid, recent, recent.Add(10*time.Minute), 20, 2)
+		insertSignal(t, st, ctx, sid, quality.Version, "unknown", "")
+	}
+	g := seedSession(t, st, grace, pid, "g1")
+	setSessionShape(t, st, ctx, g, recent, recent.Add(10*time.Minute), 20, 2)
+	insertSignal(t, st, ctx, g, quality.Version, "completed", "A")
+
+	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: time.Now().Add(-90 * 24 * time.Hour)})
+	if err != nil {
+		t.Fatalf("insights: %v", err)
+	}
+	var ada0 store.UserQuality
+	for _, u := range ins.Users.Users {
+		if u.Username == "ada" {
+			ada0 = u
+		}
+	}
+	if ada0.Username != "ada" {
+		t.Fatalf("ada not in users: %+v", ins.Users.Users)
+	}
+	if ada0.AvgScore != nil {
+		t.Errorf("ada avg score = %v, want nil (no scored session)", ada0.AvgScore)
+	}
+	if ada0.Sessions != 2 || ada0.Graded != 0 || ada0.Unknown != 2 {
+		t.Errorf("ada = {sessions %d, graded %d, unknown %d}, want {2, 0, 2}", ada0.Sessions, ada0.Graded, ada0.Unknown)
+	}
+}
+
 // TestArchetypeDistribution confirms each session bands into the archetype its facts
 // imply, matching quality.ClassifyArchetype, and that the result folds into the fixed
 // lightest-to-heaviest order.
