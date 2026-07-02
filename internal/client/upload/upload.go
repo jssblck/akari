@@ -64,6 +64,15 @@ type Target struct {
 	GitBranch  string
 	Cwd        string
 	Machine    string
+
+	// Finalize forces the session's trailing turn to be treated as settled on this
+	// sync regardless of how recently the file was written. A Codex session's final
+	// turn has no closing user line, so it is normally withheld until the file has
+	// been idle for settleWindow (see syncOnce); on an ephemeral host (CI, a cloud
+	// sandbox) that idle window never elapses before the host is torn down, so the
+	// final turn would never upload. Set by `akari sync --finalize`, an assertion by
+	// the caller that every session being synced is terminal.
+	Finalize bool
 }
 
 // Outcome reports the result of syncing one file.
@@ -283,7 +292,10 @@ func (c *Client) syncOnce(ctx context.Context, t Target, fs *fileSync, f *os.Fil
 	// A session's final turn has no closing user line, so it is withheld until the
 	// file goes idle. Treat a file untouched for settleWindow as settled, which
 	// also keeps a turn that merely paused mid-write from being flushed early.
-	settled := time.Since(info.ModTime()) > settleWindow
+	// --finalize (t.Finalize) forces settled: on an ephemeral host the idle window
+	// never elapses before teardown, so the caller asserts the session is terminal
+	// and the trailing turn flushes now rather than being lost.
+	settled := t.Finalize || time.Since(info.ModTime()) > settleWindow
 
 	action := ActionUploaded
 	if ann.StoredBytes == 0 {

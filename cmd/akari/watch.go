@@ -51,7 +51,9 @@ func runWatch(ctx context.Context, args []string) error {
 	roots := discover.Roots(cfg, os.Getenv, home)
 	resolver := resolve.New()
 	client := upload.New(&http.Client{Timeout: 60 * time.Second}, cfg.ServerURL, cfg.Token)
-	sync := syncer.New(resolver, client, machine)
+	// watch is a long-lived host: its idle ticks flush a Codex trailing turn once the
+	// settle window elapses, so it never finalizes eagerly.
+	sync := syncer.New(resolver, client, machine, false)
 
 	w := watch.New(roots, sync.SyncOne, watch.Options{Excludes: cfg.Excludes, Logf: log.Printf})
 	log.Printf("akari watch: watching %d root(s); press Ctrl-C to stop", len(roots))

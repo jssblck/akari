@@ -58,6 +58,7 @@ func runSync(ctx context.Context, args []string) error {
 	dryRun := fs.Bool("dry-run", false, "resolve and report without uploading")
 	timeLimitStr := fs.String("time-limit", defaultTimeLimit.String(), "Go duration to keep starting new uploads, e.g. 30s or 5m (0 for no limit); the in-flight upload always finishes")
 	concurrency := fs.Int("concurrency", defaultConcurrency(), "max files to sync in parallel; each file already parallelizes its own body uploads under a shared limiter, so keep this modest")
+	finalize := fs.Bool("finalize", false, "treat every session as terminal: flush a Codex session's trailing turn now instead of waiting for the idle settle window. Use on ephemeral hosts (CI, cloud sandboxes) whose window never elapses before teardown")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -89,7 +90,7 @@ func runSync(ctx context.Context, args []string) error {
 
 	resolver := resolve.New()
 	client := upload.New(&http.Client{Timeout: 60 * time.Second}, cfg.ServerURL, cfg.Token)
-	sync := syncer.New(resolver, client, machine)
+	sync := syncer.New(resolver, client, machine, *finalize)
 
 	// A time limit is a self-inflicted graceful shutdown: deadline wraps the
 	// shutdown context so the driver reads an elapsed limit exactly as it reads a
