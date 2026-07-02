@@ -2,6 +2,7 @@ package parser
 
 import (
 	"strings"
+	"time"
 
 	"github.com/tidwall/gjson"
 )
@@ -89,9 +90,125 @@ func (r *reducer) reduceClaude(region []byte, base int64) error {
 					DedupKey:       msg.Get("id").String(),
 				}, offset)
 			}
+
+			r.claudeFallbackFromAssistant(e, msg, ord, ts)
+
+		case "system":
+			// Only the safety-classifier fallback notice is kept; every other system entry
+			// stays dropped (the parser has no message row for them). It arrives on its own
+			// line, separate from the assistant entries, and carries the refusal detail the
+			// assistant side does not: trigger, category, and explanation.
+			if e.Get("subtype").String() == "model_refusal_fallback" {
+				r.claudeFallbackFromSystem(e, ts)
+			}
 		}
 		return nil
 	})
+}
+
+// claudeFallbackFromAssistant emits a FallbackOp when the assistant entry carries an
+// explicit fallback marker: a "fallback" content block OR a usage.iterations entry of
+// type "fallback_message". It keys ONLY on these markers, never on the model string
+// changing, so an intentional switch is not flagged. A normal turn also carries
+// usage.iterations (a single type=="message" entry, whose model may be absent), so the
+// presence of iterations alone is not a fallback: only a "fallback_message" entry is.
+//
+// From the block it reads from.model and to.model; from iterations it reads ToModel
+// from the fallback_message entry (else the message model) and FromModel from the last
+// type=="message" entry, and sums that entry's token counts as the declined attempt's
+// spend. A sticky-routed turn carries a fallback_message iteration entry with no block,
+// so the two sources are checked independently. The DedupKey is the top-level requestId
+// when present, else the message id, so every chunk of one API message merges to one row.
+func (r *reducer) claudeFallbackFromAssistant(e, msg gjson.Result, ord int, ts time.Time) {
+	block := msg.Get(`content.#(type=="fallback")`)
+	iterations := msg.Get("usage.iterations")
+
+	var fallbackIter, lastMessageIter gjson.Result
+	var haveFallbackIter, haveMessageIter bool
+	if iterations.IsArray() {
+		for _, it := range iterations.Array() {
+			switch it.Get("type").String() {
+			case "fallback_message":
+				fallbackIter = it
+				haveFallbackIter = true
+			case "message":
+				lastMessageIter = it
+				haveMessageIter = true
+			}
+		}
+	}
+
+	if !block.Exists() && !haveFallbackIter {
+		return // no explicit marker: an ordinary turn, not a fallback
+	}
+
+	op := FallbackOp{OccurredAt: ts, DedupKey: claudeDedupKey(e, msg)}
+	o := ord
+	op.MessageOrdinal = &o
+
+	switch {
+	case block.Exists():
+		op.FromModel = block.Get("from.model").String()
+		op.ToModel = block.Get("to.model").String()
+	default:
+		if haveMessageIter {
+			op.FromModel = lastMessageIter.Get("model").String()
+		}
+	}
+	if op.ToModel == "" {
+		if haveFallbackIter {
+			op.ToModel = fallbackIter.Get("model").String()
+		}
+		if op.ToModel == "" {
+			op.ToModel = msg.Get("model").String()
+		}
+	}
+
+	// The declined attempt's spend is the sum over the type=="message" iteration entries.
+	// It is only meaningful when a fallback_message entry is present (an ordinary turn's
+	// lone message entry is the served turn, not a declined one), so it is summed only then.
+	if haveFallbackIter && iterations.IsArray() {
+		op.DeclinedObserved = true
+		for _, it := range iterations.Array() {
+			if it.Get("type").String() != "message" {
+				continue
+			}
+			op.DeclinedInput += int(it.Get("input_tokens").Int())
+			op.DeclinedOutput += int(it.Get("output_tokens").Int())
+			op.DeclinedCacheWrite += int(it.Get("cache_creation_input_tokens").Int())
+			op.DeclinedCacheRead += int(it.Get("cache_read_input_tokens").Int())
+		}
+	}
+
+	r.d.Fallbacks = append(r.d.Fallbacks, op)
+}
+
+// claudeFallbackFromSystem emits a FallbackOp from a model_refusal_fallback system entry.
+// It carries the refusal detail the assistant side lacks (trigger, category, explanation)
+// and shares the assistant entry's requestId as its DedupKey, so the store merges the two
+// into one row. It produces no message row and no MessageOrdinal, so it never disturbs the
+// message ordinal sequence.
+func (r *reducer) claudeFallbackFromSystem(e gjson.Result, ts time.Time) {
+	r.d.Fallbacks = append(r.d.Fallbacks, FallbackOp{
+		FromModel:          e.Get("originalModel").String(),
+		ToModel:            e.Get("fallbackModel").String(),
+		Trigger:            e.Get("trigger").String(),
+		RefusalCategory:    e.Get("apiRefusalCategory").String(),
+		RefusalExplanation: e.Get("apiRefusalExplanation").String(),
+		OccurredAt:         ts,
+		DedupKey:           e.Get("requestId").String(),
+	})
+}
+
+// claudeDedupKey is the identity that ties every JSONL line of one logical fallback
+// together: the top-level requestId when present, else the assistant message id. Claude
+// splits one API message across several assistant entries sharing both, and the system
+// entry shares the requestId, so all lines of one fallback merge to a single stored row.
+func claudeDedupKey(e, msg gjson.Result) string {
+	if req := e.Get("requestId").String(); req != "" {
+		return req
+	}
+	return msg.Get("id").String()
 }
 
 // applyResult records a tool result against the call its id names. body is the

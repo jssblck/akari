@@ -58,6 +58,7 @@
   ],
   "Usage": null,
   "Attachments": null,
+  "Fallbacks": null,
   "Started": "2024-01-01T10:00:00Z",
   "Ended": "2024-01-01T10:00:05Z"
 }

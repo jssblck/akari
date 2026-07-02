@@ -53,6 +53,17 @@ across multiple agents, models, cache tokens, duplicate usage, undated usage, an
 unpriced usage) and, for the specific Claude duplicate-usage case, by
 `TestClaudeDuplicateUsageCountedOnce` in the parse package.
 
+`sessions.model_fallback_count` follows the same construction against the
+`model_fallbacks` table: `applyDelta` counts only the rows its merge-upsert freshly
+inserts (the several transcript lines of one fallback share a dedup key, so later
+lines merge rather than re-count), and a reparse zeroes the counter and replays the
+fold. The invariant `sessions.model_fallback_count == count(model_fallbacks)` is
+pinned across ingest and reparse by `TestClaudeModelFallbackMergesAndCounts` in the
+parse package. The declined attempt's token counts live on the `model_fallbacks` row
+only; they are deliberately NOT folded into `sessions.total_*` or `usage_events`
+(whether a declined attempt is billed depends on where in the stream it declined, so
+the totals stay a record of served usage).
+
 ## The one legitimate gap
 
 The analytics surfaces filter `occurred_at IS NOT NULL`: an undated event has no day

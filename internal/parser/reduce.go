@@ -94,6 +94,52 @@ type AttachmentOp struct {
 	Filename       string
 }
 
+// FallbackOp records that a Claude Fable turn was declined by the safety classifier
+// and re-served by a lower model. It is emitted only from explicit Claude Code markers
+// (a "fallback" content block, a usage.iterations "fallback_message" entry, or a
+// "model_refusal_fallback" system entry): never from a bare model-string change, which
+// is an intentional switch (a /model command, a resume under a different default, a
+// subagent on a smaller model), not a fallback.
+//
+// One logical fallback surfaces across several JSONL lines that the store merges by
+// DedupKey: Claude splits one API message into several assistant entries sharing the
+// requestId (each repeating the same iterations), and a separate system entry carries
+// the refusal category. The assistant side brings MessageOrdinal and the declined
+// attempt's token counts; the system side brings Trigger, RefusalCategory, and
+// RefusalExplanation. Either can be the first to arrive, so the store's merge fills a
+// field from whichever line carries it. A field the source did not observe is left
+// zero (MessageOrdinal nil, token counts zero, strings empty) so the merge can tell
+// "unset" from a real value.
+type FallbackOp struct {
+	// MessageOrdinal ties an assistant-side op to the message op the same entry produced
+	// (the same way Usage ties to its message). It is nil on a system-side op, which
+	// produces no message row and must not disturb ordinals.
+	MessageOrdinal *int
+	FromModel      string
+	ToModel        string
+	// Trigger, RefusalCategory, and RefusalExplanation come only from the system entry.
+	Trigger            string
+	RefusalCategory    string
+	RefusalExplanation string
+	// Declined* are the token counts of the declined attempt (the type=="message"
+	// iteration entries), meaningful only on an assistant-side op that saw a
+	// fallback_message entry. Zero elsewhere.
+	DeclinedInput      int
+	DeclinedOutput     int
+	DeclinedCacheWrite int
+	DeclinedCacheRead  int
+	// DeclinedObserved is true only when the declined spend was actually summed from
+	// fallback_message iteration entries. An assistant entry that carries a fallback
+	// content block but no usage.iterations is a real fallback whose declined counts
+	// were never reported, so it leaves this false and the zero Declined* stay
+	// "unmeasured" rather than reading as a measured zero-token attempt.
+	DeclinedObserved bool
+	OccurredAt       time.Time
+	// DedupKey is the top-level requestId when present, else the assistant message id.
+	// Every line of one logical fallback repeats it, so the store dedups and merges on it.
+	DedupKey string
+}
+
 // Delta is everything one Reduce call produces for one raw region: the rows to
 // write and the region's timestamp span. It carries operations, not a whole
 // session, so applying it is append-only work proportional to the region, never to
@@ -107,6 +153,7 @@ type Delta struct {
 	ToolResults []ToolResultOp
 	Usage       []Usage
 	Attachments []AttachmentOp
+	Fallbacks   []FallbackOp
 
 	Started time.Time
 	Ended   time.Time
@@ -455,5 +502,6 @@ func assemble(d Delta) Session {
 	}
 
 	s.UsageEvent = d.Usage
+	s.Fallbacks = d.Fallbacks
 	return s
 }
