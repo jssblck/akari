@@ -3,6 +3,8 @@ package web
 import (
 	"strings"
 	"testing"
+
+	"github.com/jssblck/akari/internal/server/ogimage"
 )
 
 // The logged-out landing page is a product landing page: a hero over alternating
@@ -13,7 +15,7 @@ import (
 // spine at the source package guards the anonymous root independently of the httpapi
 // route wiring.
 func TestLandingPageRendersHeroAndEntryPoints(t *testing.T) {
-	html := renderComponent(t, LandingPage())
+	html := renderComponent(t, LandingPage(OGMeta{}))
 
 	// The public layout wraps it: the top bar's brand, the Docs and GitHub links,
 	// the Log in link, and the product name in the page title.
@@ -119,5 +121,19 @@ func TestLandingMockDataReconciles(t *testing.T) {
 	}
 	if got := FmtPercent(landingMockCacheHit()); got != "71%" {
 		t.Errorf("FmtPercent(landingMockCacheHit()) = %q, want %q", got, "71%")
+	}
+}
+
+// TestLandingHeroMatchesCardCopy reconciles the templ hero with the canonical
+// landing copy in the ogimage package (which the /og.png card draws and the
+// root handler's meta tags derive from). The template cannot import ogimage, so
+// this test is the coupling: a copy edit that lands in only one of the two
+// fails here instead of shipping a homepage whose h1, meta tags, and preview
+// card say different things. Importing ogimage from a web test is cycle-safe:
+// neither package imports the other.
+func TestLandingHeroMatchesCardCopy(t *testing.T) {
+	html := renderComponent(t, LandingPage(OGMeta{}))
+	if want := "<h1>" + ogimage.LandingHeadline + "</h1>"; !strings.Contains(html, want) {
+		t.Errorf("landing hero h1 does not carry ogimage.LandingHeadline; want %q in the rendered page", want)
 	}
 }

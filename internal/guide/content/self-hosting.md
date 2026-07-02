@@ -70,6 +70,7 @@ Only the database URL is required.
 | `AKARI_SWEEP_INTERVAL` | `1h` | How often the server reclaims orphaned content-addressed blobs. A Go duration (`30m`, `2h`); `0` disables the background sweep. |
 | `AKARI_OG_CACHE_TTL` | `1h` | How long a rendered Open Graph preview card of a published overview is served from cache before the next request re-renders it. A Go duration; must be positive. |
 | `AKARI_OG_CLEANUP_INTERVAL` | `24h` | How often the server prunes expired preview cards (older than `AKARI_OG_CACHE_TTL`) from the cache. A Go duration; `0` disables the sweep. |
+| `AKARI_SIGNALS_SETTLE_INTERVAL` | `5m` | How often the server computes per-session quality signals (outcome, grade, prompt hygiene, context health) for sessions that have settled: a session is graded once it has been idle past the abandoned threshold (30 minutes), off the ingest path, so a live session is never graded with a verdict that would drift. A Go duration; `0` disables the background pass (signals then land only on reparse or via `akari-server settle`). |
 
 ## The database
 
@@ -125,13 +126,16 @@ run-the-server behavior:
 akari-server                  # run the HTTP server (default)
 akari-server reparse          # force a projection rebuild (see above)
 akari-server sweep            # reclaim orphaned content-addressed blobs now
+akari-server settle           # compute quality signals for every settled session now
 akari-server dev-seed         # fill a local server with example data (development)
 akari-server update           # update to the latest release in place
 akari-server version          # print the build version and exit
 ```
 
 `sweep` is the manual form of the periodic blob reclaim; it is safe to run any
-time, since blob liveness is computed rather than reference-counted. `update`
+time, since blob liveness is computed rather than reference-counted. `settle` is
+the manual form of the periodic signals pass: it grades every settled session
+missing a current-version signals row, then exits. `update`
 downloads and swaps in the latest release (and reminds you to
 `systemctl restart akari-server` when a service is installed); inside a container,
 rebuild the image and redeploy rather than updating the binary in place.

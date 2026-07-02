@@ -2,11 +2,11 @@
 
 The web UI is where a human reads what the agents did. It is server-rendered: a
 persistent left sidebar carries the primary sections (Overview, Insights,
-Projects, Sessions, Account), with the signed-in user and a log-out control at
-its foot. Reading the UI needs a full-scope credential, which in practice is a
-browser session; signing in gives you that. Every timestamp renders in your own
-timezone: the browser reports its zone in a cookie once, and the server formats
-against it from the next page on.
+Projects, Sessions, Account, and this Guide), with the signed-in user and a
+log-out control at its foot. Reading the UI needs a full-scope credential, which
+in practice is a browser session; signing in gives you that. Every timestamp
+renders in your own timezone: the browser reports its zone in a cookie once, and
+the server formats against it from the next page on.
 
 ## Overview
 
