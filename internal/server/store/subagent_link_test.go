@@ -193,3 +193,46 @@ func TestBackfillLinksExistingSubagents(t *testing.T) {
 		t.Fatalf("standalone must stay top-level, got parent %d", *pp)
 	}
 }
+
+// TestSubagentsSurfaceModelFallbackCount pins that the shared SessionSummary read
+// (sessionSelect) loads the model_fallback_count rollup, so a subagent row reports its own
+// count rather than a phantom zero. The MCP DTO publishes the field as always-present, so a
+// child that fell back would otherwise read as zero under get_session.subagents while its own
+// header reports the real rollup.
+func TestSubagentsSurfaceModelFallbackCount(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	uid := seedUser(t, st, "grace")
+	pid, err := st.UpsertProject(ctx, "github.com/ada/engine", "github.com", "ada", "engine", "engine", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	announce := func(src string) int64 {
+		t.Helper()
+		ann, err := st.Announce(ctx, store.AnnounceParams{UserID: uid, Agent: "claude", SourceSessionID: src, ProjectID: pid})
+		if err != nil {
+			t.Fatalf("announce %q: %v", src, err)
+		}
+		return ann.SessionID
+	}
+
+	parent := announce("fb-parent")
+	child := announce("fb-parent/subagents/agent-abc")
+	// Stamp a non-zero fallback rollup directly on the child (the rollup the projection folds).
+	if _, err := st.Pool.Exec(ctx, "UPDATE sessions SET model_fallback_count = 3 WHERE id = $1", child); err != nil {
+		t.Fatalf("stamp child rollup: %v", err)
+	}
+
+	subs, err := st.Subagents(ctx, parent)
+	if err != nil {
+		t.Fatalf("subagents: %v", err)
+	}
+	if len(subs) != 1 || subs[0].ID != child {
+		t.Fatalf("Subagents(parent) = %+v, want the one child %d", subs, child)
+	}
+	if subs[0].ModelFallbackCount != 3 {
+		t.Errorf("subagent ModelFallbackCount = %d, want 3 (the shared summary read must load the rollup)", subs[0].ModelFallbackCount)
+	}
+}

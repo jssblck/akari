@@ -142,6 +142,11 @@
 .tok-cell:focus-visible { outline: none; box-shadow: var(--ring); border-radius: var(--r-sm); }
 .tok-tip {
   display: none; position: absolute; right: 0; top: calc(100% + 6px);
+  /* Size to the content rather than shrink-wrapping against the narrow cell the
+     card is anchored to, so lines never wrap until the card would exceed a fifth
+     of the viewport (the same contract as .stat-tip in base.css). Anchored
+     right: 0, it grows leftward over the table, which overflow already allows. */
+  width: max-content; max-width: 20vw;
   min-width: 184px; text-align: left; z-index: var(--z-overlay);
   background: var(--surface-2); border: 1px solid var(--border-strong); border-radius: var(--r-md);
   padding: var(--sp-sm) var(--sp-md); box-shadow: var(--shadow-overlay);

@@ -109,6 +109,30 @@ type AttachmentDelta struct {
 	Filename       string
 }
 
+// ProjFallback is one model_fallbacks insert: a Claude Fable turn the safety classifier
+// declined and re-served on a lower model. One logical fallback arrives across several
+// transcript lines that share DedupKey (Claude splits one API message into several
+// assistant entries, plus a separate system entry for the refusal detail), so applyDelta
+// merges rows on (session_id, dedup_key): the assistant side brings MessageOrdinal and the
+// declined token counts, the system side brings Trigger/RefusalCategory/RefusalExplanation,
+// and each column fills from whichever line carried it. A field the source did not observe
+// is left at its unset default (MessageOrdinal nil, token counts nil, strings empty) so the
+// merge can tell "unset" from a real value and never overwrites a filled field with a blank.
+type ProjFallback struct {
+	MessageOrdinal     *int
+	FromModel          string
+	ToModel            string
+	Trigger            string
+	RefusalCategory    string
+	RefusalExplanation string
+	DeclinedInput      *int
+	DeclinedOutput     *int
+	DeclinedCacheWrite *int
+	DeclinedCacheRead  *int
+	OccurredAt         time.Time
+	DedupKey           string
+}
+
 // ProjectionDelta is the incremental projection write for one parsed region: the
 // rows to add and the region's timestamp span. The session rollups are not folded
 // from precomputed counters carried here. They are derived from the rows that
@@ -123,6 +147,7 @@ type ProjectionDelta struct {
 	ToolResults []ToolResultDelta
 	Usage       []ProjUsage
 	Attachments []AttachmentDelta
+	Fallbacks   []ProjFallback
 
 	Started time.Time
 	Ended   time.Time
@@ -138,12 +163,18 @@ type ProjectionDelta struct {
 type appliedDelta struct {
 	MessagesAdded     int
 	UserMessagesAdded int
-	Input             int64
-	Output            int64
-	CacheWrite        int64
-	CacheRead         int64
-	CostUSD           float64
-	CostIncomplete    bool
+	// FallbacksAdded counts only the model_fallbacks rows that were freshly inserted, not
+	// the ones a later line merged into an existing (session_id, dedup_key). The several
+	// transcript lines of one logical fallback share a dedup_key, so the first inserts and
+	// the rest merge; counting only inserts keeps sessions.model_fallback_count equal to
+	// the number of distinct fallback events.
+	FallbacksAdded int
+	Input          int64
+	Output         int64
+	CacheWrite     int64
+	CacheRead      int64
+	CostUSD        float64
+	CostIncomplete bool
 	// CacheSavingsUSD is the prompt-cache dollars the surviving rows saved versus paying
 	// the uncached input rate for the same cached volume, priced per model (the rate gap
 	// differs by family and is negative on a Claude cache write). It folds into the session
@@ -630,6 +661,92 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 			return appliedDelta{}, fmt.Errorf("insert attachment for session %d ordinal %d: %w", sessionID, a.MessageOrdinal, err)
 		}
 	}
+
+	// Model fallbacks merge on (session_id, dedup_key): the several transcript lines of one
+	// logical fallback share a dedup_key (Claude's split assistant entries plus the system
+	// entry), so the first line inserts the row and the rest fill the columns their line
+	// carries. Two kinds of column merge here, and they resolve conflicts in opposite
+	// directions on purpose.
+	//
+	// message_ordinal and occurred_at are turn identity, and both bind to the assistant line
+	// that owns the turn, so they stay in lockstep with the usage projection. usage_events
+	// only ever exists for an assistant line (its insert is ON CONFLICT DO NOTHING, pinning
+	// the first assistant line's ordinal and timestamp), so the fallback row must read the
+	// same turn: the assistant line's ordinal and the assistant line's timestamp. The system
+	// entry carries a NULL ordinal and its own, often later, timestamp, and must never move
+	// the fallback notice onto a different turn time than the usage it describes.
+	//
+	// message_ordinal is first-wins (the existing value leads the COALESCE), so once an
+	// assistant line sets it, no later line moves it. occurred_at then tracks whichever line
+	// owns that ordinal, not merely whichever arrived first: once the row has an ordinal its
+	// timestamp is frozen (the assistant line's, matching usage_events), so a later system
+	// merge cannot overwrite it. Ordering matters because the system entry can arrive first:
+	// with only its NULL-ordinal row present the timestamp is a placeholder, and when the
+	// assistant line later fills the ordinal the CASE adopts that line's timestamp too,
+	// replacing the placeholder so both projections land on the one canonical turn time.
+	//
+	// The descriptive columns are the opposite, fill-toward-complete: a non-empty string
+	// wins over an empty one and a non-null value over NULL (via COALESCE, EXCLUDED first so
+	// a new value overrides a prior NULL but a NULL never clears a filled value). These are
+	// fields one side carries and the other lacks (trigger/category/explanation live only on
+	// the system entry, the declined token counts only on the specific assistant line), so
+	// whichever line arrives first, the later lines still fill in what it was missing.
+	//
+	// Only a fresh insert counts toward model_fallback_count: `xmax = 0` is true exactly for the row this statement inserted
+	// (a row updated by ON CONFLICT has a non-zero xmax), which distinguishes insert from
+	// merge where RowsAffected cannot (it is 1 for both). The nullable refusal columns pass
+	// through nullString so an assistant-first row stores NULL, not '', and a later system
+	// merge fills them via COALESCE; reads backfill '' for display.
+	for _, fb := range d.Fallbacks {
+		var ord, declIn, declOut, declCW, declCR any
+		if fb.MessageOrdinal != nil {
+			ord = *fb.MessageOrdinal
+		}
+		if fb.DeclinedInput != nil {
+			declIn = *fb.DeclinedInput
+		}
+		if fb.DeclinedOutput != nil {
+			declOut = *fb.DeclinedOutput
+		}
+		if fb.DeclinedCacheWrite != nil {
+			declCW = *fb.DeclinedCacheWrite
+		}
+		if fb.DeclinedCacheRead != nil {
+			declCR = *fb.DeclinedCacheRead
+		}
+		var inserted bool
+		if err := tx.QueryRow(ctx,
+			`INSERT INTO model_fallbacks
+			   (session_id, message_ordinal, from_model, to_model, trigger, refusal_category,
+			    refusal_explanation, declined_input_tokens, declined_output_tokens,
+			    declined_cache_write_tokens, declined_cache_read_tokens, occurred_at, dedup_key)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+			 ON CONFLICT (session_id, dedup_key) DO UPDATE SET
+			   message_ordinal     = COALESCE(model_fallbacks.message_ordinal, EXCLUDED.message_ordinal),
+			   from_model          = CASE WHEN EXCLUDED.from_model <> '' THEN EXCLUDED.from_model ELSE model_fallbacks.from_model END,
+			   to_model            = CASE WHEN EXCLUDED.to_model   <> '' THEN EXCLUDED.to_model   ELSE model_fallbacks.to_model   END,
+			   trigger             = CASE WHEN EXCLUDED.trigger    <> '' THEN EXCLUDED.trigger    ELSE model_fallbacks.trigger    END,
+			   refusal_category    = COALESCE(EXCLUDED.refusal_category, model_fallbacks.refusal_category),
+			   refusal_explanation = COALESCE(EXCLUDED.refusal_explanation, model_fallbacks.refusal_explanation),
+			   declined_input_tokens       = COALESCE(EXCLUDED.declined_input_tokens, model_fallbacks.declined_input_tokens),
+			   declined_output_tokens      = COALESCE(EXCLUDED.declined_output_tokens, model_fallbacks.declined_output_tokens),
+			   declined_cache_write_tokens = COALESCE(EXCLUDED.declined_cache_write_tokens, model_fallbacks.declined_cache_write_tokens),
+			   declined_cache_read_tokens  = COALESCE(EXCLUDED.declined_cache_read_tokens, model_fallbacks.declined_cache_read_tokens),
+			   occurred_at         = CASE
+			       WHEN model_fallbacks.message_ordinal IS NOT NULL THEN model_fallbacks.occurred_at
+			       WHEN EXCLUDED.message_ordinal IS NOT NULL THEN EXCLUDED.occurred_at
+			       ELSE COALESCE(model_fallbacks.occurred_at, EXCLUDED.occurred_at)
+			   END
+			 RETURNING (xmax = 0)`,
+			sessionID, ord, sanitizeText(fb.FromModel), sanitizeText(fb.ToModel), sanitizeText(fb.Trigger),
+			nullString(sanitizeText(fb.RefusalCategory)), nullString(sanitizeText(fb.RefusalExplanation)),
+			declIn, declOut, declCW, declCR, nullTime(fb.OccurredAt), sanitizeText(fb.DedupKey)).Scan(&inserted); err != nil {
+			return appliedDelta{}, fmt.Errorf("upsert model fallback for session %d key %q: %w", sessionID, fb.DedupKey, err)
+		}
+		if inserted {
+			applied.FallbacksAdded++
+		}
+	}
 	return applied, nil
 }
 
@@ -661,6 +778,7 @@ func applyAggregates(ctx context.Context, tx pgx.Tx, sessionID int64, parserVers
 		`UPDATE sessions SET
 		   message_count = message_count + $2,
 		   user_message_count = user_message_count + $3,
+		   model_fallback_count = model_fallback_count + $17,
 		   total_input_tokens = total_input_tokens + $4,
 		   total_output_tokens = total_output_tokens + $5,
 		   total_cache_write_tokens = total_cache_write_tokens + $6,
@@ -691,7 +809,7 @@ func applyAggregates(ctx context.Context, tx pgx.Tx, sessionID int64, parserVers
 		a.CostUSD, a.CostIncomplete,
 		a.CacheSavingsUSD, a.CacheSavingsIncomplete,
 		nullTime(started), nullTime(ended), parserVersion,
-		regionHasCache, pricing.Version)
+		regionHasCache, pricing.Version, a.FallbacksAdded)
 	if err != nil {
 		return fmt.Errorf("update aggregates for session %d: %w", sessionID, err)
 	}
@@ -827,6 +945,10 @@ func clearProjectionForReparseTx(ctx context.Context, tx pgx.Tx, sessionID int64
 		// them, so it clears with the ledger it summarizes rather than lingering with stale sums.
 		"DELETE FROM message_turn_usage WHERE session_id = $1",
 		"DELETE FROM attachments WHERE session_id = $1",
+		// model_fallbacks is parser-owned (the reducer emits it from the transcript's fallback
+		// markers), so it clears with the rest and the replay re-detects it; resetSessionAggregates
+		// zeroes model_fallback_count so the reparse re-accumulates it from the surviving inserts.
+		"DELETE FROM model_fallbacks WHERE session_id = $1",
 		// session_signals is parser-owned too (derived from messages and tool_calls), so
 		// it clears with the rest. ReparseSession rebuilds it at the end of its replay;
 		// the standalone reset leaves it absent until the settle pass refreshes it, once
@@ -854,6 +976,7 @@ func resetSessionAggregates(ctx context.Context, tx pgx.Tx, sessionID int64) err
 	_, err := tx.Exec(ctx,
 		`UPDATE sessions SET
 		   message_count = 0, user_message_count = 0,
+		   model_fallback_count = 0,
 		   total_input_tokens = 0, total_output_tokens = 0,
 		   total_cache_write_tokens = 0, total_cache_read_tokens = 0,
 		   total_cost_usd = 0, cost_incomplete = FALSE,

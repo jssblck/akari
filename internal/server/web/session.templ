@@ -96,7 +96,7 @@ templ SessionMain(d store.SessionDetail, msgs []store.Message, tools map[int][]s
 		</div>
 	}
 	<h2>Transcript</h2>
-	@Transcript(msgs, tools, attachments, SessionBlobBase(d.ID))
+	@Transcript(msgs, tools, attachments, FallbacksByOrdinal(hs.Fallbacks), SessionBlobBase(d.ID))
 }
 
 // Outline is the left pane of the session view: one entry per turn, with its
@@ -194,7 +194,63 @@ templ sessionStats(d store.SessionDetail, hs HeaderStats) {
 		@tokenStat(d, hs.Signals)
 		@statCache(hs.Cache)
 		@statQuality(hs.Signals)
+		if d.ModelFallbackCount > 0 {
+			@statFallback(d.ModelFallbackCount, hs.Fallbacks)
+		}
 		@stat("Duration", FmtDuration(d.StartedAt, d.EndedAt), "dur")
+	</div>
+}
+
+// statFallback is the model-fallback readout: it renders ONLY when the session had a
+// fallback (a Claude Fable turn the safety classifier declined and re-served on a lower
+// model), so its absence is the negative signal and the common session shows no tile. The
+// count reads at a glance in the warn band; the per-fallback detail (the model pair, the
+// refusal category, the declined attempt's token spend broken out by class, and the time)
+// reveals on hover or keyboard focus through the same .stat-tip system the Quality and
+// Tokens tiles use. A field the transcript never named reads a plain default (unknown,
+// uncategorized) rather than a blank cell, since a single-line fallback can arrive with only
+// part of its detail. The tooltip lists at most the first five fallbacks (the slice is
+// already capped at the store read); a session that fell back more names the remainder in a
+// closing "plus N more" line computed from the full count, so a pathological session's
+// tooltip stays short.
+templ statFallback(count int, fbs []store.ModelFallback) {
+	<div class="stat fallback-stat" tabindex="0">
+		<div class="label">Fallbacks</div>
+		<div class="value fallback-value" data-stat-key="fallbacks">{ fmt.Sprintf("%d", count) }</div>
+		<div class="stat-tip" role="tooltip">
+			for i, f := range fbs {
+				if i >= 5 {
+					{{ break }}
+				}
+				if i > 0 {
+					<div class="tt-sub">Fallback</div>
+				}
+				<dl class="tt-grid">
+					<dt>Models</dt>
+					<dd>{ FallbackModelsLabel(f) }</dd>
+					<dt>Category</dt>
+					<dd>{ FallbackCategoryLabel(f) }</dd>
+					if FallbackDeclinedObserved(f) {
+						// The four token classes, each on its own row rather than one summed figure, so a
+						// reader sees the breakdown the way the Tokens tile shows it. A declined attempt is
+						// never priced (it was refused, not served), so there is no cost line to pair with them.
+						<dt>Declined input</dt>
+						<dd>{ FmtTokens(*f.DeclinedInput) }</dd>
+						<dt>Declined output</dt>
+						<dd>{ FmtTokens(*f.DeclinedOutput) }</dd>
+						<dt>Declined cache write</dt>
+						<dd>{ FmtTokens(*f.DeclinedCacheWrite) }</dd>
+						<dt>Declined cache read</dt>
+						<dd>{ FmtTokens(*f.DeclinedCacheRead) }</dd>
+					}
+					<dt>Time</dt>
+					<dd>{ FallbackTimeLabel(ctx, f) }</dd>
+				</dl>
+			}
+			if over := FallbacksOverflow(count, min(len(fbs), 5)); over > 0 {
+				<div class="tt-note">{ fmt.Sprintf("plus %d more", over) }</div>
+			}
+		</div>
 	</div>
 }
 
@@ -339,7 +395,7 @@ templ stat(label, value, key string) {
 // then a context+cost stamp group that hosts a per-turn token breakdown card); a shed divider
 // hosting its own before/after breakdown card is drawn above the marked message; muted hygiene tags
 // sit after a user message's role tag.
-templ Transcript(msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, blobBase string) {
+templ Transcript(msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, fallbacks map[int]store.ModelFallback, blobBase string) {
 	if len(msgs) == 0 {
 		<div class="empty">No messages parsed yet.</div>
 	} else {
@@ -349,6 +405,9 @@ templ Transcript(msgs []store.Message, tools map[int][]store.ToolCallView, attac
 				{{ metrics := walker.Next(m) }}
 				if metrics.Shed != nil {
 					@shedDivider(*metrics.Shed)
+				}
+				if fb, ok := fallbacks[m.Ordinal]; ok {
+					@fallbackNotice(fb)
 				}
 				if m.Role == "context" {
 					@contextTurn(m)
@@ -485,6 +544,17 @@ templ shedDivider(shed ShedMark) {
 			</dl>
 			<span class="tt-cost">{ TurnCostLabel(shed.ToUsage) }</span>
 		</span>
+	</div>
+}
+
+// fallbackNotice draws a slim, warn-styled row above the turn a model fallback landed on,
+// naming the model pair and the trigger in one plain sentence. Detection is marker-based
+// (an intentional model switch is never in this data), so the copy states "fell back"
+// plainly rather than hedging. It keeps the shed divider's low-key styling in the warn hue,
+// so the transcript reads it as an observability mark rather than a warning banner.
+templ fallbackNotice(f store.ModelFallback) {
+	<div class="msg-fallback" role="note">
+		<span class="fallback-label">{ FallbackNoticeLabel(f) }</span>
 	</div>
 }
 

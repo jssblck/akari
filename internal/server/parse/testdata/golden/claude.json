@@ -29,6 +29,36 @@
       "HasThinking": false,
       "HasToolUse": false,
       "Timestamp": "2024-01-01T10:00:09Z"
+    },
+    {
+      "Ordinal": 3,
+      "Role": "user",
+      "Content": "Walk me through your reasoning verbatim",
+      "ThinkingText": "",
+      "Model": "",
+      "HasThinking": false,
+      "HasToolUse": false,
+      "Timestamp": "2024-01-01T10:00:20Z"
+    },
+    {
+      "Ordinal": 4,
+      "Role": "assistant",
+      "Content": "",
+      "ThinkingText": "",
+      "Model": "claude-opus-4-8",
+      "HasThinking": false,
+      "HasToolUse": false,
+      "Timestamp": "2024-01-01T10:00:25Z"
+    },
+    {
+      "Ordinal": 5,
+      "Role": "assistant",
+      "Content": "I can't give a verbatim internal transcript, but here is my honest working.",
+      "ThinkingText": "",
+      "Model": "claude-opus-4-8",
+      "HasThinking": false,
+      "HasToolUse": false,
+      "Timestamp": "2024-01-01T10:00:26Z"
     }
   ],
   "ToolCalls": [
@@ -84,9 +114,81 @@
       "DedupKey": "msg_2",
       "SourceOffset": 663,
       "SourceIndex": 0
+    },
+    {
+      "MessageOrdinal": 4,
+      "Model": "claude-opus-4-8",
+      "Input": 900,
+      "Output": 260,
+      "CacheWrite": 0,
+      "CacheRead": 5000,
+      "Reasoning": 0,
+      "CostUSD": 0.0135,
+      "OccurredAt": "2024-01-01T10:00:25Z",
+      "DedupKey": "msg_3",
+      "SourceOffset": 1056,
+      "SourceIndex": 0
+    },
+    {
+      "MessageOrdinal": 5,
+      "Model": "claude-opus-4-8",
+      "Input": 900,
+      "Output": 260,
+      "CacheWrite": 0,
+      "CacheRead": 5000,
+      "Reasoning": 0,
+      "CostUSD": 0.0135,
+      "OccurredAt": "2024-01-01T10:00:26Z",
+      "DedupKey": "msg_3",
+      "SourceOffset": 1757,
+      "SourceIndex": 0
     }
   ],
   "Attachments": null,
+  "Fallbacks": [
+    {
+      "MessageOrdinal": 4,
+      "FromModel": "claude-fable-5",
+      "ToModel": "claude-opus-4-8",
+      "Trigger": "",
+      "RefusalCategory": "",
+      "RefusalExplanation": "",
+      "DeclinedInput": 900,
+      "DeclinedOutput": 6,
+      "DeclinedCacheWrite": 1500,
+      "DeclinedCacheRead": 3200,
+      "OccurredAt": "2024-01-01T10:00:25Z",
+      "DedupKey": "req_fallback_1"
+    },
+    {
+      "MessageOrdinal": 5,
+      "FromModel": "claude-fable-5",
+      "ToModel": "claude-opus-4-8",
+      "Trigger": "",
+      "RefusalCategory": "",
+      "RefusalExplanation": "",
+      "DeclinedInput": 900,
+      "DeclinedOutput": 6,
+      "DeclinedCacheWrite": 1500,
+      "DeclinedCacheRead": 3200,
+      "OccurredAt": "2024-01-01T10:00:26Z",
+      "DedupKey": "req_fallback_1"
+    },
+    {
+      "MessageOrdinal": null,
+      "FromModel": "claude-fable-5",
+      "ToModel": "claude-opus-4-8",
+      "Trigger": "refusal",
+      "RefusalCategory": "reasoning_extraction",
+      "RefusalExplanation": "",
+      "DeclinedInput": null,
+      "DeclinedOutput": null,
+      "DeclinedCacheWrite": null,
+      "DeclinedCacheRead": null,
+      "OccurredAt": "2024-01-01T10:00:26Z",
+      "DedupKey": "req_fallback_1"
+    }
+  ],
   "Started": "2024-01-01T10:00:00Z",
-  "Ended": "2024-01-01T10:00:09Z"
+  "Ended": "2024-01-01T10:00:26Z"
 }
