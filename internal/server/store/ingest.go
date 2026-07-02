@@ -226,6 +226,17 @@ func keepRemoteAttributionTx(ctx context.Context, tx pgx.Tx, p AnnounceParams) (
 
 func announceIntoProjectTx(ctx context.Context, tx pgx.Tx, p AnnounceParams) (AnnounceResult, error) {
 	var r AnnounceResult
+	// Read the session's stored cwd (if it already exists) before the upsert overwrites it, so a
+	// changed cwd can be detected and the dependent tool_calls.file_rel_path projection recomputed
+	// below. The announce identity lock is held for the whole transaction, so this read-then-write
+	// cannot interleave with a concurrent announce for the same logical session. A fresh session
+	// (no row yet) reads the empty string and never triggers a recompute (it has no tool calls).
+	var priorCwd string
+	if err := tx.QueryRow(ctx,
+		`SELECT COALESCE(cwd, '') FROM sessions WHERE user_id = $1 AND agent = $2 AND source_session_id = $3`,
+		p.UserID, p.Agent, p.SourceSessionID).Scan(&priorCwd); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return AnnounceResult{}, fmt.Errorf("read prior cwd for announce: %w", err)
+	}
 	if err := tx.QueryRow(ctx,
 		`INSERT INTO sessions (user_id, project_id, agent, source_session_id, machine, cwd, git_branch)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -239,6 +250,19 @@ func announceIntoProjectTx(ctx context.Context, tx pgx.Tx, p AnnounceParams) (An
 		p.UserID, p.ProjectID, p.Agent, p.SourceSessionID, p.Machine, p.Cwd, p.GitBranch).Scan(&r.SessionID); err != nil {
 		return AnnounceResult{}, fmt.Errorf("upsert session for announce: %w", err)
 	}
+	// file_rel_path is a projection of the session's cwd and each tool call's file_path (derived at
+	// insert in projection.go through sessionRelPath), so it must follow its inputs: the announce
+	// upsert above can change cwd (cwd = EXCLUDED.cwd), which would strand every already-inserted
+	// rel path at the old anchor and split one repo file's churn across two keys. When the cwd
+	// actually changed, recompute the stored rel paths against the new cwd. A session's tool calls
+	// are bounded (it is one session's edits, pushed to the CAS, not whole-session bytes), and a
+	// cwd change is rare (a re-announce from a different checkout), so this is a rare, bounded write
+	// rather than hot-path work.
+	if priorCwd != p.Cwd {
+		if err := recomputeToolCallRelPathsTx(ctx, tx, r.SessionID, p.Cwd); err != nil {
+			return AnnounceResult{}, err
+		}
+	}
 	if err := linkSubagentParentTx(ctx, tx, p, r.SessionID); err != nil {
 		return AnnounceResult{}, err
 	}
@@ -249,6 +273,87 @@ func announceIntoProjectTx(ctx context.Context, tx pgx.Tx, p AnnounceParams) (An
 	return r, tx.QueryRow(ctx,
 		`SELECT byte_len, content_sha256 FROM session_raw WHERE session_id = $1`, r.SessionID).
 		Scan(&r.StoredBytes, &r.PrefixSHA256)
+}
+
+// relPathRecomputeBatch is how many tool-call rows recomputeToolCallRelPathsTx reads and writes per
+// keyset page. It bounds peak memory to a fixed window (this many (ordinal, call_index, path)
+// tuples) regardless of how many tool calls a session accumulated, so the recompute does not hold a
+// per-session-sized slice resident. It is large enough that a typical session recomputes in one or
+// two pages.
+const relPathRecomputeBatch = 512
+
+// recomputeToolCallRelPathsTx re-derives every tool_calls.file_rel_path for a session against a
+// new cwd, so the stored projection follows its inputs when an announce changes cwd. file_rel_path
+// is computed once at insert (projection.go) from the cwd known then; a later announce from a
+// different checkout would otherwise leave the column pinned to the stale anchor, fragmenting one
+// repo file's churn across the old and new relative keys. It recomputes the relative form with the
+// same sessionRelPath the insert uses (so the recompute and the live path never diverge), setting
+// NULL for a row with no stable relative form under the new cwd (a path outside the new workspace,
+// or one that never had an absolute anchor), matching the insert's rule.
+//
+// It pages by keyset on the tool_calls primary key (message_ordinal, call_index) in fixed-size
+// batches rather than buffering the whole session's rows: peak memory tracks relPathRecomputeBatch
+// tuples, not the session's total tool-call count, so an arbitrarily large session recomputes in
+// bounded memory. Each page reads its batch, closes its rows (pgx forbids a write on the same
+// connection while a query's rows are open), applies the batch's updates, then resumes strictly
+// after the last key it saw. A cwd change is rare (a re-announce from a different checkout), so this
+// pass runs off the hot path.
+func recomputeToolCallRelPathsTx(ctx context.Context, tx pgx.Tx, sessionID int64, cwd string) error {
+	// update is one row's key and its recomputed relative path (nil for NULL), buffered only for the
+	// current page.
+	type update struct {
+		ordinal, callIndex int
+		rel                any
+	}
+	// The keyset cursor: the last (ordinal, call_index) written, so the next page resumes strictly
+	// after it. Starts below any real key.
+	lastOrdinal, lastCallIndex := -1, -1
+	for {
+		rows, err := tx.Query(ctx,
+			`SELECT message_ordinal, call_index, COALESCE(file_path, '')
+			   FROM tool_calls
+			  WHERE session_id = $1 AND (message_ordinal, call_index) > ($2, $3)
+			  ORDER BY message_ordinal, call_index
+			  LIMIT $4`,
+			sessionID, lastOrdinal, lastCallIndex, relPathRecomputeBatch)
+		if err != nil {
+			return fmt.Errorf("read tool calls to recompute rel paths for session %d: %w", sessionID, err)
+		}
+		batch := make([]update, 0, relPathRecomputeBatch)
+		for rows.Next() {
+			var u update
+			var filePath string
+			if err := rows.Scan(&u.ordinal, &u.callIndex, &filePath); err != nil {
+				rows.Close()
+				return fmt.Errorf("scan tool call for rel-path recompute in session %d: %w", sessionID, err)
+			}
+			if r, ok := sessionRelPath(cwd, filePath); ok {
+				u.rel = r
+			}
+			batch = append(batch, u)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return fmt.Errorf("iterate tool calls for rel-path recompute in session %d: %w", sessionID, err)
+		}
+		rows.Close()
+		if len(batch) == 0 {
+			return nil
+		}
+		for _, u := range batch {
+			if _, err := tx.Exec(ctx,
+				`UPDATE tool_calls SET file_rel_path = $4
+				   WHERE session_id = $1 AND message_ordinal = $2 AND call_index = $3`,
+				sessionID, u.ordinal, u.callIndex, u.rel); err != nil {
+				return fmt.Errorf("update tool call rel path %d/%d for session %d: %w", u.ordinal, u.callIndex, sessionID, err)
+			}
+		}
+		last := batch[len(batch)-1]
+		lastOrdinal, lastCallIndex = last.ordinal, last.callIndex
+		if len(batch) < relPathRecomputeBatch {
+			return nil // a short page is the last page
+		}
+	}
 }
 
 // subagentMarker is the path segment the client's source id uses to nest a Claude
@@ -413,6 +518,8 @@ func (s *Store) ResetRaw(ctx context.Context, sessionID int64) error {
 			"DELETE FROM messages WHERE session_id = $1",
 			"DELETE FROM tool_calls WHERE session_id = $1",
 			"DELETE FROM usage_events WHERE session_id = $1",
+			// The per-turn usage rollup is derived from usage_events, so it clears with them.
+			"DELETE FROM message_turn_usage WHERE session_id = $1",
 			"DELETE FROM attachments WHERE session_id = $1",
 			// Derived signals clear with the projection they summarize; the settle pass
 			// rebuilds the row from the re-parsed messages and tool calls once the

@@ -127,6 +127,87 @@ func TestQualityDistribution(t *testing.T) {
 	}
 }
 
+// TestQualityDrilldownWindowsOnStartedAt pins that a windowed quality bar and its drill-down
+// list describe the identical session set. The bar counts sessions by when they started
+// (QualityDistribution over AnalyticsFilter.Since on s.started_at); the feed reaches that list
+// through SessionFilter.StartedSince, which conds() applies to the same s.started_at column. The
+// footgun this guards is the two windowing on different columns: a session started before the
+// window but re-activated inside it (updated_at in range, started_at out) would list under the
+// feed's old updated_at bound while the bar never counted it, so the bar and its destination
+// would disagree. With both bounding started_at they agree, and the early-started session is
+// excluded from both.
+func TestQualityDrilldownWindowsOnStartedAt(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	ada := seedUser(t, st, "ada")
+	pid, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now()
+	inWindow := now.Add(-3 * 24 * time.Hour)      // started inside a 7-day window
+	beforeWindow := now.Add(-30 * 24 * time.Hour) // started well before it
+	activeNow := now.Add(-1 * time.Hour)          // last-active recently, inside the window
+
+	// A session started inside the window, graded and current: the bar counts it and the feed
+	// lists it.
+	inside := seedSession(t, st, ada, pid, "started-inside")
+	setSessionShape(t, st, ctx, inside, inWindow, inWindow.Add(10*time.Minute), 20, 2)
+	insertSignal(t, st, ctx, inside, quality.Version, "completed", "A")
+
+	// A session started BEFORE the window but re-activated inside it: updated_at lands in range
+	// while started_at does not. A feed bound on updated_at would surface it; one bound on
+	// started_at (StartedSince) must not, matching the bar that counts by started_at.
+	early := seedSession(t, st, ada, pid, "started-before")
+	setSessionShape(t, st, ctx, early, beforeWindow, beforeWindow.Add(10*time.Minute), 20, 2)
+	insertSignal(t, st, ctx, early, quality.Version, "completed", "A")
+	if _, err := st.Pool.Exec(ctx, `UPDATE sessions SET updated_at = $2 WHERE id = $1`, early, activeNow); err != nil {
+		t.Fatalf("bump early session updated_at: %v", err)
+	}
+
+	since := now.Add(-7 * 24 * time.Hour)
+
+	// The bar: QualityDistribution counts sessions whose started_at falls in the window.
+	dist, err := st.QualityDistribution(ctx, store.AnalyticsFilter{Since: since})
+	if err != nil {
+		t.Fatalf("quality distribution: %v", err)
+	}
+	if dist.Sessions != 1 {
+		t.Fatalf("windowed bar counted %d sessions, want 1 (only the started-inside session)", dist.Sessions)
+	}
+
+	// The drill-down list: the feed under the equivalent StartedSince bound. Its length must
+	// equal the bar's count, and it must not include the early-started session.
+	rows, err := st.ListAllSessions(ctx, store.SessionFilter{StartedSince: since})
+	if err != nil {
+		t.Fatalf("list sessions: %v", err)
+	}
+	if len(rows) != dist.Sessions {
+		t.Fatalf("feed listed %d sessions, want %d (bar and its destination list must agree)", len(rows), dist.Sessions)
+	}
+	for _, r := range rows {
+		if r.ID == early {
+			t.Errorf("the early-started session (started_at before the window, active inside it) leaked into the drill-down list")
+		}
+	}
+	if len(rows) != 1 || rows[0].ID != inside {
+		t.Errorf("feed = %v, want just the started-inside session %d", rows, inside)
+	}
+
+	// A feed bound on last-active (Since on updated_at, the project-page basis) DOES surface the
+	// re-activated early session, confirming the two bounds carry distinct semantics and the
+	// drill-down deliberately uses started_at, not updated_at.
+	byActivity, err := st.ListAllSessions(ctx, store.SessionFilter{Since: since})
+	if err != nil {
+		t.Fatalf("list sessions by activity: %v", err)
+	}
+	if len(byActivity) != 2 {
+		t.Errorf("last-active feed listed %d sessions, want 2 (both the inside and the re-activated early session)", len(byActivity))
+	}
+}
+
 // TestUserQuality confirms the per-user leaderboard the Insights People panel reads: the
 // per-author session counts, the outcome partition (Unknown as the residue), the graded
 // coverage, the average score over scored rows only, and the busiest-first ordering. It goes

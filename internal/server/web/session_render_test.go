@@ -66,7 +66,7 @@ func TestSessionPageRendersSubagents(t *testing.T) {
 		{ID: 4243, Agent: "claude", Username: "grace", Machine: "grace", GitBranch: "main", MessageCount: 7, TotalCostUSD: 0.19},
 	}
 
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, subs, HeaderStats{}, 0, false, true))
+	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, subs, HeaderStats{}, 0, false, true))
 	for _, want := range []string{
 		`<h2>Subagents</h2>`,
 		`class="subagents"`,
@@ -78,7 +78,7 @@ func TestSessionPageRendersSubagents(t *testing.T) {
 		}
 	}
 
-	bare := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, nil, HeaderStats{}, 0, false, true))
+	bare := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, HeaderStats{}, 0, false, true))
 	if strings.Contains(bare, "<h2>Subagents</h2>") {
 		t.Error("session page without subagents should omit the Subagents heading")
 	}
@@ -91,7 +91,7 @@ func TestSessionPageRendersSubagents(t *testing.T) {
 func TestSessionPageCompactHeaderAndModal(t *testing.T) {
 	p := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "jessoteric"}
 	d, msgs, tools := sessionFixture()
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, nil, HeaderStats{}, 0, false, true))
+	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, HeaderStats{}, 0, false, true))
 
 	for _, want := range []string{
 		`class="session-page"`,    // full-width wrapper drives main:has(> .session-page)
@@ -126,7 +126,7 @@ func TestSessionPageCompactHeaderAndModal(t *testing.T) {
 func TestSessionStatsFoldTokensAndDropLive(t *testing.T) {
 	p := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "jessoteric"}
 	d, msgs, tools := sessionFixture()
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, nil, HeaderStats{}, 0, true, true))
+	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, HeaderStats{}, 0, true, true))
 
 	// The tile must show the aggregate of all four token classes, and the tooltip
 	// must carry each class value plus the cost, run through the same formatters
@@ -168,7 +168,7 @@ func TestSessionStatsTokensContext(t *testing.T) {
 		Outcome: "completed", OutcomeConfidence: "high",
 		PeakContextTokens: &peak, ContextResetCount: &resets,
 	}}
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, nil, hs, 0, false, true))
+	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, hs, 0, false, true))
 
 	for _, want := range []string{
 		`class="tt-sub">Context</div>`,           // the context group under its own ruled label
@@ -182,7 +182,7 @@ func TestSessionStatsTokensContext(t *testing.T) {
 	}
 
 	// A session with no measured context draws no Context group at all.
-	bare := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, nil, HeaderStats{}, 0, false, true))
+	bare := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, HeaderStats{}, 0, false, true))
 	if strings.Contains(bare, `class="tt-sub">Context</div>`) {
 		t.Error("an unmeasured session should draw no Context group in the Tokens tile")
 	}
@@ -204,7 +204,7 @@ func TestSessionStatsQualityTileScored(t *testing.T) {
 		ToolCalls: 12, ToolFailures: 2, ToolRetries: 1, EditChurn: 3, LongestFailureStreak: 1,
 		ShortPromptCount: 4, NoCodeContextCount: 2, UnstructuredStart: true, HygieneMeasured: true,
 	}}
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, nil, hs, 0, false, true))
+	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, hs, 0, false, true))
 
 	for _, want := range []string{
 		`class="stat quality-stat q-good"`,    // a B bands as "good"
@@ -234,7 +234,7 @@ func TestSessionStatsQualityTileUnscored(t *testing.T) {
 	p := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "jessoteric"}
 	d, msgs, tools := sessionFixture()
 	hs := HeaderStats{Signals: store.SessionSignals{Outcome: "unknown", OutcomeConfidence: "low"}}
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, nil, hs, 0, false, true))
+	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, hs, 0, false, true))
 
 	for _, want := range []string{
 		`class="stat quality-stat q-none"`,
@@ -263,19 +263,18 @@ func TestTranscriptInstruments(t *testing.T) {
 	ts := func(secs int) *time.Time { u := base.Add(time.Duration(secs) * time.Second); return &u }
 
 	// A prompt (terse and code-pointerless), its reply 6s later, then a heavy turn and a
-	// shed-down turn so a context divider draws between ordinals 2 and 3.
+	// shed-down turn so a context divider draws between ordinals 2 and 3. Each turn's usage now
+	// rides on its message (Message.Usage), the shape the message read folds it into.
 	msgs := []store.Message{
 		{Ordinal: 0, Role: "user", Content: "fix it", Timestamp: ts(0),
 			PromptShort: true, PromptNoCode: true, PromptDigest: 4242, PromptFactsCurrent: true},
-		{Ordinal: 1, Role: "assistant", Content: "On it.", Model: "gpt-5", Timestamp: ts(6)},
+		{Ordinal: 1, Role: "assistant", Content: "On it.", Model: "gpt-5", Timestamp: ts(6),
+			Usage: &store.TurnUsage{Input: 1200, Output: 950, CacheRead: 78000, CacheWrite: 3100, ContextTokens: 82300, CostUSD: floatPtr(0.31), CostIncomplete: true}},
 		{Ordinal: 2, Role: "user", Content: "and the tests too please, thorough pass", Timestamp: ts(20),
-			PromptDigest: 7, PromptFactsCurrent: true},
-		{Ordinal: 3, Role: "assistant", Content: "Compacted.", Model: "gpt-5", Timestamp: ts(31)},
-	}
-	usage := map[int]store.TurnUsage{
-		1: {Input: 1200, Output: 950, CacheRead: 78000, CacheWrite: 3100, ContextTokens: 82300, CostUSD: floatPtr(0.31)},
-		2: {Input: 1000, CacheRead: 159000, CacheWrite: 0, ContextTokens: 160000},
-		3: {Input: 500, CacheRead: 11500, CacheWrite: 0, ContextTokens: 12000},
+			PromptDigest: 7, PromptFactsCurrent: true,
+			Usage: &store.TurnUsage{Input: 1000, CacheRead: 159000, CacheWrite: 0, ContextTokens: 160000}},
+		{Ordinal: 3, Role: "assistant", Content: "Compacted.", Model: "gpt-5", Timestamp: ts(31),
+			Usage: &store.TurnUsage{Input: 500, CacheRead: 11500, CacheWrite: 0, ContextTokens: 12000}},
 	}
 	tools := map[int][]store.ToolCallView{
 		1: {{
@@ -285,7 +284,7 @@ func TestTranscriptInstruments(t *testing.T) {
 		}},
 	}
 
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, usage, nil, HeaderStats{}, 0, false, true))
+	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, HeaderStats{}, 0, false, true))
 
 	for _, want := range []string{
 		// (a) the answered turn's latency stamp, prompt-to-reply
@@ -303,12 +302,14 @@ func TestTranscriptInstruments(t *testing.T) {
 		// breakdown card (the four classes, the context total, the cost)
 		`class="tok-cell turn-metrics"`,
 		`class="stamp-ctx mono">ctx 82.3k</span>`,
-		`class="stamp-cost mono">$0.31</span>`,
-		`class="tok-tip"`,              // the shared breakdown card markup
-		`>Context</dt>`,                // the context-occupancy line inside the turn card
-		`<dd>82,300</dd>`,              // ordinal 1's context total, full tokens
-		`<dd>78,000</dd>`,              // its cache read, a per-class row in the card
-		`class="tt-cost">$0.31</span>`, // the turn cost in the card
+		// A mixed priced/unpriced turn's cost reads as a lower bound ("$0.31+") both on the stamp
+		// and in the card, so an exact-looking cost never sits beside unpriced token rows.
+		`class="stamp-cost mono">$0.31+</span>`,
+		`class="tok-tip"`,               // the shared breakdown card markup
+		`>Context</dt>`,                 // the context-occupancy line inside the turn card
+		`<dd>82,300</dd>`,               // ordinal 1's context total, full tokens
+		`<dd>78,000</dd>`,               // its cache read, a per-class row in the card
+		`class="tt-cost">$0.31+</span>`, // the turn cost in the card, marked a lower bound
 		// (e) the tool chip prefers the relative path, absolute in the title
 		`title="C:\Users\me\projects\worktrees\akari\x\internal\auth.go">internal/auth.go</span>`,
 	} {
@@ -339,7 +340,7 @@ func TestSessionQualityScoreArithmetic(t *testing.T) {
 		Score: &score, Grade: &grade,
 		ToolCalls: 10, ToolFailures: 3, // 30 errored + 9 failures = 39, score 61
 	}}
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, nil, hs, 0, false, true))
+	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, hs, 0, false, true))
 	for _, want := range []string{
 		`class="tt-sub">Score arithmetic</div>`,
 		`>errored ending</dt>`, `<dd class="mono">-30</dd>`,
@@ -355,13 +356,13 @@ func TestSessionQualityScoreArithmetic(t *testing.T) {
 	clean := HeaderStats{Signals: store.SessionSignals{
 		Outcome: "completed", OutcomeConfidence: "high", Score: &cs, Grade: &cg,
 	}}
-	cleanHTML := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, nil, clean, 0, false, true))
+	cleanHTML := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, clean, 0, false, true))
 	if !strings.Contains(cleanHTML, `>No penalties</dt>`) {
 		t.Error("a clean scored run should show a No penalties row in the score arithmetic")
 	}
 
 	unscored := HeaderStats{Signals: store.SessionSignals{Outcome: "unknown", OutcomeConfidence: "low"}}
-	unscoredHTML := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, nil, unscored, 0, false, true))
+	unscoredHTML := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, unscored, 0, false, true))
 	if strings.Contains(unscoredHTML, `Score arithmetic`) {
 		t.Error("an unscored session should draw no score-arithmetic group")
 	}
@@ -375,7 +376,7 @@ func TestSessionPagePublicShowsUnpublish(t *testing.T) {
 	pub := "k3y"
 	d.Visibility = "public"
 	d.PublicID = &pub
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, nil, HeaderStats{}, 0, false, true))
+	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, HeaderStats{}, 0, false, true))
 
 	for _, want := range []string{`>Unpublish</button>`, `class="share-link`, PublicPath(pub)} {
 		if !strings.Contains(html, want) {
@@ -393,7 +394,7 @@ func TestSessionPageActionsGating(t *testing.T) {
 	d, msgs, tools := sessionFixture()
 
 	admin := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "ada", IsAdmin: true}
-	adminHTML := renderComponent(t, SessionPage(admin, d, msgs, tools, nil, nil, nil, HeaderStats{}, 0, false, false))
+	adminHTML := renderComponent(t, SessionPage(admin, d, msgs, tools, nil, nil, HeaderStats{}, 0, false, false))
 	if !strings.Contains(adminHTML, `>Delete</button>`) {
 		t.Error("admin should be able to delete a session they do not own")
 	}
@@ -402,7 +403,7 @@ func TestSessionPageActionsGating(t *testing.T) {
 	}
 
 	viewer := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "anna"}
-	viewerHTML := renderComponent(t, SessionPage(viewer, d, msgs, tools, nil, nil, nil, HeaderStats{}, 0, false, false))
+	viewerHTML := renderComponent(t, SessionPage(viewer, d, msgs, tools, nil, nil, HeaderStats{}, 0, false, false))
 	if strings.Contains(viewerHTML, `class="session-actions"`) {
 		t.Error("a plain viewer should see no actions cluster")
 	}
@@ -416,7 +417,7 @@ func TestPublicSessionPageWrapperAndModal(t *testing.T) {
 	pub := "k3y"
 	d.Visibility = "public"
 	d.PublicID = &pub
-	html := renderComponent(t, PublicSessionPage(d, msgs, tools, nil, nil, nil, HeaderStats{}))
+	html := renderComponent(t, PublicSessionPage(d, msgs, tools, nil, nil, HeaderStats{}))
 
 	for _, want := range []string{`class="session-page"`, `id="session-modal"`, `id="session-inspector"`} {
 		if !strings.Contains(html, want) {

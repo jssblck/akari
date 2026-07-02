@@ -333,21 +333,51 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 		// later change to the classifier is told apart from the current rules: the settle pass treats an
 		// old-version row like an unfilled one until the reparse re-derives it (see gatherPromptHygiene).
 		var pShort, pNoCode, pGreeting, pDigest, pFactsVersion any
+		// duplicateEligible marks a user turn the duplicate check applies to: the same eligibility
+		// gatherPromptHygiene's duplicate_prompt_count uses (non-empty content, not short, a real
+		// digest). Only such rows carry a non-NULL duplicate_prompt; an ineligible row leaves it NULL
+		// (no badge), matching the hygiene aggregate's exclusion of short/empty prompts.
+		duplicateEligible := false
 		if m.Role == roleUser {
 			facts := quality.ClassifyPrompt(content)
 			pShort, pNoCode, pGreeting, pDigest = facts.Short, facts.NoCodeContext, facts.BareGreeting, facts.Digest
 			pFactsVersion = quality.PromptFactsVersion
+			duplicateEligible = content != "" && !facts.Short
+		}
+		// Materialize the duplicate-prompt verdict here, in the ordered insert, rather than folding a
+		// whole-session window on every transcript render (the live body re-fetches on each SSE
+		// append, so a windowed read would redo O(session) work per refresh). For an eligible user
+		// row the flag is a scalar subquery: does an earlier eligible user row in this session already
+		// carry the same digest? Messages apply in ordinal order and the reparse re-inserts them in
+		// that same order, so the subquery sees exactly the earlier prefix the old window counted; the
+		// idx_messages_session_digest partial index (migration 0029) makes it a bounded probe, not a
+		// per-insert session rescan, so ingest stays linear. The first occurrence of a digest reads
+		// false (the original); every later eligible occurrence reads true. An ineligible row passes
+		// NULL so the column stays unset (no badge).
+		var pDuplicate any
+		if duplicateEligible {
+			var isDup bool
+			if err := tx.QueryRow(ctx,
+				`SELECT EXISTS (
+				   SELECT 1 FROM messages
+				    WHERE session_id = $1 AND role = 'user' AND ordinal < $2
+				      AND prompt_digest = $3 AND NOT coalesce(prompt_short, false)
+				      AND content_length > 0 AND prompt_facts_version = $4)`,
+				sessionID, m.Ordinal, pDigest, quality.PromptFactsVersion).Scan(&isDup); err != nil {
+				return appliedDelta{}, fmt.Errorf("check duplicate prompt for message %d in session %d: %w", m.Ordinal, sessionID, err)
+			}
+			pDuplicate = isDup
 		}
 		tag, err := tx.Exec(ctx,
 			`INSERT INTO messages
 			   (session_id, ordinal, role, content, thinking_text, model, timestamp, has_thinking, has_tool_use,
-			    prompt_short, prompt_no_code, prompt_bare_greeting, prompt_digest, prompt_facts_version)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+			    prompt_short, prompt_no_code, prompt_bare_greeting, prompt_digest, prompt_facts_version, duplicate_prompt)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 			 ON CONFLICT (session_id, ordinal) DO NOTHING`,
 			sessionID, m.Ordinal, sanitizeText(m.Role), content,
 			sanitizeText(m.ThinkingText), sanitizeText(m.Model),
 			nullTime(m.Timestamp), m.HasThinking, m.HasToolUse,
-			pShort, pNoCode, pGreeting, pDigest, pFactsVersion)
+			pShort, pNoCode, pGreeting, pDigest, pFactsVersion, pDuplicate)
 		if err != nil {
 			return appliedDelta{}, fmt.Errorf("write message %d for session %d: %w", m.Ordinal, sessionID, err)
 		}
@@ -500,6 +530,41 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 		}
 		if tag.RowsAffected() == 0 {
 			continue
+		}
+		// Fold this surviving row into its turn's usage rollup, the same accumulate the session
+		// totals do below but keyed by message_ordinal so the transcript reads one row per turn
+		// instead of re-grouping usage_events on every render. Only rows attributable to a turn
+		// contribute: a NULL-ordinal row belongs to the session totals, not to any one message
+		// (the same WHERE message_ordinal IS NOT NULL the old fold applied), so it is skipped
+		// here. cost_count counts the priced rows so the read can tell an all-unpriced turn (nil
+		// cost) from a summed zero; cost_incomplete flags a token-bearing but unpriced row so the
+		// turn's cost reads as a lower bound, mirroring the session-total cost_incomplete rule.
+		if u.MessageOrdinal != nil {
+			costDelta := 0.0
+			costCountDelta := int64(0)
+			if u.CostUSD != nil {
+				costDelta = *u.CostUSD
+				costCountDelta = 1
+			}
+			costIncomplete := u.CostUSD == nil && u.Input+u.Output+u.CacheWrite+u.CacheRead+u.Reasoning > 0
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO message_turn_usage
+				   (session_id, message_ordinal, input_tokens, output_tokens, cache_write_tokens,
+				    cache_read_tokens, reasoning_tokens, cost_sum, cost_count, cost_incomplete)
+				 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+				 ON CONFLICT (session_id, message_ordinal) DO UPDATE SET
+				   input_tokens       = message_turn_usage.input_tokens       + EXCLUDED.input_tokens,
+				   output_tokens      = message_turn_usage.output_tokens      + EXCLUDED.output_tokens,
+				   cache_write_tokens = message_turn_usage.cache_write_tokens + EXCLUDED.cache_write_tokens,
+				   cache_read_tokens  = message_turn_usage.cache_read_tokens  + EXCLUDED.cache_read_tokens,
+				   reasoning_tokens   = message_turn_usage.reasoning_tokens   + EXCLUDED.reasoning_tokens,
+				   cost_sum           = message_turn_usage.cost_sum           + EXCLUDED.cost_sum,
+				   cost_count         = message_turn_usage.cost_count         + EXCLUDED.cost_count,
+				   cost_incomplete    = message_turn_usage.cost_incomplete    OR EXCLUDED.cost_incomplete`,
+				sessionID, *u.MessageOrdinal, int64(u.Input), int64(u.Output), int64(u.CacheWrite),
+				int64(u.CacheRead), int64(u.Reasoning), costDelta, costCountDelta, costIncomplete); err != nil {
+				return appliedDelta{}, fmt.Errorf("fold turn usage for session %d ordinal %d: %w", sessionID, *u.MessageOrdinal, err)
+			}
 		}
 		applied.Input += int64(u.Input)
 		applied.Output += int64(u.Output)
@@ -753,6 +818,9 @@ func clearProjectionForReparseTx(ctx context.Context, tx pgx.Tx, sessionID int64
 		"DELETE FROM messages WHERE session_id = $1",
 		"DELETE FROM tool_calls WHERE session_id = $1",
 		"DELETE FROM usage_events WHERE session_id = $1",
+		// message_turn_usage is a per-turn rollup OF usage_events, rebuilt as the replay re-inserts
+		// them, so it clears with the ledger it summarizes rather than lingering with stale sums.
+		"DELETE FROM message_turn_usage WHERE session_id = $1",
 		"DELETE FROM attachments WHERE session_id = $1",
 		// session_signals is parser-owned too (derived from messages and tool_calls), so
 		// it clears with the rest. ReparseSession rebuilds it at the end of its replay;

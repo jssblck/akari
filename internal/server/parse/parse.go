@@ -40,7 +40,26 @@ import (
 // epoch reparse reached that session. Bumping Version forces a rewind-and-replay so every
 // row of a session fills the column in one pass, keeping a session's tool_calls internally
 // consistent rather than blended across the change.
-const Version = 4
+//
+// Version 5 pairs with the Epoch 4 -> 5 bump that materializes messages.duplicate_prompt
+// (the store-side per-user-turn repeat verdict, see epoch.go and store/projection.go). The
+// flag is filled at insert from the ordered prefix of earlier messages, so it cannot backfill
+// on its own AND an incremental resume would misjudge it: a session parsed at version 4 that
+// resumed incrementally would fill the flag only on newly appended rows (leaving its earlier
+// rows NULL), and a later duplicate would be judged against a prefix whose own flags were
+// never derived. Bumping Version forces a rewind-and-replay so every user turn re-derives its
+// flag against the full ordered prefix in one pass, keeping a session's transcript badges
+// internally consistent rather than blended across the change.
+//
+// Version 6 pairs with the Epoch 5 -> 6 bump that materializes the message_turn_usage rollup (the
+// per-turn usage fold the transcript reads, see migration 0030_message_turn_usage and the usage
+// insert loop in store/projection.go). The rollup is accumulated as usage rows insert, so it cannot
+// backfill on its own AND an incremental resume would leave it partial: a session parsed at version 5
+// that resumed incrementally would fold only newly appended usage rows into the rollup while its
+// earlier turns carried none, so the transcript would read a zero turn load for every pre-change
+// message. Bumping Version forces a rewind-and-replay so every surviving usage row re-folds into its
+// turn in one pass, keeping a session's per-turn loads consistent rather than blended across the change.
+const Version = 6
 
 // Advance parses any not-yet-parsed bytes of a session and applies them to the
 // projection, looping until the parse cursor catches up to the stored length. It

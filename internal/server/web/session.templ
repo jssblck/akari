@@ -6,7 +6,7 @@ import (
 	"github.com/jssblck/akari/internal/server/store"
 )
 
-templ SessionPage(p Page, d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, usage map[int]store.TurnUsage, subagents []store.SessionSummary, hs HeaderStats, dupIDs int, live, owner bool) {
+templ SessionPage(p Page, d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, subagents []store.SessionSummary, hs HeaderStats, dupIDs int, live, owner bool) {
 	@layout(p) {
 		<div class="session-page">
 			<div class="session-head">
@@ -42,11 +42,11 @@ templ SessionPage(p Page, d store.SessionDetail, msgs []store.Message, tools map
 				</aside>
 				if live {
 					<div id="session-body" class="session-main" data-sse={ SSEPath(d.ID) } data-body={ BodyPath(d.ID) }>
-						@SessionMain(d, msgs, tools, attachments, usage, subagents, hs)
+						@SessionMain(d, msgs, tools, attachments, subagents, hs)
 					</div>
 				} else {
 					<div id="session-body" class="session-main">
-						@SessionMain(d, msgs, tools, attachments, usage, subagents, hs)
+						@SessionMain(d, msgs, tools, attachments, subagents, hs)
 					</div>
 				}
 			</div>
@@ -88,7 +88,7 @@ templ sessionActions(d store.SessionDetail, owner bool) {
 // subagents, and the transcript. Only this fragment is re-fetched and swapped on
 // a live SSE update, so the outline and inspector (its siblings in the grid)
 // persist across updates and are not re-rendered per refresh.
-templ SessionMain(d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, usage map[int]store.TurnUsage, subagents []store.SessionSummary, hs HeaderStats) {
+templ SessionMain(d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, subagents []store.SessionSummary, hs HeaderStats) {
 	@sessionStats(d, hs)
 	if len(subagents) > 0 {
 		<h2>Subagents</h2>
@@ -97,7 +97,7 @@ templ SessionMain(d store.SessionDetail, msgs []store.Message, tools map[int][]s
 		</div>
 	}
 	<h2>Transcript</h2>
-	@Transcript(msgs, tools, attachments, usage, SessionBlobBase(d.ID))
+	@Transcript(msgs, tools, attachments, SessionBlobBase(d.ID))
 }
 
 // Outline is the left pane of the session view: one entry per turn, with its
@@ -322,24 +322,25 @@ templ stat(label, value, key string) {
 	</div>
 }
 
-// Transcript renders the session's messages as an instrumented trace. The three per-message
-// instruments (reply latency, context sheds, duplicate prompts) are derived once, in a single
-// linear walk over the messages and their per-turn usage (see TranscriptAnnotations in
-// session_metrics.go), into one map keyed by ordinal that the render reads as each message goes
-// out. The meta line carries a right-aligned cluster of stamps (latency, then a context+cost stamp
-// group that hosts a per-turn token breakdown card); a shed divider hosting its own before/after
-// breakdown card is drawn above the marked message; muted hygiene tags sit after a user message's
-// role tag.
-templ Transcript(msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, usage map[int]store.TurnUsage, blobBase string) {
+// Transcript renders the session's messages as an instrumented trace. The two carried per-message
+// instruments (reply latency and context sheds) are derived while walking the message slice with a
+// TranscriptWalker holding only bounded state (see session_metrics.go), so the render path holds no
+// session-sized structure beyond the message slice the page already renders; the duplicate-prompt
+// verdict rides on each message (m.DuplicatePrompt), and each turn's usage rides on m.Usage, both
+// folded in the message read. The meta line carries a right-aligned cluster of stamps (latency,
+// then a context+cost stamp group that hosts a per-turn token breakdown card); a shed divider
+// hosting its own before/after breakdown card is drawn above the marked message; muted hygiene tags
+// sit after a user message's role tag.
+templ Transcript(msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, blobBase string) {
 	if len(msgs) == 0 {
 		<div class="empty">No messages parsed yet.</div>
 	} else {
-		{{ ann := TranscriptAnnotations(msgs, usage) }}
+		{{ walker := &TranscriptWalker{} }}
 		<div class="transcript">
 			for _, m := range msgs {
-				{{ a := ann[m.Ordinal] }}
-				if a.Shed != nil {
-					@shedDivider(*a.Shed)
+				{{ metrics := walker.Next(m) }}
+				if metrics.Shed != nil {
+					@shedDivider(*metrics.Shed)
 				}
 				<div class={ "msg " + RoleClass(m.Role) } id={ fmt.Sprintf("msg-%d", m.Ordinal) } data-ordinal={ fmt.Sprintf("%d", m.Ordinal) }>
 					<div class="meta">
@@ -354,27 +355,27 @@ templ Transcript(msgs []store.Message, tools map[int][]store.ToolCallView, attac
 							if m.PromptNoCode {
 								<span class="tag hygiene" title="a change request with no file, path, or code anchor">no code pointer</span>
 							}
-							if a.DuplicatePrompt {
+							if m.DuplicatePrompt {
 								<span class="tag hygiene" title="verbatim repeat of an earlier prompt">repeat</span>
 							}
 						}
 						<span class="spacer"></span>
 						<span class="meta-metrics">
-							if a.Latency > 0 {
-								<span class="stamp-latency mono" title="time from the prompt to this reply">{ FmtTurnLatency(a.Latency) }</span>
+							if metrics.Latency > 0 {
+								<span class="stamp-latency mono" title="time from the prompt to this reply">{ FmtTurnLatency(metrics.Latency) }</span>
 							}
-							if u, ok := usage[m.Ordinal]; ok {
+							if m.Usage != nil {
 								// One focusable host wraps the ctx and cost stamps and carries a single
 								// per-turn breakdown card (the four token classes, reasoning if present, the
 								// context total, and the turn cost or "unpriced"). The visible stamps stay as
 								// compact as before; the card is the detail, so no bare token figure renders
 								// without its breakdown.
 								<span class="tok-cell turn-metrics" tabindex="0">
-									<span class="stamp-ctx mono">{ FmtContextStamp(u) }</span>
-									if u.CostUSD != nil {
-										<span class="stamp-cost mono">{ FmtCost(*u.CostUSD, false) }</span>
+									<span class="stamp-ctx mono">{ FmtContextStamp(*m.Usage) }</span>
+									if m.Usage.CostUSD != nil {
+										<span class="stamp-cost mono">{ FmtCost(*m.Usage.CostUSD, m.Usage.CostIncomplete) }</span>
 									}
-									@turnCard(u)
+									@turnCard(*m.Usage)
 								</span>
 							}
 						</span>
@@ -414,8 +415,11 @@ templ Transcript(msgs []store.Message, tools map[int][]store.ToolCallView, attac
 // that splits the before turn and the after turn into their token classes and cost. The label's
 // two figures are context occupancy (input + cache read + cache write), so each bare figure gets
 // its full per-class detail in the card rather than standing alone, the same treatment every other
-// token figure in the transcript carries. The divider is focusable (tabindex) so the card opens on
-// keyboard focus as well as hover, matching the turn stamp beside it.
+// token figure in the transcript carries. Each side carries its own cost line (the turn's cost, or
+// "unpriced" when it never got a rate) through the same TurnCostLabel and .tt-cost idiom the turn
+// card uses, so the two occupancy figures never render without the spend behind them. The divider
+// is focusable (tabindex) so the card opens on keyboard focus as well as hover, matching the turn
+// stamp beside it.
 templ shedDivider(shed ShedMark) {
 	<div class="msg-shed tok-cell" role="separator" tabindex="0" aria-label={ ShedLabel(shed) }>
 		<span class="shed-label mono">{ ShedLabel(shed) }</span>
@@ -433,6 +437,7 @@ templ shedDivider(shed ShedMark) {
 				<dt>Output</dt>
 				<dd>{ FmtTokens(shed.FromUsage.Output) }</dd>
 			</dl>
+			<span class="tt-cost">{ TurnCostLabel(shed.FromUsage) }</span>
 			<dl class="tt-grid shed-after">
 				<dt>After</dt>
 				<dd>{ FmtTokens(shed.ToTokens) }</dd>
@@ -445,6 +450,7 @@ templ shedDivider(shed ShedMark) {
 				<dt>Output</dt>
 				<dd>{ FmtTokens(shed.ToUsage.Output) }</dd>
 			</dl>
+			<span class="tt-cost">{ TurnCostLabel(shed.ToUsage) }</span>
 		</span>
 	</div>
 }

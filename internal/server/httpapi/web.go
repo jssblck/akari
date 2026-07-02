@@ -179,14 +179,18 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	// The feed accepts a ?range drill-down bound (7d/30d/90d/year/all, the ParseRange keys), so a
 	// bar or People link from the windowed Insights/project analytics opens a feed scoped to the
-	// same trailing window its count described. Unlike the analytics surfaces, the feed's default
-	// is all-history, not the trailing year: an absent or "all" param leaves Since zero (no bound,
-	// the current behavior), and only an explicitly bounded key sets it. web.RangeBounds is the
-	// whitelist here, the counterpart to web.ValidOutcome / web.ValidGrade: an unknown or "all"
-	// value reads as unbounded rather than falling to ParseRange's trailing-year default.
+	// same trailing window its count described. It sets StartedSince, not Since: the Insights and
+	// People counts window on s.started_at (AnalyticsFilter.clauseFor), so the drill-down list must
+	// bound the feed on the same started_at basis or a session started before the window but
+	// re-activated inside it would list without being counted. Unlike the analytics surfaces, the
+	// feed's default is all-history, not the trailing year: an absent or "all" param leaves the
+	// bound zero (no filter, the current behavior), and only an explicitly bounded key sets it.
+	// web.RangeBounds is the whitelist here, the counterpart to web.ValidOutcome / web.ValidGrade:
+	// an unknown or "all" value reads as unbounded rather than falling to ParseRange's
+	// trailing-year default.
 	rng := strings.TrimSpace(q.Get("range"))
 	if web.RangeBounds(rng) {
-		filter.Since = web.RangeSince(rng, time.Now())
+		filter.StartedSince = web.RangeSince(rng, time.Now())
 	} else {
 		rng = "all"
 	}
@@ -297,43 +301,32 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 
 // sessionView loads everything the session page (and its live body fragment)
 // needs: detail, transcript, tool metadata and attachments grouped by message, and
-// subagents.
-func (s *Server) sessionView(r *http.Request, id int64) (store.SessionDetail, []store.Message, map[int][]store.ToolCallView, map[int][]store.AttachmentView, map[int]store.TurnUsage, []store.SessionSummary, error) {
+// subagents. Each message carries its own per-turn usage (Message.Usage) and duplicate-prompt
+// verdict (Message.DuplicatePrompt), folded in the Messages read itself, so the transcript's
+// context/cost stamps and repeat badges need no second session-sized structure beside the message
+// slice the page already renders.
+func (s *Server) sessionView(r *http.Request, id int64) (store.SessionDetail, []store.Message, map[int][]store.ToolCallView, map[int][]store.AttachmentView, []store.SessionSummary, error) {
 	d, err := s.Store.SessionDetailByID(r.Context(), id)
 	if err != nil {
-		return d, nil, nil, nil, nil, nil, err
+		return d, nil, nil, nil, nil, err
 	}
 	msgs, err := s.Store.Messages(r.Context(), id)
 	if err != nil {
-		return d, nil, nil, nil, nil, nil, err
+		return d, nil, nil, nil, nil, err
 	}
 	tools, err := s.Store.ToolCalls(r.Context(), id)
 	if err != nil {
-		return d, nil, nil, nil, nil, nil, err
+		return d, nil, nil, nil, nil, err
 	}
 	atts, err := s.Store.Attachments(r.Context(), id)
 	if err != nil {
-		return d, nil, nil, nil, nil, nil, err
-	}
-	// The per-turn usage backs the transcript's per-message context and cost stamps. It is one
-	// aggregated query per render: a GROUP BY over usage_events scoped to this session by an
-	// indexed session_id, the same shape and order as the Messages fetch beside it (O(session), one
-	// round trip), folded here so both the first render and every SSE body refresh carry it.
-	// Scoping it to a window is impossible on purpose: the web session page renders the FULL
-	// transcript (the message slice is unbounded by design; the windowed MessagesAfter reader is
-	// the MCP server's, not this page's), so the usage must cover every rendered turn. The refresh
-	// count stays bounded because the SSE notify path coalesces: subscribe's channel is buffered by
-	// one and publish sends non-blocking (see sseHub.publish), so a burst of appended regions
-	// collapses to a single "you have updates" wake and one body fetch, not one per region.
-	usage, err := s.Store.SessionTurnUsage(r.Context(), id)
-	if err != nil {
-		return d, nil, nil, nil, nil, nil, err
+		return d, nil, nil, nil, nil, err
 	}
 	subs, err := s.Store.Subagents(r.Context(), id)
 	if err != nil {
-		return d, nil, nil, nil, nil, nil, err
+		return d, nil, nil, nil, nil, err
 	}
-	return d, msgs, web.ToolsByOrdinal(tools), web.AttachmentsByOrdinal(atts), usage, subs, nil
+	return d, msgs, web.ToolsByOrdinal(tools), web.AttachmentsByOrdinal(atts), subs, nil
 }
 
 // sessionHeaderStats builds the derived stat-tile inputs the session instrument header
@@ -368,7 +361,7 @@ func (s *Server) handleSessionPage(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(r, "Not found"), http.StatusNotFound, "Session not found."))
 		return
 	}
-	d, msgs, tools, atts, usage, subs, err := s.sessionView(r, id)
+	d, msgs, tools, atts, subs, err := s.sessionView(r, id)
 	if errors.Is(err, store.ErrNotFound) {
 		render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(r, "Not found"), http.StatusNotFound, "Session not found."))
 		return
@@ -392,7 +385,7 @@ func (s *Server) handleSessionPage(w http.ResponseWriter, r *http.Request) {
 	title := fmt.Sprintf("Session #%d", d.ID)
 	p, _ := principalFrom(r.Context())
 	owner := p.UserID == d.OwnerID
-	render(w, r, http.StatusOK, web.SessionPage(s.pageForNav(r, title, "sessions"), d, msgs, tools, atts, usage, subs, hs, dupIDs, true, owner))
+	render(w, r, http.StatusOK, web.SessionPage(s.pageForNav(r, title, "sessions"), d, msgs, tools, atts, subs, hs, dupIDs, true, owner))
 }
 
 // handlePublishSession marks the owner's session public and redirects back to it.
@@ -715,13 +708,6 @@ func (s *Server) handlePublicSession(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load session."))
 		return
 	}
-	// The per-message context and cost stamps leak nothing the public transcript does not already
-	// show (they are derived from the same token totals), so the public page carries them too.
-	usage, err := s.Store.SessionTurnUsage(r.Context(), d.ID)
-	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load session."))
-		return
-	}
 	subs, err := s.Store.Subagents(r.Context(), d.ID)
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load session."))
@@ -740,7 +726,7 @@ func (s *Server) handlePublicSession(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load session."))
 		return
 	}
-	render(w, r, http.StatusOK, web.PublicSessionPage(d, msgs, web.ToolsByOrdinal(tools), web.AttachmentsByOrdinal(atts), usage, publicSubs, hs))
+	render(w, r, http.StatusOK, web.PublicSessionPage(d, msgs, web.ToolsByOrdinal(tools), web.AttachmentsByOrdinal(atts), publicSubs, hs))
 }
 
 // handleSessionBody serves just the live-updating body fragment, re-fetched by
@@ -751,7 +737,7 @@ func (s *Server) handleSessionBody(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	d, msgs, tools, atts, usage, subs, err := s.sessionView(r, id)
+	d, msgs, tools, atts, subs, err := s.sessionView(r, id)
 	if errors.Is(err, store.ErrNotFound) {
 		http.NotFound(w, r)
 		return
@@ -771,7 +757,7 @@ func (s *Server) handleSessionBody(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Could not load session.", http.StatusInternalServerError)
 		return
 	}
-	render(w, r, http.StatusOK, web.SessionMain(d, msgs, tools, atts, usage, subs, hs))
+	render(w, r, http.StatusOK, web.SessionMain(d, msgs, tools, atts, subs, hs))
 }
 
 // handleSessionEvents is the SSE endpoint that signals a watching browser to

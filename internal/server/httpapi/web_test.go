@@ -695,9 +695,10 @@ func TestSessionsFeedRangeWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("project: %v", err)
 	}
-	// A recent session (active yesterday) and an old one (aged 60 days), so a 30-day window keeps
-	// the recent one and drops the old one. The global feed orders by last activity, so aging the
-	// old session's updated_at moves it out of the trailing window.
+	// A recent session (started yesterday) and an old one (started 60 days ago), so a 30-day window
+	// keeps the recent one and drops the old one. The feed's ?range drill-down windows on
+	// started_at (StartedSince), matching the Insights/People bars it arrives from, so this stamps
+	// the recent session's started_at inside the window and ages the old one's out of it.
 	annNew, err := st.Announce(ctx, store.AnnounceParams{
 		UserID: owner.ID, Agent: "claude", SourceSessionID: "sess-new",
 		ProjectID: projectID, Cwd: "/home/grace/akari", Machine: "laptop",
@@ -713,7 +714,12 @@ func TestSessionsFeedRangeWindow(t *testing.T) {
 		t.Fatalf("announce old: %v", err)
 	}
 	if _, err := st.Pool.Exec(ctx,
-		`UPDATE sessions SET updated_at = now() - make_interval(days => 60) WHERE id = $1`,
+		`UPDATE sessions SET started_at = now() - make_interval(days => 1) WHERE id = $1`,
+		annNew.SessionID); err != nil {
+		t.Fatalf("date new session: %v", err)
+	}
+	if _, err := st.Pool.Exec(ctx,
+		`UPDATE sessions SET started_at = now() - make_interval(days => 60) WHERE id = $1`,
 		annOld.SessionID); err != nil {
 		t.Fatalf("age old session: %v", err)
 	}

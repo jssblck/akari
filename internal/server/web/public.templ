@@ -6,7 +6,7 @@ import (
 	"github.com/jssblck/akari/internal/server/store"
 )
 
-templ PublicSessionPage(d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, usage map[int]store.TurnUsage, publicSubs []store.SessionSummary, hs HeaderStats) {
+templ PublicSessionPage(d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, publicSubs []store.SessionSummary, hs HeaderStats) {
 	@publicLayout(SessionProjectLabel(d)+" session", OGMeta{}) {
 		<div class="session-page">
 			<div class="session-head">
@@ -49,7 +49,7 @@ templ PublicSessionPage(d store.SessionDetail, msgs []store.Message, tools map[i
 							</div>
 						}
 						<h2>Transcript</h2>
-						@Transcript(msgs, tools, attachments, usage, PublicBlobBase(*d.PublicID))
+						@Transcript(msgs, tools, attachments, PublicBlobBase(*d.PublicID))
 					</div>
 				</div>
 			</div>
