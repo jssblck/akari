@@ -86,3 +86,38 @@ func TestLandingPageRendersHeroAndEntryPoints(t *testing.T) {
 		t.Error("landing page should not render the signed-in sidebar")
 	}
 }
+
+// TestLandingMockDataReconciles pins the projection-consistency property the
+// landing mock is required to have even though nothing behind it is a real
+// row: the facet rail's three groups, the project table, and the strip all
+// describe the same population of sessions. It also pins the rendered
+// figures a viewer actually sees, so an edit to a project row or a facet
+// count that breaks the story (a group that no longer sums to the session
+// total, a total that no longer matches the headline strip) fails loudly
+// instead of silently drifting.
+func TestLandingMockDataReconciles(t *testing.T) {
+	totals := landingMockTotals()
+
+	for _, group := range landingMockFacets {
+		var sum int64
+		for _, row := range group.Rows {
+			sum += row.Count
+		}
+		if sum != totals.Sessions {
+			t.Errorf("facet group %q sums to %d sessions, want %d (landingMockTotals().Sessions)", group.Label, sum, totals.Sessions)
+		}
+	}
+
+	if totals.Sessions != 1284 {
+		t.Errorf("landingMockTotals().Sessions = %d, want 1284", totals.Sessions)
+	}
+	if got := FmtTokensCompact(totals.Tokens()); got != "96.4M" {
+		t.Errorf("FmtTokensCompact(landingMockTotals().Tokens()) = %q, want %q", got, "96.4M")
+	}
+	if got := FmtCost(totals.Cost, false); got != "$412.87" {
+		t.Errorf("FmtCost(landingMockTotals().Cost, false) = %q, want %q", got, "$412.87")
+	}
+	if got := FmtPercent(landingMockCacheHit()); got != "71%" {
+		t.Errorf("FmtPercent(landingMockCacheHit()) = %q, want %q", got, "71%")
+	}
+}

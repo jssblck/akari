@@ -9,17 +9,18 @@ package web
 // developer-tool landing page leads with a real surface. The mocks are static HTML
 // and CSS only: no JavaScript hydration, since charts.js is not available to a
 // resting mock.
+
 // landingTokensCell renders one of the landing mock's token figures through the
 // same tok-cell + tokenCard treatment every real surface uses, so even a demo
 // number carries the four-class breakdown and its cost behind hover or focus
-// rather than reading as a bare figure. The literals are chosen to reconcile:
-// each figure's classes sum to its total, and the strip total equals the visible
-// project rows plus the remainder footer, so the mock obeys the same consistency
-// property the live tables do.
-templ landingTokensCell(total, in, out, cacheRead, cacheWrite int64, cost float64) {
+// rather than reading as a bare figure. The figures live in landing.go, one
+// landingMockProject reconciled by construction (Tokens sums the four classes
+// this renders), so the headline total and the hover breakdown can never
+// disagree with each other.
+templ landingTokensCell(p landingMockProject) {
 	<span class="tok-cell" tabindex="0">
-		<span class="tok-total">{ FmtTokensCompact(total) }</span>
-		@tokenCard(total, in, out, cacheRead, cacheWrite, 0, cost, false)
+		<span class="tok-total">{ FmtTokensCompact(p.Tokens()) }</span>
+		@tokenCard(p.Tokens(), p.In, p.Out, p.CacheRead, p.CacheWrite, 0, p.Cost, false)
 	</span>
 }
 
@@ -140,24 +141,25 @@ templ LandingPage() {
 					</p>
 				</div>
 				<div class="landing-mock">
+					{{ totals := landingMockTotals() }}
 					<div class="mock-strip">
 						<div class="mk-stat">
 							<span class="label">Cost</span>
-							<span class="mk-val">$412.87</span>
+							<span class="mk-val">{ FmtCost(totals.Cost, false) }</span>
 						</div>
 						<div class="mk-stat">
 							<span class="label">Tokens</span>
 							<span class="mk-val">
-								@landingTokensCell(96_400_000, 24_000_000, 9_200_000, 58_800_000, 4_400_000, 412.87)
+								@landingTokensCell(totals)
 							</span>
 						</div>
 						<div class="mk-stat">
 							<span class="label">Sessions</span>
-							<span class="mk-val">1,284</span>
+							<span class="mk-val">{ FmtTokens(totals.Sessions) }</span>
 						</div>
 						<div class="mk-stat">
 							<span class="label">Cache hit</span>
-							<span class="mk-val">71%</span>
+							<span class="mk-val">{ FmtPercent(landingMockCacheHit()) }</span>
 						</div>
 					</div>
 					<div class="mock-frame mk-tight">
@@ -172,59 +174,39 @@ templ LandingPage() {
 								</tr>
 							</thead>
 							<tbody>
-								<tr>
-									<td>jssblck/akari</td>
-									<td class="num">412</td>
-									<td class="num">
-										@landingTokensCell(31_200_000, 7_400_000, 3_100_000, 19_300_000, 1_400_000, 148.11)
-									</td>
-									<td class="num">
-										<svg class="mk-spark" viewBox="0 0 64 16" width="64" height="16" preserveAspectRatio="none" aria-hidden="true">
-											<polyline points="0,12 12,10 24,11 36,6 48,7 64,3" fill="none" stroke="currentColor" stroke-width="1.3"></polyline>
-										</svg>
-									</td>
-									<td class="num">$148.11</td>
-								</tr>
-								<tr>
-									<td>jssblck/tapestry</td>
-									<td class="num">188</td>
-									<td class="num">
-										@landingTokensCell(12_900_000, 3_200_000, 1_300_000, 7_900_000, 500_000, 61.40)
-									</td>
-									<td class="num">
-										<svg class="mk-spark" viewBox="0 0 64 16" width="64" height="16" preserveAspectRatio="none" aria-hidden="true">
-											<polyline points="0,6 12,8 24,7 36,9 48,8 64,10" fill="none" stroke="currentColor" stroke-width="1.3"></polyline>
-										</svg>
-									</td>
-									<td class="num">$61.40</td>
-								</tr>
-								<tr>
-									<td>hopper/subroutines</td>
-									<td class="num">97</td>
-									<td class="num">
-										@landingTokensCell(8_300_000, 2_100_000, 800_000, 5_000_000, 400_000, 37.92)
-									</td>
-									<td class="num">
-										<svg class="mk-spark" viewBox="0 0 64 16" width="64" height="16" preserveAspectRatio="none" aria-hidden="true">
-											<polyline points="0,9 12,7 24,8 36,7 48,5 64,6" fill="none" stroke="currentColor" stroke-width="1.3"></polyline>
-										</svg>
-									</td>
-									<td class="num">$37.92</td>
-								</tr>
+								for _, p := range landingMockProjects {
+									<tr>
+										<td>{ p.Name }</td>
+										<td class="num">{ FmtTokens(p.Sessions) }</td>
+										<td class="num">
+											@landingTokensCell(p)
+										</td>
+										<td class="num">
+											if p.Spark != "" {
+												<svg class="mk-spark" viewBox="0 0 64 16" width="64" height="16" preserveAspectRatio="none" aria-hidden="true">
+													<polyline points={ p.Spark } fill="none" stroke="currentColor" stroke-width="1.3"></polyline>
+												</svg>
+											}
+										</td>
+										<td class="num">{ FmtCost(p.Cost, false) }</td>
+									</tr>
+								}
 							</tbody>
 							// The remainder footer carries everything beyond the three visible
-							// rows (the app's own capped-table idiom), so the strip's totals
-							// reconcile: 697 + 587 sessions, 52.4M + 44.0M tokens, and $247.43
-							// + $165.44 match the 1,284 / 96.4M / $412.87 the strip reads.
+							// rows (the app's own capped-table idiom). Both this row and the
+							// strip above it derive from the same landingMockProjects and
+							// landingMockRemainder in landing.go, so their totals reconcile by
+							// construction rather than by a comment promising the arithmetic
+							// works out.
 							<tfoot>
 								<tr class="remainder">
-									<td>all other projects</td>
-									<td class="num">587</td>
+									<td>{ landingMockRemainder.Name }</td>
+									<td class="num">{ FmtTokens(landingMockRemainder.Sessions) }</td>
 									<td class="num">
-										@landingTokensCell(44_000_000, 11_300_000, 4_000_000, 26_600_000, 2_100_000, 165.44)
+										@landingTokensCell(landingMockRemainder)
 									</td>
 									<td class="num"></td>
-									<td class="num">$165.44</td>
+									<td class="num">{ FmtCost(landingMockRemainder.Cost, false) }</td>
 								</tr>
 							</tfoot>
 						</table>
@@ -245,24 +227,14 @@ templ LandingPage() {
 				<div class="landing-mock">
 					<div class="mock-frame mk-list">
 						<div class="mk-facets">
-							<div class="mk-facet">
-								<span class="label">Agent</span>
-								<span class="mk-frow"><span>claude</span><span class="mk-fc">812</span></span>
-								<span class="mk-frow"><span>codex</span><span class="mk-fc">341</span></span>
-								<span class="mk-frow"><span>pi</span><span class="mk-fc">131</span></span>
-							</div>
-							<div class="mk-facet">
-								<span class="label">Machine</span>
-								<span class="mk-frow"><span>framework</span><span class="mk-fc">623</span></span>
-								<span class="mk-frow"><span>mac-studio</span><span class="mk-fc">512</span></span>
-								<span class="mk-frow"><span>thinkpad</span><span class="mk-fc">149</span></span>
-							</div>
-							<div class="mk-facet">
-								<span class="label">User</span>
-								<span class="mk-frow"><span>grace</span><span class="mk-fc">704</span></span>
-								<span class="mk-frow"><span>ada</span><span class="mk-fc">391</span></span>
-								<span class="mk-frow"><span>katherine</span><span class="mk-fc">189</span></span>
-							</div>
+							for _, group := range landingMockFacets {
+								<div class="mk-facet">
+									<span class="label">{ group.Label }</span>
+									for _, row := range group.Rows {
+										<span class="mk-frow"><span>{ row.Name }</span><span class="mk-fc">{ FmtTokens(row.Count) }</span></span>
+									}
+								</div>
+							}
 						</div>
 						<div class="mk-rows">
 							<div class="mk-srow">
