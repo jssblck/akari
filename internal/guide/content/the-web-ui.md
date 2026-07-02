@@ -51,11 +51,10 @@ message counts. Below it is the transcript itself:
 - **Messages, thinking, and tool calls**, in order, with a timeline rail that maps
   the turns and flags any tool that errored.
 - **Tool bodies as chips.** A tool call's input and result show as
-  size-and-type chips (for example "36 KB json") that expand inline when you click
-  them, fetched from content-addressed storage on demand. An editing tool's input
-  expands as a rendered **diff** rather than raw JSON.
-- **A density toggle** switches between a comfortable and a compact reading mode,
-  for skimming a long run or reading it closely.
+  size-and-type chips (for example "36 KB json"). Clicking one opens the body in
+  the inspector modal, fetched from content-addressed storage on demand, so a
+  large body gets real room without pushing the transcript around. An editing
+  tool's input opens as a rendered **diff** rather than raw JSON.
 - **Subagents** spawned by the session are listed under it, so a run that launched
   helpers reads as a tree rather than scattered rows.
 - **Live updates.** A session still being written updates in place over
