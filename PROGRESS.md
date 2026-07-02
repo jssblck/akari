@@ -41,7 +41,9 @@ cost and an incomplete flag, and a `reparse` subcommand to rebuild from raw.
 - [x] handleChunk parses on every append; returns real message_count
 - [x] cmd/akari-server reparse subcommand (--agent filter)
 - [x] Tests: parser unit (fixtures per agent), pricing, parse-pipeline integration,
-      stale-projection guard; full suite green (run with `-p 1`, shared test DB)
+      stale-projection guard; full suite green (run with `-p 1` against the then-shared
+      test DB; tests later moved to per-test databases and default parallelism, see
+      Notes)
 - [x] e2e: register -> ingest token -> announce -> chunk over HTTP, projection +
       cost verified in DB; reparse confirmed idempotent against live data
 - [x] codex review (gpt-5.5 high) twice; all findings fixed and re-verified
@@ -334,7 +336,8 @@ PRODUCT.md), inline fleet analytics, and a reworked session read experience.
       instrument header and a diff-ready transcript
 - [x] Tests: store analytics rollups + sparkline windowing (DB-gated); web chart
       helpers (breakdown widths, sparkline shape, rail markers, diff detection,
-      series JSON round-trip); full suite green with `-p 1`
+      series JSON round-trip); full suite green with `-p 1` (historical; no longer
+      needed, see Notes)
 - [x] Verified in a real browser against seeded data: global and per-project
       charts with a working crosshair (cost and token modes), breakdown bars and
       sparklines, the session timeline rail and error marker, an Edit tool
@@ -372,7 +375,7 @@ upload time, so a transcript stays small however big the tool outputs are and th
       same projection), store pin/sweep safety + reference recording, and end-to-end
       client→server dedup-on-resync (zero bytes, zero bodies, cold cache too), big
       body (160 MiB result, transcript stays tiny), and resume; full suite green
-      with `-race -p 1`
+      with `-race -p 1` (historical; no longer needed, see Notes)
 
 ## Deferred (from codex review, to address in later milestones)
 

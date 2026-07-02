@@ -1,0 +1,335 @@
+package web
+
+import (
+	"fmt"
+
+	"github.com/jssblck/akari/internal/server/store"
+)
+
+// InsightsPage is the cross-cutting analytics surface at /insights: two headline bands of
+// measured rates (concurrency and velocity) over the fleet, a tools band (reliability and
+// mix), a prompt-hygiene band (input quality), how the window's sessions distribute across
+// quality grades, outcomes, and archetypes, then the files it edited more than once.
+// Everything is bounded to the selected trailing window. Like the overview it carries no
+// heading (the sidebar marks the section); the toolbar holds the window selector and a
+// session count for context. The whole section carries id="insights" so the selector can
+// swap it in one shot, the same pattern the usage panel uses.
+templ InsightsPage(p Page, ins store.Insights, rng string, ranges []RangeOption) {
+	@layout(p) {
+		<section class="insights" id="insights">
+			<div class="ins-toolbar">
+				<div class="ins-summary">
+					<span class="label">Insights</span>
+					<span class="muted small">{ fmt.Sprintf("%d session%s in window", ins.Quality.Sessions, plural(ins.Quality.Sessions)) }</span>
+				</div>
+				@rangeSelector(ranges, "#insights")
+			</div>
+			if !ins.HasData() {
+				<div class="empty">No sessions in this window yet.</div>
+			} else {
+				<div class="ins-headline">
+					@concurrencyPanel(ins.Concurrency)
+					@velocityPanel(ins.Velocity)
+				</div>
+				<div class="ins-tools">
+					@toolsPanel(ins.Tools)
+				</div>
+				<div class="ins-hygiene">
+					@hygienePanel(ins.Hygiene)
+				</div>
+				<div class="ins-context">
+					@contextPanel(ins.Context)
+				</div>
+				<div class="ins-grid">
+					@distributionPanel("Grades", "the quality score banded A to F, unscored for an ungraded session", GradeBars(ins.Quality.Grades))
+					@distributionPanel("Outcomes", "how each session ended", OutcomeBars(ins.Quality.Outcomes))
+					@distributionPanel("Archetypes", "session shape by length and turns", ArchetypeBars(ins.Archetypes))
+				</div>
+				<div class="ins-churn">
+					@churnPanel(ins.Churn)
+				</div>
+			}
+		</section>
+	}
+}
+
+// concurrencyPanel is one headline band: how many sessions overlapped at the fleet's
+// peak (and when), which single user ran the most at once, and the average concurrency
+// across the span the sessions cover. Three figures read left to right, the same
+// instrument tone as the overview stat tiles, since concurrency is a measured rate
+// rather than a distribution of buckets.
+templ concurrencyPanel(c store.ConcurrencyStats) {
+	<div class="ins-panel ins-concurrency">
+		<div class="ins-panel-head">
+			<span class="label">Concurrency</span>
+			<span class="muted small ins-caption">peak overlap among sessions that started in this window</span>
+		</div>
+		if !c.HasData() {
+			<div class="muted small">No sessions with a measured start and end in this window.</div>
+		} else {
+			<div class="ins-figs">
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ fmt.Sprintf("%d", c.FleetPeak) }</div>
+					<div class="ins-fig-k">peak at once</div>
+					if !c.FleetPeakAt.IsZero() {
+						<div class="ins-fig-sub muted small">{ FmtTimeAt(c.FleetPeakAt) }</div>
+					}
+				</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ ConcurrencyBusiest(c) }</div>
+					<div class="ins-fig-k">busiest user</div>
+				</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ FmtAvgConcurrent(c.AvgConcurrent) }</div>
+					<div class="ins-fig-k">average concurrent</div>
+				</div>
+			</div>
+		}
+	</div>
+}
+
+// velocityPanel is the other headline band: how fast the agent starts replying after a
+// prompt (the turn-cycle latency at the median and the slow tail), how slow the opening
+// reply runs on its own, and how densely messages and tool calls land per active minute.
+// It reuses the same figure row as concurrency, since velocity is the same kind of
+// measured rate rather than a bucketed distribution.
+templ velocityPanel(v store.VelocityStats) {
+	<div class="ins-panel ins-velocity">
+		<div class="ins-panel-head">
+			<span class="label">Velocity</span>
+			<span class="muted small ins-caption">how fast turns cycle and work moves</span>
+		</div>
+		if !v.HasData() {
+			<div class="muted small">No timed turns in this window.</div>
+		} else {
+			<div class="ins-figs">
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ FmtLatency(v.ResponseP50) }</div>
+					<div class="ins-fig-k">response p50</div>
+				</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ FmtLatency(v.ResponseP90) }</div>
+					<div class="ins-fig-k">response p90</div>
+				</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ FmtLatency(v.FirstResponseP50) }</div>
+					<div class="ins-fig-k">opening p50</div>
+				</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ VelocityMsgsRate(v) }</div>
+					<div class="ins-fig-k">msgs / active min</div>
+				</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ VelocityToolsRate(v) }</div>
+					<div class="ins-fig-k">tools / active min</div>
+				</div>
+			</div>
+		}
+	</div>
+}
+
+// toolsPanel is the full-width tool band: three fleet figures (total calls, error rate,
+// tools per turn) over a mix of the busiest tools, each bar sized by call volume and
+// coloured by its own reliability. It sits below the rate bands and above the quality
+// distributions, since it is part measured rate and part distribution.
+templ toolsPanel(t store.ToolStats) {
+	<div class="ins-panel ins-tools-panel">
+		<div class="ins-panel-head">
+			<span class="label">Tools</span>
+			<span class="muted small ins-caption">reliability and mix across the window's sessions</span>
+		</div>
+		if !t.HasData() {
+			<div class="muted small">No tool calls in this window.</div>
+		} else {
+			<div class="ins-figs">
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ fmt.Sprintf("%d", t.TotalCalls) }</div>
+					<div class="ins-fig-k">tool calls</div>
+				</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ FmtErrorRate(t.ErrorRate()) }</div>
+					<div class="ins-fig-k">error rate</div>
+				</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ FmtRate(t.ToolsPerTurn()) }</div>
+					<div class="ins-fig-k">tools / turn</div>
+				</div>
+			</div>
+			<ul class="bars tool-bars">
+				for _, b := range ToolBars(t) {
+					<li class="bar-row">
+						<div class="bar-head">
+							<span class="bar-label">{ b.Name }</span>
+							<span class="bar-val">
+								{ fmt.Sprintf("%d", b.Calls) }
+								if b.ErrText != "" {
+									<span class="tool-err">{ b.ErrText }</span>
+								}
+							</span>
+						</div>
+						<div class="bar-track">
+							<div class="bar-fill" data-pct={ fmt.Sprintf("%.2f", b.Pct) } data-color={ b.Color }></div>
+						</div>
+					</li>
+				}
+			</ul>
+			if t.Clipped > 0 {
+				<div class="muted small tool-clip">{ fmt.Sprintf("+%d more tool%s not shown", t.Clipped, plural(t.Clipped)) }</div>
+			}
+		}
+	</div>
+}
+
+// hygienePanel is the full-width input-quality band: four rates over the window's human
+// prompts (terse, repeated, and no-code-context prompts) and its sessions (unstructured
+// openings), each figure paired with the raw count it came from. It reads the human's
+// side of the fleet, the counterpart to the tools band's read of the agent's side, so it
+// sits directly below it. The rates never feed the quality score: an unclear prompt is
+// the human's to tighten, not a mark against the agent.
+templ hygienePanel(h store.PromptHygiene) {
+	<div class="ins-panel ins-hygiene-panel">
+		<div class="ins-panel-head">
+			<span class="label">Prompt hygiene</span>
+			<span class="muted small ins-caption">how clearly the window's prompts set the agent up</span>
+		</div>
+		if !h.HasData() {
+			<div class="muted small">No prompts in this window.</div>
+		} else {
+			<div class="ins-figs">
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ HygienePct(h.Short, h.Prompts) }</div>
+					<div class="ins-fig-k">terse prompts</div>
+					<div class="ins-fig-sub muted small">{ HygieneCount(h.Short, h.Prompts) }</div>
+				</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ HygienePct(h.Duplicate, h.Prompts) }</div>
+					<div class="ins-fig-k">repeated prompts</div>
+					<div class="ins-fig-sub muted small">{ HygieneCount(h.Duplicate, h.Prompts) }</div>
+				</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ HygienePct(h.NoCodeContext, h.Prompts) }</div>
+					<div class="ins-fig-k">no code pointer</div>
+					<div class="ins-fig-sub muted small">{ HygieneCount(h.NoCodeContext, h.Prompts) }</div>
+				</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ HygienePct(h.UnstructuredStarts, h.Sessions) }</div>
+					<div class="ins-fig-k">unstructured start</div>
+					<div class="ins-fig-sub muted small">{ HygieneCount(h.UnstructuredStarts, h.Sessions) }</div>
+				</div>
+			</div>
+		}
+	</div>
+}
+
+// contextPanel is the full-width context-load band: how heavy the window's sessions got
+// (the median, p90, and heaviest peak context, in tokens) and how often they shed that
+// context (the share of sessions that hit at least one inferred reset, and the total).
+// Peak is a raw token count, deliberately not divided by any model's window, so it reads
+// the same whether a model holds 200k tokens or a million: 180k in context is heavy either
+// way. Like hygiene these figures never feed the quality score; they describe resource load.
+// Each peak is one turn's occupancy (input plus cache read plus cache write, output
+// excluded), and these are order statistics over the per-session peaks, so there is no
+// per-class total to break down. They carry a plain caption of what a peak is made of
+// rather than the four-class spend card, the single-metric exemption the token-consistency
+// convention allows.
+templ contextPanel(c store.ContextHealthStats) {
+	<div class="ins-panel ins-context-panel">
+		<div class="ins-panel-head">
+			<span class="label">Context health</span>
+			<span class="muted small ins-caption">how heavy sessions got and how often they shed context</span>
+		</div>
+		if !c.HasData() {
+			<div class="muted small">No sessions with measured context in this window.</div>
+		} else {
+			<div class="ins-figs">
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ FmtTokensCompact(c.PeakTokensP50) }</div>
+					<div class="ins-fig-k">median peak</div>
+				</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ FmtTokensCompact(c.PeakTokensP90) }</div>
+					<div class="ins-fig-k">p90 peak</div>
+				</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ FmtTokensCompact(c.PeakTokensMax) }</div>
+					<div class="ins-fig-k">heaviest peak</div>
+				</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ HygienePct(c.SessionsWithReset, c.Sessions) }</div>
+					<div class="ins-fig-k">shed context</div>
+					<div class="ins-fig-sub muted small">{ HygieneCount(c.SessionsWithReset, c.Sessions) } sessions</div>
+				</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ FmtTokens(c.TotalResets) }</div>
+					<div class="ins-fig-k">context resets</div>
+				</div>
+			</div>
+			<div class="ins-note muted small">Each peak is a single turn's context: input, cache read, and cache write, output excluded. A load measure, not spend.</div>
+		}
+	</div>
+}
+
+// churnPanel is the full-width edit-thrash list: the files a window edited more than once,
+// most-edited first, each bar sized by edit count and annotated with how many sessions
+// returned to the path. It sits last, after the distributions, since a file path needs the
+// full width to read without truncating to nothing.
+templ churnPanel(c store.FileChurn) {
+	<div class="ins-panel ins-churn-panel">
+		<div class="ins-panel-head">
+			<span class="label">File churn</span>
+			<span class="muted small ins-caption">files edited more than once in this window</span>
+		</div>
+		if !c.HasData() {
+			<div class="muted small">No files were edited more than once in this window.</div>
+		} else {
+			<ul class="bars churn-bars">
+				for _, b := range ChurnBars(c) {
+					<li class="bar-row">
+						<div class="bar-head">
+							<span class="bar-label" title={ b.Path }>{ b.Path }</span>
+							<span class="bar-val">
+								{ fmt.Sprintf("%d edits", b.Edits) }
+								<span class="churn-sess">{ ChurnSessions(b.Sessions) }</span>
+							</span>
+						</div>
+						<div class="bar-track">
+							<div class="bar-fill" data-pct={ fmt.Sprintf("%.2f", b.Pct) } data-color={ barPeach }></div>
+						</div>
+					</li>
+				}
+			</ul>
+			if c.Clipped > 0 {
+				<div class="muted small tool-clip">{ fmt.Sprintf("+%d more churned file%s not shown", c.Clipped, plural(c.Clipped)) }</div>
+			}
+		}
+	</div>
+}
+
+// distributionPanel renders one labeled set of horizontal bars: a title, a one-line
+// caption, and a bar per bucket sized to the largest in the set. It reuses the
+// breakdown bars' markup (.bars / .bar-row / .bar-fill[data-pct][data-color]), so the
+// shared animateBars handler grows the fills in on load and after an htmx swap, and the
+// existing bar styling applies without new chart code.
+templ distributionPanel(title, caption string, rows []DistRow) {
+	<div class="ins-panel">
+		<div class="ins-panel-head">
+			<span class="label">{ title }</span>
+			if caption != "" {
+				<span class="muted small ins-caption">{ caption }</span>
+			}
+		</div>
+		<ul class="bars dist-bars">
+			for _, r := range rows {
+				<li class="bar-row">
+					<div class="bar-head">
+						<span class="bar-label">{ r.Label }</span>
+						<span class="bar-val">{ fmt.Sprintf("%d", r.Count) }</span>
+					</div>
+					<div class="bar-track">
+						<div class="bar-fill" data-pct={ fmt.Sprintf("%.2f", r.Pct) } data-color={ r.Color }></div>
+					</div>
+				</li>
+			}
+		</ul>
+	</div>
+}

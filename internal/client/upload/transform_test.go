@@ -132,17 +132,22 @@ func TestTransformPassesThroughBodylessLines(t *testing.T) {
 
 // TestTransformLiftsClaudeToolBodies confirms a Claude tool input and result are
 // replaced by sentinels in the transcript and surfaced as bodies whose content is
-// exactly what the server would CAS.
+// exactly what the server would CAS. The input sentinel must keep the input's
+// file_path (the reducer projects it onto the tool call), while the body itself
+// (here recognizable by its distinctive path value) leaves the transcript.
 func TestTransformLiftsClaudeToolBodies(t *testing.T) {
-	assistant := `{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"a.go"}}]}}` + "\n"
+	assistant := `{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"a.go","query":"unmistakable-body"}}]}}` + "\n"
 	result := `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"package a","is_error":false}]}}` + "\n"
 	content := assistant + result
 	f, size := openTemp(t, content)
 
 	sink := runTransform(t, f, 0, size, "claude", true)
 	out := string(sink.data)
-	if strings.Contains(out, `"file_path":"a.go"`) {
+	if strings.Contains(out, "unmistakable-body") {
 		t.Errorf("input body still inline in transformed transcript: %s", out)
+	}
+	if !strings.Contains(out, `"file_path":"a.go"`) {
+		t.Errorf("input sentinel lost the file_path: %s", out)
 	}
 	if strings.Contains(out, "package a") {
 		t.Errorf("result body still inline in transformed transcript: %s", out)
@@ -155,8 +160,8 @@ func TestTransformLiftsClaudeToolBodies(t *testing.T) {
 		t.Fatalf("lifted %d bodies, want 2", len(sink.bodies))
 	}
 	want := map[string]string{
-		`{"file_path":"a.go"}`: "input",
-		"package a":            "result",
+		`{"file_path":"a.go","query":"unmistakable-body"}`: "input",
+		"package a": "result",
 	}
 	for _, b := range sink.bodies {
 		kind, ok := want[b.Content]
@@ -315,6 +320,60 @@ func TestTransformBigAndSmallEquivalent(t *testing.T) {
 	}
 	if small.bodies[0].SHA256 != bigp.bodies[0].SHA256 {
 		t.Fatalf("big vs small body hash differ: %s vs %s", small.bodies[0].SHA256, bigp.bodies[0].SHA256)
+	}
+}
+
+// TestTransformBigInputKeepsFilePath confirms the streaming big-line path carries a
+// JSON tool input's file_path onto its sentinel byte-identically to the buffered
+// path, for both input encodings: a raw JSON object (Claude tool_use input) and a
+// JSON-encoded string (Codex function_call arguments). This is the field the lift
+// would otherwise erase; the server projects it onto the tool call from the
+// sentinel alone.
+func TestTransformBigInputKeepsFilePath(t *testing.T) {
+	bulk := strings.Repeat("0123456789abcdef", 256) // 4 KiB of body bulk past the shrunken threshold
+	codexArgs := `{"file_path":"pkg/big.go","content":"` + bulk + `"}`
+	cases := []struct {
+		name, agent, line string
+		parseAgent        parser.Agent
+	}{
+		{
+			"claude-raw-object", "claude",
+			`{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Write","input":{"file_path":"pkg/big.go","content":"` + bulk + `"}}]}}` + "\n",
+			parser.AgentClaude,
+		},
+		{
+			"codex-json-string", "codex",
+			`{"type":"response_item","payload":{"type":"function_call","name":"write","call_id":"c1","arguments":` + jsonString(codexArgs) + `}}` + "\n",
+			parser.AgentCodex,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f, size := openTemp(t, c.line)
+
+			setBigLineThreshold(t, 1<<20)
+			small := runTransform(t, f, 0, size, c.agent, true)
+			setBigLineThreshold(t, 256)
+			big := runTransform(t, f, 0, size, c.agent, true)
+
+			if string(small.data) != string(big.data) {
+				t.Fatalf("big vs small transform differ:\n small=%q\n big  =%q", small.data, big.data)
+			}
+			out := string(big.data)
+			if strings.Contains(out, bulk) {
+				t.Fatal("input body still inline after streaming transform")
+			}
+			if !strings.Contains(out, `"file_path":"pkg/big.go"`) {
+				t.Fatalf("input sentinel lost the file_path: %s", out)
+			}
+			d, err := parser.Parse(c.parseAgent, big.data)
+			if err != nil {
+				t.Fatalf("parse transformed: %v", err)
+			}
+			if len(d.ToolCalls) != 1 || d.ToolCalls[0].FilePath != "pkg/big.go" {
+				t.Fatalf("parsed tool call file path not preserved: %+v", d.ToolCalls)
+			}
+		})
 	}
 }
 

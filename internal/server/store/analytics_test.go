@@ -219,6 +219,69 @@ func TestCostIncompleteReasoningOnly(t *testing.T) {
 	}
 }
 
+// TestAnalyticsReasoningTokens pins the reasoning surfacing: the window total and the
+// per-agent split carry the reasoning-token class, and it stays OUT of the four-class
+// Tokens total so the headline-equals-sum reconciliation the billed classes hold is
+// undisturbed.
+func TestAnalyticsReasoningTokens(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	user, err := st.Register(ctx, "grace", "h", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	proj, err := st.UpsertProject(ctx, "github.com/ada/reason", "github.com", "ada", "reason", "reason", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+
+	// A codex session reports reasoning tokens; a claude session reports none.
+	sX := seedSessionWithStats(t, st, user.ID, proj, "codex", "x1", 1.0, 100, 200)
+	if _, err := st.Pool.Exec(ctx,
+		`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, reasoning_tokens, cost_usd, occurred_at, dedup_key)
+		 VALUES ($1,'gpt-5.5',100,200,500,1.0, now(), 'x-u')`, sX); err != nil {
+		t.Fatalf("seed codex usage: %v", err)
+	}
+	sC := seedSessionWithStats(t, st, user.ID, proj, "claude", "c1", 0.5, 300, 50)
+	if _, err := st.Pool.Exec(ctx,
+		`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, reasoning_tokens, cost_usd, occurred_at, dedup_key)
+		 VALUES ($1,'claude-opus-4-8',300,50,0,0.5, now(), 'c-u')`, sC); err != nil {
+		t.Fatalf("seed claude usage: %v", err)
+	}
+
+	a, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: proj})
+	if err != nil {
+		t.Fatalf("analytics: %v", err)
+	}
+	if a.TotalReasoning != 500 {
+		t.Errorf("TotalReasoning = %d, want 500", a.TotalReasoning)
+	}
+	// The four billed classes total 100+200+300+50 = 650; reasoning stays out of it.
+	if a.TotalTokens() != 650 {
+		t.Errorf("TotalTokens = %d, want 650 (reasoning must not fold into the billed classes)", a.TotalTokens())
+	}
+	byAgent := map[string]store.Breakdown{}
+	for _, ag := range a.Agents {
+		byAgent[ag.Label] = ag
+	}
+	if byAgent["codex"].Reasoning != 500 {
+		t.Errorf("codex reasoning = %d, want 500", byAgent["codex"].Reasoning)
+	}
+	if byAgent["claude"].Reasoning != 0 {
+		t.Errorf("claude reasoning = %d, want 0", byAgent["claude"].Reasoning)
+	}
+	// The by-model split must sum to the same reasoning total as the by-agent split, the
+	// same three-way reconciliation the billed classes hold.
+	var modelReasoning int64
+	for _, m := range a.Models {
+		modelReasoning += m.Reasoning
+	}
+	if modelReasoning != a.TotalReasoning {
+		t.Errorf("by-model reasoning sum = %d, want %d (must match the headline)", modelReasoning, a.TotalReasoning)
+	}
+}
+
 // TestAnalyticsFiltersByAgentAndMachine pins the project page's reconciliation fix:
 // the usage panel scopes to the same agent/machine the session table does, so a
 // filtered headline reflects only the filtered slice rather than staying

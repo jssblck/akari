@@ -323,26 +323,41 @@ func ingest(ctx context.Context, opts Options, token string) (ingestStats, error
 	return stats, nil
 }
 
-// reassignSessions gives every session a randomly chosen owner from userIDs,
-// inside one transaction, and returns the resulting per-user count. The owning
-// account is the only user-scoped field on a session (messages, tool calls, and
-// usage rows hang off the session id), so this alone redistributes the data.
-// Each (agent, source_session_id) pair stays on exactly one row, so the
-// (user_id, agent, source_session_id) uniqueness constraint cannot be violated.
+// reassignSessions gives every session a randomly chosen owner from userIDs, inside one
+// transaction, and returns the resulting per-user count. The owning account is the only
+// user-scoped field on a session (messages, tool calls, and usage rows hang off the session
+// id), so this alone redistributes the data. Each (agent, source_session_id) pair stays on
+// exactly one row, so the (user_id, agent, source_session_id) uniqueness constraint cannot
+// be violated.
+//
+// Assignment is per family, not per session: a subagent rides with the session that spawned
+// it (its parent), so a parent and its children land on one owner. That keeps the link the
+// ingest path sets meaningful (a subagent belongs to the same person as its orchestrator)
+// and the demo realistic, rather than splitting one run's parent and subagents across
+// accounts. A top-level session is its own family, so a store with no subagents reassigns
+// exactly as a flat per-session shuffle would.
 func reassignSessions(ctx context.Context, pool *pgxpool.Pool, userIDs []int64, rng *rand.Rand) (map[int64]int, error) {
 	if len(userIDs) == 0 {
 		return nil, fmt.Errorf("no users to reassign to")
 	}
-	ids, err := allSessionIDs(ctx, pool)
+	fam, err := sessionFamilies(ctx, pool)
 	if err != nil {
 		return nil, err
 	}
+	// Pick an owner once per family root, in a stable order, so the draw is deterministic
+	// for a fixed seed and every member of a family resolves to the same account.
+	rootUser := make(map[int64]int64)
+	for _, f := range fam {
+		if _, ok := rootUser[f.root]; !ok {
+			rootUser[f.root] = userIDs[rng.Intn(len(userIDs))]
+		}
+	}
 	dist := make(map[int64]int, len(userIDs))
 	err = pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-		for _, sid := range ids {
-			uid := userIDs[rng.Intn(len(userIDs))]
+		for _, f := range fam {
+			uid := rootUser[f.root]
 			if _, err := tx.Exec(ctx,
-				`UPDATE sessions SET user_id = $1, updated_at = now() WHERE id = $2`, uid, sid); err != nil {
+				`UPDATE sessions SET user_id = $1, updated_at = now() WHERE id = $2`, uid, f.id); err != nil {
 				return err
 			}
 			dist[uid]++
@@ -373,21 +388,32 @@ func deleteAllSessions(ctx context.Context, pool *pgxpool.Pool) (int64, error) {
 	return tag.RowsAffected(), nil
 }
 
-func allSessionIDs(ctx context.Context, pool *pgxpool.Pool) ([]int64, error) {
-	rows, err := pool.Query(ctx, `SELECT id FROM sessions ORDER BY id`)
+// famMember is one session paired with its family root: parent_session_id when the session
+// is a subagent, otherwise the session's own id. Reassignment groups on the root.
+type famMember struct{ id, root int64 }
+
+// sessionFamilies lists every session with its family root, ordered by id so the owner draw
+// is deterministic. The root is the top-level session a family shares (the linker points
+// every subagent straight at the session that spawned it, so a child's parent is itself a
+// root), which coalesce collapses to the session's own id for a top-level session.
+func sessionFamilies(ctx context.Context, pool *pgxpool.Pool) ([]famMember, error) {
+	rows, err := pool.Query(ctx, `SELECT id, coalesce(parent_session_id, id) FROM sessions ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var ids []int64
+	var fam []famMember
 	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
+		var m famMember
+		if err := rows.Scan(&m.id, &m.root); err != nil {
+			return nil, fmt.Errorf("scan session family row: %w", err)
 		}
-		ids = append(ids, id)
+		fam = append(fam, m)
 	}
-	return ids, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate session families: %w", err)
+	}
+	return fam, nil
 }
 
 func userIDs(users []demoUser) []int64 {

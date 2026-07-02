@@ -1,0 +1,88 @@
+/* The Insights surface: cross-cutting distributions (quality grades, outcomes, and
+   archetypes) over a trailing window. It reuses the breakdown bars (.bars / .bar-row /
+   .bar-fill, defined in overview.css) and the segmented range selector, so a
+   distribution reads with the same instrument styling as the cost breakdowns; this
+   sheet adds only the page's own toolbar and panel grid. */
+
+.insights { margin-top: var(--sp-md); }
+
+/* The toolbar carries the section label and an in-window session count on the left and
+   the trailing-window selector on the right, the same control the usage panel uses. */
+.ins-toolbar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--sp-md); flex-wrap: wrap; margin-bottom: var(--sp-lg);
+}
+.ins-summary { display: flex; align-items: baseline; gap: var(--sp-sm); }
+
+/* The panels sit in a responsive grid: three across on a wide screen, collapsing to
+   two then one as the column narrows, so each distribution keeps a readable bar width
+   rather than being squeezed. */
+.ins-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--sp-xl); }
+.ins-panel {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-md); padding: var(--sp-lg);
+}
+.ins-panel-head { margin-bottom: var(--sp-md); }
+.ins-caption { display: block; margin-top: 3px; line-height: 1.4; }
+
+/* The distribution bars carry their value beside the label and never truncate it (the
+   labels are short, fixed buckets), unlike the breakdown bars whose model ids can run
+   long. */
+.dist-bars .bar-label { max-width: none; }
+
+/* The headline holds the two measured-rate bands (concurrency and velocity) side by side
+   above the distribution grid; each band lays its figures out in a wrapping row that reads
+   left to right like the overview stat tiles. The two collapse to a stack before the
+   distribution grid does, since a five-figure velocity row needs the width sooner. */
+.ins-headline {
+  display: grid; grid-template-columns: repeat(2, 1fr);
+  gap: var(--sp-xl); margin-bottom: var(--sp-xl);
+}
+.ins-figs { display: flex; flex-wrap: wrap; gap: var(--sp-xl); }
+.ins-fig { min-width: 110px; }
+.ins-fig-v {
+  font-family: var(--mono); font-size: 1.5rem; font-variant-numeric: tabular-nums;
+  color: var(--text); letter-spacing: -0.01em; line-height: 1.2;
+}
+.ins-fig-k { color: var(--muted); font-size: 0.8125rem; margin-top: 2px; }
+.ins-fig-sub { margin-top: 1px; }
+
+/* The tools band is a full-width panel between the rate bands and the distribution grid:
+   its three fleet figures reuse the shared figure row, then the tool mix reuses the
+   breakdown bars below them (keeping the base label truncation, since a tool name can run
+   long). The per-bar error suffix reads in the status-error tone so an unreliable tool
+   draws the eye without a second chart. */
+.ins-tools { margin-bottom: var(--sp-xl); }
+.tool-bars { margin-top: var(--sp-lg); }
+.tool-err { color: var(--err); margin-left: 6px; font-variant-numeric: tabular-nums; }
+.tool-clip { margin-top: var(--sp-sm); }
+
+/* The prompt-hygiene band is a full-width panel below the tools band: four rate figures
+   over the window's prompts and sessions, reusing the shared figure row. It reads the
+   human's input quality where the tools band reads the agent's reliability, so the two sit
+   together above the quality distributions. */
+.ins-hygiene { margin-bottom: var(--sp-xl); }
+
+/* The context-health band is a full-width panel below the hygiene band: peak-context
+   figures and reset rates over the window's sessions, reusing the shared figure row. It
+   reads how heavy the sessions got where hygiene reads how clearly they were prompted, so
+   it rounds out the human-and-load bands before the quality distributions. */
+.ins-context { margin-bottom: var(--sp-xl); }
+
+/* The file-churn list is a full-width panel below the distribution grid: a bar per path
+   the window edited more than once, the session count muted beside the edit total, and the
+   full path on hover. A long path truncates from the LEFT (direction: rtl on the label), so
+   the filename at the end stays visible while the leading directories give way, the
+   opposite of the default end-ellipsis that would hide the part that identifies the file. */
+.ins-churn { margin-top: var(--sp-xl); }
+.churn-bars { margin-top: var(--sp-sm); }
+.churn-bars .bar-label { direction: rtl; text-align: left; max-width: 65%; }
+.churn-sess { color: var(--muted); margin-left: 8px; }
+
+@media (max-width: 1100px) {
+  .ins-headline { grid-template-columns: 1fr; gap: var(--sp-lg); }
+  .ins-grid { grid-template-columns: repeat(2, 1fr); gap: var(--sp-lg); }
+}
+@media (max-width: 720px) {
+  .ins-grid { grid-template-columns: 1fr; }
+}

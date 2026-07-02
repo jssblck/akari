@@ -187,6 +187,62 @@ func TestReassignSessions(t *testing.T) {
 	}
 }
 
+// TestReassignSessionsKeepsFamiliesTogether pins that a parent and its subagents land on one
+// owner. The link the ingest path sets means a subagent belongs to the same person as its
+// orchestrator, so the shuffle groups on the family root rather than moving each session
+// independently. Several seeds exercise different owner draws; none may split the family.
+func TestReassignSessionsKeepsFamiliesTogether(t *testing.T) {
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	users, err := ensureUsers(ctx, st.Pool, 4, "pw")
+	if err != nil {
+		t.Fatalf("ensureUsers: %v", err)
+	}
+	proj := seedProject(t, st.Pool, "github.com/jssblck/akari")
+
+	parent := seedSession(t, st.Pool, users[0].ID, proj, "orchestrator")
+	child1 := seedSession(t, st.Pool, users[0].ID, proj, "orchestrator/subagents/agent-1")
+	child2 := seedSession(t, st.Pool, users[0].ID, proj, "orchestrator/subagents/agent-2")
+	linkChild(t, st.Pool, child1, parent)
+	linkChild(t, st.Pool, child2, parent)
+	// Standalone sessions so the shuffle has other families to spread across.
+	for i := 0; i < 10; i++ {
+		seedSession(t, st.Pool, users[0].ID, proj, srcName(i))
+	}
+
+	for seed := int64(1); seed <= 8; seed++ {
+		rng := rand.New(rand.NewSource(seed))
+		if _, err := reassignSessions(ctx, st.Pool, userIDs(users), rng); err != nil {
+			t.Fatalf("reassignSessions (seed %d): %v", seed, err)
+		}
+		parentOwner := ownerOf(t, st.Pool, parent)
+		if c1 := ownerOf(t, st.Pool, child1); c1 != parentOwner {
+			t.Errorf("seed %d: child1 owner %d != parent owner %d", seed, c1, parentOwner)
+		}
+		if c2 := ownerOf(t, st.Pool, child2); c2 != parentOwner {
+			t.Errorf("seed %d: child2 owner %d != parent owner %d", seed, c2, parentOwner)
+		}
+	}
+}
+
+func linkChild(t *testing.T, pool *pgxpool.Pool, child, parent int64) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE sessions SET parent_session_id = $1, relationship_type = 'subagent' WHERE id = $2`, parent, child); err != nil {
+		t.Fatalf("link child %d to %d: %v", child, parent, err)
+	}
+}
+
+func ownerOf(t *testing.T, pool *pgxpool.Pool, sid int64) int64 {
+	t.Helper()
+	var uid int64
+	if err := pool.QueryRow(context.Background(), `SELECT user_id FROM sessions WHERE id = $1`, sid).Scan(&uid); err != nil {
+		t.Fatalf("owner of %d: %v", sid, err)
+	}
+	return uid
+}
+
 func srcName(i int) string {
 	return "src-" + string(rune('a'+i/26)) + string(rune('a'+i%26))
 }

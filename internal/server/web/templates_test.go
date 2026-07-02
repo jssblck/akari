@@ -32,6 +32,7 @@ func analyticsWithData() store.Analytics {
 		TotalOut:        50,
 		TotalCacheRead:  30,
 		TotalCacheWrite: 12,
+		TotalReasoning:  700,
 		Series: []store.DayPoint{{
 			Day:   time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC),
 			Input: 100, Output: 20, CacheRead: 5, CacheWrite: 2, CostUSD: 1.25,
@@ -145,17 +146,34 @@ func TestOverviewPageTokensStat(t *testing.T) {
 	p := Page{Title: "Overview", LoggedIn: true, Active: "overview", Username: "Grace Hopper"}
 	html := renderComponent(t, OverviewPage(p, analyticsWithData(), DefaultRange, nil, nil))
 
-	for _, want := range []string{`>Tokens</div>`, `tokens-stat`, `tokens-value`, `class="stat-tip"`, `<dt>In</dt>`, `<dt>Out</dt>`, `<dt>Cache read</dt>`, `<dt>Cache write</dt>`} {
+	for _, want := range []string{`>Tokens</div>`, `tokens-stat`, `tokens-value`, `class="stat-tip"`, `<dt>In</dt>`, `<dt>Out</dt>`, `<dt>Cache read</dt>`, `<dt>Cache write</dt>`, `<dt>Reasoning</dt>`} {
 		if !strings.Contains(html, want) {
 			t.Errorf("tokens readout missing %q", want)
 		}
 	}
-	// Combined total: 100 + 50 + 30 + 12 = 192.
+	// Combined total: 100 + 50 + 30 + 12 = 192; reasoning (700) stays out of the headline
+	// and shows only as its own tooltip line.
 	if !strings.Contains(html, `>192</div>`) {
 		t.Error("tokens readout should show the combined token total (192)")
 	}
+	if !strings.Contains(html, `<dd>700</dd>`) {
+		t.Error("tokens tooltip should show the reasoning class (700) as its own line")
+	}
 	if strings.Contains(html, `>Input</div>`) || strings.Contains(html, `>Output</div>`) {
 		t.Error("the Input/Output tiles should be folded into the Tokens readout")
+	}
+}
+
+// A window with no reasoning tokens (a Claude-only fleet) shows no Reasoning line rather
+// than a "Reasoning 0" that would read as a real, always-present class.
+func TestOverviewPageHidesZeroReasoning(t *testing.T) {
+	p := Page{Title: "Overview", LoggedIn: true, Active: "overview", Username: "Grace Hopper"}
+	a := analyticsWithData()
+	a.TotalReasoning = 0
+	html := renderComponent(t, OverviewPage(p, a, DefaultRange, nil, nil))
+
+	if strings.Contains(html, `<dt>Reasoning</dt>`) {
+		t.Error("tokens tooltip should omit the reasoning line when there are no reasoning tokens")
 	}
 }
 

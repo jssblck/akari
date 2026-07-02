@@ -217,7 +217,7 @@ func registerTools(s *mcp.Server, st *store.Store) {
 			ByteLen:   meta.ByteLen,
 			Truncated: meta.ByteLen > limit,
 		}
-		encodeBody(&out, buf.Bytes())
+		out.Encoding, out.Content = encodeBytes(buf.Bytes())
 		return jsonResult(out)
 	})
 
@@ -232,7 +232,7 @@ func registerTools(s *mcp.Server, st *store.Store) {
 			return nil, rawDTO{}, mapNotFound(err, "session")
 		}
 		out := rawDTO{TotalBytes: total, BytesReturned: written, Truncated: truncated}
-		encodeRaw(&out, buf.Bytes())
+		out.Encoding, out.Content = encodeBytes(buf.Bytes())
 		return jsonResult(out)
 	})
 }
@@ -359,28 +359,12 @@ func clampMax(max int) int64 {
 	return int64(max)
 }
 
-// encodeBody fills a bodyDTO's content as UTF-8 text when the bytes are valid text,
-// and base64 otherwise, so a textual tool body reads directly while a binary one
-// still round-trips.
-func encodeBody(out *bodyDTO, b []byte) {
+// encodeBytes renders body bytes as UTF-8 text when they are valid text, and
+// base64 otherwise, so a textual body reads directly while a binary one still
+// round-trips. Both byte-returning tools (tool body and session raw) share it.
+func encodeBytes(b []byte) (encoding, content string) {
 	if utf8.Valid(b) {
-		out.Encoding = "text"
-		out.Content = string(b)
-		return
+		return "text", string(b)
 	}
-	out.Encoding = "base64"
-	out.Content = base64.StdEncoding.EncodeToString(b)
-}
-
-// encodeRaw mirrors encodeBody for the raw-bytes tool. Ingested transcripts are
-// JSONL text in practice, so this is text almost always, with base64 as the safe
-// fallback for anything that is not valid UTF-8.
-func encodeRaw(out *rawDTO, b []byte) {
-	if utf8.Valid(b) {
-		out.Encoding = "text"
-		out.Content = string(b)
-		return
-	}
-	out.Encoding = "base64"
-	out.Content = base64.StdEncoding.EncodeToString(b)
+	return "base64", base64.StdEncoding.EncodeToString(b)
 }

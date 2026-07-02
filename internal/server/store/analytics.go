@@ -31,7 +31,13 @@ type Breakdown struct {
 	Output     int64
 	CacheRead  int64
 	CacheWrite int64
-	Sessions   int
+	// Reasoning is the slice's reasoning-token volume, the class some agents (codex, pi)
+	// report for the model's hidden deliberation. It is tracked and shown on its own but
+	// deliberately excluded from Tokens(): reasoning is neither a prompt nor a cache class,
+	// so folding it into the bar-sizing total would double-count against the billed classes
+	// and unsettle the headline-equals-sum reconciliation. It surfaces as its own figure.
+	Reasoning int64
+	Sessions  int
 	// CostIncomplete is true when this slice folded in a usage event that carried
 	// real token volume but no price (an unpriced model), so the slice's cost is a
 	// lower bound. It lets a by-model or by-agent row show the same "$X+" marker the
@@ -61,13 +67,23 @@ type Analytics struct {
 	TotalOut        int64
 	TotalCacheRead  int64
 	TotalCacheWrite int64
-	Sessions        int
+	// TotalReasoning is the window's reasoning-token volume, summed from the by-agent split
+	// like the other totals. It sits beside TotalTokens rather than inside it (see
+	// Breakdown.Reasoning for why), so the Tokens tile shows it as a distinct class without
+	// disturbing the headline-equals-sum-of-series reconciliation the four billed classes hold.
+	TotalReasoning int64
+	Sessions       int
 	// CostIncomplete is true when any usage event in the window carried token
 	// volume but no price, so TotalCost is a lower bound. The headline Cost tile
 	// shows the "$X+" marker when set, matching how a single session flags an
 	// incomplete cost. It is the OR of the by-agent slices, the same rows the
 	// headline totals are summed from.
 	CostIncomplete bool
+	// Cache is the prompt-cache effectiveness over the same scope: hit rate, the
+	// dollars caching saved, and the prompt-token split. It reads from the same dated
+	// usage_events base as the totals (see CacheStats), so the Cache tile reconciles
+	// with the Tokens tile beside it rather than counting usage the panel drops.
+	Cache CacheStats
 }
 
 // AnalyticsFilter scopes an Analytics query. The zero value is the whole instance,
@@ -138,8 +154,29 @@ func (a Analytics) TotalTokens() int64 {
 // The headline totals are summed from the by-agent split rather than queried
 // again: a session has exactly one agent, so the per-agent rows partition the
 // usage cleanly and their sum is the grand total with no double counting.
+// It reads inside one read-only REPEATABLE READ transaction so every grouped query and the
+// Cache tile share a single MVCC snapshot: the headline token classes and the Cache split are
+// the same sums regrouped, so a concurrent ingest landing between two pooled reads would let
+// them disagree by the usage that arrived mid-render. Unlike AnalyticsSnapshot this takes no
+// reparse-lock gate (a live panel tolerates a snapshot that falls during a reparse, where each
+// session is atomically old or new), and being read-only it takes no locks that could block
+// ingest.
 func (s *Store) Analytics(ctx context.Context, f AnalyticsFilter) (Analytics, error) {
-	return s.analyticsFrom(ctx, s.Pool, f)
+	var a Analytics
+	err := pgx.BeginTxFunc(ctx, s.Pool,
+		pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly},
+		func(tx pgx.Tx) error {
+			var err error
+			a, err = s.analyticsFrom(ctx, tx, f)
+			return err
+		})
+	if err != nil {
+		// Wrap so a begin or commit failure on the snapshot transaction reaches callers
+		// (the MCP overview and project tools among them) named as an analytics-snapshot
+		// failure, not a bare pgx or context error with no indication of what read broke.
+		return Analytics{}, fmt.Errorf("analytics snapshot: %w", err)
+	}
+	return a, nil
 }
 
 // querier is the subset of *pgxpool.Pool and pgx.Tx that the analytics queries
@@ -186,8 +223,21 @@ func (s *Store) analyticsFrom(ctx context.Context, q querier, f AnalyticsFilter)
 		a.TotalOut += ag.Output
 		a.TotalCacheRead += ag.CacheRead
 		a.TotalCacheWrite += ag.CacheWrite
+		a.TotalReasoning += ag.Reasoning
 		a.CostIncomplete = a.CostIncomplete || ag.CostIncomplete
 	}
+
+	// Cache effectiveness shares the same scoped dated-usage base, so its prompt
+	// totals reconcile with the headline token classes above (its Input/CacheRead/
+	// CacheWrite are the same sums, regrouped by model to price the saving). It reads
+	// through the same querier, so under AnalyticsSnapshot the Cache tile comes from the
+	// one repeatable-read snapshot as the totals (not a second pooled connection that
+	// could see a different MVCC snapshot, or deadlock a small pool by holding two).
+	cache, err := s.cacheStats(ctx, q, f)
+	if err != nil {
+		return a, err
+	}
+	a.Cache = cache
 	return a, nil
 }
 
@@ -238,11 +288,25 @@ func (s *Store) AnalyticsSnapshot(ctx context.Context, f AnalyticsFilter) (a Ana
 
 // clause builds the conjunctive WHERE additions for a usage_events query joined to
 // sessions as `s`: the optional project, user-set, agent, and machine scopes, plus
-// the optional trailing time bound. Agent and machine read the verbatim session
-// columns the session list filters on, so the panel and the table narrow by the
-// same values. Placeholders are numbered so it can follow an existing WHERE clause
-// that already opened the predicate.
+// the optional trailing time bound on ue.occurred_at. Agent and machine read the
+// verbatim session columns the session list filters on, so the panel and the table
+// narrow by the same values. Placeholders are numbered so it can follow an existing
+// WHERE clause that already opened the predicate.
 func (f AnalyticsFilter) clause() (string, []any) {
+	return f.clauseFor("ue.occurred_at")
+}
+
+// clauseFor is clause with the trailing-window bound applied to an arbitrary
+// timestamp expression rather than ue.occurred_at, so a query over a session-derived
+// table (session_signals, or sessions alone, which carry no usage_events to date) can
+// reuse the identical project / user / agent / machine scoping with its own time
+// column. Both trailing-window bounds (Since and Until) apply to timeExpr; every
+// other predicate is the same, so the Insights distributions narrow by the same
+// filter the usage panel does. A session whose time column is NULL falls outside
+// either bound (the comparison is NULL, so not true), which is the right call: an
+// undated session has no place on a windowed view, the same reasoning the usage
+// base applies to undated usage.
+func (f AnalyticsFilter) clauseFor(timeExpr string) (string, []any) {
 	var clauses string
 	var args []any
 	if f.ProjectID != 0 {
@@ -271,11 +335,11 @@ func (f AnalyticsFilter) clause() (string, []any) {
 	}
 	if !f.Since.IsZero() {
 		args = append(args, f.Since)
-		clauses += fmt.Sprintf(" AND ue.occurred_at >= $%d", len(args))
+		clauses += fmt.Sprintf(" AND %s >= $%d", timeExpr, len(args))
 	}
 	if !f.Until.IsZero() {
 		args = append(args, f.Until)
-		clauses += fmt.Sprintf(" AND ue.occurred_at < $%d", len(args))
+		clauses += fmt.Sprintf(" AND %s < $%d", timeExpr, len(args))
 	}
 	return clauses, args
 }
@@ -336,6 +400,7 @@ func (s *Store) analyticsByModel(ctx context.Context, q querier, f AnalyticsFilt
 		        coalesce(sum(ue.output_tokens), 0),
 		        coalesce(sum(ue.cache_read_tokens), 0),
 		        coalesce(sum(ue.cache_write_tokens), 0),
+		        coalesce(sum(ue.reasoning_tokens), 0),
 		        count(DISTINCT ue.session_id),
 		        coalesce(`+costIncompleteExpr+`, false)
 		   FROM usage_events ue
@@ -369,6 +434,7 @@ func (s *Store) analyticsByAgent(ctx context.Context, q querier, f AnalyticsFilt
 		        coalesce(sum(ue.output_tokens), 0),
 		        coalesce(sum(ue.cache_read_tokens), 0),
 		        coalesce(sum(ue.cache_write_tokens), 0),
+		        coalesce(sum(ue.reasoning_tokens), 0),
 		        count(DISTINCT ue.session_id),
 		        coalesce(`+costIncompleteExpr+`, false)
 		   FROM usage_events ue
@@ -395,7 +461,7 @@ func scanBreakdowns(rows interface {
 	var out []Breakdown
 	for rows.Next() {
 		var b Breakdown
-		if err := rows.Scan(&b.Label, &b.CostUSD, &b.Input, &b.Output, &b.CacheRead, &b.CacheWrite, &b.Sessions, &b.CostIncomplete); err != nil {
+		if err := rows.Scan(&b.Label, &b.CostUSD, &b.Input, &b.Output, &b.CacheRead, &b.CacheWrite, &b.Reasoning, &b.Sessions, &b.CostIncomplete); err != nil {
 			return nil, err
 		}
 		out = append(out, b)

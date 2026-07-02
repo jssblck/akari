@@ -391,10 +391,10 @@ func TestCostIncompleteForUnknownModel(t *testing.T) {
 }
 
 // TestClaudeDuplicateUsageCountedOnce reproduces the Claude rollup over-count.
-// Claude repeats the same usage block across lines (a sidechain or summary
-// duplicate carries the same message id, hence the same dedup_key), so the usage
-// ledger keeps exactly one row while a naive per-region fold added every
-// occurrence (the 2.4x to 3.6x inflation seen in production). The invariant the
+// Claude streams one assistant message across several lines that share its message
+// id, hence the same dedup_key, so the usage ledger keeps exactly one row while a
+// naive per-region fold added every occurrence (the 2.4x to 3.6x inflation seen in
+// production). The invariant the
 // fix lands: the session rollups equal the deduped ledger, so total_* matches
 // sum(usage_events.*) rather than a multiple of it, and message_count matches the
 // count of messages rows.

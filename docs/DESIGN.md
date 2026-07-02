@@ -465,9 +465,9 @@ The session rollups (`message_count`, `user_message_count`, the token totals, an
 the reducer carries. The projection inserts messages and usage under their unique
 indexes with `ON CONFLICT DO NOTHING`, so a duplicate is dropped from the ledger,
 and only an insert that survives that guard contributes to the rollup. This
-matters because a Claude transcript repeats the same usage block across sidechain
-and summary lines (the same `dedup_key`), so the ledger keeps one row while the
-raw region carries several. Folding the persisted set keeps the invariant that,
+matters because a Claude transcript streams one assistant message across several
+lines that share a `dedup_key`, so the ledger keeps one row while the raw region
+carries several. Folding the persisted set keeps the invariant that,
 for every agent, `sessions.total_*` equals the matching `sum` over `usage_events`
 and `message_count` equals the count of `messages` rows. `cost_incomplete` is
 derived the same way: a surviving usage row that carries tokens but no priced cost
@@ -1135,32 +1135,39 @@ environment.
 
 ## Repository layout
 
-The current scaffold (`main.go` plus `internal/greet`) is placeholder and will
-be replaced by:
-
 ```
 cmd/
   akari/            # client binary
-  akari-server/     # server binary
+  akari-server/     # server binary (plus sweep, reparse, dev-seed subcommands)
 internal/
-  parser/           # claude, codex, pi parsers + normalized types (server-side)
+  parser/           # claude, codex, pi parsers + normalized types (shared)
   casenc/           # client-side CAS body encoder (zstd policy, deterministic)
   gitremote/        # remote URL canonicalization
   pricing/          # compiled-in rate table + cost computation
+  guide/            # embedded user-guide chapters + Markdown rendering
+  devseed/          # dev-seed roster and ingest driver
+  selfupdate/       # client self-update against GitHub releases
+  shutdown/         # signal-driven shutdown context
+  version/          # build version stamp
   server/
-    httpapi/        # ingest + read handlers
-    web/            # templ templates, HTMX fragments
-    store/          # postgres queries, CAS (large objects), migrations
+    httpapi/        # ingest + read handlers, OAuth, SSE
+    mcpserver/      # MCP tools over the read surface
+    ogimage/        # Open Graph preview card rendering
+    web/            # templ templates, HTMX fragments, static assets
+    store/          # postgres queries, CAS (large objects), migration runner
+    storetest/      # per-test database provisioning
     auth/           # password, tokens, cookies
-    parse/          # parse pipeline + reparse
+    parse/          # parse pipeline
+    reparse/        # fleet-wide reparse service
   client/
     discover/       # session file enumeration
     resolve/        # cwd -> git remote, skip-and-warn
+    syncer/         # scheduling across sessions
     upload/         # ingest protocol driver (stateless)
     watch/          # fsnotify + polling fallback
     daemon/         # per-OS background management
   config/           # shared config loading
-migrations/         # forward-only SQL
+migrations/         # forward-only SQL, embedded into the server
 docker-compose.yml
 Dockerfile
 ```

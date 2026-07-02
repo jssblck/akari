@@ -45,6 +45,12 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "settle" {
+		if err := runSettle(os.Args[2:]); err != nil {
+			log.Fatalf("akari-server settle: %v", err)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "dev-seed" {
 		if err := runDevSeed(os.Args[2:]); err != nil {
 			log.Fatalf("akari-server dev-seed: %v", err)
@@ -134,6 +140,42 @@ func run() error {
 	} else {
 		close(ogDone)
 	}
+	// Materialize per-session signals for settled sessions on the same footing as the
+	// sweep. The ingest append path deliberately leaves signals uncomputed (see
+	// AdvanceProjection) so ingest stays linear and a live session is never graded with a
+	// time-dependent outcome; this loop fills the grade in once a session has been idle
+	// past the abandoned threshold. settleDone lets shutdown wait for an in-flight pass
+	// before the pool closes.
+	settleDone := make(chan struct{})
+	if cfg.SignalsSettleInterval > 0 {
+		go func() {
+			defer close(settleDone)
+			runSettleMaintenance(rootCtx, st, cfg.SignalsSettleInterval)
+		}()
+	} else {
+		close(settleDone)
+	}
+
+	// Backfill the per-session cache-savings rollup for any session the parse-time fold never
+	// reached: a session ingested before the column existed whose reparse fails keeps its
+	// usage_events but a zero rollup, which the epoch reparse cannot fix. The saving is a pure
+	// function of usage_events, so this prices it directly, independent of the parse. This
+	// startup pass is a self-limiting, idempotent one-shot (not a loop), run in the background so
+	// a large first pass does not delay accepting connections; backfillDone lets shutdown wait for
+	// it. It is the fast initial catch-up only: runSettleMaintenance re-runs the same drain each
+	// tick, which is what consumes candidates minted after this pass (a pricing rolling deploy
+	// keeps producing them), so a session is never left provisional once the settle loop is on.
+	backfillDone := make(chan struct{})
+	go func() {
+		defer close(backfillDone)
+		if n, err := st.BackfillCacheSavings(rootCtx); err != nil {
+			if !errors.Is(err, context.Canceled) {
+				log.Printf("cache-savings backfill: %v", err)
+			}
+		} else if n > 0 {
+			log.Printf("cache-savings backfill: priced %d session(s)", n)
+		}
+	}()
 
 	// Registered after st.Close so LIFO runs it first: cancel the background loops
 	// and wait for them to finish before the pool closes, on every return path
@@ -143,6 +185,8 @@ func run() error {
 		stop()
 		<-sweepDone
 		<-ogDone
+		<-settleDone
+		<-backfillDone
 	}()
 
 	srv := &http.Server{
@@ -173,6 +217,8 @@ func run() error {
 		}
 		<-sweepDone
 		<-ogDone
+		<-settleDone
+		<-backfillDone
 		close(idleClosed)
 	}()
 
@@ -181,6 +227,9 @@ func run() error {
 	}
 	if cfg.OGCleanupInterval > 0 {
 		log.Printf("overview preview cache cleanup every %s", cfg.OGCleanupInterval)
+	}
+	if cfg.SignalsSettleInterval > 0 {
+		log.Printf("signals settle pass every %s", cfg.SignalsSettleInterval)
 	}
 	log.Printf("akari-server listening on %s", cfg.Listen)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

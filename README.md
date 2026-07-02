@@ -21,7 +21,9 @@ the background, so there is no manual step after a parser upgrade.
 - **The server** stores the raw bytes, parses them into a normalized projection
   (messages, tool calls, token usage), prices usage from a compiled-in rate
   table, and serves a web UI. Bulky tool bodies go into a content-addressed store
-  (Postgres large objects), deduped across sessions.
+  (Postgres large objects), deduped across sessions. From the projection it also
+  derives per-session signals (an outcome, a quality grade, and input and load
+  measures) that feed the Insights analytics.
 - **Projects** are keyed by canonical git remote, so the same repo cloned into
   several worktrees or machines collapses into one project.
 
@@ -183,6 +185,7 @@ yourself. It reads `AKARI_DATABASE_URL` and the upload target from `AKARI_URL`
 | `AKARI_SWEEP_INTERVAL` | `1h` | How often the server reclaims orphaned CAS blobs. A Go duration (`30m`, `2h`); `0` disables the background sweep. |
 | `AKARI_OG_CACHE_TTL` | `1h` | How long a rendered Open Graph preview card is served from cache before the next request re-renders it. A Go duration; must be positive (the card is always cached). |
 | `AKARI_OG_CLEANUP_INTERVAL` | `24h` | How often the server prunes expired preview cards (older than `AKARI_OG_CACHE_TTL`) from the cache. A Go duration; `0` disables the sweep. |
+| `AKARI_SIGNALS_SETTLE_INTERVAL` | `5m` | How often the server computes per-session quality signals (outcome, grade, prompt hygiene, context health) for sessions that have settled: a session is graded once it has been idle past the abandoned threshold, off the ingest path, so a live session is never graded with an outcome that would drift. A Go duration; `0` disables the background pass (signals then land only on reparse or via `akari-server settle`). |
 
 Migrations are embedded and applied on startup, so the server is safe to restart.
 
@@ -193,6 +196,7 @@ akari-server            # run the HTTP server (default)
 akari-server reparse    # force a rebuild of every projection from stored raw bytes
 akari-server reparse --agent claude   # limit a reparse to one agent
 akari-server sweep      # reclaim orphaned CAS blobs now
+akari-server settle     # compute quality signals for every settled session now
 akari-server dev-seed   # fill a local server with example data (see Example data above)
 akari-server update     # update to the latest release (see Updating below)
 akari-server version    # print the build version and exit
@@ -203,7 +207,9 @@ parser epoch against the epoch the stored data was last rebuilt under and, when 
 differ, reparses in the background on startup. An admin can also force one from the
 account page. `akari-server reparse` is the manual escape hatch and forces a run
 regardless of the epoch; it sweeps orphaned blobs afterward, as the automatic run
-does. `sweep` is the manual form of the periodic background sweep.
+does. `sweep` is the manual form of the periodic background sweep, and `settle` is
+the manual form of the periodic signals pass (it grades every settled session that
+is missing a current-version row, then exits).
 
 ## Running a client
 
@@ -247,13 +253,21 @@ warning rather than uploaded under an ambiguous project.
 
 ## The web UI
 
-A persistent left sidebar carries the primary sections (Overview, Sessions,
-Projects, Search, Account); the signed-in user and log-out sit at its foot.
+A persistent left sidebar carries the primary sections (Overview, Insights,
+Projects, Sessions, Account); the signed-in user and log-out sit at its foot.
 
 - **Overview**: the landing surface. A fleet-wide usage panel bounded to a
   trailing window (7, 30, or 90 days, a year, or all of history): cost, combined
   tokens, and session totals, a daily-activity heatmap, and a by-model and
   by-agent breakdown, every figure scoped to the chosen window.
+- **Insights**: the cross-cutting analytics surface, scoped to the same trailing
+  window but reading how sessions went rather than what they cost. Headline bands
+  for concurrency (peak overlap, busiest user, average) and velocity (turn-cycle
+  latency percentiles and throughput); a tools band (call volume, error rate, and
+  the busiest tools banded by reliability); a prompt-hygiene band (how clearly the
+  window's prompts set the agent up); a context-health band (how heavy sessions
+  got and how often they shed context); distributions of quality grades, outcomes,
+  and session archetypes; and a file-churn list of paths edited more than once.
 - **Sessions**: every session across all projects in one place, with a faceted
   filter rail (agent, project, user, and machine, each with counts) and a project
   column, so a run is findable without first choosing its project.
@@ -266,19 +280,44 @@ Projects, Search, Account); the signed-in user and log-out sit at its foot.
   agent, user, and machine filters, and the same analytics panel scoped to the
   project.
 - **Session view**: a sticky stats header (tokens in/out/cache, cost, duration,
-  message counts) and the transcript: messages, thinking, and tool calls, with a
-  timeline rail that maps the turns and flags errored tools. Tool input and result
-  bodies show as size/type chips that expand inline on click, fetched from the
-  CAS; an editing tool's input expands as a rendered diff. A density toggle
-  switches between a comfortable and a compact reading mode. Subagent sessions are
-  listed under the session that spawned them. In-progress sessions update live
-  over server-sent events.
+  message counts, and a Quality tile carrying the session's grade and outcome) and
+  the transcript: messages, thinking, and tool calls, with a timeline rail that
+  maps the turns and flags errored tools. The Quality and Tokens tiles reveal
+  their drivers on hover: the tool-health counts and prompt-hygiene flags behind
+  the grade, and the peak context and reset count behind the tokens. Tool input
+  and result bodies show as size/type chips that expand inline on click, fetched
+  from the CAS; an editing tool's input expands as a rendered diff. A density
+  toggle switches between a comfortable and a compact reading mode. Subagent
+  sessions are listed under the session that spawned them. In-progress sessions
+  update live over server-sent events.
 - **Charts** are rendered by a small dependency-free SVG module bundled as a
   static asset; the UI fonts (Geist and Geist Mono) are self-hosted, so the binary
   stays self-contained with no Node toolchain.
 - **Account**: API tokens (ingest, read, or full scope), connected MCP apps (with
   a one-click disconnect that revokes their tokens), invites for admins, and a
   Publicity control to publish your own usage overview (see below).
+
+### Session quality and insights
+
+Every session carries derived signals computed from its own projection, never
+from a label the agent emits. An outcome (completed, abandoned, errored, or
+unknown, each with a confidence) is inferred from the last substantive turn,
+unresolved tool calls, and any trailing failures. A 0-100 quality score and an
+A-F grade come from a penalty model over tool health: failures, immediate
+retries, edit churn, and the longest failure streak, weighed with the outcome.
+Two further signal sets are informational and never move the grade. Prompt
+hygiene reads the human's input (terse, repeated, or no-code-context prompts, and
+unstructured openings); context health reads resource load (the heaviest
+single-turn context a session held, as a raw token count independent of any
+model's window, and the number of inferred context resets, the sharp drops that
+read as a compaction or a clear).
+
+The signals live in their own table, rebuilt from the session's stored messages,
+tool calls, and usage on catch-up or reparse. They sit outside the token-rollup
+invariant, so `sessions.total_*` still equals the sum over `usage_events`. A signals version stamps each row: the analytics
+count only rows at the current version, and a fleet-wide reparse epoch rebuilds
+the whole corpus when the model changes, so a scoring change reaches old sessions
+on the next deploy without re-uploading anything.
 
 ### Visibility and publishing
 
