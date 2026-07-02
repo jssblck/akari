@@ -36,12 +36,17 @@
 
 /* ---- Tokens ---- */
 :root {
-  --bg: #14131b;
-  --surface: #1b1a24;
-  --surface-2: #232230;
-  --surface-3: #2b2939;
-  --border: #383548;
-  --border-strong: #4a4660;
+  /* The substrate is a deep, near-neutral graphite ladder: the ground reads as a
+     genuinely dark base and each panel step carries only a faint violet cast, so
+     the pastel signals and text (unchanged) carry the contrast rather than a
+     uniformly lilac-tinted haze. Chroma is roughly halved against the pastels and
+     held flat up the ladder; see DESIGN.md for the tonal reasoning. */
+  --bg: #0c0a0e;
+  --surface: #18161b;
+  --surface-2: #242228;
+  --surface-3: #302e35;
+  --border: #3e3b44;
+  --border-strong: #57535f;
   --text: #e6e3f0;
   --subtext: #c5c1d6;
   --muted: #9a94ad;
@@ -53,8 +58,8 @@
   --err: #ef9aa9;
   --warn: #f0c592;
   --info: #92cfd4;
-  --msg-user: #272336;
-  --msg-assistant: #1f1f2b;
+  --msg-user: #201e26;
+  --msg-assistant: #1b1b1f;
 
   --sans: "Geist", "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
