@@ -73,13 +73,24 @@ func sampleInsights() store.Insights {
 				{Key: "abandoned", Count: 1}, {Key: "unknown", Count: 4},
 			},
 			Sessions: 15,
+			Graded:   11, // 15 total minus the 4 unscored; GradedNote reads 73%
 		},
 		Archetypes: []store.LabeledCount{
 			{Key: "quick", Count: 6}, {Key: "standard", Count: 5}, {Key: "deep", Count: 2},
 			{Key: "marathon", Count: 1}, {Key: "automation", Count: 1},
 		},
+		Users: store.UserQualityStats{
+			Users: []store.UserQuality{
+				{Username: "ada", Sessions: 9, Graded: 7, Completed: 6, Abandoned: 1, Errored: 1, Unknown: 1, AvgScore: f64(82.5)},
+				{Username: "grace", Sessions: 6, Graded: 4, Completed: 3, Abandoned: 0, Errored: 1, Unknown: 2, AvgScore: nil},
+			},
+			Clipped: 1,
+		},
 	}
 }
+
+// f64 boxes a float for the nullable AvgScore fixtures.
+func f64(v float64) *float64 { return &v }
 
 // The Insights page renders the three distribution panels with their bars, the unscored
 // grade bucket labeled rather than blank, the in-window session count, and the
@@ -140,12 +151,59 @@ func TestInsightsPageRendersDistributions(t *testing.T) {
 		`>Quick<`,                            // archetype label, title-cased
 		`class="bar-fill"`,                   // reuses the breakdown bar markup
 		`data-color="` + barSage + `"`,       // a graded bar carries its tone
-		`hx-get="/insights?range=7d"`,        // the window selector refetches this page
+		`73% graded`,                         // the Grades panel coverage note (11 of 15)
+		`class="bar-link"`,                   // a distribution bar renders as a drill-down link (the whole-row link)
+		// The drill-downs carry the active window (range=30d) and empty=1 so a bar's count and the
+		// feed it opens describe the same trailing window and the same empty-session policy the panel
+		// counted under, rather than the bar counting 30 days while the link opens the all-time feed.
+		`href="/sessions?empty=1&amp;outcome=completed&amp;range=30d"`, // the outcome bar drills into the windowed feed
+		`href="/sessions?empty=1&amp;grade=A&amp;range=30d"`,           // a grade bar drills into its letter, windowed
+		`href="/sessions?empty=1&amp;grade=unscored&amp;range=30d"`,    // the unscored bucket uses the sentinel
+		`>People<`, // the per-user quality panel
+		`href="/sessions?empty=1&amp;range=30d&amp;user=ada"`, // a username drills into that author's windowed sessions
+		`class="mix-bar"`, // the per-row stacked outcome bar
+		`6 completed, 1 abandoned, 1 errored, 1 unknown`, // the mix hover title spells out the counts
+		`7 of 9`,                      // ada's graded coverage
+		`>82.5<`,                      // ada's average score, one decimal
+		`+1 more user not shown`,      // the clipped-tail note
+		`hx-get="/insights?range=7d"`, // the window selector refetches this page
 		`hx-select="#insights"`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("insights page missing %q", want)
 		}
+	}
+}
+
+// The People panel hides on a single-author instance (its one row would only restate the
+// fleet distributions under a name) and dashes an author whose average score is unmeasured.
+func TestInsightsPagePeoplePanel(t *testing.T) {
+	p := Page{Title: "Insights", LoggedIn: true, Active: "insights", Username: "ada"}
+	ranges := RangeOptions("/insights", nil, "30d")
+
+	// Two authors: the panel renders, and Grace's nil AvgScore dashes rather than reading 0.
+	two := renderComponent(t, InsightsPage(p, sampleInsights(), "30d", ranges))
+	if !strings.Contains(two, `>People<`) {
+		t.Error("people panel should render for two authors")
+	}
+	// Grace's Avg score cell is a dash (nil AvgScore), in the last column of her row. Her link
+	// carries the active window (range=30d) and empty=1 so it opens her windowed sessions under
+	// the same empty-session policy the panel counted them under.
+	if !strings.Contains(two, `href="/sessions?empty=1&amp;range=30d&amp;user=grace"`) {
+		t.Error("grace's row should link to her windowed sessions")
+	}
+
+	// One author: the panel hides entirely.
+	ins := sampleInsights()
+	ins.Users = store.UserQualityStats{Users: []store.UserQuality{
+		{Username: "ada", Sessions: 9, Graded: 7, Completed: 9, AvgScore: f64(82.5)},
+	}}
+	one := renderComponent(t, InsightsPage(p, ins, "30d", ranges))
+	if strings.Contains(one, `>People<`) {
+		t.Error("people panel should hide for a single author")
+	}
+	if strings.Contains(one, `id="ins-people"`) {
+		t.Error("people panel wrapper should not render for a single author")
 	}
 }
 

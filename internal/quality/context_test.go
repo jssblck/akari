@@ -96,3 +96,31 @@ func TestContextHealth(t *testing.T) {
 		})
 	}
 }
+
+// TestIsContextReset pins the exported predicate at its two boundaries, so the folder and the
+// transcript's shed markers (which both call it) can never drift on which turn sheds context.
+// The rule is a fall to at most half the prior turn, from a prior turn at or above the keep
+// floor: the fraction is inclusive at exactly half, and the floor is inclusive at exactly the
+// floor value.
+func TestIsContextReset(t *testing.T) {
+	cases := []struct {
+		name      string
+		prev, cur int64
+		wantReset bool
+	}{
+		{"drop to under half from a large context resets", 180000, 20000, true},
+		{"drop to exactly half from at-floor context resets", resetKeepFloorTokens, resetKeepFloorTokens / 2, true},
+		{"a shallow dip (more than half remains) does not reset", 120000, 90000, false},
+		{"a drop from just under the floor does not reset", resetKeepFloorTokens - 1, 0, false},
+		{"the floor itself is inclusive", resetKeepFloorTokens, 0, true},
+		{"growth never resets", 30000, 80000, false},
+		{"a flat turn does not reset", 100000, 100000, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsContextReset(tc.prev, tc.cur); got != tc.wantReset {
+				t.Errorf("IsContextReset(%d, %d) = %v, want %v", tc.prev, tc.cur, got, tc.wantReset)
+			}
+		})
+	}
+}

@@ -43,6 +43,38 @@ func TestRangeSince(t *testing.T) {
 	}
 }
 
+// RangeLabel returns each known range key's display label, and falls back to the key itself
+// for an unknown or empty value so a stale ?range chip still reads something rather than
+// rendering blank.
+func TestRangeLabel(t *testing.T) {
+	for _, dr := range DateRanges {
+		if got := RangeLabel(dr.Key); got != dr.Label {
+			t.Errorf("RangeLabel(%q) = %q, want %q", dr.Key, got, dr.Label)
+		}
+	}
+	for _, bad := range []string{"", "bogus", "30D"} {
+		if got := RangeLabel(bad); got != bad {
+			t.Errorf("RangeLabel(%q) = %q, want the key itself back", bad, got)
+		}
+	}
+}
+
+// RangeBounds is the sessions feed's whitelist: only a known trailing window bounds the
+// list, so an "all", empty, or hand-typed junk key leaves the feed unbounded rather than
+// falling to ParseRange's trailing-year default.
+func TestRangeBounds(t *testing.T) {
+	for _, k := range []string{"7d", "30d", "90d", "year"} {
+		if !RangeBounds(k) {
+			t.Errorf("RangeBounds(%q) = false, want true (bounded window)", k)
+		}
+	}
+	for _, k := range []string{"all", "", "bogus", "month"} {
+		if RangeBounds(k) {
+			t.Errorf("RangeBounds(%q) = true, want false (unbounded)", k)
+		}
+	}
+}
+
 // RangeOptions builds one button per window, each refetching basePath at its own
 // range. Anything in preserve rides along except an incoming range (each button
 // sets its own) and empty values (dropped), so a stray ?range= or a blank filter

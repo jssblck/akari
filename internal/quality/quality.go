@@ -7,6 +7,11 @@
 // retries, churn, an errored ending), then map the remainder to a letter.
 package quality
 
+import (
+	"strconv"
+	"strings"
+)
+
 // Version is the signals-and-scoring version. Bump it whenever the set of signals
 // computed, the penalty weights, or the grade thresholds change, so a stored row
 // records which model produced it. A reparse rebuilds every row to the running
@@ -22,7 +27,18 @@ package quality
 // ContextHealth) describes resource load, not whether the session went well; it reads a
 // session's own usage turns, since a subagent is a separate session in its own transcript
 // file and never mixes into another session's context.
-const Version = 1
+//
+// Version 2 sharpens outcome classification so a settled session gets a verdict where v1
+// gave up. Two cases that v1 always left unknown now resolve: an automation run (no human
+// turn) that reached a substantive assistant last word and has gone idle reads as
+// completed, and a session that ends mid-tool once it has gone idle past the abandoned
+// threshold reads as errored for automation (the run was killed or crashed) or abandoned
+// for a human (someone interrupted or walked away). This lifts the "unknown outcome, and
+// therefore unscored" share without inventing a verdict for a still-live session: a
+// pending call or an unsettled automation run stays unknown until the settle pass sees it
+// idle. The signal set, the penalty weights, and the grade thresholds are unchanged, so
+// scoring of a given Signals value is identical to v1; only the outcome fed into it moved.
+const Version = 2
 
 // PromptFactsVersion stamps the per-message prompt-hygiene facts ClassifyPrompt materializes on
 // each human message (see the messages.prompt_* columns and store.gatherPromptHygiene). It is
@@ -91,18 +107,43 @@ type Facts struct {
 // never read as "completed" merely because the assistant spoke last.
 func Classify(f Facts) (Outcome, Confidence) {
 	switch {
-	case f.UserMessages == 0:
-		// No human turn at all: a subagent or an automated run, not something to grade
-		// as completed or abandoned.
-		return OutcomeUnknown, ConfLow
-	case f.ToolCallPending:
-		// A tool call with no result means the transcript stops mid-action (the session
-		// is still live, or it was truncated). Either way the ending is not yet known.
-		return OutcomeUnknown, ConfLow
 	case f.TrailingFailures >= 3:
-		// The session ends on three or more consecutive failing tool calls, so it
-		// stopped in a broken state rather than at a resolved answer.
+		// A run of three or more failing tool calls at the tail is objective evidence
+		// that the session stopped in a broken state, and it stands independent of who
+		// was in the loop, so it wins first. This is safe against a still-live session:
+		// a pending call at the very end has a NULL result_status, which breaks the
+		// trailing-error suffix the store's gather query counts, so TrailingFailures is 0
+		// whenever the last call is still pending. A tail run this long therefore only
+		// forms once those calls have actually resolved as failures.
 		return OutcomeErrored, ConfHigh
+	case f.ToolCallPending && !f.IdleLongEnough:
+		// A tool call with no result on a session that is still recent may simply be
+		// mid-action (the run is live, or the tool is slow), so hold the verdict rather
+		// than call a working session broken.
+		return OutcomeUnknown, ConfLow
+	case f.ToolCallPending && f.UserMessages == 0:
+		// A run that died mid-tool and has since gone idle, with no human ever in the
+		// loop, is automation that was killed or crashed: nothing came back to resume it.
+		// Errored, at medium confidence because we infer the death from the idle gap
+		// rather than a terminal marker.
+		return OutcomeErrored, ConfMedium
+	case f.ToolCallPending:
+		// A human session that stopped mid-tool and has gone idle past the threshold: the
+		// person interrupted the tool or walked away before it finished. Abandoned, at
+		// medium confidence for the same heuristic-idle reason.
+		return OutcomeAbandoned, ConfMedium
+	case f.UserMessages == 0:
+		// No human turn at all: a subagent or scripted run. If it reached a substantive
+		// assistant last word and has settled (idle past the threshold, so no more is
+		// coming), it delivered an answer and ran to completion: completed at medium
+		// confidence, medium because no human ever confirmed the result. A run that is not
+		// yet idle stays unknown so a live streaming subagent is never graded early; the
+		// settle pass re-grades it once it settles. No assistant word at all (only tool
+		// plumbing) leaves nothing to read.
+		if f.LastAssistantOrd >= 0 && f.IdleLongEnough {
+			return OutcomeCompleted, ConfMedium
+		}
+		return OutcomeUnknown, ConfLow
 	case f.LastAssistantOrd < 0 && f.LastUserOrd < 0:
 		// No substantive turn from either side (only tool plumbing): nothing to read.
 		return OutcomeUnknown, ConfLow
@@ -183,6 +224,63 @@ func Score(s Signals) (score int, grade string, scored bool) {
 		score = 0
 	}
 	return score, gradeFor(score), true
+}
+
+// ScoreBreakdownItem is one line of the score arithmetic: a human-readable label for a
+// penalty and the positive number of points it subtracted. The UI stacks these to show a
+// reader why a session scored what it did, so a low grade is explained rather than
+// asserted.
+type ScoreBreakdownItem struct {
+	Label  string // e.g. "errored ending", "3 tool failures"
+	Points int    // the penalty subtracted, always > 0
+}
+
+// ScoreBreakdown returns the penalty lines behind Score for the same Signals, in the same
+// order Score applies them (outcome, failures, retries, churn, streak) and with the same
+// caps, so the sum of the returned Points equals 100 minus the score (before the clamp at
+// zero). It returns nil for an unscored session (the same gating as Score: an unknown
+// outcome with no tool signal), since there is no arithmetic to explain. A scored session
+// with no penalties (a clean completed run) also returns nil: there is nothing subtracted,
+// so there is nothing to list.
+func ScoreBreakdown(s Signals) []ScoreBreakdownItem {
+	if s.Outcome == OutcomeUnknown && !s.hasToolSignal() {
+		return nil
+	}
+	var items []ScoreBreakdownItem
+	switch s.Outcome {
+	case OutcomeErrored:
+		items = append(items, ScoreBreakdownItem{Label: "errored ending", Points: penErrored})
+	case OutcomeAbandoned:
+		items = append(items, ScoreBreakdownItem{Label: "abandoned", Points: penAbandoned})
+	}
+	if p := min(s.ToolFailures*penPerFailure, capFailures); p > 0 {
+		items = append(items, ScoreBreakdownItem{Label: plural(s.ToolFailures, "tool failure"), Points: p})
+	}
+	if p := min(s.ToolRetries*penPerRetry, capRetries); p > 0 {
+		items = append(items, ScoreBreakdownItem{Label: plural(s.ToolRetries, "retry"), Points: p})
+	}
+	if p := min(s.EditChurn*penPerChurn, capChurn); p > 0 {
+		items = append(items, ScoreBreakdownItem{Label: plural(s.EditChurn, "churned edit"), Points: p})
+	}
+	if s.LongestFailureStreak >= failureStreakFloor {
+		items = append(items, ScoreBreakdownItem{Label: "failure streak", Points: penFailureStreak})
+	}
+	return items
+}
+
+// plural renders a count with a noun, pluralized by a trailing "s" (or "ies" when the
+// singular ends in "y", so "retry" becomes "2 retries"), so a breakdown label reads
+// grammatically for the handful of nouns Score uses.
+func plural(n int, singular string) string {
+	noun := singular
+	if n != 1 {
+		if strings.HasSuffix(singular, "y") {
+			noun = strings.TrimSuffix(singular, "y") + "ies"
+		} else {
+			noun = singular + "s"
+		}
+	}
+	return strconv.Itoa(n) + " " + noun
 }
 
 // Archetype is a coarse shape-of-session label, the kind agentsview surfaces to let a

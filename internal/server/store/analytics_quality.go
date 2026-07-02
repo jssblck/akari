@@ -29,6 +29,13 @@ type QualityDistribution struct {
 	Grades   []LabeledCount // canonical order: A, B, C, D, F, then "" (unscored)
 	Outcomes []LabeledCount // canonical order: completed, errored, abandoned, unknown
 	Sessions int            // total scoped sessions (every session falls in one bucket)
+	// Graded is how many scoped sessions carry a gated (current-version, non-stale) grade,
+	// the complement of the unscored bucket. The Insights Grades panel reads it as a
+	// coverage figure ("N% graded"): the share of the cohort a letter grade actually
+	// speaks for, so a distribution dominated by the unscored bar reads as thin coverage
+	// rather than a real spread. It is Sessions minus the unscored count, but computed in
+	// the same grade scan with a FILTER so it needs no second pass over the cohort.
+	Graded int
 }
 
 // gradeOrder and outcomeOrder fix the bar order so a distribution reads the same every
@@ -79,10 +86,15 @@ func (s *Store) qualityDistributionFrom(ctx context.Context, q querier, f Analyt
 	if err != nil {
 		return QualityDistribution{}, fmt.Errorf("outcome distribution: %w", err)
 	}
+	// Graded is the cohort minus its unscored bucket. It falls straight out of the grade
+	// scan already run (the "" key holds the sessions with no gated grade), so it needs no
+	// FILTER clause or second pass: subtracting the one bucket the same scan produced is
+	// exact and cheaper than re-counting.
 	return QualityDistribution{
 		Grades:   orderedCounts(gradeOrder, grades),
 		Outcomes: orderedCounts(outcomeOrder, outcomes),
 		Sessions: gTotal,
+		Graded:   gTotal - grades[""],
 	}, nil
 }
 
@@ -141,4 +153,113 @@ func orderedCounts(order []string, counts map[string]int) []LabeledCount {
 		out = append(out, LabeledCount{Key: k, Count: counts[k]})
 	}
 	return out
+}
+
+// maxUserQualityRows caps the per-user quality table at its busiest authors, so an
+// instance with many accounts still reads as a short leaderboard of who ran the most
+// sessions in the window. The count of authors beyond the cap rides UserQualityStats.Clipped
+// so the panel can note the tail it dropped, the same top-N shape fileChurnFrom uses.
+const maxUserQualityRows = 12
+
+// UserQuality is one author's quality picture over a scope: how many sessions they ran, how
+// many carry a gated grade, how those sessions split across outcomes, and their average
+// quality score. The outcome counts partition Sessions (Unknown is the residue, so the four
+// always sum to Sessions), which lets the panel draw one stacked magnitude bar per row. AvgScore
+// is nil when no session in scope is scored, so the panel dashes it rather than printing a zero
+// that would read as a real (bad) average.
+type UserQuality struct {
+	Username  string
+	Sessions  int
+	Graded    int
+	Completed int
+	Abandoned int
+	Errored   int
+	Unknown   int
+	AvgScore  *float64 // nil when no scored session in scope
+}
+
+// UserQualityStats is the per-user quality leaderboard: the busiest authors' rows plus a count
+// of the authors clipped past the cap, so the panel can note the tail. Users is ordered by
+// session count descending then username, so the reader scans from the heaviest author down and
+// ties read alphabetically rather than in arbitrary GROUP BY order.
+type UserQualityStats struct {
+	Users   []UserQuality
+	Clipped int
+}
+
+// userQualityFrom aggregates each author's session count, outcome mix, graded coverage, and
+// average score for the Insights People panel. It scopes over sessions with the same analytics
+// filter the distributions use (clauseFor on s.started_at, so a windowed view counts sessions
+// that started in the window and a per-project or per-user scope narrows identically), joins the
+// author, and LEFT JOINs the gated signals row so an ungraded session still counts under its
+// author with an 'unknown' outcome and no score rather than dropping out. Every figure derives
+// from that one gated join with FILTER aggregates, so the row is one scan per author.
+//
+// The gate is the shared idiom (sig.signals_version = quality.Version AND NOT s.signals_stale):
+// a missing, superseded, or stale row reads as ungraded, so Graded and AvgScore speak only for
+// the sessions a current grade actually covers, matching the distribution buckets and the
+// session-list drill-down. Unknown is Sessions minus the three known outcomes, computed in Go so
+// the four counts partition Sessions exactly (a coalesced 'unknown' from the join and the residue
+// are the same set). AvgScore rounds to one decimal and is left nil when the author has no scored
+// session in scope, the "unmeasured" default a zero would misread as a real average.
+//
+// The busiest maxUserQualityRows authors are kept, so the cap lives in SQL: the query LIMITs to
+// that many rows and Postgres returns the top slice by a bounded top-N sort rather than streaming
+// every author for the loop to discard. The clipped-tail count needs the whole-set total, which a
+// windowed count(*) OVER () could not give under a LIMIT, so it comes from a scalar count over the
+// same grouped set (agg is referenced twice, so Postgres materializes it once and the grouping runs
+// a single time).
+func (s *Store) userQualityFrom(ctx context.Context, q querier, f AnalyticsFilter) (UserQualityStats, error) {
+	var out UserQualityStats
+
+	filter, args := f.clauseFor("s.started_at")
+	versionArg := len(args) + 1
+	args = append(args, quality.Version)
+	limitArg := len(args) + 1
+	args = append(args, maxUserQualityRows)
+	rows, err := q.Query(ctx, fmt.Sprintf(
+		`WITH agg AS (
+		   SELECT u.username AS username,
+		          count(*) AS sessions,
+		          count(*) FILTER (WHERE sig.grade IS NOT NULL) AS graded,
+		          count(*) FILTER (WHERE sig.outcome = 'completed') AS completed,
+		          count(*) FILTER (WHERE sig.outcome = 'abandoned') AS abandoned,
+		          count(*) FILTER (WHERE sig.outcome = 'errored') AS errored,
+		          round(avg(sig.score) FILTER (WHERE sig.score IS NOT NULL), 1) AS avg_score
+		     FROM sessions s
+		     JOIN users u ON u.id = s.user_id
+		     LEFT JOIN session_signals sig
+		       ON sig.session_id = s.id AND sig.signals_version = $%d AND NOT s.signals_stale
+		    WHERE TRUE`+filter+`
+		    GROUP BY u.username
+		 )
+		 SELECT username, sessions, graded, completed, abandoned, errored, avg_score,
+		        (SELECT count(*) FROM agg) AS authors
+		   FROM agg
+		  ORDER BY sessions DESC, username
+		  LIMIT $%d`, versionArg, limitArg), args...)
+	if err != nil {
+		return UserQualityStats{}, fmt.Errorf("query user quality: %w", err)
+	}
+	defer rows.Close()
+
+	var authors int
+	for rows.Next() {
+		var uq UserQuality
+		if err := rows.Scan(&uq.Username, &uq.Sessions, &uq.Graded,
+			&uq.Completed, &uq.Abandoned, &uq.Errored, &uq.AvgScore, &authors); err != nil {
+			return UserQualityStats{}, fmt.Errorf("scan user quality: %w", err)
+		}
+		// Unknown is the residue: sessions whose gated outcome is 'unknown' (or absent), so the
+		// four outcome counts partition Sessions and the stacked bar spans the full width.
+		uq.Unknown = uq.Sessions - uq.Completed - uq.Abandoned - uq.Errored
+		out.Users = append(out.Users, uq)
+	}
+	if err := rows.Err(); err != nil {
+		return UserQualityStats{}, fmt.Errorf("iterate user quality: %w", err)
+	}
+	if authors > maxUserQualityRows {
+		out.Clipped = authors - maxUserQualityRows
+	}
+	return out, nil
 }

@@ -69,7 +69,7 @@ templ tokensCell(pr store.ProjectSummary) {
 	</span>
 }
 
-templ ProjectPage(p Page, proj store.ProjectSummary, sessions []store.SessionSummary, remainder store.SessionRemainder, facets Facets, sel store.SessionFilter, a store.Analytics, rng string) {
+templ ProjectPage(p Page, proj store.ProjectSummary, sessions []store.SessionSummary, remainder store.SessionRemainder, facets Facets, sel store.SessionFilter, a store.Analytics, ins store.Insights, rng string) {
 	@layout(p) {
 		<div class="page-head">
 			<h1>{ ProjectTitle(proj) }</h1>
@@ -78,12 +78,14 @@ templ ProjectPage(p Page, proj store.ProjectSummary, sessions []store.SessionSum
 				<span class="muted small mono">{ LocalPath(proj) }</span>
 			}
 		</div>
-		// Panel and table live in one swappable region so a range or filter change
-		// refetches both together and they always reflect the same scope: the panel
-		// headline narrows with the rows instead of staying project-wide while the
-		// rows filter. The controls inside target #project-view for that reason.
+		// Panel, quality band, and table live in one swappable region so a range or filter
+		// change refetches all three together and they always reflect the same scope: the
+		// panel headline and the quality bars narrow with the rows instead of staying
+		// project-wide while the rows filter. The controls inside target #project-view for
+		// that reason.
 		<div id="project-view">
 			@analyticsPanel(a, "chart-project", ProjectRangeOptions(proj.ID, sel, rng), rng, nil, nil, "#project-view")
+			@projectQuality(proj.ID, sel, ins, rng)
 			<section>
 				<div class="panel-head">
 					<h2>Sessions</h2>
@@ -94,6 +96,55 @@ templ ProjectPage(p Page, proj store.ProjectSummary, sessions []store.SessionSum
 				</div>
 			</section>
 		</div>
+	}
+}
+
+// projectQuality is the project page's per-project answer to "how are agent sessions going
+// in this repo": the same instrument-styled quality band /insights carries, scoped to one
+// project and deliberately kept lean. It renders only when the scope has graded sessions
+// (ins.HasData), so a project with no sessions in the window shows no empty band; the usage
+// panel above already carries that scope's activity.
+//
+// The band stays a distilled subset of /insights on purpose (the design's "density earned"
+// doctrine rejects the wall of panels): a three-column distribution row (grades, outcomes,
+// archetypes), a tools row, and the churn list. It omits velocity, concurrency, hygiene,
+// and context, which belong to the fleet-wide read; the project page already carries the
+// usage panel, so the band earns only the quality-verdict panels.
+//
+// The grade and outcome bars drill into the sessions feed scoped to this project and the
+// page's active user/agent/machine filter (base = sel, which carries the project id and any
+// toolbar narrowing), plus the active range (rng), so a click lands on the same sessions the bar
+// counts, bounded to the same window, rather than the unscoped, all-time fleet feed. Churn drops
+// its per-bar project tag (showProject false): every row is this one project, so the tag would be
+// noise, and the caption drops the "grouped per project" clause the fleet page needs.
+//
+// The band's window semantics differ from the usage panel's on purpose: this band derives from the
+// Insights read, which counts sessions by started_at falling in the window, while the usage panel
+// and the session table window on dated usage_events. A quality verdict is a per-session fact keyed
+// to when the session ran, so it follows the Insights convention (a caption on the section head
+// names the window as "sessions that started in this window"); spend is per-usage-event, so it
+// windows on the event dates. Forcing one onto the other would misdate whichever it borrows, so the
+// gap is intentional and named rather than reconciled. See the handleProjectPage Insights call for
+// the matching note.
+templ projectQuality(projectID int64, sel store.SessionFilter, ins store.Insights, rng string) {
+	if ins.HasData() {
+		<section class="proj-quality">
+			<div class="proj-quality-head">
+				<span class="label">Quality</span>
+				<span class="muted small ins-caption">sessions that started in this window</span>
+			</div>
+			<div class="ins-grid">
+				@distributionPanel("Grades", "the quality score banded A to F, unscored for an ungraded session", GradedNote(ins.Quality), GradeBars(ins.Quality.Grades, sel, rng))
+				@distributionPanel("Outcomes", "how each session ended", "", OutcomeBars(ins.Quality.Outcomes, sel, rng))
+				@distributionPanel("Archetypes", "session shape by length and turns", "", ArchetypeBars(ins.Archetypes))
+			</div>
+			<div class="ins-tools proj-quality-tools">
+				@toolsPanel(ins.Tools)
+			</div>
+			<div class="ins-churn proj-quality-churn">
+				@churnPanel(ins.Churn, "files edited more than once in this window", false)
+			</div>
+		</section>
 	}
 }
 

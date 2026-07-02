@@ -62,4 +62,36 @@ package parse
 // no detail on its sentinels, so it keeps an empty detail (the UI degrades for that); re-uploading is the
 // only way to fill it. This is a parser output change (the projection delta now carries the field), so it
 // pairs with the parse.Version bump and the golden fixtures move.
-const Epoch = 4
+//
+// Epoch 4 -> 5: materialize tool_calls.file_rel_path, the session-relative form of a tool call's
+// file_path (see migration 0030_tool_call_rel_path and the tool-call insert in store/projection.go).
+// It exists so file churn can aggregate one repo file across the git worktrees it was edited from:
+// file_path is absolute and fragments the same file into per-worktree rows, while the relative path
+// paired with the project is worktree-invariant. Like the prompt-hygiene facts, migration 0030 adds
+// the column but cannot backfill it; this bump reparses the corpus so every existing tool call
+// re-inserts through sessionRelPath and the column fills in one pass. The column is a store-side
+// derived value, not parser output (the reducer's delta is unchanged), so the projection delta is
+// byte-for-byte identical and the golden fixtures do not move; the bump is the backfill signal and
+// stands on its own.
+//
+// Epoch 5 -> 6: materialize messages.duplicate_prompt, the per-user-turn verdict that this prompt
+// repeats an earlier eligible prompt's digest (see migration 0031_message_duplicate_prompt and the
+// message insert in store/projection.go). It exists so the web transcript reads a stored boolean
+// instead of folding a whole-session window on every SSE-driven body refresh. Because the verdict
+// depends on the ordered prefix of earlier messages, it can only be filled as messages re-insert in
+// order; migration 0031 adds the column but cannot backfill it, so this bump reparses the corpus and
+// every existing user turn re-derives its flag in one ordered pass. The flag is a store-side derived
+// column, not parser output (the reducer's delta is unchanged), so the projection delta is
+// byte-for-byte identical and the golden fixtures do not move; the bump is the backfill signal and
+// stands on its own.
+//
+// Epoch 6 -> 7: materialize the message_turn_usage rollup, one row per (session, message_ordinal)
+// holding that turn's summed token classes and cost (see migration 0032_message_turn_usage and the
+// usage insert loop in store/projection.go). It exists so the web transcript joins one indexed row
+// per message instead of re-grouping the session's whole usage_events table on every SSE-driven body
+// refresh. The rollup is accumulated as each surviving usage row inserts; migration 0032 creates the
+// table but cannot backfill it, so this bump reparses the corpus and every existing session's usage
+// re-folds into its per-turn rows in one pass. The rollup is a store-side fold OF usage_events, not
+// parser output (the reducer's delta is unchanged), so the projection delta is byte-for-byte identical
+// and the golden fixtures do not move; the bump is the backfill signal and stands on its own.
+const Epoch = 7

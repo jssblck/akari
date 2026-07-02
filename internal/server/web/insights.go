@@ -175,6 +175,9 @@ func toolBarColor(errRate float64) string {
 // ChurnBar is one file's bar in the churn list: sized by edit count, labelled with its
 // path, and annotated with how many sessions returned to it.
 type ChurnBar struct {
+	// Project is the file's project display label, shown as a tag beside the path so the
+	// churn list groups the same relative path per project across worktrees.
+	Project  string
 	Path     string
 	Edits    int
 	Sessions int
@@ -199,7 +202,7 @@ func ChurnBars(c store.FileChurn) []ChurnBar {
 		if pct > 0 && pct < 2 {
 			pct = 2
 		}
-		bars = append(bars, ChurnBar{Path: f.Path, Edits: f.Edits, Sessions: f.Sessions, Pct: pct})
+		bars = append(bars, ChurnBar{Project: f.Project, Path: f.Path, Edits: f.Edits, Sessions: f.Sessions, Pct: pct})
 	}
 	return bars
 }
@@ -274,25 +277,36 @@ func distRows(counts []store.LabeledCount, label, color func(string) string, hre
 
 // GradeBars renders the grade distribution: A through F then the unscored bucket, each
 // banded in the report-card tone the session Quality tile uses. Each non-empty bar links
-// into the matching sessions, carrying the current Insights window (rng) so the session
-// list is scoped to the same period the panel counted. IncludeEmpty rides along because
-// the panel counts sessions regardless of message_count (a zero-message session can still
-// carry a grade), so the drilled feed must show empties too or its count would fall short
-// of the bar it drilled from.
-func GradeBars(counts []store.LabeledCount, rng string) []DistRow {
+// into the matching sessions, carrying the current window (rng) so the session list is
+// scoped to the same period the panel counted. base is the drill-down's starting filter:
+// the fleet Insights page passes an empty filter (a fleet-wide drill), while the project
+// page passes a filter already scoped to the project so the drill stays inside it. IncludeEmpty
+// rides along because the panel counts sessions regardless of message_count (a zero-message
+// session can still carry a grade), so the drilled feed must show empties too or its count
+// would fall short of the bar it drilled from.
+func GradeBars(counts []store.LabeledCount, base store.SessionFilter, rng string) []DistRow {
 	return distRows(counts, gradeLabel, gradeBarColor, func(key string) string {
-		return SessionsPath(store.SessionFilter{Grade: GradeFilterKey(key), Range: drillRange(rng), IncludeEmpty: true})
+		f := base
+		f.Grade = GradeFilterKey(key)
+		f.Range = drillRange(rng)
+		f.IncludeEmpty = true
+		return SessionsPath(f)
 	})
 }
 
 // OutcomeBars renders the outcome distribution, reusing OutcomeLabel for the title-cased
 // names and a semantic tone per outcome. Each non-empty bar links into the matching
-// sessions, carrying the current Insights window (rng) and IncludeEmpty for the same
-// reason GradeBars does: the panel scope counts zero-message sessions, so the drilled
-// feed must include them to match.
-func OutcomeBars(counts []store.LabeledCount, rng string) []DistRow {
+// sessions, carrying base (the project scope on the project page, empty on the fleet
+// Insights page), the current window (rng), and IncludeEmpty for the same reason GradeBars
+// does: the panel scope counts zero-message sessions, so the drilled feed must include them
+// to match.
+func OutcomeBars(counts []store.LabeledCount, base store.SessionFilter, rng string) []DistRow {
 	return distRows(counts, OutcomeLabel, outcomeBarColor, func(key string) string {
-		return SessionsPath(store.SessionFilter{Outcome: key, Range: drillRange(rng), IncludeEmpty: true})
+		f := base
+		f.Outcome = key
+		f.Range = drillRange(rng)
+		f.IncludeEmpty = true
+		return SessionsPath(f)
 	})
 }
 
@@ -416,4 +430,90 @@ func archetypeBarColor(a string) string {
 	default: // automation
 		return barMuted
 	}
+}
+
+// GradedNote is the coverage caption for a quality distribution panel: the share of
+// in-scope sessions that carry a usable grade, so a reader can weigh a mostly ungraded
+// window's bars for what they are. It reads "" when the window is empty (the panel shows
+// its own empty state), and rounds to whole percent, with a "<1% graded" floor so a
+// nonzero-but-tiny coverage does not round away to "0% graded".
+func GradedNote(q store.QualityDistribution) string {
+	if q.Sessions == 0 {
+		return ""
+	}
+	pct := float64(q.Graded) / float64(q.Sessions) * 100
+	if pct > 0 && pct < 1 {
+		return "<1% graded"
+	}
+	return fmt.Sprintf("%.0f%% graded", pct)
+}
+
+// OutcomeSegment is one slice of a People-row outcome mix bar: its width (Pct of the
+// user's sessions), its color, and the count and label the title reads back.
+type OutcomeSegment struct {
+	Color string
+	Pct   float64
+	Count int
+	Label string
+}
+
+// OutcomeMixTitle is the hover title for a People-row outcome mix bar, spelling out the
+// four outcome counts the bar renders proportionally.
+func OutcomeMixTitle(u store.UserQuality) string {
+	return fmt.Sprintf("%d completed, %d abandoned, %d errored, %d unknown",
+		u.Completed, u.Abandoned, u.Errored, u.Unknown)
+}
+
+// OutcomeSegments splits a user's sessions into the proportional slices of their outcome
+// mix bar, dropping empty slices so a zero-count outcome adds no invisible segment. It
+// returns nil when the user has no sessions (the row shows a placeholder instead).
+func OutcomeSegments(u store.UserQuality) []OutcomeSegment {
+	if u.Sessions <= 0 {
+		return nil
+	}
+	raw := []OutcomeSegment{
+		{Color: barSage, Count: u.Completed, Label: "completed"},
+		{Color: barPeach, Count: u.Abandoned, Label: "abandoned"},
+		{Color: barRose, Count: u.Errored, Label: "errored"},
+		{Color: barMuted, Count: u.Unknown, Label: "unknown"},
+	}
+	out := make([]OutcomeSegment, 0, len(raw))
+	for _, s := range raw {
+		if s.Count <= 0 {
+			continue
+		}
+		s.Pct = float64(s.Count) / float64(u.Sessions) * 100
+		out = append(out, s)
+	}
+	return out
+}
+
+// SegmentStyle is the inline style for one outcome mix slice: its proportional width and
+// its color.
+func SegmentStyle(seg OutcomeSegment) string {
+	return fmt.Sprintf("width:%.2f%%;background:%s", seg.Pct, seg.Color)
+}
+
+// UserAvgScore formats a People-row average quality score, or a dash when the user has no
+// graded session to average.
+func UserAvgScore(u store.UserQuality) string {
+	if u.AvgScore == nil {
+		return "-"
+	}
+	return fmt.Sprintf("%.1f", *u.AvgScore)
+}
+
+// UserGradedLabel is the People-row coverage cell: how many of the user's sessions carry
+// a usable grade out of their total.
+func UserGradedLabel(u store.UserQuality) string {
+	return fmt.Sprintf("%d of %d", u.Graded, u.Sessions)
+}
+
+// UserQualityHref links a People row to the session feed scoped to that user, carrying the
+// active window so the drill-through opens the same cohort the row summarized. IncludeEmpty
+// rides along for the same reason the grade and outcome drills carry it: the People panel
+// counts a user's sessions regardless of message_count, so the drilled feed must show empties
+// too or its list would fall short of the row's count.
+func UserQualityHref(u store.UserQuality, rng string) templ.SafeURL {
+	return SessionsHref(store.SessionFilter{Username: u.Username, Range: drillRange(rng), IncludeEmpty: true})
 }

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jssblck/akari/internal/quality"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/storetest"
 )
@@ -345,6 +346,71 @@ func TestListAllSessionsSort(t *testing.T) {
 	}
 }
 
+// TestListAllSessionsOutcomeGradeFilter confirms the SessionFilter outcome and grade
+// narrowing mirrors the Insights distribution buckets: a graded, completed session matches
+// outcome=completed and its letter; an ungraded session (no gated signals row) matches only
+// outcome=unknown and grade=unscored, since the filter coalesces a missing row to those
+// buckets exactly as the distribution LEFT JOIN does. This is the property that keeps a
+// distribution bar's count and its drill-down list in agreement.
+func TestListAllSessionsOutcomeGradeFilter(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	ada := seedUser(t, st, "ada")
+	pid, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A graded, completed session (grade B) and an ungraded one (no signals row at all, so it
+	// coalesces to unknown/unscored). markSignalsFresh inside insertSignal clears signals_stale
+	// so the graded row reads through the version-and-stale gate the filter applies.
+	graded := seedSession(t, st, ada, pid, "graded")
+	insertSignal(t, st, ctx, graded, quality.Version, "completed", "B")
+	ungraded := seedSession(t, st, ada, pid, "ungraded")
+
+	// The seeded sessions carry no message, so each filter sets IncludeEmpty to see them, the
+	// same empty=1 the real quality drill-downs carry so a bar's count and its feed agree
+	// regardless of message_count (a zero-message session can still carry a grade).
+	only := func(t *testing.T, f store.SessionFilter, want int64, label string) {
+		t.Helper()
+		f.IncludeEmpty = true
+		rows, _, err := st.ListAllSessions(ctx, f)
+		if err != nil {
+			t.Fatalf("%s: %v", label, err)
+		}
+		if len(rows) != 1 || rows[0].ID != want {
+			ids := make([]int64, len(rows))
+			for i, r := range rows {
+				ids[i] = r.ID
+			}
+			t.Fatalf("%s = %v, want just [%d]", label, ids, want)
+		}
+	}
+
+	only(t, store.SessionFilter{Outcome: "completed"}, graded, "outcome=completed")
+	only(t, store.SessionFilter{Outcome: "unknown"}, ungraded, "outcome=unknown")
+	only(t, store.SessionFilter{Grade: "B"}, graded, "grade=B")
+	only(t, store.SessionFilter{Grade: "unscored"}, ungraded, "grade=unscored")
+
+	// A stale graded row folds into the missing bucket: mark the graded session stale and it
+	// now matches unknown/unscored rather than its stored outcome and grade, the read-side
+	// mirror of the settle pass's staleness flag.
+	if _, err := st.Pool.Exec(ctx, `UPDATE sessions SET signals_stale = true WHERE id = $1`, graded); err != nil {
+		t.Fatalf("mark graded stale: %v", err)
+	}
+	if rows, _, err := st.ListAllSessions(ctx, store.SessionFilter{Outcome: "completed", IncludeEmpty: true}); err != nil {
+		t.Fatalf("stale outcome=completed: %v", err)
+	} else if len(rows) != 0 {
+		t.Errorf("stale graded session should not match outcome=completed, got %d rows", len(rows))
+	}
+	if rows, _, err := st.ListAllSessions(ctx, store.SessionFilter{Grade: "unscored", IncludeEmpty: true}); err != nil {
+		t.Fatalf("stale grade=unscored: %v", err)
+	} else if len(rows) != 2 {
+		t.Errorf("both sessions should read unscored once the graded one is stale, got %d rows", len(rows))
+	}
+}
+
 // cmpOrd returns the sign of a-b, for asserting numeric column orderings.
 func cmpOrd(a, b int64) int {
 	switch {
@@ -586,5 +652,41 @@ func TestGlobalFacetsProjectOrder(t *testing.T) {
 			}
 			t.Fatalf("project facet order = %v, want remotes busiest-first then locals busiest-first", gotOrder)
 		}
+	}
+}
+
+// TestMessagesPromptFactsEmptyContent pins that an empty-content user turn reads
+// PromptFactsCurrent = false even when its facts are stamped at the current classifier version.
+// The Messages read gates PromptFactsCurrent on content_length > 0 so the per-message hygiene
+// badge is computed over the same prompt set as gatherPromptHygiene (which counts only user turns
+// with content_length > 0). Without the gate, an empty or attachment-only user turn would render a
+// transcript badge the session aggregate excluded, so the two would disagree on the same session.
+func TestMessagesPromptFactsEmptyContent(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	sid := seedForReads(t, st)
+
+	// An empty-content user row with a digest at the current facts version: everything the version
+	// gate checks passes except content_length, which is zero (content is ''). content_length is a
+	// generated octet_length(content) column, so inserting '' makes it 0 without setting it directly.
+	if _, err := st.Pool.Exec(ctx,
+		`INSERT INTO messages (session_id, ordinal, role, content, prompt_short, prompt_no_code, prompt_digest, prompt_facts_version)
+		 VALUES ($1, 0, 'user', '', true, false, 123456, $2)`,
+		sid, quality.PromptFactsVersion); err != nil {
+		t.Fatalf("insert empty-content user message: %v", err)
+	}
+
+	msgs, err := st.Messages(ctx, sid)
+	if err != nil {
+		t.Fatalf("read messages: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("read %d messages, want 1", len(msgs))
+	}
+	// The empty turn has current facts and a digest, but content_length is 0, so the badge gate
+	// excludes it exactly as the session hygiene aggregate does.
+	if msgs[0].PromptFactsCurrent {
+		t.Error("an empty-content user turn must read PromptFactsCurrent = false so the transcript badge matches gatherPromptHygiene's content_length > 0 set")
 	}
 }

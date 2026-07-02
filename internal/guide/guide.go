@@ -90,7 +90,7 @@ var chapters = []Chapter{
 		Summary: "The akari CLI in depth: login, sync, watch, the daemon, discovery, and the resumable upload."},
 	{Slug: "the-web-ui", Order: 4, file: "the-web-ui.md",
 		Title:   "The web UI",
-		Summary: "Reading your history: the overview, the session feed, projects, and the transcript view."},
+		Summary: "Reading your history: the overview, insights, the session feed, projects, and the transcript view."},
 	{Slug: "accounts-and-sharing", Order: 5, file: "accounts-and-sharing.md",
 		Title:   "Accounts and sharing",
 		Summary: "Registration and invites, the three token scopes, and publishing a session or your usage overview."},

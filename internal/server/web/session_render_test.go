@@ -8,6 +8,9 @@ import (
 	"github.com/jssblck/akari/internal/server/store"
 )
 
+// floatPtr returns a pointer to a float, for the nullable per-turn cost in TurnUsage fixtures.
+func floatPtr(f float64) *float64 { return &f }
+
 // fixtureDetail is a codex shell_command's Detail: a realistic invocation longer
 // than DetailLabel's 80-rune cap, so the fixture exercises truncation rather than
 // a string that happens to fit.
@@ -291,6 +294,123 @@ func TestSessionStatsQualityTileUnscored(t *testing.T) {
 	}
 	if strings.Contains(html, `>Failures</dt>`) {
 		t.Error("an unscored, tool-less session should show no tool-health rows")
+	}
+}
+
+// The transcript reads as an instrumented trace: an answered turn carries a latency stamp, a
+// user message renders its hygiene tags, a context-shed divider draws above the shed-down turn,
+// a message with usage carries its context and cost stamps, and a tool chip prefers the
+// worktree-relative path with the absolute one in its title. This drives the per-message
+// instruments end to end through the transcript template.
+func TestTranscriptInstruments(t *testing.T) {
+	p := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "jessoteric"}
+	d, _, _ := sessionFixture()
+	base := time.Date(2026, 6, 28, 9, 0, 0, 0, time.UTC)
+	ts := func(secs int) *time.Time { u := base.Add(time.Duration(secs) * time.Second); return &u }
+
+	// A prompt (terse and code-pointerless), its reply 6s later, then a heavy turn and a
+	// shed-down turn so a context divider draws between ordinals 2 and 3. Each turn's usage now
+	// rides on its message (Message.Usage), the shape the message read folds it into.
+	msgs := []store.Message{
+		{Ordinal: 0, Role: "user", Content: "fix it", Timestamp: ts(0),
+			PromptShort: true, PromptNoCode: true, PromptDigest: 4242, PromptFactsCurrent: true},
+		{Ordinal: 1, Role: "assistant", Content: "On it.", Model: "gpt-5", Timestamp: ts(6),
+			Usage: &store.TurnUsage{Input: 1200, Output: 950, CacheRead: 78000, CacheWrite: 3100, ContextTokens: 82300, CostUSD: floatPtr(0.31), CostIncomplete: true}},
+		{Ordinal: 2, Role: "user", Content: "and the tests too please, thorough pass", Timestamp: ts(20),
+			PromptDigest: 7, PromptFactsCurrent: true,
+			Usage: &store.TurnUsage{Input: 1000, CacheRead: 159000, CacheWrite: 0, ContextTokens: 160000}},
+		{Ordinal: 3, Role: "assistant", Content: "Compacted.", Model: "gpt-5", Timestamp: ts(31),
+			Usage: &store.TurnUsage{Input: 500, CacheRead: 11500, CacheWrite: 0, ContextTokens: 12000}},
+	}
+	tools := map[int][]store.ToolCallView{
+		1: {{
+			MessageOrdinal: 1, ToolName: "Edit",
+			FilePath: "C:\\Users\\me\\projects\\worktrees\\akari\\x\\internal\\auth.go", FileRelPath: "internal/auth.go",
+			InputSHA: "aaaa", InputBytes: 143, InputMediaType: "json",
+		}},
+	}
+
+	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, HeaderStats{}, 0, false, true))
+
+	for _, want := range []string{
+		// (a) the answered turn's latency stamp, prompt-to-reply
+		`class="stamp-latency mono" title="time from the prompt to this reply">+6s</span>`,
+		// (b) the hygiene tags on the terse, no-code prompt
+		`class="tag hygiene" title="under 4 words: give the agent something to grip">terse</span>`,
+		`class="tag hygiene" title="a change request with no file, path, or code anchor">no code pointer</span>`,
+		// (c) the shed divider between the heavy turn and the shed-down turn, hosting its
+		// before/after breakdown card
+		`class="msg-shed tok-cell"`,
+		`context shed: 160.0k → 12.0k`,
+		`class="tok-tip shed-tip"`,    // the shed divider's breakdown card
+		`>Before</dt>`, `>After</dt>`, // the two turns' occupancy, each with its per-class split
+		// (d) the context and cost stamps ride one focusable host that carries a single per-turn
+		// breakdown card (the four classes, the context total, the cost)
+		`class="tok-cell turn-metrics"`,
+		`class="stamp-ctx mono">ctx 82.3k</span>`,
+		// A mixed priced/unpriced turn's cost reads as a lower bound ("$0.31+") both on the stamp
+		// and in the card, so an exact-looking cost never sits beside unpriced token rows.
+		`class="stamp-cost mono">$0.31+</span>`,
+		`class="tok-tip"`,               // the shared breakdown card markup
+		`>Context</dt>`,                 // the context-occupancy line inside the turn card
+		`<dd>82,300</dd>`,               // ordinal 1's context total, full tokens
+		`<dd>78,000</dd>`,               // its cache read, a per-class row in the card
+		`class="tt-cost">$0.31+</span>`, // the turn cost in the card, marked a lower bound
+		// (e) the tool chip prefers the relative path, absolute in the title
+		`title="C:\Users\me\projects\worktrees\akari\x\internal\auth.go">internal/auth.go</span>`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("instrumented transcript missing %q", want)
+		}
+	}
+	// The unpriced turn (ordinal 2, nil cost) still shows its ctx stamp, and its breakdown card
+	// reads "unpriced" for the cost rather than a misleading $0.00.
+	if !strings.Contains(html, `ctx 160.0k`) {
+		t.Error("a turn with usage but no priced cost should still show its context stamp")
+	}
+	if !strings.Contains(html, `class="tt-cost">unpriced</span>`) {
+		t.Error("an unpriced turn's breakdown card should read \"unpriced\" for its cost")
+	}
+}
+
+// The quality tooltip appends a score-arithmetic group when the session is scored: one row per
+// penalty (label plus the negative points), then the final score. A clean scored run (no
+// penalties) reads "no penalties" instead of an empty group; an unscored session draws no group.
+func TestSessionQualityScoreArithmetic(t *testing.T) {
+	p := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "jessoteric"}
+	d, msgs, tools := sessionFixture()
+	score := 61
+	grade := "D"
+	hs := HeaderStats{Signals: store.SessionSignals{
+		Outcome: "errored", OutcomeConfidence: "high",
+		Score: &score, Grade: &grade,
+		ToolCalls: 10, ToolFailures: 3, // 30 errored + 9 failures = 39, score 61
+	}}
+	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, hs, 0, false, true))
+	for _, want := range []string{
+		`class="tt-sub">Score arithmetic</div>`,
+		`>errored ending</dt>`, `<dd class="mono">-30</dd>`,
+		`>3 tool failures</dt>`, `<dd class="mono">-9</dd>`,
+		`>Score</dt>`, `<dd class="mono">61</dd>`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("score arithmetic missing %q", want)
+		}
+	}
+
+	cs, cg := 100, "A"
+	clean := HeaderStats{Signals: store.SessionSignals{
+		Outcome: "completed", OutcomeConfidence: "high", Score: &cs, Grade: &cg,
+	}}
+	cleanHTML := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, clean, 0, false, true))
+	if !strings.Contains(cleanHTML, `>No penalties</dt>`) {
+		t.Error("a clean scored run should show a No penalties row in the score arithmetic")
+	}
+
+	unscored := HeaderStats{Signals: store.SessionSignals{Outcome: "unknown", OutcomeConfidence: "low"}}
+	unscoredHTML := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, unscored, 0, false, true))
+	if strings.Contains(unscoredHTML, `Score arithmetic`) {
+		t.Error("an unscored session should draw no score-arithmetic group")
 	}
 }
 

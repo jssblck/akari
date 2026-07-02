@@ -1,0 +1,16 @@
+-- Add the session-relative form of a tool call's file_path, so file churn can aggregate one
+-- repo file across the git worktrees it was edited from. file_path is absolute, so the same
+-- repo file edited from two worktrees of one repo (C:\...\worktrees\akari\foo\internal\x.go and
+-- C:\...\projects\akari\internal\x.go) fragments into separate churn rows and the aggregate
+-- reads as noise. Projects already collapse worktrees (they key on the canonical git remote), so
+-- pairing the project with a worktree-invariant relative path is the key churn needs.
+--
+-- file_rel_path is file_path with the session's cwd prefix stripped and separators normalized to
+-- '/'. It is NULL when the path does not sit under the session's cwd (a file edited outside the
+-- workspace stays absolute-only, with no anchor to make it relative) or when no cwd is known. The
+-- projection is the one place that sees both the session's cwd and the parsed path, so it fills
+-- this column at insert (see sessionRelPath and the tool-call insert in store/projection.go);
+-- existing rows read NULL until the paired parse.Epoch bump (3 -> 4) reparses the corpus and
+-- re-derives it. Like the prompt-hygiene facts (migration 0022), a plain ALTER cannot backfill it,
+-- so the epoch reparse is the backfill.
+ALTER TABLE tool_calls ADD COLUMN file_rel_path TEXT;
