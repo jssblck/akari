@@ -73,26 +73,36 @@ templ tokensCell(pr store.ProjectSummary) {
 
 templ ProjectPage(p Page, proj store.ProjectSummary, sessions []store.SessionSummary, remainder store.SessionRemainder, facets Facets, sel store.SessionFilter, a store.Analytics, ins store.Insights, rng string) {
 	@layout(p) {
-		<div class="page-head">
-			<h1>{ ProjectTitle(proj) }</h1>
-			@kindTag(proj.Kind)
-			if IsLocalKind(proj.Kind) {
-				<span class="muted small mono">{ LocalPath(proj) }</span>
-			}
-		</div>
-		// Panel, quality band, and table live in one swappable region so a range or filter
-		// change refetches all three together and they always reflect the same scope: the
-		// panel headline and the quality bars narrow with the rows instead of staying
-		// project-wide while the rows filter. The controls inside target #project-view for
-		// that reason.
+		// A zero-height sentinel at the header's rest position. app.js watches it with an
+		// IntersectionObserver to flag when the sticky header has pinned (see the sticky
+		// styles in projects.css); it sits outside #project-view so it survives the filter
+		// swap that replaces the header, keeping the observer attached across swaps.
+		<div class="ph-sentinel" aria-hidden="true"></div>
+		// Header, panel, quality band, and table live in one swappable region so a range
+		// or filter change refetches all of them together and they always reflect the same
+		// scope: the panel headline and the quality bars narrow with the rows instead of
+		// staying project-wide while the rows filter. The controls target #project-view for
+		// that reason, and the header rides inside it so the filter toolbar's hidden range
+		// (and the range selector's preserved filters) re-render in sync on every swap.
 		<div id="project-view">
+			// The filter toolbar sits in the header, right-aligned beside the title, rather
+			// than above the table: the filters scope the whole page (usage panel and quality
+			// band, not just the rows), so heading the page with them makes that reach obvious
+			// and keeps the reader anchored at the top when a filter change reflows the view.
+			<div class="page-head project-head">
+				<h1>{ ProjectTitle(proj) }</h1>
+				@kindTag(proj.Kind)
+				if IsLocalKind(proj.Kind) {
+					<span class="muted small mono">{ LocalPath(proj) }</span>
+				}
+				@projectSessionToolbar(proj.ID, facets, sel, rng)
+			</div>
 			@analyticsPanel(a, "chart-project", ProjectRangeOptions(proj.ID, sel, rng), rng, nil, nil, "#project-view")
 			@projectQuality(proj.ID, sel, ins, rng)
 			<section>
 				<div class="panel-head">
 					<h2>Sessions</h2>
 				</div>
-				@projectSessionToolbar(proj.ID, facets, sel, rng)
 				<div id="session-list">
 					@ProjectSessionList(sessions, remainder)
 				</div>
@@ -153,10 +163,12 @@ templ projectQuality(projectID int64, sel store.SessionFilter, ins store.Insight
 // projectSessionToolbar is the project page's session filter, rendered through the
 // same labeled, auto-submitting tbSelect controls as the global Sessions toolbar so
 // the two surfaces filter the same way: picking a value submits on change (app.js)
-// rather than waiting on a separate button, with a no-script Apply fallback. It
-// swaps the whole #project-view so the usage panel re-scopes to the same filter as
-// the table, and shows all three facets since a single project's facet space is
-// small. The hidden range rides along so a filter change holds the active window.
+// rather than waiting on a separate button, with a no-script Apply fallback. It sits
+// right-aligned in the page header (not above the table) because it swaps the whole
+// #project-view: the usage panel and quality band re-scope with the rows, so leading
+// the page with the filters makes that page-wide reach read at a glance. It shows all
+// three facets since a single project's facet space is small. The hidden range rides
+// along so a filter change holds the active window.
 templ projectSessionToolbar(projectID int64, facets Facets, sel store.SessionFilter, rng string) {
 	<form class="toolbar" method="get" hx-get={ ProjectPath(projectID) } hx-target="#project-view" hx-select="#project-view" hx-swap="outerHTML" hx-push-url="true">
 		<input type="hidden" name="range" value={ rng }/>
