@@ -165,6 +165,142 @@ func TestListProjectsRollups(t *testing.T) {
 	}
 }
 
+// TestProjectAndDetailRecencyUseLastActive pins that the projects index and the
+// session detail read last_active_at (the session's last-event time), not updated_at
+// (the row-write time a reparse restamps). Each session's updated_at is pushed the
+// opposite way from its ended_at, the exact divergence a bulk reparse produces, so a
+// surface that still read updated_at would order and date these rows backwards.
+func TestProjectAndDetailRecencyUseLastActive(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	u, err := st.Register(ctx, "grace", "h", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	projRecent, err := st.UpsertProject(ctx, "github.com/ada/recent", "github.com", "ada", "recent", "recent", "remote")
+	if err != nil {
+		t.Fatalf("recent project: %v", err)
+	}
+	projOld, err := st.UpsertProject(ctx, "github.com/ada/old", "github.com", "ada", "old", "old", "remote")
+	if err != nil {
+		t.Fatalf("old project: %v", err)
+	}
+
+	now := time.Now()
+	hourAgo := now.Add(-1 * time.Hour)
+	weekAgo := now.Add(-7 * 24 * time.Hour)
+	monthAgo := now.Add(-30 * 24 * time.Hour)
+
+	setTimes := func(id int64, ended, updated time.Time) {
+		t.Helper()
+		if _, err := st.Pool.Exec(ctx, `UPDATE sessions SET ended_at = $2, updated_at = $3 WHERE id = $1`, id, ended, updated); err != nil {
+			t.Fatalf("set times for %d: %v", id, err)
+		}
+	}
+
+	// projRecent was last active an hour ago; its updated_at sits a week back.
+	sRecent := seedSessionWithStats(t, st, u.ID, projRecent, "claude", "recent", 0, 10, 5)
+	setTimes(sRecent, hourAgo, weekAgo)
+	// projOld was last active a month ago, but a reparse just bumped updated_at to now.
+	sOld := seedSessionWithStats(t, st, u.ID, projOld, "claude", "old", 0, 10, 5)
+	setTimes(sOld, monthAgo, now)
+
+	// ListProjects orders by max(last_active_at) and reports it as LastActivity, so the
+	// recently active project sorts first and the reparsed-but-old one carries its
+	// month-old activity, not the reparse time. Ordering on updated_at would invert both.
+	projects, err := st.ListProjects(ctx)
+	if err != nil {
+		t.Fatalf("list projects: %v", err)
+	}
+	posRecent, posOld := -1, -1
+	var oldActivity *time.Time
+	for i, p := range projects {
+		switch p.ID {
+		case projRecent:
+			posRecent = i
+		case projOld:
+			posOld = i
+			oldActivity = p.LastActivity
+		}
+	}
+	if posRecent == -1 || posOld == -1 {
+		t.Fatalf("seeded projects not both present: recent=%d old=%d", posRecent, posOld)
+	}
+	if posRecent > posOld {
+		t.Errorf("projects ordered by parse time, not activity: recent at %d, old at %d", posRecent, posOld)
+	}
+	if oldActivity == nil {
+		t.Fatal("old project LastActivity is nil, want its month-old last-event time")
+	}
+	if d := now.Sub(*oldActivity); d < 7*24*time.Hour {
+		t.Errorf("old project LastActivity = %v (%.0fh ago), want the month-old activity, not the reparse time", *oldActivity, d.Hours())
+	}
+
+	// Session detail returns the same last-active time, not the reparse-bumped updated_at.
+	d, err := st.SessionDetailByID(ctx, sOld)
+	if err != nil {
+		t.Fatalf("session detail: %v", err)
+	}
+	if d.LastActiveAt == nil {
+		t.Fatal("detail LastActiveAt is nil, want the month-old last-event time")
+	}
+	if gap := now.Sub(*d.LastActiveAt); gap < 7*24*time.Hour {
+		t.Errorf("detail LastActiveAt = %v (%.0fh ago), want the month-old activity, not the reparse time", *d.LastActiveAt, gap.Hours())
+	}
+}
+
+// TestWindowSessionPageOrdersByLastActive pins that the project session table
+// (WindowSessionPage) orders rows by last_active_at, not updated_at. The two sessions
+// have their updated_at ordering inverted from their ended_at ordering, so a query
+// still keyed on updated_at would return them in the wrong order.
+func TestWindowSessionPageOrdersByLastActive(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	u, err := st.Register(ctx, "grace", "h", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	proj, err := st.UpsertProject(ctx, "github.com/ada/win", "github.com", "ada", "win", "win", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+
+	now := time.Now()
+	setTimes := func(id int64, ended, updated time.Time) {
+		t.Helper()
+		if _, err := st.Pool.Exec(ctx, `UPDATE sessions SET ended_at = $2, updated_at = $3 WHERE id = $1`, id, ended, updated); err != nil {
+			t.Fatalf("set times for %d: %v", id, err)
+		}
+	}
+
+	// Both carry dated usage inside the window (WindowSessionPage windows on
+	// ue.occurred_at), so both qualify and only their order is under test.
+	first := seedSessionWithStats(t, st, u.ID, proj, "claude", "first", 0, 10, 5)
+	seedUsageAt(t, st, first, "claude-opus-4-8", 1.0, 10, 5, now.Add(-2*time.Hour), "u-first")
+	second := seedSessionWithStats(t, st, u.ID, proj, "claude", "second", 0, 10, 5)
+	seedUsageAt(t, st, second, "claude-opus-4-8", 1.0, 10, 5, now.Add(-2*time.Hour), "u-second")
+
+	// first was active an hour ago but its updated_at is a week back; second was active
+	// a day ago but its updated_at is now (a fresh reparse). Activity order is first
+	// then second; updated_at order is the reverse.
+	setTimes(first, now.Add(-1*time.Hour), now.Add(-7*24*time.Hour))
+	setTimes(second, now.Add(-24*time.Hour), now)
+
+	page, err := st.WindowSessionPage(ctx, store.SessionFilter{ProjectID: proj})
+	if err != nil {
+		t.Fatalf("window session page: %v", err)
+	}
+	if len(page.Sessions) != 2 {
+		t.Fatalf("want 2 windowed rows, got %d", len(page.Sessions))
+	}
+	if page.Sessions[0].ID != first || page.Sessions[1].ID != second {
+		t.Errorf("rows ordered by parse time, not activity: got %d then %d, want %d then %d",
+			page.Sessions[0].ID, page.Sessions[1].ID, first, second)
+	}
+}
+
 func TestListAllSessions(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
