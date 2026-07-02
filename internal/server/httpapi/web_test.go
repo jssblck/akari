@@ -1287,6 +1287,64 @@ func TestProjectOverviewPublishRequiresAuth(t *testing.T) {
 	}
 }
 
+// TestProjectOverviewToggleEdgeCases covers the toggle and public routes' failure
+// branches: a malformed id 404s, a toggle for a missing project renders the
+// not-found page, and the public page 404s for both a non-numeric and an unknown id
+// (never redirecting a logged-out viewer to login).
+func TestProjectOverviewToggleEdgeCases(t *testing.T) {
+	t.Parallel()
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+
+	if _, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), ""); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	c := newClient(t)
+	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	if _, err := c.PostForm(srv.URL+"/login", url.Values{
+		"username": {"grace"}, "password": {"hopper-1906"},
+	}); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+
+	// A malformed id on a toggle route is a 404 (ParseInt fails before any store call).
+	for _, path := range []string{"/projects/not-a-number/overview/publish", "/projects/not-a-number/overview/unpublish"} {
+		resp, err := c.PostForm(srv.URL+path, url.Values{})
+		if err != nil {
+			t.Fatalf("post %s: %v", path, err)
+		}
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("POST %s = %d, want 404", path, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+
+	// Toggling a project that does not exist surfaces store.ErrNotFound as the
+	// not-found page (a 404), not a redirect or a 500.
+	for _, path := range []string{web.ProjectPublishPath(999999), web.ProjectUnpublishPath(999999)} {
+		resp, err := c.PostForm(srv.URL+path, url.Values{})
+		if err != nil {
+			t.Fatalf("post %s: %v", path, err)
+		}
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("POST %s (missing project) = %d, want 404", path, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+
+	// The public page 404s for a non-numeric id and for an unknown/unpublished id, and
+	// never redirects a logged-out viewer to login.
+	anon := newClient(t)
+	anon.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	for _, path := range []string{"/p/not-a-number", "/p/999999"} {
+		resp := mustGet(t, anon, srv.URL+path)
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("GET %s = %d, want 404", path, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+}
+
 // TestPublicOverviewOGImage drives the Open Graph preview card end to end: the
 // public page advertises it via og:image meta tags, the /og.png route renders a
 // valid 1200x630 PNG on demand and caches it, a repeat fetch within the TTL is

@@ -170,6 +170,11 @@ func TestPublishUnpublishProjectOverview(t *testing.T) {
 	if p, err := st.Project(ctx, projectID); err != nil || !p.OverviewPublic {
 		t.Fatalf("Project after publish err=%v public=%v, want true", err, p.OverviewPublic)
 	}
+	// The projects-index rollup reports the same flag as the single-project read, so the
+	// two projections of the public gate cannot drift.
+	if got := projectFromList(t, st, projectID); !got.OverviewPublic {
+		t.Fatalf("ListProjects OverviewPublic = false after publish, want true (drift from Project)")
+	}
 
 	// Disabling hides the page (the link stops resolving).
 	if err := st.UnpublishProjectOverview(ctx, projectID); err != nil {
@@ -180,6 +185,9 @@ func TestPublishUnpublishProjectOverview(t *testing.T) {
 	}
 	if p, err := st.Project(ctx, projectID); err != nil || p.OverviewPublic {
 		t.Fatalf("after unpublish err=%v public=%v, want false", err, p.OverviewPublic)
+	}
+	if got := projectFromList(t, st, projectID); got.OverviewPublic {
+		t.Fatalf("ListProjects OverviewPublic = true after unpublish, want false")
 	}
 
 	// Re-publishing brings the same /p/<id> back.
@@ -254,6 +262,24 @@ func TestDeleteSessionCascadesAndOrphansBlob(t *testing.T) {
 	if err := st.DeleteSession(ctx, sid); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("delete missing = %v, want ErrNotFound", err)
 	}
+}
+
+// projectFromList finds a project's rollup row in ListProjects, so a test can
+// reconcile the index projection of a field (OverviewPublic here) against the
+// single-project read and catch the two drifting.
+func projectFromList(t *testing.T, st *store.Store, id int64) store.ProjectSummary {
+	t.Helper()
+	projects, err := st.ListProjects(context.Background())
+	if err != nil {
+		t.Fatalf("list projects: %v", err)
+	}
+	for _, p := range projects {
+		if p.ID == id {
+			return p
+		}
+	}
+	t.Fatalf("project %d not found in ListProjects", id)
+	return store.ProjectSummary{}
 }
 
 // mintInvite creates a redeemable invite and returns the secret's hash, so a

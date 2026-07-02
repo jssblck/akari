@@ -869,6 +869,26 @@ func TestAnalyticsByUser(t *testing.T) {
 	if !costsEqual(userCost, a.TotalCost) {
 		t.Errorf("by-user cost sum %.2f != headline %.2f", userCost, a.TotalCost)
 	}
+
+	// OmitUsers drops the by-user split (the public project overview sets it, since its
+	// panel never renders Users) while every headline total stays intact: the totals sum
+	// from the by-agent split, not the by-user one, so omitting the latter changes no
+	// figure. The by-model and by-agent splits the public panel does render are untouched.
+	omit, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: proj, OmitUsers: true})
+	if err != nil {
+		t.Fatalf("analytics OmitUsers: %v", err)
+	}
+	if len(omit.Users) != 0 {
+		t.Errorf("OmitUsers should drop the by-user split, got %d rows: %+v", len(omit.Users), omit.Users)
+	}
+	if omit.TotalTokens() != a.TotalTokens() || !costsEqual(omit.TotalCost, a.TotalCost) || omit.Sessions != a.Sessions {
+		t.Errorf("OmitUsers changed the headline: tokens %d/%d cost %.2f/%.2f sessions %d/%d",
+			omit.TotalTokens(), a.TotalTokens(), omit.TotalCost, a.TotalCost, omit.Sessions, a.Sessions)
+	}
+	if len(omit.Models) != len(a.Models) || len(omit.Agents) != len(a.Agents) {
+		t.Errorf("OmitUsers should not touch the model/agent splits: models %d/%d agents %d/%d",
+			len(omit.Models), len(a.Models), len(omit.Agents), len(a.Agents))
+	}
 }
 
 // ListUsers returns every account ordered by username, carrying only the identity

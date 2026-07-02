@@ -54,10 +54,10 @@ type ProjectSummary struct {
 	// projects index. NULL for a project with no sessions.
 	LastActivity *time.Time
 	// OverviewPublic gates whether the project's usage overview resolves for
-	// logged-out viewers at /p/<id>. It is populated by Project (the single-project
-	// read) and PublicProjectOverview (the public gate); the projects-index rollup
-	// (ListProjects) leaves it at its false zero value, since the index renders no
-	// publicity control.
+	// logged-out viewers at /p/<id>. Every read that returns a ProjectSummary
+	// populates it from projects.overview_public (Project, PublicProjectOverview, and
+	// the ListProjects rollup), so the flag reads the same for a given project across
+	// surfaces rather than one projection carrying a stale false the others contradict.
 	OverviewPublic bool
 }
 
@@ -474,7 +474,7 @@ func (s SearchSnippet) Has() bool { return s.Text != "" }
 // first.
 func (s *Store) ListProjects(ctx context.Context) ([]ProjectSummary, error) {
 	rows, err := s.Pool.Query(ctx,
-		`SELECT p.id, p.remote_key, p.host, p.owner, p.repo, p.display_name, p.kind,
+		`SELECT p.id, p.remote_key, p.host, p.owner, p.repo, p.display_name, p.kind, p.overview_public,
 		        count(s.id),
 		        coalesce(sum(s.total_cost_usd), 0),
 		        coalesce(sum(s.total_input_tokens), 0),
@@ -494,7 +494,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]ProjectSummary, error) {
 	var out []ProjectSummary
 	for rows.Next() {
 		var p ProjectSummary
-		if err := rows.Scan(&p.ID, &p.RemoteKey, &p.Host, &p.Owner, &p.Repo, &p.DisplayName, &p.Kind,
+		if err := rows.Scan(&p.ID, &p.RemoteKey, &p.Host, &p.Owner, &p.Repo, &p.DisplayName, &p.Kind, &p.OverviewPublic,
 			&p.SessionCount, &p.TotalCostUSD, &p.TotalInput, &p.TotalOutput,
 			&p.TotalCacheRead, &p.TotalCacheWrite, &p.CostIncomplete, &p.LastActivity); err != nil {
 			return nil, err

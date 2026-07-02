@@ -86,10 +86,22 @@ func TestPlainBarsDropDrillLinks(t *testing.T) {
 	}
 
 	outcomes := []store.LabeledCount{{Key: "completed", Count: 4}, {Key: "abandoned", Count: 1}}
-	for i, r := range OutcomeBarsPlain(outcomes) {
-		if r.Href != "" {
-			t.Errorf("OutcomeBarsPlain[%d] Href = %q, want empty", i, r.Href)
+	linkedOut := OutcomeBars(outcomes, store.SessionFilter{ProjectID: 7}, "30d")
+	plainOut := OutcomeBarsPlain(outcomes)
+	if len(plainOut) != len(linkedOut) {
+		t.Fatalf("OutcomeBarsPlain len = %d, want %d", len(plainOut), len(linkedOut))
+	}
+	for i := range plainOut {
+		if plainOut[i].Label != linkedOut[i].Label || plainOut[i].Count != linkedOut[i].Count ||
+			plainOut[i].Color != linkedOut[i].Color || plainOut[i].Pct != linkedOut[i].Pct {
+			t.Errorf("OutcomeBarsPlain[%d] = %+v, want same label/count/color/pct as %+v", i, plainOut[i], linkedOut[i])
 		}
+		if plainOut[i].Href != "" {
+			t.Errorf("OutcomeBarsPlain[%d] Href = %q, want empty", i, plainOut[i].Href)
+		}
+	}
+	if linkedOut[0].Href == "" {
+		t.Fatal("OutcomeBars should link a non-empty bucket; the plain test would be vacuous otherwise")
 	}
 }
 
