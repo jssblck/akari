@@ -24,7 +24,20 @@
 }
 .toolbar select:hover { border-color: var(--border-strong); }
 /* The project list is the long one; let it grow without forcing the row wide. */
-.tb-field:nth-child(2) select { max-width: 280px; }
+.tb-field:nth-child(3) select { max-width: 280px; }
+
+/* Search input: a mono text field that submits on Enter (no per-keystroke
+   auto-submit). It leads the toolbar so the reader's eye lands on it first, and
+   reads as one of the toolbar controls rather than a heavier search bar. */
+.tb-search input {
+  padding: 6px 10px; font-size: 0.8125rem; min-width: 200px;
+  color: var(--text); background: var(--surface);
+  font-family: var(--mono); border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+.tb-search input:hover { border-color: var(--border-strong); }
+.tb-search input:focus-visible { outline: none; border-color: var(--lilac); box-shadow: var(--ring); }
+.tb-search input::placeholder { color: var(--faint); }
 
 /* ---- Active filter chips ---- */
 .active-filters { display: flex; gap: var(--sp-sm); flex-wrap: wrap; align-items: center; margin-bottom: var(--sp-md); }
@@ -68,13 +81,27 @@
 
 .srow-agent { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-/* The main column is a single metadata line: the project anchors it, the branch
-   carries the detail that tells two same-project runs apart, then the state chips.
-   The branch takes the slack and ellipsizes so a long ref never pushes the chips
-   out of the row. */
-.srow-main {
-  min-width: 0;
-  display: flex; align-items: center; gap: var(--sp-sm);
+/* The main column stacks two lines: the metadata line (project, branch, chips)
+   over a muted second line carrying the run's first-prompt title, or the search
+   snippet when a search is active. A row with neither renders just the one line. */
+.srow-main { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+/* The metadata line: the project anchors it, the branch carries the detail that
+   tells two same-project runs apart, then the state chips. The branch takes the
+   slack and ellipsizes so a long ref never pushes the chips out of the row. */
+.srow-line { min-width: 0; display: flex; align-items: center; gap: var(--sp-sm); }
+/* The second line: one muted, ellipsized line. It reads as context under the
+   metadata, never competing with it for weight. */
+.srow-sub {
+  min-width: 0; color: var(--muted); font-size: 0.75rem; line-height: 1.3;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* The search snippet's matched run gets a subtle lilac-tinted highlight: a
+   background wash, not a filled lilac block, so a feed of matches does not spend
+   the accent as saturated color on every row (the One Voice Rule). The text keeps
+   its ink so the match reads as emphasized context, not a chip. */
+.srow-snippet mark {
+  background: color-mix(in srgb, var(--lilac) 18%, transparent);
+  color: var(--subtext); border-radius: 2px; padding: 0 1px;
 }
 .srow-proj {
   flex: none; color: var(--text); font-size: 0.875rem;
@@ -125,6 +152,42 @@
 .tok-tip .tt-grid dt { color: var(--muted); }
 .tok-tip .tt-grid dd { margin: 0; color: var(--subtext); text-align: right; font-variant-numeric: tabular-nums; }
 .tok-tip .tt-cost { display: block; margin-top: 5px; padding-top: 5px; border-top: 1px solid var(--border); color: var(--text); font: 450 0.75rem var(--mono); font-variant-numeric: tabular-nums; text-align: right; }
+
+/* ---- Feed footer ---- */
+/* One quiet line under the feed: the "N of M" count on the left, the empty-hidden
+   toggle and the "Show more" control on the right. It sits below the last row's
+   rule, so it reads as a summary line, not another row. */
+.feed-footer {
+  display: flex; align-items: center; gap: var(--sp-md);
+  margin-top: var(--sp-md); padding: var(--sp-sm) var(--sp-sm) 0;
+}
+.feed-footer .spacer { flex: 1; }
+.feed-count { color: var(--muted); font-variant-numeric: tabular-nums; }
+.feed-empty { color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
+.feed-empty .dot { color: var(--faint); }
+/* "Show more" is a quiet text control, not a filled button: the feed stays calm,
+   and the accent is not spent on a footer affordance. */
+.showmore {
+  color: var(--subtext); border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm); padding: 4px 12px;
+}
+.showmore:hover { text-decoration: none; border-color: var(--lilac); color: var(--lilac); }
+
+/* In-flight feedback for "Show more", matching the usage panel's rule
+   (overview.css): the control refetches and replaces the whole #session-list,
+   and htmx marks it .htmx-request while that request is outstanding. Dim the
+   feed and pulse the busy control so the page-in reads as "updating" rather than
+   an unexplained pause; the fresh list that replaces #session-list carries no
+   .htmx-request, so the state clears on its own. The per-project session list
+   swaps inside #project-view instead, whose own rule (overview.css) already
+   covers it. */
+#session-list:has(.showmore.htmx-request) .feed {
+  opacity: 0.5; pointer-events: none;
+  transition: opacity var(--dur-base) var(--ease-state);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .showmore.htmx-request { animation: ctrl-busy 0.9s var(--ease-state) infinite; }
+}
 
 /* ---- Responsive ---- */
 /* On a narrow viewport the agent column and the token bar fold away, leaving

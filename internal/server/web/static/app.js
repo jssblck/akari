@@ -579,6 +579,34 @@
     else form.submit();
   });
 
+  // ---------------- Notice banner ----------------
+  // The one-shot success banner (see layout.templ) removes itself on a dismiss
+  // click and auto-removes after a few seconds. Under prefers-reduced-motion the
+  // fade transition is disabled in CSS (.notice-out), so adding the class there
+  // removes it instantly instead of animating; either way the DOM removal itself
+  // is immediate once the fade (or lack of one) has had a frame to apply.
+  var NOTICE_AUTO_DISMISS_MS = 6000;
+  function dismissNotice(el) {
+    if (!el || el._dismissed) return;
+    el._dismissed = true;
+    el.classList.add("notice-out");
+    var reduced = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    var remove = function () { if (el.parentNode) el.parentNode.removeChild(el); };
+    if (reduced) { remove(); return; }
+    el.addEventListener("transitionend", remove, { once: true });
+    setTimeout(remove, 400); // fallback in case transitionend never fires
+  }
+  function initNotice() {
+    var el = document.querySelector("[data-notice]");
+    if (!el) return;
+    setTimeout(function () { dismissNotice(el); }, NOTICE_AUTO_DISMISS_MS);
+  }
+  document.addEventListener("click", function (ev) {
+    var btn = ev.target.closest ? ev.target.closest("[data-notice-dismiss]") : null;
+    if (!btn) return;
+    dismissNotice(btn.closest("[data-notice]"));
+  });
+
   // ---------------- Init ----------------
   function init() {
     animateBars();
@@ -586,6 +614,7 @@
     initLive();
     initReparseWatch();
     initReparsePublic();
+    initNotice();
   }
   // ---------------- Overview user filter ----------------
   // The per-user filter is a <details> that lives inside #usage, so every range or

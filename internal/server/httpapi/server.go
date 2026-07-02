@@ -158,6 +158,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /account/tokens/{id}/revoke", s.requireFull(s.handleRevokeTokenForm))
 	mux.HandleFunc("POST /account/connections/{client_id}/revoke", s.requireFull(s.handleRevokeConnectionForm))
 	mux.HandleFunc("POST /account/invites", s.requireAdmin(s.handleCreateInviteForm))
+	mux.HandleFunc("POST /account/invites/{id}/revoke", s.requireAdmin(s.handleRevokeInviteForm))
 	mux.HandleFunc("POST /account/reparse", s.requireAdmin(s.handleReparseForm))
 	mux.HandleFunc("POST /account/overview/publish", s.requireFull(s.handlePublishOverview))
 	mux.HandleFunc("POST /account/overview/unpublish", s.requireFull(s.handleUnpublishOverview))

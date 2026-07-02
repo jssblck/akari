@@ -59,9 +59,16 @@ func (b Breakdown) Tokens() int64 {
 // AnalyticsFilter (a project or the whole instance, a trailing window, and an
 // optional user/agent/machine narrowing).
 type Analytics struct {
-	Series          []DayPoint
-	Models          []Breakdown
-	Agents          []Breakdown
+	Series []DayPoint
+	Models []Breakdown
+	Agents []Breakdown
+	// Users is the by-owning-user split, the same shape as Models and Agents. The
+	// overview only renders it once more than one user has usage in scope (see
+	// analyticsByUser): a single-user instance or a single-user filter (the public
+	// overview, scoped by the handler to one account) gains nothing from a breakdown
+	// of one row, so the row still populates here and the view decides whether to
+	// show it.
+	Users           []Breakdown
 	TotalCost       float64
 	TotalIn         int64
 	TotalOut        int64
@@ -210,6 +217,12 @@ func (s *Store) analyticsFrom(ctx context.Context, q querier, f AnalyticsFilter)
 		return a, err
 	}
 	a.Agents = agents
+
+	users, err := s.analyticsByUser(ctx, q, f)
+	if err != nil {
+		return a, err
+	}
+	a.Users = users
 
 	// Sum the headline from the by-agent split so the total and the rows beneath it
 	// are the same arithmetic. Agents partition sessions one-to-one, so the session
@@ -449,6 +462,41 @@ func (s *Store) analyticsByAgent(ctx context.Context, q querier, f AnalyticsFilt
 	out, err := scanBreakdowns(rows)
 	if err != nil {
 		return nil, fmt.Errorf("scan analytics by agent: %w", err)
+	}
+	return out, nil
+}
+
+// analyticsByUser groups the same filtered usage base as analyticsByModel and
+// analyticsByAgent by the session's owning user, joined through sessions to name
+// each row by username. It is not summed into the headline the way the by-agent
+// split is (see analyticsFrom): a session has exactly one user, so this too would
+// partition cleanly, but the by-agent split already owns that role and a second
+// summation would be redundant, not additive.
+func (s *Store) analyticsByUser(ctx context.Context, q querier, f AnalyticsFilter) ([]Breakdown, error) {
+	filter, args := f.clause()
+	rows, err := q.Query(ctx,
+		`SELECT u.username,
+		        coalesce(sum(ue.cost_usd), 0),
+		        coalesce(sum(ue.input_tokens), 0),
+		        coalesce(sum(ue.output_tokens), 0),
+		        coalesce(sum(ue.cache_read_tokens), 0),
+		        coalesce(sum(ue.cache_write_tokens), 0),
+		        coalesce(sum(ue.reasoning_tokens), 0),
+		        count(DISTINCT ue.session_id),
+		        coalesce(`+costIncompleteExpr+`, false)
+		   FROM usage_events ue
+		   JOIN sessions s ON s.id = ue.session_id
+		   JOIN users u ON u.id = s.user_id
+		  WHERE ue.occurred_at IS NOT NULL`+filter+`
+		  GROUP BY u.username
+		  ORDER BY 2 DESC, count(DISTINCT ue.session_id) DESC`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query analytics by user: %w", err)
+	}
+	defer rows.Close()
+	out, err := scanBreakdowns(rows)
+	if err != nil {
+		return nil, fmt.Errorf("scan analytics by user: %w", err)
 	}
 	return out, nil
 }

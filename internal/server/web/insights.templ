@@ -6,6 +6,13 @@ import (
 	"github.com/jssblck/akari/internal/server/store"
 )
 
+// peakTip is the shared tooltip on the context panel's three peak figures (median, p90,
+// heaviest): the one place that definition survives now that the panel's visible
+// footnote is gone. It names the token classes a peak is made of and flags it as a load
+// measure rather than a spend figure, the distinction that would otherwise invite reading
+// a peak as a cost.
+const peakTip = "One turn's prompt: input + cache read + cache write. Load, not spend."
+
 // InsightsPage is the cross-cutting analytics surface at /insights: two headline bands of
 // measured rates (concurrency and velocity) over the fleet, a tools band (reliability and
 // mix), a prompt-hygiene band (input quality), how the window's sessions distribute across
@@ -28,7 +35,7 @@ templ InsightsPage(p Page, ins store.Insights, rng string, ranges []RangeOption)
 				<div class="empty">No sessions in this window yet.</div>
 			} else {
 				<div class="ins-headline">
-					@concurrencyPanel(ins.Concurrency)
+					@concurrencyPanel(ins.Concurrency, rng)
 					@velocityPanel(ins.Velocity)
 				</div>
 				<div class="ins-tools">
@@ -41,9 +48,9 @@ templ InsightsPage(p Page, ins store.Insights, rng string, ranges []RangeOption)
 					@contextPanel(ins.Context)
 				</div>
 				<div class="ins-grid">
-					@distributionPanel("Grades", "the quality score banded A to F, unscored for an ungraded session", GradeBars(ins.Quality.Grades))
-					@distributionPanel("Outcomes", "how each session ended", OutcomeBars(ins.Quality.Outcomes))
-					@distributionPanel("Archetypes", "session shape by length and turns", ArchetypeBars(ins.Archetypes))
+					@distributionPanel("Grades", "A to F; unscored means the session was never graded", GradeBars(ins.Quality.Grades, rng))
+					@distributionPanel("Outcomes", "", OutcomeBars(ins.Quality.Outcomes, rng))
+					@distributionPanel("Archetypes", "", ArchetypeBars(ins.Archetypes))
 				</div>
 				<div class="ins-churn">
 					@churnPanel(ins.Churn)
@@ -58,11 +65,10 @@ templ InsightsPage(p Page, ins store.Insights, rng string, ranges []RangeOption)
 // across the span the sessions cover. Three figures read left to right, the same
 // instrument tone as the overview stat tiles, since concurrency is a measured rate
 // rather than a distribution of buckets.
-templ concurrencyPanel(c store.ConcurrencyStats) {
+templ concurrencyPanel(c store.ConcurrencyStats, rng string) {
 	<div class="ins-panel ins-concurrency">
 		<div class="ins-panel-head">
 			<span class="label">Concurrency</span>
-			<span class="muted small ins-caption">peak overlap among sessions that started in this window</span>
 		</div>
 		if !c.HasData() {
 			<div class="muted small">No sessions with a measured start and end in this window.</div>
@@ -72,11 +78,15 @@ templ concurrencyPanel(c store.ConcurrencyStats) {
 					<div class="ins-fig-v">{ fmt.Sprintf("%d", c.FleetPeak) }</div>
 					<div class="ins-fig-k">peak at once</div>
 					if !c.FleetPeakAt.IsZero() {
-						<div class="ins-fig-sub muted small">{ FmtTimeAt(c.FleetPeakAt) }</div>
+						<div class="ins-fig-sub muted small">{ FmtTimeAt(ctx, c.FleetPeakAt) }</div>
 					}
 				</div>
 				<div class="ins-fig">
-					<div class="ins-fig-v">{ ConcurrencyBusiest(c) }</div>
+					if c.BusiestUser != "" {
+							<a class="ins-fig-v ins-fig-link" href={ ConcurrencyBusiestHref(c, rng) }>{ ConcurrencyBusiest(c) }</a>
+						} else {
+							<div class="ins-fig-v">{ ConcurrencyBusiest(c) }</div>
+						}
 					<div class="ins-fig-k">busiest user</div>
 				</div>
 				<div class="ins-fig">
@@ -97,7 +107,6 @@ templ velocityPanel(v store.VelocityStats) {
 	<div class="ins-panel ins-velocity">
 		<div class="ins-panel-head">
 			<span class="label">Velocity</span>
-			<span class="muted small ins-caption">how fast turns cycle and work moves</span>
 		</div>
 		if !v.HasData() {
 			<div class="muted small">No timed turns in this window.</div>
@@ -136,7 +145,6 @@ templ toolsPanel(t store.ToolStats) {
 	<div class="ins-panel ins-tools-panel">
 		<div class="ins-panel-head">
 			<span class="label">Tools</span>
-			<span class="muted small ins-caption">reliability and mix across the window's sessions</span>
 		</div>
 		if !t.HasData() {
 			<div class="muted small">No tool calls in this window.</div>
@@ -190,7 +198,6 @@ templ hygienePanel(h store.PromptHygiene) {
 	<div class="ins-panel ins-hygiene-panel">
 		<div class="ins-panel-head">
 			<span class="label">Prompt hygiene</span>
-			<span class="muted small ins-caption">how clearly the window's prompts set the agent up</span>
 		</div>
 		if !h.HasData() {
 			<div class="muted small">No prompts in this window.</div>
@@ -229,14 +236,13 @@ templ hygienePanel(h store.PromptHygiene) {
 // way. Like hygiene these figures never feed the quality score; they describe resource load.
 // Each peak is one turn's occupancy (input plus cache read plus cache write, output
 // excluded), and these are order statistics over the per-session peaks, so there is no
-// per-class total to break down. They carry a plain caption of what a peak is made of
-// rather than the four-class spend card, the single-metric exemption the token-consistency
-// convention allows.
+// per-class total to break down. That definition lives on the peak figures' title
+// tooltips (peakTip) rather than as visible prose, the single-metric exemption the
+// token-consistency convention allows.
 templ contextPanel(c store.ContextHealthStats) {
 	<div class="ins-panel ins-context-panel">
 		<div class="ins-panel-head">
 			<span class="label">Context health</span>
-			<span class="muted small ins-caption">how heavy sessions got and how often they shed context</span>
 		</div>
 		if !c.HasData() {
 			<div class="muted small">No sessions with measured context in this window.</div>
@@ -244,15 +250,15 @@ templ contextPanel(c store.ContextHealthStats) {
 			<div class="ins-figs">
 				<div class="ins-fig">
 					<div class="ins-fig-v">{ FmtTokensCompact(c.PeakTokensP50) }</div>
-					<div class="ins-fig-k">median peak</div>
+					<div class="ins-fig-k" title={ peakTip }>median peak</div>
 				</div>
 				<div class="ins-fig">
 					<div class="ins-fig-v">{ FmtTokensCompact(c.PeakTokensP90) }</div>
-					<div class="ins-fig-k">p90 peak</div>
+					<div class="ins-fig-k" title={ peakTip }>p90 peak</div>
 				</div>
 				<div class="ins-fig">
 					<div class="ins-fig-v">{ FmtTokensCompact(c.PeakTokensMax) }</div>
-					<div class="ins-fig-k">heaviest peak</div>
+					<div class="ins-fig-k" title={ peakTip }>heaviest peak</div>
 				</div>
 				<div class="ins-fig">
 					<div class="ins-fig-v">{ HygienePct(c.SessionsWithReset, c.Sessions) }</div>
@@ -264,7 +270,6 @@ templ contextPanel(c store.ContextHealthStats) {
 					<div class="ins-fig-k">context resets</div>
 				</div>
 			</div>
-			<div class="ins-note muted small">Each peak is a single turn's context: input, cache read, and cache write, output excluded. A load measure, not spend.</div>
 		}
 	</div>
 }
@@ -277,7 +282,6 @@ templ churnPanel(c store.FileChurn) {
 	<div class="ins-panel ins-churn-panel">
 		<div class="ins-panel-head">
 			<span class="label">File churn</span>
-			<span class="muted small ins-caption">files edited more than once in this window</span>
 		</div>
 		if !c.HasData() {
 			<div class="muted small">No files were edited more than once in this window.</div>
@@ -305,30 +309,42 @@ templ churnPanel(c store.FileChurn) {
 	</div>
 }
 
-// distributionPanel renders one labeled set of horizontal bars: a title, a one-line
-// caption, and a bar per bucket sized to the largest in the set. It reuses the
-// breakdown bars' markup (.bars / .bar-row / .bar-fill[data-pct][data-color]), so the
-// shared animateBars handler grows the fills in on load and after an htmx swap, and the
-// existing bar styling applies without new chart code.
-templ distributionPanel(title, caption string, rows []DistRow) {
+// distributionPanel renders one labeled set of horizontal bars: a title and a bar per
+// bucket sized to the largest in the set. It reuses the breakdown bars' markup (.bars /
+// .bar-row / .bar-fill[data-pct][data-color]), so the shared animateBars handler grows
+// the fills in on load and after an htmx swap, and the existing bar styling applies
+// without new chart code. titleAttr is an optional tooltip on the header, the one place a
+// definition survives (the Grades panel's "unscored" case); every other panel passes "".
+templ distributionPanel(title, titleAttr string, rows []DistRow) {
 	<div class="ins-panel">
 		<div class="ins-panel-head">
-			<span class="label">{ title }</span>
-			if caption != "" {
-				<span class="muted small ins-caption">{ caption }</span>
-			}
+			<span class="label" title={ titleAttr }>{ title }</span>
 		</div>
 		<ul class="bars dist-bars">
 			for _, r := range rows {
-				<li class="bar-row">
-					<div class="bar-head">
-						<span class="bar-label">{ r.Label }</span>
-						<span class="bar-val">{ fmt.Sprintf("%d", r.Count) }</span>
-					</div>
-					<div class="bar-track">
-						<div class="bar-fill" data-pct={ fmt.Sprintf("%.2f", r.Pct) } data-color={ r.Color }></div>
-					</div>
-				</li>
+				if r.Href != "" {
+					<li class="bar-row">
+						<a class="bar-link" href={ templ.SafeURL(r.Href) }>
+							<div class="bar-head">
+								<span class="bar-label">{ r.Label }</span>
+								<span class="bar-val">{ fmt.Sprintf("%d", r.Count) }</span>
+							</div>
+							<div class="bar-track">
+								<div class="bar-fill" data-pct={ fmt.Sprintf("%.2f", r.Pct) } data-color={ r.Color }></div>
+							</div>
+						</a>
+					</li>
+				} else {
+					<li class="bar-row">
+						<div class="bar-head">
+							<span class="bar-label">{ r.Label }</span>
+							<span class="bar-val">{ fmt.Sprintf("%d", r.Count) }</span>
+						</div>
+						<div class="bar-track">
+							<div class="bar-fill" data-pct={ fmt.Sprintf("%.2f", r.Pct) } data-color={ r.Color }></div>
+						</div>
+					</li>
+				}
 			}
 		</ul>
 	</div>

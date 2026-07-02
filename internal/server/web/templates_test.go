@@ -191,6 +191,32 @@ func TestOverviewPageDropsRecentActivity(t *testing.T) {
 	}
 }
 
+// The overview's By user breakdown only earns its place once more than one user has
+// usage in the scope: a single-user instance (or a single-user filter, like the public
+// overview) gains nothing from a breakdown of one row.
+func TestOverviewPageByUserBreakdownGatedOnMultipleUsers(t *testing.T) {
+	p := Page{Title: "Overview", LoggedIn: true, Active: "overview", Username: "Grace Hopper"}
+
+	one := analyticsWithData()
+	one.Users = []store.Breakdown{{Label: "grace", CostUSD: 12.5, Input: 100, Sessions: 3}}
+	html := renderComponent(t, OverviewPage(p, one, DefaultRange, nil, nil))
+	if strings.Contains(html, "By user") {
+		t.Error("a single-user breakdown should not render the By user list")
+	}
+
+	two := analyticsWithData()
+	two.Users = []store.Breakdown{
+		{Label: "grace", CostUSD: 9.0, Input: 80, Sessions: 2},
+		{Label: "ada", CostUSD: 3.5, Input: 20, Sessions: 1},
+	}
+	html = renderComponent(t, OverviewPage(p, two, DefaultRange, nil, nil))
+	for _, want := range []string{"By user", ">grace<", ">ada<"} {
+		if !strings.Contains(html, want) {
+			t.Errorf("a multi-user breakdown should render %q", want)
+		}
+	}
+}
+
 // The projects index is now just the table: no usage panel (the Overview owns
 // fleet usage), no page heading (the sidebar marks the section), and no
 // local-folder list. The token columns collapse to one "Tokens" total whose
@@ -243,7 +269,7 @@ func TestGlobalSessionListRow(t *testing.T) {
 		},
 		ProjectID: 4, ProjectKey: "scratch", ProjectName: "scratch", ProjectKind: "standalone",
 	}}
-	html := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Sort: "updated", Desc: true}))
+	html := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Sort: "updated", Desc: true}, SessionFooter{Shown: 1}))
 
 	for _, want := range []string{
 		// The whole row links to the session.
@@ -253,8 +279,8 @@ func TestGlobalSessionListRow(t *testing.T) {
 		`class="tag standalone"`, `class="tag public"`,
 		// Tokens: compact figure plus the breakdown card and cost.
 		`160 tokens`, "<dt>In</dt>", "<dt>Out</dt>", "<dt>Cache read</dt>", "<dt>Cache write</dt>", "$1.25",
-		// Time reads as the clock with the exact stamp on hover.
-		`title="` + FmtTime(&ts) + `"`,
+		// Time reads as the clock with the exact stamp (with its zone) on hover.
+		`title="` + FmtTimeLong(context.Background(), &ts) + `"`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("feed row missing %q", want)
@@ -263,6 +289,112 @@ func TestGlobalSessionListRow(t *testing.T) {
 	// The session id is never printed, and the old table chrome is gone.
 	if strings.Contains(html, "#7") || strings.Contains(html, "<table") || strings.Contains(html, "sort-link") {
 		t.Error("feed should drop the session id, the table, and the sort headers")
+	}
+}
+
+// A feed row renders its first-prompt title as a muted second line when no search
+// snippet is present, and no second line at all when the session has no title.
+func TestGlobalSessionListTitleLine(t *testing.T) {
+	ts := time.Now().UTC()
+	rows := []store.SessionRow{
+		{SessionSummary: store.SessionSummary{ID: 1, Agent: "claude", MessageCount: 2, Title: "Fix the timezone pass", UpdatedAt: &ts}, ProjectID: 1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote"},
+		{SessionSummary: store.SessionSummary{ID: 2, Agent: "claude", MessageCount: 1, UpdatedAt: &ts}, ProjectID: 1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote"},
+	}
+	html := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Sort: "updated", Desc: true}, SessionFooter{Shown: 2}))
+
+	if !strings.Contains(html, `class="srow-sub" title="Fix the timezone pass">Fix the timezone pass</div>`) {
+		t.Errorf("a titled row should render its title as the second line, got:\n%s", html)
+	}
+	// The untitled row (id 2) renders no snippet class and no title sub-line for it;
+	// exactly one srow-sub should appear (the titled row's).
+	if n := strings.Count(html, `class="srow-sub"`); n != 1 {
+		t.Errorf("exactly one title sub-line expected, got %d", n)
+	}
+}
+
+// A searched feed renders the snippet as the second line with the match wrapped in
+// <mark>, and the <mark> is template structure around escaped text: a snippet whose
+// content or match contains markup renders escaped, never injected. The snippet
+// replaces the title line when both would apply.
+func TestGlobalSessionListSnippetLine(t *testing.T) {
+	ts := time.Now().UTC()
+	// A snippet whose surrounding text and matched run both contain markup-looking
+	// text, to prove the template escapes every part and only the <mark> is real.
+	snip := store.SearchSnippet{Text: "before <b>x</b> <script>alert(1)</script> after", MatchStart: 16, MatchEnd: 41}
+	rows := []store.SessionRow{{
+		SessionSummary: store.SessionSummary{ID: 9, Agent: "claude", MessageCount: 3, Title: "should be replaced by snippet", UpdatedAt: &ts},
+		ProjectID:      1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote",
+		Search: snip,
+	}}
+	html := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Query: "script", Sort: "updated", Desc: true}, SessionFooter{Shown: 1}))
+
+	// The <mark> wrapper is real template markup.
+	if !strings.Contains(html, "<mark>") || !strings.Contains(html, "</mark>") {
+		t.Errorf("snippet should wrap the match in <mark>, got:\n%s", html)
+	}
+	// The content's own angle brackets are escaped, never emitted as elements.
+	if strings.Contains(html, "<script>alert(1)</script>") || strings.Contains(html, "<b>x</b>") {
+		t.Errorf("snippet content must be escaped, not injected as markup, got:\n%s", html)
+	}
+	if !strings.Contains(html, "&lt;script&gt;alert(1)&lt;/script&gt;") {
+		t.Errorf("snippet content should render as escaped text, got:\n%s", html)
+	}
+	// The snippet replaces the title line: the title text must not appear.
+	if strings.Contains(html, "should be replaced by snippet") {
+		t.Error("a searched row should show the snippet, not the title")
+	}
+}
+
+// The footer renders "Showing N" with a "Show more" htmx control when more rows match
+// than the page holds, "N sessions" (the exact total) when the page is the whole set,
+// and the terse empty-hidden toggle. At the cap it names the cap instead of a button.
+func TestGlobalSessionListFooter(t *testing.T) {
+	ts := time.Now().UTC()
+	rows := []store.SessionRow{{
+		SessionSummary: store.SessionSummary{ID: 1, Agent: "claude", MessageCount: 1, UpdatedAt: &ts},
+		ProjectID:      1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote",
+	}}
+	// hasMore true: the page is not the whole set, so the count reads "Showing N", a
+	// "Show more" control appears, and the empty toggle (hasEmpty true) reads "empty
+	// hidden · show".
+	sel := store.SessionFilter{Sort: "updated", Desc: true, Limit: 100}
+	footer := BuildSessionFooter(sel, 100, true, true)
+	html := renderComponent(t, GlobalSessionList(rows, sel, footer))
+
+	for _, want := range []string{
+		`Showing 100`,
+		`hx-target="#session-list"`, `hx-select="#session-list"`, `hx-swap="outerHTML"`,
+		`>Show more</a>`,
+		// Empty toggle: hidden, a "show" verb, no count.
+		`empty hidden`, `>show</a>`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("footer missing %q, got:\n%s", want, html)
+		}
+	}
+	if strings.Contains(html, " of ") {
+		t.Errorf("the more-matching footer should not read 'N of M', got:\n%s", html)
+	}
+
+	// hasMore false: the shown count IS the exact total, so the footer reads "N
+	// sessions" and offers no "Show more".
+	exact := BuildSessionFooter(store.SessionFilter{Sort: "updated", Desc: true}, 7, false, false)
+	exactHTML := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Sort: "updated", Desc: true}, exact))
+	if !strings.Contains(exactHTML, "7 sessions") {
+		t.Errorf("an exhausted page should read the exact 'N sessions', got:\n%s", exactHTML)
+	}
+	if strings.Contains(exactHTML, ">Show more</a>") {
+		t.Errorf("an exhausted page should carry no Show more, got:\n%s", exactHTML)
+	}
+
+	// At the cap with more matching, the button is replaced by the cap note.
+	capped := BuildSessionFooter(store.SessionFilter{Limit: 500}, 500, true, false)
+	capHTML := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Limit: 500}, capped))
+	if strings.Contains(capHTML, ">Show more</a>") {
+		t.Error("at the cap there should be no Show more button")
+	}
+	if !strings.Contains(capHTML, "at cap") {
+		t.Error("at the cap the footer should name the cap")
 	}
 }
 
@@ -280,7 +412,7 @@ func TestGlobalSessionListGrouping(t *testing.T) {
 		{SessionSummary: store.SessionSummary{ID: 2, Agent: "claude", UpdatedAt: &earlier}, ProjectID: 1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote"},
 	}
 
-	grouped := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Sort: "updated", Desc: true}))
+	grouped := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Sort: "updated", Desc: true}, SessionFooter{Shown: 2}))
 	if !strings.Contains(grouped, `class="day-head"`) || !strings.Contains(grouped, `>Today</span>`) {
 		t.Error("most-recent order should render a day heading")
 	}
@@ -289,7 +421,7 @@ func TestGlobalSessionListGrouping(t *testing.T) {
 		t.Error("a repeated project label should fade")
 	}
 
-	flat := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Sort: "tokens", Desc: true}))
+	flat := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Sort: "tokens", Desc: true}, SessionFooter{Shown: 2}))
 	if strings.Contains(flat, `class="day-head"`) {
 		t.Error("a non-recent sort should not day-group the feed")
 	}

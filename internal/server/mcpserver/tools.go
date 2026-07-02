@@ -113,7 +113,7 @@ func registerTools(s *mcp.Server, st *store.Store) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "list_sessions",
-		Description: "The cross-project session feed, newest session first, with optional filters (project_id, agent, username, machine, and a trailing-day window). Each row carries its last-activity time (updated_at) so you can order a page by recency. Returns the facet rail too: the busiest agents, users, machines, and projects with counts, whose values are the exact strings to pass back as filters. Up to 500 rows per page; page forward with the returned next_cursor (a stable id keyset, so paging the whole feed is complete even as sessions are re-activated mid-walk).",
+		Description: "The cross-project session feed, newest session first, with optional filters (project_id, agent, username, machine, and a trailing-day window on the session's start time). Each row carries its last-activity time (updated_at) so you can order a page by recency. Returns the facet rail too: the busiest agents, users, machines, and projects with counts, whose values are the exact strings to pass back as filters. Up to 500 rows per page; page forward with the returned next_cursor (a stable id keyset, so paging the whole feed is complete even as sessions are re-activated mid-walk).",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in listSessionsInput) (*mcp.CallToolResult, sessionsDTO, error) {
 		cursor, err := decodeCursor(in.Cursor)
 		if err != nil {
@@ -122,6 +122,10 @@ func registerTools(s *mcp.Server, st *store.Store) {
 		rows, next, err := st.SessionFeed(ctx, store.SessionFilter{
 			ProjectID: in.ProjectID, Agent: in.Agent, Machine: in.Machine, Username: in.Username,
 			Since: sinceFromDays(in.Days),
+			// The MCP feed lists every session an agent might inspect, including ones
+			// whose parse produced no readable message (still reachable by id); the
+			// empty-hiding is a global-web-feed affordance, not this API's contract.
+			IncludeEmpty: true,
 		}, in.Limit, cursor)
 		if err != nil {
 			return nil, sessionsDTO{}, err

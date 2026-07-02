@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/a-h/templ"
 	"github.com/jssblck/akari/internal/server/auth"
@@ -65,6 +66,16 @@ func (s *Server) pageForNav(r *http.Request, title, active string) web.Page {
 // Buffering the render to recover a clean 500 is deliberately not done: these
 // pages are cheap to render and effectively never fail.
 func render(w http.ResponseWriter, r *http.Request, status int, c templ.Component) {
+	// Every HTML page renders through here, so resolving the viewer's timezone once
+	// at this seam localizes every stamp and day heading (authed, public, and error
+	// pages alike) without each handler having to thread a location through. The
+	// helpers read it off the context via web.Loc, defaulting to UTC when the tz
+	// cookie is absent.
+	r = withLocation(r)
+	// Likewise, draining any one-shot notice cookie here (rather than in pageFor)
+	// means every render path clears it exactly once, regardless of which page the
+	// action's redirect landed on; the authed layout reads it back via web.Notice.
+	r = withNotice(w, r)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
 	_ = c.Render(r.Context(), w)
@@ -171,6 +182,69 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		}
 		filter.ProjectID = pid
 	}
+	// Content search: a trimmed, length-capped query restricts the feed to sessions
+	// with a matching message and drives the per-row snippet. An empty query behaves
+	// exactly as before. The cap bounds the ILIKE pattern to a sane length so a
+	// pathological query cannot force a huge scan.
+	if v := strings.TrimSpace(q.Get("q")); v != "" {
+		if len(v) > maxSearchQueryLen {
+			// Cut on a rune boundary: a byte-mid-rune truncation would hand Postgres
+			// invalid UTF-8, which it rejects with an encoding error.
+			cut := maxSearchQueryLen
+			for cut > 0 && !utf8.RuneStart(v[cut]) {
+				cut--
+			}
+			v = v[:cut]
+		}
+		filter.Query = v
+	}
+	// Grade, outcome, and range arrive from an Insights drill-through link. Each is
+	// whitelist-validated: a present-but-unknown value is a bad request, not a silent
+	// fall-through to the unfiltered list, matching the project-filter precedent above.
+	if v := strings.TrimSpace(q.Get("grade")); v != "" {
+		if !web.IsGrade(v) {
+			render(w, r, http.StatusBadRequest, web.ErrorPage(s.pageForNav(r, "Bad request", "sessions"), http.StatusBadRequest, "Invalid grade filter."))
+			return
+		}
+		filter.Grade = v
+	}
+	if v := strings.TrimSpace(q.Get("outcome")); v != "" {
+		if !web.IsOutcome(v) {
+			render(w, r, http.StatusBadRequest, web.ErrorPage(s.pageForNav(r, "Bad request", "sessions"), http.StatusBadRequest, "Invalid outcome filter."))
+			return
+		}
+		filter.Outcome = v
+	}
+	// The window rides ?range= just as it does on Insights, so a drill-through link
+	// carries its window through. Unlike Insights, the bare /sessions list has no
+	// window by default (it is the whole feed), so a Since bound applies only when the
+	// param is actually present: an absent range leaves the list unwindowed rather than
+	// silently trimming it to the default year. An unknown value normalizes to the
+	// default via ParseRange rather than erroring, matching the sort-key precedent.
+	//
+	// ListAllSessions bounds this Since on s.started_at, the column the Insights panels
+	// window their cohorts by, so a drill-through from a panel bar opens exactly the
+	// sessions that bar counted rather than a differently windowed feed.
+	if raw := strings.TrimSpace(q.Get("range")); raw != "" {
+		filter.Range = web.ParseRange(raw)
+		filter.Since = web.RangeSince(filter.Range, time.Now())
+	}
+	// Empty sessions (message_count = 0) are hidden by default; empty=1 shows them.
+	filter.IncludeEmpty = q.Get("empty") == "1"
+	// spanned=1 narrows to sessions with a measured span, the concurrency panel's cohort;
+	// it arrives only on the busiest-user drill so that feed matches what the panel swept.
+	filter.RequireSpan = q.Get("spanned") == "1"
+	// The paging limit rides the URL, doubled by "Show more" and clamped to the
+	// store's window. An absent or malformed value is the default page.
+	filter.Limit = web.DefaultSessionLimit
+	if v := strings.TrimSpace(q.Get("limit")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			if n > web.MaxSessionLimit {
+				n = web.MaxSessionLimit
+			}
+			filter.Limit = n
+		}
+	}
 	// Click-to-sort: an unknown sort key falls back to the default order rather
 	// than erroring, so a stale or tampered link still renders the feed. The
 	// direction defaults to descending; the header links always carry an explicit
@@ -180,13 +254,29 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		filter.Sort = v
 	}
 	filter.Desc = q.Get("dir") != "asc"
-	rows, err := s.Store.ListAllSessions(r.Context(), filter)
+	// The list fetches limit+1 rows and reports hasMore, so the footer learns whether a
+	// next page exists without a count(*) over the whole matching history: the render
+	// cost stays linear in the page, not the corpus.
+	rows, hasMore, err := s.Store.ListAllSessions(r.Context(), filter)
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "sessions"), http.StatusInternalServerError, "Could not load sessions."))
 		return
 	}
+	// The empty-hidden toggle needs only whether any empty session exists in scope, not
+	// how many: that yes/no is a bounded EXISTS probe rather than the O(total) aggregate
+	// the old count carried. It probes regardless of the current IncludeEmpty state:
+	// HasEmptySessions forces empties into scope to answer "are there any here", so even
+	// when they are being shown the toggle appears only when hiding them would actually
+	// change the feed. A ?empty=1 over a scope with no empties thus shows no toggle,
+	// rather than a "showing empty · hide" that would hide nothing.
+	hasEmpty, err := s.Store.HasEmptySessions(r.Context(), filter)
+	if err != nil {
+		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "sessions"), http.StatusInternalServerError, "Could not load sessions."))
+		return
+	}
+	footer := web.BuildSessionFooter(filter, len(rows), hasMore, hasEmpty)
 	if r.Header.Get("HX-Request") == "true" {
-		render(w, r, http.StatusOK, web.GlobalSessionList(rows, filter))
+		render(w, r, http.StatusOK, web.GlobalSessionList(rows, filter, footer))
 		return
 	}
 	facets, err := s.Store.GlobalFacets(r.Context())
@@ -194,8 +284,13 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "sessions"), http.StatusInternalServerError, "Could not load filters."))
 		return
 	}
-	render(w, r, http.StatusOK, web.SessionsPage(s.pageForNav(r, "Sessions", "sessions"), rows, facets, filter))
+	render(w, r, http.StatusOK, web.SessionsPage(s.pageForNav(r, "Sessions", "sessions"), rows, facets, filter, footer))
 }
+
+// maxSearchQueryLen caps the content-search string before it becomes an ILIKE
+// pattern, so a pasted multi-kilobyte query cannot drive a pathological scan. It is
+// generous for any real search term.
+const maxSearchQueryLen = 200
 
 func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
@@ -224,6 +319,10 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 		Machine:   strings.TrimSpace(r.URL.Query().Get("machine")),
 		Username:  strings.TrimSpace(r.URL.Query().Get("user")),
 		Since:     since,
+		// The per-project table is windowed by dated usage and reconciles with the
+		// usage panel; the empty-hiding is a global-feed affordance only, so keep every
+		// session here regardless of message count.
+		IncludeEmpty: true,
 	}
 	// The table draws from the same windowed usage base as the panel (WindowSessionPage,
 	// not the lifetime-rollup ListSessions), so each row's tokens and cost are its
@@ -363,6 +462,7 @@ func (s *Server) handlePublishSession(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(r, "Not found"), http.StatusNotFound, "Session not found."))
 		return
 	}
+	s.setNotice(w, "Published")
 	http.Redirect(w, r, fmt.Sprintf("/sessions/%d", id), http.StatusSeeOther)
 }
 
@@ -377,6 +477,7 @@ func (s *Server) handlePublishOverview(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not publish overview."))
 		return
 	}
+	s.setNotice(w, "Overview published")
 	http.Redirect(w, r, "/account", http.StatusSeeOther)
 }
 
@@ -388,6 +489,7 @@ func (s *Server) handleUnpublishOverview(w http.ResponseWriter, r *http.Request)
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not update overview."))
 		return
 	}
+	s.setNotice(w, "Overview unpublished")
 	http.Redirect(w, r, "/account", http.StatusSeeOther)
 }
 
@@ -608,6 +710,7 @@ func (s *Server) handleUnpublishSession(w http.ResponseWriter, r *http.Request) 
 		render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(r, "Not found"), http.StatusNotFound, "Session not found."))
 		return
 	}
+	s.setNotice(w, "Unpublished")
 	http.Redirect(w, r, fmt.Sprintf("/sessions/%d", id), http.StatusSeeOther)
 }
 
@@ -636,6 +739,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not delete session."))
 		return
 	}
+	s.setNotice(w, "Session deleted")
 	http.Redirect(w, r, fmt.Sprintf("/projects/%d", d.ProjectID), http.StatusSeeOther)
 }
 
@@ -747,13 +851,24 @@ func (s *Server) handleAccountPage(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load connected apps."))
 		return
 	}
+	page := s.pageForNav(r, "Account", "account")
+	// Invites are admin-only machinery: skip the query entirely for a non-admin
+	// viewer rather than loading a list the page never renders.
+	var invites []store.Invite
+	if page.IsAdmin {
+		invites, err = s.Store.ListInvites(r.Context())
+		if err != nil {
+			render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load invites."))
+			return
+		}
+	}
 	// Freshly minted secrets are passed once via short-lived flash cookies, then
 	// cleared, so a page reload does not keep showing them.
 	newToken := readFlash(w, r, "akari_new_token")
 	newInvite := readFlash(w, r, "akari_new_invite")
 	st := s.reparser.Status()
 	rp := web.ReparseView{InProgress: st.InProgress, Done: st.Done, Total: st.Total, Failed: st.Failed}
-	render(w, r, http.StatusOK, web.AccountPage(s.pageForNav(r, "Account", "account"), tokens, grants, newToken, newInvite, rp))
+	render(w, r, http.StatusOK, web.AccountPage(page, tokens, grants, invites, newToken, newInvite, rp))
 }
 
 // Login and register, form (HTML) variants. These mirror the JSON handlers but
@@ -878,9 +993,18 @@ func (s *Server) handleCreateTokenForm(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRevokeTokenForm(w http.ResponseWriter, r *http.Request) {
 	p, _ := principalFrom(r.Context())
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err == nil {
-		_ = s.Store.RevokeAPIToken(r.Context(), p.UserID, id)
+	if err != nil {
+		http.Redirect(w, r, "/account", http.StatusSeeOther)
+		return
 	}
+	// Surface a revocation failure instead of redirecting as if it worked: a silent
+	// redirect would tell the user the token is gone while it stays live, matching the
+	// connection- and invite-revoke handlers.
+	if err := s.Store.RevokeAPIToken(r.Context(), p.UserID, id); err != nil {
+		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not revoke the token. Try again."))
+		return
+	}
+	s.setNotice(w, "Token revoked")
 	http.Redirect(w, r, "/account", http.StatusSeeOther)
 }
 
@@ -914,6 +1038,27 @@ func (s *Server) handleCreateInviteForm(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	s.setFlash(w, "akari_new_invite", token)
+	http.Redirect(w, r, "/account", http.StatusSeeOther)
+}
+
+// handleRevokeInviteForm deletes an invite token by id. Deletion (not a revoked
+// flag, unlike API tokens) is correct here: an invite carries no history worth
+// keeping once it will never be redeemed, and ListInvites has nothing left to
+// join against it for.
+func (s *Server) handleRevokeInviteForm(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Redirect(w, r, "/account", http.StatusSeeOther)
+		return
+	}
+	// Surface a deletion failure instead of redirecting as if it worked: a silent
+	// redirect would tell the admin the invite is gone while it stays redeemable,
+	// matching the connection-revoke handler's ErrorPage on failure.
+	if err := s.Store.RevokeInvite(r.Context(), id); err != nil {
+		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not revoke the invite. Try again."))
+		return
+	}
+	s.setNotice(w, "Invite revoked")
 	http.Redirect(w, r, "/account", http.StatusSeeOther)
 }
 

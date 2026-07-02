@@ -27,10 +27,10 @@ templ ConsentPage(p Page, c ConsentParams) {
 				{ c.ClientName } is asking to connect to akari as <strong>{ c.Username }</strong>.
 			</p>
 			<p class="muted">
-				It will be able to read everything you can: every session transcript, project,
-				and usage figure across the instance, plus the raw underlying data. It is
-				read-only, so it cannot publish, delete, or change anything, and you can
-				disconnect it any time from your account page.
+				It will read everything you can: every session, project, and usage figure on
+				the instance, plus the raw underlying data. It is read-only and cannot publish,
+				delete, or change anything, and you can disconnect it any time from your account
+				page.
 			</p>
 			<form method="post" action="/oauth/authorize">
 				<input type="hidden" name="client_id" value={ c.ClientID }/>

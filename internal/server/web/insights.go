@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/a-h/templ"
+
 	"github.com/jssblck/akari/internal/server/store"
 )
 
@@ -16,6 +18,17 @@ func ConcurrencyBusiest(c store.ConcurrencyStats) string {
 		return "-"
 	}
 	return fmt.Sprintf("%s (%d)", c.BusiestUser, c.BusiestUserPeak)
+}
+
+// ConcurrencyBusiestHref drills the busiest-user figure into that user's sessions,
+// carrying the current Insights window (rng) so the list matches the panel's period. It
+// is called only when a busiest user exists (the template guards on BusiestUser != "").
+// IncludeEmpty rides along because the concurrency panel counts sessions regardless of
+// message_count, and RequireSpan narrows to the measured-span cohort the panel actually
+// sweeps (spanFilter): without it the drill would list sessions with no parsed span that
+// the panel never counted, so the feed and the figure would disagree.
+func ConcurrencyBusiestHref(c store.ConcurrencyStats, rng string) templ.SafeURL {
+	return SessionsHref(store.SessionFilter{Username: c.BusiestUser, Range: drillRange(rng), IncludeEmpty: true, RequireSpan: true})
 }
 
 // FmtAvgConcurrent renders the average concurrency to one decimal, the granularity that
@@ -220,13 +233,21 @@ type DistRow struct {
 	Count int
 	Pct   float64
 	Color string
+	// Href, when set, drills the row into the matching session list (a /sessions link
+	// carrying the grade or outcome filter plus the current window). It is empty for a
+	// dimension with no session-list filter (archetypes) and for a zero-count row, which
+	// stays plain text rather than linking to an empty list.
+	Href string
 }
 
 // distRows turns labeled counts into renderable bars: each width is its share of the
 // largest count in the set, so the tallest bar is full and the rest are relative. A
 // non-zero bucket always shows at least a sliver, so it never reads as empty next to a
-// much larger neighbour. label and color map the canonical key to its display form.
-func distRows(counts []store.LabeledCount, label, color func(string) string) []DistRow {
+// much larger neighbour. label and color map the canonical key to its display form. href
+// builds the drill-through link for a bucket, or returns "" when the dimension is not
+// filterable; a zero-count bucket never links regardless, since it would open an empty
+// list.
+func distRows(counts []store.LabeledCount, label, color func(string) string, href func(string) string) []DistRow {
 	var maxN int
 	for _, c := range counts {
 		if c.Count > maxN {
@@ -242,27 +263,54 @@ func distRows(counts []store.LabeledCount, label, color func(string) string) []D
 		if pct > 0 && pct < 2 {
 			pct = 2
 		}
-		rows = append(rows, DistRow{Label: label(c.Key), Count: c.Count, Pct: pct, Color: color(c.Key)})
+		link := ""
+		if href != nil && c.Count > 0 {
+			link = href(c.Key)
+		}
+		rows = append(rows, DistRow{Label: label(c.Key), Count: c.Count, Pct: pct, Color: color(c.Key), Href: link})
 	}
 	return rows
 }
 
 // GradeBars renders the grade distribution: A through F then the unscored bucket, each
-// banded in the report-card tone the session Quality tile uses.
-func GradeBars(counts []store.LabeledCount) []DistRow {
-	return distRows(counts, gradeLabel, gradeBarColor)
+// banded in the report-card tone the session Quality tile uses. Each non-empty bar links
+// into the matching sessions, carrying the current Insights window (rng) so the session
+// list is scoped to the same period the panel counted. IncludeEmpty rides along because
+// the panel counts sessions regardless of message_count (a zero-message session can still
+// carry a grade), so the drilled feed must show empties too or its count would fall short
+// of the bar it drilled from.
+func GradeBars(counts []store.LabeledCount, rng string) []DistRow {
+	return distRows(counts, gradeLabel, gradeBarColor, func(key string) string {
+		return SessionsPath(store.SessionFilter{Grade: GradeFilterKey(key), Range: drillRange(rng), IncludeEmpty: true})
+	})
 }
 
 // OutcomeBars renders the outcome distribution, reusing OutcomeLabel for the title-cased
-// names and a semantic tone per outcome.
-func OutcomeBars(counts []store.LabeledCount) []DistRow {
-	return distRows(counts, OutcomeLabel, outcomeBarColor)
+// names and a semantic tone per outcome. Each non-empty bar links into the matching
+// sessions, carrying the current Insights window (rng) and IncludeEmpty for the same
+// reason GradeBars does: the panel scope counts zero-message sessions, so the drilled
+// feed must include them to match.
+func OutcomeBars(counts []store.LabeledCount, rng string) []DistRow {
+	return distRows(counts, OutcomeLabel, outcomeBarColor, func(key string) string {
+		return SessionsPath(store.SessionFilter{Outcome: key, Range: drillRange(rng), IncludeEmpty: true})
+	})
 }
 
 // ArchetypeBars renders the archetype mix, lightest to heaviest, each in its own
-// categorical hue.
+// categorical hue. Archetypes have no session-list filter, so their rows do not link.
 func ArchetypeBars(counts []store.LabeledCount) []DistRow {
-	return distRows(counts, titleCase, archetypeBarColor)
+	return distRows(counts, titleCase, archetypeBarColor, nil)
+}
+
+// drillRange normalizes an Insights window key for a drill-through link. The "all" window
+// applies no bound, so it is dropped rather than carried as a chip that would window
+// nothing (the bare, unwindowed session list is what "all" means). Every other key rides
+// through so the session list matches the panel's period.
+func drillRange(rng string) string {
+	if rng == "" || rng == "all" {
+		return ""
+	}
+	return rng
 }
 
 // gradeLabel is the bar label for a grade key: the letter, or "Unscored" for the empty
@@ -273,6 +321,52 @@ func gradeLabel(key string) string {
 	}
 	return key
 }
+
+// UnscoredKey is the sentinel a drill-through link and the Grade filter carry for the
+// unscored grade bucket, since the empty string reads as "no grade filter". The Grades
+// panel's unscored bar links with this value.
+const UnscoredKey = "unscored"
+
+// IsGrade reports whether v is a grade the session list can filter by: a letter A..F or
+// the unscored sentinel. The handler uses it to reject a tampered ?grade= value.
+func IsGrade(v string) bool {
+	switch v {
+	case "A", "B", "C", "D", "F", UnscoredKey:
+		return true
+	}
+	return false
+}
+
+// IsOutcome reports whether v is a filterable outcome, so the handler can reject a
+// tampered ?outcome= value.
+func IsOutcome(v string) bool {
+	switch v {
+	case "completed", "abandoned", "errored", "unknown":
+		return true
+	}
+	return false
+}
+
+// GradeFilterKey maps a Grades-distribution key to the ?grade= value that drills into the
+// matching sessions: the empty (unscored) bucket becomes the sentinel, a letter stays
+// itself. It is the inverse of gradeLabel for URL building.
+func GradeFilterKey(distKey string) string {
+	if distKey == "" {
+		return UnscoredKey
+	}
+	return distKey
+}
+
+// GradeChipLabel and OutcomeChipLabel render the active-filter chip value for a grade or
+// outcome, terse to match the agent/user chips ("grade A", "outcome abandoned").
+func GradeChipLabel(grade string) string {
+	if grade == UnscoredKey {
+		return "unscored"
+	}
+	return grade
+}
+
+func OutcomeChipLabel(outcome string) string { return outcome }
 
 // titleCase upper-cases the first rune of a lowercase key (an archetype name) for
 // display, leaving the rest as is.

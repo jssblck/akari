@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/jssblck/akari/internal/pricing"
+	"github.com/jssblck/akari/internal/quality"
 )
 
 // ProjectSummary is one row of the projects index: a project plus rolled-up
@@ -77,6 +78,12 @@ type SessionSummary struct {
 	StartedAt        *time.Time
 	EndedAt          *time.Time
 	UpdatedAt        *time.Time
+	// Title is the session's first user message, squashed to single-spaced and
+	// capped for display, so a row is recognizable by what the run was about rather
+	// than only its metadata. It is empty for a session with no user message. The
+	// figure is fetched by a LEFT JOIN LATERAL over the first ordinal user message,
+	// so it rides the list read rather than a per-row lookup.
+	Title string
 }
 
 // SessionDetail adds the owning project to a session summary, plus the rolled-up
@@ -139,10 +146,45 @@ type SessionFilter struct {
 	Agent     string
 	Machine   string
 	Username  string
+	// Query, when set, restricts the list to sessions with at least one message
+	// whose content matches it case-insensitively (an ILIKE substring, with the LIKE
+	// metacharacters escaped so a literal % or _ in the query matches itself). It
+	// drives the match from the messages side so the content trigram index serves it
+	// (see ListAllSessions), and it also windows a per-row snippet around the first
+	// match. The empty string is no content filter.
+	Query string
+	// IncludeEmpty keeps sessions whose parse produced no readable message
+	// (message_count = 0) in the list. The default excludes them: they clutter the
+	// global feed without carrying anything to read. Setting it restores the old
+	// behavior of listing every session regardless of message count.
+	IncludeEmpty bool
 	// Since bounds the list to sessions last active at or after this instant,
 	// matching the analytics window so a project page's session list and its usage
 	// panel cover the same range. The zero time means no lower bound.
 	Since time.Time
+	// Grade narrows by the Insights Grades panel's buckets: a letter "A".."F" matches
+	// sessions with a usable current-version signals row carrying that grade, and the
+	// sentinel "unscored" matches the panel's catch-all (explicit NULL-grade row, stale
+	// or non-current row, or no row at all). The empty string is no grade filter. See
+	// conds() for the exact match.
+	Grade string
+	// Outcome narrows by the Outcomes panel's buckets: "completed", "abandoned", and
+	// "errored" match a usable current-version signals row with that outcome, and
+	// "unknown" matches the panel's catch-all (an explicit unknown row or a missing/
+	// stale one). The empty string is no outcome filter. See conds().
+	Outcome string
+	// Range is the trailing-window key (a web.DateRanges key like "30d") that produced
+	// Since, carried so the URL builder can re-emit ?range= and the chip can label the
+	// window. It is display-and-URL state only: the query narrows by Since, never by
+	// this string, so the store ignores it. The empty string means no windowing.
+	Range string
+	// RequireSpan narrows to sessions with a measured span (a parsed start and end and a
+	// non-negative duration), the exact cohort the Insights Concurrency panel sweeps (see
+	// spanFilter in analytics_concurrency.go). The busiest-user drill sets it so the
+	// linked feed matches the panel's session set rather than a looser "all this user's
+	// sessions in the window", which would list sessions the panel never counted. The
+	// zero value applies no span constraint.
+	RequireSpan bool
 	// Sort names the column the global session list is ordered by (see
 	// sessionSortColumns). The empty string means DefaultSort. Desc selects
 	// descending order. Together they back the click-to-sort table headers; an
@@ -159,6 +201,14 @@ type SessionFilter struct {
 // s.updated_at for the whole-session lists, ue.occurred_at for the windowed
 // queries that scope by dated usage. Placeholders start at $1; the caller
 // appends its own (cursor, limit, offset) after.
+//
+// The content-search condition (Query) is expressed as an EXISTS over the
+// messages table rather than a join, so a session with many matching messages
+// still contributes one row and Postgres can drive the match from the messages
+// content trigram index (idx_messages_content_trgm) then confirm the session by
+// its primary key, instead of joining every matching message back into the list.
+// The query is matched as a case-insensitive substring (ILIKE), with the LIKE
+// metacharacters escaped so a literal % or _ typed into the box matches itself.
 func (f SessionFilter) conds(sinceCol string) (conds []string, args []any) {
 	add := func(cond string, val any) {
 		args = append(args, val)
@@ -176,10 +226,79 @@ func (f SessionFilter) conds(sinceCol string) (conds []string, args []any) {
 	if f.Username != "" {
 		add("u.username =", f.Username)
 	}
+	if !f.IncludeEmpty {
+		// A parse that produced no readable message leaves message_count = 0; those
+		// rows clutter the global feed without carrying anything to open, so the
+		// default hides them. This is a plain scalar comparison, no placeholder.
+		conds = append(conds, "s.message_count > 0")
+	}
+	if q := f.Query; q != "" {
+		args = append(args, likePattern(q))
+		conds = append(conds, "EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id AND m.content ILIKE $"+itoa(len(args))+")")
+	}
 	if !f.Since.IsZero() {
 		add(sinceCol+" >=", f.Since)
 	}
+	if f.RequireSpan {
+		// The exact predicate the concurrency sweep uses (spanFilter in
+		// analytics_concurrency.go): a parsed start and end and a non-negative duration.
+		// Kept in step by name so the busiest-user drill lists precisely the spanned
+		// cohort the panel counted. No placeholder: it is a plain column comparison.
+		conds = append(conds, "s.started_at IS NOT NULL AND s.ended_at IS NOT NULL AND s.ended_at >= s.started_at")
+	}
+	// Grade and outcome match the Insights distributions' definition exactly, so a
+	// drill-through from a panel bar opens precisely the sessions that bar counted
+	// (pinned bucket by bucket in TestDrillFiltersMatchQualityDistribution). The panel's
+	// scan (qualityDistributionFrom in analytics_quality.go) LEFT JOINs the current-version,
+	// non-stale signals row and coalesces a missing one into the catch-all bucket (grade ''
+	// / outcome 'unknown'), so the buckets split two ways:
+	//
+	//   - A letter grade or a concrete outcome is an EXISTS: the session has a usable row
+	//     (signals_version = quality.Version AND NOT s.signals_stale) carrying that value.
+	//     Only NULL grades and missing rows fold in the panel, so EXISTS matches its
+	//     letter and concrete-outcome bars exactly.
+	//   - The catch-all buckets are the complement, a NOT EXISTS: "unscored" is no usable
+	//     row with a non-NULL grade, which folds in the explicit NULL-grade row, the stale
+	//     or non-current-version row, and the session with no row at all, the same three
+	//     cases the panel test names (analytics_insights_test.go, "unscored = a4
+	//     (explicit) + a6stale (stale row) + a7none (no row)"). "unknown" is likewise no
+	//     usable row with a different outcome, folding the explicit 'unknown' row together
+	//     with the missing-row cases.
+	if g := f.Grade; g != "" {
+		args = append(args, quality.Version)
+		ver := "$" + itoa(len(args))
+		if g == "unscored" {
+			conds = append(conds, "NOT EXISTS (SELECT 1 FROM session_signals sig WHERE sig.session_id = s.id"+
+				" AND sig.signals_version = "+ver+" AND NOT s.signals_stale AND sig.grade IS NOT NULL)")
+		} else {
+			args = append(args, g)
+			conds = append(conds, "EXISTS (SELECT 1 FROM session_signals sig WHERE sig.session_id = s.id"+
+				" AND sig.signals_version = "+ver+" AND NOT s.signals_stale AND sig.grade = $"+itoa(len(args))+")")
+		}
+	}
+	if o := f.Outcome; o != "" {
+		args = append(args, quality.Version)
+		ver := "$" + itoa(len(args))
+		args = append(args, o)
+		if o == "unknown" {
+			conds = append(conds, "NOT EXISTS (SELECT 1 FROM session_signals sig WHERE sig.session_id = s.id"+
+				" AND sig.signals_version = "+ver+" AND NOT s.signals_stale AND sig.outcome <> $"+itoa(len(args))+")")
+		} else {
+			conds = append(conds, "EXISTS (SELECT 1 FROM session_signals sig WHERE sig.session_id = s.id"+
+				" AND sig.signals_version = "+ver+" AND NOT s.signals_stale AND sig.outcome = $"+itoa(len(args))+")")
+		}
+	}
 	return conds, args
+}
+
+// likePattern wraps a user's search string in the wildcards that make it a
+// case-insensitive substring match, escaping the LIKE metacharacters (%, _, and
+// the escape character itself) so a literal one the user typed matches itself
+// rather than acting as a wildcard. The default backslash escape applies, so a
+// backslash in the query is doubled here.
+func likePattern(q string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return "%" + r.Replace(q) + "%"
 }
 
 // DefaultSort is the global session list's order when none is requested: most
@@ -191,11 +310,11 @@ const DefaultSort = "updated"
 // The map is the trust boundary: a key absent here never reaches the SQL, so the
 // expression can be interpolated without risking injection.
 //
-// agent, branch, messages, and tokens are session-local and index-walked (see
-// migration 0014): each has a (col, id) btree that, paired with the direction-
-// following id tiebreak in orderClause, satisfies the ORDER BY ... LIMIT with an
-// index scan rather than sorting the whole history. tokens reads the stored
-// generated total_tokens column for the same reason. project and user sort on
+// agent, branch, messages, tokens, and cost are session-local and index-walked
+// (see migrations 0014 and 0028): each has a (col, id) btree that, paired with
+// the direction-following id tiebreak in orderClause, satisfies the ORDER BY ...
+// LIMIT with an index scan rather than sorting the whole history. tokens reads the
+// stored generated total_tokens column for the same reason. project and user sort on
 // joined tables (the projects CASE, users.username), which a session index cannot
 // walk; they rank the working set, cheap when a facet filter narrows it and a full
 // sort only on the unfiltered whole-history case.
@@ -206,6 +325,7 @@ var sessionSortColumns = map[string]string{
 	"user":     "u.username",
 	"messages": "s.message_count",
 	"tokens":   "s.total_tokens",
+	"cost":     "s.total_cost_usd",
 	"updated":  "s.updated_at",
 }
 
@@ -262,7 +382,34 @@ type SessionRow struct {
 	ProjectKey  string
 	ProjectName string
 	ProjectKind string
+	// Search is the content-match snippet for this row, populated only when the
+	// list was run with a Query filter: a window of the first matching message's
+	// content centered on the match, so the feed can show what the session said
+	// around the search term. It is the zero value on an unfiltered list.
+	Search SearchSnippet
 }
+
+// SearchSnippet is a window of a matching message's content around the first
+// occurrence of the search query, with the match's offsets within the window so a
+// renderer can wrap exactly the matched run in a highlight without re-scanning.
+// The window is computed in Go from the raw matching content (fetched by a lateral
+// join in the search query) rather than in SQL, so the offsets are byte positions
+// into Text and stay exact for the template's three-part split (before, match,
+// after). A zero-value snippet (empty Text) means no match was carried.
+type SearchSnippet struct {
+	// Text is the trimmed content window, with leading/trailing ellipses already
+	// applied when the window was cut from a longer message.
+	Text string
+	// MatchStart and MatchEnd are the byte offsets of the matched run within Text,
+	// so MatchStart <= MatchEnd <= len(Text). They are equal (both zero) when Text
+	// is empty.
+	MatchStart int
+	MatchEnd   int
+}
+
+// Has reports whether the snippet carries a match, so a renderer can choose the
+// snippet line over the title line only when a search actually produced one.
+func (s SearchSnippet) Has() bool { return s.Text != "" }
 
 // ListProjects returns every project with rolled-up stats, most recently active
 // first.
@@ -445,18 +592,28 @@ func (s *Store) WindowSessionPage(ctx context.Context, f SessionFilter) (Session
 		where += " AND " + strings.Join(conds, " AND ")
 	}
 
+	// The Title lateral rides the same grouped read (a correlated LIMIT 1 over the
+	// first user message), added to the GROUP BY so the aggregate stays well-formed.
+	// It matches the global feed's title so a session reads the same on both surfaces.
 	q := `
 		SELECT s.id, s.agent, s.machine, s.git_branch, u.username,
 		       s.message_count, s.user_message_count,
 		       coalesce(sum(ue.input_tokens), 0), coalesce(sum(ue.output_tokens), 0),
 		       coalesce(sum(ue.cache_write_tokens), 0), coalesce(sum(ue.cache_read_tokens), 0),
 		       coalesce(sum(ue.cost_usd), 0), ` + costIncompleteExpr + `,
-		       s.visibility, s.public_id, s.started_at, s.ended_at, s.updated_at
+		       s.visibility, s.public_id, s.started_at, s.ended_at, s.updated_at,
+		       coalesce(title.content, '')
 		  FROM usage_events ue
 		  JOIN sessions s ON s.id = ue.session_id
 		  JOIN users u ON u.id = s.user_id
+		  LEFT JOIN LATERAL (
+		         SELECT left(m.content, ` + itoa(titleCap) + `) AS content
+		           FROM messages m
+		          WHERE m.session_id = s.id AND m.role = 'user'
+		          ORDER BY m.ordinal LIMIT 1
+		       ) title ON true
 		 WHERE ` + where + `
-		 GROUP BY s.id, u.username
+		 GROUP BY s.id, u.username, title.content
 		 ORDER BY s.updated_at DESC, s.id DESC
 		 LIMIT $` + itoa(len(args)+1)
 	rowArgs := append(append([]any{}, args...), windowSessionLimit)
@@ -473,9 +630,10 @@ func (s *Store) WindowSessionPage(ctx context.Context, f SessionFilter) (Session
 			&sm.MessageCount, &sm.UserMessageCount,
 			&sm.TotalInput, &sm.TotalOutput, &sm.TotalCacheWrite, &sm.TotalCacheRead,
 			&sm.TotalCostUSD, &sm.CostIncomplete, &sm.Visibility, &sm.PublicID,
-			&sm.StartedAt, &sm.EndedAt, &sm.UpdatedAt); err != nil {
+			&sm.StartedAt, &sm.EndedAt, &sm.UpdatedAt, &sm.Title); err != nil {
 			return SessionPage{}, fmt.Errorf("scan window session: %w", err)
 		}
+		sm.Title = squashSpaces(sm.Title)
 		out = append(out, sm)
 	}
 	if err := rows.Err(); err != nil {
@@ -533,41 +691,150 @@ func (s *Store) windowSessionRemainder(ctx context.Context, where string, args [
 
 // globalSessionSelect is the column list and joins for cross-project session
 // rows: the same session columns as sessionSelect, plus the owning project's
-// identity so the list can show and link a project per row.
-const globalSessionSelect = `
+// identity so the list can show and link a project per row, and two lateral
+// lookups off the messages table.
+//
+// The Title lateral is always present: the session's first user message, capped
+// in SQL to a bounded prefix (left(...)) so a giant opening prompt never pulls its
+// whole content into the row, then squashed to single-spaced in Go. It is a
+// correlated LEFT JOIN LATERAL ordered by ordinal with LIMIT 1, so it walks the
+// messages (session_id, ordinal) primary key straight to the first user turn
+// rather than scanning the session's transcript.
+//
+// The match lateral (%[1]s) is spliced in only when a content search is active:
+// it fetches the first matching message's content (again LIMIT 1 by ordinal) so
+// SearchSnippet can window it in Go. It carries the same escaped ILIKE pattern the
+// EXISTS filter in conds() uses, passed as the placeholder the caller records.
+// When no search is active the format arg is empty and a NULL literal fills the
+// column so the row shape stays fixed.
+func globalSessionSelect(matchLateral, matchCol, matchCutCol string) string {
+	return `
 	SELECT s.id, s.agent, s.machine, s.git_branch, u.username,
 	       s.message_count, s.user_message_count,
 	       s.total_input_tokens, s.total_output_tokens,
 	       s.total_cache_write_tokens, s.total_cache_read_tokens,
 	       s.total_cost_usd, s.cost_incomplete, s.visibility, s.public_id,
 	       s.started_at, s.ended_at, s.updated_at,
-	       p.id, p.remote_key, p.display_name, p.kind
+	       p.id, p.remote_key, p.display_name, p.kind,
+	       coalesce(title.content, ''), ` + matchCol + `, ` + matchCutCol + `
 	  FROM sessions s
 	  JOIN users u ON u.id = s.user_id
-	  JOIN projects p ON p.id = s.project_id`
+	  JOIN projects p ON p.id = s.project_id
+	  LEFT JOIN LATERAL (
+	         SELECT left(m.content, ` + itoa(titleCap) + `) AS content
+	           FROM messages m
+	          WHERE m.session_id = s.id AND m.role = 'user'
+	          ORDER BY m.ordinal LIMIT 1
+	       ) title ON true` + matchLateral
+}
 
-func scanSessionRow(rows pgx.Rows) (SessionRow, error) {
-	var r SessionRow
-	err := rows.Scan(&r.ID, &r.Agent, &r.Machine, &r.GitBranch, &r.Username,
+// titleCap bounds the first-user-message prefix the Title column carries. 240
+// characters is well past what any row can display (CSS ellipsizes it far sooner),
+// so the cap only guards against pulling a multi-kilobyte opening prompt into
+// every row while leaving the visible portion intact.
+const titleCap = 240
+
+// scanSessionRow reads one cross-project row. matchActive reports whether the query
+// selected the match-content and front-cut columns (a live content search), so the
+// scan targets them and the row shape matches the SELECT. The raw (SQL-windowed)
+// match content and the front-cut flag stay local: the caller windows them into the
+// row's snippet. frontCut reports whether the SQL window dropped leading content, so
+// the snippet builder prepends an ellipsis rather than reading the window's start as
+// the message's start.
+func scanSessionRow(rows pgx.Rows, matchActive bool) (r SessionRow, raw string, frontCut bool, err error) {
+	var match *string
+	var cut bool
+	dest := []any{&r.ID, &r.Agent, &r.Machine, &r.GitBranch, &r.Username,
 		&r.MessageCount, &r.UserMessageCount,
 		&r.TotalInput, &r.TotalOutput, &r.TotalCacheWrite, &r.TotalCacheRead,
 		&r.TotalCostUSD, &r.CostIncomplete, &r.Visibility, &r.PublicID,
 		&r.StartedAt, &r.EndedAt, &r.UpdatedAt,
-		&r.ProjectID, &r.ProjectKey, &r.ProjectName, &r.ProjectKind)
-	if err != nil {
-		return r, fmt.Errorf("scan global session row: %w", err)
+		&r.ProjectID, &r.ProjectKey, &r.ProjectName, &r.ProjectKind,
+		&r.Title, &match, &cut}
+	if err := rows.Scan(dest...); err != nil {
+		return r, "", false, fmt.Errorf("scan global session row: %w", err)
 	}
-	return r, nil
+	r.Title = squashSpaces(r.Title)
+	if matchActive && match != nil {
+		raw = *match
+		frontCut = cut
+	}
+	return r, raw, frontCut, nil
 }
 
-// ListAllSessions returns sessions across every project matching the filter,
-// newest first. A zero ProjectID means "all projects"; the other fields narrow
-// the set exactly as ListSessions does. This backs the global Sessions view and
-// the Overview's recent-activity feed.
-func (s *Store) ListAllSessions(ctx context.Context, f SessionFilter) ([]SessionRow, error) {
-	conds, args := f.conds("s.updated_at")
+// snippetSQLWindowRadius and snippetSQLWindowLen bound the matching-message content
+// the search LATERAL pulls back per row. A page of results would otherwise
+// materialize every matching message in full (kilobytes each) only to window down to
+// a ~160-char snippet, so the window is cut in SQL: substring the content around the
+// match position, keeping radius bytes of lead and enough trailing room that the Go
+// snippet builder still has both sides of context to trim to word boundaries. The
+// length is radius plus the visible window plus a matching trailing margin, so a match
+// anywhere in the window has full context on either side.
+const (
+	snippetSQLWindowRadius = 240
+	snippetSQLWindowLen    = 720
+)
 
-	q := globalSessionSelect
+// ListAllSessions returns one page of sessions across every project matching the
+// filter, newest first, and whether more rows match beyond the page. A zero
+// ProjectID means "all projects"; the other fields narrow the set exactly as
+// ListSessions does. This backs the global Sessions view and the Overview's
+// recent-activity feed.
+//
+// The page is bounded by the filter's Limit, and the hasMore return reports whether
+// at least one more row matches past it: the query asks for limit+1 rows and, when it
+// comes back full, trims the extra and flags hasMore. The handler thus learns "is
+// there a next page" without a second count(*) over the whole matching history, so
+// the render cost stays linear in the page rather than the corpus.
+//
+// Every row carries its first-user-message Title. When Query is set, each row also
+// carries a SearchSnippet windowed around the first match. The match window is bounded
+// in SQL (see snippetSQLWindowLen): the LATERAL locates the match with strpos and
+// selects only a substring around it, so a huge message never rides back whole just to
+// yield a short snippet. Go finishes the windowing so the offsets are exact byte
+// positions the template can split on.
+func (s *Store) ListAllSessions(ctx context.Context, f SessionFilter) (rows []SessionRow, hasMore bool, err error) {
+	// Bound Since on s.started_at, the same column the Insights panels window their
+	// cohorts by (qualityDistributionFrom in analytics_quality.go and the concurrency
+	// scans in analytics_concurrency.go both clauseFor("s.started_at")). A drill-through
+	// from a panel bar thus lands on exactly the sessions that bar counted: a session
+	// started before the window but bumped inside it by a late reparse stays out of both,
+	// where an updated_at bound would have pulled it into the feed but not the panel.
+	conds, args := f.conds("s.started_at")
+
+	// The match lateral reuses the escaped ILIKE pattern conds() already appended as
+	// the last arg (so the row it snippets is the row the EXISTS filter matched), and
+	// additionally binds the raw query for strpos, which wants the literal substring,
+	// not the LIKE-escaped pattern. strpos over lower()'d content finds the match byte
+	// offset so the substring can window around it; a 0 (the rare case where lower()
+	// case-folding disagrees with the ILIKE match position on some Unicode) falls back
+	// to the head of the message, and Go's fold-insensitive search finds or misses it
+	// gracefully rather than anchoring on a wrong offset.
+	matchLateral, matchCol, matchCutCol := "", "NULL", "false"
+	searching := f.Query != ""
+	if searching {
+		patternPlaceholder := "$" + itoa(len(args))
+		args = append(args, f.Query)
+		rawPlaceholder := "$" + itoa(len(args))
+		radius := itoa(snippetSQLWindowRadius)
+		length := itoa(snippetSQLWindowLen)
+		// pos is the 1-based match offset (0 when the fold disagrees); the window starts
+		// radius bytes before it, floored at 1. front_cut reports whether the window
+		// dropped leading content, so Go prepends an ellipsis and does not read the
+		// window's start as the message's start.
+		matchLateral = `
+	  LEFT JOIN LATERAL (
+	         SELECT substring(m.content from greatest(1, strpos(lower(m.content), lower(` + rawPlaceholder + `)) - ` + radius + `) for ` + length + `) AS content,
+	                strpos(lower(m.content), lower(` + rawPlaceholder + `)) > ` + itoa(snippetSQLWindowRadius+1) + ` AS front_cut
+	           FROM messages m
+	          WHERE m.session_id = s.id AND m.content ILIKE ` + patternPlaceholder + `
+	          ORDER BY m.ordinal LIMIT 1
+	       ) match ON true`
+		matchCol = "match.content"
+		matchCutCol = "coalesce(match.front_cut, false)"
+	}
+
+	q := globalSessionSelect(matchLateral, matchCol, matchCutCol)
 	if len(conds) > 0 {
 		q += " WHERE " + strings.Join(conds, " AND ")
 	}
@@ -576,30 +843,118 @@ func (s *Store) ListAllSessions(ctx context.Context, f SessionFilter) ([]Session
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	args = append(args, limit)
+	// Ask for one row past the page so a full extra row means "more match" without a
+	// separate count over the history. The extra row is trimmed before returning.
+	args = append(args, limit+1)
 	q += " LIMIT $" + itoa(len(args))
 	if f.Offset > 0 {
 		args = append(args, f.Offset)
 		q += " OFFSET $" + itoa(len(args))
 	}
 
-	rows, err := s.Pool.Query(ctx, q, args...)
+	qrows, err := s.Pool.Query(ctx, q, args...)
 	if err != nil {
-		return nil, fmt.Errorf("query global sessions: %w", err)
+		return nil, false, fmt.Errorf("query global sessions: %w", err)
 	}
-	defer rows.Close()
+	defer qrows.Close()
 	var out []SessionRow
-	for rows.Next() {
-		r, err := scanSessionRow(rows)
+	for qrows.Next() {
+		r, raw, frontCut, err := scanSessionRow(qrows, searching)
 		if err != nil {
-			return nil, err
+			return nil, false, err
+		}
+		if searching {
+			r.Search = buildSnippet(raw, f.Query, frontCut)
 		}
 		out = append(out, r)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate global sessions: %w", err)
+	if err := qrows.Err(); err != nil {
+		return nil, false, fmt.Errorf("iterate global sessions: %w", err)
 	}
-	return out, nil
+	// A full extra row past the page is the "more match" signal: drop it and flag
+	// hasMore so the footer can offer the next page without counting the corpus.
+	if len(out) > limit {
+		out = out[:limit]
+		hasMore = true
+	}
+	return out, hasMore, nil
+}
+
+// CountAllSessions counts the sessions ListAllSessions would return for the same
+// filter (ignoring Limit and Offset), plus how many empty sessions the default
+// hides. It shares conds() with ListAllSessions so the two can never disagree about
+// which rows match.
+//
+// It exists for tests and verification only, NOT the render path: the /sessions
+// footer no longer counts the corpus (that count(*) was O(total), the very cost the
+// incremental-efficiency gate flagged), so nothing in a request calls this. The
+// drift-guard tests keep it to pin the drill filters' bucket semantics against the
+// Insights panel counts, and TestCountAllSessionsAgreement uses it to hold the
+// list-vs-count invariant the shared conds() guarantees.
+//
+// The empty count is a FILTER aggregate over the same matched set, so it reflects
+// the sessions hidden BY the empty filter within the current agent/project/query
+// scope, not a fleet-wide zero-message count. When IncludeEmpty is set the empty
+// rows are already in Total, and Empty reports how many of them are the
+// zero-message ones.
+func (s *Store) CountAllSessions(ctx context.Context, f SessionFilter) (total, empty int, err error) {
+	// Count over the same match set as the list, but neutralize the empty-hiding so
+	// the FILTER can report the hidden count regardless of the current toggle: run
+	// conds with IncludeEmpty forced on, then let the FILTER split the empty ones out.
+	cf := f
+	cf.IncludeEmpty = true
+	// Bound on s.started_at to match ListAllSessions (and the Insights panels), so the
+	// drift-guard tests pin the same windowed cohort the list and the bars count.
+	conds, args := cf.conds("s.started_at")
+
+	// A content search still needs the messages EXISTS from conds(); no lateral or
+	// ordering is needed for a count, so the query is just the filtered aggregate.
+	q := `SELECT count(*), count(*) FILTER (WHERE s.message_count = 0)
+	        FROM sessions s
+	        JOIN users u ON u.id = s.user_id
+	        JOIN projects p ON p.id = s.project_id`
+	if len(conds) > 0 {
+		q += " WHERE " + strings.Join(conds, " AND ")
+	}
+	if err := s.Pool.QueryRow(ctx, q, args...).Scan(&total, &empty); err != nil {
+		return 0, 0, fmt.Errorf("count global sessions: %w", err)
+	}
+	// When the caller hides empties (the default), the total it will show excludes
+	// them, matching the list. Report that narrowed total so "N of M" reconciles.
+	if !f.IncludeEmpty {
+		total -= empty
+	}
+	return total, empty, nil
+}
+
+// HasEmptySessions reports whether the filter's scope holds at least one empty
+// (zero-message) session, so the footer can decide whether the empty-hidden toggle
+// would change anything without counting how many. It exists so the /sessions render
+// path stays bounded: the old toggle carried a count K that was the same O(total)
+// aggregate the footer no longer runs, and the toggle only needs the yes/no.
+//
+// The probe is EXISTS over the filter's other conditions with message_count = 0
+// added, so Postgres stops at the first matching row (index-bounded, O(1)-ish)
+// instead of scanning the scope. It forces IncludeEmpty on so the empty rows are in
+// scope to be found regardless of the current toggle: the caller asks "are there
+// empties here", not "does the current list include them".
+func (s *Store) HasEmptySessions(ctx context.Context, f SessionFilter) (bool, error) {
+	cf := f
+	cf.IncludeEmpty = true
+	// Bound on s.started_at to match ListAllSessions, so the toggle reflects empties in
+	// the same windowed scope the list draws from.
+	conds, args := cf.conds("s.started_at")
+	conds = append(conds, "s.message_count = 0")
+	q := `SELECT EXISTS (SELECT 1
+	        FROM sessions s
+	        JOIN users u ON u.id = s.user_id
+	        JOIN projects p ON p.id = s.project_id
+	       WHERE ` + strings.Join(conds, " AND ") + `)`
+	var exists bool
+	if err := s.Pool.QueryRow(ctx, q, args...).Scan(&exists); err != nil {
+		return false, fmt.Errorf("probe empty sessions: %w", err)
+	}
+	return exists, nil
 }
 
 // SessionFeedCursor marks a position in the session feed: the id of the last row a
@@ -621,8 +976,15 @@ type SessionFeedCursor struct {
 // the rows it already saw and a concurrent updated_at bump cannot drop a row from the
 // walk. Each row still carries its updated_at, so a caller can order by recency within
 // a page. limit is clamped to [1, 500] (default 100).
+//
+// The Since bound windows on s.started_at, the same column ListAllSessions and
+// CountAllSessions use, so SessionFilter.Since has ONE meaning across every query that
+// shares the filter: "started in the window". A session started before the window but
+// bumped inside it is out of all three consistently, rather than in the MCP feed but
+// out of the web drill. The keyset still pages on id (immutable), so the window column
+// choice does not affect paging stability.
 func (s *Store) SessionFeed(ctx context.Context, f SessionFilter, limit int, cursor *SessionFeedCursor) ([]SessionRow, *SessionFeedCursor, error) {
-	conds, args := f.conds("s.updated_at")
+	conds, args := f.conds("s.started_at")
 	if cursor != nil {
 		// The next page is everything below the cursor in id-descending order. id is the
 		// primary key, so Postgres walks the PK index straight to the resume point rather
@@ -632,7 +994,10 @@ func (s *Store) SessionFeed(ctx context.Context, f SessionFilter, limit int, cur
 		conds = append(conds, "s.id < $"+itoa(len(args)))
 	}
 
-	q := globalSessionSelect
+	// The keyset feed does not carry a content search, so no match lateral: the
+	// Title lateral rides along (it is cheap and lets a caller show a title) and the
+	// match column is a NULL literal to keep the row shape fixed.
+	q := globalSessionSelect("", "NULL", "false")
 	if len(conds) > 0 {
 		q += " WHERE " + strings.Join(conds, " AND ")
 	}
@@ -651,7 +1016,7 @@ func (s *Store) SessionFeed(ctx context.Context, f SessionFilter, limit int, cur
 	defer rows.Close()
 	var out []SessionRow
 	for rows.Next() {
-		r, err := scanSessionRow(rows)
+		r, _, _, err := scanSessionRow(rows, false)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -706,6 +1071,20 @@ const facetLimit = 50
 // trigger on the sessions table, see migration 0005), so each category is a
 // bounded top-N index read rather than a GROUP BY over the whole sessions table.
 // It backs the global Sessions view's filter rail.
+//
+// Reconciliation gap (intentional and pinned): the rollup counts EVERY session,
+// including the empty (message_count = 0) parse-failures the default feed hides. So a
+// facet's count is the whole-corpus count and can exceed the rows a default-feed click
+// on that facet lists, by exactly the empty sessions carrying that value. Clicking the
+// facet and then showing empties (the footer's toggle, empty=1) reconciles them: the
+// facet count equals the IncludeEmpty feed count for that facet. The gap is not closed
+// in the rollup on purpose: the facet trigger fires only on the facet columns (agent,
+// machine, user_id, project_id), never on message_count (migration 0005's UPDATE OF
+// clause deliberately excludes it so live ingest's per-message projection updates do
+// not churn the rollup). A message_count-aware rollup would have to fire on every
+// ingest append, reintroducing exactly that churn. The relationship
+// (facet_count == IncludeEmpty feed count >= default feed count) is pinned by
+// TestGlobalFacetsReconcileEmptyHidden so it cannot drift silently.
 func (s *Store) GlobalFacets(ctx context.Context) (GlobalFacetValues, error) {
 	var f GlobalFacetValues
 
@@ -823,10 +1202,17 @@ func (s *Store) scanDetailRow(ctx context.Context, where string, arg any) (Sessi
 		        s.total_cost_usd, s.cost_incomplete, s.visibility, s.public_id,
 		        s.started_at, s.ended_at, s.updated_at,
 		        s.user_id, s.project_id, p.remote_key, p.display_name, p.kind, s.cwd, s.parent_session_id, s.parser_version,
-		        s.total_cache_savings_usd, s.cache_savings_incomplete, s.cache_savings_backfilled
+		        s.total_cache_savings_usd, s.cache_savings_incomplete, s.cache_savings_backfilled,
+		        coalesce(title.content, '')
 		   FROM sessions s
 		   JOIN users u ON u.id = s.user_id
 		   JOIN projects p ON p.id = s.project_id
+		   LEFT JOIN LATERAL (
+		          SELECT left(m.content, `+itoa(titleCap)+`) AS content
+		            FROM messages m
+		           WHERE m.session_id = s.id AND m.role = 'user'
+		           ORDER BY m.ordinal LIMIT 1
+		        ) title ON true
 		  WHERE `+where,
 		arg).Scan(
 		&d.ID, &d.Agent, &d.Machine, &d.GitBranch, &d.Username,
@@ -835,13 +1221,15 @@ func (s *Store) scanDetailRow(ctx context.Context, where string, arg any) (Sessi
 		&d.TotalCostUSD, &d.CostIncomplete, &d.Visibility, &d.PublicID,
 		&d.StartedAt, &d.EndedAt, &d.UpdatedAt,
 		&d.OwnerID, &d.ProjectID, &d.ProjectKey, &d.ProjectName, &d.ProjectKind, &d.Cwd, &d.ParentID, &d.ParserVersion,
-		&d.TotalCacheSavingsUSD, &d.CacheSavingsIncomplete, &cacheSavingsBackfilled)
+		&d.TotalCacheSavingsUSD, &d.CacheSavingsIncomplete, &cacheSavingsBackfilled,
+		&d.Title)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return SessionDetail{}, false, ErrNotFound
 	}
 	if err != nil {
 		return SessionDetail{}, false, err
 	}
+	d.Title = squashSpaces(d.Title)
 	return d, cacheSavingsBackfilled, nil
 }
 
