@@ -37,7 +37,8 @@ type AuthCode struct {
 
 // OAuthGrant summarizes a client a user has connected, for the account page's
 // "connected apps" list. One row per client the user has live (unrevoked) tokens
-// for, with when it was first connected and last refreshed.
+// for, with when it was first connected and when it last authenticated a request
+// or redeemed a refresh token.
 type OAuthGrant struct {
 	ClientID    string
 	ClientName  string
@@ -129,8 +130,9 @@ func (s *Store) CreateOAuthToken(ctx context.Context, p OAuthTokenParams) error 
 // check; the expiry it returns lets the caller mirror the real token lifetime.
 func (s *Store) OAuthAccessAuth(ctx context.Context, accessHash string) (userID int64, scope string, expiresAt time.Time, err error) {
 	err = s.Pool.QueryRow(ctx,
-		`SELECT user_id, scope, access_expires_at FROM oauth_tokens
-		   WHERE access_token_hash = $1 AND revoked_at IS NULL AND access_expires_at > now()`,
+		`UPDATE oauth_tokens SET last_used_at = now()
+		  WHERE access_token_hash = $1 AND revoked_at IS NULL AND access_expires_at > now()
+		  RETURNING user_id, scope, access_expires_at`,
 		accessHash).Scan(&userID, &scope, &expiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, "", time.Time{}, ErrNotFound
@@ -153,7 +155,8 @@ func (s *Store) RotateOAuthToken(ctx context.Context, oldRefreshHash string, p O
 	err = s.Pool.QueryRow(ctx,
 		`UPDATE oauth_tokens
 		    SET access_token_hash = $1, refresh_token_hash = $2,
-		        access_expires_at = $3, refresh_expires_at = $4
+		        access_expires_at = $3, refresh_expires_at = $4,
+		        last_used_at = now()
 		  WHERE refresh_token_hash = $5 AND revoked_at IS NULL
 		    AND (refresh_expires_at IS NULL OR refresh_expires_at > now())
 		  RETURNING client_id, user_id, scope, resource`,
@@ -171,13 +174,13 @@ func (s *Store) RotateOAuthToken(ctx context.Context, oldRefreshHash string, p O
 // drops off the list.
 func (s *Store) ListOAuthGrants(ctx context.Context, userID int64) ([]OAuthGrant, error) {
 	rows, err := s.Pool.Query(ctx,
-		`SELECT c.id, c.client_name, min(t.scope), min(t.created_at), max(t.created_at)
+		`SELECT c.id, c.client_name, min(t.scope), min(t.created_at), max(t.last_used_at)
 		   FROM oauth_tokens t
 		   JOIN oauth_clients c ON c.id = t.client_id
 		  WHERE t.user_id = $1 AND t.revoked_at IS NULL
 		    AND (t.refresh_expires_at IS NULL OR t.refresh_expires_at > now() OR t.access_expires_at > now())
 		  GROUP BY c.id, c.client_name
-		  ORDER BY max(t.created_at) DESC`, userID)
+		  ORDER BY max(t.last_used_at) DESC`, userID)
 	if err != nil {
 		return nil, err
 	}

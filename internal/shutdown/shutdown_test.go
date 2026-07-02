@@ -41,7 +41,7 @@ func TestAckRunsBeforeCancel(t *testing.T) {
 	ch := make(chan os.Signal, 2)
 	cancelledDuringAck := make(chan bool, 1)
 	var ctx context.Context
-	var cancel context.CancelFunc
+	var cancel func()
 	ctx, cancel = watch(ch, func() {
 		select {
 		case <-ctx.Done():
@@ -93,9 +93,26 @@ func TestStopBeforeSignal(t *testing.T) {
 
 	cancel()
 	waitCancelled(t, ctx)
-	// Give the goroutine a moment to observe ctx.Done and return.
+	// Give the goroutine a moment to observe the stop and return.
 	time.Sleep(50 * time.Millisecond)
 	if acked {
 		t.Fatal("ack ran without a signal")
 	}
+}
+
+// TestStopAfterFirstSignalReleasesWatcher verifies stop releases the goroutine
+// that would otherwise wait forever for a second signal: after stop, a late
+// signal must not force an exit, because nothing is watching anymore.
+func TestStopAfterFirstSignalReleasesWatcher(t *testing.T) {
+	ch := make(chan os.Signal, 2)
+	ctx, cancel := watch(ch, func() {}, func(int) { t.Error("exit called after stop") })
+
+	ch <- syscall.SIGINT
+	waitCancelled(t, ctx)
+	cancel()
+	// Give the goroutine a moment to observe the stop, then confirm a late
+	// signal finds no watcher.
+	time.Sleep(50 * time.Millisecond)
+	ch <- syscall.SIGINT
+	time.Sleep(50 * time.Millisecond)
 }

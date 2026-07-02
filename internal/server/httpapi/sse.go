@@ -1,6 +1,65 @@
 package httpapi
 
-import "sync"
+import (
+	"fmt"
+	"net/http"
+	"sync"
+	"time"
+)
+
+// serveSSE is the shared spine of the SSE endpoints: it sets the stream headers,
+// opens the stream with a comment, then writes one frame per value received on ch
+// (rendered by frame) and a keepalive comment every 25s, until the client goes
+// away or a write fails. Each write gets a bounded deadline rather than clearing
+// the deadline for the whole stream: a client that stops reading would otherwise
+// block the write forever, so the caller's deferred unsubscribe never runs and
+// the subscription leaks. A short deadline turns a stalled client into a write
+// error, ending the loop. onOpen, when non-nil, writes any initial frames right
+// after the stream opens and reports whether to continue (the reparse stream
+// paints the current status so a page connecting mid-run does not wait for the
+// next frame).
+func serveSSE[T any](w http.ResponseWriter, r *http.Request, ch <-chan T, frame func(T) string, onOpen func(write func(string) bool) bool) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	rc := http.NewResponseController(w)
+	write := func(payload string) bool {
+		if rc.SetWriteDeadline(time.Now().Add(10*time.Second)) != nil {
+			return false
+		}
+		if _, err := fmt.Fprint(w, payload); err != nil {
+			return false
+		}
+		return rc.Flush() == nil
+	}
+
+	// An initial comment opens the stream so the browser's EventSource fires open.
+	if !write(": connected\n\n") {
+		return
+	}
+	if onOpen != nil && !onOpen(write) {
+		return
+	}
+
+	keepalive := time.NewTicker(25 * time.Second)
+	defer keepalive.Stop()
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case v := <-ch:
+			if !write(frame(v)) {
+				return
+			}
+		case <-keepalive.C:
+			if !write(": ping\n\n") {
+				return
+			}
+		}
+	}
+}
 
 // sseHub fans session-update notifications out to any connected browsers
 // watching a session. The per-session channel carries no payload: a notification

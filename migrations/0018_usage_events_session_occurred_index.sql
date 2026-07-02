@@ -10,9 +10,10 @@
 -- which the on-demand OG card render (a year-window, user-scoped analytics read on
 -- the first fetch of a published overview's card) would pay in full on every miss.
 --
--- With (session_id, occurred_at) the planner can drive from idx_sessions_user
--- (migration 0001): resolve the user's sessions, then range-scan each session's
--- events within the window here. Each render then touches only that user's events,
+-- With (session_id, occurred_at) the planner can drive from
+-- idx_sessions_user_feed (migration 0006, whose leading column is user_id):
+-- resolve the user's sessions, then range-scan each session's events within the
+-- window here. Each render then touches only that user's events,
 -- so an OG card render is linear in that account's own usage, and the live per-user
 -- overview page (which runs the same query on every load) gets the same win. The
 -- existing (session_id, ...) unique indexes lead with session_id but carry no time

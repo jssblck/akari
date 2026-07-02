@@ -61,7 +61,8 @@ func TestNewTokenUnique(t *testing.T) {
 }
 
 func TestHashTokenStable(t *testing.T) {
-	if HashToken("abc") != HashToken("abc") {
+	first, second := HashToken("abc"), HashToken("abc")
+	if first != second {
 		t.Fatal("HashToken not deterministic")
 	}
 	if HashToken("abc") == HashToken("abd") {

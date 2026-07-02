@@ -38,7 +38,7 @@ jobs:
       HAS_AKARI: ${{ vars.AKARI_SERVER_URL != '' && secrets.AKARI_INGEST_TOKEN != '' }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Reviewers diff against the base branch, so the full history must be
           # present for `origin/<base>` to resolve.

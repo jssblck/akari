@@ -153,6 +153,35 @@ type SessionFilter struct {
 	Offset int
 }
 
+// conds builds the WHERE additions for the filter's narrowing fields, shared by
+// every session-list query so a filter field added here reaches all of them at
+// once. sinceCol names the timestamp column the Since bound applies to:
+// s.updated_at for the whole-session lists, ue.occurred_at for the windowed
+// queries that scope by dated usage. Placeholders start at $1; the caller
+// appends its own (cursor, limit, offset) after.
+func (f SessionFilter) conds(sinceCol string) (conds []string, args []any) {
+	add := func(cond string, val any) {
+		args = append(args, val)
+		conds = append(conds, cond+" $"+itoa(len(args)))
+	}
+	if f.ProjectID != 0 {
+		add("s.project_id =", f.ProjectID)
+	}
+	if f.Agent != "" {
+		add("s.agent =", f.Agent)
+	}
+	if f.Machine != "" {
+		add("s.machine =", f.Machine)
+	}
+	if f.Username != "" {
+		add("u.username =", f.Username)
+	}
+	if !f.Since.IsZero() {
+		add(sinceCol+" >=", f.Since)
+	}
+	return conds, args
+}
+
 // DefaultSort is the global session list's order when none is requested: most
 // recently active first, matching the feed's "find a recent run" purpose.
 const DefaultSort = "updated"
@@ -304,27 +333,7 @@ func scanSession(rows pgx.Rows) (SessionSummary, error) {
 
 // ListSessions returns sessions matching the filter, newest first.
 func (s *Store) ListSessions(ctx context.Context, f SessionFilter) ([]SessionSummary, error) {
-	var conds []string
-	var args []any
-	add := func(cond string, val any) {
-		args = append(args, val)
-		conds = append(conds, cond+" $"+itoa(len(args)))
-	}
-	if f.ProjectID != 0 {
-		add("s.project_id =", f.ProjectID)
-	}
-	if f.Agent != "" {
-		add("s.agent =", f.Agent)
-	}
-	if f.Machine != "" {
-		add("s.machine =", f.Machine)
-	}
-	if f.Username != "" {
-		add("u.username =", f.Username)
-	}
-	if !f.Since.IsZero() {
-		add("s.updated_at >=", f.Since)
-	}
+	conds, args := f.conds("s.updated_at")
 
 	q := sessionSelect
 	if len(conds) > 0 {
@@ -405,31 +414,12 @@ func (r SessionRemainder) Tokens() int64 {
 
 // windowSessionConds builds the shared WHERE additions for the windowed-session
 // queries (the capped rows and the remainder aggregate), so both narrow by the exact
-// same project, window, agent, user, and machine scope the usage panel does. The
-// placeholders start at $1; the caller appends its own (limit, offset) after.
+// same project, window, agent, user, and machine scope the usage panel does: the
+// standard filter conditions with the window bound applied to dated usage
+// (ue.occurred_at) rather than session activity. The placeholders start at $1; the
+// caller appends its own (limit, offset) after.
 func windowSessionConds(f SessionFilter) ([]string, []any) {
-	var conds []string
-	var args []any
-	add := func(cond string, val any) {
-		args = append(args, val)
-		conds = append(conds, cond+" $"+itoa(len(args)))
-	}
-	if f.ProjectID != 0 {
-		add("s.project_id =", f.ProjectID)
-	}
-	if f.Agent != "" {
-		add("s.agent =", f.Agent)
-	}
-	if f.Machine != "" {
-		add("s.machine =", f.Machine)
-	}
-	if f.Username != "" {
-		add("u.username =", f.Username)
-	}
-	if !f.Since.IsZero() {
-		add("ue.occurred_at >=", f.Since)
-	}
-	return conds, args
+	return f.conds("ue.occurred_at")
 }
 
 // WindowSessionPage returns the project page's session table: the capped rows that
@@ -575,27 +565,7 @@ func scanSessionRow(rows pgx.Rows) (SessionRow, error) {
 // the set exactly as ListSessions does. This backs the global Sessions view and
 // the Overview's recent-activity feed.
 func (s *Store) ListAllSessions(ctx context.Context, f SessionFilter) ([]SessionRow, error) {
-	var conds []string
-	var args []any
-	add := func(cond string, val any) {
-		args = append(args, val)
-		conds = append(conds, cond+" $"+itoa(len(args)))
-	}
-	if f.ProjectID != 0 {
-		add("s.project_id =", f.ProjectID)
-	}
-	if f.Agent != "" {
-		add("s.agent =", f.Agent)
-	}
-	if f.Machine != "" {
-		add("s.machine =", f.Machine)
-	}
-	if f.Username != "" {
-		add("u.username =", f.Username)
-	}
-	if !f.Since.IsZero() {
-		add("s.updated_at >=", f.Since)
-	}
+	conds, args := f.conds("s.updated_at")
 
 	q := globalSessionSelect
 	if len(conds) > 0 {
@@ -652,27 +622,7 @@ type SessionFeedCursor struct {
 // walk. Each row still carries its updated_at, so a caller can order by recency within
 // a page. limit is clamped to [1, 500] (default 100).
 func (s *Store) SessionFeed(ctx context.Context, f SessionFilter, limit int, cursor *SessionFeedCursor) ([]SessionRow, *SessionFeedCursor, error) {
-	var conds []string
-	var args []any
-	add := func(cond string, val any) {
-		args = append(args, val)
-		conds = append(conds, cond+" $"+itoa(len(args)))
-	}
-	if f.ProjectID != 0 {
-		add("s.project_id =", f.ProjectID)
-	}
-	if f.Agent != "" {
-		add("s.agent =", f.Agent)
-	}
-	if f.Machine != "" {
-		add("s.machine =", f.Machine)
-	}
-	if f.Username != "" {
-		add("u.username =", f.Username)
-	}
-	if !f.Since.IsZero() {
-		add("s.updated_at >=", f.Since)
-	}
+	conds, args := f.conds("s.updated_at")
 	if cursor != nil {
 		// The next page is everything below the cursor in id-descending order. id is the
 		// primary key, so Postgres walks the PK index straight to the resume point rather

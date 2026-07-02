@@ -120,12 +120,16 @@ func (r *reducer) applyResult(id string, body gjson.Result, isErr bool) {
 
 // setToolInput records a tool call's input, recognizing a CAS sentinel. When the
 // client lifted the input to the CAS, the reference and its metadata are recorded
-// and no inline body is carried; otherwise the raw input JSON travels inline and
-// the server hashes and sizes it. defaultMedia is the media type used for an
-// inline body (every agent's tool input is JSON).
+// and no inline body is carried; the sentinel's file_path (the one input field
+// the lift would otherwise erase) fills the call's FilePath. Otherwise the raw
+// input JSON travels inline and the server hashes and sizes it. defaultMedia is
+// the media type used for an inline body (every agent's tool input is JSON).
 func setToolInput(tc *ToolCall, input gjson.Result, defaultMedia string) {
 	if ref, ok := asCASRef(input); ok {
 		tc.InputSHA256, tc.InputBytes, tc.InputMediaType = ref.SHA256, ref.Bytes, ref.MediaType
+		if ref.FilePath != "" {
+			tc.FilePath = ref.FilePath
+		}
 		return
 	}
 	tc.InputJSON = input.Raw
