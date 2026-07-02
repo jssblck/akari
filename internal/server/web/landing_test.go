@@ -13,7 +13,7 @@ import (
 // spine at the source package guards the anonymous root independently of the httpapi
 // route wiring.
 func TestLandingPageRendersHeroAndEntryPoints(t *testing.T) {
-	html := renderComponent(t, LandingPage())
+	html := renderComponent(t, LandingPage(OGMeta{}))
 
 	// The public layout wraps it: the top bar's brand, the Docs and GitHub links,
 	// the Log in link, and the product name in the page title.

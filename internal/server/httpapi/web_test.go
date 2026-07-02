@@ -1241,6 +1241,47 @@ func TestPublicOverviewOGImage(t *testing.T) {
 	resp.Body.Close()
 }
 
+// TestLandingOGImage drives the homepage preview card: the logged-out root at "/"
+// advertises it via og:image (a URL ending in /og.png) with the large-image
+// Twitter card, and /og.png serves a valid 1200x630 image/png with the
+// deploy-lifetime Cache-Control. Unlike the overview card, the landing card
+// carries no user data, so it needs no published account or usage fixtures beyond
+// the test server itself (which gates on AKARI_TEST_DATABASE_URL like its
+// neighbors).
+func TestLandingOGImage(t *testing.T) {
+	t.Parallel()
+	srv, _ := newTestServer(t)
+
+	anon := newClient(t)
+	anon.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+	// The logged-out root advertises the card via Open Graph and the large-image
+	// Twitter card, naming the /og.png URL the crawler will fetch.
+	body := readBody(t, mustGet(t, anon, srv.URL+"/"))
+	for _, want := range []string{
+		`property="og:image" content="`,
+		`/og.png"`,
+		`name="twitter:card" content="summary_large_image"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("landing root missing OG tag %q, got:\n%s", want, body)
+		}
+	}
+
+	// The card itself: a valid, correctly sized PNG.
+	if b := fetchPNG(t, anon, srv.URL+"/og.png"); b.Dx() != 1200 || b.Dy() != 630 {
+		t.Fatalf("landing og.png size = %dx%d, want 1200x630", b.Dx(), b.Dy())
+	}
+
+	// It is static per binary, so it carries a deploy-lifetime Cache-Control rather
+	// than the overview card's short TTL.
+	resp := mustGet(t, anon, srv.URL+"/og.png")
+	resp.Body.Close()
+	if got := resp.Header.Get("Cache-Control"); got != "public, max-age=86400" {
+		t.Fatalf("landing og.png Cache-Control = %q, want %q", got, "public, max-age=86400")
+	}
+}
+
 // fetchPNG GETs a URL, asserts a 200 image/png, and returns the decoded image's
 // bounds so a caller can check the card's dimensions.
 func fetchPNG(t *testing.T, c *http.Client, url string) image.Rectangle {

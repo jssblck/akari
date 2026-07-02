@@ -127,6 +127,10 @@ func (s *Server) Routes() http.Handler {
 	// reparse-gated: the more specific pattern wins over /u/{username} for this exact
 	// path.
 	mux.HandleFunc("GET /u/{username}/og.png", s.handlePublicOverviewOGImage)
+	// The Open Graph preview card for the instance root ("/"). It serves static PNG
+	// bytes memoized per binary (see handleLandingOGImage), so like the overview
+	// card route it needs no auth and no reparse gate.
+	mux.HandleFunc("GET /og.png", s.handleLandingOGImage)
 	mux.HandleFunc("GET /login", s.handleLoginPage)
 	mux.HandleFunc("POST /login", s.handleLoginForm)
 	mux.HandleFunc("GET /register", s.handleRegisterPage)
