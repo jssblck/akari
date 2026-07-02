@@ -15,10 +15,11 @@ import (
 func TestOrderClause(t *testing.T) {
 	t.Parallel()
 
-	// An empty or unknown Sort is the descending updated feed order, id descending.
+	// An empty or unknown Sort is the descending recency feed order (last_active_at,
+	// the session's last-event time, not the row's updated_at write time), id descending.
 	for _, sort := range []string{"", "nonsense", "; drop table sessions"} {
 		got := SessionFilter{Sort: sort}.orderClause()
-		if want := " ORDER BY s.updated_at DESC, s.id DESC"; got != want {
+		if want := " ORDER BY s.last_active_at DESC, s.id DESC"; got != want {
 			t.Errorf("default orderClause(sort=%q) = %q, want %q", sort, got, want)
 		}
 	}

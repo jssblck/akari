@@ -230,7 +230,7 @@ templ feedRow(fr FeedRow) {
 		</div>
 		<span class="srow-msgs mono small" title="messages">{ fmt.Sprintf("%d", fr.Row.MessageCount) }</span>
 		@feedTokens(fr)
-		<span class="srow-time mono small" title={ FmtTimeLong(ctx, fr.Row.UpdatedAt) }>{ FeedTime(ctx, fr.Row.UpdatedAt) }</span>
+		<span class="srow-time mono small" title={ FmtTimeLong(ctx, fr.Row.LastActiveAt) }>{ FeedTime(ctx, fr.Row.LastActiveAt) }</span>
 	</div>
 }
 

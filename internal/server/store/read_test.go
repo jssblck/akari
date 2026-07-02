@@ -59,10 +59,12 @@ func seedSortSess(t *testing.T, st *store.Store, userID, projectID int64, agent,
 	t.Helper()
 	var id int64
 	err := st.Pool.QueryRow(context.Background(),
+		// ended_at (not updated_at) carries the age: the "updated" feed order sorts on
+		// last_active_at, the generated column that reads ended_at (migration 0033).
 		`INSERT INTO sessions (user_id, project_id, agent, source_session_id, machine,
 		   git_branch, message_count,
 		   total_input_tokens, total_output_tokens, total_cache_read_tokens, total_cache_write_tokens,
-		   updated_at)
+		   ended_at)
 		 VALUES ($1,$2,$3,$4,'box',$5,$6,$7,$8,$9,$10, now() - make_interval(mins => $11))
 		 RETURNING id`,
 		userID, projectID, agent, src, branch, msgs, in, out, cr, cw, ageMin).Scan(&id)
@@ -282,9 +284,9 @@ func TestListAllSessionsSort(t *testing.T) {
 		{"tokens", func(a, b store.SessionRow) int { return cmpOrd(tokenSum(a), tokenSum(b)) }},
 		{"updated", func(a, b store.SessionRow) int {
 			switch {
-			case a.UpdatedAt.Before(*b.UpdatedAt):
+			case a.LastActiveAt.Before(*b.LastActiveAt):
 				return -1
-			case a.UpdatedAt.After(*b.UpdatedAt):
+			case a.LastActiveAt.After(*b.LastActiveAt):
 				return 1
 			default:
 				return 0
@@ -442,14 +444,15 @@ func TestListSessionsSince(t *testing.T) {
 	}
 	recent := seedSess(t, st, u.ID, projectID, "claude", "box", "recent")
 	old := seedSess(t, st, u.ID, projectID, "claude", "box", "old")
-	// Age both timestamps together: the per-project ListSessions windows by updated_at
-	// while the global ListAllSessions windows by started_at (matching the Insights
-	// panels), so the test moves both to keep the recent-vs-old split valid for both
-	// queries it exercises below.
+	// Age both timestamps together: the per-project ListSessions windows by
+	// last_active_at (the generated column reading ended_at) while the global
+	// ListAllSessions windows by started_at (matching the Insights panels), so the
+	// test moves both to keep the recent-vs-old split valid for both queries it
+	// exercises below.
 	age := func(id int64, days int) {
 		if _, err := st.Pool.Exec(ctx,
-			`UPDATE sessions SET updated_at = now() - make_interval(days => $2),
-			        started_at = now() - make_interval(days => $2) WHERE id = $1`,
+			`UPDATE sessions SET started_at = now() - make_interval(days => $2),
+			        ended_at = now() - make_interval(days => $2) WHERE id = $1`,
 			id, days); err != nil {
 			t.Fatalf("age session %d: %v", id, err)
 		}

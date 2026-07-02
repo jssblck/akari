@@ -647,7 +647,12 @@ CREATE TABLE sessions (
   cost_incomplete      BOOLEAN NOT NULL DEFAULT FALSE,        -- any unpriced model
   parser_version    INT NOT NULL DEFAULT 0,
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),  -- row write time; moves on reparse
+  -- Feed recency: the session's last event time, falling back to created_at for a
+  -- transcript with no timestamps. Generated (not written), so a reparse that
+  -- restamps updated_at leaves it fixed. This is what the lists display and order
+  -- by, so an old session no longer reads as "updated" today (migration 0033).
+  last_active_at    TIMESTAMPTZ NOT NULL GENERATED ALWAYS AS (COALESCE(ended_at, created_at)) STORED,
   UNIQUE (user_id, agent, source_session_id)
 );
 CREATE INDEX idx_sessions_project ON sessions(project_id);

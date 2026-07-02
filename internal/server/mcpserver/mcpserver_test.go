@@ -229,12 +229,15 @@ func TestGetProjectOmitsZeroRollups(t *testing.T) {
 }
 
 // insertSession adds a session with an explicit age (minutes in the past) so feed
-// ordering is deterministic. A larger ageMin is a less recently active session.
+// ordering is deterministic. A larger ageMin is a less recently active session. The
+// age is set on ended_at, which the generated last_active_at column reads and the
+// feed orders by, rather than on updated_at (the row-write time the feed no longer
+// sorts on since migration 0033).
 func insertSession(t *testing.T, st *store.Store, userID, projectID int64, src string, ageMin int) int64 {
 	t.Helper()
 	var id int64
 	if err := st.Pool.QueryRow(context.Background(),
-		`INSERT INTO sessions (user_id, project_id, agent, source_session_id, machine, updated_at)
+		`INSERT INTO sessions (user_id, project_id, agent, source_session_id, machine, ended_at)
 		 VALUES ($1,$2,'claude',$3,'box', now() - make_interval(mins => $4)) RETURNING id`,
 		userID, projectID, src, ageMin).Scan(&id); err != nil {
 		t.Fatalf("insert session: %v", err)

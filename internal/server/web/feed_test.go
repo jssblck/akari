@@ -70,9 +70,9 @@ func TestBuildSessionFeed(t *testing.T) {
 	today2 := now.Add(-3 * time.Hour)
 	yesterday := now.Add(-26 * time.Hour)
 	rows := []store.SessionRow{
-		{SessionSummary: store.SessionSummary{ID: 1, Agent: "claude", TotalInput: 1000, UpdatedAt: &today1}, ProjectID: 1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote"},
-		{SessionSummary: store.SessionSummary{ID: 2, Agent: "claude", TotalInput: 500, UpdatedAt: &today2}, ProjectID: 1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote"},
-		{SessionSummary: store.SessionSummary{ID: 3, Agent: "claude", TotalInput: 0, UpdatedAt: &yesterday}, ProjectID: 2, ProjectKey: "site", ProjectName: "site", ProjectKind: "remote"},
+		{SessionSummary: store.SessionSummary{ID: 1, Agent: "claude", TotalInput: 1000, LastActiveAt: &today1}, ProjectID: 1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote"},
+		{SessionSummary: store.SessionSummary{ID: 2, Agent: "claude", TotalInput: 500, LastActiveAt: &today2}, ProjectID: 1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote"},
+		{SessionSummary: store.SessionSummary{ID: 3, Agent: "claude", TotalInput: 0, LastActiveAt: &yesterday}, ProjectID: 2, ProjectKey: "site", ProjectName: "site", ProjectKind: "remote"},
 	}
 
 	groups := buildSessionFeed(now, time.UTC, rows, true)

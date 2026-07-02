@@ -230,7 +230,7 @@ type sessionDTO struct {
 	PublicID         *string    `json:"public_id,omitempty"`
 	StartedAt        *time.Time `json:"started_at,omitempty"`
 	EndedAt          *time.Time `json:"ended_at,omitempty"`
-	UpdatedAt        *time.Time `json:"updated_at,omitempty"`
+	LastActiveAt     *time.Time `json:"last_active_at,omitempty"`
 	ProjectID        int64      `json:"project_id,omitempty"`
 	ProjectKey       string     `json:"project_key,omitempty"`
 	ProjectName      string     `json:"project_name,omitempty"`
@@ -244,7 +244,7 @@ func sessionSummaryToDTO(s store.SessionSummary) sessionDTO {
 		Tokens:  toks(s.TotalInput, s.TotalOutput, s.TotalCacheRead, s.TotalCacheWrite),
 		CostUSD: s.TotalCostUSD, CostIncomplete: s.CostIncomplete,
 		Visibility: s.Visibility, PublicID: s.PublicID,
-		StartedAt: s.StartedAt, EndedAt: s.EndedAt, UpdatedAt: s.UpdatedAt,
+		StartedAt: s.StartedAt, EndedAt: s.EndedAt, LastActiveAt: s.LastActiveAt,
 	}
 }
 
