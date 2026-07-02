@@ -1145,6 +1145,56 @@ with no such home, so it follows container convention and takes its
 configuration (`AKARI_DATABASE_URL`, `AKARI_LISTEN`, and similar) from the
 environment.
 
+### Federated identity behind a trusted proxy
+
+The default identity model is local: a username and an argon2id password per
+account, invite-only after the first admin. To run akari inside an organization
+that owns its own identity (a sidecar behind the org's gateway, so users are
+created automatically and can be linked into from another app as the same user),
+the server also accepts identity asserted by a trusted reverse proxy.
+
+An authenticating proxy in front (oauth2-proxy, Pomerium, or the org's own
+gateway) terminates auth against the org's IdP and forwards the authenticated
+username in a request header. Akari trusts that header, provisions the account on
+first sight, and treats the request as that signed-in user at full scope, the same
+as a browser session. This is the standard "identity-aware proxy" pattern: the
+proxy owns the session, and akari believes the header per request rather than
+running its own login. Provisioned accounts are *federated*: they carry
+`auth_source = 'proxy'` and no password, so the local `/login` form refuses them
+(their only way in is the proxy). See `proxyPrincipal` in
+`internal/server/httpapi/auth.go`.
+
+Configuration (all off by default; a direct deployment sets none of these):
+
+- `AKARI_PROXY_AUTH_HEADER`: the header the proxy sets to the authenticated
+  username, e.g. `X-Auth-Request-Preferred-Username`. Setting it turns the mode
+  on.
+- `AKARI_PROXY_AUTH_SECRET`: an optional shared secret the proxy must echo for the
+  identity header to be trusted. Defense in depth for when network isolation alone
+  is not enough: a client that reaches akari directly cannot forge an identity
+  without also knowing the secret.
+- `AKARI_PROXY_AUTH_SECRET_HEADER`: the header carrying that secret (default
+  `X-Akari-Proxy-Secret`), consulted only when the secret is set.
+
+**Trust boundary.** Turning this on means akari believes anyone who can set the
+identity header. That is safe only when akari is reachable *exclusively* through
+the proxy that sets it (a private network, a sidecar on the same pod, an ingress
+that always injects the header). Never expose a proxy-auth instance directly. The
+shared secret hardens this but does not replace network isolation.
+
+**Bootstrap the admin first.** A proxy-provisioned account is never admin, and
+once any account exists, local registration is invite-only (which needs an
+admin). So create the bootstrap admin through local password registration
+*before* enabling proxy auth, otherwise the first proxied request creates a
+non-admin account and there is no admin left to mint invites or run a reparse.
+
+Two follow-on protocols extend this same federation seam and are tracked as
+separate work: OIDC relying-party login with just-in-time provisioning (the
+portable standard for orgs with their own IdP), and SCIM 2.0 for provisioning and
+deprovisioning lifecycle. Both reuse the federated-account model introduced here
+(nullable password, `auth_source`); OIDC and SCIM extend the `auth_source` CHECK
+and add an external-subject identity when they land.
+
 ## Repository layout
 
 ```

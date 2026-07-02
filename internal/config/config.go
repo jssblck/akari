@@ -47,6 +47,26 @@ type Server struct {
 	// pure housekeeping: a live share re-renders its card on demand regardless.
 	// Defaults to 24h; set "0" to disable the sweep.
 	OGCleanupInterval time.Duration
+	// ProxyAuthHeader is the request header a trusted reverse proxy sets to the
+	// authenticated username (AKARI_PROXY_AUTH_HEADER, e.g.
+	// "X-Auth-Request-Preferred-Username"). Setting it turns on proxy-header auth:
+	// the server trusts the header's value as the signed-in user and provisions the
+	// account on first sight. It is empty (disabled) by default, because trusting a
+	// header is only safe when akari is reachable ONLY through the proxy that sets
+	// it. Leave it unset for a direct deployment. See auth.go's proxyPrincipal and
+	// the deployment notes in docs/development.md.
+	ProxyAuthHeader string
+	// ProxyAuthSecret, when set (AKARI_PROXY_AUTH_SECRET), is a shared secret the
+	// proxy must echo in ProxyAuthSecretHeader for the identity header to be
+	// trusted. It is defense in depth for when network isolation alone is not
+	// enough: a client that reaches akari directly cannot forge an identity without
+	// also knowing the secret. Empty means the identity header is trusted on
+	// network isolation alone.
+	ProxyAuthSecret string
+	// ProxyAuthSecretHeader is the header carrying ProxyAuthSecret
+	// (AKARI_PROXY_AUTH_SECRET_HEADER). Defaults to "X-Akari-Proxy-Secret". Only
+	// consulted when ProxyAuthSecret is set.
+	ProxyAuthSecretHeader string
 	// SignalsSettleInterval is how often the server wakes to compute per-session
 	// signals for sessions that have settled (AKARI_SIGNALS_SETTLE_INTERVAL). The
 	// ingest append path deliberately does not recompute signals per message (that
@@ -62,10 +82,13 @@ type Server struct {
 // and validating required values.
 func LoadServer() (Server, error) {
 	s := Server{
-		DatabaseURL:  os.Getenv("AKARI_DATABASE_URL"),
-		Listen:       listenAddr(),
-		CookieSecure: !truthy(os.Getenv("AKARI_COOKIE_INSECURE")),
-		PublicURL:    publicURL(),
+		DatabaseURL:           os.Getenv("AKARI_DATABASE_URL"),
+		Listen:                listenAddr(),
+		CookieSecure:          !truthy(os.Getenv("AKARI_COOKIE_INSECURE")),
+		PublicURL:             publicURL(),
+		ProxyAuthHeader:       strings.TrimSpace(os.Getenv("AKARI_PROXY_AUTH_HEADER")),
+		ProxyAuthSecret:       os.Getenv("AKARI_PROXY_AUTH_SECRET"),
+		ProxyAuthSecretHeader: proxyAuthSecretHeader(),
 	}
 	if s.DatabaseURL == "" {
 		return Server{}, fmt.Errorf("AKARI_DATABASE_URL is required")
@@ -139,6 +162,16 @@ func publicURL() string {
 		v = strings.TrimSpace(os.Getenv("AKARI_URL"))
 	}
 	return strings.TrimRight(v, "/")
+}
+
+// proxyAuthSecretHeader resolves the header the proxy echoes the shared secret in,
+// defaulting to X-Akari-Proxy-Secret when unset so operators need only set the
+// secret value itself in the common case.
+func proxyAuthSecretHeader() string {
+	if v := strings.TrimSpace(os.Getenv("AKARI_PROXY_AUTH_SECRET_HEADER")); v != "" {
+		return v
+	}
+	return "X-Akari-Proxy-Secret"
 }
 
 func truthy(v string) bool {

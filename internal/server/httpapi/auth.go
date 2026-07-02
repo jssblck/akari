@@ -2,7 +2,9 @@ package httpapi
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -38,8 +40,16 @@ func principalFrom(ctx context.Context) (principal, bool) {
 	return p, ok
 }
 
-// resolve authenticates a request from a Bearer token or a session cookie. A
-// cookie always carries full scope; a token carries its stored scope.
+// resolve authenticates a request from a Bearer token, a trusted proxy header, or
+// a session cookie, in that order. A Bearer token carries its stored scope; a
+// proxy header or a cookie carries full scope (both name an interactive user).
+//
+// Bearer wins so an explicit API/MCP credential is honored even when the proxy
+// also injects its identity header (a coding agent hitting /mcp with its own
+// token is that token's principal, not the browser user the proxy names). The
+// proxy header is checked before the cookie because in a proxy deployment the
+// proxy is the identity authority: a stale akari cookie must not shadow the
+// identity the proxy asserts now.
 func (s *Server) resolve(r *http.Request) (principal, bool) {
 	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
 		token := strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
@@ -49,6 +59,24 @@ func (s *Server) resolve(r *http.Request) (principal, bool) {
 		}
 		return principal{UserID: uid, Scope: scope}, true
 	}
+	if username, asserted := s.proxyIdentity(r); asserted {
+		// A trusted proxy asserted this identity. Commit to it: resolve the account
+		// (provisioning it on first sight) and return the principal. Crucially, do
+		// NOT fall through to the cookie on a provisioning error. A transient store
+		// failure must fail closed, or a stale akari cookie could authenticate a
+		// request that the proxy is asserting a different identity for, the exact
+		// shadowing this ordering exists to prevent.
+		u, err := s.Store.UpsertProxyUser(r.Context(), username)
+		if err != nil {
+			// Fail closed (never fall through to the cookie), but do not swallow the
+			// cause: a store or context failure while resolving an identity the proxy
+			// vouched for denies a legitimate user, so it must stay diagnosable rather
+			// than reading as a plain "not signed in".
+			log.Printf("proxy auth: resolve asserted identity %q: %v", username, err)
+			return principal{}, false
+		}
+		return principal{UserID: u.ID, Scope: scopeFull}, true
+	}
 	if c, err := r.Cookie(cookieName); err == nil {
 		uid, err := s.Store.WebSession(r.Context(), auth.HashToken(c.Value))
 		if err == nil {
@@ -56,6 +84,35 @@ func (s *Server) resolve(r *http.Request) (principal, bool) {
 		}
 	}
 	return principal{}, false
+}
+
+// proxyIdentity returns the username a trusted reverse proxy asserted for this
+// request, and whether such an identity was in fact asserted. It reports true only
+// when proxy-auth mode is on (see config.Server.ProxyAuthHeader), the identity
+// header is present and non-blank, and any configured shared secret matches. A
+// false means no trusted identity was presented (mode off, header absent or blank,
+// or secret mismatch), so resolve falls through to the other credential paths; a
+// true commits resolve to the proxy identity, which then fails closed rather than
+// falling through if the account cannot be resolved.
+//
+// The trust model is deliberate and documented: akari believes the header because
+// the deployment guarantees only the proxy can set it (akari is not directly
+// reachable), optionally reinforced by a shared secret the proxy echoes.
+func (s *Server) proxyIdentity(r *http.Request) (string, bool) {
+	if s.Cfg.ProxyAuthHeader == "" {
+		return "", false
+	}
+	username := strings.TrimSpace(r.Header.Get(s.Cfg.ProxyAuthHeader))
+	if username == "" {
+		return "", false
+	}
+	if s.Cfg.ProxyAuthSecret != "" {
+		got := r.Header.Get(s.Cfg.ProxyAuthSecretHeader)
+		if subtle.ConstantTimeCompare([]byte(got), []byte(s.Cfg.ProxyAuthSecret)) != 1 {
+			return "", false
+		}
+	}
+	return username, true
 }
 
 func (s *Server) withPrincipal(r *http.Request, p principal) *http.Request {
@@ -207,6 +264,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	u, err := s.Store.UserByUsername(r.Context(), strings.TrimSpace(req.Username))
 	if err != nil {
 		// Do not distinguish unknown user from bad password.
+		writeError(w, http.StatusUnauthorized, "invalid credentials")
+		return
+	}
+	if !u.HasPassword() {
+		// A federated account has no local password: it signs in through its
+		// external source (the proxy header), never here. Refuse without revealing
+		// that the account exists, matching the unknown-user response.
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
