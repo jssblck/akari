@@ -136,6 +136,9 @@ jobs:
         # repo through the checkout's git remote. Best effort: a sync hiccup must
         # not flip the review verdict, so this step never fails the job. --time-limit 0
         # lifts the default cap since there is only this run's handful of sessions.
+        # --finalize treats every session as terminal so a Codex session's trailing
+        # turn flushes now: the runner is torn down right after this step, so its idle
+        # settle window would never elapse to flush that turn otherwise.
         if: ${{ always() && env.HAS_AKARI == 'true' }}
         continue-on-error: true
         env:
@@ -144,4 +147,4 @@ jobs:
         run: |
           set -euo pipefail
           akari login --server "$AKARI_SERVER_URL" --token "$AKARI_INGEST_TOKEN"
-          akari sync --time-limit 0
+          akari sync --time-limit 0 --finalize
