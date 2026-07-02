@@ -68,6 +68,7 @@ main:has(> .session-page) { max-width: none; }
 .ol-step .ol-tn { color: var(--lilac); }
 .ol-step.ol-step-error .ol-tn { color: var(--err); }
 .ol-step .ol-file { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.ol-step .ol-detail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); min-width: 0; }
 
 /* ---- Inspector (tool-body modal) ----
    A selected tool call's bodies open in a large centered dialog instead of a
@@ -91,6 +92,7 @@ body.modal-open { overflow: hidden; }
 .insp-head { display: flex; align-items: center; gap: var(--sp-sm); padding: var(--sp-md) var(--sp-md); border-bottom: 1px solid var(--border); }
 .insp-tn { color: var(--lilac); font-family: var(--mono); font-weight: 500; font-size: 0.8125rem; flex: none; }
 .insp-file { color: var(--muted); font-size: 0.75rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.insp-detail { color: var(--muted); font-size: 0.75rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .insp-spacer { flex: 1 1 auto; }
 .insp-status { flex: none; font-size: 0.75rem; font-weight: 500; }
 .insp-close { background: transparent; color: var(--faint); border: none; padding: 2px 6px; font-size: 0.875rem; flex: none; }
@@ -126,6 +128,7 @@ body.modal-open { overflow: hidden; }
 }
 .tool-chip .tname { color: var(--lilac); font-weight: 500; }
 .tool-chip .tpath { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40ch; }
+.tool-chip .tdetail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 48ch; color: var(--muted); }
 .tstatus.ok { color: var(--ok); }
 .tstatus.err { color: var(--err); }
 .stamp {

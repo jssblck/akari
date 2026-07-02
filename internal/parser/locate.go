@@ -33,14 +33,17 @@ func readFull(f io.ReaderAt, buf []byte, off int64) error {
 // sentinel replaces. Kind and Media say how to canonicalize the raw value into the
 // bytes the CAS stores (CanonicalBodyReader), so the streamed body is byte
 // identical to what the server records inline today. FilePath is the top-level
-// file_path string of a JSON tool input (empty otherwise), extracted here so the
-// sentinel the caller builds carries it, exactly as the buffered RewriteLine path
-// does via sentinelFilePath.
+// file_path string of a JSON tool input (empty otherwise), and Detail is the
+// input's short human-scannable summary (a command, pattern, URL, or description;
+// empty otherwise), both extracted here so the sentinel the caller builds carries
+// them, exactly as the buffered RewriteLine path does via sentinelFilePath and
+// sentinelDetail.
 type BodyLocation struct {
 	Span     ValueSpan
 	Kind     BodyKind
 	Media    string
 	FilePath string
+	Detail   string
 }
 
 // LocateToolBodies enumerates the tool input and result bodies in one transcript
@@ -359,7 +362,7 @@ func (s *lineSource) unquotedAt(path []Step) (string, error) {
 
 // locateSingle emits the body at a single fixed path with a known kind/media. The
 // single-body cases call emit at most once. Its callers are all tool inputs, so a
-// JSON body gets its file_path extracted for the sentinel.
+// JSON body gets its file_path and detail extracted for the sentinel.
 func (s *lineSource) locateSingle(path []Step, kind BodyKind, media string, emit func(BodyLocation) error) error {
 	spans, err := s.locate([][]Step{path})
 	if err != nil {
@@ -370,65 +373,110 @@ func (s *lineSource) locateSingle(path []Step, kind BodyKind, media string, emit
 		return nil
 	}
 	loc := BodyLocation{Span: sp, Kind: kind, Media: media}
-	if loc.FilePath, err = s.inputFilePath(sp, kind, media); err != nil {
+	if loc.FilePath, loc.Detail, err = s.inputProjections(sp, kind, media); err != nil {
 		return err
 	}
 	return emit(loc)
 }
 
-// inputFilePath extracts the top-level file_path string of a JSON tool input body
-// without ever buffering the body, mirroring sentinelFilePath's rule exactly (the
+// inputProjections extracts the two body-derived fields a JSON tool input's
+// sentinel carries (its top-level file_path and its short detail) without ever
+// buffering the body, mirroring sentinelFilePath and sentinelDetail exactly (the
 // buffered and streaming rewrite paths must produce byte-identical sentinels). It
-// returns "" for a non-JSON input and for an absent, non-string, or over-long
-// value. The extra structural pass costs O(span) time at O(1) memory and runs only
-// for tool inputs on the rare big-line path.
-func (s *lineSource) inputFilePath(sp ValueSpan, kind BodyKind, media string) (string, error) {
+// returns "" for a non-JSON input, and for each field independently when its value
+// is absent, non-string, empty, or over cap. It locates file_path plus every
+// detail candidate in a single LocateValues pass over the canonical body stream,
+// then reads only the small spans that came back. The pass costs O(span) time at
+// O(1) memory and runs only for tool inputs on the rare big-line path.
+func (s *lineSource) inputProjections(sp ValueSpan, kind BodyKind, media string) (filePath, detail string, err error) {
 	if media != "application/json" {
-		return "", nil
+		return "", "", nil
 	}
 	// The canonical bytes of the input are a JSON document of their own (BodyRaw:
 	// the raw object; BodyJSONString: the decoded contents of a JSON-encoded
-	// string). Scan that document for its top-level file_path.
+	// string). One structural pass locates file_path and every detail candidate; a
+	// candidate absent from the body simply has no span in the result map.
+	paths := [][]Step{{Key("file_path")}}
+	for _, key := range detailKeys {
+		paths = append(paths, []Step{Key(key)})
+	}
 	body := func() io.Reader { return CanonicalBodyReader(s.ctx, s.f, s.base, sp, kind) }
-	v, ok, err := LocateValue(s.ctx, []Step{Key("file_path")}, readerWindows(body()))
+	located, err := LocateValues(s.ctx, paths, readerWindows(body()))
 	if err != nil {
-		return "", fmt.Errorf("locate input file_path: %w", err)
+		return "", "", fmt.Errorf("locate input projections: %w", err)
 	}
-	if !ok {
-		return "", nil
+	spans := make(map[int]ValueSpan, len(located))
+	for _, ls := range located {
+		spans[ls.PathIndex] = ls.Span
 	}
-	// A JSON string of decoded length <= maxSentinelFilePath occupies at most
-	// 6 bytes per character (a \uXXXX escape) plus the quotes, so a raw span past
-	// that bound cannot decode under the cap and is dropped without reading.
+	// path index 0 is file_path; indexes 1.. are detailKeys in priority order.
+	if v, ok := spans[0]; ok {
+		fp, ok, err := s.readStringSpan(sp, kind, v, maxSentinelFilePath)
+		if err != nil {
+			return "", "", err
+		}
+		if ok {
+			filePath = fp
+		}
+	}
+	for i := range detailKeys {
+		v, ok := spans[i+1]
+		if !ok {
+			continue
+		}
+		str, ok, err := s.readStringSpan(sp, kind, v, maxSentinelDetail)
+		if err != nil {
+			return "", "", err
+		}
+		if ok && str != "" {
+			detail = str
+			break
+		}
+	}
+	return filePath, detail, nil
+}
+
+// readStringSpan reads the JSON string value at v (a span relative to the body
+// document at sp) and returns its decoded contents, or ok=false when the value is
+// not a string or decodes to more than maxLen. It bounds the raw span before
+// reading so an over-long value is dropped without materializing it, then reads the
+// small span the way the field's canonicalization allows: a raw body maps straight
+// onto the file, a decoded body has no random access and is re-streamed and skipped.
+// It is the shared span-read-and-unmarshal both projections use, so file_path and
+// detail stay byte-identical to the buffered path.
+func (s *lineSource) readStringSpan(sp ValueSpan, kind BodyKind, v ValueSpan, maxLen int) (string, bool, error) {
+	// A JSON string of decoded length <= maxLen occupies at most 6 bytes per
+	// character (a \uXXXX escape) plus the quotes, so a raw span past that bound
+	// cannot decode under the cap and is dropped without reading.
 	n := v.End - v.Start
-	if n < 2 || n > 6*maxSentinelFilePath+2 {
-		return "", nil
+	if n < 2 || n > int64(6*maxLen+2) {
+		return "", false, nil
 	}
 	raw := make([]byte, n)
 	if kind == BodyRaw {
 		// A raw body's canonical bytes are its source bytes, so the located span maps
 		// straight onto the file.
 		if err := readFull(s.f, raw, s.base+sp.Start+v.Start); err != nil {
-			return "", err
+			return "", false, err
 		}
 	} else {
 		// A decoded stream has no random access; re-stream and skip to the value.
-		r := body()
+		r := CanonicalBodyReader(s.ctx, s.f, s.base, sp, kind)
 		if _, err := io.CopyN(io.Discard, r, v.Start); err != nil {
-			return "", fmt.Errorf("seek input file_path: %w", err)
+			return "", false, fmt.Errorf("seek input string span: %w", err)
 		}
 		if _, err := io.ReadFull(r, raw); err != nil {
-			return "", fmt.Errorf("read input file_path: %w", err)
+			return "", false, fmt.Errorf("read input string span: %w", err)
 		}
 	}
-	var fp string
-	if json.Unmarshal(raw, &fp) != nil {
-		return "", nil // not a string value; the buffered path drops it too
+	var str string
+	if json.Unmarshal(raw, &str) != nil {
+		return "", false, nil // not a string value; the buffered path drops it too
 	}
-	if len(fp) > maxSentinelFilePath {
-		return "", nil
+	if len(str) > maxLen {
+		return "", false, nil
 	}
-	return fp, nil
+	return str, true, nil
 }
 
 // readerWindows adapts an io.Reader to the chunked next() a streaming scan
@@ -475,7 +523,7 @@ func (s *lineSource) locateSingleResult(path []Step, emit func(BodyLocation) err
 // back only the tiny type and body spans per element, never the body bytes. Each
 // matching body is streamed to emit the instant its block is visited, so peak
 // memory does not scale with the block count. Its callers are all tool inputs, so
-// a JSON body gets its file_path extracted for the sentinel.
+// a JSON body gets its file_path and detail extracted for the sentinel.
 func (s *lineSource) locateBlocks(arr []Step, wantType string, bodyKey Step, kind BodyKind, media string, emit func(BodyLocation) error) error {
 	return s.walkBlocks(arr, bodyKey, func(typeSpan, bodySpan ValueSpan, hasBody bool) error {
 		bt, err := s.unquoted(typeSpan)
@@ -488,7 +536,7 @@ func (s *lineSource) locateBlocks(arr []Step, wantType string, bodyKey Step, kin
 		if hasBody && bodySpan.End > bodySpan.Start {
 			loc := BodyLocation{Span: bodySpan, Kind: kind, Media: media}
 			var err error
-			if loc.FilePath, err = s.inputFilePath(bodySpan, kind, media); err != nil {
+			if loc.FilePath, loc.Detail, err = s.inputProjections(bodySpan, kind, media); err != nil {
 				return err
 			}
 			return emit(loc)

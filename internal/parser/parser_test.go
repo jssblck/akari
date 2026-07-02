@@ -116,6 +116,11 @@ func TestParseClaudeToolError(t *testing.T) {
 	if tc.InputJSON == "" || tc.FilePath != "" {
 		t.Errorf("input = %q file=%q", tc.InputJSON, tc.FilePath)
 	}
+	// A Bash call has no file_path, so the inline parse derives its detail from the
+	// command for the UI to show in its place.
+	if tc.Detail != "false" {
+		t.Errorf("detail = %q, want %q", tc.Detail, "false")
+	}
 }
 
 func TestParseCodex(t *testing.T) {

@@ -505,6 +505,48 @@ func BaseName(p string) string {
 	return p
 }
 
+// DetailLabel renders a tool call's Detail (a command, pattern, URL, or other
+// bounded input summary, up to 2048 bytes and possibly multi-line) as a single
+// scannable line for a chip or outline step: every run of whitespace collapses to
+// one space, and the result is capped at 80 runes with a trailing ellipsis. The
+// cap keeps a chip from growing to the size of its input; the full text still
+// reaches the reader through the element's title attribute, so nothing is lost,
+// only deferred to hover. The truncation counts runes, not bytes, so it never
+// splits a multi-byte UTF-8 sequence.
+func DetailLabel(s string) string {
+	const max = 80
+	var b strings.Builder
+	b.Grow(max + 4)
+	space := false
+	started := false
+	emitted := 0
+	for _, r := range s {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+			if started {
+				space = true
+			}
+			continue
+		}
+		if emitted >= max {
+			b.WriteRune('…')
+			return b.String()
+		}
+		if space {
+			b.WriteByte(' ')
+			emitted++
+			space = false
+			if emitted >= max {
+				b.WriteRune('…')
+				return b.String()
+			}
+		}
+		b.WriteRune(r)
+		emitted++
+		started = true
+	}
+	return b.String()
+}
+
 // ReparseView is the reparse status the account page renders: whether one is
 // running and how far along. The httpapi layer fills it from the reparse service,
 // so the web package stays free of a dependency on that service.

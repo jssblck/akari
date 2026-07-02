@@ -54,4 +54,12 @@ package parse
 // fill in one pass. The facts are store-side derived columns, not parser output, so the reducer's
 // projection delta is byte-for-byte identical and the golden fixtures do not move; the bump is the
 // backfill signal and stands on its own.
-const Epoch = 3
+//
+// Epoch 3 -> 4: add a per-tool-call detail (a shell command, a search pattern, a fetched URL, or an
+// agent's description) so the UI can show what a call did when it has no file_path. The reparse
+// re-derives it from the raw transcript wherever the input body is inline, so an inline-bodied session
+// backfills its details in one pass. A session whose inputs were CAS-stripped before this change carries
+// no detail on its sentinels, so it keeps an empty detail (the UI degrades for that); re-uploading is the
+// only way to fill it. This is a parser output change (the projection delta now carries the field), so it
+// pairs with the parse.Version bump and the golden fixtures move.
+const Epoch = 4

@@ -9,6 +9,50 @@ import (
 	"github.com/jssblck/akari/internal/server/store"
 )
 
+// TestDetailLabel pins the chip-summary rendering for store.ToolCallView.Detail:
+// whitespace of any kind collapses to single spaces so a multi-line shell
+// command reads as one scannable line, and the output is capped at 80 runes
+// with a trailing ellipsis so a chip never grows to the size of its input. The
+// full text still reaches the reader through the element's title attribute, so
+// the cap here is purely a display concern.
+func TestDetailLabel(t *testing.T) {
+	if got := DetailLabel(""); got != "" {
+		t.Errorf("empty detail = %q, want empty", got)
+	}
+	if got := DetailLabel("go test ./..."); got != "go test ./..." {
+		t.Errorf("plain detail = %q", got)
+	}
+	// A multi-line command (tabs, newlines, repeated spaces) collapses to one
+	// space-separated line, the same rendering an OutlineTitle turn gets.
+	if got := DetailLabel("go build \\\n\t./...  &&\ngo test ./..."); got != "go build \\ ./... && go test ./..." {
+		t.Errorf("multiline detail = %q", got)
+	}
+	// Content beyond the cap is truncated with a single trailing ellipsis rune
+	// and never longer than the cap plus that rune, regardless of input size.
+	long := ""
+	for i := 0; i < 40; i++ {
+		long += "word "
+	}
+	got := DetailLabel(long)
+	runes := []rune(got)
+	if runes[len(runes)-1] != '…' {
+		t.Errorf("a long detail should end with an ellipsis: %q", got)
+	}
+	if n := len(runes); n != 81 {
+		t.Errorf("a long detail should be exactly cap+ellipsis runes, got %d: %q", n, got)
+	}
+	// A multi-byte rune sitting right at the 80-rune boundary must be emitted
+	// whole, never split mid-sequence: the cap counts runes, not bytes.
+	boundary := strings.Repeat("a", 79) + "€word"
+	got = DetailLabel(boundary)
+	if !strings.HasPrefix(got, strings.Repeat("a", 79)+"€") {
+		t.Errorf("a multi-byte rune at the boundary should be emitted intact: %q", got)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("truncation past the boundary rune should still end in an ellipsis: %q", got)
+	}
+}
+
 func TestDuplicateIDsLabel(t *testing.T) {
 	if got := DuplicateIDsLabel(1); got != "1 duplicate id" {
 		t.Errorf("label(1) = %q", got)

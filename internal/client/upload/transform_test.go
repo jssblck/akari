@@ -136,7 +136,10 @@ func TestTransformPassesThroughBodylessLines(t *testing.T) {
 // file_path (the reducer projects it onto the tool call), while the body itself
 // (here recognizable by its distinctive path value) leaves the transcript.
 func TestTransformLiftsClaudeToolBodies(t *testing.T) {
-	assistant := `{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"a.go","query":"unmistakable-body"}}]}}` + "\n"
+	// The marker rides on a key that is not a detail candidate (offset), so its only
+	// home is the lifted body: a detail candidate value would legitimately reappear on
+	// the sentinel and defeat the "body left the transcript" assertion.
+	assistant := `{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"a.go","offset":"unmistakable-body"}}]}}` + "\n"
 	result := `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"package a","is_error":false}]}}` + "\n"
 	content := assistant + result
 	f, size := openTemp(t, content)
@@ -160,7 +163,7 @@ func TestTransformLiftsClaudeToolBodies(t *testing.T) {
 		t.Fatalf("lifted %d bodies, want 2", len(sink.bodies))
 	}
 	want := map[string]string{
-		`{"file_path":"a.go","query":"unmistakable-body"}`: "input",
+		`{"file_path":"a.go","offset":"unmistakable-body"}`: "input",
 		"package a": "result",
 	}
 	for _, b := range sink.bodies {
@@ -324,21 +327,23 @@ func TestTransformBigAndSmallEquivalent(t *testing.T) {
 }
 
 // TestTransformBigInputKeepsFilePath confirms the streaming big-line path carries a
-// JSON tool input's file_path onto its sentinel byte-identically to the buffered
-// path, for both input encodings: a raw JSON object (Claude tool_use input) and a
-// JSON-encoded string (Codex function_call arguments). This is the field the lift
-// would otherwise erase; the server projects it onto the tool call from the
-// sentinel alone.
+// JSON tool input's projected fields (file_path and detail) onto its sentinel
+// byte-identically to the buffered path, for both input encodings: a raw JSON
+// object (Claude tool_use input) and a JSON-encoded string (Codex function_call
+// arguments). These are the fields the lift would otherwise erase; the server
+// projects them onto the tool call from the sentinel alone. Each case carries both
+// a file_path and a command so the two projections are exercised together, and the
+// detail rule (command wins over description) is confirmed end to end.
 func TestTransformBigInputKeepsFilePath(t *testing.T) {
 	bulk := strings.Repeat("0123456789abcdef", 256) // 4 KiB of body bulk past the shrunken threshold
-	codexArgs := `{"file_path":"pkg/big.go","content":"` + bulk + `"}`
+	codexArgs := `{"file_path":"pkg/big.go","command":"go generate ./...","content":"` + bulk + `"}`
 	cases := []struct {
 		name, agent, line string
 		parseAgent        parser.Agent
 	}{
 		{
 			"claude-raw-object", "claude",
-			`{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Write","input":{"file_path":"pkg/big.go","content":"` + bulk + `"}}]}}` + "\n",
+			`{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Write","input":{"file_path":"pkg/big.go","command":"go generate ./...","content":"` + bulk + `"}}]}}` + "\n",
 			parser.AgentClaude,
 		},
 		{
@@ -366,12 +371,18 @@ func TestTransformBigInputKeepsFilePath(t *testing.T) {
 			if !strings.Contains(out, `"file_path":"pkg/big.go"`) {
 				t.Fatalf("input sentinel lost the file_path: %s", out)
 			}
+			if !strings.Contains(out, `"detail":"go generate ./..."`) {
+				t.Fatalf("input sentinel lost the detail: %s", out)
+			}
 			d, err := parser.Parse(c.parseAgent, big.data)
 			if err != nil {
 				t.Fatalf("parse transformed: %v", err)
 			}
 			if len(d.ToolCalls) != 1 || d.ToolCalls[0].FilePath != "pkg/big.go" {
 				t.Fatalf("parsed tool call file path not preserved: %+v", d.ToolCalls)
+			}
+			if d.ToolCalls[0].Detail != "go generate ./..." {
+				t.Fatalf("parsed tool call detail not preserved: %+v", d.ToolCalls)
 			}
 		})
 	}
@@ -405,6 +416,45 @@ func TestPrefixDigestRecomputesBigBodyKeys(t *testing.T) {
 	}
 	if got := hex.EncodeToString(h.Sum(nil)); got != hexSHA(string(transformed)) {
 		t.Fatal("cold prefix digest does not match the transformed bytes the upload produced")
+	}
+}
+
+// TestPrefixDigestRecomputesBigBodyKeysWithDetail is
+// TestPrefixDigestRecomputesBigBodyKeys's sibling for a big tool INPUT rather than a
+// result: rewriteForDigest's streaming branch calls parser.SentinelBytes with
+// loc.Detail alongside loc.FilePath, so a cold digest that rebuilds the sentinel
+// without the detail would produce different bytes than the transform actually
+// uploaded. A big command string pushes the line past the big-line threshold, so the
+// digest is forced through the same streaming rewriteForDigest branch the result-body
+// case above exercises, this time with a detail candidate on the input.
+func TestPrefixDigestRecomputesBigBodyKeysWithDetail(t *testing.T) {
+	setBigLineThreshold(t, 256)
+	// A command past the big-line threshold but still under the sentinel's detail
+	// cap, and compressible, so the cold path streams and zstd-compresses it while
+	// the input's "command" key stays the sentinel's detail candidate rather than
+	// falling through to description.
+	bigCommand := "go test ./... " + strings.Repeat("-run TestSomethingLong ", 20)
+	content := `{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":` +
+		jsonString(bigCommand) + `,"description":"run the suite"}}]}}` + "\n"
+	f, size := openTemp(t, content)
+
+	// The transform produces the canonical transformed bytes, sentinel detail included.
+	transformed := runTransform(t, f, 0, size, "claude", true).data
+	if !strings.Contains(string(transformed), `"detail":"`+bigCommand+`"`) {
+		t.Fatalf("transformed line lost the detail for the big command: %s", transformed)
+	}
+
+	// The cold path must recompute a byte-identical transformed prefix, detail
+	// included, by re-streaming and re-deriving the sentinel over the file span.
+	h, orig, ok, err := transformPrefixDigest(context.Background(), f, "claude", size, int64(len(transformed)), casenc.New())
+	if err != nil || !ok {
+		t.Fatalf("cold prefix digest over a big input with a detail: ok=%v err=%v", ok, err)
+	}
+	if orig != size {
+		t.Fatalf("recovered original base = %d, want the full size %d", orig, size)
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); got != hexSHA(string(transformed)) {
+		t.Fatal("cold prefix digest does not match the transformed bytes the upload produced: a rewriteForDigest that dropped the detail would land here")
 	}
 }
 

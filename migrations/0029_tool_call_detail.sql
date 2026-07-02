@@ -1,0 +1,13 @@
+-- Give each tool call a short, human-scannable detail: a summary of the input the UI shows when a call
+-- has no file_path to display. Bash and PowerShell store the command (its description when a heredoc
+-- command overflows the cap), Grep and Glob store the pattern, WebFetch the url, WebSearch the query,
+-- Agent the description, and Skill the skill; Read, Edit, and Write have none of these and keep an empty
+-- detail, since their chip already shows file_path.
+--
+-- The parser derives it from the input's top-level JSON keys where the body is inline, and it rides the
+-- CAS sentinel where the client already lifted the body (mirroring file_path), so the server records it
+-- whether or not it ever sees the input body. NULL means unmeasured: a row written before this column
+-- existed, or a session whose inputs were CAS-stripped before the paired parser change so its sentinels
+-- carry no detail. The epoch-4 reparse backfills every session whose raw bodies are still inline,
+-- re-deriving the detail in one pass; a client-stripped session stays NULL until it is re-uploaded.
+ALTER TABLE tool_calls ADD COLUMN detail TEXT;

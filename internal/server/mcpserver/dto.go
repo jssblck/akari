@@ -372,6 +372,7 @@ type toolCallDTO struct {
 	ToolName        string `json:"tool_name"`
 	Category        string `json:"category,omitempty"`
 	FilePath        string `json:"file_path,omitempty"`
+	Detail          string `json:"detail,omitempty"`
 	InputSHA256     string `json:"input_sha256,omitempty"`
 	InputBytes      int64  `json:"input_bytes,omitempty"`
 	InputMediaType  string `json:"input_media_type,omitempty"`
@@ -384,7 +385,7 @@ type toolCallDTO struct {
 func toolCallToDTO(c store.ToolCallView) toolCallDTO {
 	return toolCallDTO{
 		MessageOrdinal: c.MessageOrdinal, CallIndex: c.CallIndex, ToolName: c.ToolName,
-		Category: c.Category, FilePath: c.FilePath,
+		Category: c.Category, FilePath: c.FilePath, Detail: c.Detail,
 		InputSHA256: c.InputSHA, InputBytes: c.InputBytes, InputMediaType: c.InputMediaType,
 		ResultSHA256: c.ResultSHA, ResultBytes: c.ResultBytes, ResultMediaType: c.ResultMediaType,
 		ResultStatus: c.ResultStatus,
