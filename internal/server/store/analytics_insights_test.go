@@ -132,10 +132,10 @@ func TestQualityDistribution(t *testing.T) {
 // (QualityDistribution over AnalyticsFilter.Since on s.started_at); the feed reaches that list
 // through ListAllSessions, which binds SessionFilter.Since to that same s.started_at column
 // (conds("s.started_at")). The footgun this guards is the two windowing on different columns: a
-// session started before the window but re-activated inside it (updated_at in range, started_at
-// out) would list under an updated_at bound while the bar never counted it, so the bar and its
-// destination would disagree. With both bounding started_at they agree, and the early-started
-// session is excluded from both.
+// session started before the window but re-activated inside it (last_active_at in range,
+// started_at out) would list under a last-active bound while the bar never counted it, so the
+// bar and its destination would disagree. With both bounding started_at they agree, and the
+// early-started session is excluded from both.
 func TestQualityDrilldownWindowsOnStartedAt(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -157,15 +157,15 @@ func TestQualityDrilldownWindowsOnStartedAt(t *testing.T) {
 	setSessionShape(t, st, ctx, inside, inWindow, inWindow.Add(10*time.Minute), 20, 2)
 	insertSignal(t, st, ctx, inside, quality.Version, "completed", "A")
 
-	// A session started BEFORE the window but re-activated inside it: updated_at lands in range
-	// while started_at does not. A feed bound on updated_at would surface it; ListAllSessions,
-	// which binds Since to started_at, must not, matching the bar that counts by started_at.
+	// A session started BEFORE the window but re-activated inside it: its last event
+	// (ended_at, and thus the generated last_active_at) lands in range while started_at does
+	// not. A feed bound on last-active would surface it; ListAllSessions, which binds Since to
+	// started_at, must not, matching the bar that counts by started_at. Re-activation means new
+	// activity, so we move ended_at (not updated_at, which a mere reparse would move without the
+	// session having actually changed).
 	early := seedSession(t, st, ada, pid, "started-before")
-	setSessionShape(t, st, ctx, early, beforeWindow, beforeWindow.Add(10*time.Minute), 20, 2)
+	setSessionShape(t, st, ctx, early, beforeWindow, activeNow, 20, 2)
 	insertSignal(t, st, ctx, early, quality.Version, "completed", "A")
-	if _, err := st.Pool.Exec(ctx, `UPDATE sessions SET updated_at = $2 WHERE id = $1`, early, activeNow); err != nil {
-		t.Fatalf("bump early session updated_at: %v", err)
-	}
 
 	since := now.Add(-7 * 24 * time.Hour)
 
@@ -179,8 +179,8 @@ func TestQualityDrilldownWindowsOnStartedAt(t *testing.T) {
 	}
 
 	// The drill-down list: ListAllSessions binds Since to s.started_at (unlike ListSessions, which
-	// binds it to s.updated_at), so the same Since value lands on the identical started_at window
-	// the bar counted. Its length must equal the bar's count, and it must not include the
+	// binds it to s.last_active_at), so the same Since value lands on the identical started_at
+	// window the bar counted. Its length must equal the bar's count, and it must not include the
 	// early-started session.
 	rows, _, err := st.ListAllSessions(ctx, store.SessionFilter{Since: since, IncludeEmpty: true})
 	if err != nil {
@@ -198,15 +198,71 @@ func TestQualityDrilldownWindowsOnStartedAt(t *testing.T) {
 		t.Errorf("feed = %v, want just the started-inside session %d", rows, inside)
 	}
 
-	// A list bound on last-active (Since on updated_at, the project-page basis via ListSessions)
-	// DOES surface the re-activated early session, confirming the two bounds carry distinct
-	// semantics and the started_at drill-down deliberately uses started_at, not updated_at.
+	// A list bound on last-active (Since on last_active_at, the project-page basis via
+	// ListSessions) DOES surface the re-activated early session, confirming the two bounds carry
+	// distinct semantics and the started_at drill-down deliberately uses started_at, not
+	// last-active.
 	byActivity, err := st.ListSessions(ctx, store.SessionFilter{Since: since, IncludeEmpty: true})
 	if err != nil {
 		t.Fatalf("list sessions by activity: %v", err)
 	}
 	if len(byActivity) != 2 {
 		t.Errorf("last-active list showed %d sessions, want 2 (both the inside and the re-activated early session)", len(byActivity))
+	}
+}
+
+// TestReparseDoesNotFloatLastActive is the regression test for the feed showing days-old
+// sessions as "updated" today. last_active_at reads the session's last event time (ended_at),
+// not the row's updated_at write time, so a reparse (which restamps updated_at to now but replays
+// the same events, leaving ended_at fixed) must not move a session in the last-active list or
+// window. This is the exact scenario a bulk epoch reparse produces.
+func TestReparseDoesNotFloatLastActive(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	ada := seedUser(t, st, "ada")
+	pid, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now()
+	old := now.Add(-30 * 24 * time.Hour) // last active a month ago
+
+	sid := seedSession(t, st, ada, pid, "old-and-reparsed")
+	setSessionShape(t, st, ctx, sid, old, old.Add(10*time.Minute), 20, 2)
+
+	// Simulate a reparse: updated_at jumps to now while the replayed events leave started_at and
+	// ended_at (and thus last_active_at) exactly where the session's activity put them.
+	if _, err := st.Pool.Exec(ctx, `UPDATE sessions SET updated_at = now() WHERE id = $1`, sid); err != nil {
+		t.Fatalf("bump updated_at to simulate reparse: %v", err)
+	}
+
+	// The row reports its month-old activity, not the reparse time.
+	rows, err := st.ListSessions(ctx, store.SessionFilter{ProjectID: pid, IncludeEmpty: true})
+	if err != nil {
+		t.Fatalf("list sessions: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("listed %d sessions, want 1", len(rows))
+	}
+	if rows[0].LastActiveAt == nil {
+		t.Fatal("last_active_at is nil, want the session's month-old last-event time")
+	}
+	if got := *rows[0].LastActiveAt; now.Sub(got) < 7*24*time.Hour {
+		t.Errorf("last_active_at = %v (%.0fh ago), want the month-old activity, not the reparse time", got, now.Sub(got).Hours())
+	}
+
+	// A 7-day last-active window excludes the reparsed-but-inactive session. Under the old
+	// updated_at behavior it would have leaked in, because the reparse restamped updated_at.
+	win, err := st.ListSessions(ctx, store.SessionFilter{
+		ProjectID: pid, Since: now.Add(-7 * 24 * time.Hour), IncludeEmpty: true,
+	})
+	if err != nil {
+		t.Fatalf("windowed list: %v", err)
+	}
+	if len(win) != 0 {
+		t.Errorf("7-day last-active window listed %d sessions, want 0 (the reparse must not resurface a month-old session)", len(win))
 	}
 }
 

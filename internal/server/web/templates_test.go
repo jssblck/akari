@@ -265,7 +265,7 @@ func TestGlobalSessionListRow(t *testing.T) {
 			ID: 7, Agent: "claude", GitBranch: "main", Username: "grace",
 			MessageCount: 12,
 			TotalInput:   100, TotalOutput: 50, TotalCacheRead: 7, TotalCacheWrite: 3,
-			TotalCostUSD: 1.25, Visibility: "public", UpdatedAt: &ts,
+			TotalCostUSD: 1.25, Visibility: "public", LastActiveAt: &ts,
 		},
 		ProjectID: 4, ProjectKey: "scratch", ProjectName: "scratch", ProjectKind: "standalone",
 	}}
@@ -297,8 +297,8 @@ func TestGlobalSessionListRow(t *testing.T) {
 func TestGlobalSessionListTitleLine(t *testing.T) {
 	ts := time.Now().UTC()
 	rows := []store.SessionRow{
-		{SessionSummary: store.SessionSummary{ID: 1, Agent: "claude", MessageCount: 2, Title: "Fix the timezone pass", UpdatedAt: &ts}, ProjectID: 1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote"},
-		{SessionSummary: store.SessionSummary{ID: 2, Agent: "claude", MessageCount: 1, UpdatedAt: &ts}, ProjectID: 1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote"},
+		{SessionSummary: store.SessionSummary{ID: 1, Agent: "claude", MessageCount: 2, Title: "Fix the timezone pass", LastActiveAt: &ts}, ProjectID: 1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote"},
+		{SessionSummary: store.SessionSummary{ID: 2, Agent: "claude", MessageCount: 1, LastActiveAt: &ts}, ProjectID: 1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote"},
 	}
 	html := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Sort: "updated", Desc: true}, SessionFooter{Shown: 2}))
 
@@ -322,7 +322,7 @@ func TestGlobalSessionListSnippetLine(t *testing.T) {
 	// text, to prove the template escapes every part and only the <mark> is real.
 	snip := store.SearchSnippet{Text: "before <b>x</b> <script>alert(1)</script> after", MatchStart: 16, MatchEnd: 41}
 	rows := []store.SessionRow{{
-		SessionSummary: store.SessionSummary{ID: 9, Agent: "claude", MessageCount: 3, Title: "should be replaced by snippet", UpdatedAt: &ts},
+		SessionSummary: store.SessionSummary{ID: 9, Agent: "claude", MessageCount: 3, Title: "should be replaced by snippet", LastActiveAt: &ts},
 		ProjectID:      1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote",
 		Search: snip,
 	}}
@@ -351,7 +351,7 @@ func TestGlobalSessionListSnippetLine(t *testing.T) {
 func TestGlobalSessionListFooter(t *testing.T) {
 	ts := time.Now().UTC()
 	rows := []store.SessionRow{{
-		SessionSummary: store.SessionSummary{ID: 1, Agent: "claude", MessageCount: 1, UpdatedAt: &ts},
+		SessionSummary: store.SessionSummary{ID: 1, Agent: "claude", MessageCount: 1, LastActiveAt: &ts},
 		ProjectID:      1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote",
 	}}
 	// hasMore true: the page is not the whole set, so the count reads "Showing N", a
@@ -408,8 +408,8 @@ func TestGlobalSessionListGrouping(t *testing.T) {
 	today := time.Date(n.Year(), n.Month(), n.Day(), 12, 0, 0, 0, time.UTC)
 	earlier := today.Add(-2 * time.Hour)
 	rows := []store.SessionRow{
-		{SessionSummary: store.SessionSummary{ID: 1, Agent: "claude", UpdatedAt: &today}, ProjectID: 1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote"},
-		{SessionSummary: store.SessionSummary{ID: 2, Agent: "claude", UpdatedAt: &earlier}, ProjectID: 1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote"},
+		{SessionSummary: store.SessionSummary{ID: 1, Agent: "claude", LastActiveAt: &today}, ProjectID: 1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote"},
+		{SessionSummary: store.SessionSummary{ID: 2, Agent: "claude", LastActiveAt: &earlier}, ProjectID: 1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote"},
 	}
 
 	grouped := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Sort: "updated", Desc: true}, SessionFooter{Shown: 2}))

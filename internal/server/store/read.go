@@ -48,7 +48,11 @@ type ProjectSummary struct {
 	// TestUndatedUsageIsTheOnlyRollupAnalyticsGap): the flag tracks each surface's
 	// own displayed total rather than diverging from it.
 	CostIncomplete bool
-	LastActivity   *time.Time
+	// LastActivity is the most recent session activity in the project: max over its
+	// sessions' last_active_at (last-event time), not their updated_at write time,
+	// so a reparse of the project's sessions does not float it to the top of the
+	// projects index. NULL for a project with no sessions.
+	LastActivity *time.Time
 }
 
 // TotalTokens is the sum of every token class for a project: input, output, and
@@ -77,7 +81,13 @@ type SessionSummary struct {
 	PublicID         *string
 	StartedAt        *time.Time
 	EndedAt          *time.Time
-	UpdatedAt        *time.Time
+	// LastActiveAt is when the session was last active: its last event timestamp
+	// (ended_at), falling back to the row's creation time for a transcript that
+	// carried no timestamps. It is the feed's "updated" recency, read from the
+	// generated last_active_at column rather than the row's updated_at write time,
+	// so a reparse (which restamps updated_at to now) never makes a days-old session
+	// read as freshly updated. See migration 0033.
+	LastActiveAt *time.Time
 	// Title is the session's first user message, squashed to single-spaced and
 	// capped for display, so a row is recognizable by what the run was about rather
 	// than only its metadata. It is empty for a session with no user message. The
@@ -232,9 +242,11 @@ type SessionFilter struct {
 // conds builds the WHERE additions for the filter's narrowing fields, shared by
 // every session-list query so a filter field added here reaches all of them at
 // once. sinceCol names the timestamp column the Since bound applies to:
-// s.updated_at for the whole-session lists, ue.occurred_at for the windowed
-// queries that scope by dated usage. Placeholders start at $1; the caller
-// appends its own (cursor, limit, offset) after.
+// s.last_active_at for the last-active list (ListSessions), s.started_at for the
+// global feed that must match the Insights quality window (ListAllSessions,
+// CountAllSessions), and ue.occurred_at for the windowed queries that scope by
+// dated usage. Placeholders start at $1; the caller appends its own (cursor,
+// limit, offset) after.
 //
 // The content-search condition (Query) is expressed as an EXISTS over the
 // messages table rather than a join, so a session with many matching messages
@@ -360,7 +372,13 @@ var sessionSortColumns = map[string]string{
 	"messages": "s.message_count",
 	"tokens":   "s.total_tokens",
 	"cost":     "s.total_cost_usd",
-	"updated":  "s.updated_at",
+	// "updated" is the feed's recency order. It sorts on last_active_at (the
+	// session's last-event time), NOT updated_at (the row's last-write time): a
+	// reparse restamps updated_at but leaves last_active_at fixed, so an old
+	// session stays where its activity puts it. The query-string key stays
+	// "updated" so bookmarked feed URLs keep working; only the column it maps to
+	// changed. Index-walked by idx_sessions_feed_active (migration 0033).
+	"updated": "s.last_active_at",
 }
 
 // IsSortKey reports whether key names a sortable column of the global session
@@ -385,11 +403,12 @@ func IsSortKey(key string) bool {
 // satisfies "col ASC, id ASC" and a backward scan "col DESC, id DESC". A fixed
 // id DESC tiebreak would leave the ascending case unable to walk the index and
 // force a sort. The default order is descending, so its tiebreak stays id DESC,
-// matching the feed indexes (0004, 0006) exactly.
+// matching the feed indexes (0033, 0006) exactly.
 //
 // No NULLS LAST: every sortable expression is NOT NULL (the session columns, the
-// generated total_tokens, the username join, and the project CASE over two NOT
-// NULL columns all are), so a nulls placement would never change a result. It
+// generated last_active_at and total_tokens, the username join, and the project
+// CASE over two NOT NULL columns all are), so a nulls placement would never change
+// a result. It
 // would, however, defeat the index: Postgres only matches an ORDER BY to a btree
 // when the nulls placement agrees, and a DESC btree defaults to NULLS FIRST, so a
 // "DESC NULLS LAST" clause forces a full sort instead of an index scan. Omitting
@@ -457,11 +476,11 @@ func (s *Store) ListProjects(ctx context.Context) ([]ProjectSummary, error) {
 		        coalesce(sum(s.total_cache_read_tokens), 0),
 		        coalesce(sum(s.total_cache_write_tokens), 0),
 		        coalesce(bool_or(s.cost_incomplete), false),
-		        max(s.updated_at)
+		        max(s.last_active_at)
 		   FROM projects p
 		   LEFT JOIN sessions s ON s.project_id = p.id
 		  GROUP BY p.id
-		  ORDER BY max(s.updated_at) DESC NULLS LAST, p.remote_key`)
+		  ORDER BY max(s.last_active_at) DESC NULLS LAST, p.remote_key`)
 	if err != nil {
 		return nil, err
 	}
@@ -498,7 +517,7 @@ const sessionSelect = `
 	       s.total_input_tokens, s.total_output_tokens,
 	       s.total_cache_write_tokens, s.total_cache_read_tokens,
 	       s.total_cost_usd, s.cost_incomplete, s.visibility, s.public_id,
-	       s.started_at, s.ended_at, s.updated_at
+	       s.started_at, s.ended_at, s.last_active_at
 	  FROM sessions s
 	  JOIN users u ON u.id = s.user_id`
 
@@ -508,22 +527,27 @@ func scanSession(rows pgx.Rows) (SessionSummary, error) {
 		&s.MessageCount, &s.UserMessageCount,
 		&s.TotalInput, &s.TotalOutput, &s.TotalCacheWrite, &s.TotalCacheRead,
 		&s.TotalCostUSD, &s.CostIncomplete, &s.Visibility, &s.PublicID,
-		&s.StartedAt, &s.EndedAt, &s.UpdatedAt)
+		&s.StartedAt, &s.EndedAt, &s.LastActiveAt)
 	return s, err
 }
 
-// ListSessions returns sessions matching the filter, newest first.
+// ListSessions returns sessions matching the filter, newest first. Its Since bound
+// and its order both key on last_active_at (last-event time), so this is the
+// "sessions last active in a window, most recently active first" list, immune to a
+// reparse restamping updated_at. It differs deliberately from ListAllSessions,
+// which binds Since to started_at to match the Insights quality window (see the
+// note on CountAllSessions and TestQualityDrilldownWindowsOnStartedAt).
 func (s *Store) ListSessions(ctx context.Context, f SessionFilter) ([]SessionSummary, error) {
-	conds, args := f.conds("s.updated_at")
+	conds, args := f.conds("s.last_active_at")
 
 	q := sessionSelect
 	if len(conds) > 0 {
 		q += " WHERE " + strings.Join(conds, " AND ")
 	}
-	// No NULLS LAST: updated_at is NOT NULL, so it cannot change the result, but it
-	// would stop Postgres from matching this order to the feed indexes (0004, 0006)
+	// No NULLS LAST: last_active_at is NOT NULL, so it cannot change the result, but
+	// it would stop Postgres from matching this order to the feed indexes (0033, 0006)
 	// and force a full sort instead of an index walk to the LIMIT. See orderClause.
-	q += " ORDER BY s.updated_at DESC, s.id DESC"
+	q += " ORDER BY s.last_active_at DESC, s.id DESC"
 	limit := f.Limit
 	if limit <= 0 || limit > 500 {
 		limit = 100
@@ -635,7 +659,7 @@ func (s *Store) WindowSessionPage(ctx context.Context, f SessionFilter) (Session
 		       coalesce(sum(ue.input_tokens), 0), coalesce(sum(ue.output_tokens), 0),
 		       coalesce(sum(ue.cache_write_tokens), 0), coalesce(sum(ue.cache_read_tokens), 0),
 		       coalesce(sum(ue.cost_usd), 0), ` + costIncompleteExpr + `,
-		       s.visibility, s.public_id, s.started_at, s.ended_at, s.updated_at,
+		       s.visibility, s.public_id, s.started_at, s.ended_at, s.last_active_at,
 		       coalesce(title.content, '')
 		  FROM usage_events ue
 		  JOIN sessions s ON s.id = ue.session_id
@@ -648,7 +672,7 @@ func (s *Store) WindowSessionPage(ctx context.Context, f SessionFilter) (Session
 		       ) title ON true
 		 WHERE ` + where + `
 		 GROUP BY s.id, u.username, title.content
-		 ORDER BY s.updated_at DESC, s.id DESC
+		 ORDER BY s.last_active_at DESC, s.id DESC
 		 LIMIT $` + itoa(len(args)+1)
 	rowArgs := append(append([]any{}, args...), windowSessionLimit)
 
@@ -664,7 +688,7 @@ func (s *Store) WindowSessionPage(ctx context.Context, f SessionFilter) (Session
 			&sm.MessageCount, &sm.UserMessageCount,
 			&sm.TotalInput, &sm.TotalOutput, &sm.TotalCacheWrite, &sm.TotalCacheRead,
 			&sm.TotalCostUSD, &sm.CostIncomplete, &sm.Visibility, &sm.PublicID,
-			&sm.StartedAt, &sm.EndedAt, &sm.UpdatedAt, &sm.Title); err != nil {
+			&sm.StartedAt, &sm.EndedAt, &sm.LastActiveAt, &sm.Title); err != nil {
 			return SessionPage{}, fmt.Errorf("scan window session: %w", err)
 		}
 		sm.Title = squashSpaces(sm.Title)
@@ -710,7 +734,7 @@ func (s *Store) windowSessionRemainder(ctx context.Context, where string, args [
 		         JOIN users u ON u.id = s.user_id
 		        WHERE ` + where + `
 		        GROUP BY s.id
-		        ORDER BY s.updated_at DESC, s.id DESC
+		        ORDER BY s.last_active_at DESC, s.id DESC
 		        OFFSET $` + itoa(len(args)+1) + `
 		  ) t`
 	remArgs := append(append([]any{}, args...), windowSessionLimit)
@@ -748,7 +772,7 @@ func globalSessionSelect(matchLateral, matchCol, matchCutCol string) string {
 	       s.total_input_tokens, s.total_output_tokens,
 	       s.total_cache_write_tokens, s.total_cache_read_tokens,
 	       s.total_cost_usd, s.cost_incomplete, s.visibility, s.public_id,
-	       s.started_at, s.ended_at, s.updated_at,
+	       s.started_at, s.ended_at, s.last_active_at,
 	       p.id, p.remote_key, p.display_name, p.kind,
 	       coalesce(title.content, ''), ` + matchCol + `, ` + matchCutCol + `
 	  FROM sessions s
@@ -782,7 +806,7 @@ func scanSessionRow(rows pgx.Rows, matchActive bool) (r SessionRow, raw string, 
 		&r.MessageCount, &r.UserMessageCount,
 		&r.TotalInput, &r.TotalOutput, &r.TotalCacheWrite, &r.TotalCacheRead,
 		&r.TotalCostUSD, &r.CostIncomplete, &r.Visibility, &r.PublicID,
-		&r.StartedAt, &r.EndedAt, &r.UpdatedAt,
+		&r.StartedAt, &r.EndedAt, &r.LastActiveAt,
 		&r.ProjectID, &r.ProjectKey, &r.ProjectName, &r.ProjectKind,
 		&r.Title, &match, &cut}
 	if err := rows.Scan(dest...); err != nil {
@@ -1234,7 +1258,7 @@ func (s *Store) scanDetailRow(ctx context.Context, where string, arg any) (Sessi
 		        s.total_input_tokens, s.total_output_tokens,
 		        s.total_cache_write_tokens, s.total_cache_read_tokens,
 		        s.total_cost_usd, s.cost_incomplete, s.visibility, s.public_id,
-		        s.started_at, s.ended_at, s.updated_at,
+		        s.started_at, s.ended_at, s.last_active_at,
 		        s.user_id, s.project_id, p.remote_key, p.display_name, p.kind, s.cwd, s.parent_session_id, s.parser_version,
 		        s.total_cache_savings_usd, s.cache_savings_incomplete, s.cache_savings_backfilled,
 		        coalesce(title.content, '')
@@ -1253,7 +1277,7 @@ func (s *Store) scanDetailRow(ctx context.Context, where string, arg any) (Sessi
 		&d.MessageCount, &d.UserMessageCount,
 		&d.TotalInput, &d.TotalOutput, &d.TotalCacheWrite, &d.TotalCacheRead,
 		&d.TotalCostUSD, &d.CostIncomplete, &d.Visibility, &d.PublicID,
-		&d.StartedAt, &d.EndedAt, &d.UpdatedAt,
+		&d.StartedAt, &d.EndedAt, &d.LastActiveAt,
 		&d.OwnerID, &d.ProjectID, &d.ProjectKey, &d.ProjectName, &d.ProjectKind, &d.Cwd, &d.ParentID, &d.ParserVersion,
 		&d.TotalCacheSavingsUSD, &d.CacheSavingsIncomplete, &cacheSavingsBackfilled,
 		&d.Title)
