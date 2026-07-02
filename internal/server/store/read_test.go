@@ -168,7 +168,7 @@ func TestListAllSessions(t *testing.T) {
 	ctx := context.Background()
 	_, remoteID, _ := seedGlobalCorpus(t, st)
 
-	all, err := st.ListAllSessions(ctx, store.SessionFilter{})
+	all, _, err := st.ListAllSessions(ctx, store.SessionFilter{})
 	if err != nil {
 		t.Fatalf("list all: %v", err)
 	}
@@ -187,21 +187,21 @@ func TestListAllSessions(t *testing.T) {
 	}
 
 	// Filters narrow the set.
-	claude, err := st.ListAllSessions(ctx, store.SessionFilter{Agent: "claude"})
+	claude, _, err := st.ListAllSessions(ctx, store.SessionFilter{Agent: "claude"})
 	if err != nil || len(claude) != 4 {
 		t.Fatalf("agent filter: len=%d err=%v, want 4", len(claude), err)
 	}
-	inRemote, err := st.ListAllSessions(ctx, store.SessionFilter{ProjectID: remoteID})
+	inRemote, _, err := st.ListAllSessions(ctx, store.SessionFilter{ProjectID: remoteID})
 	if err != nil || len(inRemote) != 3 {
 		t.Fatalf("project filter: len=%d err=%v, want 3", len(inRemote), err)
 	}
-	byMachine, err := st.ListAllSessions(ctx, store.SessionFilter{Machine: "rig"})
+	byMachine, _, err := st.ListAllSessions(ctx, store.SessionFilter{Machine: "rig"})
 	if err != nil || len(byMachine) != 2 {
 		t.Fatalf("machine filter: len=%d err=%v, want 2", len(byMachine), err)
 	}
 
 	// Limit caps the page.
-	capped, err := st.ListAllSessions(ctx, store.SessionFilter{Limit: 2})
+	capped, _, err := st.ListAllSessions(ctx, store.SessionFilter{Limit: 2})
 	if err != nil || len(capped) != 2 {
 		t.Fatalf("limit: len=%d err=%v, want 2", len(capped), err)
 	}
@@ -293,7 +293,7 @@ func TestListAllSessionsSort(t *testing.T) {
 
 	assertOrdered := func(t *testing.T, key string, cmp func(a, b store.SessionRow) int, desc bool) {
 		t.Helper()
-		rows, err := st.ListAllSessions(ctx, store.SessionFilter{Sort: key, Desc: desc})
+		rows, _, err := st.ListAllSessions(ctx, store.SessionFilter{Sort: key, Desc: desc})
 		if err != nil {
 			t.Fatalf("sort %s desc=%v: %v", key, desc, err)
 		}
@@ -327,11 +327,11 @@ func TestListAllSessionsSort(t *testing.T) {
 
 	// An unknown sort key falls back to the default order (most recent first, id
 	// descending on ties), identical to the zero-value filter.
-	bogus, err := st.ListAllSessions(ctx, store.SessionFilter{Sort: "; drop table sessions"})
+	bogus, _, err := st.ListAllSessions(ctx, store.SessionFilter{Sort: "; drop table sessions"})
 	if err != nil {
 		t.Fatalf("bogus sort should fall back, not error: %v", err)
 	}
-	def, err := st.ListAllSessions(ctx, store.SessionFilter{})
+	def, _, err := st.ListAllSessions(ctx, store.SessionFilter{})
 	if err != nil {
 		t.Fatalf("default list: %v", err)
 	}
@@ -376,9 +376,14 @@ func TestListSessionsSince(t *testing.T) {
 	}
 	recent := seedSess(t, st, u.ID, projectID, "claude", "box", "recent")
 	old := seedSess(t, st, u.ID, projectID, "claude", "box", "old")
+	// Age both timestamps together: the per-project ListSessions windows by updated_at
+	// while the global ListAllSessions windows by started_at (matching the Insights
+	// panels), so the test moves both to keep the recent-vs-old split valid for both
+	// queries it exercises below.
 	age := func(id int64, days int) {
 		if _, err := st.Pool.Exec(ctx,
-			`UPDATE sessions SET updated_at = now() - make_interval(days => $2) WHERE id = $1`,
+			`UPDATE sessions SET updated_at = now() - make_interval(days => $2),
+			        started_at = now() - make_interval(days => $2) WHERE id = $1`,
 			id, days); err != nil {
 			t.Fatalf("age session %d: %v", id, err)
 		}
@@ -405,11 +410,11 @@ func TestListSessionsSince(t *testing.T) {
 
 	// The cross-project query honors Since the same way: unbounded lists both, a
 	// 30-day window drops the 40-day-old session.
-	allRows, err := st.ListAllSessions(ctx, store.SessionFilter{})
+	allRows, _, err := st.ListAllSessions(ctx, store.SessionFilter{})
 	if err != nil || len(allRows) != 2 {
 		t.Fatalf("global unbounded: len=%d err=%v, want 2", len(allRows), err)
 	}
-	winRows, err := st.ListAllSessions(ctx, store.SessionFilter{Since: time.Now().AddDate(0, 0, -30)})
+	winRows, _, err := st.ListAllSessions(ctx, store.SessionFilter{Since: time.Now().AddDate(0, 0, -30)})
 	if err != nil {
 		t.Fatalf("global windowed: %v", err)
 	}

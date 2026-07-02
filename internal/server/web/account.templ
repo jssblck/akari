@@ -119,6 +119,7 @@ templ accountInvites(invites []store.Invite, newInvite string) {
 				</thead>
 				<tbody>
 					for _, inv := range invites {
+						{{ view := inviteViewOf(inv) }}
 						<tr>
 							<td>
 								if inv.Note != "" {
@@ -128,9 +129,9 @@ templ accountInvites(invites []store.Invite, newInvite string) {
 								}
 							</td>
 							<td class="muted">{ FmtTimeAt(ctx, inv.CreatedAt) }</td>
-							<td>{ inviteStatus(inv) }</td>
+							<td>{ view.Status }</td>
 							<td>
-								if inviteRevocable(inv) {
+								if view.Revocable {
 									<form method="post" action={ templ.SafeURL(fmt.Sprintf("/account/invites/%d/revoke", inv.ID)) } class="inline">
 										<button class="secondary" type="submit">Revoke</button>
 									</form>
@@ -177,27 +178,50 @@ templ accountPublicity(p Page) {
 	</section>
 }
 
-// inviteStatus renders an invite's one-word status: who redeemed it, that it
-// expired unused, or that it is still open. Revocation only applies to the
-// still-open case (inviteRevocable), so this and that function classify the
-// same three states from the same fields.
-func inviteStatus(inv store.Invite) string {
-	switch {
-	case inv.RedeemedBy != nil:
-		return "redeemed by " + *inv.RedeemedBy
-	case inv.ExpiresAt != nil && inv.ExpiresAt.Before(time.Now()):
-		return "expired"
-	default:
-		return "unused"
-	}
+// inviteView is one invite's rendered state: its one-word status and whether the
+// Revoke control applies. The two are derived together from a single instant so the
+// label and the button can never disagree (an invite expiring between two separate
+// time.Now() reads once let a row read "unused" while hiding Revoke, or the reverse).
+type inviteView struct {
+	Status    string
+	Revocable bool
 }
 
-// inviteRevocable reports whether an invite can still be revoked: unredeemed
-// and, if it carries an expiry, not yet past it. A redeemed or expired invite
-// can no longer be used, so revoking it would have no effect.
-func inviteRevocable(inv store.Invite) bool {
-	if inv.RedeemedBy != nil {
-		return false
+// inviteViewOf classifies an invite against the current instant, snapshotting
+// time.Now() once so the status label and the revocability both read from the same
+// moment. It is the single source of an invite row's projected state.
+func inviteViewOf(inv store.Invite) inviteView {
+	return classifyInvite(inv, time.Now())
+}
+
+// classifyInvite derives an invite's status and revocability from one now, so the two
+// projections of the same three states (redeemed, expired, still open) stay
+// consistent. Revocation applies only to the still-open case: a redeemed or expired
+// invite can no longer be used, so revoking it would do nothing.
+//
+// Redemption keys on RedeemedAt, the same column Register and RevokeInvite treat as the
+// source of truth (redeemed_at IS NULL is their "still open" gate). RedeemedBy is a
+// second column patched after redeemed_at is set, so a row can carry redeemed_at with a
+// not-yet-patched RedeemedBy; keying on RedeemedBy would then show that row as "unused"
+// and revocable while the store already considers it redeemed. Keying on RedeemedAt
+// keeps the view, the write path, and the redemption gate on one predicate; the
+// redeemer name is shown when present and falls back to a bare "redeemed" otherwise.
+//
+// The expiry boundary likewise matches the redemption predicate exactly (Register
+// redeems only while expires_at > now): an invite whose expiry equals now is already
+// unredeemable, so it reads "expired" and is non-revocable rather than showing a Revoke
+// button that guards a token no one can accept.
+func classifyInvite(inv store.Invite, now time.Time) inviteView {
+	switch {
+	case inv.RedeemedAt != nil:
+		status := "redeemed"
+		if inv.RedeemedBy != nil {
+			status = "redeemed by " + *inv.RedeemedBy
+		}
+		return inviteView{Status: status, Revocable: false}
+	case inv.ExpiresAt != nil && !inv.ExpiresAt.After(now):
+		return inviteView{Status: "expired", Revocable: false}
+	default:
+		return inviteView{Status: "unused", Revocable: true}
 	}
-	return inv.ExpiresAt == nil || inv.ExpiresAt.After(time.Now())
 }

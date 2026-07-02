@@ -157,6 +157,11 @@ func sessionsQuery(f store.SessionFilter) string {
 	if f.IncludeEmpty {
 		q.Set("empty", "1")
 	}
+	// The span constraint rides the URL only when set (the busiest-user drill), so the
+	// linked feed round-trips the same spanned cohort the concurrency panel counted.
+	if f.RequireSpan {
+		q.Set("spanned", "1")
+	}
 	// The paging limit rides the URL only when it has grown past the default page, so
 	// a "Show more" swap and a reload land on the same expanded feed while the first
 	// page stays a bare path.

@@ -23,8 +23,12 @@ func ConcurrencyBusiest(c store.ConcurrencyStats) string {
 // ConcurrencyBusiestHref drills the busiest-user figure into that user's sessions,
 // carrying the current Insights window (rng) so the list matches the panel's period. It
 // is called only when a busiest user exists (the template guards on BusiestUser != "").
+// IncludeEmpty rides along because the concurrency panel counts sessions regardless of
+// message_count, and RequireSpan narrows to the measured-span cohort the panel actually
+// sweeps (spanFilter): without it the drill would list sessions with no parsed span that
+// the panel never counted, so the feed and the figure would disagree.
 func ConcurrencyBusiestHref(c store.ConcurrencyStats, rng string) templ.SafeURL {
-	return SessionsHref(store.SessionFilter{Username: c.BusiestUser, Range: drillRange(rng)})
+	return SessionsHref(store.SessionFilter{Username: c.BusiestUser, Range: drillRange(rng), IncludeEmpty: true, RequireSpan: true})
 }
 
 // FmtAvgConcurrent renders the average concurrency to one decimal, the granularity that
@@ -271,19 +275,24 @@ func distRows(counts []store.LabeledCount, label, color func(string) string, hre
 // GradeBars renders the grade distribution: A through F then the unscored bucket, each
 // banded in the report-card tone the session Quality tile uses. Each non-empty bar links
 // into the matching sessions, carrying the current Insights window (rng) so the session
-// list is scoped to the same period the panel counted.
+// list is scoped to the same period the panel counted. IncludeEmpty rides along because
+// the panel counts sessions regardless of message_count (a zero-message session can still
+// carry a grade), so the drilled feed must show empties too or its count would fall short
+// of the bar it drilled from.
 func GradeBars(counts []store.LabeledCount, rng string) []DistRow {
 	return distRows(counts, gradeLabel, gradeBarColor, func(key string) string {
-		return SessionsPath(store.SessionFilter{Grade: GradeFilterKey(key), Range: drillRange(rng)})
+		return SessionsPath(store.SessionFilter{Grade: GradeFilterKey(key), Range: drillRange(rng), IncludeEmpty: true})
 	})
 }
 
 // OutcomeBars renders the outcome distribution, reusing OutcomeLabel for the title-cased
 // names and a semantic tone per outcome. Each non-empty bar links into the matching
-// sessions, carrying the current Insights window (rng).
+// sessions, carrying the current Insights window (rng) and IncludeEmpty for the same
+// reason GradeBars does: the panel scope counts zero-message sessions, so the drilled
+// feed must include them to match.
 func OutcomeBars(counts []store.LabeledCount, rng string) []DistRow {
 	return distRows(counts, OutcomeLabel, outcomeBarColor, func(key string) string {
-		return SessionsPath(store.SessionFilter{Outcome: key, Range: drillRange(rng)})
+		return SessionsPath(store.SessionFilter{Outcome: key, Range: drillRange(rng), IncludeEmpty: true})
 	})
 }
 

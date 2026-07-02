@@ -87,7 +87,7 @@ func TestSessionFilterGradeOutcome(t *testing.T) {
 
 	list := func(f store.SessionFilter) []store.SessionRow {
 		t.Helper()
-		rows, err := st.ListAllSessions(ctx, f)
+		rows, _, err := st.ListAllSessions(ctx, f)
 		if err != nil {
 			t.Fatalf("list sessions: %v", err)
 		}
@@ -203,6 +203,15 @@ func TestDrillFiltersMatchQualityDistribution(t *testing.T) {
 	mk(grace, "d8", quality.Version, "completed", "F")
 	noneID := seedSession(t, st, ada, pid, "d9none") // no signals row at all -> catch-all
 	setSessionShape(t, st, ctx, noneID, recent, recent.Add(10*time.Minute), 20, 2)
+	// A zero-message graded session: the panel counts sessions regardless of
+	// message_count, so it lands in the grade-B bucket, but the drill feed hides
+	// empties by default. The drill link therefore carries IncludeEmpty (the count
+	// closure below sets it), and this row asserts the bar count still equals the
+	// drilled count once the feed shows empties. Without IncludeEmpty the drilled
+	// count would fall one short of the bar.
+	emptyGraded := seedSession(t, st, grace, pid, "d10empty")
+	setSessionShape(t, st, ctx, emptyGraded, recent, recent.Add(10*time.Minute), 0, 0)
+	insertSignal(t, st, ctx, emptyGraded, quality.Version, "abandoned", "B")
 
 	dist, err := st.QualityDistribution(ctx, store.AnalyticsFilter{})
 	if err != nil {
@@ -210,12 +219,14 @@ func TestDrillFiltersMatchQualityDistribution(t *testing.T) {
 	}
 	// Sanity-pin the fixture first, so an unexpectedly empty distribution cannot make the
 	// bucket loop below pass vacuously.
-	if dist.Sessions != 8 {
-		t.Fatalf("Sessions = %d, want 8 seeded", dist.Sessions)
+	if dist.Sessions != 9 {
+		t.Fatalf("Sessions = %d, want 9 seeded", dist.Sessions)
 	}
 	g := countByKey(dist.Grades)
-	if g["A"] != 2 || g["B"] != 1 || g["C"] != 1 || g["D"] != 0 || g["F"] != 1 || g[""] != 3 {
-		t.Fatalf("grade counts = %+v, want A2 B1 C1 D0 F1 unscored3", g)
+	// The zero-message session grades B, so B is now 2: the panel counts it despite its
+	// empty message_count, which is exactly why the drill must carry IncludeEmpty.
+	if g["A"] != 2 || g["B"] != 2 || g["C"] != 1 || g["D"] != 0 || g["F"] != 1 || g[""] != 3 {
+		t.Fatalf("grade counts = %+v, want A2 B2 C1 D0 F1 unscored3", g)
 	}
 
 	// Every bar links with the panel key mapped to the filter value (the empty grade key
@@ -247,7 +258,8 @@ func TestDrillFiltersMatchQualityDistribution(t *testing.T) {
 }
 
 // TestSessionFilterSince pins the trailing-window bound the drill-through carries: the
-// list narrows to sessions active at or after the bound, and CountAllSessions agrees.
+// list narrows to sessions STARTED at or after the bound, matching the column the
+// Insights panels window by (s.started_at), and CountAllSessions agrees.
 func TestSessionFilterSince(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -263,17 +275,11 @@ func TestSessionFilterSince(t *testing.T) {
 	setSessionShape(t, st, ctx, recent, now.Add(-2*time.Hour), now.Add(-time.Hour), 10, 3)
 	old := seedSession(t, st, ada, pid, "old")
 	setSessionShape(t, st, ctx, old, now.AddDate(0, 0, -60), now.AddDate(0, 0, -60), 10, 3)
-	// ListAllSessions bounds Since on s.updated_at; setSessionShape moves started/ended but
-	// not updated_at, so pin updated_at directly to the same instants the window tests.
-	if _, err := st.Pool.Exec(ctx, "UPDATE sessions SET updated_at = $2 WHERE id = $1", recent, now.Add(-time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.Pool.Exec(ctx, "UPDATE sessions SET updated_at = $2 WHERE id = $1", old, now.AddDate(0, 0, -60)); err != nil {
-		t.Fatal(err)
-	}
+	// The bound is on s.started_at, which setSessionShape sets, so the started times above
+	// are what the window tests. No updated_at fiddling is needed.
 
 	f := store.SessionFilter{Since: now.AddDate(0, 0, -30)}
-	rows, err := st.ListAllSessions(ctx, f)
+	rows, _, err := st.ListAllSessions(ctx, f)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -286,5 +292,55 @@ func TestSessionFilterSince(t *testing.T) {
 	}
 	if total != 1 {
 		t.Errorf("count since -30d = %d, want 1", total)
+	}
+}
+
+// TestSessionFilterSinceWindowsStartedAt is the projection-consistency counterexample:
+// the drill feed windows by s.started_at, the same column the Insights panels bucket by,
+// NOT s.updated_at. A session started before the window but bumped (updated) inside it by
+// a late reparse stays OUT of the feed, matching the panel bucket that never counted it;
+// the inverse, started inside the window but updated after, stays IN, matching a panel
+// that did count it. An updated_at bound would flip both, so the feed and the panel would
+// disagree on exactly these two rows.
+func TestSessionFilterSinceWindowsStartedAt(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	ada := seedUser(t, st, "ada")
+	pid, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	windowStart := now.AddDate(0, 0, -30)
+
+	// startedBeforeUpdatedInside: started 60 days ago (before the window) but updated
+	// yesterday (inside it). An updated_at bound would wrongly include it; a started_at
+	// bound excludes it, matching the panel bucket that windows on started_at.
+	before := seedSession(t, st, ada, pid, "started-before")
+	setSessionShape(t, st, ctx, before, now.AddDate(0, 0, -60), now.AddDate(0, 0, -60), 10, 3)
+	if _, err := st.Pool.Exec(ctx, "UPDATE sessions SET updated_at = $2 WHERE id = $1", before, now.AddDate(0, 0, -1)); err != nil {
+		t.Fatal(err)
+	}
+	// startedInsideUpdatedAfter: started 10 days ago (inside the window) but its
+	// updated_at sits before the window (an odd but legal state); a started_at bound
+	// includes it, matching the panel that counted it by its start.
+	inside := seedSession(t, st, ada, pid, "started-inside")
+	setSessionShape(t, st, ctx, inside, now.AddDate(0, 0, -10), now.AddDate(0, 0, -10), 10, 3)
+	if _, err := st.Pool.Exec(ctx, "UPDATE sessions SET updated_at = $2 WHERE id = $1", inside, now.AddDate(0, 0, -45)); err != nil {
+		t.Fatal(err)
+	}
+
+	f := store.SessionFilter{Since: windowStart}
+	rows, _, err := st.ListAllSessions(ctx, f)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	got := idSet(rows)
+	if got[before] {
+		t.Errorf("session started before the window but updated inside it must be excluded (started_at bound), got included")
+	}
+	if !got[inside] {
+		t.Errorf("session started inside the window must be included even if updated before it (started_at bound), got excluded")
 	}
 }

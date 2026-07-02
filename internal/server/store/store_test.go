@@ -184,6 +184,95 @@ func TestRevokeInvite(t *testing.T) {
 	}
 }
 
+// TestRevokeInviteLeavesRedeemedInvite pins the race-closing guard: RevokeInvite only
+// deletes UNREDEEMED invites, so an invite already redeemed by a registration is left
+// intact (its redemption history stays joinable) rather than deleted out from under the
+// account it created. This is the store-side half of the RevokeInvite/Register race
+// fix: the delete and the redemption are mutually exclusive on the same row.
+func TestRevokeInviteLeavesRedeemedInvite(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	admin, err := st.Register(ctx, "grace", "hash1", "")
+	if err != nil {
+		t.Fatalf("register admin: %v", err)
+	}
+	tokenHash := hashHex("redeem-then-revoke")
+	id, err := st.CreateInvite(ctx, tokenHash, admin.ID, "", nil)
+	if err != nil {
+		t.Fatalf("create invite: %v", err)
+	}
+	// Redeem it by registering a new account with the token.
+	if _, err := st.Register(ctx, "ada", "hash2", tokenHash); err != nil {
+		t.Fatalf("redeem invite: %v", err)
+	}
+
+	// Revoking the now-redeemed invite is a harmless no-op: the delete's redeemed_at IS
+	// NULL guard matches nothing, so the redeemed row survives for ListInvites to join.
+	if err := st.RevokeInvite(ctx, id); err != nil {
+		t.Fatalf("revoke redeemed invite: %v", err)
+	}
+	invites, err := st.ListInvites(ctx)
+	if err != nil {
+		t.Fatalf("list invites: %v", err)
+	}
+	var found bool
+	for _, inv := range invites {
+		if inv.ID == id {
+			found = true
+			if inv.RedeemedBy == nil || *inv.RedeemedBy != "ada" {
+				t.Errorf("redeemed invite should still name its redeemer, got %+v", inv)
+			}
+		}
+	}
+	if !found {
+		t.Error("a redeemed invite must not be deleted by RevokeInvite (it keeps its history)")
+	}
+}
+
+// TestRevokeInviteLeavesExpiredInvite pins that the write path shares the view's
+// revocability policy: an expired (but unredeemed) invite is not revocable, so
+// RevokeInvite is a no-op on it, matching classifyInvite marking it "expired · not
+// revocable" and Register refusing to redeem it. One policy across read, write, and
+// redemption.
+func TestRevokeInviteLeavesExpiredInvite(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	admin, err := st.Register(ctx, "grace", "hash1", "")
+	if err != nil {
+		t.Fatalf("register admin: %v", err)
+	}
+	// An invite that expired an hour ago (unredeemed): past its expiry, so no longer
+	// open. CreateInvite takes an optional expiry; pin one in the past.
+	past := time.Now().Add(-time.Hour)
+	id, err := st.CreateInvite(ctx, hashHex("expired-open"), admin.ID, "", &past)
+	if err != nil {
+		t.Fatalf("create expired invite: %v", err)
+	}
+
+	// Revoking is a no-op: the expiry guard matches nothing, so the row survives (its
+	// absence of a Revoke button in the UI and this no-op are the same policy).
+	if err := st.RevokeInvite(ctx, id); err != nil {
+		t.Fatalf("revoke expired invite: %v", err)
+	}
+	invites, err := st.ListInvites(ctx)
+	if err != nil {
+		t.Fatalf("list invites: %v", err)
+	}
+	var found bool
+	for _, inv := range invites {
+		if inv.ID == id {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("an expired invite must not be deleted by RevokeInvite (it is not revocable)")
+	}
+}
+
 func TestTokenAuth(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)

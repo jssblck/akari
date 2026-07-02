@@ -178,6 +178,13 @@ type SessionFilter struct {
 	// window. It is display-and-URL state only: the query narrows by Since, never by
 	// this string, so the store ignores it. The empty string means no windowing.
 	Range string
+	// RequireSpan narrows to sessions with a measured span (a parsed start and end and a
+	// non-negative duration), the exact cohort the Insights Concurrency panel sweeps (see
+	// spanFilter in analytics_concurrency.go). The busiest-user drill sets it so the
+	// linked feed matches the panel's session set rather than a looser "all this user's
+	// sessions in the window", which would list sessions the panel never counted. The
+	// zero value applies no span constraint.
+	RequireSpan bool
 	// Sort names the column the global session list is ordered by (see
 	// sessionSortColumns). The empty string means DefaultSort. Desc selects
 	// descending order. Together they back the click-to-sort table headers; an
@@ -231,6 +238,13 @@ func (f SessionFilter) conds(sinceCol string) (conds []string, args []any) {
 	}
 	if !f.Since.IsZero() {
 		add(sinceCol+" >=", f.Since)
+	}
+	if f.RequireSpan {
+		// The exact predicate the concurrency sweep uses (spanFilter in
+		// analytics_concurrency.go): a parsed start and end and a non-negative duration.
+		// Kept in step by name so the busiest-user drill lists precisely the spanned
+		// cohort the panel counted. No placeholder: it is a plain column comparison.
+		conds = append(conds, "s.started_at IS NOT NULL AND s.ended_at IS NOT NULL AND s.ended_at >= s.started_at")
 	}
 	// Grade and outcome match the Insights distributions' definition exactly, so a
 	// drill-through from a panel bar opens precisely the sessions that bar counted
@@ -693,7 +707,7 @@ func (s *Store) windowSessionRemainder(ctx context.Context, where string, args [
 // EXISTS filter in conds() uses, passed as the placeholder the caller records.
 // When no search is active the format arg is empty and a NULL literal fills the
 // column so the row shape stays fixed.
-func globalSessionSelect(matchLateral, matchCol string) string {
+func globalSessionSelect(matchLateral, matchCol, matchCutCol string) string {
 	return `
 	SELECT s.id, s.agent, s.machine, s.git_branch, u.username,
 	       s.message_count, s.user_message_count,
@@ -702,7 +716,7 @@ func globalSessionSelect(matchLateral, matchCol string) string {
 	       s.total_cost_usd, s.cost_incomplete, s.visibility, s.public_id,
 	       s.started_at, s.ended_at, s.updated_at,
 	       p.id, p.remote_key, p.display_name, p.kind,
-	       coalesce(title.content, ''), ` + matchCol + `
+	       coalesce(title.content, ''), ` + matchCol + `, ` + matchCutCol + `
 	  FROM sessions s
 	  JOIN users u ON u.id = s.user_id
 	  JOIN projects p ON p.id = s.project_id
@@ -720,61 +734,107 @@ func globalSessionSelect(matchLateral, matchCol string) string {
 // every row while leaving the visible portion intact.
 const titleCap = 240
 
-// scanSessionRow reads one cross-project row. matchArgActive reports whether the
-// query selected the match-content column (a live content search), so the scan
-// targets an extra nullable string only then and the row shape matches the SELECT.
-// The raw match content stays local: the caller windows it into the row's snippet.
-func scanSessionRow(rows pgx.Rows, matchActive bool) (SessionRow, string, error) {
-	var r SessionRow
+// scanSessionRow reads one cross-project row. matchActive reports whether the query
+// selected the match-content and front-cut columns (a live content search), so the
+// scan targets them and the row shape matches the SELECT. The raw (SQL-windowed)
+// match content and the front-cut flag stay local: the caller windows them into the
+// row's snippet. frontCut reports whether the SQL window dropped leading content, so
+// the snippet builder prepends an ellipsis rather than reading the window's start as
+// the message's start.
+func scanSessionRow(rows pgx.Rows, matchActive bool) (r SessionRow, raw string, frontCut bool, err error) {
 	var match *string
+	var cut bool
 	dest := []any{&r.ID, &r.Agent, &r.Machine, &r.GitBranch, &r.Username,
 		&r.MessageCount, &r.UserMessageCount,
 		&r.TotalInput, &r.TotalOutput, &r.TotalCacheWrite, &r.TotalCacheRead,
 		&r.TotalCostUSD, &r.CostIncomplete, &r.Visibility, &r.PublicID,
 		&r.StartedAt, &r.EndedAt, &r.UpdatedAt,
 		&r.ProjectID, &r.ProjectKey, &r.ProjectName, &r.ProjectKind,
-		&r.Title, &match}
+		&r.Title, &match, &cut}
 	if err := rows.Scan(dest...); err != nil {
-		return r, "", fmt.Errorf("scan global session row: %w", err)
+		return r, "", false, fmt.Errorf("scan global session row: %w", err)
 	}
 	r.Title = squashSpaces(r.Title)
-	var raw string
 	if matchActive && match != nil {
 		raw = *match
+		frontCut = cut
 	}
-	return r, raw, nil
+	return r, raw, frontCut, nil
 }
 
-// ListAllSessions returns sessions across every project matching the filter,
-// newest first. A zero ProjectID means "all projects"; the other fields narrow
-// the set exactly as ListSessions does. This backs the global Sessions view and
-// the Overview's recent-activity feed.
+// snippetSQLWindowRadius and snippetSQLWindowLen bound the matching-message content
+// the search LATERAL pulls back per row. A page of results would otherwise
+// materialize every matching message in full (kilobytes each) only to window down to
+// a ~160-char snippet, so the window is cut in SQL: substring the content around the
+// match position, keeping radius bytes of lead and enough trailing room that the Go
+// snippet builder still has both sides of context to trim to word boundaries. The
+// length is radius plus the visible window plus a matching trailing margin, so a match
+// anywhere in the window has full context on either side.
+const (
+	snippetSQLWindowRadius = 240
+	snippetSQLWindowLen    = 720
+)
+
+// ListAllSessions returns one page of sessions across every project matching the
+// filter, newest first, and whether more rows match beyond the page. A zero
+// ProjectID means "all projects"; the other fields narrow the set exactly as
+// ListSessions does. This backs the global Sessions view and the Overview's
+// recent-activity feed.
+//
+// The page is bounded by the filter's Limit, and the hasMore return reports whether
+// at least one more row matches past it: the query asks for limit+1 rows and, when it
+// comes back full, trims the extra and flags hasMore. The handler thus learns "is
+// there a next page" without a second count(*) over the whole matching history, so
+// the render cost stays linear in the page rather than the corpus.
 //
 // Every row carries its first-user-message Title. When Query is set, each row also
-// carries a SearchSnippet windowed around the first match, computed in Go from the
-// first matching message's content (fetched by the match lateral) so the offsets
-// are exact byte positions the template can split on.
-func (s *Store) ListAllSessions(ctx context.Context, f SessionFilter) ([]SessionRow, error) {
-	conds, args := f.conds("s.updated_at")
+// carries a SearchSnippet windowed around the first match. The match window is bounded
+// in SQL (see snippetSQLWindowLen): the LATERAL locates the match with strpos and
+// selects only a substring around it, so a huge message never rides back whole just to
+// yield a short snippet. Go finishes the windowing so the offsets are exact byte
+// positions the template can split on.
+func (s *Store) ListAllSessions(ctx context.Context, f SessionFilter) (rows []SessionRow, hasMore bool, err error) {
+	// Bound Since on s.started_at, the same column the Insights panels window their
+	// cohorts by (qualityDistributionFrom in analytics_quality.go and the concurrency
+	// scans in analytics_concurrency.go both clauseFor("s.started_at")). A drill-through
+	// from a panel bar thus lands on exactly the sessions that bar counted: a session
+	// started before the window but bumped inside it by a late reparse stays out of both,
+	// where an updated_at bound would have pulled it into the feed but not the panel.
+	conds, args := f.conds("s.started_at")
 
-	// The match lateral needs the same escaped ILIKE pattern the EXISTS filter in
-	// conds() built. conds() already appended that pattern as the last arg when Query
-	// is set, so reuse its placeholder rather than binding the pattern twice.
-	matchLateral, matchCol := "", "NULL"
+	// The match lateral reuses the escaped ILIKE pattern conds() already appended as
+	// the last arg (so the row it snippets is the row the EXISTS filter matched), and
+	// additionally binds the raw query for strpos, which wants the literal substring,
+	// not the LIKE-escaped pattern. strpos over lower()'d content finds the match byte
+	// offset so the substring can window around it; a 0 (the rare case where lower()
+	// case-folding disagrees with the ILIKE match position on some Unicode) falls back
+	// to the head of the message, and Go's fold-insensitive search finds or misses it
+	// gracefully rather than anchoring on a wrong offset.
+	matchLateral, matchCol, matchCutCol := "", "NULL", "false"
 	searching := f.Query != ""
 	if searching {
 		patternPlaceholder := "$" + itoa(len(args))
+		args = append(args, f.Query)
+		rawPlaceholder := "$" + itoa(len(args))
+		radius := itoa(snippetSQLWindowRadius)
+		length := itoa(snippetSQLWindowLen)
+		// pos is the 1-based match offset (0 when the fold disagrees); the window starts
+		// radius bytes before it, floored at 1. front_cut reports whether the window
+		// dropped leading content, so Go prepends an ellipsis and does not read the
+		// window's start as the message's start.
 		matchLateral = `
 	  LEFT JOIN LATERAL (
-	         SELECT m.content
+	         SELECT substring(m.content from greatest(1, strpos(lower(m.content), lower(` + rawPlaceholder + `)) - ` + radius + `) for ` + length + `) AS content,
+	                strpos(lower(m.content), lower(` + rawPlaceholder + `)) > ` + itoa(snippetSQLWindowRadius+1) + ` AS front_cut
 	           FROM messages m
 	          WHERE m.session_id = s.id AND m.content ILIKE ` + patternPlaceholder + `
 	          ORDER BY m.ordinal LIMIT 1
 	       ) match ON true`
 		matchCol = "match.content"
+		matchCutCol = "coalesce(match.front_cut, false)"
 	}
 
-	q := globalSessionSelect(matchLateral, matchCol)
+	q := globalSessionSelect(matchLateral, matchCol, matchCutCol)
 	if len(conds) > 0 {
 		q += " WHERE " + strings.Join(conds, " AND ")
 	}
@@ -783,53 +843,69 @@ func (s *Store) ListAllSessions(ctx context.Context, f SessionFilter) ([]Session
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	args = append(args, limit)
+	// Ask for one row past the page so a full extra row means "more match" without a
+	// separate count over the history. The extra row is trimmed before returning.
+	args = append(args, limit+1)
 	q += " LIMIT $" + itoa(len(args))
 	if f.Offset > 0 {
 		args = append(args, f.Offset)
 		q += " OFFSET $" + itoa(len(args))
 	}
 
-	rows, err := s.Pool.Query(ctx, q, args...)
+	qrows, err := s.Pool.Query(ctx, q, args...)
 	if err != nil {
-		return nil, fmt.Errorf("query global sessions: %w", err)
+		return nil, false, fmt.Errorf("query global sessions: %w", err)
 	}
-	defer rows.Close()
+	defer qrows.Close()
 	var out []SessionRow
-	for rows.Next() {
-		r, raw, err := scanSessionRow(rows, searching)
+	for qrows.Next() {
+		r, raw, frontCut, err := scanSessionRow(qrows, searching)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if searching {
-			r.Search = buildSnippet(raw, f.Query)
+			r.Search = buildSnippet(raw, f.Query, frontCut)
 		}
 		out = append(out, r)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate global sessions: %w", err)
+	if err := qrows.Err(); err != nil {
+		return nil, false, fmt.Errorf("iterate global sessions: %w", err)
 	}
-	return out, nil
+	// A full extra row past the page is the "more match" signal: drop it and flag
+	// hasMore so the footer can offer the next page without counting the corpus.
+	if len(out) > limit {
+		out = out[:limit]
+		hasMore = true
+	}
+	return out, hasMore, nil
 }
 
 // CountAllSessions counts the sessions ListAllSessions would return for the same
 // filter (ignoring Limit and Offset), plus how many empty sessions the default
-// hides. It shares conds() with ListAllSessions so the two can never disagree
-// about which rows match, and the footer's "N of M" and the empty-hidden toggle
-// both read from this one round trip.
+// hides. It shares conds() with ListAllSessions so the two can never disagree about
+// which rows match.
+//
+// It exists for tests and verification only, NOT the render path: the /sessions
+// footer no longer counts the corpus (that count(*) was O(total), the very cost the
+// incremental-efficiency gate flagged), so nothing in a request calls this. The
+// drift-guard tests keep it to pin the drill filters' bucket semantics against the
+// Insights panel counts, and TestCountAllSessionsAgreement uses it to hold the
+// list-vs-count invariant the shared conds() guarantees.
 //
 // The empty count is a FILTER aggregate over the same matched set, so it reflects
 // the sessions hidden BY the empty filter within the current agent/project/query
 // scope, not a fleet-wide zero-message count. When IncludeEmpty is set the empty
 // rows are already in Total, and Empty reports how many of them are the
-// zero-message ones (so the toggle can read "showing empty").
+// zero-message ones.
 func (s *Store) CountAllSessions(ctx context.Context, f SessionFilter) (total, empty int, err error) {
 	// Count over the same match set as the list, but neutralize the empty-hiding so
 	// the FILTER can report the hidden count regardless of the current toggle: run
 	// conds with IncludeEmpty forced on, then let the FILTER split the empty ones out.
 	cf := f
 	cf.IncludeEmpty = true
-	conds, args := cf.conds("s.updated_at")
+	// Bound on s.started_at to match ListAllSessions (and the Insights panels), so the
+	// drift-guard tests pin the same windowed cohort the list and the bars count.
+	conds, args := cf.conds("s.started_at")
 
 	// A content search still needs the messages EXISTS from conds(); no lateral or
 	// ordering is needed for a count, so the query is just the filtered aggregate.
@@ -851,6 +927,36 @@ func (s *Store) CountAllSessions(ctx context.Context, f SessionFilter) (total, e
 	return total, empty, nil
 }
 
+// HasEmptySessions reports whether the filter's scope holds at least one empty
+// (zero-message) session, so the footer can decide whether the empty-hidden toggle
+// would change anything without counting how many. It exists so the /sessions render
+// path stays bounded: the old toggle carried a count K that was the same O(total)
+// aggregate the footer no longer runs, and the toggle only needs the yes/no.
+//
+// The probe is EXISTS over the filter's other conditions with message_count = 0
+// added, so Postgres stops at the first matching row (index-bounded, O(1)-ish)
+// instead of scanning the scope. It forces IncludeEmpty on so the empty rows are in
+// scope to be found regardless of the current toggle: the caller asks "are there
+// empties here", not "does the current list include them".
+func (s *Store) HasEmptySessions(ctx context.Context, f SessionFilter) (bool, error) {
+	cf := f
+	cf.IncludeEmpty = true
+	// Bound on s.started_at to match ListAllSessions, so the toggle reflects empties in
+	// the same windowed scope the list draws from.
+	conds, args := cf.conds("s.started_at")
+	conds = append(conds, "s.message_count = 0")
+	q := `SELECT EXISTS (SELECT 1
+	        FROM sessions s
+	        JOIN users u ON u.id = s.user_id
+	        JOIN projects p ON p.id = s.project_id
+	       WHERE ` + strings.Join(conds, " AND ") + `)`
+	var exists bool
+	if err := s.Pool.QueryRow(ctx, q, args...).Scan(&exists); err != nil {
+		return false, fmt.Errorf("probe empty sessions: %w", err)
+	}
+	return exists, nil
+}
+
 // SessionFeedCursor marks a position in the session feed: the id of the last row a
 // page returned. The feed pages on the session id, which is immutable, rather than on
 // updated_at. That matters for a client paging the whole feed across separate
@@ -870,8 +976,15 @@ type SessionFeedCursor struct {
 // the rows it already saw and a concurrent updated_at bump cannot drop a row from the
 // walk. Each row still carries its updated_at, so a caller can order by recency within
 // a page. limit is clamped to [1, 500] (default 100).
+//
+// The Since bound windows on s.started_at, the same column ListAllSessions and
+// CountAllSessions use, so SessionFilter.Since has ONE meaning across every query that
+// shares the filter: "started in the window". A session started before the window but
+// bumped inside it is out of all three consistently, rather than in the MCP feed but
+// out of the web drill. The keyset still pages on id (immutable), so the window column
+// choice does not affect paging stability.
 func (s *Store) SessionFeed(ctx context.Context, f SessionFilter, limit int, cursor *SessionFeedCursor) ([]SessionRow, *SessionFeedCursor, error) {
-	conds, args := f.conds("s.updated_at")
+	conds, args := f.conds("s.started_at")
 	if cursor != nil {
 		// The next page is everything below the cursor in id-descending order. id is the
 		// primary key, so Postgres walks the PK index straight to the resume point rather
@@ -884,7 +997,7 @@ func (s *Store) SessionFeed(ctx context.Context, f SessionFilter, limit int, cur
 	// The keyset feed does not carry a content search, so no match lateral: the
 	// Title lateral rides along (it is cheap and lets a caller show a title) and the
 	// match column is a NULL literal to keep the row shape fixed.
-	q := globalSessionSelect("", "NULL")
+	q := globalSessionSelect("", "NULL", "false")
 	if len(conds) > 0 {
 		q += " WHERE " + strings.Join(conds, " AND ")
 	}
@@ -903,7 +1016,7 @@ func (s *Store) SessionFeed(ctx context.Context, f SessionFilter, limit int, cur
 	defer rows.Close()
 	var out []SessionRow
 	for rows.Next() {
-		r, _, err := scanSessionRow(rows, false)
+		r, _, _, err := scanSessionRow(rows, false)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -958,6 +1071,20 @@ const facetLimit = 50
 // trigger on the sessions table, see migration 0005), so each category is a
 // bounded top-N index read rather than a GROUP BY over the whole sessions table.
 // It backs the global Sessions view's filter rail.
+//
+// Reconciliation gap (intentional and pinned): the rollup counts EVERY session,
+// including the empty (message_count = 0) parse-failures the default feed hides. So a
+// facet's count is the whole-corpus count and can exceed the rows a default-feed click
+// on that facet lists, by exactly the empty sessions carrying that value. Clicking the
+// facet and then showing empties (the footer's toggle, empty=1) reconciles them: the
+// facet count equals the IncludeEmpty feed count for that facet. The gap is not closed
+// in the rollup on purpose: the facet trigger fires only on the facet columns (agent,
+// machine, user_id, project_id), never on message_count (migration 0005's UPDATE OF
+// clause deliberately excludes it so live ingest's per-message projection updates do
+// not churn the rollup). A message_count-aware rollup would have to fire on every
+// ingest append, reintroducing exactly that churn. The relationship
+// (facet_count == IncludeEmpty feed count >= default feed count) is pinned by
+// TestGlobalFacetsReconcileEmptyHidden so it cannot drift silently.
 func (s *Store) GlobalFacets(ctx context.Context) (GlobalFacetValues, error) {
 	var f GlobalFacetValues
 

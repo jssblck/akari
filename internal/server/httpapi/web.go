@@ -221,12 +221,19 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	// param is actually present: an absent range leaves the list unwindowed rather than
 	// silently trimming it to the default year. An unknown value normalizes to the
 	// default via ParseRange rather than erroring, matching the sort-key precedent.
+	//
+	// ListAllSessions bounds this Since on s.started_at, the column the Insights panels
+	// window their cohorts by, so a drill-through from a panel bar opens exactly the
+	// sessions that bar counted rather than a differently windowed feed.
 	if raw := strings.TrimSpace(q.Get("range")); raw != "" {
 		filter.Range = web.ParseRange(raw)
 		filter.Since = web.RangeSince(filter.Range, time.Now())
 	}
 	// Empty sessions (message_count = 0) are hidden by default; empty=1 shows them.
 	filter.IncludeEmpty = q.Get("empty") == "1"
+	// spanned=1 narrows to sessions with a measured span, the concurrency panel's cohort;
+	// it arrives only on the busiest-user drill so that feed matches what the panel swept.
+	filter.RequireSpan = q.Get("spanned") == "1"
 	// The paging limit rides the URL, doubled by "Show more" and clamped to the
 	// store's window. An absent or malformed value is the default page.
 	filter.Limit = web.DefaultSessionLimit
@@ -247,20 +254,27 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		filter.Sort = v
 	}
 	filter.Desc = q.Get("dir") != "asc"
-	rows, err := s.Store.ListAllSessions(r.Context(), filter)
+	// The list fetches limit+1 rows and reports hasMore, so the footer learns whether a
+	// next page exists without a count(*) over the whole matching history: the render
+	// cost stays linear in the page, not the corpus.
+	rows, hasMore, err := s.Store.ListAllSessions(r.Context(), filter)
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "sessions"), http.StatusInternalServerError, "Could not load sessions."))
 		return
 	}
-	// One count query backs the footer's "N of M" and the empty-hidden toggle,
-	// sharing the filter's conds so it can never disagree with the list about which
-	// rows match.
-	total, emptyHidden, err := s.Store.CountAllSessions(r.Context(), filter)
+	// The empty-hidden toggle needs only whether any empty session exists in scope, not
+	// how many: that yes/no is a bounded EXISTS probe rather than the O(total) aggregate
+	// the old count carried. It probes regardless of the current IncludeEmpty state:
+	// HasEmptySessions forces empties into scope to answer "are there any here", so even
+	// when they are being shown the toggle appears only when hiding them would actually
+	// change the feed. A ?empty=1 over a scope with no empties thus shows no toggle,
+	// rather than a "showing empty · hide" that would hide nothing.
+	hasEmpty, err := s.Store.HasEmptySessions(r.Context(), filter)
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "sessions"), http.StatusInternalServerError, "Could not load sessions."))
 		return
 	}
-	footer := web.BuildSessionFooter(filter, len(rows), total, emptyHidden)
+	footer := web.BuildSessionFooter(filter, len(rows), hasMore, hasEmpty)
 	if r.Header.Get("HX-Request") == "true" {
 		render(w, r, http.StatusOK, web.GlobalSessionList(rows, filter, footer))
 		return
@@ -979,11 +993,18 @@ func (s *Server) handleCreateTokenForm(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRevokeTokenForm(w http.ResponseWriter, r *http.Request) {
 	p, _ := principalFrom(r.Context())
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err == nil {
-		if err := s.Store.RevokeAPIToken(r.Context(), p.UserID, id); err == nil {
-			s.setNotice(w, "Token revoked")
-		}
+	if err != nil {
+		http.Redirect(w, r, "/account", http.StatusSeeOther)
+		return
 	}
+	// Surface a revocation failure instead of redirecting as if it worked: a silent
+	// redirect would tell the user the token is gone while it stays live, matching the
+	// connection- and invite-revoke handlers.
+	if err := s.Store.RevokeAPIToken(r.Context(), p.UserID, id); err != nil {
+		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not revoke the token. Try again."))
+		return
+	}
+	s.setNotice(w, "Token revoked")
 	http.Redirect(w, r, "/account", http.StatusSeeOther)
 }
 
@@ -1026,11 +1047,18 @@ func (s *Server) handleCreateInviteForm(w http.ResponseWriter, r *http.Request) 
 // join against it for.
 func (s *Server) handleRevokeInviteForm(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err == nil {
-		if err := s.Store.RevokeInvite(r.Context(), id); err == nil {
-			s.setNotice(w, "Invite revoked")
-		}
+	if err != nil {
+		http.Redirect(w, r, "/account", http.StatusSeeOther)
+		return
 	}
+	// Surface a deletion failure instead of redirecting as if it worked: a silent
+	// redirect would tell the admin the invite is gone while it stays redeemable,
+	// matching the connection-revoke handler's ErrorPage on failure.
+	if err := s.Store.RevokeInvite(r.Context(), id); err != nil {
+		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not revoke the invite. Try again."))
+		return
+	}
+	s.setNotice(w, "Invite revoked")
 	http.Redirect(w, r, "/account", http.StatusSeeOther)
 }
 

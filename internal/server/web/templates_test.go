@@ -269,7 +269,7 @@ func TestGlobalSessionListRow(t *testing.T) {
 		},
 		ProjectID: 4, ProjectKey: "scratch", ProjectName: "scratch", ProjectKind: "standalone",
 	}}
-	html := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Sort: "updated", Desc: true}, SessionFooter{Shown: 1, Total: 1}))
+	html := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Sort: "updated", Desc: true}, SessionFooter{Shown: 1}))
 
 	for _, want := range []string{
 		// The whole row links to the session.
@@ -300,7 +300,7 @@ func TestGlobalSessionListTitleLine(t *testing.T) {
 		{SessionSummary: store.SessionSummary{ID: 1, Agent: "claude", MessageCount: 2, Title: "Fix the timezone pass", UpdatedAt: &ts}, ProjectID: 1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote"},
 		{SessionSummary: store.SessionSummary{ID: 2, Agent: "claude", MessageCount: 1, UpdatedAt: &ts}, ProjectID: 1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote"},
 	}
-	html := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Sort: "updated", Desc: true}, SessionFooter{Shown: 2, Total: 2}))
+	html := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Sort: "updated", Desc: true}, SessionFooter{Shown: 2}))
 
 	if !strings.Contains(html, `class="srow-sub" title="Fix the timezone pass">Fix the timezone pass</div>`) {
 		t.Errorf("a titled row should render its title as the second line, got:\n%s", html)
@@ -326,7 +326,7 @@ func TestGlobalSessionListSnippetLine(t *testing.T) {
 		ProjectID:      1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote",
 		Search: snip,
 	}}
-	html := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Query: "script", Sort: "updated", Desc: true}, SessionFooter{Shown: 1, Total: 1}))
+	html := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Query: "script", Sort: "updated", Desc: true}, SessionFooter{Shown: 1}))
 
 	// The <mark> wrapper is real template markup.
 	if !strings.Contains(html, "<mark>") || !strings.Contains(html, "</mark>") {
@@ -345,33 +345,50 @@ func TestGlobalSessionListSnippetLine(t *testing.T) {
 	}
 }
 
-// The footer renders "N of M", a "Show more" htmx control when more rows match than
-// are shown, and the terse empty-hidden toggle. At the cap it names the cap instead
-// of a button.
+// The footer renders "Showing N" with a "Show more" htmx control when more rows match
+// than the page holds, "N sessions" (the exact total) when the page is the whole set,
+// and the terse empty-hidden toggle. At the cap it names the cap instead of a button.
 func TestGlobalSessionListFooter(t *testing.T) {
 	ts := time.Now().UTC()
 	rows := []store.SessionRow{{
 		SessionSummary: store.SessionSummary{ID: 1, Agent: "claude", MessageCount: 1, UpdatedAt: &ts},
 		ProjectID:      1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote",
 	}}
+	// hasMore true: the page is not the whole set, so the count reads "Showing N", a
+	// "Show more" control appears, and the empty toggle (hasEmpty true) reads "empty
+	// hidden · show".
 	sel := store.SessionFilter{Sort: "updated", Desc: true, Limit: 100}
-	footer := BuildSessionFooter(sel, 100, 250, 4)
+	footer := BuildSessionFooter(sel, 100, true, true)
 	html := renderComponent(t, GlobalSessionList(rows, sel, footer))
 
 	for _, want := range []string{
-		`100 of 250`,
+		`Showing 100`,
 		`hx-target="#session-list"`, `hx-select="#session-list"`, `hx-swap="outerHTML"`,
 		`>Show more</a>`,
-		// Empty toggle: four hidden, a "show" verb.
-		`4 empty hidden`, `>show</a>`,
+		// Empty toggle: hidden, a "show" verb, no count.
+		`empty hidden`, `>show</a>`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("footer missing %q, got:\n%s", want, html)
 		}
 	}
+	if strings.Contains(html, " of ") {
+		t.Errorf("the more-matching footer should not read 'N of M', got:\n%s", html)
+	}
+
+	// hasMore false: the shown count IS the exact total, so the footer reads "N
+	// sessions" and offers no "Show more".
+	exact := BuildSessionFooter(store.SessionFilter{Sort: "updated", Desc: true}, 7, false, false)
+	exactHTML := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Sort: "updated", Desc: true}, exact))
+	if !strings.Contains(exactHTML, "7 sessions") {
+		t.Errorf("an exhausted page should read the exact 'N sessions', got:\n%s", exactHTML)
+	}
+	if strings.Contains(exactHTML, ">Show more</a>") {
+		t.Errorf("an exhausted page should carry no Show more, got:\n%s", exactHTML)
+	}
 
 	// At the cap with more matching, the button is replaced by the cap note.
-	capped := BuildSessionFooter(store.SessionFilter{Limit: 500}, 500, 900, 0)
+	capped := BuildSessionFooter(store.SessionFilter{Limit: 500}, 500, true, false)
 	capHTML := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Limit: 500}, capped))
 	if strings.Contains(capHTML, ">Show more</a>") {
 		t.Error("at the cap there should be no Show more button")
@@ -395,7 +412,7 @@ func TestGlobalSessionListGrouping(t *testing.T) {
 		{SessionSummary: store.SessionSummary{ID: 2, Agent: "claude", UpdatedAt: &earlier}, ProjectID: 1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote"},
 	}
 
-	grouped := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Sort: "updated", Desc: true}, SessionFooter{Shown: 2, Total: 2}))
+	grouped := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Sort: "updated", Desc: true}, SessionFooter{Shown: 2}))
 	if !strings.Contains(grouped, `class="day-head"`) || !strings.Contains(grouped, `>Today</span>`) {
 		t.Error("most-recent order should render a day heading")
 	}
@@ -404,7 +421,7 @@ func TestGlobalSessionListGrouping(t *testing.T) {
 		t.Error("a repeated project label should fade")
 	}
 
-	flat := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Sort: "tokens", Desc: true}, SessionFooter{Shown: 2, Total: 2}))
+	flat := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Sort: "tokens", Desc: true}, SessionFooter{Shown: 2}))
 	if strings.Contains(flat, `class="day-head"`) {
 		t.Error("a non-recent sort should not day-group the feed")
 	}

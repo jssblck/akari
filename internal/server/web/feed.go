@@ -227,55 +227,61 @@ func SplitSnippet(s store.SearchSnippet) SnippetParts {
 	}
 }
 
-// SessionFooter is the state the feed's footer renders under the list: the "N of M"
+// SessionFooter is the state the feed's footer renders under the list: the session
 // count, whether a "Show more" button applies, and the empty-hidden toggle. It is
-// computed once from the loaded rows and the count query so the template stays a
-// dumb renderer and the two never disagree about what the numbers mean.
+// computed once from the loaded rows and two bounded store probes (hasMore and
+// hasEmpty) so the template stays a dumb renderer and the render cost stays linear in
+// the page rather than the corpus: the old "N of M" carried a count(*) over the whole
+// matching history, which the incremental-efficiency gate flagged.
 type SessionFooter struct {
-	// Shown is how many rows the feed currently renders; Total is how many match the
-	// filter across the whole corpus (from CountAllSessions).
+	// Shown is how many rows the feed currently renders. When HasMore is false it is
+	// also the exact total, since the whole matching set fit in the page; when HasMore
+	// is true more rows match beyond it and the count reads "Showing N".
 	Shown int
-	Total int
+	// HasMore reports that at least one more row matches past the page (from
+	// ListAllSessions' limit+1 probe), so the footer offers the next page and the count
+	// reads "Showing N" rather than the exact "N sessions".
+	HasMore bool
 	// MoreHref is the "Show more" target (a doubled-limit path), set only when more
 	// rows match than are shown and the page is below the cap.
 	MoreHref string
 	// AtCap reports the feed is showing the maximum page (500) yet more match, so the
 	// footer names the cap and drops the button, asking the reader to narrow instead.
 	AtCap bool
-	// EmptyHidden is how many empty (zero-message) sessions the current scope holds;
-	// IncludeEmpty reports whether they are being shown. Together they drive the
-	// terse empty toggle: "K empty hidden · show" when hidden, "showing empty · hide"
-	// when shown. The toggle is omitted when no empty session exists in scope.
-	EmptyHidden  int
+	// HasEmpty reports whether the current scope holds at least one empty (zero-message)
+	// session, so the toggle appears only when it would change the feed; IncludeEmpty
+	// reports whether those empties are being shown. Together they drive the terse
+	// toggle: "empty hidden · show" when hidden, "showing empty · hide" when shown.
+	HasEmpty     bool
 	IncludeEmpty bool
 	EmptyHref    string
 }
 
-// BuildSessionFooter assembles the footer state from the loaded rows, the filter,
-// and the count query's total and empty-in-scope figures. shown is len(rows); the
-// "Show more" button appears only when shown < total and the page is below the cap,
-// and the empty toggle appears only when the scope actually holds an empty session.
-func BuildSessionFooter(f store.SessionFilter, shown, total, emptyHidden int) SessionFooter {
+// BuildSessionFooter assembles the footer state from the loaded rows, the filter, and
+// two bounded probes: hasMore (does a further page exist) and hasEmpty (does any empty
+// session sit in scope). shown is len(rows); the "Show more" button appears only when
+// more rows match and the page is below the cap, and the empty toggle appears only
+// when the scope actually holds an empty session (or already shows them, so the reader
+// can hide them again).
+func BuildSessionFooter(f store.SessionFilter, shown int, hasMore, hasEmpty bool) SessionFooter {
 	ft := SessionFooter{
 		Shown:        shown,
-		Total:        total,
-		EmptyHidden:  emptyHidden,
+		HasMore:      hasMore,
+		HasEmpty:     hasEmpty,
 		IncludeEmpty: f.IncludeEmpty,
 	}
 	limit := effLimit(f)
 	switch {
-	case shown < total && limit >= MaxSessionLimit:
+	case hasMore && limit >= MaxSessionLimit:
 		// At the cap with more matching: name the cap, no button, narrow instead.
 		ft.AtCap = true
-	case shown < total:
+	case hasMore:
 		ft.MoreHref = ShowMorePath(f)
 	}
 	// The empty toggle is relevant only when hiding actually withholds something (or
-	// when already showing empties, so the reader can hide them again). When empties
-	// are shown, emptyHidden counts how many empty rows are in the shown set; when
-	// hidden, it counts how many are being withheld. Either way a nonzero value means
-	// the toggle would change the feed.
-	if emptyHidden > 0 {
+	// when already showing empties, so the reader can hide them again). Either way a
+	// scope that holds an empty session means the toggle would change the feed.
+	if hasEmpty {
 		ft.EmptyHref = string(EmptyToggleHref(f))
 	}
 	return ft
@@ -284,18 +290,28 @@ func BuildSessionFooter(f store.SessionFilter, shown, total, emptyHidden int) Se
 // HasEmptyToggle reports whether the footer shows the empty-hidden toggle.
 func (ft SessionFooter) HasEmptyToggle() bool { return ft.EmptyHref != "" }
 
-// CountLabel is the footer's "N of M" figure, tabular and terse.
+// CountLabel is the footer's session-count figure, tabular and terse. When the whole
+// matching set fit in the page (no further page) the shown count IS the exact total,
+// so it reads "N sessions"; when more match beyond the page it reads "Showing N",
+// since the exact total is deliberately not counted.
 func (ft SessionFooter) CountLabel() string {
-	return fmt.Sprintf("%d of %d", ft.Shown, ft.Total)
+	if ft.HasMore {
+		return fmt.Sprintf("Showing %d", ft.Shown)
+	}
+	if ft.Shown == 1 {
+		return "1 session"
+	}
+	return fmt.Sprintf("%d sessions", ft.Shown)
 }
 
-// EmptyToggleLabel is the terse toggle copy: the count of hidden empties and a
-// "show" verb when they are hidden, or "showing empty" and a "hide" verb when they
-// are shown. It returns the two parts (the count/state text and the verb) so the
-// template can style the verb as the link affordance.
+// EmptyToggleLabel is the terse toggle copy: "empty hidden" and a "show" verb when
+// empties are hidden, or "showing empty" and a "hide" verb when they are shown. It
+// returns the two parts (the state text and the verb) so the template can style the
+// verb as the link affordance. The count is gone with the O(total) aggregate that
+// produced it: the toggle only reports the state, not the magnitude.
 func (ft SessionFooter) EmptyToggleLabel() (text, verb string) {
 	if ft.IncludeEmpty {
 		return "showing empty", "hide"
 	}
-	return fmt.Sprintf("%d empty hidden", ft.EmptyHidden), "show"
+	return "empty hidden", "show"
 }

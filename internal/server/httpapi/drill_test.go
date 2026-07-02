@@ -122,10 +122,31 @@ func TestSessionsDrillMalformed(t *testing.T) {
 	resp.Body.Close()
 }
 
+// TestSessionsOverlongQueryTruncatesOnRuneBoundary pins the rune-safe cap on the search
+// query: a query longer than maxSearchQueryLen whose multibyte character straddles the
+// byte cap must be truncated on a rune boundary, not mid-rune. A mid-rune cut would hand
+// Postgres invalid UTF-8 and 500 the request; the handler cuts back to a rune start, so
+// the search runs and returns 200.
+func TestSessionsOverlongQueryTruncatesOnRuneBoundary(t *testing.T) {
+	t.Parallel()
+	srv, _ := newTestServer(t)
+	c := newClient(t)
+	registerFirstUser(t, srv.URL, "grace", "hopper-1906", c)
+
+	// 199 ASCII bytes then a 2-byte rune (é), so the character spans bytes 199-200 and
+	// the 200-byte cap lands in its middle. A naive byte cut would split the rune.
+	q := strings.Repeat("a", 199) + "é" + strings.Repeat("b", 50)
+	resp := mustGet(t, c, srv.URL+"/sessions?q="+url.QueryEscape(q))
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("overlong query straddling the byte cap should 200 (rune-safe truncation), got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
 // TestSessionsDrillCountAgreement confirms the handler's footer count agrees with the
-// rendered rows under a grade filter, the "N of M" invariant CountAllSessions shares with
-// the list through conds(). It seeds two graded sessions (one A, one F) and checks the A
-// drill shows "1 of 1".
+// rendered rows under a grade filter. It seeds two graded sessions (one A, one F) and
+// checks the A drill shows the exact "1 session" (the whole matching set fit the page,
+// so the count is exact, not "Showing N").
 func TestSessionsDrillCountAgreement(t *testing.T) {
 	t.Parallel()
 	srv, st := newTestServer(t)
@@ -161,7 +182,10 @@ func TestSessionsDrillCountAgreement(t *testing.T) {
 	seed("drill-f", "F")
 
 	body := readBody(t, mustGet(t, c, srv.URL+"/sessions?grade=A"))
-	if !strings.Contains(body, "1 of 1") {
-		t.Errorf("grade=A footer should read '1 of 1' (one A session of one matching), got:\n%s", body)
+	if !strings.Contains(body, "1 session") {
+		t.Errorf("grade=A footer should read the exact '1 session' (one A session, page not exhausted), got:\n%s", body)
+	}
+	if strings.Contains(body, " of ") {
+		t.Errorf("the footer should no longer read 'N of M', got:\n%s", body)
 	}
 }

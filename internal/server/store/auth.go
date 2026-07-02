@@ -249,7 +249,7 @@ func (s *Store) ListInvites(ctx context.Context) ([]Invite, error) {
 		   LEFT JOIN users redeemer ON redeemer.id = i.redeemed_by
 		  ORDER BY i.created_at DESC`)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("query invites: %w", err)
 	}
 	defer rows.Close()
 	var out []Invite
@@ -257,17 +257,40 @@ func (s *Store) ListInvites(ctx context.Context) ([]Invite, error) {
 		var inv Invite
 		if err := rows.Scan(&inv.ID, &inv.Note, &inv.CreatedBy, &inv.CreatedAt, &inv.ExpiresAt,
 			&inv.RedeemedBy, &inv.RedeemedAt); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scan invite: %w", err)
 		}
 		out = append(out, inv)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate invites: %w", err)
+	}
+	return out, nil
 }
 
-// RevokeInvite deletes an invite token by id. It is a no-op (not an error) if
-// the id does not exist, matching RevokeAPIToken's idempotent shape; the caller
-// (an admin-only form handler) redirects either way.
+// RevokeInvite deletes a STILL-OPEN invite token by id: unredeemed and not past its
+// expiry. It is a no-op (not an error) if the id does not exist or the invite is no
+// longer open (redeemed or expired), matching RevokeAPIToken's idempotent shape; the
+// caller (an admin-only form handler) redirects either way.
+//
+// The predicate is exactly the one revocability policy the whole app shares: an invite
+// is revocable iff it is still redeemable. It matches classifyInvite in the account
+// view (which shows Revoke only for the still-open case) and Register's redemption
+// gate (redeemed_at IS NULL AND (expires_at IS NULL OR expires_at > now())), so the
+// page's control, this write path, and the redemption never disagree about which
+// invites can still be acted on. A direct POST to revoke an expired or redeemed invite
+// therefore does nothing, just as the missing Revoke button implies.
+//
+// Aligning on redeemed_at IS NULL also closes a race with Register: Register redeems an
+// invite inside its registration transaction and only then patches redeemed_by. Scoping
+// the delete to unredeemed rows makes the two mutually exclusive on the same row:
+// whichever commits first, the other matches nothing (Register sees the row deleted and
+// returns ErrInvalidInvite; the delete sees redeemed_at set and removes nothing).
 func (s *Store) RevokeInvite(ctx context.Context, id int64) error {
-	_, err := s.Pool.Exec(ctx, "DELETE FROM invite_tokens WHERE id = $1", id)
-	return err
+	if _, err := s.Pool.Exec(ctx,
+		`DELETE FROM invite_tokens
+		  WHERE id = $1 AND redeemed_at IS NULL
+		    AND (expires_at IS NULL OR expires_at > now())`, id); err != nil {
+		return fmt.Errorf("revoke invite: %w", err)
+	}
+	return nil
 }
