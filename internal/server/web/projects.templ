@@ -28,30 +28,32 @@ templ ProjectsPage(p Page, projects []store.ProjectSummary, spark map[int64][]fl
 		if len(projects) == 0 {
 			<div class="empty">No git-remote projects yet.</div>
 		} else {
-			<table class="grid projects">
-				<thead>
-					<tr>
-						<th class="proj-name">Project</th>
-						<th class="trend">30d</th>
-						<th class="num">Sessions</th>
-						<th class="num">Tokens</th>
-						<th class="num">Cost</th>
-						<th>Updated</th>
-					</tr>
-				</thead>
-				<tbody>
-					for _, pr := range projects {
-						<tr data-row-href={ ProjectPath(pr.ID) }>
-							<td class="proj-name"><a href={ ProjectHref(pr.ID) }>{ pr.RemoteKey }</a></td>
-							<td class="trend">@templ.Raw(Sparkline(spark[pr.ID]))</td>
-							<td class="num">{ fmt.Sprintf("%d", pr.SessionCount) }</td>
-							<td class="num">@tokensCell(pr)</td>
-							<td class="num">{ FmtCost(pr.TotalCostUSD, pr.CostIncomplete) }</td>
-							<td class="muted nowrap">{ FmtRelTime(ctx, pr.LastActivity) }</td>
+			<div class="table-scroll">
+				<table class="grid projects">
+					<thead>
+						<tr>
+							<th class="proj-name">Project</th>
+							<th class="trend">30d</th>
+							<th class="num">Sessions</th>
+							<th class="num">Tokens</th>
+							<th class="num">Cost</th>
+							<th>Updated</th>
 						</tr>
-					}
-				</tbody>
-			</table>
+					</thead>
+					<tbody>
+						for _, pr := range projects {
+							<tr data-row-href={ ProjectPath(pr.ID) }>
+								<td class="proj-name"><a href={ ProjectHref(pr.ID) }>{ pr.RemoteKey }</a></td>
+								<td class="trend">@templ.Raw(Sparkline(spark[pr.ID]))</td>
+								<td class="num">{ fmt.Sprintf("%d", pr.SessionCount) }</td>
+								<td class="num">@tokensCell(pr)</td>
+								<td class="num">{ FmtCost(pr.TotalCostUSD, pr.CostIncomplete) }</td>
+								<td class="muted nowrap">{ FmtRelTime(ctx, pr.LastActivity) }</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			</div>
 			<p class="muted small projects-footnote">Local folders are under <a href="/sessions">Sessions</a>.</p>
 		}
 	}
@@ -195,54 +197,56 @@ templ ProjectSessionList(sessions []store.SessionSummary, rem store.SessionRemai
 	if len(sessions) == 0 {
 		<div class="empty">No sessions match these filters.</div>
 	} else {
-		<table class="grid">
-			<thead>
-				<tr>
-					<th>Session</th>
-					<th>Agent</th>
-					<th>User</th>
-					<th>Machine</th>
-					<th>Branch</th>
-					<th class="num">Messages</th>
-					<th class="num">Tokens</th>
-					<th class="num">Cost</th>
-					<th>Updated</th>
-				</tr>
-			</thead>
-			<tbody>
-				for _, s := range sessions {
-					<tr data-row-href={ SessionPath(s.ID) }>
-						<td>
-							<a href={ SessionHref(s.ID) }>#{ fmt.Sprintf("%d", s.ID) }</a>
-							if s.Visibility == "public" {
-								<span class="tag public">public</span>
-							}
-							if s.Title != "" {
-								<div class="row-sub muted small" title={ s.Title }>{ s.Title }</div>
-							}
-						</td>
-						<td><span class="tag agent">{ s.Agent }</span></td>
-						<td>{ s.Username }</td>
-						<td class="muted">{ s.Machine }</td>
-						<td class="muted">{ s.GitBranch }</td>
-						<td class="num">{ fmt.Sprintf("%d", s.MessageCount) }</td>
-						<td class="num">@sessionTokensCell(s)</td>
-						<td class="num">{ FmtCost(s.TotalCostUSD, s.CostIncomplete) }</td>
-						<td class="muted nowrap" title={ FmtTimeLong(ctx, s.UpdatedAt) }>{ FmtRelTime(ctx, s.UpdatedAt) }</td>
+		<div class="table-scroll">
+			<table class="grid">
+				<thead>
+					<tr>
+						<th>Session</th>
+						<th>Agent</th>
+						<th>User</th>
+						<th>Machine</th>
+						<th>Branch</th>
+						<th class="num">Messages</th>
+						<th class="num">Tokens</th>
+						<th class="num">Cost</th>
+						<th>Updated</th>
 					</tr>
+				</thead>
+				<tbody>
+					for _, s := range sessions {
+						<tr data-row-href={ SessionPath(s.ID) }>
+							<td>
+								<a href={ SessionHref(s.ID) }>#{ fmt.Sprintf("%d", s.ID) }</a>
+								if s.Visibility == "public" {
+									<span class="tag public">public</span>
+								}
+								if s.Title != "" {
+									<div class="row-sub muted small" title={ s.Title }>{ s.Title }</div>
+								}
+							</td>
+							<td><span class="tag agent">{ s.Agent }</span></td>
+							<td>{ s.Username }</td>
+							<td class="muted">{ s.Machine }</td>
+							<td class="muted">{ s.GitBranch }</td>
+							<td class="num">{ fmt.Sprintf("%d", s.MessageCount) }</td>
+							<td class="num">@sessionTokensCell(s)</td>
+							<td class="num">{ FmtCost(s.TotalCostUSD, s.CostIncomplete) }</td>
+							<td class="muted nowrap" title={ FmtTimeLong(ctx, s.UpdatedAt) }>{ FmtRelTime(ctx, s.UpdatedAt) }</td>
+						</tr>
+					}
+				</tbody>
+				if rem.Has() {
+					<tfoot>
+						<tr class="remainder" title="Older sessions in this range, beyond the rows shown">
+							<td colspan="6">{ fmt.Sprintf("+%d more session%s in this range", rem.Sessions, plural(rem.Sessions)) }</td>
+							<td class="num">@remainderTokensCell(rem)</td>
+							<td class="num">{ FmtCost(rem.CostUSD, rem.CostIncomplete) }</td>
+							<td></td>
+						</tr>
+					</tfoot>
 				}
-			</tbody>
-			if rem.Has() {
-				<tfoot>
-					<tr class="remainder" title="Older sessions in this range, beyond the rows shown">
-						<td colspan="6">{ fmt.Sprintf("+%d more session%s in this range", rem.Sessions, plural(rem.Sessions)) }</td>
-						<td class="num">@remainderTokensCell(rem)</td>
-						<td class="num">{ FmtCost(rem.CostUSD, rem.CostIncomplete) }</td>
-						<td></td>
-					</tr>
-				</tfoot>
-			}
-		</table>
+			</table>
+		</div>
 	}
 }
 
@@ -275,38 +279,40 @@ templ SessionList(sessions []store.SessionSummary) {
 	if len(sessions) == 0 {
 		<div class="empty">No sessions match these filters.</div>
 	} else {
-		<table class="grid">
-			<thead>
-				<tr>
-					<th>Session</th>
-					<th>Agent</th>
-					<th>User</th>
-					<th>Machine</th>
-					<th>Branch</th>
-					<th class="num">Messages</th>
-					<th class="num">Cost</th>
-					<th>Updated</th>
-				</tr>
-			</thead>
-			<tbody>
-				for _, s := range sessions {
-					<tr data-row-href={ SessionPath(s.ID) }>
-						<td>
-							<a href={ SessionHref(s.ID) }>#{ fmt.Sprintf("%d", s.ID) }</a>
-							if s.Visibility == "public" {
-								<span class="tag public">public</span>
-							}
-						</td>
-						<td><span class="tag agent">{ s.Agent }</span></td>
-						<td>{ s.Username }</td>
-						<td class="muted">{ s.Machine }</td>
-						<td class="muted">{ s.GitBranch }</td>
-						<td class="num">{ fmt.Sprintf("%d", s.MessageCount) }</td>
-						<td class="num">{ FmtCost(s.TotalCostUSD, s.CostIncomplete) }</td>
-						<td class="muted">{ FmtTime(ctx, s.UpdatedAt) }</td>
+		<div class="table-scroll">
+			<table class="grid">
+				<thead>
+					<tr>
+						<th>Session</th>
+						<th>Agent</th>
+						<th>User</th>
+						<th>Machine</th>
+						<th>Branch</th>
+						<th class="num">Messages</th>
+						<th class="num">Cost</th>
+						<th>Updated</th>
 					</tr>
-				}
-			</tbody>
-		</table>
+				</thead>
+				<tbody>
+					for _, s := range sessions {
+						<tr data-row-href={ SessionPath(s.ID) }>
+							<td>
+								<a href={ SessionHref(s.ID) }>#{ fmt.Sprintf("%d", s.ID) }</a>
+								if s.Visibility == "public" {
+									<span class="tag public">public</span>
+								}
+							</td>
+							<td><span class="tag agent">{ s.Agent }</span></td>
+							<td>{ s.Username }</td>
+							<td class="muted">{ s.Machine }</td>
+							<td class="muted">{ s.GitBranch }</td>
+							<td class="num">{ fmt.Sprintf("%d", s.MessageCount) }</td>
+							<td class="num">{ FmtCost(s.TotalCostUSD, s.CostIncomplete) }</td>
+							<td class="muted">{ FmtTime(ctx, s.UpdatedAt) }</td>
+						</tr>
+					}
+				</tbody>
+			</table>
+		</div>
 	}
 }
