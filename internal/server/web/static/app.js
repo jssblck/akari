@@ -620,6 +620,7 @@
     initReparseWatch();
     initReparsePublic();
     initNotice();
+    initProjectStickyHeader();
   }
   // ---------------- Overview user filter ----------------
   // The per-user filter is a <details> that lives inside #usage, so every range or
@@ -645,13 +646,27 @@
     if (open) { open.open = false; userFilterOpen = false; }
   });
 
+  // The project header is sticky, so a filter or range change can fire while the
+  // reader is scrolled deep into the view. That swap replaces all of #project-view by
+  // outerHTML and the window is the scroll container, so without help the browser
+  // clamps the scroll to the freshly built (often shorter) page and throws the reader
+  // to a new spot. Record the scroll offset before the swap and restore it after, so a
+  // change made from the pinned header leaves the reader where they were (a genuinely
+  // shorter result set still clamps to its own bottom, which is as close as it gets).
+  var projectViewScrollY = null;
+  document.addEventListener("htmx:beforeSwap", function (e) {
+    var t = e.detail && e.detail.target;
+    projectViewScrollY = (t && t.id === "project-view") ? window.scrollY : null;
+  });
+
   // Re-grow the bars after a range or filter swaps a panel by outerHTML: the usage
   // panel (#usage), the insights section (#insights), or the project view
   // (#project-view). The replacement bars start at width 0, so they need
   // re-animating. Gate O(1) on the swapped target's id so live transcript appends
   // (which swap #session-body) do no work here, then animate the live node by id (an
   // outerHTML swap's target is the detached old node). The usage swap also replaces
-  // the per-user filter, so reopen it when it was open before.
+  // the per-user filter, so reopen it when it was open before; the project-view swap
+  // restores the pre-swap scroll offset (see beforeSwap above).
   document.addEventListener("htmx:afterSwap", function (e) {
     var t = (e.detail && e.detail.target) || e.target;
     if (!t || (t.id !== "usage" && t.id !== "insights" && t.id !== "project-view")) return;
@@ -662,7 +677,28 @@
       var d = root.querySelector(".userfilter");
       if (d) d.open = true;
     }
+    if (t.id === "project-view" && projectViewScrollY != null) {
+      window.scrollTo(0, projectViewScrollY); // clamps to the new page height on its own
+      projectViewScrollY = null;
+    }
   });
+
+  // ---------------- Sticky project header ----------------
+  // Flag when the project page's header has pinned to the top so it can gain a
+  // floating border (styled in projects.css). A 1px sentinel sits at the header's rest
+  // position; when it scrolls out of view the header has pinned. The flag rides on the
+  // persistent <main> rather than the header itself, so it survives the filter swap
+  // that replaces the header. The sentinel lives outside #project-view for the same
+  // reason, so the observer stays attached across swaps and is set up once here.
+  function initProjectStickyHeader() {
+    var sentinel = document.querySelector(".ph-sentinel");
+    if (!sentinel || !("IntersectionObserver" in window)) return;
+    var main = sentinel.parentElement;
+    if (!main) return;
+    new IntersectionObserver(function (entries) {
+      main.classList.toggle("header-stuck", !entries[0].isIntersecting);
+    }, { threshold: 0 }).observe(sentinel);
+  }
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", init);
   } else {

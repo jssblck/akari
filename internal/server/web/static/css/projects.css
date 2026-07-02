@@ -56,3 +56,35 @@ table.grid.projects td.num { overflow: visible; }
    rather than crushing the project name. */
 .project-head { align-items: center; flex-wrap: wrap; }
 .project-head .toolbar { margin: 0 0 0 auto; }
+
+/* The header pins to the top as the reader scrolls, so the project name and the
+   filters that scope the whole page stay reachable however far down the session
+   table they are. It carries its own vertical padding (the base margin only spaces it
+   from the panel below) and an opaque page-coloured background so content scrolls
+   cleanly under it. The bottom border is always present but transparent, so the
+   pinned state can colour it in without nudging the layout by a pixel. z-index rides
+   the shared sticky layer, below the tool-body modal overlay. */
+.project-head {
+  position: sticky; top: 0; z-index: var(--z-sticky);
+  padding-block: var(--sp-md); margin-bottom: var(--sp-md);
+  background: var(--bg);
+  border-bottom: 1px solid transparent;
+}
+/* Pinned state, flagged on the persistent <main> by app.js (not on the header, which
+   the filter swap replaces): a hairline plus a soft drop shadow lift the bar off the
+   content sliding beneath it. */
+.header-stuck .project-head {
+  border-bottom-color: var(--border);
+  box-shadow: 0 6px 16px -12px rgba(0, 0, 0, 0.65);
+}
+/* Below 980px the sidebar itself becomes a sticky top strip (see layout.css), so a
+   second bar pinned to top:0 would collide with it. Drop the header out of the sticky
+   flow there and let it scroll with the page. */
+@media (max-width: 980px) {
+  .project-head { position: static; box-shadow: none; border-bottom-color: transparent; }
+}
+
+/* The stuck-state sentinel: a 1px marker at the header's rest position that app.js
+   observes to toggle .header-stuck. The negative margin keeps it from adding height
+   to the page. */
+.ph-sentinel { height: 1px; margin-bottom: -1px; pointer-events: none; }

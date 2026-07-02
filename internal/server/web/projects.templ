@@ -73,6 +73,11 @@ templ tokensCell(pr store.ProjectSummary) {
 
 templ ProjectPage(p Page, proj store.ProjectSummary, sessions []store.SessionSummary, remainder store.SessionRemainder, facets Facets, sel store.SessionFilter, a store.Analytics, ins store.Insights, rng string) {
 	@layout(p) {
+		// A zero-height sentinel at the header's rest position. app.js watches it with an
+		// IntersectionObserver to flag when the sticky header has pinned (see the sticky
+		// styles in projects.css); it sits outside #project-view so it survives the filter
+		// swap that replaces the header, keeping the observer attached across swaps.
+		<div class="ph-sentinel" aria-hidden="true"></div>
 		// Header, panel, quality band, and table live in one swappable region so a range
 		// or filter change refetches all of them together and they always reflect the same
 		// scope: the panel headline and the quality bars narrow with the rows instead of
