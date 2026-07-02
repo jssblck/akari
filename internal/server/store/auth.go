@@ -11,11 +11,20 @@ import (
 
 // User is an akari account.
 type User struct {
-	ID           int64
-	Username     string
+	ID       int64
+	Username string
+	// PasswordHash is the argon2id PHC string for a local account, or empty for a
+	// federated one (auth_source != "password"). It is read through COALESCE, so a
+	// NULL hash surfaces as "" rather than a scan error; the login path treats an
+	// empty hash as "no local password" and refuses it before ever calling the
+	// verifier. See HasPassword.
 	PasswordHash string
-	IsAdmin      bool
-	CreatedAt    time.Time
+	// AuthSource is how the account authenticates: "password" for a local account,
+	// or an external source ("proxy") for a federated one provisioned on the fly
+	// from a trusted assertion.
+	AuthSource string
+	IsAdmin    bool
+	CreatedAt  time.Time
 	// OverviewPublic reports whether this account has published its own usage
 	// overview to logged-out viewers at /u/<username>. It is loaded by UserByID
 	// (the account page and the overview badge read the owner's own state through
@@ -23,6 +32,12 @@ type User struct {
 	// identities.
 	OverviewPublic bool
 }
+
+// HasPassword reports whether the account can log in with a local password. A
+// federated account (provisioned from a trusted external assertion) has none, so
+// the password login path must refuse it rather than calling the verifier with an
+// empty hash.
+func (u User) HasPassword() bool { return u.PasswordHash != "" }
 
 // APIToken is a stored client token (the secret itself is never stored, only its
 // hash).
@@ -72,8 +87,8 @@ func (s *Store) Register(ctx context.Context, username, passwordHash, inviteHash
 
 			if err := tx.QueryRow(ctx,
 				`INSERT INTO users (username, password_hash, is_admin)
-				 VALUES ($1, $2, FALSE) RETURNING id, username, password_hash, is_admin, created_at`,
-				username, passwordHash).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.IsAdmin, &u.CreatedAt); err != nil {
+				 VALUES ($1, $2, FALSE) RETURNING id, username, password_hash, auth_source, is_admin, created_at`,
+				username, passwordHash).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.AuthSource, &u.IsAdmin, &u.CreatedAt); err != nil {
 				return err
 			}
 			_, err = tx.Exec(ctx, "UPDATE invite_tokens SET redeemed_by = $1 WHERE id = $2", u.ID, inviteID)
@@ -82,18 +97,21 @@ func (s *Store) Register(ctx context.Context, username, passwordHash, inviteHash
 
 		return tx.QueryRow(ctx,
 			`INSERT INTO users (username, password_hash, is_admin)
-			 VALUES ($1, $2, $3) RETURNING id, username, password_hash, is_admin, created_at`,
-			username, passwordHash, isAdmin).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.IsAdmin, &u.CreatedAt)
+			 VALUES ($1, $2, $3) RETURNING id, username, password_hash, auth_source, is_admin, created_at`,
+			username, passwordHash, isAdmin).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.AuthSource, &u.IsAdmin, &u.CreatedAt)
 	})
 	return u, err
 }
 
-// UserByUsername looks up a user by username.
+// UserByUsername looks up a user by username. password_hash is read through
+// COALESCE so a federated account's NULL hash surfaces as "" rather than a scan
+// error.
 func (s *Store) UserByUsername(ctx context.Context, username string) (User, error) {
 	var u User
 	err := s.Pool.QueryRow(ctx,
-		`SELECT id, username, password_hash, is_admin, created_at FROM users WHERE username = $1`,
-		username).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.IsAdmin, &u.CreatedAt)
+		`SELECT id, username, COALESCE(password_hash, ''), auth_source, is_admin, created_at
+		   FROM users WHERE username = $1`,
+		username).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.AuthSource, &u.IsAdmin, &u.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return User{}, ErrNotFound
 	}
@@ -105,13 +123,52 @@ func (s *Store) UserByUsername(ctx context.Context, username string) (User, erro
 func (s *Store) UserByID(ctx context.Context, id int64) (User, error) {
 	var u User
 	err := s.Pool.QueryRow(ctx,
-		`SELECT id, username, password_hash, is_admin, created_at, overview_public
+		`SELECT id, username, COALESCE(password_hash, ''), auth_source, is_admin, created_at, overview_public
 		   FROM users WHERE id = $1`,
-		id).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.IsAdmin, &u.CreatedAt, &u.OverviewPublic)
+		id).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.AuthSource, &u.IsAdmin, &u.CreatedAt, &u.OverviewPublic)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return User{}, ErrNotFound
 	}
 	return u, err
+}
+
+// UpsertProxyUser resolves the account for a username asserted by a trusted
+// reverse proxy, provisioning it on first sight (auth_source "proxy", no
+// password, not admin). It is the just-in-time provisioning behind proxy-header
+// auth: the proxy has already authenticated the user against the org's identity,
+// so the first request under a new identity mints the local account and every
+// later one resolves it.
+//
+// The common path is a plain read (the account already exists), so the steady
+// state costs one indexed lookup, not a write, on the per-request auth path. Only
+// a genuinely new identity takes the insert, and ON CONFLICT DO NOTHING absorbs
+// the race between two concurrent first requests for the same user: whichever
+// loses the insert still reads the row back.
+//
+// An existing username is adopted regardless of its auth_source, including a local
+// password account or an admin: in this deployment the proxy is the authority on
+// identity, so an assertion for "grace" is grace. The insert never rewrites an
+// existing row, so adopting a local account does not strip its password or flip
+// its source. Operators who do not want that overlap keep the local and federated
+// namespaces disjoint (the deployment notes in docs/development.md spell this out).
+func (s *Store) UpsertProxyUser(ctx context.Context, username string) (User, error) {
+	u, err := s.UserByUsername(ctx, username)
+	if err == nil {
+		return u, nil
+	}
+	if !errors.Is(err, ErrNotFound) {
+		return User{}, fmt.Errorf("look up proxy user: %w", err)
+	}
+	if _, err := s.Pool.Exec(ctx,
+		`INSERT INTO users (username, auth_source) VALUES ($1, 'proxy')
+		 ON CONFLICT (username) DO NOTHING`, username); err != nil {
+		return User{}, fmt.Errorf("provision proxy user: %w", err)
+	}
+	u, err = s.UserByUsername(ctx, username)
+	if err != nil {
+		return User{}, fmt.Errorf("read back provisioned proxy user: %w", err)
+	}
+	return u, nil
 }
 
 // ListUsers returns every account, id and username only, ordered by username, to

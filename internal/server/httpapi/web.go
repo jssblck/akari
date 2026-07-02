@@ -955,6 +955,13 @@ func (s *Server) handleLoginForm(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusUnauthorized, web.LoginPage(web.Page{Title: "Log in"}, next, "Invalid credentials."))
 		return
 	}
+	if !u.HasPassword() {
+		// A federated account (proxy-provisioned) has no local password and cannot
+		// use this form; it signs in through its external source. Refuse without
+		// revealing the account exists.
+		render(w, r, http.StatusUnauthorized, web.LoginPage(web.Page{Title: "Log in"}, next, "Invalid credentials."))
+		return
+	}
 	ok, err := auth.VerifyPassword(password, u.PasswordHash)
 	if err != nil || !ok {
 		render(w, r, http.StatusUnauthorized, web.LoginPage(web.Page{Title: "Log in"}, next, "Invalid credentials."))
