@@ -55,6 +55,20 @@ func TestLandingPageRendersHeroAndEntryPoints(t *testing.T) {
 		}
 	}
 
+	// The cost mock's token figures ride the shared tok-cell + tokenCard treatment
+	// (never a bare number), and the table closes with the remainder footer that
+	// makes the strip's totals reconcile with the visible rows.
+	for _, want := range []string{
+		`class="tok-cell"`,
+		`class="tok-tip"`,
+		`class="remainder"`,
+		`all other projects`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("landing cost mock should carry the shared token treatment; missing %q", want)
+		}
+	}
+
 	// The old prominent register/login buttons and the first-account note were never
 	// carried over: the hero CTA goes to the guide, and the foot makes no admin claim.
 	for _, unwanted := range []string{

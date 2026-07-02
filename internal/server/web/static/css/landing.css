@@ -141,9 +141,12 @@
 .mk-add::before { content: "+"; }
 
 /* ---- Cost mock: fused instrument strip + a small grid ---- */
+/* overflow stays visible so the Tokens readout's tok-tip hover card can drop
+   below the strip instead of being clipped, the same concession base.css makes
+   for the analytics strip. */
 .mock-strip {
   display: flex; border: 1px solid var(--border); border-radius: var(--r-md);
-  background: var(--surface); margin-bottom: var(--sp-md); overflow: hidden;
+  background: var(--surface); margin-bottom: var(--sp-md); overflow: visible;
 }
 .mk-stat { flex: 1; min-width: 0; padding: 10px var(--sp-lg); }
 .mk-stat + .mk-stat { border-left: 1px solid var(--border); }
@@ -153,6 +156,11 @@
 .mk-grid td { color: var(--subtext); }
 .mk-grid tbody tr:last-child td { border-bottom: none; }
 .mk-grid tbody tr:hover td { background: var(--surface-2); }
+.mk-grid tfoot td { border-bottom: none; }
+/* The cost table's frame lets the token hover cards escape; its inset padding
+   already keeps the table clear of the rounded corners, so nothing needed the
+   clip. The mobile media query below still scrolls it horizontally. */
+.landing-mock .mock-frame:has(.mk-grid) { overflow: visible; }
 /* The sparkline is a quiet steel trend, not a lilac accent (lilac is spent on the
    tool names and the one primary button); it takes the border-strong tone. */
 .mk-spark { color: var(--border-strong); display: inline-block; vertical-align: middle; width: 64px; height: 16px; }
