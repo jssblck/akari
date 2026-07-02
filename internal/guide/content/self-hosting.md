@@ -67,6 +67,9 @@ Only the database URL is required.
 | `AKARI_LISTEN` | `:8080` | Address the HTTP server binds. Falls back to `PORT` when unset. |
 | `AKARI_PUBLIC_URL` | (derived) | The externally reachable base URL (`https://akari.example.com`), used as the OAuth issuer and the base of the URLs the [MCP](./agent-access.md) authorization flow advertises. Falls back to `AKARI_URL`; when neither is set the server derives the origin per request, which is correct for a single-origin deployment behind a proxy that forwards the host. |
 | `AKARI_COOKIE_INSECURE` | unset | Set truthy to drop the `Secure` flag on session cookies, for plain-HTTP local development. Leave unset in production so cookies are HTTPS-only. |
+| `AKARI_PROXY_AUTH_HEADER` | unset | Enables reverse-proxy single sign-on. The request header a trusted proxy in front sets to the authenticated username (for example `X-Auth-Request-Preferred-Username`). When set, akari trusts that header as the signed-in user and provisions the account on first sight. Leave unset for a direct, locally-authenticated deployment. See [Single sign-on behind a trusted proxy](#single-sign-on-behind-a-trusted-proxy). |
+| `AKARI_PROXY_AUTH_SECRET` | unset | Optional shared secret the proxy must echo (in `AKARI_PROXY_AUTH_SECRET_HEADER`) for the identity header to be trusted. Defense in depth for when network isolation alone is not enough. Only consulted when `AKARI_PROXY_AUTH_HEADER` is set. |
+| `AKARI_PROXY_AUTH_SECRET_HEADER` | `X-Akari-Proxy-Secret` | The header carrying `AKARI_PROXY_AUTH_SECRET`. Only consulted when that secret is set. |
 | `AKARI_SWEEP_INTERVAL` | `1h` | How often the server reclaims orphaned content-addressed blobs. A Go duration (`30m`, `2h`); `0` disables the background sweep. |
 | `AKARI_OG_CACHE_TTL` | `1h` | How long a rendered Open Graph preview card of a published overview is served from cache before the next request re-renders it. A Go duration; must be positive. |
 | `AKARI_OG_CLEANUP_INTERVAL` | `24h` | How often the server prunes expired preview cards (older than `AKARI_OG_CACHE_TTL`) from the cache. A Go duration; `0` disables the sweep. |
@@ -92,6 +95,87 @@ the server in a browser and register to claim it. That account can then mint
 invite tokens (Account page) for everyone
 else, who redeem them when they register. The full account and token model is
 [Accounts and sharing](./accounts-and-sharing.md).
+
+## Single sign-on behind a trusted proxy
+
+akari's built-in accounts are local: a username and password per person,
+invite-gated after the first admin. To run akari inside an environment that
+already has its own identity (as a sidecar to another application, or behind your
+organization's gateway), it can instead trust identity asserted by a reverse proxy
+in front of it. This is the standard identity-aware-proxy pattern: the proxy
+authenticates the user against your identity provider, and akari trusts the
+username it forwards.
+
+### How it works
+
+Put an authenticating proxy (oauth2-proxy, Pomerium, or your own gateway) in front
+of the server. The proxy signs the user in against your IdP and forwards their
+username in a request header. Set `AKARI_PROXY_AUTH_HEADER` to that header's name,
+and the server will:
+
+- read the username from that header on every request,
+- provision an account the first time it sees a new one (with no password, and not
+  an admin), and
+- treat the request as that signed-in user at full scope, exactly like a browser
+  session.
+
+Accounts created this way are federated: they have no local password, so the
+[login form](./accounts-and-sharing.md) refuses them. Their only way in is through
+the proxy. Everything else (the feed, projects, publishing, and minting API and
+[MCP](./agent-access.md) tokens) behaves the same as for a local account.
+
+Because the proxy authenticates every request, deep-linking a user straight into a
+page needs no extra step: a link from your other application to
+`https://akari.internal/sessions/123` arrives already authenticated as whoever the
+proxy says the user is.
+
+### The trust boundary
+
+Turning this on means akari believes anyone who can set the identity header. That
+is safe only when akari is reachable **exclusively** through the proxy that sets
+it: a private network, a sidecar sharing a pod, or an ingress that always injects
+the header. Never expose a proxy-auth instance directly to a network where a client
+could set the header itself. Configure the proxy to overwrite (not append) the
+identity header, so a client cannot smuggle its own value through.
+
+For defense in depth, set `AKARI_PROXY_AUTH_SECRET` to a value shared out of band
+with the proxy. The proxy must echo it in `AKARI_PROXY_AUTH_SECRET_HEADER` (default
+`X-Akari-Proxy-Secret`), or akari ignores the identity header, so a client that
+reaches the server directly cannot forge an identity without also knowing the
+secret. It hardens the boundary; it does not replace network isolation.
+
+### Bootstrapping the admin
+
+A proxy-provisioned account is never an admin, and once any account exists local
+registration is invite-only (which needs an admin to mint the invite). So create
+the first admin through local password registration **before** you enable proxy
+auth: register in a browser to claim the bootstrap admin (see
+[The first account](#the-first-account)), then set `AKARI_PROXY_AUTH_HEADER` and
+restart. Enable proxy auth on a truly empty database and the first proxied request
+creates an ordinary non-admin account, leaving no admin to mint invites or run a
+reparse.
+
+### Example
+
+With oauth2-proxy in front, forwarding the authenticated username to the akari
+upstream it protects:
+
+```sh
+# oauth2-proxy is configured to pass the signed-in user to its upstream, e.g.
+#   --pass-user-headers  (sends X-Forwarded-Preferred-Username / X-Auth-Request-*)
+# Tell akari which of those headers carries the username:
+AKARI_PROXY_AUTH_HEADER=X-Auth-Request-Preferred-Username
+```
+
+Point oauth2-proxy's upstream at the akari server, and make sure only the proxy can
+reach akari's `AKARI_LISTEN` port (a private network or a shared pod). The exact
+header name and the flag that emits it vary by proxy and version, so match
+`AKARI_PROXY_AUTH_HEADER` to whatever your proxy actually sends.
+
+Native OIDC login (akari as a relying party, provisioning users on first login) and
+SCIM provisioning are planned, so you will be able to point akari straight at an
+identity provider and manage the account lifecycle from it. Until then, the
+reverse-proxy pattern above is the supported integration.
 
 ## Reparse
 
@@ -160,6 +244,9 @@ A short checklist for a real deployment:
   and back it up on your normal schedule.
 - **Capture logs** through your container runtime or systemd; the server logs to
   standard output and error.
+- **If you use reverse-proxy single sign-on**, make sure the server is reachable
+  only through the proxy that sets the identity header (see
+  [Single sign-on behind a trusted proxy](#single-sign-on-behind-a-trusted-proxy)).
 
 The server shuts down gracefully on interrupt: it drains in-flight requests and
 lets background work (sweep, card refresh, any reparse) wind down before the

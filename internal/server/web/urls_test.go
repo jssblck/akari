@@ -156,10 +156,10 @@ func TestOverviewPath(t *testing.T) {
 		ids  []int64
 		want string
 	}{
-		{"range only", "30d", nil, "/?range=30d"},
-		{"range and users", "7d", []int64{2, 5}, "/?range=7d&user=2&user=5"},
-		{"users no range", "", []int64{9}, "/?user=9"},
-		{"nothing", "", nil, "/"},
+		{"range only", "30d", nil, "/overview?range=30d"},
+		{"range and users", "7d", []int64{2, 5}, "/overview?range=7d&user=2&user=5"},
+		{"users no range", "", []int64{9}, "/overview?user=9"},
+		{"nothing", "", nil, "/overview"},
 	}
 	for _, c := range cases {
 		if got := OverviewPath(c.rng, c.ids); got != c.want {

@@ -7,7 +7,7 @@ import (
 )
 
 templ PublicSessionPage(d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, publicSubs []store.SessionSummary, hs HeaderStats) {
-	@publicLayout(SessionProjectLabel(d)+" session", OGMeta{}) {
+	@publicLayout(SessionProjectLabel(d)+" session", OGMeta{}, Page{}) {
 		<div class="session-page">
 			<div class="session-head">
 				<div class="session-title">
@@ -69,7 +69,7 @@ templ PublicSessionPage(d store.SessionDetail, msgs []store.Message, tools map[i
 // is client-side. The panel carries no session links, so nothing here exposes a
 // session or another user.
 templ PublicOverviewPage(username string, a store.Analytics, rng string, og OGMeta) {
-	@publicLayout(username+" usage", og) {
+	@publicLayout(username+" usage", og, Page{}) {
 		<div class="public-overview">
 			<div class="public-overview-head">
 				<h1>
@@ -98,7 +98,7 @@ templ PublicOverviewPage(username string, a store.Analytics, rng string, og OGMe
 // #public-project-view region, so the usage panel and the quality band (both scoped to
 // the range) move to the new window together.
 templ PublicProjectPage(proj store.ProjectSummary, a store.Analytics, ins store.Insights, rng string, og OGMeta) {
-	@publicLayout(ProjectTitle(proj)+" usage", og) {
+	@publicLayout(ProjectTitle(proj)+" usage", og, Page{}) {
 		<div class="public-overview">
 			<div class="public-overview-head">
 				<h1>
@@ -152,7 +152,7 @@ templ publicProjectQuality(ins store.Insights, rng string) {
 }
 
 templ PublicErrorPage(code int, message string) {
-	@publicLayout(fmt.Sprintf("%d", code), OGMeta{}) {
+	@publicLayout(fmt.Sprintf("%d", code), OGMeta{}, Page{}) {
 		<div class="empty big">
 			<h1>{ fmt.Sprintf("%d", code) }</h1>
 			<p>{ message }</p>

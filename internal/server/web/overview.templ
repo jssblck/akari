@@ -6,9 +6,9 @@ import (
 	"github.com/jssblck/akari/internal/server/store"
 )
 
-// OverviewPage is the landing surface: the fleet-wide usage panel (totals, the
-// activity grid, and model and agent breakdowns), bounded to the selected
-// trailing window and the selected users. rng is the active range key and
+// OverviewPage is the app's home surface at /overview: the fleet-wide usage panel
+// (totals, the activity grid, and model and agent breakdowns), bounded to the
+// selected trailing window and the selected users. rng is the active range key and
 // selected the chosen user ids, both already applied to a by the store; users is
 // the full account list the per-user filter offers, and the panel's controls mark
 // the active range and selection. The page carries no heading: the sidebar
@@ -27,7 +27,7 @@ templ OverviewPage(p Page, a store.Analytics, rng string, users []store.User, se
 				<a class="muted small" href="/account#publicity">Manage</a>
 			</div>
 		}
-		@analyticsPanel(a, "chart-global", RangeOptions("/", userValues(selected), rng), rng, users, selected, "#usage", true)
+		@analyticsPanel(a, "chart-global", RangeOptions("/overview", userValues(selected), rng), rng, users, selected, "#usage", true)
 	}
 }
 
@@ -232,7 +232,7 @@ templ userFilter(users []store.User, selected []int64, rng string, swap string) 
 						name="user"
 						value={ fmt.Sprintf("%d", u.ID) }
 						checked?={ sel[u.ID] }
-						hx-get="/"
+						hx-get="/overview"
 						hx-include="closest .userfilter-menu"
 						hx-target={ swap }
 						hx-select={ swap }

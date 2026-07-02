@@ -89,7 +89,7 @@ templ ReparseBanner(done, total, failed int) {
 // page reloads on a timer (data-reparse-public) and returns to the real view once
 // the reparse finishes.
 templ PublicReparsePage(done, total, failed int) {
-	@publicLayout("Reparsing", OGMeta{}) {
+	@publicLayout("Reparsing", OGMeta{}, Page{}) {
 		<div class="empty big" data-reparse-public>
 			<h1>Reparsing</h1>
 			<p>Rebuilding parsed sessions from raw bytes. The page reloads when it finishes.</p>

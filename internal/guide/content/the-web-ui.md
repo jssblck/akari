@@ -4,15 +4,17 @@ The web UI is where a human reads what the agents did. It is server-rendered: a
 persistent left sidebar carries the primary sections (Overview, Insights,
 Projects, Sessions, Account, and this Guide), with the signed-in user and a
 log-out control at its foot. Reading the UI needs a full-scope credential, which
-in practice is a browser session; signing in gives you that. Every timestamp
-renders in your own timezone: the browser reports its zone in a cookie once, and
-the server formats against it from the next page on.
+in practice is a browser session; signing in gives you that. The site root (`/`)
+is the public homepage, shown to everyone; signing in takes you to the app,
+whose home is the Overview at `/overview`. Every timestamp renders in your own
+timezone: the browser reports its zone in a cookie once, and the server formats
+against it from the next page on.
 
 ## Overview
 
-**Overview** is the landing surface: fleet-wide usage bounded to a trailing
-window. Pick the window (7, 30, or 90 days, a year, or all of history) and every
-figure on the panel follows it:
+**Overview** (at `/overview`) is the app's home: fleet-wide usage bounded to a
+trailing window. Pick the window (7, 30, or 90 days, a year, or all of history)
+and every figure on the panel follows it:
 
 - **Cost, combined tokens, and session totals** for the window, as stable tabular
   figures. A partial cost (some session used a model the rate table does not

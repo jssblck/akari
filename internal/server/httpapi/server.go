@@ -151,6 +151,7 @@ func (s *Server) Routes() http.Handler {
 	// ungated: gating it would write HTML into the event stream, and the gated
 	// session page does not open it anyway.
 	mux.HandleFunc("GET /{$}", s.handleRoot)
+	mux.HandleFunc("GET /overview", s.requireReadHTML(s.gateParsed(s.handleOverview)))
 	mux.HandleFunc("GET /insights", s.requireReadHTML(s.gateParsed(s.handleInsights)))
 	mux.HandleFunc("GET /projects", s.requireReadHTML(s.gateParsed(s.handleProjectsIndex)))
 	mux.HandleFunc("GET /sessions", s.requireReadHTML(s.gateParsed(s.handleSessions)))

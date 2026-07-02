@@ -2,12 +2,12 @@
 name: akari
 description: A self-hosted instrument for reading AI coding-agent sessions.
 colors:
-  bg: "#14131b"
-  surface: "#1b1a24"
-  surface-2: "#232230"
-  surface-3: "#2b2939"
-  border: "#383548"
-  border-strong: "#4a4660"
+  bg: "#0c0a0e"
+  surface: "#18161b"
+  surface-2: "#242228"
+  surface-3: "#302e35"
+  border: "#3e3b44"
+  border-strong: "#57535f"
   text: "#e6e3f0"
   subtext: "#c5c1d6"
   muted: "#9a94ad"
@@ -19,8 +19,8 @@ colors:
   err: "#ef9aa9"
   warn: "#f0c592"
   info: "#92cfd4"
-  msg-user: "#272336"
-  msg-assistant: "#1f1f2b"
+  msg-user: "#201e26"
+  msg-assistant: "#1b1b1f"
   viz-1-lilac: "#c6a8f2"
   viz-2-teal: "#88cfce"
   viz-3-peach: "#f0bf92"
@@ -217,17 +217,22 @@ never the brand. For intensity ramps (a heatmap, a usage density), step the
 lightness of Machined Lilac rather than mixing hues.
 
 ### Neutral
-- **The Room** (`#14131b`): the page ground, a deep violet-tinted near-black.
-- **Surface** (`#1b1a24`) / **Surface Raised** (`#232230`) / **Surface Elevated**
-  (`#2b2939`): the tonal ladder. Depth is built by stepping these, not by shadow.
-- **Scribe Line** (`#383548`) and **Scribe Strong** (`#4a4660`): 1px hairline
+The substrate is deliberately deep and near-neutral: a genuinely dark ground with
+only a faint violet cast that grows no stronger up the ladder. Desaturation here is
+what lets the pastels and text carry the contrast instead of a uniform lilac haze,
+so the neutrals hold roughly half the chroma of the signal hues.
+- **The Room** (`#0c0a0e`): the page ground, a deep violet-tinted near-black.
+- **Surface** (`#18161b`) / **Surface Raised** (`#242228`) / **Surface Elevated**
+  (`#302e35`): the tonal ladder. Depth is built by stepping these, not by shadow;
+  the ground-to-Surface step is wide enough that a panel reads as clearly lifted.
+- **Scribe Line** (`#3e3b44`) and **Scribe Strong** (`#57535f`): 1px hairline
   borders. The default frame is one scribed line, not a heavy box.
 - **Text** (`#e6e3f0`): primary reading color. **Subtext** (`#c5c1d6`): secondary.
   **Muted** (`#9a94ad`): labels, captions, and placeholders (held to full body
   contrast, never washed out). **Faint** (`#6f6987`): non-text dividers only, never
   type.
-- **Message surfaces**: user turns sit on warm violet **`#272336`**, assistant
-  turns on cooler steel **`#1f1f2b`**, so author is legible by tone alone.
+- **Message surfaces**: user turns sit on warm violet **`#201e26`**, assistant
+  turns on cooler steel **`#1b1b1f`**, so author is legible by tone alone.
 
 ### Named Rules
 **The One Voice Rule.** Machined Lilac covers at most 10% of any screen. If two
