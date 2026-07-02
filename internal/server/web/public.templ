@@ -79,8 +79,66 @@ templ PublicOverviewPage(username string, a store.Analytics, rng string, og OGMe
 				</h1>
 				<span class="tag public">public</span>
 			</div>
-			@analyticsPanel(a, "chart-public", RangeOptions(PublicOverviewPath(username), nil, rng), rng, nil, nil, "#usage")
+			@analyticsPanel(a, "chart-public", RangeOptions(PublicOverviewPath(username), nil, rng), rng, nil, nil, "#usage", true)
 		</div>
+	}
+}
+
+// PublicProjectPage is the logged-out view of one project's published usage overview
+// at /p/<id>. It reuses the signed-in project page's building blocks (the analytics
+// panel and the quality band), scoped by the handler to this one project across every
+// account, so the totals, activity grid, by-model/by-agent breakdowns, and the
+// quality/tools/churn band read identically. Two things are deliberately absent versus
+// the signed-in page: the session table (sessions stay private unless published one at
+// a time) and the by-user cost breakdown (analyticsPanel's showUsers is false, so the
+// accounts that ran in the repo are not named). The quality band's grade and outcome
+// bars render plain rather than linking into the private session feed, so nothing here
+// exposes a session or a username. The panel's per-user filter is absent (users is
+// nil), and the range buttons refetch the public path, htmx-swapping #usage just as the
+// authed overview does.
+templ PublicProjectPage(proj store.ProjectSummary, a store.Analytics, ins store.Insights, rng string, og OGMeta) {
+	@publicLayout(ProjectTitle(proj)+" usage", og) {
+		<div class="public-overview">
+			<div class="public-overview-head">
+				<h1>
+					<span>{ ProjectTitle(proj) }</span>
+					<span class="sep">/</span>
+					<span class="muted">usage</span>
+				</h1>
+				<span class="tag public">public</span>
+			</div>
+			@analyticsPanel(a, "chart-public", RangeOptions(PublicProjectPath(proj.ID), nil, rng), rng, nil, nil, "#usage", false)
+			@publicProjectQuality(ins, rng)
+		</div>
+	}
+}
+
+// publicProjectQuality is the drill-free counterpart to projectQuality for the public
+// project overview: the same distilled quality band (grades, outcomes, archetypes, a
+// tools row, and the churn list), scoped to the project and window by the handler. Its
+// grade and outcome bars use the Plain bar builders, so they render as bars rather than
+// links into the signed-in session feed a logged-out viewer cannot open. Like the
+// signed-in band it renders only when the scope has graded sessions (ins.HasData), so a
+// window with no sessions shows no empty band under the usage panel.
+templ publicProjectQuality(ins store.Insights, rng string) {
+	if ins.HasData() {
+		<section class="proj-quality">
+			<div class="proj-quality-head">
+				<span class="label">Quality</span>
+				<span class="muted small ins-caption">sessions that started in this window</span>
+			</div>
+			<div class="ins-grid">
+				@distributionPanel("Grades", "A to F; unscored means the session was never graded", GradedNote(ins.Quality), GradeBarsPlain(ins.Quality.Grades))
+				@distributionPanel("Outcomes", "how each session ended", "", OutcomeBarsPlain(ins.Quality.Outcomes))
+				@distributionPanel("Archetypes", "session shape by length and turns", "", ArchetypeBars(ins.Archetypes))
+			</div>
+			<div class="ins-tools proj-quality-tools">
+				@toolsPanel(ins.Tools)
+			</div>
+			<div class="ins-churn proj-quality-churn">
+				@churnPanel(ins.Churn, "files edited more than once in this window", false)
+			</div>
+		</section>
 	}
 }
 

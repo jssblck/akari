@@ -316,6 +316,20 @@ func ArchetypeBars(counts []store.LabeledCount) []DistRow {
 	return distRows(counts, titleCase, archetypeBarColor, nil)
 }
 
+// GradeBarsPlain and OutcomeBarsPlain are the drill-free counterparts to GradeBars
+// and OutcomeBars, for the public project overview. Passing a nil href builder leaves
+// every row's Href empty, so distributionPanel renders plain bars instead of links
+// into the private session feed: the public page shows the quality distribution but
+// keeps the sessions behind it private (they publish one at a time, not through the
+// project's overview).
+func GradeBarsPlain(counts []store.LabeledCount) []DistRow {
+	return distRows(counts, gradeLabel, gradeBarColor, nil)
+}
+
+func OutcomeBarsPlain(counts []store.LabeledCount) []DistRow {
+	return distRows(counts, OutcomeLabel, outcomeBarColor, nil)
+}
+
 // drillRange normalizes an Insights window key for a drill-through link. The "all" window
 // applies no bound, so it is dropped rather than carried as a chip that would window
 // nothing (the bare, unwindowed session list is what "all" means). Every other key rides

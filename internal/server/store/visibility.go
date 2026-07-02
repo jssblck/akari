@@ -93,6 +93,57 @@ func (s *Store) UnpublishOverview(ctx context.Context, userID int64) error {
 	return nil
 }
 
+// PublishProjectOverview marks a project's usage overview public, so /p/<id>
+// resolves for logged-out viewers. Projects are fleet-global rather than owned, so
+// (unlike PublishSession) there is no owner check: any signed-in caller may flip the
+// gate, matching the route's requireFull guard. The address is the project id, so
+// there is no capability id to mint. A missing project touches no row and is
+// ErrNotFound rather than a silent no-op.
+func (s *Store) PublishProjectOverview(ctx context.Context, projectID int64) error {
+	tag, err := s.Pool.Exec(ctx,
+		`UPDATE projects SET overview_public = TRUE WHERE id = $1`, projectID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UnpublishProjectOverview hides a project's public overview by clearing the gate
+// flag. The URL is the project id and never changes, so re-publishing later brings
+// the same /p/<id> back.
+func (s *Store) UnpublishProjectOverview(ctx context.Context, projectID int64) error {
+	tag, err := s.Pool.Exec(ctx,
+		`UPDATE projects SET overview_public = FALSE WHERE id = $1`, projectID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// PublicProjectOverview resolves a project id to its identity for the logged-out
+// overview page, only while that project's overview is public. The flag is folded
+// into the WHERE clause, so an unknown or unpublished id yields ErrNotFound and the
+// link 404s. It returns the same identity fields Project does (no rollups), which the
+// public page pairs with a windowed analytics read.
+func (s *Store) PublicProjectOverview(ctx context.Context, id int64) (ProjectSummary, error) {
+	var p ProjectSummary
+	err := s.Pool.QueryRow(ctx,
+		`SELECT id, remote_key, host, owner, repo, display_name, kind, overview_public
+		   FROM projects
+		  WHERE id = $1 AND overview_public = TRUE`, id).
+		Scan(&p.ID, &p.RemoteKey, &p.Host, &p.Owner, &p.Repo, &p.DisplayName, &p.Kind, &p.OverviewPublic)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ProjectSummary{}, ErrNotFound
+	}
+	return p, err
+}
+
 // PublicOverviewUser resolves a username to its account for the logged-out
 // overview page, only while that account's overview is public. The flag is folded
 // into the WHERE clause, so an unknown or unpublished name yields ErrNotFound and

@@ -404,6 +404,25 @@ func PublicOverviewHref(username string) templ.SafeURL {
 	return templ.URL(PublicOverviewPath(username))
 }
 
+// PublicProjectPath is the plain-string path of a project's public usage overview,
+// rooted at /p/<id>. The range selector on the public page builds its buttons from
+// this base (via RangeOptions), so switching the window refetches the public path
+// rather than the authed project page, and the signed-in project page shows it as
+// the shareable link.
+func PublicProjectPath(id int64) string { return fmt.Sprintf("/p/%d", id) }
+
+// PublicProjectHref is the sanitized href form of PublicProjectPath, for the
+// project page's share link and public badge.
+func PublicProjectHref(id int64) templ.SafeURL {
+	return templ.URL(PublicProjectPath(id))
+}
+
+// ProjectPublishPath and ProjectUnpublishPath are the POST targets for the project
+// page's publicity control, mirroring the account overview toggles. They are plain
+// strings the templ form actions wrap in templ.SafeURL.
+func ProjectPublishPath(id int64) string   { return fmt.Sprintf("/projects/%d/overview/publish", id) }
+func ProjectUnpublishPath(id int64) string { return fmt.Sprintf("/projects/%d/overview/unpublish", id) }
+
 // SessionBlobBase and PublicBlobBase are the per-session prefixes under which CAS
 // blobs are served, for the authenticated and logged-out views respectively. A
 // blob URL is the base plus "/blob/{sha256}"; serving is gated on the session

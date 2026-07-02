@@ -79,6 +79,7 @@ templ ProjectPage(p Page, proj store.ProjectSummary, sessions []store.SessionSum
 			if IsLocalKind(proj.Kind) {
 				<span class="muted small mono">{ LocalPath(proj) }</span>
 			}
+			@projectPublicity(proj)
 		</div>
 		// Panel, quality band, and table live in one swappable region so a range or filter
 		// change refetches all three together and they always reflect the same scope: the
@@ -86,7 +87,7 @@ templ ProjectPage(p Page, proj store.ProjectSummary, sessions []store.SessionSum
 		// project-wide while the rows filter. The controls inside target #project-view for
 		// that reason.
 		<div id="project-view">
-			@analyticsPanel(a, "chart-project", ProjectRangeOptions(proj.ID, sel, rng), rng, nil, nil, "#project-view")
+			@analyticsPanel(a, "chart-project", ProjectRangeOptions(proj.ID, sel, rng), rng, nil, nil, "#project-view", true)
 			@projectQuality(proj.ID, sel, ins, rng)
 			<section>
 				<div class="panel-head">
@@ -98,6 +99,36 @@ templ ProjectPage(p Page, proj store.ProjectSummary, sessions []store.SessionSum
 				</div>
 			</section>
 		</div>
+	}
+}
+
+// projectPublicity is the project page's control for exposing this project's usage
+// overview to logged-out viewers at /p/<id>. It mirrors the account page's overview
+// publicity: a published project shows the public tag, a View link to the public
+// page, and a make-private control; an unpublished one offers the publish button.
+// The public page is aggregate only (no session list, no by-user breakdown), so
+// publishing shares the repo's usage shape without exposing a session or which
+// accounts ran in it.
+//
+// The control is offered only for remote (git-origin) projects: a standalone or
+// orphaned folder's title is a local filesystem path (ProjectTitle falls back to the
+// folder name), which a public page should not surface, so those keep no publicity
+// toggle.
+templ projectPublicity(proj store.ProjectSummary) {
+	if !IsLocalKind(proj.Kind) {
+		if proj.OverviewPublic {
+			<span class="overview-public-badge">
+				<span class="tag public">public</span>
+				<a class="share-link" href={ PublicProjectHref(proj.ID) } target="_blank" rel="noopener" title="Public project overview link">View public page</a>
+				<form method="post" action={ templ.SafeURL(ProjectUnpublishPath(proj.ID)) } class="inline">
+					<button class="secondary small" type="submit" title="Hide the public page. The URL is the project id, so making it public again brings the same link back.">Make private</button>
+				</form>
+			</span>
+		} else {
+			<form method="post" action={ templ.SafeURL(ProjectPublishPath(proj.ID)) } class="inline">
+				<button class="ghost small" type="submit" title="Anyone can read this project's usage overview while it is public. Sessions stay private.">Make overview public</button>
+			</form>
+		}
 	}
 }
 

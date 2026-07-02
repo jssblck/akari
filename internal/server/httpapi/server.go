@@ -125,6 +125,10 @@ func (s *Server) Routes() http.Handler {
 	// one account, and gated during a reparse like the public session view (it shows
 	// parsed data).
 	mux.HandleFunc("GET /u/{username}", s.gatePublicParsed(s.handlePublicOverview))
+	// A project's published usage overview at /p/<id>: aggregate, scoped to that one
+	// project across every account, with no session list. Gated during a reparse like
+	// the other public parsed pages.
+	mux.HandleFunc("GET /p/{id}", s.gatePublicParsed(s.handlePublicProject))
 	// The Open Graph preview card for that overview. It serves PNG bytes rendered on
 	// demand and held in a TTL cache (see handlePublicOverviewOGImage), so it is not
 	// reparse-gated: the more specific pattern wins over /u/{username} for this exact
@@ -157,6 +161,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /sessions/{id}/publish", s.requireFull(s.handlePublishSession))
 	mux.HandleFunc("POST /sessions/{id}/unpublish", s.requireFull(s.handleUnpublishSession))
 	mux.HandleFunc("POST /sessions/{id}/delete", s.requireFull(s.handleDeleteSession))
+	// A project's overview publicity toggle. Projects are fleet-global, so this needs
+	// only a full-scope credential (any signed-in user), not an owner check.
+	mux.HandleFunc("POST /projects/{id}/overview/publish", s.requireFull(s.handlePublishProjectOverview))
+	mux.HandleFunc("POST /projects/{id}/overview/unpublish", s.requireFull(s.handleUnpublishProjectOverview))
 
 	// Account stays fully available during a reparse: it is not parsed data, and it
 	// hosts the reparse status and the admin Reparse button.
