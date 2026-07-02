@@ -23,6 +23,9 @@ func TestFaviconLinksEmbeddedAssets(t *testing.T) {
 	}{
 		{"app layout", renderComponent(t, LoginPage(Page{Title: "Log in"}, "/", ""))},
 		{"public layout", renderComponent(t, PublicErrorPage(404, "gone"))},
+		// The docs page carries its own hand-rolled head, so it needs the icon links
+		// declared independently of the two shared layouts.
+		{"guide layout", renderComponent(t, GuidePage(sampleGuideView()))},
 	} {
 		for _, want := range wantLinks {
 			if !strings.Contains(tc.html, want) {

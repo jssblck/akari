@@ -9,6 +9,36 @@ import (
 	"github.com/jssblck/akari/internal/server/store"
 )
 
+// TestSessionPageTitle pins the browser-tab title for a session view: the
+// session's own summary wins when it has one, and an untitled session falls back
+// to a stable "<project> session" label (the folder name for a local project, the
+// remote key otherwise), never a bare id.
+func TestSessionPageTitle(t *testing.T) {
+	titled := store.SessionDetail{SessionSummary: store.SessionSummary{Title: "Fix the timezone pass"}, ProjectKey: "akari", ProjectKind: "remote"}
+	if got := SessionPageTitle(titled); got != "Fix the timezone pass" {
+		t.Errorf("titled session = %q, want the session title", got)
+	}
+	remote := store.SessionDetail{ProjectKey: "github.com/jssblck/akari", ProjectKind: "remote"}
+	if got := SessionPageTitle(remote); got != "github.com/jssblck/akari session" {
+		t.Errorf("untitled remote session = %q", got)
+	}
+	local := store.SessionDetail{ProjectName: "akari", ProjectKey: "local:hopper:/src/akari", ProjectKind: "standalone"}
+	if got := SessionPageTitle(local); got != "akari session" {
+		t.Errorf("untitled local session = %q, want the folder name, not the synthetic key", got)
+	}
+}
+
+// TestErrorTitle pins the public error page's tab title: a known status pairs the
+// code with its standard reason, and an unknown code degrades to the number alone.
+func TestErrorTitle(t *testing.T) {
+	if got := errorTitle(404); got != "404 Not Found" {
+		t.Errorf("404 title = %q", got)
+	}
+	if got := errorTitle(499); got != "499" {
+		t.Errorf("unknown-code title = %q, want the bare number", got)
+	}
+}
+
 // TestDetailLabel pins the chip-summary rendering for store.ToolCallView.Detail:
 // whitespace of any kind collapses to single spaces so a multi-line shell
 // command reads as one scannable line, and the output is capped at 80 runes
