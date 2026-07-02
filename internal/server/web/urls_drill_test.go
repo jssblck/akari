@@ -153,9 +153,9 @@ func TestSessionSortOptionsHasCost(t *testing.T) {
 func TestSplitSnippetMalformed(t *testing.T) {
 	text := "hello world"
 	for _, s := range []store.SearchSnippet{
-		{Text: text, MatchStart: -1, MatchEnd: 3},         // negative start
-		{Text: text, MatchStart: 2, MatchEnd: 999},        // end past the text
-		{Text: text, MatchStart: 8, MatchEnd: 3},          // start after end
+		{Text: text, MatchStart: -1, MatchEnd: 3},  // negative start
+		{Text: text, MatchStart: 2, MatchEnd: 999}, // end past the text
+		{Text: text, MatchStart: 8, MatchEnd: 3},   // start after end
 	} {
 		parts := SplitSnippet(s)
 		if parts.Before != text || parts.Match != "" || parts.After != "" {
