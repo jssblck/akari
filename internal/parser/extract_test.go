@@ -318,10 +318,29 @@ func TestSentinelDetail(t *testing.T) {
 			want:  `"detail":"https://ada.example/spec"`,
 		},
 		{
+			name:  "websearch query",
+			agent: AgentClaude,
+			line:  `{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"WebSearch","input":{"query":"Ada Lovelace notes"}}]}}`,
+			want:  `"detail":"Ada Lovelace notes"`,
+		},
+		{
 			name:  "agent description",
 			agent: AgentClaude,
 			line:  `{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Agent","input":{"description":"explore the store layer"}}]}}`,
 			want:  `"detail":"explore the store layer"`,
+		},
+		{
+			name:    "skill is the last-priority candidate",
+			agent:   AgentClaude,
+			line:    `{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Skill","input":{"skill":"stop-slop","args":"--fix"}}]}}`,
+			want:    `"detail":"stop-slop"`,
+			absentS: `"detail":"--fix"`,
+		},
+		{
+			name:  "empty command falls through to description",
+			agent: AgentClaude,
+			line:  `{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"","description":"a real description"}}]}}`,
+			want:  `"detail":"a real description"`,
 		},
 		{
 			name:   "tool result never gets a detail",

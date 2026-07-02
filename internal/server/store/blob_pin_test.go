@@ -256,8 +256,9 @@ func TestApplyDeltaReferencesUploadedBlob(t *testing.T) {
 // summary the UI shows when a call has no file_path) is stored and read back on
 // both projection paths: the inline body path (the server writes the blob) and the
 // client-lifted sentinel path (the reference is recorded with the detail already
-// derived off the sentinel). It is DB-gated and skips cleanly without a test
-// database, like the other store tests.
+// derived off the sentinel), on both the unbounded ToolCalls read and the
+// ordinal-windowed ToolCallsInRange a bounded transcript page uses. It is DB-gated
+// and skips cleanly without a test database, like the other store tests.
 func TestToolCallDetailRoundTrip(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -282,7 +283,10 @@ func TestToolCallDetailRoundTrip(t *testing.T) {
 	}
 
 	delta := store.ProjectionDelta{
-		Messages: []store.MessageDelta{{Ordinal: 0, Role: "assistant", Content: "x", HasToolUse: true}},
+		Messages: []store.MessageDelta{
+			{Ordinal: 0, Role: "assistant", Content: "x", HasToolUse: true},
+			{Ordinal: 1, Role: "assistant", Content: "y", HasToolUse: true},
+		},
 		ToolCalls: []store.ProjToolCall{
 			{
 				MessageOrdinal: 0, CallIndex: 0, ToolName: "Grep", Category: "search",
@@ -295,6 +299,15 @@ func TestToolCallDetailRoundTrip(t *testing.T) {
 				Detail:      "go build ./...",
 				InputSHA256: liftedSHA, InputBytes: int64(len(liftedBody)), InputMediaType: "application/json", CallUID: "c-sentinel",
 			},
+			// A third call on a later message, outside the window ToolCallsInRange
+			// below asks for, so the test also pins that the range is exclusionary
+			// and not just additive.
+			{
+				MessageOrdinal: 1, CallIndex: 0, ToolName: "Grep", Category: "search",
+				Detail:         "func Winlock",
+				InputBody:      `{"pattern":"func Winlock"}`,
+				InputMediaType: "application/json", CallUID: "c-out-of-range",
+			},
 		},
 	}
 	if err := st.ApplyProjectionDelta(ctx, sid, delta); err != nil {
@@ -305,8 +318,8 @@ func TestToolCallDetailRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read tool calls: %v", err)
 	}
-	if len(calls) != 2 {
-		t.Fatalf("read %d tool calls, want 2", len(calls))
+	if len(calls) != 3 {
+		t.Fatalf("read %d tool calls, want 3", len(calls))
 	}
 	if got, want := calls[0].Detail, "func Reduce"; got != want {
 		t.Errorf("inline-path detail = %q, want %q", got, want)
@@ -318,6 +331,24 @@ func TestToolCallDetailRoundTrip(t *testing.T) {
 	// the CAS reference rather than an inline body.
 	if calls[1].InputSHA != liftedSHA {
 		t.Errorf("sentinel-path input sha = %q, want %q", calls[1].InputSHA, liftedSHA)
+	}
+
+	// ToolCallsInRange is the bounded-read sibling of ToolCalls (a transcript page
+	// fetches only the calls for the messages it returned); it must carry Detail
+	// through the same coalesce as the unbounded read, and the ordinal window must
+	// exclude the call that hangs on message 1.
+	inRange, err := st.ToolCallsInRange(ctx, sid, 0, 0)
+	if err != nil {
+		t.Fatalf("read tool calls in range: %v", err)
+	}
+	if len(inRange) != 2 {
+		t.Fatalf("read %d tool calls in range [0,0], want 2 (the message-1 call must be excluded)", len(inRange))
+	}
+	if got, want := inRange[0].Detail, "func Reduce"; got != want {
+		t.Errorf("ranged inline-path detail = %q, want %q", got, want)
+	}
+	if got, want := inRange[1].Detail, "go build ./..."; got != want {
+		t.Errorf("ranged sentinel-path detail = %q, want %q", got, want)
 	}
 }
 

@@ -62,9 +62,9 @@ func seedSession(t *testing.T, st *store.Store) seeded {
 		t.Fatalf("put blob: %v", err)
 	}
 	if _, err := st.Pool.Exec(ctx,
-		`INSERT INTO tool_calls (session_id, message_ordinal, call_index, tool_name, category, file_path,
+		`INSERT INTO tool_calls (session_id, message_ordinal, call_index, tool_name, category, file_path, detail,
 		   input_sha256, input_bytes, input_media_type, result_status)
-		 VALUES ($1,1,0,'Bash','exec','', $2, $3, 'application/json','ok')`,
+		 VALUES ($1,1,0,'Bash','exec','','ls -1', $2, $3, 'application/json','ok')`,
 		sessionID, inputSHA, len(toolBody)); err != nil {
 		t.Fatalf("tool_call: %v", err)
 	}
@@ -106,6 +106,19 @@ func connect(t *testing.T, st *store.Store) *mcpsdk.ClientSession {
 
 func callJSON(t *testing.T, sess *mcpsdk.ClientSession, name string, args any) map[string]any {
 	t.Helper()
+	text := rawToolResult(t, sess, name, args)
+	var out map[string]any
+	if err := json.Unmarshal([]byte(text), &out); err != nil {
+		t.Fatalf("call %s: unmarshal %q: %v", name, text, err)
+	}
+	return out
+}
+
+// rawToolResult returns a tool call's result as the literal JSON text the wire
+// carries, for a test that needs to pin an exact field spelling (a key name, a
+// value's quoting) rather than the decoded map callJSON produces.
+func rawToolResult(t *testing.T, sess *mcpsdk.ClientSession, name string, args any) string {
+	t.Helper()
 	res, err := sess.CallTool(context.Background(), &mcpsdk.CallToolParams{Name: name, Arguments: args})
 	if err != nil {
 		t.Fatalf("call %s: %v", name, err)
@@ -117,11 +130,7 @@ func callJSON(t *testing.T, sess *mcpsdk.ClientSession, name string, args any) m
 	if !ok {
 		t.Fatalf("call %s: content %T not text", name, res.Content[0])
 	}
-	var out map[string]any
-	if err := json.Unmarshal([]byte(text.Text), &out); err != nil {
-		t.Fatalf("call %s: unmarshal %q: %v", name, text.Text, err)
-	}
-	return out
+	return text.Text
 }
 
 func TestToolsReturnSeededData(t *testing.T) {
@@ -157,6 +166,15 @@ func TestToolsReturnSeededData(t *testing.T) {
 	calls, _ := tr["tool_calls"].([]any)
 	if len(calls) != 1 || calls[0].(map[string]any)["input_sha256"] != fx.inputSHA {
 		t.Fatalf("transcript tool_calls wrong: %+v", calls)
+	}
+	// The tool call's derived detail (the command summary) rides on the DTO the same
+	// way file_path does, so a caller reading the transcript can scan the command
+	// without a separate read_tool_body round trip.
+	if calls[0].(map[string]any)["detail"] != "ls -1" {
+		t.Fatalf("transcript tool_calls missing detail: %+v", calls)
+	}
+	if raw := rawToolResult(t, sess, "get_session", map[string]any{"session_id": fx.sessionID}); !strings.Contains(raw, `"detail": "ls -1"`) {
+		t.Fatalf("get_session transcript JSON missing literal detail field: %s", raw)
 	}
 
 	// read_tool_body returns the CAS body as text, gated by the referencing session.

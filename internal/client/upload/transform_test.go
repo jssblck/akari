@@ -419,6 +419,45 @@ func TestPrefixDigestRecomputesBigBodyKeys(t *testing.T) {
 	}
 }
 
+// TestPrefixDigestRecomputesBigBodyKeysWithDetail is
+// TestPrefixDigestRecomputesBigBodyKeys's sibling for a big tool INPUT rather than a
+// result: rewriteForDigest's streaming branch calls parser.SentinelBytes with
+// loc.Detail alongside loc.FilePath, so a cold digest that rebuilds the sentinel
+// without the detail would produce different bytes than the transform actually
+// uploaded. A big command string pushes the line past the big-line threshold, so the
+// digest is forced through the same streaming rewriteForDigest branch the result-body
+// case above exercises, this time with a detail candidate on the input.
+func TestPrefixDigestRecomputesBigBodyKeysWithDetail(t *testing.T) {
+	setBigLineThreshold(t, 256)
+	// A command past the big-line threshold but still under the sentinel's detail
+	// cap, and compressible, so the cold path streams and zstd-compresses it while
+	// the input's "command" key stays the sentinel's detail candidate rather than
+	// falling through to description.
+	bigCommand := "go test ./... " + strings.Repeat("-run TestSomethingLong ", 20)
+	content := `{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":` +
+		jsonString(bigCommand) + `,"description":"run the suite"}}]}}` + "\n"
+	f, size := openTemp(t, content)
+
+	// The transform produces the canonical transformed bytes, sentinel detail included.
+	transformed := runTransform(t, f, 0, size, "claude", true).data
+	if !strings.Contains(string(transformed), `"detail":"`+bigCommand+`"`) {
+		t.Fatalf("transformed line lost the detail for the big command: %s", transformed)
+	}
+
+	// The cold path must recompute a byte-identical transformed prefix, detail
+	// included, by re-streaming and re-deriving the sentinel over the file span.
+	h, orig, ok, err := transformPrefixDigest(context.Background(), f, "claude", size, int64(len(transformed)), casenc.New())
+	if err != nil || !ok {
+		t.Fatalf("cold prefix digest over a big input with a detail: ok=%v err=%v", ok, err)
+	}
+	if orig != size {
+		t.Fatalf("recovered original base = %d, want the full size %d", orig, size)
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); got != hexSHA(string(transformed)) {
+		t.Fatal("cold prefix digest does not match the transformed bytes the upload produced: a rewriteForDigest that dropped the detail would land here")
+	}
+}
+
 // TestRewindResetsBothCursors confirms rewind drops the transformed and original
 // cursors together so a re-upload starts from zero.
 func TestRewindResetsBothCursors(t *testing.T) {
