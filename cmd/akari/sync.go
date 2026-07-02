@@ -50,9 +50,20 @@ func syncDeadline(ctx context.Context, limit time.Duration) (context.Context, co
 	return context.WithTimeout(ctx, limit)
 }
 
-// runSync performs a single discovery pass and uploads everything new since the
-// server's cursor for each file, then prints a tally and exits.
-func runSync(ctx context.Context, args []string) error {
+// syncOptions is the parsed, validated form of `akari sync`'s flags. It is split
+// out from runSync so the flag wiring, including whether --finalize reaches the
+// syncer, is testable without a config file, discovery, or a live server.
+type syncOptions struct {
+	configPath  string
+	dryRun      bool
+	timeLimit   time.Duration
+	concurrency int
+	finalize    bool
+}
+
+// parseSyncArgs parses and validates the sync flag set. Validation happens here so a
+// bad --time-limit or --concurrency fails fast, before any config or discovery work.
+func parseSyncArgs(args []string) (syncOptions, error) {
 	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
 	configPath := fs.String("config", "", "config file path (default: platform config dir)")
 	dryRun := fs.Bool("dry-run", false, "resolve and report without uploading")
@@ -60,20 +71,36 @@ func runSync(ctx context.Context, args []string) error {
 	concurrency := fs.Int("concurrency", defaultConcurrency(), "max files to sync in parallel; each file already parallelizes its own body uploads under a shared limiter, so keep this modest")
 	finalize := fs.Bool("finalize", false, "treat every session as terminal: flush a Codex session's trailing turn now instead of waiting for the idle settle window. Use on ephemeral hosts (CI, cloud sandboxes) whose window never elapses before teardown")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return syncOptions{}, err
 	}
 	timeLimit, err := time.ParseDuration(*timeLimitStr)
 	if err != nil {
-		return fmt.Errorf("invalid --time-limit: %w", err)
+		return syncOptions{}, fmt.Errorf("invalid --time-limit: %w", err)
 	}
 	if timeLimit < 0 {
-		return fmt.Errorf("invalid --time-limit: must not be negative")
+		return syncOptions{}, fmt.Errorf("invalid --time-limit: must not be negative")
 	}
 	if *concurrency < 1 {
-		return fmt.Errorf("invalid --concurrency: must be at least 1")
+		return syncOptions{}, fmt.Errorf("invalid --concurrency: must be at least 1")
+	}
+	return syncOptions{
+		configPath:  *configPath,
+		dryRun:      *dryRun,
+		timeLimit:   timeLimit,
+		concurrency: *concurrency,
+		finalize:    *finalize,
+	}, nil
+}
+
+// runSync performs a single discovery pass and uploads everything new since the
+// server's cursor for each file, then prints a tally and exits.
+func runSync(ctx context.Context, args []string) error {
+	opts, err := parseSyncArgs(args)
+	if err != nil {
+		return err
 	}
 
-	cfg, err := config.LoadClient(*configPath)
+	cfg, err := config.LoadClient(opts.configPath)
 	if err != nil {
 		return err
 	}
@@ -90,12 +117,12 @@ func runSync(ctx context.Context, args []string) error {
 
 	resolver := resolve.New()
 	client := upload.New(&http.Client{Timeout: 60 * time.Second}, cfg.ServerURL, cfg.Token)
-	sync := syncer.New(resolver, client, machine, *finalize)
+	sync := syncer.New(resolver, client, machine, opts.finalize)
 
 	// A time limit is a self-inflicted graceful shutdown: deadline wraps the
 	// shutdown context so the driver reads an elapsed limit exactly as it reads a
 	// first Ctrl-C, stopping new files while letting in-flight ones finish.
-	deadline, cancel := syncDeadline(ctx, timeLimit)
+	deadline, cancel := syncDeadline(ctx, opts.timeLimit)
 	defer cancel()
 
 	// work is detached from ctx so files currently being uploaded finish to a clean
@@ -109,7 +136,7 @@ func runSync(ctx context.Context, args []string) error {
 	// at once (the resolver guards its cache, the uploader serializes per path and
 	// shares its limiter and encoder across files), so syncAll fans them out.
 	run := func(c context.Context, f discover.File) outcome {
-		if *dryRun {
+		if opts.dryRun {
 			res := resolver.Resolve(c, f)
 			return outcome{resolve: &res}
 		}
@@ -117,9 +144,9 @@ func runSync(ctx context.Context, args []string) error {
 		return outcome{sync: &r}
 	}
 
-	sum, interrupted := syncAll(work, deadline, files, *concurrency, run)
+	sum, interrupted := syncAll(work, deadline, files, opts.concurrency, run)
 
-	printSummary(len(files), sum, *dryRun)
+	printSummary(len(files), sum, opts.dryRun)
 	if interrupted {
 		// ctx (the bare shutdown context) carries Ctrl-C; if it is still live the
 		// driver must have stopped because deadline's own timeout fired instead.

@@ -46,13 +46,26 @@ func (r Result) Destination() string {
 	return string(r.Kind)
 }
 
+// fileResolver resolves a discovered session file to its project. *resolve.Resolver
+// implements it; the interface is the seam a test substitutes a fake through.
+type fileResolver interface {
+	Resolve(ctx context.Context, f discover.File) resolve.Result
+}
+
+// fileUploader pushes a resolved session's new bytes to the server. *upload.Client
+// implements it; the interface lets a test observe the Target the syncer builds
+// (in particular that Finalize is carried through) without a live server.
+type fileUploader interface {
+	SyncFile(ctx context.Context, t upload.Target) (upload.Outcome, error)
+}
+
 // Syncer resolves files and uploads them to one server as one machine. When
 // finalize is set, every file it syncs is uploaded as terminal: a Codex session's
 // withheld trailing turn is flushed now rather than after the idle settle window,
 // for ephemeral hosts (CI, cloud sandboxes) whose window never elapses.
 type Syncer struct {
-	resolver *resolve.Resolver
-	uploader *upload.Client
+	resolver fileResolver
+	uploader fileUploader
 	machine  string
 	finalize bool
 }
@@ -60,7 +73,7 @@ type Syncer struct {
 // New builds a Syncer. finalize forces every synced session's trailing turn to be
 // treated as settled (see Syncer); the watch loop and devseed pass false, only
 // `akari sync --finalize` passes true.
-func New(r *resolve.Resolver, u *upload.Client, machine string, finalize bool) *Syncer {
+func New(r fileResolver, u fileUploader, machine string, finalize bool) *Syncer {
 	return &Syncer{resolver: r, uploader: u, machine: machine, finalize: finalize}
 }
 
