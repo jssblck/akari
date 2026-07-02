@@ -37,7 +37,7 @@ to rotate a token or move servers does not wipe your discovery settings.
 ### sync
 
 ```sh
-akari sync [--dry-run] [--time-limit <dur>] [--concurrency <n>]
+akari sync [--dry-run] [--time-limit <dur>] [--concurrency <n>] [--finalize]
 ```
 
 `sync` makes one pass: discover every session file, resolve each to a project,
@@ -55,6 +55,13 @@ re-run sends only bytes the server does not already have.
   count, capped at 8). Each file also parallelizes its own body uploads under a
   shared limiter, so the file-level cap stays modest on purpose. A given file
   never races with itself.
+- `--finalize` treats every session as terminal, flushing each one's final turn
+  now instead of waiting for the file to go idle (see "How the upload works"
+  below). Use it on a host that disappears right after the sync, a CI job or a
+  cloud sandbox, where the idle wait never elapses and the last turn would
+  otherwise never upload. Reach for it only when every session is genuinely
+  finished: on a workstation where a session may still be running, it would flush
+  a turn mid-stream, so let the idle wait do its job there instead.
 
 ### watch
 
@@ -185,7 +192,9 @@ Two consequences worth knowing:
 
 - **A session's final turn is withheld until its file goes idle.** The last turn
   often has no closing line to mark it complete, so the client waits for the file
-  to be untouched briefly before flushing it.
+  to be untouched briefly before flushing it. On a host that is torn down right
+  after the sync (CI, a cloud sandbox), that idle wait never elapses, so pass
+  `akari sync --finalize` to flush the final turns immediately.
 - **Re-running is cheap and safe.** Because the server tracks the cursor and the
   client re-derives everything from the file, `sync` after `sync` uploads only new
   bytes, and an interrupted upload resumes rather than restarting.

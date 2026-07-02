@@ -303,3 +303,32 @@ func TestWithheldCodexTurnBodiesUploadThisTick(t *testing.T) {
 		t.Fatal("after settle, server stored no transcript, want the withheld turn flushed")
 	}
 }
+
+// TestFinalizeFlushesOpenCodexTurn proves Target.Finalize (`akari sync --finalize`)
+// flushes a Codex session's trailing open turn on the first sync even though the file
+// was just written and the idle settle window has not elapsed. Absent the flag that
+// turn is withheld until the file goes idle (see TestWithheldCodexTurnBodiesUploadThisTick);
+// on an ephemeral host (CI, a cloud sandbox) the window never elapses before teardown,
+// so without --finalize the final turn would never upload.
+func TestFinalizeFlushesOpenCodexTurn(t *testing.T) {
+	setSettleWindow(t, time.Hour) // the file is fresh, so absent Finalize the turn stays withheld
+	c, fs := newTestClient(t)
+
+	// An open trailing turn: an assistant message with no closing user response_item, so
+	// the client sees no turn boundary and would withhold it until the file settled.
+	content := `{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"text","text":"done"}]}}` + "\n"
+	tgt := Target{Agent: "codex", Path: tempFile(t, content), SourceID: "s1", ProjectKey: "github.com/o/r", Machine: "m", Finalize: true}
+
+	out, err := c.SyncFile(context.Background(), tgt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Action != ActionUploaded {
+		t.Fatalf("action = %s, want uploaded (finalize flushes the open turn immediately)", out.Action)
+	}
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if len(fs.buf) == 0 {
+		t.Fatal("server stored nothing; want the open trailing turn flushed by --finalize despite the fresh file")
+	}
+}
