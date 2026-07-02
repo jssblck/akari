@@ -18,7 +18,6 @@ header.topbar nav { display: flex; align-items: center; gap: var(--sp-lg); }
 header.topbar nav a { color: var(--subtext); }
 header.topbar nav a:hover { color: var(--lilac); text-decoration: none; }
 header.topbar nav .gh-link { display: inline-flex; }
-header.topbar .who { color: var(--muted); font-family: var(--mono); font-size: 0.8125rem; }
 
 /* ---- App shell: persistent sidebar + content ---- */
 :root { --sidebar-w: 232px; }

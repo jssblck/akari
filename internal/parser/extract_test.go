@@ -232,12 +232,41 @@ func TestRoundTripProjection(t *testing.T) {
 				if o.ResultStatus != n.ResultStatus {
 					t.Errorf("call %d result status = %q, want %q", i, n.ResultStatus, o.ResultStatus)
 				}
+				// Lifting the input must not lose the file path the reducer projects
+				// onto the call; the sentinel carries it in the input's place.
+				if o.FilePath != n.FilePath {
+					t.Errorf("call %d file path = %q, want %q", i, n.FilePath, o.FilePath)
+				}
 			}
 
 			if len(orig.UsageEvent) != len(roundTripped.UsageEvent) {
 				t.Errorf("usage count: orig=%d transformed=%d", len(orig.UsageEvent), len(roundTripped.UsageEvent))
 			}
 		})
+	}
+}
+
+// TestSentinelFilePathInputsOnly pins the sentinel file_path rule: a JSON tool
+// input's top-level file_path rides on its sentinel, while a result body never
+// gets one even when its content is a JSON object carrying that key (results are
+// displayed, not projected onto the call), and a non-JSON input (a Codex
+// custom_tool_call patch) never gets one either.
+func TestSentinelFilePathInputsOnly(t *testing.T) {
+	input := `{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"a.go"}}]}}` + "\n"
+	result := `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":{"file_path":"decoy.go","ok":true}}]}}` + "\n"
+	patch := `{"type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","call_id":"c1","input":"*** patch with file_path text"}}` + "\n"
+
+	rewritten, _ := RewriteLine(AgentClaude, []byte(input), idEncoder{})
+	if !strings.Contains(string(rewritten), `"file_path":"a.go"`) {
+		t.Errorf("input sentinel lost the file_path: %s", rewritten)
+	}
+	rewritten, _ = RewriteLine(AgentClaude, []byte(result), idEncoder{})
+	if strings.Contains(string(rewritten), "decoy.go") {
+		t.Errorf("result sentinel must not carry a file_path: %s", rewritten)
+	}
+	rewritten, _ = RewriteLine(AgentCodex, []byte(patch), idEncoder{})
+	if strings.Contains(string(rewritten), `"file_path"`) {
+		t.Errorf("non-JSON input sentinel must not carry a file_path: %s", rewritten)
 	}
 }
 

@@ -20,12 +20,12 @@ import (
 //
 // Version 2 changed how the session rollups are folded: they now count only the
 // usage and message rows that survive their ON CONFLICT dedup, where version 1
-// added every per-region occurrence and so inflated Claude sessions (which repeat
-// a usage block across sidechain and summary lines). A version-1 session keeps its
-// inflated rollup until a reparse rewinds it, which is why the fix ships with a
-// version bump: an incremental advance over a still version-1 session would fold a
-// correct delta onto a wrong base. Run `akari-server reparse` to correct the live
-// data.
+// added every per-region occurrence and so inflated Claude sessions (which stream
+// one assistant message across several lines that share a usage block). A version-1
+// session keeps its inflated rollup until a reparse rewinds it, which is why the fix
+// ships with a version bump: an incremental advance over a still version-1 session
+// would fold a correct delta onto a wrong base. Run `akari-server reparse` to
+// correct the live data.
 //
 // Version 3 added Codex custom_tool_call bodies and binary image attachments (image
 // generation results and pasted images) to the projection, so a reparse backfills

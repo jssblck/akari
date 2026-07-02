@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -12,7 +13,8 @@ import (
 // This file pins the load-bearing invariant the whole dashboard leans on:
 //
 //	sessions.total_* == sum over a session's usage_events, for every token class
-//	and for cost, and message_count == count of a session's messages rows.
+//	and for cost; message_count == count of a session's messages rows; and
+//	user_message_count == count of its role='user' messages rows.
 //
 // akari aggregates token and cost data from two bases. The usage_events ledger
 // backs the analytics surfaces (the overview and project usage panels, the
@@ -25,6 +27,13 @@ import (
 // it directly, on the live ingest path and after a reparse, and check that the
 // cross-base views built on top of it reconcile. See docs/data-aggregation.md for
 // the full inventory of aggregation sites and which base each reads.
+//
+// user_message_count is pinned here for the same reason: the archetype banding, the
+// session-outcome fold, and the tools-per-turn denominator all read that rollup as if
+// it equaled count(messages WHERE role='user'). It does, because applyAggregates folds
+// it from exactly the user-role message rows that inserted and resetSessionAggregates
+// zeroes it before a reparse re-folds, but that too is unenforced at the schema level,
+// so the assertion below keeps every consumer of the rollup honest.
 
 // usageRow is one usage_events insert for a test ingest, named so a delta reads
 // like the transcript it stands in for. A zero At means an undated event (NULL
@@ -132,26 +141,27 @@ func ledgerTotals(t *testing.T, st *store.Store, sessionID int64) (in, out, cr, 
 
 // rollupTotals reads a session's stored rollups, the base the projects index and
 // every per-session figure read. It is the left-hand side of the invariant.
-func rollupTotals(t *testing.T, st *store.Store, sessionID int64) (in, out, cr, cw int64, cost float64, msgs int) {
+func rollupTotals(t *testing.T, st *store.Store, sessionID int64) (in, out, cr, cw int64, cost float64, msgs, userMsgs int) {
 	t.Helper()
 	if err := st.Pool.QueryRow(context.Background(),
 		`SELECT total_input_tokens, total_output_tokens, total_cache_read_tokens,
-		        total_cache_write_tokens, total_cost_usd, message_count
+		        total_cache_write_tokens, total_cost_usd, message_count, user_message_count
 		   FROM sessions WHERE id = $1`, sessionID).
-		Scan(&in, &out, &cr, &cw, &cost, &msgs); err != nil {
+		Scan(&in, &out, &cr, &cw, &cost, &msgs, &userMsgs); err != nil {
 		t.Fatalf("rollup totals for session %d: %v", sessionID, err)
 	}
-	return in, out, cr, cw, cost, msgs
+	return in, out, cr, cw, cost, msgs, userMsgs
 }
 
 // assertRollupMatchesLedger pins the invariant for one session: every token class
-// and the cost in sessions.total_* equal the sum over its usage_events, and
-// message_count equals the count of its messages rows. `when` labels the phase
-// (after ingest, after reparse) so a failure says which path broke it.
+// and the cost in sessions.total_* equal the sum over its usage_events, message_count
+// equals the count of its messages rows, and user_message_count equals the count of its
+// role='user' messages rows. `when` labels the phase (after ingest, after reparse) so a
+// failure says which path broke it.
 func assertRollupMatchesLedger(t *testing.T, st *store.Store, sessionID int64, when string) {
 	t.Helper()
 	lin, lout, lcr, lcw, lcost, _ := ledgerTotals(t, st, sessionID)
-	rin, rout, rcr, rcw, rcost, msgs := rollupTotals(t, st, sessionID)
+	rin, rout, rcr, rcw, rcost, msgs, userMsgs := rollupTotals(t, st, sessionID)
 	if rin != lin || rout != lout || rcr != lcr || rcw != lcw {
 		t.Errorf("%s: session %d rollup tokens (in=%d out=%d cr=%d cw=%d) != ledger (in=%d out=%d cr=%d cw=%d)",
 			when, sessionID, rin, rout, rcr, rcw, lin, lout, lcr, lcw)
@@ -159,20 +169,24 @@ func assertRollupMatchesLedger(t *testing.T, st *store.Store, sessionID int64, w
 	if rcost != lcost {
 		t.Errorf("%s: session %d total_cost_usd = %v != ledger cost %v", when, sessionID, rcost, lcost)
 	}
-	var rowCount int
+	var rowCount, userRowCount int
 	if err := st.Pool.QueryRow(context.Background(),
-		"SELECT count(*) FROM messages WHERE session_id = $1", sessionID).Scan(&rowCount); err != nil {
+		`SELECT count(*), count(*) FILTER (WHERE role = 'user')
+		   FROM messages WHERE session_id = $1`, sessionID).Scan(&rowCount, &userRowCount); err != nil {
 		t.Fatalf("count messages for session %d: %v", sessionID, err)
 	}
 	if msgs != rowCount {
 		t.Errorf("%s: session %d message_count = %d != count of messages rows %d", when, sessionID, msgs, rowCount)
 	}
+	if userMsgs != userRowCount {
+		t.Errorf("%s: session %d user_message_count = %d != count of role='user' messages rows %d", when, sessionID, userMsgs, userRowCount)
+	}
 }
 
 // adversarialUsage is a usage shape built to break a fold that is not careful:
 // a priced cache-dominant Claude row, the SAME row repeated under a colliding
-// dedup_key (Claude replays a usage block across sidechain and summary lines, so
-// the ledger keeps one and the rollup must count one), a second priced model, an
+// dedup_key (Claude streams one assistant message across several lines that share
+// it, so the ledger keeps one and the rollup must count one), a second priced model, an
 // undated row (NULL occurred_at, which the rollup counts but the analytics time
 // axis drops), and an unpriced model (tokens but no cost, which sets
 // cost_incomplete). If applyDelta folded pre-dedup rows, or zeroed a subset on
@@ -252,6 +266,110 @@ func TestSessionRollupMatchesLedger(t *testing.T) {
 			t.Fatalf("reparse session %d: %v", s.id, err)
 		}
 		assertRollupMatchesLedger(t, st, s.id, "after reparse")
+	}
+}
+
+// cacheSavingsUsage is a usage shape aimed at the savings rollup: a priced Claude row whose
+// cache reads save money while its cache write costs money (the saving nets the two and can
+// go negative), the SAME row repeated under a colliding dedup_key (the ledger keeps one, so
+// the saving must not double), a second priced model that also carries cache reads, and an
+// unpriced model that carries cache reads (its saving is omitted, so cache_savings_incomplete
+// must be set while its tokens still fold). A fold that priced pre-dedup rows, dropped a
+// model, missed the unpriced-with-cache case, or mishandled the negative cache-write term
+// would diverge from the per-model recompute the test reconciles against.
+func cacheSavingsUsage() []usageRow {
+	at := time.Date(2024, 3, 1, 12, 0, 0, 0, time.UTC)
+	priced := func(v float64) *float64 { return &v }
+	return []usageRow{
+		{Model: "claude-opus-4-8", In: 1000, Out: 2000, CR: 500_000, CW: 40_000, At: at, Cost: priced(1.50), DedupKey: "sv_a", SourceOffset: 10},
+		{Model: "claude-opus-4-8", In: 1000, Out: 2000, CR: 500_000, CW: 40_000, At: at, Cost: priced(1.50), DedupKey: "sv_a", SourceOffset: 20},
+		{Model: "gpt-5.5", In: 800, Out: 400, CR: 100_000, CW: 0, At: at.Add(time.Hour), Cost: priced(0.40), DedupKey: "sv_b", SourceOffset: 30},
+		{Model: "some-unpriced-model", In: 500, Out: 250, CR: 200_000, CW: 0, At: at.Add(2 * time.Hour), DedupKey: "sv_c", SourceOffset: 40},
+	}
+}
+
+// TestCacheSavingsRollupMatchesRecompute pins the per-session cache-savings rollup
+// (sessions.total_cache_savings_usd, folded per surviving usage row at parse time) against
+// SessionCacheStats, the from-scratch per-model recompute over the same rows. Pricing is
+// linear in tokens, so the per-row fold and the per-model recompute must land on the same
+// dollars and the same incomplete flag, after the live ingest path and again after a reparse.
+// It is the savings analogue of TestSessionRollupMatchesLedger: a fold that doubles a deduped
+// row, drops a model, mishandles the unpriced-with-cache case, swaps the read and write terms,
+// or fails to zero-and-rebuild on reparse diverges from the recompute here. The rollup is what
+// the session header's Cache tile now reads in O(1), so this is the guard that the O(1) tile
+// shows the same figure the per-row scan would.
+func TestCacheSavingsRollupMatchesRecompute(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	user, err := st.Register(ctx, "grace", "h", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	proj, err := st.UpsertProject(ctx, "github.com/ada/savings", "github.com", "ada", "savings", "savings", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	msgs := []store.MessageDelta{{Ordinal: 0, Role: "user", Content: "go"}}
+
+	// reconcile pins the rollup to the independent recompute for one session, so a failure
+	// says which phase (ingest or reparse) and which session broke it.
+	reconcile := func(t *testing.T, id int64, when string) {
+		t.Helper()
+		d, err := st.SessionDetailByID(ctx, id)
+		if err != nil {
+			t.Fatalf("%s: session detail %d: %v", when, id, err)
+		}
+		recompute, err := st.SessionCacheStats(ctx, id)
+		if err != nil {
+			t.Fatalf("%s: session cache stats %d: %v", when, id, err)
+		}
+		if math.Abs(d.TotalCacheSavingsUSD-recompute.SavingsUSD) > 1e-9 {
+			t.Errorf("%s: session %d rollup savings %v != recompute %v", when, id, d.TotalCacheSavingsUSD, recompute.SavingsUSD)
+		}
+		if d.CacheSavingsIncomplete != recompute.SavingsIncomplete {
+			t.Errorf("%s: session %d rollup incomplete %v != recompute %v", when, id, d.CacheSavingsIncomplete, recompute.SavingsIncomplete)
+		}
+	}
+
+	sMixed, reduceMixed := ingestSession(t, st, user.ID, proj, "claude", "s-mixed", msgs, cacheSavingsUsage())
+	sEmpty, reduceEmpty := ingestSession(t, st, user.ID, proj, "claude", "s-empty", msgs, nil)
+
+	reconcile(t, sMixed, "after ingest")
+	reconcile(t, sEmpty, "after ingest")
+
+	// Beyond reconciling with the oracle, pin the boundary values directly: the mixed session
+	// saves real money from its priced models yet flags incomplete for the unpriced one, and
+	// the empty session is a complete zero rather than a misleading incomplete or non-zero.
+	dMixed, err := st.SessionDetailByID(ctx, sMixed)
+	if err != nil {
+		t.Fatalf("mixed detail: %v", err)
+	}
+	if !dMixed.CacheSavingsIncomplete {
+		t.Error("mixed session should flag cache_savings_incomplete: an unpriced model carried cache reads")
+	}
+	if dMixed.TotalCacheSavingsUSD <= 0 {
+		t.Errorf("mixed session should have a positive saving from its priced cache reads; got %v", dMixed.TotalCacheSavingsUSD)
+	}
+	dEmpty, err := st.SessionDetailByID(ctx, sEmpty)
+	if err != nil {
+		t.Fatalf("empty detail: %v", err)
+	}
+	if dEmpty.CacheSavingsIncomplete || dEmpty.TotalCacheSavingsUSD != 0 {
+		t.Errorf("empty session should carry a zero complete saving; got %v incomplete=%v", dEmpty.TotalCacheSavingsUSD, dEmpty.CacheSavingsIncomplete)
+	}
+
+	// Reparse both through the identical fold: the reset must zero the saving and its flag and
+	// the rebuild must re-fold to the same figure, so the rollup does not double or drift.
+	for _, s := range []struct {
+		id     int64
+		reduce store.ReduceFunc
+	}{{sMixed, reduceMixed}, {sEmpty, reduceEmpty}} {
+		if err := st.ReparseSession(ctx, s.id, ingestVersion, s.reduce); err != nil {
+			t.Fatalf("reparse session %d: %v", s.id, err)
+		}
+		reconcile(t, s.id, "after reparse")
 	}
 }
 

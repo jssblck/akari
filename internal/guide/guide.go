@@ -222,11 +222,28 @@ func collectHeadings(doc ast.Node, src []byte) []Heading {
 		out = append(out, Heading{
 			Level: h.Level,
 			ID:    string(idStr),
-			Text:  string(h.Text(src)), //nolint:staticcheck // Text is adequate for plain heading text
+			Text:  headingText(h, src),
 		})
 		return ast.WalkContinue, nil
 	})
 	return out
+}
+
+// headingText flattens a heading's inline children to plain text, dropping any
+// inline markup (emphasis, code spans) around the words. It replaces the
+// deprecated ast.Node.Text, whose recursive walk this reimplements for the one
+// node kind the TOC needs.
+func headingText(h ast.Node, src []byte) string {
+	var sb strings.Builder
+	_ = ast.Walk(h, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+		if entering {
+			if t, ok := n.(*ast.Text); ok {
+				sb.Write(t.Segment.Value(src))
+			}
+		}
+		return ast.WalkContinue, nil
+	})
+	return sb.String()
 }
 
 // docLinks rewrites the relative cross-links the chapters author (./glossary.md,

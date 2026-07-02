@@ -29,6 +29,11 @@ func HashString(content string) string {
 // server reducer, on seeing the sentinel, records the reference (sha256, byte
 // length, media type) without re-storing the body.
 //
+// A tool-input sentinel also carries the input's top-level file_path string when
+// it has one. The reducer projects that field onto the tool call (it drives the
+// file names the UI shows per call), and lifting the input would otherwise erase
+// it: the reducer reads the transcript, and the body is no longer there.
+//
 // The key is deliberately namespaced so it cannot collide with a real tool body:
 // no agent emits a tool input or result whose top-level shape is a JSON object
 // carrying this field. A body that happened to look like one would still round
@@ -92,20 +97,30 @@ type Body struct {
 }
 
 // casRef is the parsed sentinel: the reference the server records in place of a
-// body it no longer has to store.
+// body it no longer has to store. FilePath is the top-level file_path string the
+// lifted tool input carried, preserved on the sentinel because the reducer reads
+// it from the transcript and the body itself is no longer there to read.
 type casRef struct {
 	SHA256    string
 	Bytes     int
 	MediaType string
+	FilePath  string
 }
+
+// maxSentinelFilePath caps the file_path a sentinel carries. A path longer than
+// this is not a real path; dropping it (rather than truncating) keeps the sentinel
+// small and the rule trivially identical between the buffered and streaming rewrite
+// paths, which must produce byte-identical sentinels for the same body.
+const maxSentinelFilePath = 4096
 
 // SentinelBytes renders the CAS reference that replaces a tool body, for callers
 // outside the package (the client's streaming big-line path) that build a rewritten
 // line from located spans rather than from a parsed line. It is the same encoding
 // RewriteLine uses, so a body lifted by streaming produces a byte-identical sentinel
-// to one lifted by the buffered path.
-func SentinelBytes(sha string, n int, media string) []byte {
-	return sentinelBytes(sha, n, media)
+// to one lifted by the buffered path. filePath is empty for anything that is not a
+// tool input carrying one.
+func SentinelBytes(sha string, n int, media, filePath string) []byte {
+	return sentinelBytes(sha, n, media, filePath)
 }
 
 // sentinelBytes renders the compact reference that replaces a body in the
@@ -113,14 +128,37 @@ func SentinelBytes(sha string, n int, media string) []byte {
 // valid JSONL and a Codex line keeps its turn-boundary shape: the client's chunk
 // boundary detection and the server's line parser both see the same line count
 // and the same newline positions as the original.
-func sentinelBytes(sha string, n int, media string) []byte {
+func sentinelBytes(sha string, n int, media, filePath string) []byte {
 	// Hand-build the object so the field order and escaping are fixed and
 	// independent of map iteration: the rewritten transcript must be byte stable
 	// across runs so a re-sync of an unchanged file produces identical bytes and
 	// uploads nothing.
 	b, _ := json.Marshal(media)
-	return []byte(fmt.Sprintf(`{"%s":1,"sha256":%q,"bytes":%d,"media_type":%s}`,
-		sentinelKey, sha, n, string(b)))
+	if filePath == "" {
+		return []byte(fmt.Sprintf(`{"%s":1,"sha256":%q,"bytes":%d,"media_type":%s}`,
+			sentinelKey, sha, n, string(b)))
+	}
+	fp, _ := json.Marshal(filePath)
+	return []byte(fmt.Sprintf(`{"%s":1,"sha256":%q,"bytes":%d,"media_type":%s,"file_path":%s}`,
+		sentinelKey, sha, n, string(b), string(fp)))
+}
+
+// sentinelFilePath decides what file_path a body's sentinel carries: the top-level
+// file_path string of a JSON tool input, or "" for everything else (results,
+// non-JSON inputs, a non-string or absurdly long value). Lifting the whole input to
+// the CAS would otherwise destroy the one input field the reducer projects onto
+// every tool call, so the sentinel keeps it. The streaming path's bodyFilePath
+// applies this same rule over spans; the two must stay in lockstep so a line
+// rewrites to identical bytes on either path.
+func sentinelFilePath(kind, media, content string) string {
+	if kind != bodyKindInput || media != "application/json" {
+		return ""
+	}
+	v := gjson.Get(content, "file_path")
+	if v.Type != gjson.String || len(v.String()) > maxSentinelFilePath {
+		return ""
+	}
+	return v.String()
 }
 
 // asCASRef reports whether a parsed tool body is a CAS sentinel, returning the
@@ -138,6 +176,7 @@ func asCASRef(v gjson.Result) (casRef, bool) {
 		SHA256:    v.Get("sha256").String(),
 		Bytes:     int(v.Get("bytes").Int()),
 		MediaType: v.Get("media_type").String(),
+		FilePath:  v.Get("file_path").String(),
 	}, true
 }
 
@@ -189,7 +228,7 @@ func claudeBodyFields(e gjson.Result) []bodyField {
 				continue
 			}
 			input := b.Get("input")
-			if f, ok := rawField(input, input.Raw, "application/json", "input"); ok {
+			if f, ok := rawField(input, input.Raw, "application/json", bodyKindInput); ok {
 				fields = append(fields, f)
 			}
 		}
@@ -204,7 +243,7 @@ func claudeBodyFields(e gjson.Result) []bodyField {
 			}
 			body := b.Get("content")
 			c, media := bodyContent(body)
-			if f, ok := rawField(body, c, media, "result"); ok {
+			if f, ok := rawField(body, c, media, bodyKindResult); ok {
 				fields = append(fields, f)
 			}
 		}
@@ -226,21 +265,21 @@ func codexBodyFields(e gjson.Result) []bodyField {
 			// Codex stores arguments as a JSON-encoded string; the body the reducer
 			// records is the unquoted string value, so the canonical content is
 			// args.String() while the rewritten span is the quoted raw value.
-			if f, ok := rawField(args, args.String(), "application/json", "input"); ok {
+			if f, ok := rawField(args, args.String(), "application/json", bodyKindInput); ok {
 				return []bodyField{f}
 			}
 		case p.Get("type").String() == "custom_tool_call":
 			// A custom tool call (for example apply_patch) carries its input as a plain
 			// string, which can be a large patch; lift it like any other tool input.
 			in := p.Get("input")
-			if f, ok := rawField(in, in.String(), "text/plain", "input"); ok {
+			if f, ok := rawField(in, in.String(), "text/plain", bodyKindInput); ok {
 				return []bodyField{f}
 			}
 		case p.Get("type").String() == "function_call_output",
 			p.Get("type").String() == "custom_tool_call_output":
 			out := p.Get("output")
 			c, media := bodyContent(out)
-			if f, ok := rawField(out, c, media, "result"); ok {
+			if f, ok := rawField(out, c, media, bodyKindResult); ok {
 				return []bodyField{f}
 			}
 		case p.Get("type").String() == "image_generation_call":
@@ -342,7 +381,7 @@ func piBodyFields(e gjson.Result) []bodyField {
 				continue
 			}
 			args := b.Get("arguments")
-			if f, ok := rawField(args, args.Raw, "application/json", "input"); ok {
+			if f, ok := rawField(args, args.Raw, "application/json", bodyKindInput); ok {
 				fields = append(fields, f)
 			}
 		}
@@ -350,7 +389,7 @@ func piBodyFields(e gjson.Result) []bodyField {
 	case "toolResult":
 		body := msg.Get("content")
 		c, media := bodyContent(body)
-		if f, ok := rawField(body, c, media, "result"); ok {
+		if f, ok := rawField(body, c, media, bodyKindResult); ok {
 			return []bodyField{f}
 		}
 	}
@@ -458,7 +497,8 @@ func RewriteLine(agent Agent, line []byte, enc BodyEncoder) ([]byte, []Body) {
 		}
 		sha, stored, contentType := enc.EncodeBody([]byte(f.content))
 		rewritten = append(rewritten, trimmed[cursor:f.start]...)
-		rewritten = append(rewritten, sentinelBytes(sha, len(f.content), f.media)...)
+		rewritten = append(rewritten, sentinelBytes(sha, len(f.content), f.media,
+			sentinelFilePath(f.kind, f.media, f.content))...)
 		cursor = f.end
 		bodies = append(bodies, Body{
 			SHA256:      sha,

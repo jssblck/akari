@@ -168,10 +168,8 @@ type scanner struct {
 
 	// Scalar scanning state. When inScalar is true the scanner is consuming a
 	// bare token (number, true, false, null) whose end is the first byte that is
-	// not part of the token. scalarPending, when set, is the pending value to
-	// close at the scalar's end.
-	inScalar      bool
-	scalarPending *pendingValue
+	// not part of the token.
+	inScalar bool
 
 	// pendings holds values currently open (entered but not yet closed) whose End
 	// must still be recorded.

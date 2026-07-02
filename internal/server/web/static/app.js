@@ -611,19 +611,19 @@
     if (open) { open.open = false; userFilterOpen = false; }
   });
 
-  // Re-grow the breakdown bars after the overview's range selector swaps the usage
-  // panel (#usage); the replacement bars start at width 0. Gate O(1) on the swapped
-  // target's id so live transcript appends (which swap #session-body) do no work
-  // here, then animate the live #usage by id (an outerHTML swap's target is the
-  // detached old node). The same swap replaces the user filter, so reopen it when
-  // it was open before the swap.
+  // Re-grow the bars after a range selector swaps a panel by outerHTML: the usage
+  // panel (#usage) or the insights section (#insights). The replacement bars start at
+  // width 0, so they need re-animating. Gate O(1) on the swapped target's id so live
+  // transcript appends (which swap #session-body) do no work here, then animate the
+  // live node by id (an outerHTML swap's target is the detached old node). The usage
+  // swap also replaces the per-user filter, so reopen it when it was open before.
   document.addEventListener("htmx:afterSwap", function (e) {
     var t = (e.detail && e.detail.target) || e.target;
-    if (!t || t.id !== "usage") return;
-    var root = document.getElementById("usage");
+    if (!t || (t.id !== "usage" && t.id !== "insights")) return;
+    var root = document.getElementById(t.id);
     if (!root) return;
     animateBars(root);
-    if (userFilterOpen) {
+    if (t.id === "usage" && userFilterOpen) {
       var d = root.querySelector(".userfilter");
       if (d) d.open = true;
     }

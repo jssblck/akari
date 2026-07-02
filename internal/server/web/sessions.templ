@@ -169,6 +169,6 @@ templ feedTokens(fr FeedRow) {
 	<span class="srow-tok tok-cell" tabindex="0">
 		<span class="tokbar"><span class="tokbar-fill" style={ barStyle(fr.TokenPct) }></span></span>
 		<span class="tok-total mono">{ FmtTokensCompact(RowTokens(fr.Row.SessionSummary)) }</span>
-		@tokenCard(RowTokens(fr.Row.SessionSummary), fr.Row.TotalInput, fr.Row.TotalOutput, fr.Row.TotalCacheRead, fr.Row.TotalCacheWrite, fr.Row.TotalCostUSD, fr.Row.CostIncomplete)
+		@tokenCard(RowTokens(fr.Row.SessionSummary), fr.Row.TotalInput, fr.Row.TotalOutput, fr.Row.TotalCacheRead, fr.Row.TotalCacheWrite, 0, fr.Row.TotalCostUSD, fr.Row.CostIncomplete)
 	</span>
 }

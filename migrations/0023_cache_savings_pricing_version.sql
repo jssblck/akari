@@ -1,0 +1,21 @@
+-- Records, fleet-wide, the pricing.Version the per-session cache-savings rollup was last priced
+-- under, so a rate change re-prices every cache-bearing session even one whose reparse fails.
+--
+-- The rollup (sessions.total_cache_savings_usd) is priced from usage_events at parse time, not
+-- stored per row. A reprice bumps pricing.Version and parse.Epoch together; the epoch reparse
+-- re-folds the rollup for every session it can rebuild. But a session whose reparse fails (a
+-- malformed transcript the parser cannot replay) rolls back to its old projection with
+-- cache_savings_backfilled=true, so the startup backfill (which only visits backfilled=false
+-- candidates) skips it and its rollup keeps the old rates forever, drifting from a live
+-- SessionCacheStats recompute at the new rates. reconcileCacheSavingsPricingIfNeeded closes that
+-- gap: when this marker is behind pricing.Version it clears cache_savings_backfilled on every
+-- cache-bearing session in its own committed statement (so the clear survives a later failed
+-- reparse's rollback), which makes the backfill re-price them all at the new rates.
+--
+-- It defaults to 1, the initial pricing.Version, on purpose. Unlike signals_reconciled_version
+-- (which defaults to 0 so its first reconcile runs, a harmless no-op with no stored rows yet),
+-- this reconcile is NOT a no-op on a populated corpus: it would re-price every cache-bearing
+-- session. Seeding the marker to the current version means deploying this machinery does not by
+-- itself trigger a corpus-wide re-price; only a later rate change that bumps pricing.Version past
+-- the stored marker does. The ALTER sets the existing singleton parse_meta row to 1 as well.
+ALTER TABLE parse_meta ADD COLUMN cache_savings_priced_version INT NOT NULL DEFAULT 1;

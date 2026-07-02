@@ -68,7 +68,8 @@ Only the database URL is required.
 | `AKARI_PUBLIC_URL` | (derived) | The externally reachable base URL (`https://akari.example.com`), used as the OAuth issuer and the base of the URLs the [MCP](./agent-access.md) authorization flow advertises. Falls back to `AKARI_URL`; when neither is set the server derives the origin per request, which is correct for a single-origin deployment behind a proxy that forwards the host. |
 | `AKARI_COOKIE_INSECURE` | unset | Set truthy to drop the `Secure` flag on session cookies, for plain-HTTP local development. Leave unset in production so cookies are HTTPS-only. |
 | `AKARI_SWEEP_INTERVAL` | `1h` | How often the server reclaims orphaned content-addressed blobs. A Go duration (`30m`, `2h`); `0` disables the background sweep. |
-| `AKARI_OG_REFRESH_INTERVAL` | `1h` | How often the server refreshes the Open Graph preview cards of published overviews; each wake re-renders any card older than a day. A Go duration; `0` disables the background refresh. |
+| `AKARI_OG_CACHE_TTL` | `1h` | How long a rendered Open Graph preview card of a published overview is served from cache before the next request re-renders it. A Go duration; must be positive. |
+| `AKARI_OG_CLEANUP_INTERVAL` | `24h` | How often the server prunes expired preview cards (older than `AKARI_OG_CACHE_TTL`) from the cache. A Go duration; `0` disables the sweep. |
 
 ## The database
 

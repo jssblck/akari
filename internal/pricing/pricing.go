@@ -10,6 +10,28 @@ import (
 	"strings"
 )
 
+// Version stamps the rate table below. Bump it whenever a rate in `table` changes: a new or
+// removed model, or a different Input/Output/CacheWrite/CacheRead number for an existing one.
+//
+// It exists because a reprice makes two stored figures go stale in different ways, and only one
+// of them is fixed by the reparse that a reprice already triggers. Per-row cost is stored on each
+// usage_events row at parse time, so a reprice reparses the corpus (via parse.Epoch) to rewrite
+// every row's cost; a session that fails to reparse keeps old cost, which is the honest state for
+// a transcript the parser can no longer rebuild. The per-session cache-savings rollup is
+// different: it is priced from usage_events, not stored per row, and a failed-reparse session
+// keeps its old-priced rollup with cache_savings_backfilled=true, so nothing re-prices it and its
+// tile drifts from a live SessionCacheStats recompute forever. The cache-savings reconcile
+// (store.reconcileCacheSavingsPricingIfNeeded) closes that gap by re-pricing every cache-bearing
+// session on a Version change, independent of whether its reparse succeeds.
+//
+// Version is deliberately separate from parse.Epoch. Epoch bumps for any parser or reducer change
+// (a new projection column, a changed field), most of which do not touch rates; keying the
+// cache-savings reconcile off Epoch would re-price the whole corpus on every unrelated Epoch bump.
+// A dedicated pricing Version fires that reconcile only on an actual rate change. Pair a Version
+// bump with a parse.Epoch bump, as any reprice already must, so per-row cost and the cache-savings
+// rollup are both rebuilt on the same deploy.
+const Version = 1
+
 // Rate holds per-million-token prices for one model family.
 type Rate struct {
 	Input      float64
@@ -131,4 +153,34 @@ func Cost(model string, input, output, cacheWrite, cacheRead int) (float64, bool
 		float64(cacheWrite)/million*r.CacheWrite +
 		float64(cacheRead)/million*r.CacheRead
 	return cost, true
+}
+
+// CacheSavings returns the USD that prompt caching saved versus paying the full
+// uncached input rate for the same prompt tokens, and whether the model was priced.
+//
+// Caching changes only the prompt side. A token served from cache (cacheRead) would
+// otherwise be billed at the input rate; a token written to cache (cacheWrite) would
+// otherwise be a plain input token too. So the saving is the rate gap on each, summed:
+// cacheRead*(Input-CacheRead) + cacheWrite*(Input-CacheWrite).
+//
+// For Claude the cacheWrite term is negative: cache creation is priced above input
+// (the premium paid up front to make later reads cheap), so netting it in keeps the
+// figure honest rather than advertising only the read discount. For OpenAI the Codex
+// parser reports cache creation as ordinary input (CacheWrite is unset and cacheWrite
+// tokens are nil), so the write term vanishes and the saving is the read discount
+// alone. The result can be negative in principle (cache written but never re-read) and
+// is returned unfloored, so a caller can surface that caching cost more than it saved.
+//
+// Counts are int64, not the int that Cost takes: this is the one pricing entry point
+// fed rolled, fleet-wide aggregates, whose cache-read sum over a long window can run
+// past a 32-bit range, where Cost only ever sees a single session's tokens.
+func CacheSavings(model string, cacheRead, cacheWrite int64) (float64, bool) {
+	r, ok := Lookup(model)
+	if !ok {
+		return 0, false
+	}
+	const million = 1_000_000.0
+	saving := float64(cacheRead)/million*(r.Input-r.CacheRead) +
+		float64(cacheWrite)/million*(r.Input-r.CacheWrite)
+	return saving, true
 }

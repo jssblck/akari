@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jssblck/akari/internal/pricing"
+	"github.com/jssblck/akari/internal/quality"
 )
 
 // parseBatchBytes bounds how much raw content one AdvanceProjection call parses
@@ -107,10 +109,10 @@ type AttachmentDelta struct {
 // rows to add and the region's timestamp span. The session rollups are not folded
 // from precomputed counters carried here. They are derived from the rows that
 // actually persist (see appliedDelta), because the row inserts dedup on conflict
-// and the rollups must count exactly the surviving set. Claude repeats a usage
-// block across sidechain and summary lines, so a region can carry the same usage
-// several times while the ledger keeps one; folding precomputed per-region deltas
-// over-counted those duplicates.
+// and the rollups must count exactly the surviving set. Claude streams one
+// assistant message across several transcript lines that share its message id, so a
+// region can carry the same usage block several times while the ledger keeps one;
+// folding precomputed per-region deltas over-counted those duplicates.
 type ProjectionDelta struct {
 	Messages    []MessageDelta
 	ToolCalls   []ProjToolCall
@@ -138,6 +140,16 @@ type appliedDelta struct {
 	CacheRead         int64
 	CostUSD           float64
 	CostIncomplete    bool
+	// CacheSavingsUSD is the prompt-cache dollars the surviving rows saved versus paying
+	// the uncached input rate for the same cached volume, priced per model (the rate gap
+	// differs by family and is negative on a Claude cache write). It folds into the session
+	// rollup like CostUSD so the session header's Cache tile reads one row rather than
+	// rescanning usage_events on every live refresh. CacheSavingsIncomplete is sticky like
+	// CostIncomplete: set when a surviving row carried cached volume on an unpriced model,
+	// so that row's saving is omitted. Unlike cost it is not a clean lower bound (the
+	// omitted term can be either sign), which the UI reflects as "partial" rather than "+".
+	CacheSavingsUSD        float64
+	CacheSavingsIncomplete bool
 }
 
 // roleUser is the message role that counts toward user_message_count. The reducer
@@ -225,6 +237,19 @@ func (s *Store) AdvanceProjection(ctx context.Context, sessionID int64, parserVe
 		}
 
 		parsedTo, caughtUp = regionEnd, regionEnd >= byteLen
+		// The append path deliberately does NOT refresh signals. Signals read the whole
+		// session (the last word, failure streaks across the transcript, the per-turn
+		// context sequence), so refreshing them here would recompute the entire session on
+		// every caught-up append, turning a live session's K appends into O(K^2) ingest
+		// work. It would also bake a time-dependent verdict into the row: the abandoned
+		// versus unknown outcome depends on how long the session has been idle, so a refresh
+		// taken mid-session stores a verdict that drifts once the session crosses the idle
+		// threshold. Both are avoided by computing signals once, after the session settles,
+		// off the ingest path: RefreshSettledSignals (a periodic pass) refreshes a session
+		// only once it has been idle past the abandoned threshold, so the append path stays
+		// linear and the stored outcome is computed when it is stable. A reparse still
+		// refreshes at the end of its full replay (that is the versioned backfill, not the
+		// append path).
 		return nil
 	})
 	return parsedTo, caughtUp, err
@@ -298,14 +323,31 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 	// rows that inserted keeps message_count equal to the count of messages rows
 	// even if a region is ever replayed.
 	for _, m := range d.Messages {
+		content := sanitizeText(m.Content)
+		// Derive the prompt's hygiene facts here, where the body is already resident, and store
+		// them beside the row as fixed-size columns. The settle pass then aggregates those columns
+		// instead of reading every prompt body back to re-classify it, so its peak memory does not
+		// track the largest prompt a session held (see quality.ClassifyPrompt and gatherPromptHygiene).
+		// Only real human turns carry facts; other rows leave the columns NULL and the hygiene
+		// aggregate reads role='user' only. The facts are stamped with quality.PromptFactsVersion so a
+		// later change to the classifier is told apart from the current rules: the settle pass treats an
+		// old-version row like an unfilled one until the reparse re-derives it (see gatherPromptHygiene).
+		var pShort, pNoCode, pGreeting, pDigest, pFactsVersion any
+		if m.Role == roleUser {
+			facts := quality.ClassifyPrompt(content)
+			pShort, pNoCode, pGreeting, pDigest = facts.Short, facts.NoCodeContext, facts.BareGreeting, facts.Digest
+			pFactsVersion = quality.PromptFactsVersion
+		}
 		tag, err := tx.Exec(ctx,
 			`INSERT INTO messages
-			   (session_id, ordinal, role, content, thinking_text, model, timestamp, has_thinking, has_tool_use)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+			   (session_id, ordinal, role, content, thinking_text, model, timestamp, has_thinking, has_tool_use,
+			    prompt_short, prompt_no_code, prompt_bare_greeting, prompt_digest, prompt_facts_version)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 			 ON CONFLICT (session_id, ordinal) DO NOTHING`,
-			sessionID, m.Ordinal, sanitizeText(m.Role), sanitizeText(m.Content),
+			sessionID, m.Ordinal, sanitizeText(m.Role), content,
 			sanitizeText(m.ThinkingText), sanitizeText(m.Model),
-			nullTime(m.Timestamp), m.HasThinking, m.HasToolUse)
+			nullTime(m.Timestamp), m.HasThinking, m.HasToolUse,
+			pShort, pNoCode, pGreeting, pDigest, pFactsVersion)
 		if err != nil {
 			return appliedDelta{}, fmt.Errorf("write message %d for session %d: %w", m.Ordinal, sessionID, err)
 		}
@@ -401,13 +443,17 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 		}
 	}
 
-	// Only usage rows that actually insert fold into the rollups. Claude repeats a
-	// usage block across sidechain and summary lines (same dedup_key), and Codex's
-	// replays collide on (source_offset, source_index); ON CONFLICT DO NOTHING keeps
-	// one in the ledger, and counting RowsAffected here keeps the rollup in lockstep
-	// with that surviving set. cost_incomplete is derived the same way: a surviving
-	// row that carries tokens but no priced cost is what makes the session total a
-	// partial sum.
+	// Only usage rows that actually insert fold into the rollups. Claude streams one
+	// assistant message across several transcript lines that share a dedup_key, and
+	// Codex's replays collide on (source_offset, source_index); ON CONFLICT DO NOTHING
+	// keeps one in the ledger, and counting RowsAffected here keeps the rollup in
+	// lockstep with that surviving set. cost_incomplete is derived the same way: a
+	// surviving row that carries tokens but no priced cost is what makes the session
+	// total a partial sum.
+	//
+	// DO NOTHING (not DO UPDATE) is deliberate: a DO UPDATE would fold a duplicate's
+	// tokens into the rollup (its RowsAffected is 1 too), breaking the
+	// sessions.total_* == sum(usage_events) invariant.
 	for _, u := range d.Usage {
 		var ord, cost any
 		if u.MessageOrdinal != nil {
@@ -442,6 +488,16 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 			// Tokens spent on a model the pricing table does not know: the session
 			// total is a partial sum and the flag says so.
 			applied.CostIncomplete = true
+		}
+		// Fold the prompt-cache saving the same way, over the same surviving rows. Pricing
+		// is linear in tokens, so summing each row's saving equals summing the model's
+		// grouped totals (what SessionCacheStats does over the whole session), which is what
+		// lets the rollup and that per-model recompute reconcile exactly. Cost is a stored
+		// per-row figure; the saving is not, so it is priced here rather than read off the row.
+		if saving, ok := pricing.CacheSavings(u.Model, int64(u.CacheRead), int64(u.CacheWrite)); ok {
+			applied.CacheSavingsUSD += saving
+		} else if u.CacheRead > 0 || u.CacheWrite > 0 {
+			applied.CacheSavingsIncomplete = true
 		}
 	}
 	// Attachments carry no rollup column, so they do not fold into appliedDelta; they
@@ -488,9 +544,25 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 // inserted, not from a pre-dedup per-region count, so the rollups equal the ledger
 // (sessions.total_* == sum over usage_events, message_count == count of messages
 // rows) for every agent. The span widens by LEAST/GREATEST (both ignore NULLs, so
-// a region with no timestamps leaves the bounds unchanged); cost_incomplete is
-// sticky once any surviving unpriced usage row is seen.
+// a region with no timestamps leaves the bounds unchanged); cost_incomplete and
+// cache_savings_incomplete are both sticky once any surviving unpriced usage row is
+// seen. total_cache_savings_usd folds like total_cost_usd, so the session header's Cache
+// tile reads the saving off this one row rather than rescanning usage_events per refresh.
+//
+// The one wrinkle is a pricing rolling deploy. This fold prices the region's saving with the running
+// binary's rate table (CacheSavings, in applyDelta), so a fold is consistent with the stored rollup
+// only when the corpus is priced at that same table, which the singleton marker records as
+// cache_savings_priced_version == pricing.Version. When the marker differs, in either direction, a fold
+// onto a backfilled=true row would mix rate tables and leave the row flagged authoritative. Marker
+// ahead of this binary: a newer binary priced the corpus at newer rates, so this older binary's fold
+// would splice an old-rate saving in. Marker behind: this newer binary's reconcile has not run yet, so
+// the row is still at the OLD rates while this fold adds a new-rate saving. So when this region carried
+// cache volume and the marker is not equal to pricing.Version, the fold drops cache_savings_backfilled
+// to false, returning the session to the backfill candidate set for the reconcile and drain to re-price
+// the whole saving from usage_events at the settled rate table. In steady state (marker current) the
+// flag is untouched and the O(1) rollup stays authoritative.
 func applyAggregates(ctx context.Context, tx pgx.Tx, sessionID int64, parserVersion int, a appliedDelta, started, ended time.Time) error {
+	regionHasCache := a.CacheRead > 0 || a.CacheWrite > 0
 	_, err := tx.Exec(ctx,
 		`UPDATE sessions SET
 		   message_count = message_count + $2,
@@ -501,15 +573,31 @@ func applyAggregates(ctx context.Context, tx pgx.Tx, sessionID int64, parserVers
 		   total_cache_read_tokens = total_cache_read_tokens + $7,
 		   total_cost_usd = total_cost_usd + $8,
 		   cost_incomplete = cost_incomplete OR $9,
-		   started_at = LEAST(started_at, $10),
-		   ended_at = GREATEST(ended_at, $11),
-		   parser_version = $12,
-		   updated_at = now()
+		   total_cache_savings_usd = total_cache_savings_usd + $10,
+		   cache_savings_incomplete = cache_savings_incomplete OR $11,
+		   -- Drop the authoritative flag when this cache-bearing region was folded while the corpus
+		   -- pricing marker differs from this binary's pricing.Version (a rollout in either direction),
+		   -- so the reconcile and drain re-price the whole saving at the settled rate table. The COALESCE
+		   -- reads a missing singleton as 0, which differs from any real version, so the safe direction
+		   -- (treat as in-flight, drop the flag) also covers a pre-migration database.
+		   cache_savings_backfilled = cache_savings_backfilled
+		     AND NOT ($15 AND COALESCE((SELECT cache_savings_priced_version FROM parse_meta WHERE id = TRUE), 0) <> $16),
+		   started_at = LEAST(started_at, $12),
+		   ended_at = GREATEST(ended_at, $13),
+		   parser_version = $14,
+		   updated_at = now(),
+		   -- The projection moved, so any stored grade is now behind it. Mark the session for
+		   -- the settle pass to re-grade; refreshSignalsTx clears this once it grades a settled
+		   -- session (see signals.go). This is what lets the settle pass find due sessions by an
+		   -- index seek instead of rescanning the settled tail every wake.
+		   signals_stale = true
 		 WHERE id = $1`,
 		sessionID, a.MessagesAdded, a.UserMessagesAdded,
 		a.Input, a.Output, a.CacheWrite, a.CacheRead,
 		a.CostUSD, a.CostIncomplete,
-		nullTime(started), nullTime(ended), parserVersion)
+		a.CacheSavingsUSD, a.CacheSavingsIncomplete,
+		nullTime(started), nullTime(ended), parserVersion,
+		regionHasCache, pricing.Version)
 	if err != nil {
 		return fmt.Errorf("update aggregates for session %d: %w", sessionID, err)
 	}
@@ -598,7 +686,12 @@ func (s *Store) ReparseSession(ctx context.Context, sessionID int64, parserVersi
 			state = newState
 			parsedLen = regionEnd
 		}
-		return nil
+		// The projection is fully rebuilt; recompute the session's signals from it in
+		// this same transaction. A reparse is also the versioned backfill: a caught-up
+		// session never re-enters AdvanceProjection, so an Epoch bump that reparses the
+		// corpus is what fills signals for sessions ingested before they existed, and
+		// what re-grades every session when the scoring version changes.
+		return refreshSignalsTx(ctx, tx, sessionID)
 	})
 }
 
@@ -637,6 +730,12 @@ func clearProjectionForReparseTx(ctx context.Context, tx pgx.Tx, sessionID int64
 		"DELETE FROM tool_calls WHERE session_id = $1",
 		"DELETE FROM usage_events WHERE session_id = $1",
 		"DELETE FROM attachments WHERE session_id = $1",
+		// session_signals is parser-owned too (derived from messages and tool_calls), so
+		// it clears with the rest. ReparseSession rebuilds it at the end of its replay;
+		// the standalone reset leaves it absent until the settle pass refreshes it, once
+		// the re-parsed session has settled (the append path that catches the cursor back
+		// up no longer touches signals, so the row does not come back on catch-up).
+		"DELETE FROM session_signals WHERE session_id = $1",
 	} {
 		if _, err := tx.Exec(ctx, q, sessionID); err != nil {
 			return fmt.Errorf("clear projection for reparse of session %d (%s): %w", sessionID, q, err)
@@ -661,8 +760,13 @@ func resetSessionAggregates(ctx context.Context, tx pgx.Tx, sessionID int64) err
 		   total_input_tokens = 0, total_output_tokens = 0,
 		   total_cache_write_tokens = 0, total_cache_read_tokens = 0,
 		   total_cost_usd = 0, cost_incomplete = FALSE,
+		   total_cache_savings_usd = 0, cache_savings_incomplete = FALSE,
 		   started_at = NULL, ended_at = NULL,
-		   updated_at = now()
+		   updated_at = now(),
+		   -- Clearing the projection moves it, so the stored grade is behind. The reparse
+		   -- replays and then refreshSignalsTx re-settles this flag (false only if the rebuilt
+		   -- session is settled), so a reparse of a still-live session leaves it due.
+		   signals_stale = true
 		 WHERE id = $1`, sessionID)
 	if err != nil {
 		return fmt.Errorf("reset aggregates for session %d: %w", sessionID, err)

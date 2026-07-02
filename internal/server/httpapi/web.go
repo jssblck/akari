@@ -59,15 +59,15 @@ func (s *Server) pageForNav(r *http.Request, title, active string) web.Page {
 	return pg
 }
 
-// render writes a templ component, mapping a render error to a 500.
+// render writes a templ component with the given status. The status is committed
+// before the body streams, so a mid-render failure cannot be remapped to a 500;
+// it only truncates the response, which the browser surfaces as a broken page.
+// Buffering the render to recover a clean 500 is deliberately not done: these
+// pages are cheap to render and effectively never fail.
 func render(w http.ResponseWriter, r *http.Request, status int, c templ.Component) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
-	if err := c.Render(r.Context(), w); err != nil {
-		// The header is already written; nothing left but to log via the default
-		// http error path is impossible, so swallow (the connection will close).
-		_ = err
-	}
+	_ = c.Render(r.Context(), w)
 }
 
 // handleRoot serves the site root at /. A signed-in reader (full-scope
@@ -108,6 +108,22 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	render(w, r, http.StatusOK, web.OverviewPage(s.pageForNav(r, "Overview", "overview"), analytics, rng, users, selected))
+}
+
+// handleInsights is the cross-cutting analytics surface at /insights: the quality and
+// archetype distributions over the selected trailing window. Like the overview, the
+// range selector refetches this same handler and swaps the insights section
+// (hx-select="#insights"), so a plain load and an htmx swap render from one path; the
+// window rides the URL via ?range=.
+func (s *Server) handleInsights(w http.ResponseWriter, r *http.Request) {
+	rng := web.ParseRange(r.URL.Query().Get("range"))
+	ins, err := s.Store.Insights(r.Context(), store.AnalyticsFilter{Since: web.RangeSince(rng, time.Now())})
+	if err != nil {
+		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "insights"), http.StatusInternalServerError, "Could not load insights."))
+		return
+	}
+	ranges := web.RangeOptions("/insights", nil, rng)
+	render(w, r, http.StatusOK, web.InsightsPage(s.pageForNav(r, "Insights", "insights"), ins, rng, ranges))
 }
 
 // handleProjectsIndex is the projects table (moved off the root to /projects when
@@ -269,6 +285,32 @@ func (s *Server) sessionView(r *http.Request, id int64) (store.SessionDetail, []
 	return d, msgs, web.ToolsByOrdinal(tools), web.AttachmentsByOrdinal(atts), subs, nil
 }
 
+// sessionHeaderStats builds the derived stat-tile inputs the session instrument header
+// renders: the session's all-usage cache effectiveness and its stored quality signals.
+// Both session-page handlers and the live body fragment share it, so the header reads the
+// same way on first load and on every SSE refresh.
+//
+// The Cache tile comes straight off the already-loaded SessionDetail rollups (the token
+// classes plus the parse-time cache-savings fold), so it costs nothing here. That is the
+// point of the rollup: the live body re-renders on every SSE update, and reading the tile
+// from the row the caller already holds keeps a long session's K refreshes linear rather
+// than rescanning its K usage rows each time. Only the stored signals still need a read.
+func (s *Server) sessionHeaderStats(ctx context.Context, d store.SessionDetail) (web.HeaderStats, error) {
+	cache := store.CacheStats{
+		Input:             d.TotalInput,
+		Output:            d.TotalOutput,
+		CacheRead:         d.TotalCacheRead,
+		CacheWrite:        d.TotalCacheWrite,
+		SavingsUSD:        d.TotalCacheSavingsUSD,
+		SavingsIncomplete: d.CacheSavingsIncomplete,
+	}
+	sig, err := s.Store.SessionSignalsByID(ctx, d.ID)
+	if err != nil {
+		return web.HeaderStats{}, err
+	}
+	return web.HeaderStats{Cache: cache, Signals: sig}, nil
+}
+
 func (s *Server) handleSessionPage(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
@@ -291,10 +333,15 @@ func (s *Server) handleSessionPage(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load session."))
 		return
 	}
+	hs, err := s.sessionHeaderStats(r.Context(), d)
+	if err != nil {
+		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load session."))
+		return
+	}
 	title := fmt.Sprintf("Session #%d", d.ID)
 	p, _ := principalFrom(r.Context())
 	owner := p.UserID == d.OwnerID
-	render(w, r, http.StatusOK, web.SessionPage(s.pageForNav(r, title, "sessions"), d, msgs, tools, atts, subs, dupIDs, true, owner))
+	render(w, r, http.StatusOK, web.SessionPage(s.pageForNav(r, title, "sessions"), d, msgs, tools, atts, subs, hs, dupIDs, true, owner))
 }
 
 // handlePublishSession marks the owner's session public and redirects back to it.
@@ -630,7 +677,12 @@ func (s *Server) handlePublicSession(w http.ResponseWriter, r *http.Request) {
 			publicSubs = append(publicSubs, sub)
 		}
 	}
-	render(w, r, http.StatusOK, web.PublicSessionPage(d, msgs, web.ToolsByOrdinal(tools), web.AttachmentsByOrdinal(atts), publicSubs))
+	hs, err := s.sessionHeaderStats(r.Context(), d)
+	if err != nil {
+		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load session."))
+		return
+	}
+	render(w, r, http.StatusOK, web.PublicSessionPage(d, msgs, web.ToolsByOrdinal(tools), web.AttachmentsByOrdinal(atts), publicSubs, hs))
 }
 
 // handleSessionBody serves just the live-updating body fragment, re-fetched by
@@ -652,7 +704,16 @@ func (s *Server) handleSessionBody(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Could not load session.", http.StatusInternalServerError)
 		return
 	}
-	render(w, r, http.StatusOK, web.SessionMain(d, msgs, tools, atts, subs))
+	// The live fragment re-renders the stat header on every SSE update. The Cache tile now
+	// comes off the same SessionDetail the body already loaded, so it tracks the session's
+	// growing usage in step with the Tokens tile beside it without a second read; only the
+	// stored quality signals are fetched here.
+	hs, err := s.sessionHeaderStats(r.Context(), d)
+	if err != nil {
+		http.Error(w, "Could not load session.", http.StatusInternalServerError)
+		return
+	}
+	render(w, r, http.StatusOK, web.SessionMain(d, msgs, tools, atts, subs, hs))
 }
 
 // handleSessionEvents is the SSE endpoint that signals a watching browser to
@@ -669,51 +730,9 @@ func (s *Server) handleSessionEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-
-	rc := http.NewResponseController(w)
-
-	// Each write gets a bounded deadline rather than clearing the deadline for the
-	// whole stream: a client that stops reading would otherwise block the write
-	// forever, so the deferred unsubscribe never runs and the subscription leaks.
-	// A short deadline turns a stalled client into a write error, ending the loop.
-	write := func(payload string) bool {
-		if rc.SetWriteDeadline(time.Now().Add(10*time.Second)) != nil {
-			return false
-		}
-		if _, err := fmt.Fprint(w, payload); err != nil {
-			return false
-		}
-		return rc.Flush() == nil
-	}
-
 	ch := s.hub.subscribe(id)
 	defer s.hub.unsubscribe(id, ch)
-
-	// An initial comment opens the stream so the browser's EventSource fires open.
-	if !write(": connected\n\n") {
-		return
-	}
-
-	keepalive := time.NewTicker(25 * time.Second)
-	defer keepalive.Stop()
-	ctx := r.Context()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ch:
-			if !write("event: update\ndata: 1\n\n") {
-				return
-			}
-		case <-keepalive.C:
-			if !write(": ping\n\n") {
-				return
-			}
-		}
-	}
+	serveSSE(w, r, ch, func(struct{}) string { return "event: update\ndata: 1\n\n" }, nil)
 }
 
 func (s *Server) handleAccountPage(w http.ResponseWriter, r *http.Request) {

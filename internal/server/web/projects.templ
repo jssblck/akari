@@ -64,7 +64,7 @@ templ ProjectsPage(p Page, projects []store.ProjectSummary, spark map[int64][]fl
 templ tokensCell(pr store.ProjectSummary) {
 	<span class="tok-cell" tabindex="0">
 		<span class="tok-total">{ FmtTokens(pr.TotalTokens()) }</span>
-		@tokenCard(pr.TotalTokens(), pr.TotalInput, pr.TotalOutput, pr.TotalCacheRead, pr.TotalCacheWrite, pr.TotalCostUSD, pr.CostIncomplete)
+		@tokenCard(pr.TotalTokens(), pr.TotalInput, pr.TotalOutput, pr.TotalCacheRead, pr.TotalCacheWrite, 0, pr.TotalCostUSD, pr.CostIncomplete)
 	</span>
 }
 
@@ -197,7 +197,7 @@ templ ProjectSessionList(sessions []store.SessionSummary, rem store.SessionRemai
 templ sessionTokensCell(s store.SessionSummary) {
 	<span class="tok-cell" tabindex="0">
 		<span class="tok-total">{ FmtTokens(RowTokens(s)) }</span>
-		@tokenCard(RowTokens(s), s.TotalInput, s.TotalOutput, s.TotalCacheRead, s.TotalCacheWrite, s.TotalCostUSD, s.CostIncomplete)
+		@tokenCard(RowTokens(s), s.TotalInput, s.TotalOutput, s.TotalCacheRead, s.TotalCacheWrite, 0, s.TotalCostUSD, s.CostIncomplete)
 	</span>
 }
 
@@ -208,7 +208,7 @@ templ sessionTokensCell(s store.SessionSummary) {
 templ remainderTokensCell(rem store.SessionRemainder) {
 	<span class="tok-cell" tabindex="0">
 		<span class="tok-total">{ FmtTokens(rem.Tokens()) }</span>
-		@tokenCard(rem.Tokens(), rem.Input, rem.Output, rem.CacheRead, rem.CacheWrite, rem.CostUSD, rem.CostIncomplete)
+		@tokenCard(rem.Tokens(), rem.Input, rem.Output, rem.CacheRead, rem.CacheWrite, 0, rem.CostUSD, rem.CostIncomplete)
 	</span>
 }
 

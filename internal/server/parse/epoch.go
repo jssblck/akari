@@ -25,4 +25,33 @@ package parse
 // test (epoch_test.go) is the guardrail that makes the Epoch bump impossible to
 // forget: it snapshots the projection for representative fixtures and fails, by
 // name, when that output drifts.
-const Epoch = 1
+//
+// An Epoch bump is also a way to backfill a derived projection table that did not
+// exist before. A caught-up session never re-enters AdvanceProjection, and the append
+// path does not fill session_signals (the settle pass does, once a session settles),
+// so on the first deploy of a new derived table an Epoch bump reparses the corpus to
+// populate it in one pass, independent of whether the settle loop is enabled. The
+// reparse also rebuilds session_signals at the running quality.Version, so a
+// scoring-model change rides the same signal. Such a bump leaves the parser's projection
+// delta byte-for-byte identical, so the golden fixtures do not move; the bump is
+// intentional and stands on its own.
+//
+// Epoch 1 -> 2: introduce session_signals, the per-session derived behavioral signals
+// (an outcome classification, a quality score and grade, tool-health counts,
+// prompt-hygiene counts, and context-health figures). They are materialized by the settle
+// pass as sessions settle and rebuilt on reparse; this one-time Epoch bump backfills the
+// table across the existing (already-settled) corpus on first deploy and stamps every row
+// at the running quality.Version. session_signals is a new derived table rather than a
+// change to the parser's output, so this bump leaves the projection delta byte-for-byte
+// identical and the golden fixtures do not move; it stands on its own.
+//
+// Epoch 2 -> 3: materialize per-message prompt-hygiene facts on the messages row
+// (prompt_short, prompt_no_code, prompt_bare_greeting, prompt_digest; see migration
+// 0022_prompt_hygiene_facts and the message insert in store/projection.go). They are derived at
+// insert so the settle pass aggregates fixed-size columns instead of reading prompt bodies back.
+// Migration 0022 adds the columns but, unlike a generated column, cannot backfill them; this bump
+// reparses the corpus so every existing message re-inserts through the classifier and the columns
+// fill in one pass. The facts are store-side derived columns, not parser output, so the reducer's
+// projection delta is byte-for-byte identical and the golden fixtures do not move; the bump is the
+// backfill signal and stands on its own.
+const Epoch = 3

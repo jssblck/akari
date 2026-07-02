@@ -13,11 +13,12 @@
     if (attrs) for (var k in attrs) e.setAttribute(k, attrs[k]);
     return e;
   }
+  // fmtCost mirrors web.FmtCost so the tooltip's dollar figure reads identically
+  // to every server-rendered cost on the page, at any magnitude.
   function fmtCost(v) {
     if (v === 0) return "$0";
     if (v < 0.01) return "$" + v.toFixed(4);
-    if (v < 100) return "$" + v.toFixed(2);
-    return "$" + Math.round(v).toLocaleString();
+    return "$" + v.toFixed(2);
   }
   function fmtTok(v) {
     if (v >= 1e9) return (v / 1e9).toFixed(1) + "B";
