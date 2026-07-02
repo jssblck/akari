@@ -590,6 +590,8 @@ func RoleClass(role string) string {
 		return "msg-user"
 	case "assistant":
 		return "msg-assistant"
+	case "context":
+		return "msg-context"
 	default:
 		return "msg-other"
 	}

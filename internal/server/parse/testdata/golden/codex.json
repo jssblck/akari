@@ -2,6 +2,16 @@
   "Messages": [
     {
       "Ordinal": 0,
+      "Role": "context",
+      "Content": "# AGENTS.md instructions for /home/ada/akari\n\n\u003cINSTRUCTIONS\u003e\nRun make build before you commit.\n\u003c/INSTRUCTIONS\u003e\n\u003cenvironment_context\u003e\n  \u003ccwd\u003e/home/ada/akari\u003c/cwd\u003e\n  \u003cshell\u003ebash\u003c/shell\u003e\n\u003c/environment_context\u003e",
+      "ThinkingText": "",
+      "Model": "",
+      "HasThinking": false,
+      "HasToolUse": false,
+      "Timestamp": "2024-01-01T10:00:00Z"
+    },
+    {
+      "Ordinal": 1,
       "Role": "assistant",
       "Content": "Two files.",
       "ThinkingText": "Plan the shell command.",
@@ -11,7 +21,7 @@
       "Timestamp": "2024-01-01T10:00:01Z"
     },
     {
-      "Ordinal": 1,
+      "Ordinal": 2,
       "Role": "user",
       "Content": "thanks",
       "ThinkingText": "",
@@ -23,7 +33,7 @@
   ],
   "ToolCalls": [
     {
-      "MessageOrdinal": 0,
+      "MessageOrdinal": 1,
       "CallIndex": 0,
       "ToolName": "shell_command",
       "Category": "bash",

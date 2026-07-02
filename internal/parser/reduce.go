@@ -192,6 +192,20 @@ func (r *reducer) addUser(content string, ts time.Time) int {
 	return ord
 }
 
+// addContext appends an injected-context message (RoleContext): agent framing that
+// is not a human prompt. It advances the ordinal like any turn and returns it, but
+// takes RoleContext so the store's role='user' readers (count, hygiene, title) all
+// skip it. A context turn carries no images or usage, so unlike addUser its callers
+// have no attachment to hang on the returned ordinal.
+func (r *reducer) addContext(content string, ts time.Time) int {
+	ord := r.st.NextOrdinal
+	r.st.NextOrdinal++
+	r.d.Messages = append(r.d.Messages, MessageOp{
+		Ordinal: ord, Role: RoleContext, Content: content, Timestamp: ts,
+	})
+	return ord
+}
+
 // addAttachment records one binary attachment against a message. The common path is a
 // CAS sentinel: the client lifts every image to the CAS (both the small-line rewrite
 // and the streaming big-line path lift images), so the server records a reference and

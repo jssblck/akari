@@ -38,7 +38,15 @@ import (
 // pending call or an unsettled automation run stays unknown until the settle pass sees it
 // idle. The signal set, the penalty weights, and the grade thresholds are unchanged, so
 // scoring of a given Signals value is identical to v1; only the outcome fed into it moved.
-const Version = 2
+//
+// Version 3 rides the parse.Epoch 7 -> 8 reparse that re-roles Codex injected framing (the AGENTS.md
+// instructions and environment_context block) from the user role to the "context" role. The scoring,
+// weights, and thresholds are unchanged, but the prompt-hygiene aggregate now reads a different prompt
+// set on those sessions: the framing no longer counts as a prompt, and the unstructured-start flag is
+// judged against the real opening prompt rather than the AGENTS.md block. That shifts stored hygiene
+// counts and grades, so the version bump makes the analytics count only rebuilt rows and the settle
+// pass re-stamp settled sessions once the reparse has re-derived their message roles.
+const Version = 3
 
 // PromptFactsVersion stamps the per-message prompt-hygiene facts ClassifyPrompt materializes on
 // each human message (see the messages.prompt_* columns and store.gatherPromptHygiene). It is

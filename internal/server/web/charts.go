@@ -213,6 +213,12 @@ func Sparkline(vals []float64) string {
 // most 48 runes, and it never scans more than scanCap runes of input, so even a
 // whitespace-heavy message costs a fixed amount, independent of message size.
 func OutlineTitle(m store.Message) string {
+	// An injected-context turn's content is the raw AGENTS.md / environment block, which
+	// would fill the outline row with framing text; label it by kind instead so the row
+	// reads as what it is and stays scannable.
+	if m.Role == "context" {
+		return ContextLabel(m.Content)
+	}
 	const max = 48      // emitted label length
 	const scanCap = 256 // input runes examined, bounding the scan regardless of output
 	var b strings.Builder
@@ -274,8 +280,29 @@ func OutlineTurnClass(role string, steps []store.ToolCallView) string {
 		return "ol-turn ol-user"
 	case "assistant":
 		return "ol-turn ol-assistant"
+	case "context":
+		return "ol-turn ol-context"
 	default:
 		return "ol-turn ol-other"
+	}
+}
+
+// ContextLabel names what an injected-context turn carries, from the marker its
+// content opens with (see parser.isCodexContext). It is a short, fixed label for the
+// outline row and the transcript disclosure summary, never the raw framing text.
+func ContextLabel(content string) string {
+	t := strings.TrimSpace(content)
+	hasAgents := strings.HasPrefix(t, "# AGENTS.md instructions for ") || strings.HasPrefix(t, "<user_instructions>")
+	hasEnv := strings.Contains(t, "<environment_context>")
+	switch {
+	case hasAgents && hasEnv:
+		return "project instructions + environment"
+	case hasAgents:
+		return "project instructions"
+	case hasEnv:
+		return "environment"
+	default:
+		return "agent context"
 	}
 }
 

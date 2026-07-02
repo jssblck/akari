@@ -3,6 +3,7 @@ package parser
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -207,6 +208,60 @@ func TestParseCodex(t *testing.T) {
 	}
 	if u2.MessageOrdinal == nil || *u2.MessageOrdinal != 3 {
 		t.Errorf("usage 1 ordinal = %v, want 3", u2.MessageOrdinal)
+	}
+}
+
+// TestParseCodexContext pins that Codex's injected framing is classified as context,
+// not as a human prompt: the AGENTS.md-plus-environment turn Codex prepends, and the
+// environment block it re-injects mid-session after a compaction, both take
+// RoleContext, while the real prompts stay RoleUser. This is what keeps the framing
+// out of the session title, the user-message count, and prompt hygiene downstream.
+func TestParseCodexContext(t *testing.T) {
+	s, err := Parse(AgentCodex, loadFixture(t, "codex_context.jsonl"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	// developer instructions are dropped; the two framing turns and two prompts and one
+	// assistant reply remain: context, user, assistant, context, user.
+	if len(s.Messages) != 5 {
+		t.Fatalf("messages = %d, want 5", len(s.Messages))
+	}
+
+	// The prepended AGENTS.md + environment_context turn is context, not the opening prompt.
+	if s.Messages[0].Role != RoleContext {
+		t.Errorf("message 0 role = %q, want context", s.Messages[0].Role)
+	}
+	if !strings.HasPrefix(s.Messages[0].Content, "# AGENTS.md instructions for ") {
+		t.Errorf("message 0 content = %q", s.Messages[0].Content)
+	}
+
+	// The real first prompt follows and keeps the user role, so it is the session's opener.
+	if s.Messages[1].Role != RoleUser || s.Messages[1].Content != "Add rate limiting" {
+		t.Errorf("message 1 = %+v", s.Messages[1])
+	}
+	if s.Messages[2].Role != RoleAssistant {
+		t.Errorf("message 2 role = %q, want assistant", s.Messages[2].Role)
+	}
+
+	// The environment block re-injected after a compaction is context too, matched by content
+	// rather than position, and the prompt that follows it is still a user turn.
+	if s.Messages[3].Role != RoleContext {
+		t.Errorf("message 3 role = %q, want context", s.Messages[3].Role)
+	}
+	if s.Messages[4].Role != RoleUser || s.Messages[4].Content != "Now add tests" {
+		t.Errorf("message 4 = %+v", s.Messages[4])
+	}
+
+	// Exactly two turns are real human prompts; the two framing turns are excluded.
+	users := 0
+	for _, m := range s.Messages {
+		if m.Role == RoleUser {
+			users++
+		}
+	}
+	if users != 2 {
+		t.Errorf("user messages = %d, want 2", users)
 	}
 }
 

@@ -1,0 +1,9 @@
+{"type":"session_meta","timestamp":"2024-02-01T09:00:00Z","payload":{"id":"ctx-1","cwd":"/home/ada/code/my-api","originator":"user","git":{"branch":"dev"}}}
+{"type":"response_item","timestamp":"2024-02-01T09:00:00Z","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<permissions instructions>\nApproval policy is never.\n</permissions instructions>"}]}}
+{"type":"response_item","timestamp":"2024-02-01T09:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /home/ada/code/my-api\n\n<INSTRUCTIONS>\nRun the tests before committing.\n</INSTRUCTIONS>"},{"type":"input_text","text":"<environment_context>\n  <cwd>/home/ada/code/my-api</cwd>\n  <shell>bash</shell>\n</environment_context>"}]}}
+{"type":"response_item","timestamp":"2024-02-01T09:00:01Z","payload":{"role":"user","content":[{"type":"input_text","text":"Add rate limiting"}]}}
+{"type":"response_item","timestamp":"2024-02-01T09:00:08Z","payload":{"role":"assistant","model":"gpt-5-codex","content":[{"type":"output_text","text":"I'll add rate limiting."}]}}
+{"type":"event_msg","timestamp":"2024-02-01T09:00:09Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1000,"cached_input_tokens":400,"output_tokens":200,"reasoning_output_tokens":50}}}}
+{"type":"event_msg","timestamp":"2024-02-01T09:30:00Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":2000,"cached_input_tokens":1800,"output_tokens":10}}}}
+{"type":"response_item","timestamp":"2024-02-01T09:30:01Z","payload":{"role":"user","content":[{"type":"input_text","text":"<environment_context>\n  <cwd>/home/ada/code/my-api</cwd>\n</environment_context>"}]}}
+{"type":"response_item","timestamp":"2024-02-01T09:30:05Z","payload":{"role":"user","content":[{"type":"input_text","text":"Now add tests"}]}}
