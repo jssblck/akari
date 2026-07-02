@@ -72,7 +72,7 @@ templ LandingPage() {
 							</div>
 						</div>
 					</div>
-					<p class="landing-caption muted">A session as akari shows it: every tool call timed, sized, and flagged.</p>
+					<p class="landing-caption muted">A session as akari shows it, from the prompt to the fix.</p>
 				</div>
 			</section>
 			<!-- Section 1: the transcript. Copy left, drill-in mock right on wide screens. -->
@@ -119,10 +119,10 @@ templ LandingPage() {
 				<div class="landing-copy">
 					<h2>See what it costs, per project and per model</h2>
 					<p>
-						Every session carries its token usage, priced from a compiled-in rate
-						table. Usage rolls up by project, model, agent, and machine over a
-						trailing window you choose, so the answer to where the month's spend
-						went is a lookup, not a spreadsheet.
+						Every session carries its token usage and what it cost. Usage rolls up
+						by project, model, agent, and machine over a trailing window you
+						choose, so the answer to where the month's spend went is a lookup, not
+						a spreadsheet.
 					</p>
 				</div>
 				<div class="landing-mock">
@@ -199,11 +199,10 @@ templ LandingPage() {
 				<div class="landing-copy">
 					<h2>Every machine, one history</h2>
 					<p>
-						Thin clients push raw session bytes from every laptop and workstation
-						to one server. Projects are keyed by canonical git remote, so the same
-						repo across clones, worktrees, and machines collapses into one project.
-						Full-text search across every transcript recovers the run you half
-						remember.
+						A small client on each laptop and workstation uploads new sessions to
+						one server. Projects are keyed by git remote, so the same repo across
+						clones, worktrees, and machines collapses into one project. Full-text
+						search across every transcript recovers the run you half remember.
 					</p>
 				</div>
 				<div class="landing-mock">
@@ -259,12 +258,12 @@ templ LandingPage() {
 				<div class="landing-copy">
 					<h2>Every settled run gets a grade</h2>
 					<p>
-						Once a session settles, akari derives signals from the transcript
-						itself, never from the agent's own report: an outcome with a
-						confidence, an A to F grade from tool failures, retries, and edit
-						churn, and read-only measures of prompt hygiene and context health.
-						Insights aggregates them across the fleet, so you can see which
-						projects burn retries and which prompts set the agent up well.
+						Once a run is over, akari grades it from the transcript itself, never
+						from the agent's own report: an outcome with a confidence, an A to F
+						grade from tool failures, retries, and edit churn, and measures of
+						prompt hygiene and context health. Insights aggregates the signals
+						across the fleet, so you can see which projects burn retries and which
+						prompts set the agent up well.
 					</p>
 				</div>
 				<div class="landing-mock">
@@ -295,15 +294,15 @@ templ LandingPage() {
 					<div class="landing-def">
 						<dt>Share a run</dt>
 						<dd>
-							Publishing a session mints an unguessable link for logged-out
-							viewing. Your usage overview can go public at a stable address too;
-							both revoke instantly.
+							Publishing a session mints an unguessable link anyone can view
+							without an account. Your usage overview can go public at a stable
+							address too; both revoke instantly.
 						</dd>
 					</div>
 					<div class="landing-def">
 						<dt>Read it from your agent</dt>
 						<dd>
-							A read-only MCP endpoint serves the same surface as the UI: overview,
+							A read-only MCP endpoint exposes everything the UI shows: overview,
 							projects, sessions, and full transcripts. One command connects Claude
 							Code.
 						</dd>
@@ -311,17 +310,17 @@ templ LandingPage() {
 					<div class="landing-def">
 						<dt>Old sessions get better</dt>
 						<dd>
-							Clients keep no derived state. When the parser improves, the server
-							reparses stored bytes in place, and history that was already uploaded
-							gains the new fields.
+							When akari's parsing improves, the server reprocesses what it already
+							stored, and old sessions gain the new fields with nothing
+							re-uploaded.
 						</dd>
 					</div>
 					<div class="landing-def">
 						<dt>Own every byte</dt>
 						<dd>
-							One server binary with an embedded UI, backed by Postgres. No Node
-							toolchain, no telemetry, AGPL. Run it with the bundled Docker Compose
-							file.
+							One server binary with an embedded UI, backed by Postgres. No
+							telemetry, open source under the AGPL. Run it with the bundled Docker
+							Compose file.
 						</dd>
 					</div>
 				</dl>
@@ -336,10 +335,9 @@ templ LandingPage() {
 						them in.
 					</p>
 					<p class="landing-fit">
-						The server is Linux-only and needs Postgres; clients run on Linux,
-						macOS, and Windows. Registration is closed by default: the first account
-						is the admin, and later accounts need an invite. akari is early
-						software; the store is your own Postgres, so nothing locks you in.
+						akari is early software. Registration is closed by default: the first
+						account is the admin, and later accounts join by invite. Everything is
+						stored in your own Postgres, so nothing locks you in.
 					</p>
 				</div>
 				<div class="landing-mock">
