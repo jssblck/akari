@@ -23,26 +23,83 @@ import (
 type ShedMark struct {
 	FromTokens int64
 	ToTokens   int64
+	// FromUsage and ToUsage carry the full per-turn usage behind the two occupancy figures, so
+	// the shed divider's breakdown card can spell out each side's token classes and cost rather
+	// than the label's two bare context totals. FromUsage is the prior measured turn's usage,
+	// ToUsage this turn's; both are the same TurnUsage the transcript stamps a message with.
+	FromUsage store.TurnUsage
+	ToUsage   store.TurnUsage
 }
 
-// TurnLatencies pairs each answered user prompt with the reply that followed it and returns the
-// wall-clock gap, keyed by the assistant message's ordinal. The rule walks the transcript in
-// order holding the ordinal of the most recent user message that carried a timestamp; the FIRST
-// following assistant message that also carries a timestamp closes that turn (latency = its time
-// minus the anchor's), and the anchor is then cleared so a later assistant reply in the same
-// stretch is not double-counted. A new user message resets the anchor, so an interleaved
-// exchange measures each prompt against its own reply rather than a distant one.
+// MsgAnnotation is the render-only overlay one transcript message carries: its reply latency (a
+// zero duration means the message opens no answered turn), a shed marker (nil unless this turn
+// shed context relative to the previous measured one), and whether its prompt repeats an earlier
+// one verbatim. A message with none of the three gets no map entry, so the annotations map holds
+// only the ordinals that actually carry a mark.
+type MsgAnnotation struct {
+	Latency         time.Duration
+	Shed            *ShedMark
+	DuplicatePrompt bool
+}
+
+// TranscriptAnnotations derives the three per-message transcript instruments (turn latency,
+// context sheds, and duplicate prompts) in a single linear walk over the messages, keyed by
+// ordinal, with an entry only for an ordinal that carries at least one of the three. It replaces
+// the three separate per-concern passes with one, so the transcript template calls it once and
+// reads each message's marks by ordinal as it renders.
 //
-// A pairing whose latency is negative (a clock skew, or timestamps out of order relative to the
-// ordinal order) is skipped rather than shown as a nonsense stamp; FmtLatency would render it a
-// dash anyway, but dropping it keeps the map to real measurements. Messages missing a timestamp
-// are transparent: a user message with no timestamp sets no anchor, and an assistant with no
-// timestamp cannot close one.
-func TurnLatencies(msgs []store.Message) map[int]time.Duration {
-	out := make(map[int]time.Duration)
-	// anchor holds the pending user prompt's time; nil means no open turn to close.
+// The three sub-computations keep their own semantics, folded into the one pass:
+//
+//   - Latency pairs each answered user prompt with the reply that followed it. The walk holds the
+//     time of the most recent timestamped user message; the FIRST following timestamped assistant
+//     message closes that turn (latency = its time minus the anchor's), and the anchor is then
+//     cleared so a later reply in the same stretch is not double-counted. A new user message resets
+//     the anchor, so an interleaved exchange measures each prompt against its own reply. A negative
+//     gap (clock skew, or timestamps out of order relative to ordinal order) is dropped rather than
+//     shown as a nonsense stamp. A message missing a timestamp is transparent: a user prompt with
+//     none sets no anchor, and an assistant with none cannot close one.
+//
+//   - Shed marks the turns where context dropped (a compaction or a clear). For each message that
+//     has a usage row, it compares that turn's context occupancy against the previous
+//     message-with-usage's through quality.IsContextReset; messages without a usage row are skipped,
+//     so the comparison is always between two turns that actually presented a context. The shed is
+//     attributed to the turn AFTER the drop (the smaller, post-compaction context), where the
+//     transcript draws the divider: above the message that first ran on the shed-down context.
+//
+//   - DuplicatePrompt marks a user message whose normalized digest already appeared on an earlier
+//     eligible prompt. Eligibility mirrors the session-level duplicate count: only user messages
+//     with current-version facts and not PromptShort are considered, because a terse prompt ("yes",
+//     "go on") legitimately recurs. The FIRST occurrence of a digest is not marked (the original);
+//     every later occurrence is. A message without current facts carries no trustworthy digest, so
+//     it neither marks nor seeds, the same way the renderer shows it no hygiene badge.
+//
+// This pass adds one map bounded by the same message slice the caller already holds. The web
+// transcript is deliberately unwindowed (the page renders the whole session, and the SSE body swap
+// re-renders it), so the message slice, the tool-call map, and the outline already scale with the
+// session by that design; this annotation map keeps peak memory at the page's existing order and
+// the per-refresh time at the render's existing order. An incremental server-side rollup for these
+// render-only marks would add ingest-path state and complexity to save work the page's own render
+// of the full transcript dwarfs, so the single pass is the right shape here, not a stopgap.
+func TranscriptAnnotations(msgs []store.Message, usage map[int]store.TurnUsage) map[int]MsgAnnotation {
+	out := make(map[int]MsgAnnotation)
+	// mark fetches (creating if absent) the annotation for an ordinal, so the three concerns can
+	// each set their own field on the same entry without clobbering the others.
+	mark := func(ord int, f func(*MsgAnnotation)) {
+		a := out[ord]
+		f(&a)
+		out[ord] = a
+	}
+
+	// Latency state: anchor holds the pending user prompt's time; nil means no open turn to close.
 	var anchor *time.Time
+	// Shed state: the previous measured turn's usage and whether we have one yet.
+	var prevUsage store.TurnUsage
+	havePrev := false
+	// Duplicate-prompt state: the set of normalized digests seen on eligible prompts so far.
+	seen := make(map[int64]bool)
+
 	for _, m := range msgs {
+		// Latency: reopen or close a turn on the role.
 		switch m.Role {
 		case "user":
 			// A new prompt (re)opens the turn, whether or not the prior one was answered, so a
@@ -54,91 +111,66 @@ func TurnLatencies(msgs []store.Message) map[int]time.Duration {
 				anchor = nil
 			}
 		case "assistant":
-			if anchor == nil || m.Timestamp == nil || m.Timestamp.IsZero() {
-				continue
+			if anchor != nil && m.Timestamp != nil && !m.Timestamp.IsZero() {
+				d := m.Timestamp.Sub(*anchor)
+				anchor = nil // this reply closes the turn; a later one is not its answer
+				if d >= 0 {  // an out-of-order (negative) gap is not a real latency
+					ord := m.Ordinal
+					mark(ord, func(a *MsgAnnotation) { a.Latency = d })
+				}
 			}
-			d := m.Timestamp.Sub(*anchor)
-			anchor = nil // this reply closes the turn; a later one is not the answer to this prompt
-			if d < 0 {
-				continue // out-of-order timestamps: not a real latency
+		}
+
+		// Shed: compare this turn's context occupancy against the previous measured turn's.
+		if u, ok := usage[m.Ordinal]; ok {
+			if havePrev && quality.IsContextReset(prevUsage.ContextTokens, u.ContextTokens) {
+				shed := &ShedMark{
+					FromTokens: prevUsage.ContextTokens,
+					ToTokens:   u.ContextTokens,
+					FromUsage:  prevUsage,
+					ToUsage:    u,
+				}
+				mark(m.Ordinal, func(a *MsgAnnotation) { a.Shed = shed })
 			}
-			out[m.Ordinal] = d
+			prevUsage = u
+			havePrev = true
 		}
-	}
-	return out
-}
 
-// ContextSheds finds the turns where context was shed (a compaction or a clear) and returns a
-// ShedMark per such turn, keyed by the ordinal of the message whose usage dropped. It walks the
-// messages in ordinal order (their natural transcript order) and, for each message that has a
-// usage row, compares that turn's context occupancy against the previous message-with-usage's
-// through quality.IsContextReset. Messages without a usage row are skipped, so the comparison is
-// always between two turns that actually presented a context, never across a gap of untracked
-// messages.
-//
-// The shed is attributed to the turn AFTER the drop (the smaller, post-compaction context),
-// which is where the transcript draws the divider: the divider sits above the message that first
-// ran on the shed-down context, marking the boundary the compaction crossed.
-func ContextSheds(msgs []store.Message, usage map[int]store.TurnUsage) map[int]ShedMark {
-	out := make(map[int]ShedMark)
-	var prev int64
-	havePrev := false
-	for _, m := range msgs {
-		u, ok := usage[m.Ordinal]
-		if !ok {
-			continue
+		// DuplicatePrompt: flag a repeat of an earlier eligible prompt's digest.
+		if m.Role == "user" && m.PromptFactsCurrent && !m.PromptShort {
+			if seen[m.PromptDigest] {
+				mark(m.Ordinal, func(a *MsgAnnotation) { a.DuplicatePrompt = true })
+			} else {
+				seen[m.PromptDigest] = true
+			}
 		}
-		cur := u.ContextTokens
-		if havePrev && quality.IsContextReset(prev, cur) {
-			out[m.Ordinal] = ShedMark{FromTokens: prev, ToTokens: cur}
-		}
-		prev = cur
-		havePrev = true
-	}
-	return out
-}
-
-// DuplicatePromptOrdinals marks the user messages that repeat an earlier prompt verbatim, keyed
-// by ordinal. A prompt is a repeat when its normalized digest already appeared on an earlier
-// eligible prompt. Eligibility mirrors the session-level duplicate count (quality's hygiene
-// aggregate): only user messages with current-version facts and not PromptShort are considered,
-// because a terse prompt ("yes", "go on") legitimately recurs and would otherwise flag every
-// short acknowledgement as a duplicate. The FIRST occurrence of a digest is not marked (it is
-// the original); every later occurrence is.
-//
-// A message without current facts (a superseded classifier or a pre-migration row) carries no
-// trustworthy digest, so it neither marks nor seeds: it is invisible to this pass, the same way
-// the renderer shows no hygiene badge for it.
-func DuplicatePromptOrdinals(msgs []store.Message) map[int]bool {
-	seen := make(map[int64]bool)
-	out := make(map[int]bool)
-	for _, m := range msgs {
-		if m.Role != "user" || !m.PromptFactsCurrent || m.PromptShort {
-			continue
-		}
-		if seen[m.PromptDigest] {
-			out[m.Ordinal] = true
-			continue
-		}
-		seen[m.PromptDigest] = true
 	}
 	return out
 }
 
 // FmtContextStamp renders a turn's context occupancy as the compact "ctx 82k" stamp the
-// transcript shows inline; the full per-class split rides the title (see ContextStampTitle).
+// transcript shows inline; the full per-class split and cost ride the breakdown card the stamp
+// hosts (see turnCard in session.templ), not a hover title.
 func FmtContextStamp(u store.TurnUsage) string {
 	return "ctx " + FmtTokensCompact(u.ContextTokens)
 }
 
-// ContextStampTitle spells out the classes behind a context stamp for its hover title, so the
-// compact figure is explained on inspection: "input 1.2k, cache read 78k, cache write 3.1k,
-// output 950". Output is named even though it is excluded from the occupancy figure, so a reader
-// can see the whole turn's token shape and understand why the ctx figure omits output.
-func ContextStampTitle(u store.TurnUsage) string {
-	return fmt.Sprintf("input %s, cache read %s, cache write %s, output %s",
-		FmtTokensCompact(u.Input), FmtTokensCompact(u.CacheRead),
-		FmtTokensCompact(u.CacheWrite), FmtTokensCompact(u.Output))
+// TurnTokenTotal is the four-class spend total for one turn (input + output + cache read + cache
+// write), the headline the turn's breakdown card carries above its per-class split. It is a real
+// all-four-classes total, distinct from the context-occupancy figure the visible "ctx" stamp
+// shows (which excludes output), so the card reconciles with the four rows beneath it.
+func TurnTokenTotal(u store.TurnUsage) int64 {
+	return u.Input + u.Output + u.CacheRead + u.CacheWrite
+}
+
+// TurnCostLabel renders a turn's cost for its breakdown card: the dollar figure when the turn was
+// priced, or "unpriced" when it carries no cost (a turn whose usage never got a rate), so the
+// card never shows a misleading "$0.00" for an unmeasured cost.
+func TurnCostLabel(u store.TurnUsage) string {
+	if u.CostUSD == nil {
+		return "unpriced"
+	}
+	return FmtCost(*u.CostUSD, false)
 }
 
 // ShedLabel renders a shed divider's centered label, "context shed: 145k -> 12k", with a real

@@ -14,10 +14,11 @@ func tsAt(base time.Time, secs int) *time.Time {
 	return &t
 }
 
-// TestTurnLatencies pins the prompt-to-reply pairing: the first timestamped assistant after a
-// timestamped user closes the turn (keyed by the assistant's ordinal), a later user resets the
-// anchor, a missing timestamp is transparent, and an out-of-order (negative) gap is dropped.
-func TestTurnLatencies(t *testing.T) {
+// TestAnnotationsLatency pins the prompt-to-reply pairing inside the consolidated pass: the first
+// timestamped assistant after a timestamped user closes the turn (keyed by the assistant's
+// ordinal), a later user resets the anchor, a missing timestamp is transparent, and an
+// out-of-order (negative) gap is dropped. It reads the Latency field of the single annotation map.
+func TestAnnotationsLatency(t *testing.T) {
 	base := time.Date(2026, 6, 28, 9, 0, 0, 0, time.UTC)
 	cases := []struct {
 		name string
@@ -81,7 +82,13 @@ func TestTurnLatencies(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := TurnLatencies(tc.msgs)
+			ann := TranscriptAnnotations(tc.msgs, nil)
+			got := map[int]time.Duration{}
+			for ord, a := range ann {
+				if a.Latency > 0 {
+					got[ord] = a.Latency
+				}
+			}
 			if len(got) != len(tc.want) {
 				t.Fatalf("latencies = %v, want %v", got, tc.want)
 			}
@@ -94,10 +101,12 @@ func TestTurnLatencies(t *testing.T) {
 	}
 }
 
-// TestContextSheds pins the shed markers at the reset boundary: a large-to-small drop fires and
-// carries both occupancy figures, a shallow dip does not, a drop from a small early context does
-// not, and a message without a usage row is skipped so the comparison never crosses a gap.
-func TestContextSheds(t *testing.T) {
+// TestAnnotationsSheds pins the shed markers at the reset boundary: a large-to-small drop fires and
+// carries both occupancy figures (and both turns' full usage for the divider's breakdown card), a
+// shallow dip does not, a drop from a small early context does not, and a message without a usage
+// row is skipped so the comparison never crosses a gap. It reads the Shed field of the single
+// annotation map.
+func TestAnnotationsSheds(t *testing.T) {
 	msg := func(ord int, role string) store.Message { return store.Message{Ordinal: ord, Role: role} }
 	usageOf := func(ctx int64) store.TurnUsage { return store.TurnUsage{Input: ctx, ContextTokens: ctx} }
 
@@ -152,24 +161,50 @@ func TestContextSheds(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ContextSheds(tc.msgs, tc.usage)
+			ann := TranscriptAnnotations(tc.msgs, tc.usage)
+			got := map[int]ShedMark{}
+			for ord, a := range ann {
+				if a.Shed != nil {
+					got[ord] = *a.Shed
+				}
+			}
 			if len(got) != len(tc.want) {
 				t.Fatalf("sheds = %v, want %v", got, tc.want)
 			}
 			for ord, want := range tc.want {
-				if got[ord] != want {
-					t.Errorf("shed[%d] = %+v, want %+v", ord, got[ord], want)
+				// Compare only the two occupancy figures; the full-usage fields ride along for
+				// the card and are checked separately below.
+				if got[ord].FromTokens != want.FromTokens || got[ord].ToTokens != want.ToTokens {
+					t.Errorf("shed[%d] = {%d -> %d}, want {%d -> %d}", ord,
+						got[ord].FromTokens, got[ord].ToTokens, want.FromTokens, want.ToTokens)
 				}
 			}
 		})
 	}
+
+	// A shed carries both turns' full usage so the divider's breakdown card can spell out each
+	// side's token classes, not just the two occupancy totals.
+	msgs := []store.Message{msg(0, "user"), msg(1, "assistant")}
+	usage := map[int]store.TurnUsage{
+		0: {Input: 150000, CacheRead: 30000, CacheWrite: 0, Output: 2000, ContextTokens: 180000},
+		1: {Input: 8000, CacheRead: 4000, CacheWrite: 0, Output: 500, ContextTokens: 12000},
+	}
+	ann := TranscriptAnnotations(msgs, usage)
+	a, ok := ann[1]
+	if !ok || a.Shed == nil {
+		t.Fatal("expected a shed marked on ordinal 1")
+	}
+	if a.Shed.FromUsage.Input != 150000 || a.Shed.ToUsage.Input != 8000 {
+		t.Errorf("shed usage not threaded: from.Input=%d to.Input=%d, want 150000 / 8000",
+			a.Shed.FromUsage.Input, a.Shed.ToUsage.Input)
+	}
 }
 
-// TestDuplicatePromptOrdinals pins the repeat detection: a verbatim digest repeat past its first
-// occurrence is marked, a short prompt is excluded (a terse "yes" legitimately recurs even when
-// its digest collides with another short prompt), and a message without current facts neither
-// marks nor seeds.
-func TestDuplicatePromptOrdinals(t *testing.T) {
+// TestAnnotationsDuplicatePrompts pins the repeat detection inside the consolidated pass: a
+// verbatim digest repeat past its first occurrence is marked, a short prompt is excluded (a terse
+// "yes" legitimately recurs even when its digest collides with another short prompt), and a
+// message without current facts neither marks nor seeds. It reads the DuplicatePrompt field.
+func TestAnnotationsDuplicatePrompts(t *testing.T) {
 	up := func(ord int, digest int64, short, current bool) store.Message {
 		return store.Message{Ordinal: ord, Role: "user", PromptDigest: digest, PromptShort: short, PromptFactsCurrent: current}
 	}
@@ -221,7 +256,13 @@ func TestDuplicatePromptOrdinals(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := DuplicatePromptOrdinals(tc.msgs)
+			ann := TranscriptAnnotations(tc.msgs, nil)
+			got := map[int]bool{}
+			for ord, a := range ann {
+				if a.DuplicatePrompt {
+					got[ord] = true
+				}
+			}
 			if len(got) != len(tc.want) {
 				t.Fatalf("dups = %v, want %v", got, tc.want)
 			}
@@ -231,5 +272,37 @@ func TestDuplicatePromptOrdinals(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestAnnotationsSinglePassCombines confirms the one map carries all three concerns at once: a
+// single walk marks a latency, a shed, and a duplicate across different ordinals, and an ordinal
+// with none of the three gets no entry.
+func TestAnnotationsSinglePassCombines(t *testing.T) {
+	base := time.Date(2026, 6, 28, 9, 0, 0, 0, time.UTC)
+	msgs := []store.Message{
+		{Ordinal: 0, Role: "user", Timestamp: tsAt(base, 0), PromptDigest: 7, PromptFactsCurrent: true},
+		{Ordinal: 1, Role: "assistant", Timestamp: tsAt(base, 6)},                                        // latency here
+		{Ordinal: 2, Role: "user", Timestamp: tsAt(base, 10), PromptDigest: 7, PromptFactsCurrent: true}, // duplicate here
+		{Ordinal: 3, Role: "assistant", Timestamp: tsAt(base, 20)},                                       // shed here
+	}
+	usage := map[int]store.TurnUsage{
+		1: {Input: 180000, ContextTokens: 180000},
+		3: {Input: 12000, ContextTokens: 12000},
+	}
+	ann := TranscriptAnnotations(msgs, usage)
+
+	if a := ann[1]; a.Latency != 6*time.Second {
+		t.Errorf("ordinal 1 latency = %v, want 6s", a.Latency)
+	}
+	if a := ann[2]; !a.DuplicatePrompt {
+		t.Error("ordinal 2 should be marked a duplicate prompt")
+	}
+	if a := ann[3]; a.Shed == nil || a.Shed.FromTokens != 180000 || a.Shed.ToTokens != 12000 {
+		t.Errorf("ordinal 3 shed = %+v, want {180000 -> 12000}", a.Shed)
+	}
+	// Ordinal 0 opens a turn but carries none of the three marks, so it gets no entry.
+	if _, ok := ann[0]; ok {
+		t.Error("ordinal 0 carries no annotation and should not appear in the map")
 	}
 }

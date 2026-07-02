@@ -152,17 +152,20 @@ func TestInsightsPageRendersDistributions(t *testing.T) {
 		`data-color="` + barSage + `"`,       // a graded bar carries its tone
 		`73% graded`,                         // the Grades panel coverage note (11 of 15)
 		`class="dist-link"`,                  // a distribution bar renders as a drill-down link
-		`href="/sessions?outcome=completed"`, // the outcome bar drills into the filtered feed
-		`href="/sessions?grade=A"`,           // a grade bar drills into its letter
-		`href="/sessions?grade=unscored"`,    // the unscored bucket uses the sentinel
-		`title="View completed sessions"`,    // the terse link hover title
-		`>People<`,                           // the per-user quality panel
-		`href="/sessions?user=ada"`,          // a username drills into that author's sessions
-		`class="mix-bar"`,                    // the per-row stacked outcome bar
-		`6 completed, 1 abandoned, 1 errored, 1 unknown`, // the mix hover title spells out the counts
-		`7 of 9`,                     // ada's graded coverage
-		`>82.5<`,                     // ada's average score, one decimal
-		`+1 more user not shown`,     // the clipped-tail note
+		// The drill-downs carry the active window (range=30d) so a bar's count and the feed it
+		// opens describe the same trailing window rather than the bar counting 30 days while the
+		// link opens the all-time feed.
+		`href="/sessions?outcome=completed&amp;range=30d"`, // the outcome bar drills into the windowed feed
+		`href="/sessions?grade=A&amp;range=30d"`,           // a grade bar drills into its letter, windowed
+		`href="/sessions?grade=unscored&amp;range=30d"`,    // the unscored bucket uses the sentinel
+		`title="View completed sessions"`,                  // the terse link hover title
+		`>People<`,                                         // the per-user quality panel
+		`href="/sessions?range=30d&amp;user=ada"`,          // a username drills into that author's windowed sessions
+		`class="mix-bar"`,                                  // the per-row stacked outcome bar
+		`6 completed, 1 abandoned, 1 errored, 1 unknown`,   // the mix hover title spells out the counts
+		`7 of 9`,                      // ada's graded coverage
+		`>82.5<`,                      // ada's average score, one decimal
+		`+1 more user not shown`,      // the clipped-tail note
 		`hx-get="/insights?range=7d"`, // the window selector refetches this page
 		`hx-select="#insights"`,
 	} {
@@ -183,9 +186,10 @@ func TestInsightsPagePeoplePanel(t *testing.T) {
 	if !strings.Contains(two, `>People<`) {
 		t.Error("people panel should render for two authors")
 	}
-	// Grace's Avg score cell is a dash (nil AvgScore), in the last column of her row.
-	if !strings.Contains(two, `href="/sessions?user=grace"`) {
-		t.Error("grace's row should link to her sessions")
+	// Grace's Avg score cell is a dash (nil AvgScore), in the last column of her row. Her link
+	// carries the active window (range=30d) so it opens her windowed sessions.
+	if !strings.Contains(two, `href="/sessions?range=30d&amp;user=grace"`) {
+		t.Error("grace's row should link to her windowed sessions")
 	}
 
 	// One author: the panel hides entirely.

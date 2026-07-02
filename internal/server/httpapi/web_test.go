@@ -674,6 +674,92 @@ func TestProjectPageRangeWindow(t *testing.T) {
 	}
 }
 
+// TestSessionsFeedRangeWindow drives the sessions feed's ?range drill-down bound: a bounded key
+// (30d) drops a session whose only activity predates the window, while the bare feed and an
+// unknown range value both stay all-history and list it. This pins handleSessions' range parse:
+// web.RangeBounds is the whitelist, so a bounded key sets SessionFilter.Since and anything else
+// (absent, "all", or a hand-typed junk value) leaves the feed unbounded rather than falling to
+// ParseRange's trailing-year default. The active-range chip renders for the bounded case so the
+// reader sees the feed is scoped.
+func TestSessionsFeedRangeWindow(t *testing.T) {
+	t.Parallel()
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+	c := newClient(t)
+
+	owner, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	// A recent session (active yesterday) and an old one (aged 60 days), so a 30-day window keeps
+	// the recent one and drops the old one. The global feed orders by last activity, so aging the
+	// old session's updated_at moves it out of the trailing window.
+	annNew, err := st.Announce(ctx, store.AnnounceParams{
+		UserID: owner.ID, Agent: "claude", SourceSessionID: "sess-new",
+		ProjectID: projectID, Cwd: "/home/grace/akari", Machine: "laptop",
+	})
+	if err != nil {
+		t.Fatalf("announce new: %v", err)
+	}
+	annOld, err := st.Announce(ctx, store.AnnounceParams{
+		UserID: owner.ID, Agent: "claude", SourceSessionID: "sess-old",
+		ProjectID: projectID, Cwd: "/home/grace/akari", Machine: "laptop",
+	})
+	if err != nil {
+		t.Fatalf("announce old: %v", err)
+	}
+	if _, err := st.Pool.Exec(ctx,
+		`UPDATE sessions SET updated_at = now() - make_interval(days => 60) WHERE id = $1`,
+		annOld.SessionID); err != nil {
+		t.Fatalf("age old session: %v", err)
+	}
+	recentPath := fmt.Sprintf("/sessions/%d", annNew.SessionID)
+	oldPath := fmt.Sprintf("/sessions/%d", annOld.SessionID)
+
+	if _, err := c.PostForm(srv.URL+"/login", url.Values{
+		"username": {"grace"}, "password": {"hopper-1906"},
+	}); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+
+	// A bounded window (30d) keeps the recent session and drops the 60-day-old one, and the feed
+	// shows the active-range chip so the scope is visible and removable.
+	body := readBody(t, mustGet(t, c, srv.URL+"/sessions?range=30d"))
+	if !strings.Contains(body, recentPath) {
+		t.Fatalf("range=30d should list the recent session, got:\n%s", body)
+	}
+	if strings.Contains(body, oldPath) {
+		t.Fatalf("range=30d should drop the 60-day-old session, got:\n%s", body)
+	}
+	if !strings.Contains(body, `<span class="fchip-k">range</span>`) {
+		t.Fatalf("range=30d feed should show the active-range chip, got:\n%s", body)
+	}
+
+	// The bare feed is unbounded (all-history), so it lists the old session too, and shows no
+	// range chip.
+	body = readBody(t, mustGet(t, c, srv.URL+"/sessions"))
+	if !strings.Contains(body, oldPath) {
+		t.Fatalf("the bare feed should be all-history and list the old session, got:\n%s", body)
+	}
+	if strings.Contains(body, `<span class="fchip-k">range</span>`) {
+		t.Fatalf("the unbounded feed should show no range chip, got:\n%s", body)
+	}
+
+	// An unknown range value is not a bound: it reads as all-history rather than falling to a
+	// trailing-year default, so the old session still lists and no chip appears.
+	body = readBody(t, mustGet(t, c, srv.URL+"/sessions?range=bogus"))
+	if !strings.Contains(body, oldPath) {
+		t.Fatalf("an unknown range value should leave the feed unbounded, got:\n%s", body)
+	}
+	if strings.Contains(body, `<span class="fchip-k">range</span>`) {
+		t.Fatalf("an unknown range value should show no range chip, got:\n%s", body)
+	}
+}
+
 // TestOverviewUserFilter drives the overview's per-user scope end to end: an
 // unscoped load aggregates every user (both agents show in the breakdown) and
 // lists each account as a filter option; ?user=<id> narrows the analytics to that

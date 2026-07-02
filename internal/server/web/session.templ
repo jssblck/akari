@@ -322,26 +322,24 @@ templ stat(label, value, key string) {
 	</div>
 }
 
-// Transcript renders the session's messages as an instrumented trace. Three per-message
-// instrument maps are derived once from the messages and their per-turn usage (all pure, see
-// session_metrics.go), then read by ordinal as each message renders: reply latency keyed by the
-// answering assistant's ordinal, context-shed marks keyed by the shed-down turn's ordinal, and
-// the ordinals of user prompts that repeat an earlier one. The meta line carries a right-aligned
-// cluster of stamps (latency, context load, cost); a shed divider is drawn above the marked
-// message; muted hygiene tags sit after a user message's role tag.
+// Transcript renders the session's messages as an instrumented trace. The three per-message
+// instruments (reply latency, context sheds, duplicate prompts) are derived once, in a single
+// linear walk over the messages and their per-turn usage (see TranscriptAnnotations in
+// session_metrics.go), into one map keyed by ordinal that the render reads as each message goes
+// out. The meta line carries a right-aligned cluster of stamps (latency, then a context+cost stamp
+// group that hosts a per-turn token breakdown card); a shed divider hosting its own before/after
+// breakdown card is drawn above the marked message; muted hygiene tags sit after a user message's
+// role tag.
 templ Transcript(msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, usage map[int]store.TurnUsage, blobBase string) {
 	if len(msgs) == 0 {
 		<div class="empty">No messages parsed yet.</div>
 	} else {
-		{{ latencies := TurnLatencies(msgs) }}
-		{{ sheds := ContextSheds(msgs, usage) }}
-		{{ dups := DuplicatePromptOrdinals(msgs) }}
+		{{ ann := TranscriptAnnotations(msgs, usage) }}
 		<div class="transcript">
 			for _, m := range msgs {
-				if shed, ok := sheds[m.Ordinal]; ok {
-					<div class="msg-shed" role="separator" aria-label={ ShedLabel(shed) }>
-						<span class="shed-label mono">{ ShedLabel(shed) }</span>
-					</div>
+				{{ a := ann[m.Ordinal] }}
+				if a.Shed != nil {
+					@shedDivider(*a.Shed)
 				}
 				<div class={ "msg " + RoleClass(m.Role) } id={ fmt.Sprintf("msg-%d", m.Ordinal) } data-ordinal={ fmt.Sprintf("%d", m.Ordinal) }>
 					<div class="meta">
@@ -356,20 +354,28 @@ templ Transcript(msgs []store.Message, tools map[int][]store.ToolCallView, attac
 							if m.PromptNoCode {
 								<span class="tag hygiene" title="a change request with no file, path, or code anchor">no code pointer</span>
 							}
-							if dups[m.Ordinal] {
+							if a.DuplicatePrompt {
 								<span class="tag hygiene" title="verbatim repeat of an earlier prompt">repeat</span>
 							}
 						}
 						<span class="spacer"></span>
 						<span class="meta-metrics">
-							if lat, ok := latencies[m.Ordinal]; ok {
-								<span class="stamp-latency mono" title="time from the prompt to this reply">{ FmtTurnLatency(lat) }</span>
+							if a.Latency > 0 {
+								<span class="stamp-latency mono" title="time from the prompt to this reply">{ FmtTurnLatency(a.Latency) }</span>
 							}
 							if u, ok := usage[m.Ordinal]; ok {
-								<span class="stamp-ctx mono" title={ ContextStampTitle(u) }>{ FmtContextStamp(u) }</span>
-								if u.CostUSD != nil {
-									<span class="stamp-cost mono" title="cost of this turn's usage">{ FmtCost(*u.CostUSD, false) }</span>
-								}
+								// One focusable host wraps the ctx and cost stamps and carries a single
+								// per-turn breakdown card (the four token classes, reasoning if present, the
+								// context total, and the turn cost or "unpriced"). The visible stamps stay as
+								// compact as before; the card is the detail, so no bare token figure renders
+								// without its breakdown.
+								<span class="tok-cell turn-metrics" tabindex="0">
+									<span class="stamp-ctx mono">{ FmtContextStamp(u) }</span>
+									if u.CostUSD != nil {
+										<span class="stamp-cost mono">{ FmtCost(*u.CostUSD, false) }</span>
+									}
+									@turnCard(u)
+								</span>
 							}
 						</span>
 						<span class="muted small">{ FmtTime(m.Timestamp) }</span>
@@ -401,6 +407,46 @@ templ Transcript(msgs []store.Message, tools map[int][]store.ToolCallView, attac
 			}
 		</div>
 	}
+}
+
+// shedDivider draws the context-shed divider above the turn that first ran on the shed-down
+// context: the centered "context shed: <from> -> <to>" label, hosting a focusable breakdown card
+// that splits the before turn and the after turn into their token classes and cost. The label's
+// two figures are context occupancy (input + cache read + cache write), so each bare figure gets
+// its full per-class detail in the card rather than standing alone, the same treatment every other
+// token figure in the transcript carries. The divider is focusable (tabindex) so the card opens on
+// keyboard focus as well as hover, matching the turn stamp beside it.
+templ shedDivider(shed ShedMark) {
+	<div class="msg-shed tok-cell" role="separator" tabindex="0" aria-label={ ShedLabel(shed) }>
+		<span class="shed-label mono">{ ShedLabel(shed) }</span>
+		<span class="tok-tip shed-tip" role="tooltip">
+			<span class="tt-total">context shed</span>
+			<dl class="tt-grid">
+				<dt>Before</dt>
+				<dd>{ FmtTokens(shed.FromTokens) }</dd>
+				<dt>In</dt>
+				<dd>{ FmtTokens(shed.FromUsage.Input) }</dd>
+				<dt>Cache read</dt>
+				<dd>{ FmtTokens(shed.FromUsage.CacheRead) }</dd>
+				<dt>Cache write</dt>
+				<dd>{ FmtTokens(shed.FromUsage.CacheWrite) }</dd>
+				<dt>Output</dt>
+				<dd>{ FmtTokens(shed.FromUsage.Output) }</dd>
+			</dl>
+			<dl class="tt-grid shed-after">
+				<dt>After</dt>
+				<dd>{ FmtTokens(shed.ToTokens) }</dd>
+				<dt>In</dt>
+				<dd>{ FmtTokens(shed.ToUsage.Input) }</dd>
+				<dt>Cache read</dt>
+				<dd>{ FmtTokens(shed.ToUsage.CacheRead) }</dd>
+				<dt>Cache write</dt>
+				<dd>{ FmtTokens(shed.ToUsage.CacheWrite) }</dd>
+				<dt>Output</dt>
+				<dd>{ FmtTokens(shed.ToUsage.Output) }</dd>
+			</dl>
+		</span>
+	</div>
 }
 
 // AttachmentTile renders one binary attachment. An image is shown inline from its

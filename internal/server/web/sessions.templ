@@ -10,18 +10,19 @@ import (
 // day-grouped feed of every session. It is the surface for "find a run" without
 // first picking a project. The page carries no heading: the sidebar already marks
 // this section as Sessions, so the toolbar and feed fill the surface.
-templ SessionsPage(p Page, rows []store.SessionRow, facets store.GlobalFacetValues, sel store.SessionFilter) {
+templ SessionsPage(p Page, rows []store.SessionRow, facets store.GlobalFacetValues, sel store.SessionFilter, rng string) {
 	@layout(p) {
 		<div class="sessions">
-			@sessionsToolbar(facets, sel)
-			if AnyFilterActive(sel) {
+			@sessionsToolbar(facets, sel, rng)
+			if AnyFilterActive(sel) || RangeBounds(rng) {
 				<div class="active-filters">
-					@activeChip("agent", sel.Agent, sel)
-					@activeChip("machine", sel.Machine, sel)
-					@activeChip("user", sel.Username, sel)
-					@activeChip("outcome", sel.Outcome, sel)
-					@activeChip("grade", sel.Grade, sel)
-					@activeProjectChip(facets.Projects, sel)
+					@activeChip("agent", sel.Agent, sel, rng)
+					@activeChip("machine", sel.Machine, sel, rng)
+					@activeChip("user", sel.Username, sel, rng)
+					@activeChip("outcome", sel.Outcome, sel, rng)
+					@activeChip("grade", sel.Grade, sel, rng)
+					@activeProjectChip(facets.Projects, sel, rng)
+					@activeRangeChip(sel, rng)
 					<a class="small clear" href="/sessions">Clear all</a>
 				</div>
 			}
@@ -39,8 +40,15 @@ templ SessionsPage(p Page, rows []store.SessionRow, facets store.GlobalFacetValu
 // and keeps the selects, chips, and feed in agreement. It replaces the tall
 // faceted rail, whose single-value User group and thirty-row Project list were
 // most of the old page's clutter.
-templ sessionsToolbar(facets store.GlobalFacetValues, sel store.SessionFilter) {
+templ sessionsToolbar(facets store.GlobalFacetValues, sel store.SessionFilter, rng string) {
 	<form class="toolbar" method="get" action="/sessions">
+		if RangeBounds(rng) {
+			// The selects drive the form, so the active range rides along as a hidden input:
+			// changing a filter re-submits and holds the window rather than dropping back to
+			// all-history. Only a bounded window is carried; an all/empty range is the feed's
+			// natural unbounded form and needs no field.
+			<input type="hidden" name="range" value={ rng }/>
+		}
 		@tbSelect("Agent", "agent") {
 			<option value="" selected?={ sel.Agent == "" }>All agents</option>
 			for _, a := range facets.Agents {
@@ -107,10 +115,11 @@ templ tbSelect(label, name string) {
 }
 
 // activeChip renders a removable chip for a selected text facet (agent / machine /
-// user); it renders nothing when that facet is unset.
-templ activeChip(field, value string, sel store.SessionFilter) {
+// user); it renders nothing when that facet is unset. The remove link holds the active range so
+// clearing one facet keeps the window.
+templ activeChip(field, value string, sel store.SessionFilter, rng string) {
 	if value != "" {
-		<a class="fchip" href={ facetHref(field, value, sel) }>
+		<a class="fchip" href={ facetHref(field, value, sel, rng) }>
 			<span class="fchip-k">{ field }</span>
 			<span>{ value }</span>
 			<span class="fchip-x">&times;</span>
@@ -118,12 +127,27 @@ templ activeChip(field, value string, sel store.SessionFilter) {
 	}
 }
 
-// activeProjectChip renders the removable chip for a selected project.
-templ activeProjectChip(opts []store.ProjectFacet, sel store.SessionFilter) {
+// activeProjectChip renders the removable chip for a selected project, holding the active range.
+templ activeProjectChip(opts []store.ProjectFacet, sel store.SessionFilter, rng string) {
 	if sel.ProjectID != 0 {
-		<a class="fchip" href={ ProjectFacetHref(sel, sel.ProjectID) }>
+		<a class="fchip" href={ ProjectFacetHref(sel, sel.ProjectID, rng) }>
 			<span class="fchip-k">project</span>
 			<span>{ projectLabelByID(opts, sel.ProjectID) }</span>
+			<span class="fchip-x">&times;</span>
+		</a>
+	}
+}
+
+// activeRangeChip renders the removable chip for an active trailing-window scope, shown when a
+// drill-down arrived with a bounded ?range so the reader sees the feed is windowed and can clear
+// it. Removing it drops the range param (SessionsHref with an empty key), returning the feed to
+// all-history while holding every other active filter. It renders nothing for the unbounded
+// all/empty range, which needs no chip.
+templ activeRangeChip(sel store.SessionFilter, rng string) {
+	if RangeBounds(rng) {
+		<a class="fchip" href={ SessionsHref(sel, "") }>
+			<span class="fchip-k">range</span>
+			<span>{ RangeLabel(rng) }</span>
 			<span class="fchip-x">&times;</span>
 		</a>
 	}

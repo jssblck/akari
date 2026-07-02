@@ -147,9 +147,15 @@ func ValidGrade(v string) string {
 	return ""
 }
 
-// sessionsQuery builds the query string for the global session list from a
-// filter, omitting empty fields, so facet links and the htmx swap target agree.
-func sessionsQuery(f store.SessionFilter) string {
+// sessionsQuery builds the query string for the global session list from a filter and an active
+// range key, omitting empty fields, so facet links and the htmx swap target agree. rng is threaded
+// separately rather than reverse-engineered from the filter's Since (a time carries no key), so a
+// drill-down link and the toolbar's chip round-trip the same ?range value the handler parsed.
+//
+// rng is encoded only when it names a bounded window (a known key that is not "all"): the sessions
+// feed's natural form is all-history, so an "all" or empty range adds no param and the bare
+// /sessions path stays unbounded, matching how the default order omits its sort param.
+func sessionsQuery(f store.SessionFilter, rng string) string {
 	q := url.Values{}
 	if f.Agent != "" {
 		q.Set("agent", f.Agent)
@@ -168,6 +174,9 @@ func sessionsQuery(f store.SessionFilter) string {
 	}
 	if f.ProjectID != 0 {
 		q.Set("project", fmt.Sprintf("%d", f.ProjectID))
+	}
+	if RangeBounds(rng) {
+		q.Set("range", rng)
 	}
 	// The default order (most recent first) is the bare URL; any other column or
 	// direction is encoded so the sort link round-trips and survives a reload.
@@ -202,15 +211,17 @@ func isDefaultOrder(f store.SessionFilter) bool {
 	return f.Sort == "" || (f.Sort == store.DefaultSort && f.Desc)
 }
 
-// SessionsPath is the full global session-list path for the current selection,
-// used as the htmx swap target so a facet click updates the URL coherently.
-func SessionsPath(f store.SessionFilter) string {
-	return SessionsBasePath + sessionsQuery(f)
+// SessionsPath is the full global session-list path for the current selection and active range,
+// used as the htmx swap target so a facet click updates the URL coherently. rng is the active
+// range key (7d/30d/90d/year/all); it is encoded only for a bounded window, so the unscoped feed
+// stays the bare /sessions path.
+func SessionsPath(f store.SessionFilter, rng string) string {
+	return SessionsBasePath + sessionsQuery(f, rng)
 }
 
 // SessionsHref is the sanitized href form of SessionsPath, for anchor tags.
-func SessionsHref(f store.SessionFilter) templ.SafeURL {
-	return templ.URL(SessionsPath(f))
+func SessionsHref(f store.SessionFilter, rng string) templ.SafeURL {
+	return templ.URL(SessionsPath(f, rng))
 }
 
 // facetToggle returns a copy of the filter with one field set to value, or
@@ -252,44 +263,44 @@ func facetToggle(f store.SessionFilter, field, value string) store.SessionFilter
 	return f
 }
 
-// AgentFacetHref and friends return the toggle href for a facet option, holding
-// the rest of the current selection.
-func AgentFacetHref(f store.SessionFilter, value string) templ.SafeURL {
-	return SessionsHref(facetToggle(f, "agent", value))
+// AgentFacetHref and friends return the toggle href for a facet option, holding the rest of the
+// current selection and the active range so removing one filter does not drop the window.
+func AgentFacetHref(f store.SessionFilter, value, rng string) templ.SafeURL {
+	return SessionsHref(facetToggle(f, "agent", value), rng)
 }
-func UserFacetHref(f store.SessionFilter, value string) templ.SafeURL {
-	return SessionsHref(facetToggle(f, "user", value))
+func UserFacetHref(f store.SessionFilter, value, rng string) templ.SafeURL {
+	return SessionsHref(facetToggle(f, "user", value), rng)
 }
-func MachineFacetHref(f store.SessionFilter, value string) templ.SafeURL {
-	return SessionsHref(facetToggle(f, "machine", value))
+func MachineFacetHref(f store.SessionFilter, value, rng string) templ.SafeURL {
+	return SessionsHref(facetToggle(f, "machine", value), rng)
 }
 
 // ProjectFacetHref toggles the project selection for a facet row, holding the
-// rest of the current selection.
-func ProjectFacetHref(f store.SessionFilter, id int64) templ.SafeURL {
+// rest of the current selection and the active range.
+func ProjectFacetHref(f store.SessionFilter, id int64, rng string) templ.SafeURL {
 	if f.ProjectID == id {
 		f.ProjectID = 0
 	} else {
 		f.ProjectID = id
 	}
-	return SessionsHref(f)
+	return SessionsHref(f, rng)
 }
 
-// facetHref dispatches a text facet's toggle link to the right field helper.
-func facetHref(field, value string, f store.SessionFilter) templ.SafeURL {
+// facetHref dispatches a text facet's toggle link to the right field helper, carrying the range.
+func facetHref(field, value string, f store.SessionFilter, rng string) templ.SafeURL {
 	switch field {
 	case "agent":
-		return AgentFacetHref(f, value)
+		return AgentFacetHref(f, value, rng)
 	case "user":
-		return UserFacetHref(f, value)
+		return UserFacetHref(f, value, rng)
 	case "machine":
-		return MachineFacetHref(f, value)
+		return MachineFacetHref(f, value, rng)
 	case "outcome":
-		return SessionsHref(facetToggle(f, "outcome", value))
+		return SessionsHref(facetToggle(f, "outcome", value), rng)
 	case "grade":
-		return SessionsHref(facetToggle(f, "grade", value))
+		return SessionsHref(facetToggle(f, "grade", value), rng)
 	}
-	return SessionsHref(f)
+	return SessionsHref(f, rng)
 }
 
 // projectLabelByID finds a project facet's display label by id, for the active

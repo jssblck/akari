@@ -1026,10 +1026,15 @@ func (s *Store) MessageCount(ctx context.Context, sessionID int64) (int, error) 
 // the full session in one pass; bounded readers (the MCP transcript window) use
 // MessagesPage instead so peak memory does not scale with session size.
 func (s *Store) Messages(ctx context.Context, sessionID int64) ([]Message, error) {
+	// PromptFactsCurrent additionally requires content_length > 0 so the per-message hygiene
+	// badge is computed over the same prompt set as the stored session aggregate: gatherPromptHygiene
+	// in signals.go counts only user turns with content_length > 0 (an empty or attachment-only turn
+	// is tool plumbing, not a prompt), so an empty user row must not render a transcript badge the
+	// aggregate excluded. The two must fire over one prompt set or they disagree.
 	return s.scanMessages(ctx,
 		`SELECT ordinal, role, content, thinking_text, model, has_thinking, has_tool_use, timestamp,
 		        coalesce(prompt_short, false), coalesce(prompt_no_code, false), coalesce(prompt_digest, 0),
-		        (prompt_facts_version = $2 AND prompt_digest IS NOT NULL)
+		        (prompt_facts_version = $2 AND prompt_digest IS NOT NULL AND content_length > 0)
 		   FROM messages WHERE session_id = $1 ORDER BY ordinal`, sessionID, quality.PromptFactsVersion)
 }
 
@@ -1044,18 +1049,21 @@ func (s *Store) MessagesAfter(ctx context.Context, sessionID int64, after *int, 
 	if limit <= 0 || limit > 2000 {
 		limit = 2000
 	}
+	// PromptFactsCurrent additionally requires content_length > 0 so the transcript badge mirrors
+	// the same prompt set gatherPromptHygiene aggregates over (see Messages): an empty or
+	// attachment-only user turn is excluded from both.
 	if after == nil {
 		return s.scanMessages(ctx,
 			`SELECT ordinal, role, content, thinking_text, model, has_thinking, has_tool_use, timestamp,
 			        coalesce(prompt_short, false), coalesce(prompt_no_code, false), coalesce(prompt_digest, 0),
-			        (prompt_facts_version = $3 AND prompt_digest IS NOT NULL)
+			        (prompt_facts_version = $3 AND prompt_digest IS NOT NULL AND content_length > 0)
 			   FROM messages WHERE session_id = $1 ORDER BY ordinal LIMIT $2`,
 			sessionID, limit, quality.PromptFactsVersion)
 	}
 	return s.scanMessages(ctx,
 		`SELECT ordinal, role, content, thinking_text, model, has_thinking, has_tool_use, timestamp,
 		        coalesce(prompt_short, false), coalesce(prompt_no_code, false), coalesce(prompt_digest, 0),
-		        (prompt_facts_version = $4 AND prompt_digest IS NOT NULL)
+		        (prompt_facts_version = $4 AND prompt_digest IS NOT NULL AND content_length > 0)
 		   FROM messages WHERE session_id = $1 AND ordinal > $2 ORDER BY ordinal LIMIT $3`,
 		sessionID, *after, limit, quality.PromptFactsVersion)
 }
@@ -1149,6 +1157,20 @@ type TurnUsage struct {
 // in the database (one GROUP BY over the session's rows), so the read is O(session) in one
 // query regardless of how many streamed chunks a turn carried. Order is irrelevant: the caller
 // keys the returned map by ordinal.
+//
+// This intentionally differs from the stored context signal (gatherContextHealth in signals.go),
+// which folds every raw usage_events row in (source_offset, source_index, id) order. The two are
+// measuring different things at different granularities. This read attaches usage to rendered
+// messages, so it must group by message_ordinal and can only surface usage that a turn claimed:
+// a NULL-ordinal row has no message to hang on and is skipped, and several rows on one ordinal
+// collapse into that turn's single stamp. The signal measures the raw turn sequence for its
+// peak-context and reset counts, so it folds every row (NULL-ordinal ones included) and never
+// collapses two rows that share an ordinal into one turn. The two agree whenever each ordinal
+// carries exactly one dated usage row, which is the shape a real agent produces; they can
+// diverge (a shed divider or session_signals.context_reset_count that the transcript cannot
+// reproduce) only for a multi-row turn or an unattributed row, cases the schema permits but the
+// parser does not emit. See TestSessionTurnUsageDivergesFromContextFold in turn_usage_test.go,
+// which pins this difference.
 func (s *Store) SessionTurnUsage(ctx context.Context, sessionID int64) (map[int]TurnUsage, error) {
 	rows, err := s.Pool.Query(ctx,
 		// count(cost_usd) is the number of non-NULL costs in the group; when it is zero every
@@ -1183,7 +1205,10 @@ func (s *Store) SessionTurnUsage(ctx context.Context, sessionID int64) (map[int]
 		u.ContextTokens = u.Input + u.CacheRead + u.CacheWrite
 		out[ord] = u
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate turn usage for session %d: %w", sessionID, err)
+	}
+	return out, nil
 }
 
 // DuplicateCallUIDCount returns how many of a session's tool-call ids appear on more

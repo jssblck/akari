@@ -108,6 +108,75 @@ func TestSessionTurnUsageUnpricedTurn(t *testing.T) {
 	}
 }
 
+// TestSessionTurnUsageDivergesFromContextFold pins the intentional difference between the
+// transcript's per-turn read (SessionTurnUsage) and the stored context signal's raw fold
+// (gatherContextHealth, exercised here through its tested reference quality.ContextHealth).
+// The two agree whenever each ordinal carries exactly one dated usage row (the shape a real
+// agent produces), and diverge only for a multi-row turn or an unattributed row, which the
+// schema permits but the parser does not emit. See the SessionTurnUsage doc comment in read.go.
+//
+// The divergent corpus is two usage rows on one ordinal (a big context then a sharp drop) plus a
+// NULL-ordinal row. SessionTurnUsage groups by ordinal and skips the NULL row, so it reports one
+// turn whose context is the summed rows and shows no shed divider (a turn cannot shed against
+// itself). The folder walks every raw row in order, so it sees the drop between the two same-turn
+// rows as a context reset. Their reset views therefore disagree, on purpose.
+func TestSessionTurnUsageDivergesFromContextFold(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	sid := seedForReads(t, st)
+
+	ord0 := 0
+	// Row order in the raw sequence is (source_offset, source_index, id): a big context, then a
+	// sharp drop past the reset threshold (100000 -> 1000 fires IsContextReset), then a NULL-ordinal
+	// tail row. Context occupancy is input + cache read + cache write, so cache read carries the size.
+	delta := store.ProjectionDelta{
+		Usage: []store.ProjUsage{
+			{MessageOrdinal: &ord0, Model: "gpt-5", CacheRead: 100000, CostUSD: nil, SourceOffset: 1, SourceIndex: 0},
+			{MessageOrdinal: &ord0, Model: "gpt-5", CacheRead: 1000, CostUSD: nil, SourceOffset: 2, SourceIndex: 0},
+			{MessageOrdinal: nil, Model: "gpt-5", CacheRead: 1000, CostUSD: nil, SourceOffset: 3, SourceIndex: 0},
+		},
+	}
+	if err := st.ApplyProjectionDelta(ctx, sid, delta); err != nil {
+		t.Fatalf("apply delta: %v", err)
+	}
+
+	// What the transcript returns: the two same-ordinal rows collapse into one turn, the NULL-ordinal
+	// row is skipped, so there is one turn and no second turn to shed against.
+	usage, err := st.SessionTurnUsage(ctx, sid)
+	if err != nil {
+		t.Fatalf("turn usage: %v", err)
+	}
+	if len(usage) != 1 {
+		t.Fatalf("transcript sees %d turns, want 1 (two rows collapse by ordinal, the NULL row is skipped)", len(usage))
+	}
+	if got := usage[0].ContextTokens; got != 101000 {
+		t.Errorf("collapsed turn context = %d, want 101000 (100000 + 1000 summed by ordinal)", got)
+	}
+
+	// What the signal counts: the folder walks every raw row in transcript order (both same-ordinal
+	// rows and the NULL-ordinal row), so it sees the drop as a reset. quality.ContextHealth is the
+	// buffered reference gatherContextHealth's streaming folder mirrors, fed the same ordered sizes.
+	peak, resets := quality.ContextHealth([]int64{100000, 1000, 1000})
+	if peak != 100000 {
+		t.Errorf("folder peak = %d, want 100000", peak)
+	}
+	if resets != 1 {
+		t.Errorf("folder resets = %d, want 1 (the 100000 -> 1000 drop within one ordinal)", resets)
+	}
+
+	// The pin: the transcript can render no shed divider (it has one turn), while the signal counts
+	// one reset over the same rows. This divergence is intentional (see the SessionTurnUsage doc
+	// comment): the transcript attaches usage to rendered messages and groups by ordinal, the signal
+	// measures the raw turn sequence and folds every row.
+	if len(usage) > 1 {
+		t.Fatal("guard: the transcript must have a single turn for this pin to hold")
+	}
+	if resets == 0 {
+		t.Fatal("guard: the folder must count a reset for this pin to hold")
+	}
+}
+
 // TestMessagesPromptFacts pins that the Messages read surfaces the per-prompt hygiene facts and
 // gates them behind the current classifier version: a user prompt classified at
 // quality.PromptFactsVersion reads PromptFactsCurrent true with its facts, an assistant message

@@ -177,6 +177,19 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		}
 		filter.ProjectID = pid
 	}
+	// The feed accepts a ?range drill-down bound (7d/30d/90d/year/all, the ParseRange keys), so a
+	// bar or People link from the windowed Insights/project analytics opens a feed scoped to the
+	// same trailing window its count described. Unlike the analytics surfaces, the feed's default
+	// is all-history, not the trailing year: an absent or "all" param leaves Since zero (no bound,
+	// the current behavior), and only an explicitly bounded key sets it. web.RangeBounds is the
+	// whitelist here, the counterpart to web.ValidOutcome / web.ValidGrade: an unknown or "all"
+	// value reads as unbounded rather than falling to ParseRange's trailing-year default.
+	rng := strings.TrimSpace(q.Get("range"))
+	if web.RangeBounds(rng) {
+		filter.Since = web.RangeSince(rng, time.Now())
+	} else {
+		rng = "all"
+	}
 	// Click-to-sort: an unknown sort key falls back to the default order rather
 	// than erroring, so a stale or tampered link still renders the feed. The
 	// direction defaults to descending; the header links always carry an explicit
@@ -200,7 +213,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "sessions"), http.StatusInternalServerError, "Could not load filters."))
 		return
 	}
-	render(w, r, http.StatusOK, web.SessionsPage(s.pageForNav(r, "Sessions", "sessions"), rows, facets, filter))
+	render(w, r, http.StatusOK, web.SessionsPage(s.pageForNav(r, "Sessions", "sessions"), rows, facets, filter, rng))
 }
 
 func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
@@ -265,6 +278,14 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 	// AnalyticsFilter: project, window, and any active user/agent/machine narrowing), so the
 	// grades, outcomes, tools, and churn describe exactly the sessions the rows below list
 	// rather than a project-wide read that would drift from the filtered table.
+	//
+	// Two windows meet here on purpose. Insights counts sessions by started_at falling in the
+	// trailing window; the usage panel and the session table above window on dated usage_events.
+	// The gap is intentional and not reconciled: a quality verdict is a per-session fact keyed to
+	// when the session ran, so the band follows the Insights (started_at) convention, while spend
+	// is per-usage-event and windows on the event dates. Forcing one onto the other would misdate
+	// whichever it borrows, so the band's section head names its window ("sessions that started in
+	// this window") instead. See projectQuality for the matching caption.
 	insights, err := s.Store.Insights(r.Context(), af)
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load quality signals."))
@@ -295,8 +316,15 @@ func (s *Server) sessionView(r *http.Request, id int64) (store.SessionDetail, []
 		return d, nil, nil, nil, nil, nil, err
 	}
 	// The per-turn usage backs the transcript's per-message context and cost stamps. It is one
-	// GROUP BY over the session's usage_events (O(session), one query), folded here alongside the
-	// other session-sized reads so both the first render and every SSE body refresh carry it.
+	// aggregated query per render: a GROUP BY over usage_events scoped to this session by an
+	// indexed session_id, the same shape and order as the Messages fetch beside it (O(session), one
+	// round trip), folded here so both the first render and every SSE body refresh carry it.
+	// Scoping it to a window is impossible on purpose: the web session page renders the FULL
+	// transcript (the message slice is unbounded by design; the windowed MessagesAfter reader is
+	// the MCP server's, not this page's), so the usage must cover every rendered turn. The refresh
+	// count stays bounded because the SSE notify path coalesces: subscribe's channel is buffered by
+	// one and publish sends non-blocking (see sseHub.publish), so a burst of appended regions
+	// collapses to a single "you have updates" wake and one body fetch, not one per region.
 	usage, err := s.Store.SessionTurnUsage(r.Context(), id)
 	if err != nil {
 		return d, nil, nil, nil, nil, nil, err

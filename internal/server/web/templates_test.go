@@ -361,17 +361,21 @@ func TestProjectPageRendersQualityBand(t *testing.T) {
 	html := renderComponent(t, ProjectPage(p, proj, nil, store.SessionRemainder{}, Facets{}, sel, analyticsWithData(), sampleInsights(), "90d"))
 
 	for _, want := range []string{
-		// The band and its section label.
+		// The band and its section label, plus the caption naming its window semantics (the
+		// band windows on started_at, matching the Insights convention, distinct from the
+		// usage panel's usage-event window; documented here and at the handler call).
 		`class="proj-quality"`, `>Quality</span>`,
+		`sessions that started in this window`,
 		// The three distribution panels reuse the Insights grid.
 		`class="ins-grid"`, `>Grades<`, `>Outcomes<`, `>Archetypes<`,
 		// The coverage note rides the Grades head (11 of 15 graded reads 73%).
 		`73% graded`,
-		// A grade drill-down carries the project scope, the active agent filter, and the
-		// bucket, so it lands on the same sessions the bar counts.
-		`href="/sessions?agent=claude&amp;grade=A&amp;project=7"`,
-		// An outcome drill-down likewise carries the project scope and the filter.
-		`href="/sessions?agent=claude&amp;outcome=completed&amp;project=7"`,
+		// A grade drill-down carries the project scope, the active agent filter, the bucket, AND
+		// the active range, so it lands on the same sessions the bar counts, bounded to the same
+		// window rather than opening the all-time feed.
+		`href="/sessions?agent=claude&amp;grade=A&amp;project=7&amp;range=90d"`,
+		// An outcome drill-down likewise carries the project scope, the filter, and the range.
+		`href="/sessions?agent=claude&amp;outcome=completed&amp;project=7&amp;range=90d"`,
 		// The tools and churn panels round out the band.
 		`>Tools<`, `>File churn<`, `>Read<`,
 		// The churn caption drops the fleet page's "grouped per project" clause.

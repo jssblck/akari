@@ -625,3 +625,39 @@ func TestGlobalFacetsProjectOrder(t *testing.T) {
 		}
 	}
 }
+
+// TestMessagesPromptFactsEmptyContent pins that an empty-content user turn reads
+// PromptFactsCurrent = false even when its facts are stamped at the current classifier version.
+// The Messages read gates PromptFactsCurrent on content_length > 0 so the per-message hygiene
+// badge is computed over the same prompt set as gatherPromptHygiene (which counts only user turns
+// with content_length > 0). Without the gate, an empty or attachment-only user turn would render a
+// transcript badge the session aggregate excluded, so the two would disagree on the same session.
+func TestMessagesPromptFactsEmptyContent(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	sid := seedForReads(t, st)
+
+	// An empty-content user row with a digest at the current facts version: everything the version
+	// gate checks passes except content_length, which is zero (content is ''). content_length is a
+	// generated octet_length(content) column, so inserting '' makes it 0 without setting it directly.
+	if _, err := st.Pool.Exec(ctx,
+		`INSERT INTO messages (session_id, ordinal, role, content, prompt_short, prompt_no_code, prompt_digest, prompt_facts_version)
+		 VALUES ($1, 0, 'user', '', true, false, 123456, $2)`,
+		sid, quality.PromptFactsVersion); err != nil {
+		t.Fatalf("insert empty-content user message: %v", err)
+	}
+
+	msgs, err := st.Messages(ctx, sid)
+	if err != nil {
+		t.Fatalf("read messages: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("read %d messages, want 1", len(msgs))
+	}
+	// The empty turn has current facts and a digest, but content_length is 0, so the badge gate
+	// excludes it exactly as the session hygiene aggregate does.
+	if msgs[0].PromptFactsCurrent {
+		t.Error("an empty-content user turn must read PromptFactsCurrent = false so the transcript badge matches gatherPromptHygiene's content_length > 0 set")
+	}
+}

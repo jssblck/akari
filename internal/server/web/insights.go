@@ -278,15 +278,20 @@ func distRows(counts []store.LabeledCount, label, color func(string) string, hre
 // user/agent/machine narrowing, so the link honours the page's current scope (landing on
 // ?project=<id>&grade=A rather than the unscoped feed). The bucket field overlays a copy of
 // base, so base's own Grade is never read (a grade bar always sets its own).
-func GradeBars(counts []store.LabeledCount, base store.SessionFilter) []DistRow {
-	return distRows(counts, gradeLabel, gradeBarColor, gradeHref(base))
+//
+// rng is the analytics window the bar counts describe (the active ?range key). It rides the
+// drill-down href so the feed the bar opens is bounded to the same window the bar counted, rather
+// than the count showing a window's sessions while the link opens the all-time feed. "all" and the
+// empty key add no bound (the feed's natural all-history form).
+func GradeBars(counts []store.LabeledCount, base store.SessionFilter, rng string) []DistRow {
+	return distRows(counts, gradeLabel, gradeBarColor, gradeHref(base, rng))
 }
 
 // OutcomeBars renders the outcome distribution, reusing OutcomeLabel for the title-cased
 // names and a semantic tone per outcome. Each bar drills into the feed filtered to that
-// outcome, scoped by base the same way GradeBars is (see its note on base).
-func OutcomeBars(counts []store.LabeledCount, base store.SessionFilter) []DistRow {
-	return distRows(counts, OutcomeLabel, outcomeBarColor, outcomeHref(base))
+// outcome, scoped by base and windowed by rng the same way GradeBars is (see its note).
+func OutcomeBars(counts []store.LabeledCount, base store.SessionFilter, rng string) []DistRow {
+	return distRows(counts, OutcomeLabel, outcomeBarColor, outcomeHref(base, rng))
 }
 
 // ArchetypeBars renders the archetype mix, lightest to heaviest, each in its own
@@ -302,11 +307,11 @@ func ArchetypeBars(counts []store.LabeledCount) []DistRow {
 // scope. Returning a closure lets the page thread its project (and any active
 // user/agent/machine narrowing) into every bar without the distRows plumbing knowing about
 // scope.
-func outcomeHref(base store.SessionFilter) func(key, label string) (string, string) {
+func outcomeHref(base store.SessionFilter, rng string) func(key, label string) (string, string) {
 	return func(key, label string) (string, string) {
 		f := base
 		f.Outcome = key
-		return SessionsPath(f), "View " + strings.ToLower(label) + " sessions"
+		return SessionsPath(f, rng), "View " + strings.ToLower(label) + " sessions"
 	}
 }
 
@@ -314,7 +319,7 @@ func outcomeHref(base store.SessionFilter) func(key, label string) (string, stri
 // grade; the empty bucket filters on the "unscored" sentinel, matching the store's coalesce
 // so the bar and its drill-down list agree. Like outcomeHref it overlays the grade onto a
 // copy of base, so the link carries the page's project and filter scope.
-func gradeHref(base store.SessionFilter) func(key, label string) (string, string) {
+func gradeHref(base store.SessionFilter, rng string) func(key, label string) (string, string) {
 	return func(key, label string) (string, string) {
 		grade := key
 		title := "View grade " + label + " sessions"
@@ -324,7 +329,7 @@ func gradeHref(base store.SessionFilter) func(key, label string) (string, string
 		}
 		f := base
 		f.Grade = grade
-		return SessionsPath(f), title
+		return SessionsPath(f, rng), title
 	}
 }
 
@@ -363,11 +368,12 @@ func GradedNote(q store.QualityDistribution) string {
 	return fmt.Sprintf("%.0f%% graded", pct)
 }
 
-// UserQualityHref links a People-panel row to the sessions feed scoped to that author, the
-// same ?user param the toolbar's user select carries, so a click on a name lands on their
-// sessions.
-func UserQualityHref(u store.UserQuality) templ.SafeURL {
-	return SessionsHref(store.SessionFilter{Username: u.Username})
+// UserQualityHref links a People-panel row to the sessions feed scoped to that author, the same
+// ?user param the toolbar's user select carries, so a click on a name lands on their sessions.
+// rng carries the active analytics window onto the link, so the feed opens bounded to the same
+// trailing window the row's counts describe rather than the author's all-time sessions.
+func UserQualityHref(u store.UserQuality, rng string) templ.SafeURL {
+	return SessionsHref(store.SessionFilter{Username: u.Username}, rng)
 }
 
 // UserGradedLabel renders the graded-coverage cell as "N of M", the raw magnitude behind the

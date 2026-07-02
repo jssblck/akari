@@ -30,7 +30,17 @@ import (
 // Version 3 added Codex custom_tool_call bodies and binary image attachments (image
 // generation results and pasted images) to the projection, so a reparse backfills
 // those rows on already-ingested sessions.
-const Version = 3
+//
+// Version 4 pairs with the Epoch 3 -> 4 bump that materializes tool_calls.file_rel_path
+// (the store-side session-relative path, see epoch.go and store/projection.go). The
+// column is filled at insert and cannot backfill on its own, so a session already parsed
+// at version 3 must not resume incrementally: an incremental advance would insert new
+// tool_calls rows with file_rel_path filled while its pre-change rows keep NULL, and file
+// churn would carry two representations of one file (NULL and the relative path) until the
+// epoch reparse reached that session. Bumping Version forces a rewind-and-replay so every
+// row of a session fills the column in one pass, keeping a session's tool_calls internally
+// consistent rather than blended across the change.
+const Version = 4
 
 // Advance parses any not-yet-parsed bytes of a session and applies them to the
 // projection, looping until the parse cursor catches up to the stored length. It

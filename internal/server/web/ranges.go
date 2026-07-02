@@ -41,6 +41,32 @@ func ParseRange(key string) string {
 	return DefaultRange
 }
 
+// RangeLabel returns a range key's display label ("30 days", "Year"), for the sessions feed's
+// active-range chip. An unknown key returns the key itself, so a stale value still reads rather
+// than rendering blank.
+func RangeLabel(key string) string {
+	for _, r := range DateRanges {
+		if r.Key == key {
+			return r.Label
+		}
+	}
+	return key
+}
+
+// RangeBounds reports whether a range key names a bounded trailing window (a known key with a
+// positive day span). It is false for "all", the empty string, and any unknown value, which the
+// sessions feed treats as all-history: those add no ?range param, keeping the bare feed unbounded.
+// It is the whitelist the feed's range param passes through (like ValidOutcome / ValidGrade for
+// their params), so a stale or hand-edited ?range never bounds the list to a made-up window.
+func RangeBounds(key string) bool {
+	for _, r := range DateRanges {
+		if r.Key == key {
+			return r.Days > 0
+		}
+	}
+	return false
+}
+
 // RangeSince converts a range key to the lower time bound to pass to the store,
 // measured back from now. The "all" window (zero Days) returns the zero time,
 // which the store reads as "no bound".

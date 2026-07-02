@@ -45,12 +45,12 @@ templ InsightsPage(p Page, ins store.Insights, rng string, ranges []RangeOption)
 					// multi-user instance: a single-user instance's one row would just restate the
 					// fleet distributions under a name, so the panel hides below two authors.
 					<div class="ins-people" id="ins-people">
-						@peoplePanel(ins.Users)
+						@peoplePanel(ins.Users, rng)
 					</div>
 				}
 				<div class="ins-grid">
-					@distributionPanel("Grades", "the quality score banded A to F, unscored for an ungraded session", GradedNote(ins.Quality), GradeBars(ins.Quality.Grades, store.SessionFilter{}))
-					@distributionPanel("Outcomes", "how each session ended", "", OutcomeBars(ins.Quality.Outcomes, store.SessionFilter{}))
+					@distributionPanel("Grades", "the quality score banded A to F, unscored for an ungraded session", GradedNote(ins.Quality), GradeBars(ins.Quality.Grades, store.SessionFilter{}, rng))
+					@distributionPanel("Outcomes", "how each session ended", "", OutcomeBars(ins.Quality.Outcomes, store.SessionFilter{}, rng))
 					@distributionPanel("Archetypes", "session shape by length and turns", "", ArchetypeBars(ins.Archetypes))
 				</div>
 				<div class="ins-churn">
@@ -331,7 +331,7 @@ templ churnPanel(c store.FileChurn, caption string, showProject bool) {
 // self-check ("how is my work grading") and the lead's per-person read, the human counterpart
 // to the fleet distributions below it. Each name drills into that author's sessions. It renders
 // only for two or more authors (the caller gates on len), so the table always has rows to show.
-templ peoplePanel(us store.UserQualityStats) {
+templ peoplePanel(us store.UserQualityStats, rng string) {
 	<div class="ins-panel ins-people-panel">
 		<div class="ins-panel-head">
 			<span class="label">People</span>
@@ -350,7 +350,7 @@ templ peoplePanel(us store.UserQualityStats) {
 			<tbody>
 				for _, u := range us.Users {
 					<tr>
-						<td><a href={ UserQualityHref(u) }>{ u.Username }</a></td>
+						<td><a href={ UserQualityHref(u, rng) }>{ u.Username }</a></td>
 						<td class="num">{ fmt.Sprintf("%d", u.Sessions) }</td>
 						<td>
 							<span class="mix-bar" title={ OutcomeMixTitle(u) }>

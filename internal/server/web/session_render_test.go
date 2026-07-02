@@ -293,13 +293,22 @@ func TestTranscriptInstruments(t *testing.T) {
 		// (b) the hygiene tags on the terse, no-code prompt
 		`class="tag hygiene" title="under 4 words: give the agent something to grip">terse</span>`,
 		`class="tag hygiene" title="a change request with no file, path, or code anchor">no code pointer</span>`,
-		// (c) the shed divider between the heavy turn and the shed-down turn
-		`class="msg-shed"`,
+		// (c) the shed divider between the heavy turn and the shed-down turn, hosting its
+		// before/after breakdown card
+		`class="msg-shed tok-cell"`,
 		`context shed: 160.0k → 12.0k`,
-		// (d) the context and cost stamps on a turn with usage
-		`class="stamp-ctx mono"`, `ctx 82.3k`,
-		`input 1.2k, cache read 78.0k, cache write 3.1k, output 950`, // the class breakdown in the title
-		`class="stamp-cost mono"`, `$0.31`,
+		`class="tok-tip shed-tip"`,    // the shed divider's breakdown card
+		`>Before</dt>`, `>After</dt>`, // the two turns' occupancy, each with its per-class split
+		// (d) the context and cost stamps ride one focusable host that carries a single per-turn
+		// breakdown card (the four classes, the context total, the cost)
+		`class="tok-cell turn-metrics"`,
+		`class="stamp-ctx mono">ctx 82.3k</span>`,
+		`class="stamp-cost mono">$0.31</span>`,
+		`class="tok-tip"`,              // the shared breakdown card markup
+		`>Context</dt>`,                // the context-occupancy line inside the turn card
+		`<dd>82,300</dd>`,              // ordinal 1's context total, full tokens
+		`<dd>78,000</dd>`,              // its cache read, a per-class row in the card
+		`class="tt-cost">$0.31</span>`, // the turn cost in the card
 		// (e) the tool chip prefers the relative path, absolute in the title
 		`title="C:\Users\me\projects\worktrees\akari\x\internal\auth.go">internal/auth.go</span>`,
 	} {
@@ -307,9 +316,13 @@ func TestTranscriptInstruments(t *testing.T) {
 			t.Errorf("instrumented transcript missing %q", want)
 		}
 	}
-	// The unpriced turn (ordinal 2, nil cost) still shows its ctx stamp.
+	// The unpriced turn (ordinal 2, nil cost) still shows its ctx stamp, and its breakdown card
+	// reads "unpriced" for the cost rather than a misleading $0.00.
 	if !strings.Contains(html, `ctx 160.0k`) {
 		t.Error("a turn with usage but no priced cost should still show its context stamp")
+	}
+	if !strings.Contains(html, `class="tt-cost">unpriced</span>`) {
+		t.Error("an unpriced turn's breakdown card should read \"unpriced\" for its cost")
 	}
 }
 

@@ -120,14 +120,28 @@ body.modal-open { overflow: hidden; }
    scroll. */
 .msg .meta .meta-metrics { display: inline-flex; align-items: center; gap: var(--sp-sm); flex-wrap: wrap; justify-content: flex-end; }
 .msg .meta .meta-metrics .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--muted); font-size: 0.6875rem; }
-.msg .meta .stamp-ctx { cursor: help; }
+/* The per-turn context and cost stamps sit in one focusable .tok-cell host so the two share a
+   single breakdown card (the four token classes, reasoning, the context total, and the turn cost),
+   the same hover/focus card every other token figure carries. The host reuses .tok-cell for its
+   positioning and the card reveal; here it only needs the inline layout and the help cursor. */
+.msg .meta .turn-metrics { display: inline-flex; align-items: center; gap: var(--sp-sm); cursor: help; }
 
 /* Context-shed divider: a full-width hairline with a centered mono label marking where a
    compaction or clear shed context, drawn above the first message that ran on the shed-down
-   context. It is static (no animation), so it respects prefers-reduced-motion by construction. */
+   context. It is a .tok-cell host too, so the label's two occupancy figures reveal a before/after
+   breakdown card on hover or focus rather than standing as bare numbers. The card paints from the
+   label outward (centered, not the row edge), so it sits under the figures it explains. It is
+   static (no animation), so it respects prefers-reduced-motion by construction. */
 .msg-shed { display: flex; align-items: center; gap: var(--sp-md); margin: var(--sp-xs) 0; color: var(--faint); }
 .msg-shed::before, .msg-shed::after { content: ""; flex: 1; border-top: 1px solid var(--border); }
-.msg-shed .shed-label { font-family: var(--mono); font-size: 0.6875rem; color: var(--muted); white-space: nowrap; letter-spacing: 0.02em; }
+.msg-shed .shed-label { font-family: var(--mono); font-size: 0.6875rem; color: var(--muted); white-space: nowrap; letter-spacing: 0.02em; cursor: help; }
+.msg-shed { outline: none; }
+.msg-shed:focus-visible .shed-label { box-shadow: var(--ring); border-radius: var(--r-sm); }
+/* The shed card anchors to the centered label rather than the full-width divider's right edge, so
+   it opens beneath the figures it breaks down. The second (after) group is ruled off from the
+   first (before) so the two turns read apart. */
+.msg-shed .shed-tip { left: 50%; right: auto; transform: translateX(-50%); }
+.tok-tip .tt-grid.shed-after { margin-top: 6px; padding-top: 5px; border-top: 1px solid var(--border); }
 
 /* The score-arithmetic rows in the quality tooltip: penalty points and the final score in mono,
    right-aligned in the tooltip's definition grid so the negatives stack into a readable column. */
