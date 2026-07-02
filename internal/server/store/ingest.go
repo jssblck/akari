@@ -521,6 +521,13 @@ func (s *Store) ResetRaw(ctx context.Context, sessionID int64) error {
 			// The per-turn usage rollup is derived from usage_events, so it clears with them.
 			"DELETE FROM message_turn_usage WHERE session_id = $1",
 			"DELETE FROM attachments WHERE session_id = $1",
+			// The model-fallback rows are parser-owned projection state keyed by
+			// (session_id, dedup_key), so they must clear with the rest of the projection.
+			// resetSessionAggregates zeroes sessions.model_fallback_count below, so leaving
+			// the rows would both diverge count(model_fallbacks) from the rollup and let a
+			// re-upload of the same raw merge into the stale rows instead of inserting, so the
+			// re-count never fires and the rollup stays 0.
+			"DELETE FROM model_fallbacks WHERE session_id = $1",
 			// Derived signals clear with the projection they summarize; the settle pass
 			// rebuilds the row from the re-parsed messages and tool calls once the
 			// re-ingested session settles (the append path that re-parses the chunks does

@@ -128,6 +128,12 @@ type FallbackOp struct {
 	DeclinedOutput     int
 	DeclinedCacheWrite int
 	DeclinedCacheRead  int
+	// DeclinedObserved is true only when the declined spend was actually summed from
+	// fallback_message iteration entries. An assistant entry that carries a fallback
+	// content block but no usage.iterations is a real fallback whose declined counts
+	// were never reported, so it leaves this false and the zero Declined* stay
+	// "unmeasured" rather than reading as a measured zero-token attempt.
+	DeclinedObserved bool
 	OccurredAt         time.Time
 	// DedupKey is the top-level requestId when present, else the assistant message id.
 	// Every line of one logical fallback repeats it, so the store dedups and merges on it.

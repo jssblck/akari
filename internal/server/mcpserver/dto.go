@@ -323,8 +323,12 @@ type sessionDetailDTO struct {
 	DuplicateToolCallIDs *int         `json:"duplicate_tool_call_ids,omitempty"`
 	Subagents            []sessionDTO `json:"subagents,omitempty"`
 	// ModelFallbacks lists the session's model fallbacks (see model_fallback_count),
-	// one object per occurrence in order. Omitted entirely when the count is zero, so
-	// its presence alone signals the session fell back from a Fable model at least once.
+	// one object per occurrence in order, capped at store.ModelFallbackListCap so a
+	// pathological session cannot bloat the payload (the count stays the true total). Like
+	// DuplicateToolCallIDs it rides only the first view (the header-only call or the first
+	// transcript window) and is omitted on later pages so paging a long session does not
+	// re-read it. Omitted entirely when the count is zero, so its presence on the first
+	// view signals the session fell back from a Fable model at least once.
 	ModelFallbacks []modelFallbackDTO `json:"model_fallbacks,omitempty"`
 	Transcript     *transcriptDTO     `json:"transcript,omitempty"`
 }

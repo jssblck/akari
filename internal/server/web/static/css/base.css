@@ -259,6 +259,13 @@ td.num, th.num, table.grid td.num, table.grid th.num { text-align: right; font-f
 .quality-stat.q-poor .quality-value { color: var(--err); }
 .stat-tip {
   position: absolute; top: calc(100% + 6px); left: 0; z-index: 20;
+  /* Size to the content, not to the (narrow) tile the tip is anchored to: an
+     absolutely positioned box otherwise shrink-wraps against its containing
+     block and force-wraps lines that fit comfortably on screen. Wrapping only
+     starts once the tip would exceed a fifth of the viewport. The min-width
+     floor wins over the cap on very narrow viewports, which is fine: the
+     mobile media rule below repins the tip edge to edge anyway. */
+  width: max-content; max-width: 20vw;
   min-width: 190px; padding: var(--sp-sm) var(--sp-md);
   background: var(--surface-2); border: 1px solid var(--border-strong);
   border-radius: var(--r-md); box-shadow: var(--shadow-overlay);
@@ -280,6 +287,9 @@ td.num, th.num, table.grid td.num, table.grid th.num { text-align: right; font-f
    reading as one list. */
 .stat-tip .tt-sub { margin-top: 6px; padding-top: 5px; border-top: 1px solid var(--border); color: var(--muted); font: 500 0.6875rem/1.4 var(--mono); text-transform: uppercase; letter-spacing: 0.04em; }
 .stat-tip .tt-sub + .tt-grid { margin-top: 4px; }
+/* tt-note closes a stat tooltip with a plain muted line (the fallback tile's "plus N more"
+   when the list was capped), set apart from the grids above without a heading rule. */
+.stat-tip .tt-note { margin-top: 6px; color: var(--muted); font: 450 0.75rem/1.6 var(--mono); }
 .value.settling { animation: settle var(--dur-slow) var(--ease-settle); }
 @keyframes settle {
   0% { color: var(--lilac); text-shadow: 0 0 14px rgba(198, 168, 242, 0.75); }
@@ -366,7 +376,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--l
      keeps position: sticky. */
   .stats:not(.sticky) { position: relative; }
   .tokens-stat, .cache-stat, .quality-stat, .fallback-stat { position: static; }
-  .stat-tip { left: 0; right: 0; min-width: 0; }
+  .stat-tip { left: 0; right: 0; min-width: 0; width: auto; max-width: none; }
 }
 
 /* ---- Reduced motion ---- */

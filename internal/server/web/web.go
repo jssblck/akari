@@ -427,24 +427,24 @@ func FallbackCategoryLabel(f store.ModelFallback) string {
 	return f.RefusalCategory
 }
 
-// FallbackDeclinedTokens renders the declined attempt's token spend for a tooltip row:
-// the input, output, and both cache classes that were present, summed into one figure.
-// The counts are nil until the assistant side of the fallback merged in, so a fallback
-// with no measured spend returns "" and the caller omits the row rather than showing a
-// misleading zero.
-func FallbackDeclinedTokens(f store.ModelFallback) string {
-	var total int64
-	var any bool
-	for _, p := range []*int64{f.DeclinedInput, f.DeclinedOutput, f.DeclinedCacheWrite, f.DeclinedCacheRead} {
-		if p != nil {
-			total += *p
-			any = true
-		}
+// FallbackDeclinedObserved reports whether the declined attempt's spend was fully measured:
+// all four token classes merged in from the assistant source line. The classes arrive
+// together, so a single nil means the spend was never observed and the tooltip shows no
+// declined figures rather than a partial, misleading breakdown. This matches the MCP DTO,
+// which likewise reports the declined tokens only when every class is present.
+func FallbackDeclinedObserved(f store.ModelFallback) bool {
+	return f.DeclinedInput != nil && f.DeclinedOutput != nil &&
+		f.DeclinedCacheWrite != nil && f.DeclinedCacheRead != nil
+}
+
+// FallbacksOverflow reports how many fallbacks the count claims beyond the shown rows, so a
+// tooltip that renders only a leading window can name the remainder in a "plus N more" line.
+// It is never negative: the count is the session-wide total and shown is bounded by it.
+func FallbacksOverflow(count, shown int) int {
+	if count <= shown {
+		return 0
 	}
-	if !any {
-		return ""
-	}
-	return FmtTokens(total)
+	return count - shown
 }
 
 // FallbackTimeLabel renders when a fallback occurred for a tooltip row, in the viewer's

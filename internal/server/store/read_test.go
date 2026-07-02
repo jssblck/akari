@@ -301,6 +301,42 @@ func TestWindowSessionPageOrdersByLastActive(t *testing.T) {
 	}
 }
 
+// TestWindowSessionPageSurfacesModelFallbackCount pins that the project session table
+// (WindowSessionPage) selects and scans the model_fallback_count rollup, so a project-window
+// row agrees with the feed, the header, and the subagent list rather than reading a phantom
+// zero. Every SessionSummary read must surface the count because the MCP DTO publishes it as
+// an always-present field.
+func TestWindowSessionPageSurfacesModelFallbackCount(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	u, err := st.Register(ctx, "grace", "h", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	proj, err := st.UpsertProject(ctx, "github.com/ada/win", "github.com", "ada", "win", "win", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+
+	sid := seedSessionWithStats(t, st, u.ID, proj, "claude", "fell-back", 1.0, 10, 5)
+	seedUsageAt(t, st, sid, "claude-opus-4-8", 1.0, 10, 5, time.Now().Add(-2*time.Hour), "u-fb")
+	if _, err := st.Pool.Exec(ctx, "UPDATE sessions SET model_fallback_count = 4 WHERE id = $1", sid); err != nil {
+		t.Fatalf("stamp rollup: %v", err)
+	}
+
+	page, err := st.WindowSessionPage(ctx, store.SessionFilter{ProjectID: proj})
+	if err != nil {
+		t.Fatalf("window session page: %v", err)
+	}
+	if len(page.Sessions) != 1 {
+		t.Fatalf("want 1 windowed row, got %d", len(page.Sessions))
+	}
+	if page.Sessions[0].ModelFallbackCount != 4 {
+		t.Errorf("windowed row ModelFallbackCount = %d, want 4 (the window projection must load the rollup)", page.Sessions[0].ModelFallbackCount)
+	}
+}
+
 func TestListAllSessions(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)

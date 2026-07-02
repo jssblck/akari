@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/jssblck/akari/internal/parser"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/storetest"
 )
@@ -491,7 +492,7 @@ func TestClaudeModelFallbackMergesAndCounts(t *testing.T) {
 		}
 
 		// The read path returns the one ordered row with the merged fields.
-		fbs, err := st.SessionModelFallbacks(ctx, sid)
+		fbs, err := st.SessionModelFallbacks(ctx, sid, store.ModelFallbackListCap)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -568,6 +569,77 @@ func TestClaudeModelSwitchIsNotAFallback(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("model_fallback_count = %d, want 0", count)
+	}
+}
+
+// TestClaudeModelFallbackSystemFirstMerge pins the merge when the system entry lands before
+// the assistant entries (the reverse of TestClaudeModelFallbackMergesAndCounts). The system
+// row inserts first with only its refusal fields, the later assistant entries fill the
+// message ordinal and declined tokens into the same (session_id, dedup_key) row, and
+// model_fallback_count stays 1: the count folds once on the first insert of the dedup_key, so
+// a later merge into the same key must not re-count.
+func TestClaudeModelFallbackSystemFirstMerge(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	sid := seedSession(t, st, "claude-fallback-system-first")
+
+	iters := `"iterations":[{"input_tokens":900,"output_tokens":6,"cache_read_input_tokens":3200,"cache_creation_input_tokens":1500,"type":"message","model":"claude-fable-5"},{"input_tokens":900,"output_tokens":260,"cache_read_input_tokens":5000,"cache_creation_input_tokens":0,"type":"fallback_message","model":"claude-opus-4-8"}]`
+	// First chunk: only the system entry, so its row inserts before the assistant side exists.
+	systemLine := `{"type":"system","subtype":"model_refusal_fallback","trigger":"refusal","originalModel":"claude-fable-5","fallbackModel":"claude-opus-4-8","requestId":"req_sf","apiRefusalCategory":"reasoning_extraction","apiRefusalExplanation":null,"timestamp":"2024-01-01T10:00:20Z"}` + "\n"
+	if _, err := st.AppendChunk(ctx, sid, 0, []byte(systemLine)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Advance(ctx, st, sid, "claude"); err != nil {
+		t.Fatalf("advance system: %v", err)
+	}
+
+	// After the system-only advance the row exists with the refusal fields but no ordinal.
+	var rows, count int
+	if err := st.Pool.QueryRow(ctx, "SELECT count(*) FROM model_fallbacks WHERE session_id=$1", sid).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool.QueryRow(ctx, "SELECT model_fallback_count FROM sessions WHERE id=$1", sid).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 || count != 1 {
+		t.Fatalf("after system-only: rows=%d count=%d, want 1 and 1", rows, count)
+	}
+
+	// Second chunk: the two assistant entries sharing the requestId fill in the ordinal and
+	// declined tokens on the same row.
+	assistant := `{"type":"assistant","timestamp":"2024-01-01T10:00:25Z","requestId":"req_sf","message":{"id":"msg_sf","model":"claude-opus-4-8","content":[{"type":"fallback","from":{"model":"claude-fable-5"},"to":{"model":"claude-opus-4-8"}}],"usage":{"input_tokens":900,"output_tokens":260,"cache_read_input_tokens":5000,` + iters + `}}}` + "\n" +
+		`{"type":"assistant","timestamp":"2024-01-01T10:00:26Z","requestId":"req_sf","message":{"id":"msg_sf","model":"claude-opus-4-8","content":[{"type":"text","text":"honest working"}],"usage":{"input_tokens":900,"output_tokens":260,"cache_read_input_tokens":5000,` + iters + `}}}` + "\n"
+	if _, err := st.AppendChunk(ctx, sid, int64(len(systemLine)), []byte(assistant)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Advance(ctx, st, sid, "claude"); err != nil {
+		t.Fatalf("advance assistant: %v", err)
+	}
+
+	// Still one row, still count 1, now carrying both sides' fields.
+	var ordinal, declIn *int
+	var fromM, toM, trigger, category string
+	if err := st.Pool.QueryRow(ctx, "SELECT count(*) FROM model_fallbacks WHERE session_id=$1", sid).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool.QueryRow(ctx, "SELECT model_fallback_count FROM sessions WHERE id=$1", sid).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 || count != 1 {
+		t.Fatalf("after assistant merge: rows=%d count=%d, want 1 and 1 (a merge must not re-count)", rows, count)
+	}
+	if err := st.Pool.QueryRow(ctx,
+		`SELECT message_ordinal, from_model, to_model, trigger, refusal_category, declined_input_tokens
+		   FROM model_fallbacks WHERE session_id=$1`, sid).
+		Scan(&ordinal, &fromM, &toM, &trigger, &category, &declIn); err != nil {
+		t.Fatal(err)
+	}
+	if trigger != "refusal" || category != "reasoning_extraction" {
+		t.Errorf("system-side fields lost: trigger=%q category=%q", trigger, category)
+	}
+	if ordinal == nil || declIn == nil || *declIn != 900 {
+		t.Errorf("assistant-side fields did not merge: ordinal=%v declIn=%v", ordinal, declIn)
 	}
 }
 
@@ -689,4 +761,50 @@ func TestClaudeDuplicateUsageCountedOnce(t *testing.T) {
 		t.Fatalf("reparse: %v", err)
 	}
 	assertRollupsMatchLedger(t, "after reparse")
+}
+
+// TestFallbackDeclinedProjectionGating pins toProjectionDelta's nullable mapping: an op that
+// observed its declined spend (DeclinedObserved) carries the four counts as non-nil pointers
+// so the store records measured values, while an op that never observed the spend (a fallback
+// block with no iterations, or the system-side op) leaves all four nil so the store column
+// stays NULL rather than reading a spurious zero-token attempt as measured.
+func TestFallbackDeclinedProjectionGating(t *testing.T) {
+	t.Parallel()
+	ord := 1
+	in := parser.Delta{Fallbacks: []parser.FallbackOp{
+		{
+			// Observed: the reducer summed the iteration entries.
+			MessageOrdinal: &ord, FromModel: "claude-fable-5", ToModel: "claude-opus-4-8",
+			DeclinedInput: 10, DeclinedOutput: 20, DeclinedCacheWrite: 30, DeclinedCacheRead: 40,
+			DeclinedObserved: true, DedupKey: "observed",
+		},
+		{
+			// Not observed: a fallback block rode this op but there were no iterations, so the
+			// zero counts are unmeasured even though the op carries a message ordinal.
+			MessageOrdinal: &ord, FromModel: "claude-fable-5", ToModel: "claude-opus-4-8",
+			DeclinedObserved: false, DedupKey: "block-only",
+		},
+	}}
+	d := toProjectionDelta(in)
+	if len(d.Fallbacks) != 2 {
+		t.Fatalf("projection fallbacks = %d, want 2", len(d.Fallbacks))
+	}
+
+	obs := d.Fallbacks[0]
+	if obs.DeclinedInput == nil || *obs.DeclinedInput != 10 ||
+		obs.DeclinedOutput == nil || *obs.DeclinedOutput != 20 ||
+		obs.DeclinedCacheWrite == nil || *obs.DeclinedCacheWrite != 30 ||
+		obs.DeclinedCacheRead == nil || *obs.DeclinedCacheRead != 40 {
+		t.Errorf("observed op should carry non-nil measured counts, got %+v", obs)
+	}
+
+	unobs := d.Fallbacks[1]
+	if unobs.DeclinedInput != nil || unobs.DeclinedOutput != nil ||
+		unobs.DeclinedCacheWrite != nil || unobs.DeclinedCacheRead != nil {
+		t.Errorf("unobserved op should leave all four declined pointers nil, got %+v", unobs)
+	}
+	// The op is still a fallback: only the declined spend is unmeasured, not the whole row.
+	if unobs.MessageOrdinal == nil || unobs.FromModel != "claude-fable-5" {
+		t.Errorf("unobserved op should still carry its non-token fields, got %+v", unobs)
+	}
 }

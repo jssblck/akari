@@ -147,7 +147,7 @@ func registerTools(s *mcp.Server, st *store.Store) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "get_session",
-		Description: "One session: its header (project, agent, user, machine, branch, working directory, token and cost totals, timing) and subagents, plus, unless include_transcript is false, a bounded window of the transcript (messages with thinking and model, the tool-call metadata and attachments hanging on them). A session that fell back from a Claude Fable model to a lower one (model_fallback_count above zero) also carries a model_fallbacks list, one entry per occurrence. Tool bodies live in the CAS; fetch them with read_tool_body. The window is up to transcript_limit messages; page by passing the prior window's transcript.next_after as transcript_after until transcript.has_more is false.",
+		Description: "One session: its header (project, agent, user, machine, branch, working directory, token and cost totals, timing) and subagents, plus, unless include_transcript is false, a bounded window of the transcript (messages with thinking and model, the tool-call metadata and attachments hanging on them). A session that fell back from a Claude Fable model to a lower one (model_fallback_count above zero) also carries a model_fallbacks list on the first view (a header-only call or the first transcript window), capped at the first 100 occurrences; later transcript pages omit the list but keep the count. Tool bodies live in the CAS; fetch them with read_tool_body. The window is up to transcript_limit messages; page by passing the prior window's transcript.next_after as transcript_after until transcript.has_more is false.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in getSessionInput) (*mcp.CallToolResult, sessionDetailDTO, error) {
 		d, err := st.SessionDetailByID(ctx, in.SessionID)
 		if err != nil {
@@ -177,11 +177,13 @@ func registerTools(s *mcp.Server, st *store.Store) {
 			out.Subagents = append(out.Subagents, sessionSummaryToDTO(sub))
 		}
 
-		// The fallback rows are a separate read; skip it unless the O(1) rollup on the
-		// header says the session has at least one, so the common no-fallback case pays
-		// nothing.
-		if out.ModelFallbackCount > 0 {
-			fbs, err := st.SessionModelFallbacks(ctx, in.SessionID)
+		// The fallback list is a separate, capped read that rides only the first view
+		// (a header-only call or the first transcript window), the same gate
+		// DuplicateToolCallIDs uses, so later transcript pages carry only the O(1)
+		// model_fallback_count and never re-read the rows. Skip it too when the rollup
+		// says the session had none, so the common case pays nothing.
+		if (!includeTranscript || in.TranscriptAfter == nil) && out.ModelFallbackCount > 0 {
+			fbs, err := st.SessionModelFallbacks(ctx, in.SessionID, store.ModelFallbackListCap)
 			if err != nil {
 				return nil, sessionDetailDTO{}, err
 			}

@@ -45,6 +45,12 @@ CREATE TABLE model_fallbacks (
     PRIMARY KEY (session_id, dedup_key)
 );
 
+-- SessionModelFallbacks reads one session's rows ordered by (occurred_at, dedup_key) with a
+-- LIMIT (the capped first N by occurrence). The primary key alone orders by dedup_key, so that
+-- ordered read is seekable only with a matching index; see migration 0035, which adds it. Without
+-- it a live repeated-fallback session would fetch and sort every fallback for the session on each
+-- SSE refresh through sessionHeaderStats, O(F) per refresh and O(F^2) across a run.
+
 -- The per-session count of distinct fallback events, folded on first insert of each dedup_key (a
 -- later merge into the same key does not re-count). It rides the sessions row so the feed and the
 -- session header read it in O(1) rather than counting model_fallbacks per render, and reparse resets

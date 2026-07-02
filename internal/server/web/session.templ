@@ -205,16 +205,23 @@ templ sessionStats(d store.SessionDetail, hs HeaderStats) {
 // fallback (a Claude Fable turn the safety classifier declined and re-served on a lower
 // model), so its absence is the negative signal and the common session shows no tile. The
 // count reads at a glance in the warn band; the per-fallback detail (the model pair, the
-// refusal category, the declined attempt's token spend, and the time) reveals on hover or
-// keyboard focus through the same .stat-tip system the Quality and Tokens tiles use. A
-// field the transcript never named reads a plain default (unknown, uncategorized) rather
-// than a blank cell, since a single-line fallback can arrive with only part of its detail.
+// refusal category, the declined attempt's token spend broken out by class, and the time)
+// reveals on hover or keyboard focus through the same .stat-tip system the Quality and
+// Tokens tiles use. A field the transcript never named reads a plain default (unknown,
+// uncategorized) rather than a blank cell, since a single-line fallback can arrive with only
+// part of its detail. The tooltip lists at most the first five fallbacks (the slice is
+// already capped at the store read); a session that fell back more names the remainder in a
+// closing "plus N more" line computed from the full count, so a pathological session's
+// tooltip stays short.
 templ statFallback(count int, fbs []store.ModelFallback) {
 	<div class="stat fallback-stat" tabindex="0">
 		<div class="label">Fallbacks</div>
 		<div class="value fallback-value" data-stat-key="fallbacks">{ fmt.Sprintf("%d", count) }</div>
 		<div class="stat-tip" role="tooltip">
 			for i, f := range fbs {
+				if i >= 5 {
+					{{ break }}
+				}
 				if i > 0 {
 					<div class="tt-sub">Fallback</div>
 				}
@@ -223,13 +230,25 @@ templ statFallback(count int, fbs []store.ModelFallback) {
 					<dd>{ FallbackModelsLabel(f) }</dd>
 					<dt>Category</dt>
 					<dd>{ FallbackCategoryLabel(f) }</dd>
-					if tok := FallbackDeclinedTokens(f); tok != "" {
-						<dt>Declined tokens</dt>
-						<dd>{ tok }</dd>
+					if FallbackDeclinedObserved(f) {
+						// The four token classes, each on its own row rather than one summed figure, so a
+						// reader sees the breakdown the way the Tokens tile shows it. A declined attempt is
+						// never priced (it was refused, not served), so there is no cost line to pair with them.
+						<dt>Declined input</dt>
+						<dd>{ FmtTokens(*f.DeclinedInput) }</dd>
+						<dt>Declined output</dt>
+						<dd>{ FmtTokens(*f.DeclinedOutput) }</dd>
+						<dt>Declined cache write</dt>
+						<dd>{ FmtTokens(*f.DeclinedCacheWrite) }</dd>
+						<dt>Declined cache read</dt>
+						<dd>{ FmtTokens(*f.DeclinedCacheRead) }</dd>
 					}
 					<dt>Time</dt>
 					<dd>{ FallbackTimeLabel(ctx, f) }</dd>
 				</dl>
+			}
+			if over := FallbacksOverflow(count, min(len(fbs), 5)); over > 0 {
+				<div class="tt-note">{ fmt.Sprintf("plus %d more", over) }</div>
 			}
 		</div>
 	</div>

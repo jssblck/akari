@@ -263,16 +263,15 @@ func toProjectionDelta(p parser.Delta) store.ProjectionDelta {
 			Trigger:            fb.Trigger,
 			RefusalCategory:    fb.RefusalCategory,
 			RefusalExplanation: fb.RefusalExplanation,
-			// The declined token counts are meaningful only on an assistant-side op that saw a
-			// fallback_message iteration entry. The reducer leaves them zero on a system-side op
-			// (and on an assistant op with no declined attempt), so only an assistant-side op that
-			// actually observed the declined spend carries a non-nil pointer here: a nil leaves the
-			// column NULL ("unmeasured") for the merge, rather than folding a spurious zero over a
-			// value the paired assistant line supplied.
-			DeclinedInput:      declinedTokens(fb.MessageOrdinal, fb.DeclinedInput),
-			DeclinedOutput:     declinedTokens(fb.MessageOrdinal, fb.DeclinedOutput),
-			DeclinedCacheWrite: declinedTokens(fb.MessageOrdinal, fb.DeclinedCacheWrite),
-			DeclinedCacheRead:  declinedTokens(fb.MessageOrdinal, fb.DeclinedCacheRead),
+			// The declined token counts are meaningful only when the reducer actually summed
+			// them from fallback_message iteration entries (DeclinedObserved). A system-side op,
+			// or an assistant op that carried a fallback block but no iterations, never observed
+			// the declined spend, so its zero maps to NULL ("unmeasured") for the merge rather
+			// than folding a spurious zero over a value the paired assistant line supplied.
+			DeclinedInput:      declinedTokens(fb.DeclinedObserved, fb.DeclinedInput),
+			DeclinedOutput:     declinedTokens(fb.DeclinedObserved, fb.DeclinedOutput),
+			DeclinedCacheWrite: declinedTokens(fb.DeclinedObserved, fb.DeclinedCacheWrite),
+			DeclinedCacheRead:  declinedTokens(fb.DeclinedObserved, fb.DeclinedCacheRead),
 			OccurredAt:         fb.OccurredAt,
 			DedupKey:           fb.DedupKey,
 		})
@@ -282,12 +281,12 @@ func toProjectionDelta(p parser.Delta) store.ProjectionDelta {
 }
 
 // declinedTokens turns a reducer-side declined token count into the store's nullable
-// column: the assistant-side op (the only one with a MessageOrdinal) carries the declined
-// spend, so its count (even zero) is a measured value; the system-side op has no ordinal
-// and no declined attempt, so its zero is "unmeasured" and maps to NULL, leaving the column
-// for the paired assistant line to fill rather than pinning it to zero.
-func declinedTokens(ordinal *int, n int) *int {
-	if ordinal == nil {
+// column: only an op that observed the declined attempt (summed it from fallback_message
+// iteration entries) carries a measured value, so its count (even zero) maps to a pointer;
+// an op that never observed the spend maps to NULL, leaving the column for the paired
+// assistant line to fill rather than pinning it to a spurious zero.
+func declinedTokens(observed bool, n int) *int {
+	if !observed {
 		return nil
 	}
 	return &n

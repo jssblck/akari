@@ -379,6 +379,9 @@ func TestParseClaudeFallbackFromBlockAndIterations(t *testing.T) {
 		if f.DeclinedInput != 7626 || f.DeclinedOutput != 5 || f.DeclinedCacheWrite != 9698 || f.DeclinedCacheRead != 21535 {
 			t.Errorf("op %d declined tokens = %+v", i, f)
 		}
+		if !f.DeclinedObserved {
+			t.Errorf("op %d summed declined tokens, so DeclinedObserved should be true", i)
+		}
 		if f.MessageOrdinal == nil {
 			t.Errorf("op %d should carry the ordinal of the message it rode", i)
 		}
@@ -389,6 +392,25 @@ func TestParseClaudeFallbackFromBlockAndIterations(t *testing.T) {
 	}
 	if got := *s.Fallbacks[1].MessageOrdinal; got != 1 {
 		t.Errorf("op 1 ordinal = %d, want 1", got)
+	}
+}
+
+// TestParseClaudeFallbackDedupKeyFallsBackToMessageID covers the dedup key when the entry
+// has no top-level requestId: it falls back to the assistant message id, so the store still
+// merges every line of one logical fallback (Claude repeats the message id across the split
+// entries even when requestId is absent).
+func TestParseClaudeFallbackDedupKeyFallsBackToMessageID(t *testing.T) {
+	raw := []byte(`{"type":"assistant","timestamp":"2026-07-02T11:30:00Z","message":{"id":"msg_noreq","model":"claude-opus-4-8","content":[{"type":"fallback","from":{"model":"claude-fable-5"},"to":{"model":"claude-opus-4-8"}}]}}
+`)
+	s, err := Parse(AgentClaude, raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(s.Fallbacks) != 1 {
+		t.Fatalf("fallback ops = %d, want 1", len(s.Fallbacks))
+	}
+	if got := s.Fallbacks[0].DedupKey; got != "msg_noreq" {
+		t.Errorf("dedup key = %q, want the message id msg_noreq (no requestId present)", got)
 	}
 }
 
@@ -449,8 +471,41 @@ func TestParseClaudeStickyFallbackNoBlock(t *testing.T) {
 	if f.DeclinedInput != 10 || f.DeclinedOutput != 3 || f.DeclinedCacheWrite != 5 || f.DeclinedCacheRead != 40 {
 		t.Errorf("declined tokens = %+v", f)
 	}
+	if !f.DeclinedObserved {
+		t.Error("a sticky fallback summed its iteration entries, so DeclinedObserved should be true")
+	}
 	if f.DedupKey != "req_sticky" {
 		t.Errorf("dedup key = %q", f.DedupKey)
+	}
+}
+
+// TestParseClaudeFallbackBlockNoIterations covers a fallback whose declined spend was never
+// reported: an assistant entry carries a "fallback" content block but no usage.iterations.
+// It is still detected as a fallback (the block is an explicit marker), but the declined
+// counts stay zero AND DeclinedObserved stays false, so a downstream reader can tell an
+// unmeasured attempt from a real zero-token one and leave the store column NULL.
+func TestParseClaudeFallbackBlockNoIterations(t *testing.T) {
+	raw := []byte(`{"type":"assistant","timestamp":"2026-07-02T10:00:00Z","requestId":"req_blk","message":{"id":"msg_b","model":"claude-opus-4-8","content":[{"type":"fallback","from":{"model":"claude-fable-5"},"to":{"model":"claude-opus-4-8"}}]}}
+`)
+	s, err := Parse(AgentClaude, raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(s.Fallbacks) != 1 {
+		t.Fatalf("fallback ops = %d, want 1 (the block is an explicit marker)", len(s.Fallbacks))
+	}
+	f := s.Fallbacks[0]
+	if f.FromModel != "claude-fable-5" || f.ToModel != "claude-opus-4-8" {
+		t.Errorf("models: from=%q to=%q", f.FromModel, f.ToModel)
+	}
+	if f.DeclinedObserved {
+		t.Error("no iterations means the declined spend was never observed, so DeclinedObserved must be false")
+	}
+	if f.DeclinedInput != 0 || f.DeclinedOutput != 0 || f.DeclinedCacheWrite != 0 || f.DeclinedCacheRead != 0 {
+		t.Errorf("unobserved declined counts should stay zero, got %+v", f)
+	}
+	if f.MessageOrdinal == nil {
+		t.Error("an assistant-side op still rides its message ordinal")
 	}
 }
 

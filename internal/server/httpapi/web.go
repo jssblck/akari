@@ -445,7 +445,10 @@ func (s *Server) sessionHeaderStats(ctx context.Context, d store.SessionDetail) 
 	// nothing on the overwhelming majority of pages. The rollup is the O(1) gate.
 	var fallbacks []store.ModelFallback
 	if d.ModelFallbackCount > 0 {
-		fallbacks, err = s.Store.SessionModelFallbacks(ctx, d.ID)
+		// Cap the read so a pathological session cannot grow the tooltip slice or the
+		// transcript-notice map without bound; the O(1) ModelFallbackCount stays the true
+		// total, and the tooltip renders "plus N more" from it when it overflows the cap.
+		fallbacks, err = s.Store.SessionModelFallbacks(ctx, d.ID, store.ModelFallbackListCap)
 		if err != nil {
 			return web.HeaderStats{}, err
 		}

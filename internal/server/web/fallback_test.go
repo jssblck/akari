@@ -66,22 +66,24 @@ func TestGlobalSessionListFallbackBadge(t *testing.T) {
 
 // The header renders the Fallbacks tile only when the session had a fallback, and its
 // tooltip lists each one: the model pair (a real arrow glyph), the refusal category, the
-// declined attempt's token spend, and the time. A session with no fallback draws no tile,
-// so its absence is the negative signal.
+// declined attempt's token spend broken out by class, and the time. A session with no
+// fallback draws no tile, so its absence is the negative signal.
 func TestSessionStatsFallbackTile(t *testing.T) {
 	p := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "jessoteric"}
 	d, msgs, tools := sessionFixture()
 	d.ModelFallbackCount = 1
 	when := time.Date(2026, 6, 28, 9, 5, 0, 0, time.UTC)
 	hs := HeaderStats{Fallbacks: []store.ModelFallback{{
-		MessageOrdinal:  intPtr(1),
-		FromModel:       "claude-fable-5",
-		ToModel:         "claude-opus-4-8",
-		Trigger:         "reasoning_extraction",
-		RefusalCategory: "reasoning_extraction",
-		DeclinedInput:   int64Ptr(1200),
-		DeclinedOutput:  int64Ptr(300),
-		OccurredAt:      &when,
+		MessageOrdinal:     intPtr(1),
+		FromModel:          "claude-fable-5",
+		ToModel:            "claude-opus-4-8",
+		Trigger:            "reasoning_extraction",
+		RefusalCategory:    "reasoning_extraction",
+		DeclinedInput:      int64Ptr(1200),
+		DeclinedOutput:     int64Ptr(300),
+		DeclinedCacheWrite: int64Ptr(1500),
+		DeclinedCacheRead:  int64Ptr(5000),
+		OccurredAt:         &when,
 	}}}
 	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, hs, 0, false, true))
 
@@ -90,7 +92,10 @@ func TestSessionStatsFallbackTile(t *testing.T) {
 		`data-stat-key="fallbacks">1</div>`,
 		`>Models</dt>`, `<dd>claude-fable-5 → claude-opus-4-8</dd>`, // the model pair, arrow glyph
 		`>Category</dt>`, `<dd>reasoning_extraction</dd>`,
-		`>Declined tokens</dt>`, `<dd>1,500</dd>`, // input + output, summed and separated
+		`>Declined input</dt>`, `<dd>1,200</dd>`, // each class on its own row, not one summed figure
+		`>Declined output</dt>`, `<dd>300</dd>`,
+		`>Declined cache write</dt>`, `<dd>1,500</dd>`,
+		`>Declined cache read</dt>`, `<dd>5,000</dd>`,
 		`>Time</dt>`,
 	} {
 		if !strings.Contains(html, want) {
@@ -124,8 +129,63 @@ func TestFallbackTileDefensiveDefaults(t *testing.T) {
 	if !strings.Contains(html, `<dd>-</dd>`) {
 		t.Error("a fallback with no timestamp should read a dash")
 	}
-	if strings.Contains(html, `>Declined tokens</dt>`) {
-		t.Error("a fallback with no measured spend should omit the declined-tokens row")
+	if strings.Contains(html, `>Declined input</dt>`) {
+		t.Error("a fallback with no measured spend should omit the declined-token rows")
+	}
+}
+
+// A fallback whose declined spend is only partly measured (a nil class) shows no declined
+// rows at all: the classes merge in together, so a partial breakdown would mislead. The
+// tooltip skips the whole group rather than reporting some classes and a phantom zero for
+// the rest.
+func TestFallbackTilePartialDeclinedOmitted(t *testing.T) {
+	p := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "jessoteric"}
+	d, msgs, tools := sessionFixture()
+	d.ModelFallbackCount = 1
+	// Three of four classes measured, cache read still nil: the group must not render.
+	hs := HeaderStats{Fallbacks: []store.ModelFallback{{
+		DedupKey:           "partial",
+		DeclinedInput:      int64Ptr(100),
+		DeclinedOutput:     int64Ptr(200),
+		DeclinedCacheWrite: int64Ptr(300),
+	}}}
+	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, hs, 0, false, true))
+	if strings.Contains(html, `>Declined input</dt>`) {
+		t.Error("a partly measured declined spend should omit the declined-token rows entirely")
+	}
+}
+
+// The tooltip lists at most the first five fallbacks and names the remainder in a closing
+// "plus N more" line computed from the session count, so a session that fell back many times
+// keeps a short tooltip. A session at or under five shows every one and no overflow line.
+func TestFallbackTileCapsListAndCountsOverflow(t *testing.T) {
+	p := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "jessoteric"}
+	d, msgs, tools := sessionFixture()
+
+	// Eight fetched rows against a session-wide count of twelve: five render, and the note
+	// reports twelve minus five shown, not eight minus five fetched.
+	d.ModelFallbackCount = 12
+	var many []store.ModelFallback
+	for i := 0; i < 8; i++ {
+		many = append(many, store.ModelFallback{FromModel: "claude-fable-5", ToModel: "claude-opus-4-8", DedupKey: string(rune('a' + i))})
+	}
+	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, HeaderStats{Fallbacks: many}, 0, false, true))
+	if got := strings.Count(html, `>Models</dt>`); got != 5 {
+		t.Errorf("tooltip rendered %d fallback rows, want 5", got)
+	}
+	if !strings.Contains(html, `plus 7 more`) {
+		t.Error("tooltip should note the remainder as 'plus 7 more' (count 12 minus 5 shown)")
+	}
+
+	// A session with three fallbacks shows all three and no overflow note.
+	d.ModelFallbackCount = 3
+	few := many[:3]
+	small := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, HeaderStats{Fallbacks: few}, 0, false, true))
+	if got := strings.Count(small, `>Models</dt>`); got != 3 {
+		t.Errorf("tooltip rendered %d fallback rows, want 3", got)
+	}
+	if strings.Contains(small, `plus `) {
+		t.Error("a session under the cap should show no overflow note")
 	}
 }
 
@@ -184,19 +244,37 @@ func TestFallbacksByOrdinal(t *testing.T) {
 	}
 }
 
-// FallbackDeclinedTokens sums only the classes that were measured and returns "" when
-// none were, so the caller omits the row rather than showing a misleading zero.
-func TestFallbackDeclinedTokens(t *testing.T) {
-	if got := FallbackDeclinedTokens(store.ModelFallback{}); got != "" {
-		t.Errorf("no measured spend = %q, want empty", got)
+// FallbackDeclinedObserved is true only when every token class merged in: the classes
+// arrive together, so a single nil means the spend was never observed and the tooltip omits
+// the whole per-class breakdown rather than showing a partial, misleading one.
+func TestFallbackDeclinedObserved(t *testing.T) {
+	if FallbackDeclinedObserved(store.ModelFallback{}) {
+		t.Error("no measured classes should not read as observed")
 	}
-	f := store.ModelFallback{DeclinedInput: int64Ptr(1000), DeclinedCacheRead: int64Ptr(2000)}
-	if got := FallbackDeclinedTokens(f); got != "3,000" {
-		t.Errorf("summed spend = %q, want 3,000", got)
+	// Three of four present is still not observed: the missing class breaks the breakdown.
+	partial := store.ModelFallback{DeclinedInput: int64Ptr(1), DeclinedOutput: int64Ptr(2), DeclinedCacheWrite: int64Ptr(3)}
+	if FallbackDeclinedObserved(partial) {
+		t.Error("a partly measured spend should not read as observed")
 	}
-	// A single measured zero still counts as measured, so it reads "0" not empty.
-	if got := FallbackDeclinedTokens(store.ModelFallback{DeclinedOutput: int64Ptr(0)}); got != "0" {
-		t.Errorf("a measured zero = %q, want 0", got)
+	// All four present (measured zeros count) reads as observed.
+	full := store.ModelFallback{DeclinedInput: int64Ptr(0), DeclinedOutput: int64Ptr(0), DeclinedCacheWrite: int64Ptr(0), DeclinedCacheRead: int64Ptr(0)}
+	if !FallbackDeclinedObserved(full) {
+		t.Error("all four classes measured (even zeros) should read as observed")
+	}
+}
+
+// FallbacksOverflow is the session count beyond what the tooltip shows, never negative: it
+// drives the "plus N more" line when the list was capped and is zero when the shown rows
+// already cover the count.
+func TestFallbacksOverflow(t *testing.T) {
+	if got := FallbacksOverflow(12, 5); got != 7 {
+		t.Errorf("overflow(12, 5) = %d, want 7", got)
+	}
+	if got := FallbacksOverflow(3, 5); got != 0 {
+		t.Errorf("overflow(3, 5) = %d, want 0 (shown covers the count)", got)
+	}
+	if got := FallbacksOverflow(5, 5); got != 0 {
+		t.Errorf("overflow(5, 5) = %d, want 0", got)
 	}
 }
 

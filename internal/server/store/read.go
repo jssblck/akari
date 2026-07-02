@@ -73,9 +73,11 @@ type SessionSummary struct {
 	UserMessageCount int
 	// ModelFallbackCount is how many times this session's Claude Fable turns were declined by
 	// the safety classifier and re-served on a lower model (see migration 0034). It is read from
-	// the sessions.model_fallback_count rollup so the feed and the session header show it in O(1).
-	// Only the two reads that surface it fill it (the cross-project feed row and the single-session
-	// header); the other summary reads leave it zero, which reads as "no fallbacks shown here".
+	// the sessions.model_fallback_count rollup so every summary read surfaces it in O(1). Every
+	// SessionSummary query loads it (the shared sessionSelect, the cross-project feed row, and the
+	// single-session header) so the count is truthful wherever a summary is published, including a
+	// subagent row: the MCP DTO reports it as an always-present field, so a summary that skipped the
+	// column would falsely read zero on a child session that actually fell back.
 	ModelFallbackCount int
 	TotalInput         int64
 	TotalOutput        int64
@@ -519,7 +521,7 @@ func (s *Store) Project(ctx context.Context, id int64) (ProjectSummary, error) {
 // sessionSelect is the shared column list and joins for session summaries.
 const sessionSelect = `
 	SELECT s.id, s.agent, s.machine, s.git_branch, u.username,
-	       s.message_count, s.user_message_count,
+	       s.message_count, s.user_message_count, s.model_fallback_count,
 	       s.total_input_tokens, s.total_output_tokens,
 	       s.total_cache_write_tokens, s.total_cache_read_tokens,
 	       s.total_cost_usd, s.cost_incomplete, s.visibility, s.public_id,
@@ -530,7 +532,7 @@ const sessionSelect = `
 func scanSession(rows pgx.Rows) (SessionSummary, error) {
 	var s SessionSummary
 	err := rows.Scan(&s.ID, &s.Agent, &s.Machine, &s.GitBranch, &s.Username,
-		&s.MessageCount, &s.UserMessageCount,
+		&s.MessageCount, &s.UserMessageCount, &s.ModelFallbackCount,
 		&s.TotalInput, &s.TotalOutput, &s.TotalCacheWrite, &s.TotalCacheRead,
 		&s.TotalCostUSD, &s.CostIncomplete, &s.Visibility, &s.PublicID,
 		&s.StartedAt, &s.EndedAt, &s.LastActiveAt)
@@ -661,7 +663,7 @@ func (s *Store) WindowSessionPage(ctx context.Context, f SessionFilter) (Session
 	// It matches the global feed's title so a session reads the same on both surfaces.
 	q := `
 		SELECT s.id, s.agent, s.machine, s.git_branch, u.username,
-		       s.message_count, s.user_message_count,
+		       s.message_count, s.user_message_count, s.model_fallback_count,
 		       coalesce(sum(ue.input_tokens), 0), coalesce(sum(ue.output_tokens), 0),
 		       coalesce(sum(ue.cache_write_tokens), 0), coalesce(sum(ue.cache_read_tokens), 0),
 		       coalesce(sum(ue.cost_usd), 0), ` + costIncompleteExpr + `,
@@ -691,7 +693,7 @@ func (s *Store) WindowSessionPage(ctx context.Context, f SessionFilter) (Session
 	for rows.Next() {
 		var sm SessionSummary
 		if err := rows.Scan(&sm.ID, &sm.Agent, &sm.Machine, &sm.GitBranch, &sm.Username,
-			&sm.MessageCount, &sm.UserMessageCount,
+			&sm.MessageCount, &sm.UserMessageCount, &sm.ModelFallbackCount,
 			&sm.TotalInput, &sm.TotalOutput, &sm.TotalCacheWrite, &sm.TotalCacheRead,
 			&sm.TotalCostUSD, &sm.CostIncomplete, &sm.Visibility, &sm.PublicID,
 			&sm.StartedAt, &sm.EndedAt, &sm.LastActiveAt, &sm.Title); err != nil {
@@ -1726,17 +1728,32 @@ type ModelFallback struct {
 	DedupKey           string
 }
 
+// ModelFallbackListCap is the standard cap on how many fallback rows a caller reads for
+// one session. sessions.model_fallback_count is the session-wide total and rides every
+// view; this list is only the first N by occurrence, so a reader stays bounded no matter
+// how pathological the session (a transcript that fell back thousands of times cannot blow
+// up a tooltip, a transcript-notice map, or an MCP payload). Callers pass this to
+// SessionModelFallbacks and lean on the count for the true total.
+const ModelFallbackListCap = 100
+
 // SessionModelFallbacks returns a session's recorded model fallbacks in a stable order
 // (by when they occurred, then by dedup_key so rows with no timestamp still order
-// deterministically). It reads the merged model_fallbacks rows the projection built.
-func (s *Store) SessionModelFallbacks(ctx context.Context, sessionID int64) ([]ModelFallback, error) {
-	rows, err := s.Pool.Query(ctx,
-		`SELECT message_ordinal, from_model, to_model, trigger,
-		        COALESCE(refusal_category, ''), COALESCE(refusal_explanation, ''),
-		        declined_input_tokens, declined_output_tokens, declined_cache_write_tokens,
-		        declined_cache_read_tokens, occurred_at, dedup_key
-		   FROM model_fallbacks WHERE session_id = $1
-		  ORDER BY occurred_at, dedup_key`, sessionID)
+// deterministically), capped at limit rows so the read stays bounded on a pathological
+// session. It reads the merged model_fallbacks rows the projection built. A limit of zero
+// or less means no cap; callers on hot paths pass ModelFallbackListCap.
+func (s *Store) SessionModelFallbacks(ctx context.Context, sessionID int64, limit int) ([]ModelFallback, error) {
+	query := `SELECT message_ordinal, from_model, to_model, trigger,
+	        COALESCE(refusal_category, ''), COALESCE(refusal_explanation, ''),
+	        declined_input_tokens, declined_output_tokens, declined_cache_write_tokens,
+	        declined_cache_read_tokens, occurred_at, dedup_key
+	   FROM model_fallbacks WHERE session_id = $1
+	  ORDER BY occurred_at, dedup_key`
+	args := []any{sessionID}
+	if limit > 0 {
+		query += ` LIMIT $2`
+		args = append(args, limit)
+	}
+	rows, err := s.Pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query model fallbacks for session %d: %w", sessionID, err)
 	}

@@ -168,6 +168,7 @@ func (r *reducer) claudeFallbackFromAssistant(e, msg gjson.Result, ord int, ts t
 	// It is only meaningful when a fallback_message entry is present (an ordinary turn's
 	// lone message entry is the served turn, not a declined one), so it is summed only then.
 	if haveFallbackIter && iterations.IsArray() {
+		op.DeclinedObserved = true
 		for _, it := range iterations.Array() {
 			if it.Get("type").String() != "message" {
 				continue
