@@ -481,7 +481,7 @@ func (s *Server) handleSessionPage(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load session."))
 		return
 	}
-	title := fmt.Sprintf("Session #%d", d.ID)
+	title := web.SessionPageTitle(d)
 	p, _ := principalFrom(r.Context())
 	owner := p.UserID == d.OwnerID
 	render(w, r, http.StatusOK, web.SessionPage(s.pageForNav(r, title, "sessions"), d, msgs, tools, atts, subs, hs, dupIDs, true, owner))

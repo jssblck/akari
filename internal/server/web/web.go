@@ -7,11 +7,23 @@ import (
 	"context"
 	"embed"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
 	"github.com/jssblck/akari/internal/server/store"
 )
+
+// errorTitle is the browser-tab title for a public error page: the status code
+// paired with its standard reason ("404 Not Found"), so the tab and any shared
+// link say what went wrong rather than a bare number. An unknown code with no
+// standard text falls back to the number alone.
+func errorTitle(code int) string {
+	if text := http.StatusText(code); text != "" {
+		return fmt.Sprintf("%d %s", code, text)
+	}
+	return fmt.Sprintf("%d", code)
+}
 
 // locCtxKey keys the viewer's timezone in the render context. The httpapi layer
 // resolves it from the tz cookie and stashes it before rendering; the formatting
@@ -129,6 +141,18 @@ func SessionProjectLabel(d store.SessionDetail) string {
 		return d.ProjectName
 	}
 	return d.ProjectKey
+}
+
+// SessionPageTitle is the browser-tab title for a session view: the session's own
+// summary when it has one (the same line the page's <h1> shows), else a stable
+// "<project> session" label. Both the signed-in and the public session page use it,
+// so a shared link and the in-app tab read the same rather than one saying "Session
+// #42" and the other the project name.
+func SessionPageTitle(d store.SessionDetail) string {
+	if d.Title != "" {
+		return d.Title
+	}
+	return SessionProjectLabel(d) + " session"
 }
 
 // SessionRowProject is the project label shown beside a session in the global
