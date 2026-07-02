@@ -46,3 +46,13 @@ table.grid.projects td.num { overflow: visible; }
 /* The footnote pointing local folders at Sessions: one quiet line under the
    table, not a second heading. */
 .projects-footnote { margin-top: var(--sp-sm); }
+
+/* ---- Project details: session filters in the page header ---- */
+/* The filter toolbar rides in the header, right-aligned beside the title (margin
+   auto on its left), so it reads as scoping the whole page rather than just the
+   session table it used to sit above. The base .page-head aligns its inline bits on
+   the text baseline; the toolbar's stacked label-over-select controls are taller, so
+   center the row instead, and let the toolbar wrap beneath the title on narrow widths
+   rather than crushing the project name. */
+.project-head { align-items: center; flex-wrap: wrap; }
+.project-head .toolbar { margin: 0 0 0 auto; }
