@@ -1,0 +1,14 @@
+-- Cost-sort index for the global Sessions view's "Most expensive" order.
+--
+-- The click-to-sort feed gained a cost column (SessionFilter's "cost" key, ORDER
+-- BY s.total_cost_usd). Like the session-local columns migration 0014 indexed,
+-- this pairs the sort column with the direction-following id tiebreak so one
+-- (cost, id) btree serves both asc and desc: a forward scan satisfies
+-- "total_cost_usd ASC, id ASC" and a backward scan the descending pair, so the
+-- ordered page is an index scan that stops at the LIMIT rather than a full sort of
+-- the whole session history.
+--
+-- The IF NOT EXISTS guard keeps this replayable on a database whose schema already
+-- carries the index but whose schema_migrations does not record the version (a
+-- schema-only dump restore), matching migration 0014's posture.
+CREATE INDEX IF NOT EXISTS idx_sessions_cost_sort ON sessions(total_cost_usd, id);

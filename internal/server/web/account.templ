@@ -2,17 +2,18 @@ package web
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/jssblck/akari/internal/server/store"
 )
 
-// AccountPage is the signed-in user's settings surface: reparse status, API
-// tokens, and invites. It carries no heading: the sidebar already marks this
-// section as Account, so the content starts at the top.
-templ AccountPage(p Page, tokens []store.APIToken, grants []store.OAuthGrant, newToken, newInvite string, rp ReparseView) {
+// AccountPage is the signed-in user's settings surface: daily-use controls
+// (tokens, connected apps, publicity) lead; admin-only machinery (invites,
+// reparse) trails behind a single divider that non-admins never see. It carries
+// no heading: the sidebar already marks this section as Account, so the content
+// starts at the top.
+templ AccountPage(p Page, tokens []store.APIToken, grants []store.OAuthGrant, invites []store.Invite, newToken, newInvite string, rp ReparseView) {
 	@layout(p) {
-		@accountReparse(p, rp)
-		@accountPublicity(p)
 		if newToken != "" {
 			<div class="card reveal">
 				<strong>New token (shown once):</strong> <code>{ newToken }</code>
@@ -41,8 +42,8 @@ templ AccountPage(p Page, tokens []store.APIToken, grants []store.OAuthGrant, ne
 							<tr>
 								<td>{ t.Name }</td>
 								<td><span class="tag">{ t.Scope }</span></td>
-								<td class="muted">{ FmtTimeAt(t.CreatedAt) }</td>
-								<td class="muted">{ FmtTime(t.LastUsedAt) }</td>
+								<td class="muted">{ FmtTimeAt(ctx, t.CreatedAt) }</td>
+								<td class="muted">{ FmtTime(ctx, t.LastUsedAt) }</td>
 								<td>
 									if t.RevokedAt != nil {
 										<span class="muted">revoked</span>
@@ -60,12 +61,9 @@ templ AccountPage(p Page, tokens []store.APIToken, grants []store.OAuthGrant, ne
 		</section>
 		<section>
 			<div class="panel-head"><h2>Connected apps</h2></div>
-			<p class="muted">
-				MCP clients you have connected through the browser sign-in flow. Each has
-				read-only access as you. Disconnect one to revoke its tokens immediately.
-			</p>
+			<p class="muted small">Read-only MCP clients connected as you.</p>
 			if len(grants) == 0 {
-				<div class="empty">No connected apps. Add akari as a remote MCP server in your agent to connect one.</div>
+				<div class="empty">None connected.</div>
 			} else {
 				<table class="grid">
 					<thead>
@@ -76,8 +74,8 @@ templ AccountPage(p Page, tokens []store.APIToken, grants []store.OAuthGrant, ne
 							<tr>
 								<td>{ grantName(g.ClientName) }</td>
 								<td><span class="tag">{ g.Scope }</span></td>
-								<td class="muted">{ FmtTimeAt(g.ConnectedAt) }</td>
-								<td class="muted">{ FmtTimeAt(g.LastUsedAt) }</td>
+								<td class="muted">{ FmtTimeAt(ctx, g.ConnectedAt) }</td>
+								<td class="muted">{ FmtTimeAt(ctx, g.LastUsedAt) }</td>
 								<td>
 									<form method="post" action={ templ.SafeURL(fmt.Sprintf("/account/connections/%s/revoke", g.ClientID)) } class="inline">
 										<button class="secondary" type="submit">Disconnect</button>
@@ -89,41 +87,78 @@ templ AccountPage(p Page, tokens []store.APIToken, grants []store.OAuthGrant, ne
 				</table>
 			}
 		</section>
+		@accountPublicity(p)
 		if p.IsAdmin {
-			<section>
-				<div class="panel-head"><h2>Invites</h2></div>
-				if newInvite != "" {
-					<div class="card reveal">
-						<strong>New invite (shown once):</strong> <code>{ newInvite }</code>
-					</div>
-				}
-				<form method="post" action="/account/invites">
-					<button type="submit">Create invite</button>
-				</form>
-			</section>
+			<div class="label admin-divider">Admin</div>
+			@accountInvites(invites, newInvite)
+			@accountReparse(rp)
 		}
 	}
+}
+
+// accountInvites is the admin-only Invites section: the create control and a
+// table of every invite ever issued, so an admin can see what is outstanding
+// without keeping the one-shot secrets anywhere but their own notes.
+templ accountInvites(invites []store.Invite, newInvite string) {
+	<section>
+		<div class="panel-head"><h2>Invites</h2></div>
+		if newInvite != "" {
+			<div class="card reveal">
+				<strong>New invite (shown once):</strong> <code>{ newInvite }</code>
+			</div>
+		}
+		<form method="post" action="/account/invites">
+			<button type="submit">Create invite</button>
+		</form>
+		if len(invites) == 0 {
+			<div class="empty">No invites.</div>
+		} else {
+			<table class="grid">
+				<thead>
+					<tr><th>Note</th><th>Created</th><th>Status</th><th></th></tr>
+				</thead>
+				<tbody>
+					for _, inv := range invites {
+						<tr>
+							<td>
+								if inv.Note != "" {
+									{ inv.Note }
+								} else {
+									<span class="muted">-</span>
+								}
+							</td>
+							<td class="muted">{ FmtTimeAt(ctx, inv.CreatedAt) }</td>
+							<td>{ inviteStatus(inv) }</td>
+							<td>
+								if inviteRevocable(inv) {
+									<form method="post" action={ templ.SafeURL(fmt.Sprintf("/account/invites/%d/revoke", inv.ID)) } class="inline">
+										<button class="secondary" type="submit">Revoke</button>
+									</form>
+								}
+							</td>
+						</tr>
+					}
+				</tbody>
+			</table>
+		}
+	</section>
 }
 
 // accountPublicity is the Publicity section: the control that publishes the
 // signed-in user's own usage overview to a logged-out page at /u/<username>. It
 // makes the setting discoverable from the account surface (the badge on the
-// overview is the second entry point). Only the overview is shared, and only this
-// user's: sessions stay private and other accounts' usage never appears, since the
-// public page is the aggregate panel scoped to this account. The toggle's state
-// reads from the page's OverviewPublic flag, populated by the same lookup that
-// fills the username, so the section needs no extra query. When public, the
-// /u/<username> link is shown alongside a View link and the make-private control;
-// anyone can reach a published overview by username, so this is a public page, not
-// a secret one. Making it private hides the page but the URL is the username, so
-// publishing again brings the same link back.
+// overview is the second entry point). The toggle's state reads from the page's
+// OverviewPublic flag, populated by the same lookup that fills the username, so
+// the section needs no extra query. When public, the /u/<username> link is shown
+// alongside a View link and the make-private control; anyone can reach a
+// published overview by username, so this is a public page, not a secret one.
+// Making it private hides the page but the URL is the username, so publishing
+// again brings the same link back.
 templ accountPublicity(p Page) {
 	<section id="publicity">
 		<div class="panel-head"><h2>Publicity</h2></div>
-		<p class="muted small publicity-lede">
-			Publish your usage overview to a public page at /u/{ p.Username }: the totals, activity grid, and
-			model and agent breakdowns you see on Overview, scoped to your account. Only the overview
-			is shared. Your sessions stay private, and no one else's usage appears.
+		<p class="muted small">
+			Publishes your usage overview at /u/{ p.Username }. Sessions stay private.
 		</p>
 		if p.OverviewPublic {
 			<div class="publicity-live">
@@ -140,4 +175,29 @@ templ accountPublicity(p Page) {
 			</form>
 		}
 	</section>
+}
+
+// inviteStatus renders an invite's one-word status: who redeemed it, that it
+// expired unused, or that it is still open. Revocation only applies to the
+// still-open case (inviteRevocable), so this and that function classify the
+// same three states from the same fields.
+func inviteStatus(inv store.Invite) string {
+	switch {
+	case inv.RedeemedBy != nil:
+		return "redeemed by " + *inv.RedeemedBy
+	case inv.ExpiresAt != nil && inv.ExpiresAt.Before(time.Now()):
+		return "expired"
+	default:
+		return "unused"
+	}
+}
+
+// inviteRevocable reports whether an invite can still be revoked: unredeemed
+// and, if it carries an expiry, not yet past it. A redeemed or expired invite
+// can no longer be used, so revoking it would have no effect.
+func inviteRevocable(inv store.Invite) bool {
+	if inv.RedeemedBy != nil {
+		return false
+	}
+	return inv.ExpiresAt == nil || inv.ExpiresAt.After(time.Now())
 }

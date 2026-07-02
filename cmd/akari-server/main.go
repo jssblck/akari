@@ -9,6 +9,12 @@ import (
 	"net/http"
 	"os"
 	"time"
+	// Embed the IANA timezone database in the binary so time.LoadLocation resolves a
+	// viewer's zone (from the tz cookie) even in a scratch container or on Windows,
+	// where the system zoneinfo is absent or unreliable. The web UI localizes every
+	// stamp against it; without this, LoadLocation would fail and every zone would
+	// silently fall back to UTC.
+	_ "time/tzdata"
 
 	"github.com/jssblck/akari/internal/config"
 	"github.com/jssblck/akari/internal/server/httpapi"

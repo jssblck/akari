@@ -15,15 +15,35 @@ import (
 // seedSess inserts a session with a chosen agent and machine under a user and
 // project, bypassing ingest so the cross-project read paths can be asserted
 // against known inputs. Rows are returned newest-id last.
+//
+// It seeds message_count = 1 so the session is non-empty: the global feed hides
+// zero-message sessions by default, so a plain seeded session must read as a real
+// one. Tests that want an EMPTY session (to exercise the hide/toggle) seed one
+// directly with message_count left at its 0 default rather than through here.
 func seedSess(t *testing.T, st *store.Store, userID, projectID int64, agent, machine, src string) int64 {
 	t.Helper()
 	var id int64
 	err := st.Pool.QueryRow(context.Background(),
-		`INSERT INTO sessions (user_id, project_id, agent, source_session_id, machine)
-		 VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+		`INSERT INTO sessions (user_id, project_id, agent, source_session_id, machine, message_count)
+		 VALUES ($1,$2,$3,$4,$5,1) RETURNING id`,
 		userID, projectID, agent, src, machine).Scan(&id)
 	if err != nil {
 		t.Fatalf("seed session: %v", err)
+	}
+	return id
+}
+
+// seedEmptySess inserts a zero-message session (message_count stays 0), the kind
+// the global feed hides by default. It is the counterpart to seedSess for the
+// empty-hide and toggle assertions.
+func seedEmptySess(t *testing.T, st *store.Store, userID, projectID int64, src string) int64 {
+	t.Helper()
+	var id int64
+	if err := st.Pool.QueryRow(context.Background(),
+		`INSERT INTO sessions (user_id, project_id, agent, source_session_id, machine)
+		 VALUES ($1,$2,'claude',$3,'box') RETURNING id`,
+		userID, projectID, src).Scan(&id); err != nil {
+		t.Fatalf("seed empty session: %v", err)
 	}
 	return id
 }

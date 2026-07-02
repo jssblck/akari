@@ -14,6 +14,26 @@
 }
 .ins-summary { display: flex; align-items: baseline; gap: var(--sp-sm); }
 
+/* In-flight feedback for the range swap, matching the usage panel's rule
+   (overview.css): the range selector refetches and replaces the whole #insights
+   section, and htmx marks the clicked button .htmx-request while that request is
+   outstanding. Dim every panel below the toolbar and pulse the busy button so the
+   window change reads as "updating" instead of an unexplained freeze; the fresh
+   section that replaces #insights carries no .htmx-request, so the state clears on
+   its own. */
+#insights:has(.ins-toolbar .htmx-request) .ins-headline,
+#insights:has(.ins-toolbar .htmx-request) .ins-tools,
+#insights:has(.ins-toolbar .htmx-request) .ins-hygiene,
+#insights:has(.ins-toolbar .htmx-request) .ins-context,
+#insights:has(.ins-toolbar .htmx-request) .ins-grid,
+#insights:has(.ins-toolbar .htmx-request) .ins-churn {
+  opacity: 0.5; pointer-events: none;
+  transition: opacity var(--dur-base) var(--ease-state);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .ins-toolbar .htmx-request { animation: ctrl-busy 0.9s var(--ease-state) infinite; }
+}
+
 /* The panels sit in a responsive grid: three across on a wide screen, collapsing to
    two then one as the column narrows, so each distribution keeps a readable bar width
    rather than being squeezed. */
@@ -23,12 +43,24 @@
   border-radius: var(--r-md); padding: var(--sp-lg);
 }
 .ins-panel-head { margin-bottom: var(--sp-md); }
-.ins-caption { display: block; margin-top: 3px; line-height: 1.4; }
 
 /* The distribution bars carry their value beside the label and never truncate it (the
    labels are short, fixed buckets), unlike the breakdown bars whose model ids can run
    long. */
 .dist-bars .bar-label { max-width: none; }
+
+/* A grade or outcome row that drills into its sessions is a block link over the whole
+   row (label, count, and bar), so the click target is the row rather than the label
+   alone. The affordance is quiet by rule: a faint surface tint on hover, the same tint a
+   feed row uses, and no underline, so a panel of bars does not read as a wall of links.
+   A zero-count row renders as a plain <li> with no link, so it never tints. */
+.dist-bars .bar-link {
+  display: block; color: inherit; text-decoration: none;
+  margin: calc(var(--sp-xs) * -1) calc(var(--sp-sm) * -1);
+  padding: var(--sp-xs) var(--sp-sm); border-radius: var(--r-sm);
+}
+.dist-bars .bar-link:hover { background: var(--surface-2); text-decoration: none; }
+.dist-bars .bar-link:focus-visible { outline: none; box-shadow: var(--ring); }
 
 /* The headline holds the two measured-rate bands (concurrency and velocity) side by side
    above the distribution grid; each band lays its figures out in a wrapping row that reads
@@ -44,6 +76,13 @@
   font-family: var(--mono); font-size: 1.5rem; font-variant-numeric: tabular-nums;
   color: var(--text); letter-spacing: -0.01em; line-height: 1.2;
 }
+/* The busiest-user figure drills into that user's sessions. As an <a> it keeps the
+   figure type styling (.ins-fig-v) and adds a quiet affordance: inherited color, no
+   default underline, and a faint underline only on hover, so the figure reads as a
+   figure that happens to be clickable rather than a link in link colour. */
+.ins-fig-link { display: inline-block; color: inherit; text-decoration: none; }
+.ins-fig-link:hover { text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--border-strong); }
+.ins-fig-link:focus-visible { outline: none; box-shadow: var(--ring); border-radius: var(--r-sm); }
 .ins-fig-k { color: var(--muted); font-size: 0.8125rem; margin-top: 2px; }
 .ins-fig-sub { margin-top: 1px; }
 

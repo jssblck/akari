@@ -223,3 +223,51 @@ func (s *Store) CreateInvite(ctx context.Context, tokenHash string, createdBy in
 		tokenHash, createdBy, note, expiresAt).Scan(&id)
 	return id, err
 }
+
+// Invite is an issued invite token as shown on the account page: enough to
+// judge its status (unused, expired, or redeemed by whom) without exposing the
+// token itself, which is never stored beyond its hash.
+type Invite struct {
+	ID         int64
+	Note       string
+	CreatedBy  string
+	CreatedAt  time.Time
+	ExpiresAt  *time.Time
+	RedeemedBy *string
+	RedeemedAt *time.Time
+}
+
+// ListInvites returns every invite token ever issued, newest first, joined to
+// the creator's and (if redeemed) the redeemer's username so the account page
+// can render status without a second lookup per row.
+func (s *Store) ListInvites(ctx context.Context) ([]Invite, error) {
+	rows, err := s.Pool.Query(ctx,
+		`SELECT i.id, i.note, creator.username, i.created_at, i.expires_at,
+		        redeemer.username, i.redeemed_at
+		   FROM invite_tokens i
+		   JOIN users creator ON creator.id = i.created_by
+		   LEFT JOIN users redeemer ON redeemer.id = i.redeemed_by
+		  ORDER BY i.created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Invite
+	for rows.Next() {
+		var inv Invite
+		if err := rows.Scan(&inv.ID, &inv.Note, &inv.CreatedBy, &inv.CreatedAt, &inv.ExpiresAt,
+			&inv.RedeemedBy, &inv.RedeemedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, inv)
+	}
+	return out, rows.Err()
+}
+
+// RevokeInvite deletes an invite token by id. It is a no-op (not an error) if
+// the id does not exist, matching RevokeAPIToken's idempotent shape; the caller
+// (an admin-only form handler) redirects either way.
+func (s *Store) RevokeInvite(ctx context.Context, id int64) error {
+	_, err := s.Pool.Exec(ctx, "DELETE FROM invite_tokens WHERE id = $1", id)
+	return err
+}

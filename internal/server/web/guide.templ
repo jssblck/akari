@@ -14,6 +14,7 @@ templ GuidePage(v GuideView) {
 			<meta charset="utf-8"/>
 			<meta name="viewport" content="width=device-width, initial-scale=1"/>
 			<title>{ v.Title } - akari</title>
+			@tzCookieScript()
 			<meta name="description" content={ v.Summary }/>
 			// Point agents and crawlers at the machine-readable mirrors: this page as
 			// raw Markdown, and the guide-wide discovery index.

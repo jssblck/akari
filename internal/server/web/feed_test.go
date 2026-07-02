@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -8,7 +9,8 @@ import (
 )
 
 // dayBucket labels a session's last activity relative to a fixed clock and shares
-// a key across same-day rows so the feed groups them together.
+// a key across same-day rows so the feed groups them together. The calendar date is
+// the viewer's, so the same instant can land in a different bucket by zone.
 func TestDayBucket(t *testing.T) {
 	now := time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC)
 	at := func(d time.Duration) *time.Time { tt := now.Add(d); return &tt }
@@ -25,16 +27,38 @@ func TestDayBucket(t *testing.T) {
 		{"missing timestamp is undated", nil, "Undated"},
 	}
 	for _, c := range cases {
-		if _, label := dayBucket(now, c.t); label != c.wantLabel {
+		if _, label := dayBucket(now, time.UTC, c.t); label != c.wantLabel {
 			t.Errorf("%s: label = %q, want %q", c.name, label, c.wantLabel)
 		}
 	}
 
 	// Two same-day rows share a grouping key.
-	k1, _ := dayBucket(now, at(-1*time.Hour))
-	k2, _ := dayBucket(now, at(-5*time.Hour))
+	k1, _ := dayBucket(now, time.UTC, at(-1*time.Hour))
+	k2, _ := dayBucket(now, time.UTC, at(-5*time.Hour))
 	if k1 != k2 {
 		t.Errorf("same-day rows should share a key, got %q and %q", k1, k2)
+	}
+
+	// The bucket follows the viewer's calendar date. At 2026-06-29 07:30 UTC a stamp
+	// from 2026-06-29 05:00 UTC is "Today" in UTC, but a viewer in US Pacific (PDT,
+	// eight hours behind) reads it as 2026-06-28 22:00 local, the previous day, so it
+	// buckets under "Yesterday" with a distinct grouping key.
+	pacific, err := time.LoadLocation("America/Los_Angeles")
+	if err != nil {
+		t.Skipf("America/Los_Angeles unavailable: %v", err)
+	}
+	nowUTC := time.Date(2026, 6, 29, 7, 30, 0, 0, time.UTC)
+	stamp := time.Date(2026, 6, 29, 5, 0, 0, 0, time.UTC)
+	utcKey, utcLabel := dayBucket(nowUTC, time.UTC, &stamp)
+	laKey, laLabel := dayBucket(nowUTC, pacific, &stamp)
+	if utcLabel != "Today" {
+		t.Errorf("UTC label = %q, want Today", utcLabel)
+	}
+	if laLabel != "Yesterday" {
+		t.Errorf("Pacific label = %q, want Yesterday", laLabel)
+	}
+	if utcKey == laKey {
+		t.Errorf("zones disagreeing on the calendar date should yield distinct keys, both = %q", utcKey)
 	}
 }
 
@@ -51,7 +75,7 @@ func TestBuildSessionFeed(t *testing.T) {
 		{SessionSummary: store.SessionSummary{ID: 3, Agent: "claude", TotalInput: 0, UpdatedAt: &yesterday}, ProjectID: 2, ProjectKey: "site", ProjectName: "site", ProjectKind: "remote"},
 	}
 
-	groups := buildSessionFeed(now, rows, true)
+	groups := buildSessionFeed(now, time.UTC, rows, true)
 	if len(groups) != 2 {
 		t.Fatalf("want 2 day groups, got %d", len(groups))
 	}
@@ -77,19 +101,27 @@ func TestBuildSessionFeed(t *testing.T) {
 	}
 
 	// Ungrouped (any non-recent sort) yields a single, unlabeled group in order.
-	flat := buildSessionFeed(now, rows, false)
+	flat := buildSessionFeed(now, time.UTC, rows, false)
 	if len(flat) != 1 || flat[0].Label != "" || len(flat[0].Rows) != 3 {
 		t.Errorf("ungrouped feed should be one unlabeled group of all rows, got %d groups", len(flat))
 	}
 }
 
-// FeedTime renders the clock time of day, with a placeholder for a missing stamp.
+// FeedTime renders the clock time of day in the viewer's zone, with a placeholder
+// for a missing stamp.
 func TestFeedTime(t *testing.T) {
 	tt := time.Date(2026, 6, 29, 14, 22, 0, 0, time.UTC)
-	if got := FeedTime(&tt); got != "14:22" {
+	if got := FeedTime(context.Background(), &tt); got != "14:22" {
 		t.Errorf("FeedTime = %q, want 14:22", got)
 	}
-	if got := FeedTime(nil); got != "--:--" {
+	if got := FeedTime(context.Background(), nil); got != "--:--" {
 		t.Errorf("FeedTime(nil) = %q, want --:--", got)
+	}
+	pacific, err := time.LoadLocation("America/Los_Angeles")
+	if err != nil {
+		t.Skipf("America/Los_Angeles unavailable: %v", err)
+	}
+	if got := FeedTime(WithLoc(context.Background(), pacific), &tt); got != "07:22" {
+		t.Errorf("FeedTime Pacific = %q, want 07:22", got)
 	}
 }

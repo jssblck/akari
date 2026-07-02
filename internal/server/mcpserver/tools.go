@@ -122,6 +122,10 @@ func registerTools(s *mcp.Server, st *store.Store) {
 		rows, next, err := st.SessionFeed(ctx, store.SessionFilter{
 			ProjectID: in.ProjectID, Agent: in.Agent, Machine: in.Machine, Username: in.Username,
 			Since: sinceFromDays(in.Days),
+			// The MCP feed lists every session an agent might inspect, including ones
+			// whose parse produced no readable message (still reachable by id); the
+			// empty-hiding is a global-web-feed affordance, not this API's contract.
+			IncludeEmpty: true,
 		}, in.Limit, cursor)
 		if err != nil {
 			return nil, sessionsDTO{}, err

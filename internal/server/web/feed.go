@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"time"
@@ -44,13 +45,14 @@ type SessionDayGroup struct {
 // whose project repeats the previous row's is flagged to mute its label. Token
 // bars scale against the largest session across the whole feed, so magnitudes are
 // comparable between groups.
-func BuildSessionFeed(rows []store.SessionRow, grouped bool) []SessionDayGroup {
-	return buildSessionFeed(time.Now(), rows, grouped)
+func BuildSessionFeed(ctx context.Context, rows []store.SessionRow, grouped bool) []SessionDayGroup {
+	return buildSessionFeed(time.Now(), Loc(ctx), rows, grouped)
 }
 
-// buildSessionFeed is BuildSessionFeed's clock-injected core, so the day headings
-// are testable without mocking the wall clock.
-func buildSessionFeed(now time.Time, rows []store.SessionRow, grouped bool) []SessionDayGroup {
+// buildSessionFeed is BuildSessionFeed's clock- and zone-injected core, so the day
+// headings are testable without mocking the wall clock, and a session buckets under
+// the viewer's local calendar date rather than UTC's.
+func buildSessionFeed(now time.Time, loc *time.Location, rows []store.SessionRow, grouped bool) []SessionDayGroup {
 	if len(rows) == 0 {
 		return nil
 	}
@@ -69,7 +71,7 @@ func buildSessionFeed(now time.Time, rows []store.SessionRow, grouped bool) []Se
 		fr := FeedRow{Row: r, TokenPct: tokenPct(RowTokens(r.SessionSummary), maxTok)}
 
 		if grouped {
-			key, label := dayBucket(now, r.UpdatedAt)
+			key, label := dayBucket(now, loc, r.UpdatedAt)
 			if !started || key != curKey {
 				groups = append(groups, SessionDayGroup{Label: label})
 				curKey = key
@@ -113,16 +115,17 @@ func tokenPct(tok, max int64) int {
 }
 
 // dayBucket returns a stable grouping key and a display label for a session's last
-// activity. The key is the UTC calendar date (so same-day rows share a group); the
-// label reads relative for the recent past and falls back to a date. A missing
+// activity. The key is the calendar date in the viewer's zone (so rows that share a
+// local day share a group, and a run does not split across the reader's midnight);
+// the label reads relative for the recent past and falls back to a date. A missing
 // timestamp lands in a single "Undated" group at the foot.
-func dayBucket(now time.Time, t *time.Time) (key, label string) {
+func dayBucket(now time.Time, loc *time.Location, t *time.Time) (key, label string) {
 	if t == nil || t.IsZero() {
 		return "", "Undated"
 	}
-	nu, tu := now.UTC(), t.UTC()
-	nd := time.Date(nu.Year(), nu.Month(), nu.Day(), 0, 0, 0, 0, time.UTC)
-	td := time.Date(tu.Year(), tu.Month(), tu.Day(), 0, 0, 0, 0, time.UTC)
+	nu, tu := now.In(loc), t.In(loc)
+	nd := time.Date(nu.Year(), nu.Month(), nu.Day(), 0, 0, 0, 0, loc)
+	td := time.Date(tu.Year(), tu.Month(), tu.Day(), 0, 0, 0, 0, loc)
 	key = td.Format("2006-01-02")
 	days := int(nd.Sub(td).Hours() / 24)
 	switch {
@@ -156,6 +159,7 @@ func SessionSortOptions() []SessionSortOption {
 		{Key: "updated", Label: "Recent"},
 		{Key: "tokens", Label: "Most tokens"},
 		{Key: "messages", Label: "Most messages"},
+		{Key: "cost", Label: "Most expensive"},
 	}
 }
 
@@ -186,12 +190,112 @@ func barStyle(pct int) string {
 	return fmt.Sprintf("width:%d%%", pct)
 }
 
-// FeedTime is the clock time a feed row shows. The day already rides the group
-// heading, so the row needs only the time of day; the exact stamp is the cell's
-// title on hover.
-func FeedTime(t *time.Time) string {
+// FeedTime is the clock time a feed row shows, in the viewer's timezone. The day
+// already rides the group heading, so the row needs only the time of day; the exact
+// stamp is the cell's title on hover.
+func FeedTime(ctx context.Context, t *time.Time) string {
 	if t == nil || t.IsZero() {
 		return "--:--"
 	}
-	return t.UTC().Format("15:04")
+	return t.In(Loc(ctx)).Format("15:04")
+}
+
+// SnippetParts splits a search snippet into its before/match/after text runs so the
+// template can render each as an auto-escaped text node and wrap only the middle in
+// <mark>. The <mark> element is thus template structure around plain text: the
+// matched content is never interpolated as markup, so a query or a message that
+// contains "<script>" renders as escaped text inside the highlight rather than
+// injecting an element. Offsets out of range (a malformed snippet) collapse to the
+// whole text as the "before" run with an empty match, so a bad window degrades to
+// plain unhighlighted text rather than a panic.
+type SnippetParts struct {
+	Before string
+	Match  string
+	After  string
+}
+
+// SnippetParts computes the three runs from a store snippet's byte offsets.
+func SplitSnippet(s store.SearchSnippet) SnippetParts {
+	t := s.Text
+	if s.MatchStart < 0 || s.MatchEnd > len(t) || s.MatchStart > s.MatchEnd {
+		return SnippetParts{Before: t}
+	}
+	return SnippetParts{
+		Before: t[:s.MatchStart],
+		Match:  t[s.MatchStart:s.MatchEnd],
+		After:  t[s.MatchEnd:],
+	}
+}
+
+// SessionFooter is the state the feed's footer renders under the list: the "N of M"
+// count, whether a "Show more" button applies, and the empty-hidden toggle. It is
+// computed once from the loaded rows and the count query so the template stays a
+// dumb renderer and the two never disagree about what the numbers mean.
+type SessionFooter struct {
+	// Shown is how many rows the feed currently renders; Total is how many match the
+	// filter across the whole corpus (from CountAllSessions).
+	Shown int
+	Total int
+	// MoreHref is the "Show more" target (a doubled-limit path), set only when more
+	// rows match than are shown and the page is below the cap.
+	MoreHref string
+	// AtCap reports the feed is showing the maximum page (500) yet more match, so the
+	// footer names the cap and drops the button, asking the reader to narrow instead.
+	AtCap bool
+	// EmptyHidden is how many empty (zero-message) sessions the current scope holds;
+	// IncludeEmpty reports whether they are being shown. Together they drive the
+	// terse empty toggle: "K empty hidden · show" when hidden, "showing empty · hide"
+	// when shown. The toggle is omitted when no empty session exists in scope.
+	EmptyHidden  int
+	IncludeEmpty bool
+	EmptyHref    string
+}
+
+// BuildSessionFooter assembles the footer state from the loaded rows, the filter,
+// and the count query's total and empty-in-scope figures. shown is len(rows); the
+// "Show more" button appears only when shown < total and the page is below the cap,
+// and the empty toggle appears only when the scope actually holds an empty session.
+func BuildSessionFooter(f store.SessionFilter, shown, total, emptyHidden int) SessionFooter {
+	ft := SessionFooter{
+		Shown:        shown,
+		Total:        total,
+		EmptyHidden:  emptyHidden,
+		IncludeEmpty: f.IncludeEmpty,
+	}
+	limit := effLimit(f)
+	switch {
+	case shown < total && limit >= MaxSessionLimit:
+		// At the cap with more matching: name the cap, no button, narrow instead.
+		ft.AtCap = true
+	case shown < total:
+		ft.MoreHref = ShowMorePath(f)
+	}
+	// The empty toggle is relevant only when hiding actually withholds something (or
+	// when already showing empties, so the reader can hide them again). When empties
+	// are shown, emptyHidden counts how many empty rows are in the shown set; when
+	// hidden, it counts how many are being withheld. Either way a nonzero value means
+	// the toggle would change the feed.
+	if emptyHidden > 0 {
+		ft.EmptyHref = string(EmptyToggleHref(f))
+	}
+	return ft
+}
+
+// HasEmptyToggle reports whether the footer shows the empty-hidden toggle.
+func (ft SessionFooter) HasEmptyToggle() bool { return ft.EmptyHref != "" }
+
+// CountLabel is the footer's "N of M" figure, tabular and terse.
+func (ft SessionFooter) CountLabel() string {
+	return fmt.Sprintf("%d of %d", ft.Shown, ft.Total)
+}
+
+// EmptyToggleLabel is the terse toggle copy: the count of hidden empties and a
+// "show" verb when they are hidden, or "showing empty" and a "hide" verb when they
+// are shown. It returns the two parts (the count/state text and the verb) so the
+// template can style the verb as the link affordance.
+func (ft SessionFooter) EmptyToggleLabel() (text, verb string) {
+	if ft.IncludeEmpty {
+		return "showing empty", "hide"
+	}
+	return fmt.Sprintf("%d empty hidden", ft.EmptyHidden), "show"
 }

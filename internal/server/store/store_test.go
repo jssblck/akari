@@ -50,6 +50,140 @@ func TestRegisterFirstAdminThenInvite(t *testing.T) {
 	}
 }
 
+// TestListInvites covers the three statuses the account page renders: unused,
+// redeemed (joined to the redeemer's username), and expired. It seeds one of
+// each and checks ListInvites reports all three, newest first.
+func TestListInvites(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	admin, err := st.Register(ctx, "grace", "hash1", "")
+	if err != nil {
+		t.Fatalf("register admin: %v", err)
+	}
+
+	// Unused invite.
+	unusedHash := hashHex("unused-invite")
+	unusedID, err := st.CreateInvite(ctx, unusedHash, admin.ID, "for ada", nil)
+	if err != nil {
+		t.Fatalf("create unused invite: %v", err)
+	}
+
+	// Redeemed invite: create, then register a second user against it.
+	redeemedHash := hashHex("redeemed-invite")
+	if _, err := st.CreateInvite(ctx, redeemedHash, admin.ID, "for anna", nil); err != nil {
+		t.Fatalf("create redeemed invite: %v", err)
+	}
+	if _, err := st.Register(ctx, "anna", "hash2", redeemedHash); err != nil {
+		t.Fatalf("register anna: %v", err)
+	}
+
+	// Expired invite: expires_at in the past, never redeemed.
+	expiredHash := hashHex("expired-invite")
+	past := time.Now().Add(-time.Hour)
+	expiredID, err := st.CreateInvite(ctx, expiredHash, admin.ID, "", &past)
+	if err != nil {
+		t.Fatalf("create expired invite: %v", err)
+	}
+
+	invites, err := st.ListInvites(ctx)
+	if err != nil {
+		t.Fatalf("list invites: %v", err)
+	}
+	if len(invites) != 3 {
+		t.Fatalf("list invites: got %d, want 3", len(invites))
+	}
+
+	byID := make(map[int64]store.Invite, len(invites))
+	for _, inv := range invites {
+		byID[inv.ID] = inv
+	}
+
+	unused, ok := byID[unusedID]
+	if !ok {
+		t.Fatal("unused invite missing from list")
+	}
+	if unused.Note != "for ada" || unused.CreatedBy != "grace" {
+		t.Fatalf("unused invite = %+v, want note %q created by grace", unused, "for ada")
+	}
+	if unused.RedeemedBy != nil || unused.ExpiresAt != nil {
+		t.Fatalf("unused invite should carry no redemption or expiry, got %+v", unused)
+	}
+
+	var redeemed store.Invite
+	found := false
+	for _, inv := range invites {
+		if inv.RedeemedBy != nil {
+			redeemed = inv
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("redeemed invite missing from list")
+	}
+	if redeemed.RedeemedBy == nil || *redeemed.RedeemedBy != "anna" {
+		t.Fatalf("redeemed invite RedeemedBy = %v, want anna", redeemed.RedeemedBy)
+	}
+	if redeemed.RedeemedAt == nil {
+		t.Fatal("redeemed invite should carry a redeemed_at")
+	}
+
+	expired, ok := byID[expiredID]
+	if !ok {
+		t.Fatal("expired invite missing from list")
+	}
+	if expired.ExpiresAt == nil || !expired.ExpiresAt.Before(time.Now()) {
+		t.Fatalf("expired invite ExpiresAt = %v, want a past time", expired.ExpiresAt)
+	}
+	if expired.RedeemedBy != nil {
+		t.Fatalf("expired invite should be unredeemed, got %+v", expired)
+	}
+}
+
+// TestRevokeInvite checks that revoking removes the invite from ListInvites and
+// that the token can no longer be redeemed, and that revoking an id that does
+// not exist is a harmless no-op.
+func TestRevokeInvite(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	admin, err := st.Register(ctx, "grace", "hash1", "")
+	if err != nil {
+		t.Fatalf("register admin: %v", err)
+	}
+
+	tokenHash := hashHex("revoke-me")
+	id, err := st.CreateInvite(ctx, tokenHash, admin.ID, "", nil)
+	if err != nil {
+		t.Fatalf("create invite: %v", err)
+	}
+
+	if err := st.RevokeInvite(ctx, id); err != nil {
+		t.Fatalf("revoke invite: %v", err)
+	}
+
+	invites, err := st.ListInvites(ctx)
+	if err != nil {
+		t.Fatalf("list invites: %v", err)
+	}
+	for _, inv := range invites {
+		if inv.ID == id {
+			t.Fatalf("revoked invite %d still listed", id)
+		}
+	}
+
+	if _, err := st.Register(ctx, "ada", "hash2", tokenHash); !errors.Is(err, store.ErrInvalidInvite) {
+		t.Fatalf("register with revoked invite: want ErrInvalidInvite, got %v", err)
+	}
+
+	// Revoking an unknown id is a no-op, not an error.
+	if err := st.RevokeInvite(ctx, 999999); err != nil {
+		t.Fatalf("revoke unknown invite: %v", err)
+	}
+}
+
 func TestTokenAuth(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
