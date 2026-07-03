@@ -361,7 +361,9 @@
     if (s < 3600) return (s / 60).toFixed(0) + 'm';
     return (s / 3600).toFixed(1) + 'h';
   }
-  function fmtCost(v) { return '$' + (v < 1 ? v.toFixed(2) : v.toFixed(2)); }
+  // A trailing '+' marks a lower-bound cost, matching the server's FmtCost: the figure folded a
+  // token-bearing usage event the pricing table could not price, so the true cost is higher.
+  function fmtCost(v, incomplete) { return '$' + v.toFixed(2) + (incomplete ? '+' : ''); }
 
   function chartGallery() {
     const D = window.AK_DATA;
@@ -406,7 +408,7 @@
       dot.addEventListener('mousemove', (e) => {
         const html = '<div class="tt-title">' + ARCH_LABEL[p.arch] + '</div>' +
           '<div class="tt-row">duration <b>' + fmtDuration(p.durationS) + '</b></div>' +
-          '<div class="tt-row">cost <b>' + fmtCost(p.costUsd) + '</b></div>' +
+          '<div class="tt-row">cost <b>' + fmtCost(p.costUsd, p.costIncomplete) + '</b></div>' +
           '<div class="tt-row">grade <b>' + p.grade + '</b></div>' +
           '<div class="tt-row">outcome <b>' + p.outcome + '</b></div>';
         A.showTooltip(e.clientX, e.clientY, html);
@@ -444,8 +446,8 @@
     const G = D.sessionGallery;
     const figs = [
       { v: fmtDuration(G.medianDurationS), k: 'median duration' },
-      { v: fmtCost(G.medianCostUsd), k: 'median cost' },
-      { v: fmtCost(G.priciest.costUsd), k: 'priciest session · ' + fmtDuration(G.priciest.durationS) },
+      { v: fmtCost(G.medianCostUsd, G.costIncomplete), k: 'median cost' },
+      { v: fmtCost(G.priciest.costUsd, G.costIncomplete), k: 'priciest session · ' + fmtDuration(G.priciest.durationS) },
     ];
     figs.forEach((f) => {
       const d = document.createElement('div');
@@ -1779,10 +1781,14 @@
     if (!el) return;
     el.innerHTML = '';
     const CQ = D.costQuality;
+    // A trailing '+' marks a lower-bound spend, when the window folded a token-bearing unpriced
+    // event; the flag is window-wide, so it rides both the total and the abandoned figure. The
+    // per-completed median rides the gallery cohort's own flag.
+    const spendMark = CQ.totalSpendIncomplete ? '+' : '';
     const figs = [
-      { v: '$' + A.fmtInt(CQ.totalSpend), k: 'total spend' },
-      { v: '$' + A.fmtInt(CQ.totalAbandoned) + ' sunk', k: CQ.abandonedSharePct.toFixed(0) + '% of spend' },
-      { v: '$' + CQ.medianPerCompletedSession.toFixed(2), k: 'median $ per completed session' },
+      { v: '$' + A.fmtInt(CQ.totalSpend) + spendMark, k: 'total spend' },
+      { v: '$' + A.fmtInt(CQ.totalAbandoned) + spendMark + ' sunk', k: CQ.abandonedSharePct.toFixed(0) + '% of spend' },
+      { v: '$' + CQ.medianPerCompletedSession.toFixed(2) + (CQ.medianCostIncomplete ? '+' : ''), k: 'median $ per completed session' },
     ];
     figs.forEach((f) => {
       const d = document.createElement('div');
@@ -1850,10 +1856,15 @@
     if (!el) return;
     el.innerHTML = '';
     const savingsPerDollar = D.cache.totalSavings / D.costQuality.totalSpend;
+    // Savings reads "partial", not the "+" lower-bound marker, because the omitted term for an
+    // unpriced model can be either sign. The per-dollar figure is partial when either its saving
+    // or the spend it divides by is incomplete.
+    const savingsMark = D.cache.savingsIncomplete ? ' partial' : '';
+    const perDollarMark = (D.cache.savingsIncomplete || D.costQuality.totalSpendIncomplete) ? ' partial' : '';
     const figs = [
-      { v: '$' + A.fmtInt(D.cache.totalSavings), k: 'savings total' },
+      { v: '$' + A.fmtInt(D.cache.totalSavings) + savingsMark, k: 'savings total' },
       { v: D.cache.hitRateNow.toFixed(0) + '%', k: 'hit rate' },
-      { v: '$' + savingsPerDollar.toFixed(2), k: 'savings per $1 spent' },
+      { v: '$' + savingsPerDollar.toFixed(2) + perDollarMark, k: 'savings per $1 spent' },
     ];
     figs.forEach((f) => {
       const d = document.createElement('div');
@@ -1946,10 +1957,12 @@
     if (!el) return;
     el.innerHTML = '';
     const S = D.subagents;
+    // The cost share is a ratio of two lower-bound sums when a token-bearing event went unpriced,
+    // so it reads "partial" (the ratio can move either way), not a "+" lower bound.
     const figs = [
       { v: S.sessionsThatDelegatePct + '%', k: 'sessions that delegate' },
       { v: A.fmtInt(S.subagentSessionsInWindow), k: 'subagent sessions in window' },
-      { v: S.costRunThroughSubagentsPct + '%', k: 'cost run through subagents' },
+      { v: S.costRunThroughSubagentsPct + '%' + (S.costShareIncomplete ? ' partial' : ''), k: 'cost run through subagents' },
       { v: S.deepestTree, k: 'deepest tree (levels)' },
     ];
     figs.forEach((f) => {

@@ -116,6 +116,14 @@ type Economics struct {
 	AbandonedSharePct  float64
 	TotalCacheSavings  float64
 	CacheHitRateLatest float64 // the latest measured bucket's hit rate (a real 0% included), 0 when no bucket was measured
+
+	// CostIncomplete is true when the window folded in a token-bearing usage event with no
+	// price, so every spend figure here is a lower bound, the same flag Analytics carries.
+	CostIncomplete bool
+	// CacheSavingsIncomplete is true when cached read or write volume rode a model the pricing
+	// table cannot price, so the savings total omits it. The omitted term can be either sign, so
+	// this is "partial", not a lower bound, matching CacheStats.SavingsIncomplete.
+	CacheSavingsIncomplete bool
 }
 
 // gradeOrderTrend fixes the stacked-band order for the per-bucket grade shares, unscored
@@ -647,7 +655,8 @@ func (s *Store) economicsFrom(ctx context.Context, q querier, f AnalyticsFilter,
 		        coalesce(sum(ue.cost_usd), 0),
 		        coalesce(sum(ue.cache_read_tokens), 0),
 		        coalesce(sum(ue.input_tokens), 0),
-		        coalesce(sum(ue.cache_write_tokens), 0)
+		        coalesce(sum(ue.cache_write_tokens), 0),
+		        coalesce(`+costIncompleteExpr+`, false)
 		   FROM usage_events ue
 		   JOIN sessions s ON s.id = ue.session_id
 		   LEFT JOIN session_signals sig
@@ -661,10 +670,14 @@ func (s *Store) economicsFrom(ctx context.Context, q querier, f AnalyticsFilter,
 		var b time.Time
 		var comp, aband, total float64
 		var cacheRead, input, cacheWrite int64
-		if err := rows.Scan(&b, &comp, &aband, &total, &cacheRead, &input, &cacheWrite); err != nil {
+		var incomplete bool
+		if err := rows.Scan(&b, &comp, &aband, &total, &cacheRead, &input, &cacheWrite, &incomplete); err != nil {
 			rows.Close()
 			return Economics{}, fmt.Errorf("scan cost of quality trend: %w", err)
 		}
+		// A window is incomplete if any bucket carried a token-bearing unpriced event, even one
+		// the grid drops, so the flag folds before the index guard.
+		out.CostIncomplete = out.CostIncomplete || incomplete
 		i := g.index(b)
 		if i < 0 {
 			continue
@@ -746,11 +759,19 @@ func (s *Store) cacheSavingsTrend(ctx context.Context, q querier, f AnalyticsFil
 		if err := rows.Scan(&day, &model, &cacheRead, &cacheWrite); err != nil {
 			return fmt.Errorf("scan cache savings trend: %w", err)
 		}
+		// Cached volume on a model the pricing table cannot price omits its saving and marks the
+		// total partial, the same fold CacheStats does, so the insights savings figure carries the
+		// same caveat as the overview cache tile. The check precedes the index guard so an event
+		// the grid drops still flags the window.
+		saved, ok := pricing.CacheSavings(model, day, cacheRead, cacheWrite)
+		if !ok && (cacheRead > 0 || cacheWrite > 0) {
+			out.CacheSavingsIncomplete = true
+		}
 		i := g.index(day)
 		if i < 0 {
 			continue
 		}
-		if saved, ok := pricing.CacheSavings(model, day, cacheRead, cacheWrite); ok {
+		if ok {
 			out.CacheSavings[i] += saved
 		}
 	}

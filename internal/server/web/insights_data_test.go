@@ -27,6 +27,7 @@ type akData struct {
 		Points          []map[string]any  `json:"points"`
 		ArchColor       map[string]string `json:"archColor"`
 		MedianDurationS float64           `json:"medianDurationS"`
+		CostIncomplete  bool              `json:"costIncomplete"`
 		Priciest        struct {
 			CostUsd float64 `json:"costUsd"`
 		} `json:"priciest"`
@@ -88,18 +89,21 @@ type akData struct {
 
 	CostQuality struct {
 		TotalSpend                float64 `json:"totalSpend"`
+		TotalSpendIncomplete      bool    `json:"totalSpendIncomplete"`
 		MedianPerCompletedSession float64 `json:"medianPerCompletedSession"`
 	} `json:"costQuality"`
 
 	Cache struct {
-		TotalSavings float64 `json:"totalSavings"`
-		HitRateNow   float64 `json:"hitRateNow"`
+		TotalSavings      float64 `json:"totalSavings"`
+		SavingsIncomplete bool    `json:"savingsIncomplete"`
+		HitRateNow        float64 `json:"hitRateNow"`
 	} `json:"cache"`
 
 	Subagents struct {
-		DeepestTree                int `json:"deepestTree"`
-		SessionsThatDelegatePct    int `json:"sessionsThatDelegatePct"`
-		CostRunThroughSubagentsPct int `json:"costRunThroughSubagentsPct"`
+		DeepestTree                int  `json:"deepestTree"`
+		SessionsThatDelegatePct    int  `json:"sessionsThatDelegatePct"`
+		CostRunThroughSubagentsPct int  `json:"costRunThroughSubagentsPct"`
+		CostShareIncomplete        bool `json:"costShareIncomplete"`
 	} `json:"subagents"`
 
 	Punchcard [][]struct {
@@ -250,6 +254,20 @@ func TestInsightsDataMapping(t *testing.T) {
 	}
 	if d.Cache.TotalSavings != 110 || d.Cache.HitRateNow != 74 {
 		t.Errorf("cache = %+v, want 110 saved / 74%% now", d.Cache)
+	}
+	// The incompleteness flags map through so the client can mark cost figures as lower-bound
+	// ("+") and savings/share figures as partial, matching the canonical cost and cache surfaces.
+	if !d.CostQuality.TotalSpendIncomplete {
+		t.Error("costQuality.totalSpendIncomplete = false, want true (Economics.CostIncomplete set)")
+	}
+	if !d.SessionGallery.CostIncomplete {
+		t.Error("sessionGallery.costIncomplete = false, want true (Gallery.CostIncomplete set)")
+	}
+	if !d.Cache.SavingsIncomplete {
+		t.Error("cache.savingsIncomplete = false, want true (Economics.CacheSavingsIncomplete set)")
+	}
+	if !d.Subagents.CostShareIncomplete {
+		t.Error("subagents.costShareIncomplete = false, want true (SubagentStats.CostShareIncomplete set)")
 	}
 
 	// Subagents: the tree depth and the two whole-number percentages the JS concatenates a

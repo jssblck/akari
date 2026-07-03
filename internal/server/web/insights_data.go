@@ -215,14 +215,19 @@ func prettyModel(m string) string {
 func galleryData(g store.Gallery) map[string]any {
 	points := make([]map[string]any, 0, len(g.Rows))
 	for _, r := range g.Rows {
-		points = append(points, map[string]any{
+		pt := map[string]any{
 			"durationS": r.DurationS, "costUsd": r.CostUSD, "arch": r.Archetype,
 			"grade": r.Grade, "outcome": r.Outcome,
-		})
+		}
+		if r.CostIncomplete {
+			pt["costIncomplete"] = true
+		}
+		points = append(points, pt)
 	}
 	// The scatter plots the capped Rows sample, but the medians and the priciest callout read
 	// from the full-cohort summaries so they do not silently describe only the recent sample.
-	// total and shown let the panel note when the scatter is a sample of a larger cohort.
+	// total and shown let the panel note when the scatter is a sample of a larger cohort. The
+	// cost summaries carry a lower-bound flag when any session in the cohort had an unpriced event.
 	out := map[string]any{
 		"points":          points,
 		"archColor":       archetypeColor,
@@ -230,6 +235,7 @@ func galleryData(g store.Gallery) map[string]any {
 		"shown":           len(g.Rows),
 		"medianDurationS": g.MedianDurationS,
 		"medianCostUsd":   g.MedianCostUSD,
+		"costIncomplete":  g.CostIncomplete,
 		"priciest":        map[string]any{"durationS": g.PriciestDurationS, "costUsd": g.PriciestCostUSD},
 	}
 	// A couple of callouts, only when the cohort is big enough that a labelled outlier is not
@@ -436,9 +442,11 @@ func costQualityData(e store.Economics, g store.Gallery) map[string]any {
 		"totalSpend":        e.TotalSpend,
 		"totalAbandoned":    e.TotalAbandoned,
 		"abandonedSharePct": e.AbandonedSharePct,
-		// The median completed session's cost over the full window cohort (not the capped gallery
-		// sample), so the figure is a real per-session dollar amount that describes every
-		// completed session in the window.
+		// A lower-bound marker when the window folded a token-bearing unpriced event, so the spend
+		// headline flags "+" the way every canonical cost figure does. The per-completed median
+		// rides the gallery cohort's flag (it is a gallery-cohort figure).
+		"totalSpendIncomplete":      e.CostIncomplete,
+		"medianCostIncomplete":      g.CostIncomplete,
 		"medianPerCompletedSession": g.MedianCompletedCostUSD,
 	}
 }
@@ -452,7 +460,10 @@ func cacheData(e store.Economics) map[string]any {
 		// reads the latest measured bucket, matching hitRateNow.
 		"hitRateMeasured": e.CacheMeasured,
 		"totalSavings":    e.TotalCacheSavings,
-		"hitRateNow":      e.CacheHitRateLatest,
+		// Partial (not a lower bound) when cached volume rode an unpriced model: the omitted term
+		// can be either sign, matching the overview cache tile's "partial" marker.
+		"savingsIncomplete": e.CacheSavingsIncomplete,
+		"hitRateNow":        e.CacheHitRateLatest,
 	}
 }
 
@@ -492,7 +503,10 @@ func subagentsData(s store.SubagentStats) map[string]any {
 		"sessionsThatDelegatePct":    int(math.Round(s.SessionsThatDelegatePct)),
 		"subagentSessionsInWindow":   s.SubagentSessionsInWindow,
 		"costRunThroughSubagentsPct": int(math.Round(s.CostThroughSubagentsPct)),
-		"deepestTree":                s.DeepestTree,
+		// Partial when the cost share was computed from lower-bound dollars (an unpriced
+		// token-bearing event on either side), so the share does not read as exact.
+		"costShareIncomplete": s.CostShareIncomplete,
+		"deepestTree":         s.DeepestTree,
 	}
 }
 

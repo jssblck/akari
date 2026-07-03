@@ -99,6 +99,25 @@ func TestInsightsTrends(t *testing.T) {
 	// definition fixes, where a per-bucket definition would hide it.
 	mkSession(grace, "t-churn1", 1, "completed", "B", "claude-sonnet-5", churn)
 
+	// An unpriced, token-bearing usage event on an unknown model (day 2). The pricing table
+	// cannot price it, so every cost figure in the window becomes a lower bound and the cache
+	// savings total becomes partial. Its cost is NULL, so it adds no dollars and the exact totals
+	// above are unchanged, and it rides day 2, so the latest measured cache bucket (day 1) keeps
+	// its rate. The cache tokens on an unknown model both flag cost incomplete (via the shared
+	// costIncompleteExpr) and leave the saving unpriced.
+	if _, err := st.Pool.Exec(ctx,
+		`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, occurred_at, dedup_key)
+		 VALUES ($1, 'pi-unpriced-xyz', 0, 0, 500, 0, NULL, now() - make_interval(days => 2), 't1-unpriced')`,
+		root1); err != nil {
+		t.Fatalf("seed unpriced usage: %v", err)
+	}
+	// The session's maintained cost_incomplete flag, so the gallery's per-session cost figures
+	// carry the same lower-bound marker the canonical rollups do.
+	if _, err := st.Pool.Exec(ctx,
+		`UPDATE sessions SET cost_incomplete = true WHERE id = $1`, root1); err != nil {
+		t.Fatalf("flag session cost incomplete: %v", err)
+	}
+
 	since := time.Now().Add(-7 * 24 * time.Hour)
 	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: since, Bucket: "day"})
 	if err != nil {
@@ -160,6 +179,21 @@ func TestInsightsTrends(t *testing.T) {
 	// write); the seed's 8000 / (4000 + 8000 + 3000) is ~53%. Dropping cache_write would read ~66%.
 	if got := tr.Economics.CacheHitRateLatest; got < 52 || got > 55 {
 		t.Errorf("cache hit rate = %v, want ~53 (8000/(4000+8000+3000)); a value near 66 means cache_write was dropped from the denominator", got)
+	}
+	// Incompleteness propagates: a token-bearing unpriced event makes every window cost figure a
+	// lower bound, and cached volume on an unpriced model makes the saving partial. The insights
+	// projections must carry the same flags the canonical cost and cache surfaces do.
+	if !tr.Economics.CostIncomplete {
+		t.Error("economics CostIncomplete = false, want true (a token-bearing unpriced event is in window)")
+	}
+	if !tr.Economics.CacheSavingsIncomplete {
+		t.Error("economics CacheSavingsIncomplete = false, want true (cached volume rode an unpriced model)")
+	}
+	if !tr.Gallery.CostIncomplete {
+		t.Error("gallery CostIncomplete = false, want true (a cohort session is flagged cost_incomplete)")
+	}
+	if !tr.Subagents.CostShareIncomplete {
+		t.Error("subagents CostShareIncomplete = false, want true (the cost share divides lower-bound sums)")
 	}
 
 	// Gallery summaries are computed over the full cohort in the store (not the capped Rows), so

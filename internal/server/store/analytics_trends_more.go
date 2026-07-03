@@ -89,11 +89,12 @@ type ChurnTrend struct {
 // GallerySession is one dot in the session gallery: a fully-spanned session placed by how
 // long it ran and what it cost, coloured by archetype and carrying its grade and outcome.
 type GallerySession struct {
-	DurationS float64
-	CostUSD   float64
-	Archetype string
-	Grade     string
-	Outcome   string
+	DurationS      float64
+	CostUSD        float64
+	CostIncomplete bool // the session's cost rollup folded a token-bearing unpriced event
+	Archetype      string
+	Grade          string
+	Outcome        string
 }
 
 // Gallery is the per-session scatter: one point per fully-spanned session in the window
@@ -112,6 +113,9 @@ type Gallery struct {
 	PriciestCostUSD        float64
 	LongestDurationS       float64
 	LongestCostUSD         float64
+	// CostIncomplete is true when any session in the cohort folded a token-bearing unpriced
+	// event, so the cost summaries (median cost, priciest) are lower bounds.
+	CostIncomplete bool
 }
 
 // RhythmGrid is the hour-of-week activity heatmap: Cells[dow][hour] is the message-plus-tool
@@ -147,6 +151,11 @@ type SubagentStats struct {
 	SubagentSessionsInWindow int
 	CostThroughSubagentsPct  float64
 	DeepestTree              int
+
+	// CostShareIncomplete is true when a token-bearing unpriced event landed on either the
+	// subagent numerator or the whole-window denominator, so the cost share is computed from
+	// lower-bound dollars and reads as partial (the ratio can move either way).
+	CostShareIncomplete bool
 }
 
 // HasData reports whether any delegation happened in the window.
@@ -760,6 +769,7 @@ func (s *Store) galleryFrom(ctx context.Context, q querier, f AnalyticsFilter) (
 	rows, err := q.Query(ctx, fmt.Sprintf(
 		`SELECT extract(epoch FROM (s.ended_at - s.started_at)) AS dur,
 		        s.total_cost_usd,
+		        s.cost_incomplete,
 		        %s AS archetype,
 		        coalesce(sig.grade, '') AS grade,
 		        coalesce(sig.outcome, 'unknown') AS outcome,
@@ -777,7 +787,7 @@ func (s *Store) galleryFrom(ctx context.Context, q querier, f AnalyticsFilter) (
 	for rows.Next() {
 		var gs GallerySession
 		var total int
-		if err := rows.Scan(&gs.DurationS, &gs.CostUSD, &gs.Archetype, &gs.Grade, &gs.Outcome, &total); err != nil {
+		if err := rows.Scan(&gs.DurationS, &gs.CostUSD, &gs.CostIncomplete, &gs.Archetype, &gs.Grade, &gs.Outcome, &total); err != nil {
 			return Gallery{}, fmt.Errorf("scan session gallery: %w", err)
 		}
 		out.Rows = append(out.Rows, gs)
@@ -800,6 +810,7 @@ func (s *Store) galleryFrom(ctx context.Context, q querier, f AnalyticsFilter) (
 		`WITH cohort AS (
 		   SELECT extract(epoch FROM (s.ended_at - s.started_at)) AS dur,
 		          s.total_cost_usd AS cost,
+		          s.cost_incomplete AS cost_incomplete,
 		          coalesce(sig.outcome, 'unknown') AS outcome
 		     FROM sessions s
 		     LEFT JOIN session_signals sig
@@ -810,9 +821,10 @@ func (s *Store) galleryFrom(ctx context.Context, q querier, f AnalyticsFilter) (
 		        coalesce(percentile_cont(0.5) WITHIN GROUP (ORDER BY cost), 0),
 		        coalesce(percentile_cont(0.5) WITHIN GROUP (ORDER BY cost) FILTER (WHERE outcome = 'completed'), 0),
 		        max(ARRAY[cost, dur]),
-		        max(ARRAY[dur, cost])
+		        max(ARRAY[dur, cost]),
+		        coalesce(bool_or(cost_incomplete), false)
 		   FROM cohort`, len(sargs), sfilter), sargs...).
-		Scan(&medDur, &medCost, &medComp, &priciest, &longest); err != nil {
+		Scan(&medDur, &medCost, &medComp, &priciest, &longest, &out.CostIncomplete); err != nil {
 		return Gallery{}, fmt.Errorf("session gallery summary: %w", err)
 	}
 	out.MedianDurationS = medDur
@@ -971,7 +983,8 @@ func (s *Store) subagentTrendsFrom(ctx context.Context, q querier, f AnalyticsFi
 	crows, err := q.Query(ctx, fmt.Sprintf(
 		`SELECT %s AS b,
 		        coalesce(sum(ue.cost_usd), 0),
-		        coalesce(sum(ue.cost_usd) FILTER (WHERE s.relationship_type = 'subagent'), 0)
+		        coalesce(sum(ue.cost_usd) FILTER (WHERE s.relationship_type = 'subagent'), 0),
+		        coalesce(`+costIncompleteExpr+`, false)
 		   FROM usage_events ue
 		   JOIN sessions s ON s.id = ue.session_id
 		  WHERE ue.occurred_at IS NOT NULL%s
@@ -982,12 +995,14 @@ func (s *Store) subagentTrendsFrom(ctx context.Context, q querier, f AnalyticsFi
 	for crows.Next() {
 		var b time.Time
 		var total, sub float64
-		if err := crows.Scan(&b, &total, &sub); err != nil {
+		var incomplete bool
+		if err := crows.Scan(&b, &total, &sub, &incomplete); err != nil {
 			crows.Close()
 			return SubagentStats{}, fmt.Errorf("scan subagent cost trend: %w", err)
 		}
 		totalCost += total
 		subCost += sub
+		out.CostShareIncomplete = out.CostShareIncomplete || incomplete
 		if i := g.index(b); i >= 0 && total > 0 {
 			out.CostShare[i] = sub / total * 100
 		}

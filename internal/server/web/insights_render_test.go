@@ -129,6 +129,7 @@ func sampleTrends() *store.Trends {
 			MedianDurationS: 1350, MedianCostUSD: 2.7, MedianCompletedCostUSD: 2.35,
 			PriciestDurationS: 7200, PriciestCostUSD: 12.9,
 			LongestDurationS: 7200, LongestCostUSD: 12.9,
+			CostIncomplete: true, // maps to the gallery's lower-bound cost markers
 		},
 		Velocity: store.VelocityTrends{
 			ActiveHours: []float64{5, 6}, WallHours: []float64{8, 9},
@@ -181,6 +182,8 @@ func sampleTrends() *store.Trends {
 			CacheSavings: []float64{50, 60}, CacheHitRate: []float64{72, 74}, CacheMeasured: []bool{true, true},
 			TotalSpend: 255, TotalAbandoned: 35, AbandonedSharePct: 13.7,
 			TotalCacheSavings: 110, CacheHitRateLatest: 74,
+			// Set so the serializer maps the lower-bound and partial markers through to the JSON.
+			CostIncomplete: true, CacheSavingsIncomplete: true,
 		},
 		Subagents: store.SubagentStats{
 			DelegateShare: []float64{20, 25}, CostShare: []float64{15, 18},
@@ -191,6 +194,7 @@ func sampleTrends() *store.Trends {
 			},
 			SessionsThatDelegatePct: 22.5, SubagentSessionsInWindow: 14,
 			CostThroughSubagentsPct: 16.4, DeepestTree: 3,
+			CostShareIncomplete: true, // maps to the "partial" marker on the cost-share figure
 		},
 		Rhythm: store.RhythmGrid{Cells: rhythm},
 	}
