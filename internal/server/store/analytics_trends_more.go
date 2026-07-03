@@ -99,6 +99,17 @@ type GallerySession struct {
 type Gallery struct {
 	Rows  []GallerySession
 	Total int
+
+	// Window-wide summary figures, computed over the full cohort rather than the capped Rows, so
+	// the headline medians and the priciest and longest callouts describe every session in the
+	// window and not just the most recent maxGalleryPoints kept for the scatter payload.
+	MedianDurationS        float64
+	MedianCostUSD          float64
+	MedianCompletedCostUSD float64
+	PriciestDurationS      float64
+	PriciestCostUSD        float64
+	LongestDurationS       float64
+	LongestCostUSD         float64
 }
 
 // RhythmGrid is the hour-of-week activity heatmap: Cells[dow][hour] is the message-plus-tool
@@ -603,9 +614,12 @@ const maxChurnTreeFiles = 150
 func (s *Store) churnTrendFrom(ctx context.Context, q querier, f AnalyticsFilter, g trendGrid) (ChurnTrend, error) {
 	out := ChurnTrend{ReEdits: make([]int, g.n()), Files: make([]int, g.n())}
 
-	// Per-bucket edit volume and hot-file count. Hot means edited more than once in the
-	// bucket, the same threshold the tree and the headline totals use, so a bucket of one-off
-	// edits does not report phantom hot files the treemap has nothing to show for.
+	// Per-bucket edit volume and hot-file count. A file is hot when it is edited more than once
+	// across the whole window (the same definition the tree and TotalHotFiles use), and it counts
+	// in each bucket it was edited in. Defining hot per bucket instead would drop a file edited
+	// once in each of two buckets: hot in the window total, invisible in every bucket. The totals
+	// CTE re-sums each file's per-bucket edits into its window total, then the final grouping
+	// counts, per bucket, the files whose window total clears the bar.
 	filter, args := f.clauseFor("s.started_at")
 	rows, err := q.Query(ctx, fmt.Sprintf(
 		`WITH scoped AS (
@@ -625,11 +639,18 @@ func (s *Store) churnTrendFrom(ctx context.Context, q querier, f AnalyticsFilter
 		     FROM scoped
 		 ),
 		 perfile AS (
-		   SELECT b, project_id, churn_path, count(*) AS edits
+		   SELECT b, project_id, churn_path, count(*) AS edits_in_bucket
 		     FROM ranked WHERE rn = 1 GROUP BY b, project_id, churn_path
+		 ),
+		 totals AS (
+		   SELECT project_id, churn_path, sum(edits_in_bucket) AS edits_total
+		     FROM perfile GROUP BY project_id, churn_path
 		 )
-		 SELECT b, coalesce(sum(edits), 0)::bigint, count(*) FILTER (WHERE edits > 1)
-		   FROM perfile GROUP BY b`, g.sqlBucket("s.started_at"), filter), args...)
+		 SELECT p.b,
+		        coalesce(sum(p.edits_in_bucket), 0)::bigint,
+		        count(*) FILTER (WHERE t.edits_total > 1)
+		   FROM perfile p JOIN totals t USING (project_id, churn_path)
+		  GROUP BY p.b`, g.sqlBucket("s.started_at"), filter), args...)
 	if err != nil {
 		return ChurnTrend{}, fmt.Errorf("churn trend: %w", err)
 	}
@@ -758,6 +779,44 @@ func (s *Store) galleryFrom(ctx context.Context, q querier, f AnalyticsFilter) (
 	}
 	if err := rows.Err(); err != nil {
 		return Gallery{}, fmt.Errorf("iterate session gallery: %w", err)
+	}
+
+	// Window-wide summaries over the full cohort, so the headline medians and the priciest and
+	// longest callouts are not skewed by the maxGalleryPoints sampling that bounds Rows. The two
+	// max(ARRAY[...]) pairs pick the priciest (by cost, ties by duration) and longest (by
+	// duration, ties by cost) session in a single pass: max over a numeric array compares
+	// element by element, so the leading key wins and the trailing key breaks ties.
+	sfilter, sargs := f.clauseFor("s.started_at")
+	sargs = append(sargs, quality.Version)
+	var medDur, medCost, medComp float64
+	var priciest, longest []float64
+	if err := q.QueryRow(ctx, fmt.Sprintf(
+		`WITH cohort AS (
+		   SELECT extract(epoch FROM (s.ended_at - s.started_at)) AS dur,
+		          s.total_cost_usd AS cost,
+		          coalesce(sig.outcome, 'unknown') AS outcome
+		     FROM sessions s
+		     LEFT JOIN session_signals sig
+		       ON sig.session_id = s.id AND sig.signals_version = $%d AND NOT s.signals_stale
+		    WHERE s.started_at IS NOT NULL AND s.ended_at IS NOT NULL AND s.ended_at >= s.started_at%s
+		 )
+		 SELECT coalesce(percentile_cont(0.5) WITHIN GROUP (ORDER BY dur), 0),
+		        coalesce(percentile_cont(0.5) WITHIN GROUP (ORDER BY cost), 0),
+		        coalesce(percentile_cont(0.5) WITHIN GROUP (ORDER BY cost) FILTER (WHERE outcome = 'completed'), 0),
+		        max(ARRAY[cost, dur]),
+		        max(ARRAY[dur, cost])
+		   FROM cohort`, len(sargs), sfilter), sargs...).
+		Scan(&medDur, &medCost, &medComp, &priciest, &longest); err != nil {
+		return Gallery{}, fmt.Errorf("session gallery summary: %w", err)
+	}
+	out.MedianDurationS = medDur
+	out.MedianCostUSD = medCost
+	out.MedianCompletedCostUSD = medComp
+	if len(priciest) == 2 {
+		out.PriciestCostUSD, out.PriciestDurationS = priciest[0], priciest[1]
+	}
+	if len(longest) == 2 {
+		out.LongestDurationS, out.LongestCostUSD = longest[0], longest[1]
 	}
 	return out, nil
 }

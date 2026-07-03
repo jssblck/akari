@@ -38,8 +38,9 @@ type akData struct {
 	} `json:"concurrency"`
 
 	Throughput struct {
-		MsgsPerMin  []float64 `json:"msgsPerMin"`
-		ToolsPerMin []float64 `json:"toolsPerMin"`
+		MsgsPerMin    []float64 `json:"msgsPerMin"`
+		ToolsPerMin   []float64 `json:"toolsPerMin"`
+		MsgsPerMinAvg float64   `json:"msgsPerMinAvg"`
 	} `json:"throughput"`
 
 	AllTools []struct {
@@ -167,9 +168,13 @@ func TestInsightsDataMapping(t *testing.T) {
 	}
 
 	// Throughput is the integration-time cadence adaptation: per-bucket msgs/min and
-	// tools/min, not the underivable per-model tokens/sec.
+	// tools/min, not the underivable per-model tokens/sec. The headline avg is the canonical
+	// whole-window rate (VelocityStats.MsgsPerActiveMin), not the mean of the per-bucket series.
 	if len(d.Throughput.MsgsPerMin) != 2 || d.Throughput.MsgsPerMin[0] != 3.1 {
 		t.Errorf("throughput.msgsPerMin = %v, want [3.1 3.4]", d.Throughput.MsgsPerMin)
+	}
+	if d.Throughput.MsgsPerMinAvg != 4.2 {
+		t.Errorf("throughput.msgsPerMinAvg = %v, want 4.2 (canonical MsgsPerActiveMin, not the per-bucket mean 3.25)", d.Throughput.MsgsPerMinAvg)
 	}
 
 	// Tools: reliability error rate is a percent, the mix legend uses the shared category

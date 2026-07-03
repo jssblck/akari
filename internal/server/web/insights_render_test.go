@@ -123,6 +123,12 @@ func sampleTrends() *store.Trends {
 				{DurationS: 900, CostUSD: 1.9, Archetype: "standard", Grade: "B", Outcome: "abandoned"},
 			},
 			Total: 8,
+			// Full-cohort summaries (store-computed in SQL): median of the eight durations is
+			// 1350s and of the costs 2.7; the priciest and longest are the same marathon session
+			// at $12.9 / 7200s; the six completed costs median to 2.35.
+			MedianDurationS: 1350, MedianCostUSD: 2.7, MedianCompletedCostUSD: 2.35,
+			PriciestDurationS: 7200, PriciestCostUSD: 12.9,
+			LongestDurationS: 7200, LongestCostUSD: 12.9,
 		},
 		Velocity: store.VelocityTrends{
 			ActiveHours: []float64{5, 6}, WallHours: []float64{8, 9},
@@ -171,8 +177,8 @@ func sampleTrends() *store.Trends {
 			ContextMarkers: []store.ContextMarker{{Tokens: 128000, Label: "p50 128.0k"}},
 		},
 		Economics: store.Economics{
-			CostCompleted: []float64{100, 120}, CostAbandoned: []float64{20, 15},
-			CacheSavings: []float64{50, 60}, CacheHitRate: []float64{72, 74},
+			CostCompleted: []float64{100, 120}, CostAbandoned: []float64{20, 15}, CostOther: []float64{0, 0},
+			CacheSavings: []float64{50, 60}, CacheHitRate: []float64{72, 74}, CacheMeasured: []bool{true, true},
 			TotalSpend: 255, TotalAbandoned: 35, AbandonedSharePct: 13.7,
 			TotalCacheSavings: 110, CacheHitRateLatest: 74,
 		},

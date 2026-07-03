@@ -93,6 +93,12 @@ func TestInsightsTrends(t *testing.T) {
 		}
 	}
 
+	// A day-1 edit of the same churn file the three day-2 sessions touched. The file is now hot
+	// across the window (four edits) but edited only once in the day-1 bucket, so the per-bucket
+	// hot-file series must still count it in day 1: this is the cross-bucket case the window-hot
+	// definition fixes, where a per-bucket definition would hide it.
+	mkSession(grace, "t-churn1", 1, "completed", "B", "claude-sonnet-5", churn)
+
 	since := time.Now().Add(-7 * 24 * time.Hour)
 	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: since, Bucket: "day"})
 	if err != nil {
@@ -115,23 +121,37 @@ func TestInsightsTrends(t *testing.T) {
 		t.Errorf("fleet mix = %+v, want at least two model bands", tr.FleetMix.Models)
 	}
 
-	// Signals: the outcomes are counted across buckets (five sessions have a shape and a
+	// Signals: the outcomes are counted across buckets (six sessions have a shape and a
 	// current-version signal in window).
 	var outcomeTotal int
 	for _, n := range tr.Signals.OutcomeTotal {
 		outcomeTotal += n
 	}
-	if outcomeTotal != 5 {
-		t.Errorf("signal outcome total = %d, want 5 (four roots + one subagent)", outcomeTotal)
+	if outcomeTotal != 6 {
+		t.Errorf("signal outcome total = %d, want 6 (five roots + one subagent)", outcomeTotal)
 	}
 
-	// Economics: spend covers every outcome (five sessions at $1.50), abandoned spend covers only
+	// Economics: spend covers every outcome (six sessions at $1.50), abandoned spend covers only
 	// the one outcome = 'abandoned' session, so the errored and completed dollars are excluded.
-	if got := tr.Economics.TotalSpend; got < 7.49 || got > 7.51 {
-		t.Errorf("economics total spend = %v, want 7.5 (five sessions at $1.50 each)", got)
+	if got := tr.Economics.TotalSpend; got < 8.99 || got > 9.01 {
+		t.Errorf("economics total spend = %v, want 9.0 (six sessions at $1.50 each)", got)
 	}
 	if got := tr.Economics.TotalAbandoned; got < 1.49 || got > 1.51 {
 		t.Errorf("abandoned spend = %v, want 1.5 (only the outcome='abandoned' session; errored and completed excluded)", got)
+	}
+	// The three cost bands (completed, abandoned, other) sum to total spend per bucket, so the
+	// stacked chart reconciles with the headline. The errored session's dollars land in other,
+	// which is why the completed+abandoned bars alone would fall short of the total.
+	var bandSum, otherSum float64
+	for i := range tr.Economics.CostCompleted {
+		bandSum += tr.Economics.CostCompleted[i] + tr.Economics.CostAbandoned[i] + tr.Economics.CostOther[i]
+		otherSum += tr.Economics.CostOther[i]
+	}
+	if bandSum < 8.99 || bandSum > 9.01 {
+		t.Errorf("cost bands sum to %v, want 9.0 (completed + abandoned + other must equal total spend)", bandSum)
+	}
+	if otherSum < 1.49 || otherSum > 1.51 {
+		t.Errorf("other-outcome spend = %v, want 1.5 (the errored session, neither completed nor abandoned)", otherSum)
 	}
 	if tr.Economics.TotalCacheSavings <= 0 {
 		t.Errorf("economics cache savings = %v, want > 0 (cache tokens were seeded)", tr.Economics.TotalCacheSavings)
@@ -140,6 +160,16 @@ func TestInsightsTrends(t *testing.T) {
 	// write); the seed's 8000 / (4000 + 8000 + 3000) is ~53%. Dropping cache_write would read ~66%.
 	if got := tr.Economics.CacheHitRateLatest; got < 52 || got > 55 {
 		t.Errorf("cache hit rate = %v, want ~53 (8000/(4000+8000+3000)); a value near 66 means cache_write was dropped from the denominator", got)
+	}
+
+	// Gallery summaries are computed over the full cohort in the store (not the capped Rows), so
+	// the headline median duration describes every fully-spanned session. Each seeded session
+	// spans 20 minutes, so the median is 1200 seconds over all six.
+	if tr.Gallery.Total != 6 {
+		t.Errorf("gallery total = %d, want 6 fully-spanned sessions", tr.Gallery.Total)
+	}
+	if got := tr.Gallery.MedianDurationS; got < 1199 || got > 1201 {
+		t.Errorf("gallery median duration = %v, want 1200 (each seeded session spans 20 minutes)", got)
 	}
 
 	// Tools: the reliability scatter carries the seeded tools, and the churn tree carries the
@@ -159,15 +189,21 @@ func TestInsightsTrends(t *testing.T) {
 	if !foundChurn {
 		t.Errorf("churn tree missing the twice-edited file %q: %+v", churn, tr.Churn.Tree)
 	}
-	// Only the file three sessions edited clears the hot-file bar; the two one-off edits (t3's
-	// templ and the errored session's main.go) must not, so the per-bucket hot-file series sums to
-	// exactly one.
+	// The churn file is hot across the window (four edits: three on day 2, one on day 1) and the
+	// two one-off edits (t3's templ, the errored session's main.go) are not. Under the window-hot
+	// definition the hot file counts in each bucket it was edited in, so the per-bucket series
+	// sums to two (one for day 2, one for day 1), while the distinct-file window total is one. A
+	// per-bucket-hot definition would drop the day-1 edit and sum to one, disagreeing with the
+	// tree and TotalHotFiles.
 	var hotFiles int
 	for _, n := range tr.Churn.Files {
 		hotFiles += n
 	}
-	if hotFiles != 1 {
-		t.Errorf("churn hot-file total = %d, want 1 (only the thrice-edited file; one-off edits are not hot)", hotFiles)
+	if hotFiles != 2 {
+		t.Errorf("churn per-bucket hot-file series sums to %d, want 2 (the cross-bucket hot file counts in both its buckets)", hotFiles)
+	}
+	if tr.Churn.TotalHotFiles != 1 {
+		t.Errorf("churn TotalHotFiles = %d, want 1 (one distinct file edited more than once across the window)", tr.Churn.TotalHotFiles)
 	}
 
 	// Context histogram counts both measured peaks, including the sub-8k one folded into the first

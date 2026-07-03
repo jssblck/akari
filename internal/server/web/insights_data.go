@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"sort"
 	"strings"
 
 	"github.com/a-h/templ"
@@ -42,7 +41,14 @@ func InsightsData(ins store.Insights) (string, error) {
 		},
 		"activeHours":  activeHoursData(t.Velocity),
 		"responseTime": map[string]any{"p50": t.Velocity.ResponseP50, "p90": t.Velocity.ResponseP90, "p99": t.Velocity.ResponseP99},
-		"throughput":   map[string]any{"msgsPerMin": t.Velocity.MsgsPerMin, "toolsPerMin": t.Velocity.ToolsPerMin},
+		// The per-bucket series draws the chart; the two headline rates are the canonical
+		// whole-window aggregate (total messages and tools over total active minutes), so the
+		// figure matches the same-scope velocity readout instead of averaging already-normalized
+		// per-bucket rates, which drifts when buckets hold unequal active time.
+		"throughput": map[string]any{
+			"msgsPerMin": t.Velocity.MsgsPerMin, "toolsPerMin": t.Velocity.ToolsPerMin,
+			"msgsPerMinAvg": ins.Velocity.MsgsPerActiveMin, "toolsPerMinAvg": ins.Velocity.ToolsPerActiveMin,
+		},
 
 		"allTools":     toolsData(t.Tools.Reliability),
 		"toolMix":      toolMixData(t.Tools, n),
@@ -208,41 +214,34 @@ func prettyModel(m string) string {
 
 func galleryData(g store.Gallery) map[string]any {
 	points := make([]map[string]any, 0, len(g.Rows))
-	durations := make([]float64, 0, len(g.Rows))
-	costs := make([]float64, 0, len(g.Rows))
-	var priciest store.GallerySession
 	for _, r := range g.Rows {
 		points = append(points, map[string]any{
 			"durationS": r.DurationS, "costUsd": r.CostUSD, "arch": r.Archetype,
 			"grade": r.Grade, "outcome": r.Outcome,
 		})
-		durations = append(durations, r.DurationS)
-		costs = append(costs, r.CostUSD)
-		if r.CostUSD > priciest.CostUSD {
-			priciest = r
-		}
 	}
+	// The scatter plots the capped Rows sample, but the medians and the priciest callout read
+	// from the full-cohort summaries so they do not silently describe only the recent sample.
+	// total and shown let the panel note when the scatter is a sample of a larger cohort.
 	out := map[string]any{
 		"points":          points,
 		"archColor":       archetypeColor,
-		"medianDurationS": median(durations),
-		"medianCostUsd":   median(costs),
-		"priciest":        map[string]any{"durationS": priciest.DurationS, "costUsd": priciest.CostUSD},
+		"total":           g.Total,
+		"shown":           len(g.Rows),
+		"medianDurationS": g.MedianDurationS,
+		"medianCostUsd":   g.MedianCostUSD,
+		"priciest":        map[string]any{"durationS": g.PriciestDurationS, "costUsd": g.PriciestCostUSD},
 	}
-	// A couple of callouts, only when the scatter has enough points that a labelled outlier
-	// is not the whole story: the priciest session, and the longest-running one.
-	if len(g.Rows) >= 8 {
-		var longest store.GallerySession
-		for _, r := range g.Rows {
-			if r.DurationS > longest.DurationS {
-				longest = r
-			}
-		}
+	// A couple of callouts, only when the cohort is big enough that a labelled outlier is not
+	// the whole story: the priciest session, and the longest-running one when it is a different
+	// session. Both read the full-cohort extremes, so they mark the window's real outliers even
+	// when the scatter shows only the most recent sample.
+	if g.Total >= 8 {
 		anns := []map[string]any{
-			{"durationS": priciest.DurationS, "costUsd": priciest.CostUSD, "label": fmtCostShort(priciest.CostUSD), "corner": "top-right"},
+			{"durationS": g.PriciestDurationS, "costUsd": g.PriciestCostUSD, "label": fmtCostShort(g.PriciestCostUSD), "corner": "top-right"},
 		}
-		if longest.DurationS != priciest.DurationS {
-			anns = append(anns, map[string]any{"durationS": longest.DurationS, "costUsd": longest.CostUSD, "label": fmtDurationShort(longest.DurationS), "corner": "bottom-left"})
+		if g.LongestDurationS != g.PriciestDurationS {
+			anns = append(anns, map[string]any{"durationS": g.LongestDurationS, "costUsd": g.LongestCostUSD, "label": fmtDurationShort(g.LongestDurationS), "corner": "bottom-left"})
 		}
 		out["annotations"] = anns
 	}
@@ -421,34 +420,39 @@ func churnTrendData(c store.ChurnTrend) map[string]any {
 }
 
 func costQualityData(e store.Economics, g store.Gallery) map[string]any {
+	// Three stacked bands per bucket (completed, abandoned, other) so they sum to the bucket's
+	// spend and the chart reconciles with the total-spend headline; other is every dollar that
+	// is neither completed nor abandoned.
 	rows := make([]map[string]any, len(e.CostCompleted))
 	for i := range e.CostCompleted {
-		rows[i] = map[string]any{"completed": e.CostCompleted[i], "abandoned": e.CostAbandoned[i]}
-	}
-	// The median completed session's cost, read off the gallery cohort (the same fully
-	// spanned sessions), so the figure is a real per-session dollar amount rather than a
-	// spend total divided by a guessed session count.
-	var completedCosts []float64
-	for _, r := range g.Rows {
-		if r.Outcome == "completed" {
-			completedCosts = append(completedCosts, r.CostUSD)
+		row := map[string]any{"completed": e.CostCompleted[i], "abandoned": e.CostAbandoned[i]}
+		if i < len(e.CostOther) {
+			row["other"] = e.CostOther[i]
 		}
+		rows[i] = row
 	}
 	return map[string]any{
-		"rows":                      rows,
-		"totalSpend":                e.TotalSpend,
-		"totalAbandoned":            e.TotalAbandoned,
-		"abandonedSharePct":         e.AbandonedSharePct,
-		"medianPerCompletedSession": median(completedCosts),
+		"rows":              rows,
+		"totalSpend":        e.TotalSpend,
+		"totalAbandoned":    e.TotalAbandoned,
+		"abandonedSharePct": e.AbandonedSharePct,
+		// The median completed session's cost over the full window cohort (not the capped gallery
+		// sample), so the figure is a real per-session dollar amount that describes every
+		// completed session in the window.
+		"medianPerCompletedSession": g.MedianCompletedCostUSD,
 	}
 }
 
 func cacheData(e store.Economics) map[string]any {
 	return map[string]any{
-		"savings":      e.CacheSavings,
-		"hitRate":      e.CacheHitRate,
-		"totalSavings": e.TotalCacheSavings,
-		"hitRateNow":   e.CacheHitRateLatest,
+		"savings": e.CacheSavings,
+		"hitRate": e.CacheHitRate,
+		// Which buckets had prompt-side tokens, so the chart draws the hit-rate line only across
+		// measured buckets (an idle bucket is a gap, not a false drop to 0%) and the headline
+		// reads the latest measured bucket, matching hitRateNow.
+		"hitRateMeasured": e.CacheMeasured,
+		"totalSavings":    e.TotalCacheSavings,
+		"hitRateNow":      e.CacheHitRateLatest,
 	}
 }
 
@@ -524,21 +528,6 @@ func punchcardPeak(r store.RhythmGrid) (string, bool) {
 		return "", false
 	}
 	return fmt.Sprintf("peak %s %02d:00", punchcardDOW[bestD], bestH), true
-}
-
-// median returns the middle value of a copy of xs (mean of the two middle values for an even
-// count), or 0 for an empty slice.
-func median(xs []float64) float64 {
-	if len(xs) == 0 {
-		return 0
-	}
-	cp := append([]float64(nil), xs...)
-	sort.Float64s(cp)
-	mid := len(cp) / 2
-	if len(cp)%2 == 1 {
-		return cp[mid]
-	}
-	return (cp[mid-1] + cp[mid]) / 2
 }
 
 func fmtTokensShort(nTok int64) string {

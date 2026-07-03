@@ -100,19 +100,22 @@ type ContextMarker struct {
 	Label  string
 }
 
-// Economics is the per-bucket money read: spend split by whether the session completed (so
-// the abandon rate carries a dollar figure, not just a count), and what caching saved.
+// Economics is the per-bucket money read: spend split by outcome class (completed, abandoned,
+// and everything else) so the three bands sum to the window's total spend and the abandon rate
+// carries a dollar figure, plus what caching saved.
 type Economics struct {
 	CostCompleted []float64 // dollars spent in bucket i by sessions that completed
 	CostAbandoned []float64 // dollars spent in bucket i by sessions that abandoned (outcome='abandoned')
+	CostOther     []float64 // dollars spent in bucket i by every other outcome (errored, unknown, ungraded)
 	CacheSavings  []float64 // dollars caching saved in bucket i, priced per day and model
 	CacheHitRate  []float64 // cache-read share of all prompt-side tokens (input+read+write), percent
+	CacheMeasured []bool    // whether bucket i had prompt-side tokens, so a 0 rate reads as measured 0% not "no data"
 
 	TotalSpend         float64 // all spend across the window, every outcome
 	TotalAbandoned     float64 // spend by abandoned sessions across the window
 	AbandonedSharePct  float64
 	TotalCacheSavings  float64
-	CacheHitRateLatest float64
+	CacheHitRateLatest float64 // the latest measured bucket's hit rate (a real 0% included), 0 when no bucket was measured
 }
 
 // gradeOrderTrend fixes the stacked-band order for the per-bucket grade shares, unscored
@@ -629,8 +632,10 @@ func (s *Store) economicsFrom(ctx context.Context, q querier, f AnalyticsFilter,
 	out := Economics{
 		CostCompleted: make([]float64, g.n()),
 		CostAbandoned: make([]float64, g.n()),
+		CostOther:     make([]float64, g.n()),
 		CacheSavings:  make([]float64, g.n()),
 		CacheHitRate:  make([]float64, g.n()),
+		CacheMeasured: make([]bool, g.n()),
 	}
 
 	filter, args := f.clause() // occurred_at window
@@ -666,18 +671,26 @@ func (s *Store) economicsFrom(ctx context.Context, q querier, f AnalyticsFilter,
 		}
 		// Completed and abandoned are the outcome projection's own buckets, so these dollars
 		// read against the outcome distribution: abandoned is outcome='abandoned' only, not
-		// every non-completed session (an errored or ungraded session with cost is neither
-		// completed nor abandoned here, the same way the outcome split treats it). Total spend
-		// is the unfiltered sum, so it still covers every outcome including those two.
+		// every non-completed session (the same way the outcome split treats it). Other is every
+		// dollar that is neither (errored, unknown, or a session with no current-version signal);
+		// carrying it as its own band makes the three bands sum to total spend, so the stacked
+		// chart reconciles with the '$ total spend' headline instead of hiding non-outcome
+		// dollars in the gap between the bars and the total. Float summation can leave a sub-cent
+		// negative residue, so clamp it.
 		out.CostCompleted[i] = comp
 		out.CostAbandoned[i] = aband
+		if other := total - comp - aband; other > 0 {
+			out.CostOther[i] = other
+		}
 		out.TotalSpend += total
 		out.TotalAbandoned += aband
 		// Cache hit rate is cache_read over all prompt-side tokens (input + cache_read +
 		// cache_write), the same denominator the canonical cache tile uses, so the trend and
-		// the tile never disagree. Dropping cache_write would overstate the hit rate.
+		// the tile never disagree. A bucket with prompt tokens but no cache reads is a real 0%,
+		// so record whether the bucket was measured rather than reading a 0 rate as "no data".
 		if denom := input + cacheRead + cacheWrite; denom > 0 {
 			out.CacheHitRate[i] = float64(cacheRead) / float64(denom) * 100
+			out.CacheMeasured[i] = true
 		}
 	}
 	rows.Close()
@@ -695,8 +708,11 @@ func (s *Store) economicsFrom(ctx context.Context, q querier, f AnalyticsFilter,
 	if out.TotalSpend > 0 {
 		out.AbandonedSharePct = out.TotalAbandoned / out.TotalSpend * 100
 	}
-	for i := len(out.CacheHitRate) - 1; i >= 0; i-- {
-		if out.CacheHitRate[i] > 0 {
+	// The headline hit rate is the latest measured bucket's rate, including a genuine 0%. The old
+	// scan stopped at the latest nonzero bucket, so an idle or cache-cold latest bucket made the
+	// headline reuse a stale earlier rate the series no longer showed.
+	for i := len(out.CacheMeasured) - 1; i >= 0; i-- {
+		if out.CacheMeasured[i] {
 			out.CacheHitRateLatest = out.CacheHitRate[i]
 			break
 		}

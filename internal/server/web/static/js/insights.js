@@ -740,10 +740,11 @@
     if (!el) return;
     el.innerHTML = '';
     const T = D.throughput;
-    const avg = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0);
+    // The canonical whole-window rates (total over total active minutes), not the mean of the
+    // per-bucket rates, which drifts when buckets hold unequal active time.
     const figs = [
-      { v: avg(T.msgsPerMin).toFixed(1), k: 'avg msgs/active min' },
-      { v: avg(T.toolsPerMin).toFixed(1), k: 'avg tools/active min' },
+      { v: (T.msgsPerMinAvg || 0).toFixed(1), k: 'avg msgs/active min' },
+      { v: (T.toolsPerMinAvg || 0).toFixed(1), k: 'avg tools/active min' },
     ];
     figs.forEach((f) => {
       const d = document.createElement('div');
@@ -1728,7 +1729,7 @@
     const svg = A.svgRoot(w, h);
     const rows = D.costQuality.rows;
     const xScale = A.scaleLinear([0, D.nBuckets - 1], [pL, w - pR]);
-    const maxV = Math.max(...rows.map((r) => r.completed + r.abandoned)) * 1.1;
+    const maxV = Math.max(...rows.map((r) => r.completed + r.abandoned + (r.other || 0))) * 1.1;
     const yScale = A.scaleLinear([0, maxV], [h - pB, pT]);
 
     A.axisTicksY(svg, mini ? [0, Math.round(maxV)] : [0, Math.round(maxV / 2), Math.round(maxV)], pL, w - pR, yScale, (v) => '$' + A.fmtK(v));
@@ -1738,10 +1739,13 @@
     const bw = (w - pL - pR) / D.nBuckets - (mini ? 1 : 2);
     rows.forEach((r, i) => {
       const x = xScale(i) - bw / 2;
+      const other = r.other || 0;
       const yComp = yScale(r.completed);
-      const yTot = yScale(r.completed + r.abandoned);
+      const yAband = yScale(r.completed + r.abandoned);
+      const yTot = yScale(r.completed + r.abandoned + other);
       clip.appendChild(A.svgEl('rect', { x, y: yComp, width: bw, height: (h - pB) - yComp, fill: 'var(--ok)', opacity: '0.78' }));
-      clip.appendChild(A.svgEl('rect', { x, y: yTot, width: bw, height: yComp - yTot, fill: 'var(--warn)', opacity: '0.82' }));
+      clip.appendChild(A.svgEl('rect', { x, y: yAband, width: bw, height: yComp - yAband, fill: 'var(--warn)', opacity: '0.82' }));
+      if (other > 0) clip.appendChild(A.svgEl('rect', { x, y: yTot, width: bw, height: yAband - yTot, fill: 'var(--muted)', opacity: '0.5' }));
     });
     A.axisBaseline(svg, pL, w - pR, h - pB);
 
@@ -1749,7 +1753,8 @@
       const r = rows[i];
       return '<div class="tt-title">' + D.bucketLabels[i] + '</div>' +
         '<div class="tt-row" style="color:var(--ok)">completed <b>$' + r.completed.toFixed(0) + '</b></div>' +
-        '<div class="tt-row" style="color:var(--warn)">abandoned <b>$' + r.abandoned.toFixed(0) + '</b></div>';
+        '<div class="tt-row" style="color:var(--warn)">abandoned <b>$' + r.abandoned.toFixed(0) + '</b></div>' +
+        ((r.other || 0) > 0 ? '<div class="tt-row" style="color:var(--muted)">other <b>$' + r.other.toFixed(0) + '</b></div>' : '');
     });
 
     return svg;
@@ -1759,7 +1764,7 @@
     const el = document.getElementById('costquality-legend');
     if (!el) return;
     el.innerHTML = '';
-    const items = [{ label: 'Completed sessions', color: 'var(--ok)' }, { label: 'Abandoned sessions', color: 'var(--warn)' }];
+    const items = [{ label: 'Completed sessions', color: 'var(--ok)' }, { label: 'Abandoned sessions', color: 'var(--warn)' }, { label: 'Other outcomes', color: 'var(--muted)' }];
     items.forEach((it) => {
       const li = document.createElement('li');
       li.className = 'legend-chip';
@@ -1805,8 +1810,12 @@
     clip.appendChild(A.svgEl('path', { d: A.pathArea(pts, yScale(0)), fill: 'var(--viz-2)', opacity: '0.22' }));
     clip.appendChild(A.svgEl('path', { d: A.pathLine(pts), fill: 'none', stroke: 'var(--viz-2)', 'stroke-width': mini ? 1.4 : 2 }));
 
-    const hitPts = C.hitRate.map((v, i) => [xScale(i), yScaleHit(v)]);
-    clip.appendChild(A.svgEl('path', { d: A.pathLine(hitPts), fill: 'none', stroke: 'var(--viz-7)', 'stroke-width': mini ? 1.2 : 1.6, 'stroke-dasharray': '3,3' }));
+    // Draw the hit-rate line only across measured buckets, so an idle bucket reads as a gap
+    // rather than a false drop to 0% on the 80-92% scale. hitRateMeasured is absent on older
+    // payloads, so treat every bucket as measured then.
+    const measured = C.hitRateMeasured || C.hitRate.map(() => true);
+    const measuredPts = C.hitRate.map((v, i) => [xScale(i), yScaleHit(v)]).filter((_, i) => measured[i]);
+    if (measuredPts.length) clip.appendChild(A.svgEl('path', { d: A.pathLine(measuredPts), fill: 'none', stroke: 'var(--viz-7)', 'stroke-width': mini ? 1.2 : 1.6, 'stroke-dasharray': '3,3' }));
 
     if (!mini) {
       [80, 85, 90].forEach((v) => {
@@ -1815,18 +1824,21 @@
         t.textContent = v + '%';
         svg.appendChild(t);
       });
-      const lastHit = hitPts[hitPts.length - 1];
-      const t2 = A.svgEl('text', { x: w - pR + 6, y: lastHit[1] - 8, class: 'callout-label', fill: 'var(--viz-7)' });
-      t2.textContent = 'hit rate ' + C.hitRateNow.toFixed(0) + '%';
-      svg.appendChild(t2);
+      const lastHit = measuredPts.length ? measuredPts[measuredPts.length - 1] : null;
+      if (lastHit) {
+        const t2 = A.svgEl('text', { x: w - pR + 6, y: lastHit[1] - 8, class: 'callout-label', fill: 'var(--viz-7)' });
+        t2.textContent = 'hit rate ' + C.hitRateNow.toFixed(0) + '%';
+        svg.appendChild(t2);
+      }
     }
 
     A.axisBaseline(svg, pL, w - pR, h - pB);
 
     if (!mini) A.attachHoverBucket(svg, w, h, pL, pR, pT, pB, xScale, (i) => {
+      const measuredHit = !C.hitRateMeasured || C.hitRateMeasured[i];
       return '<div class="tt-title">' + D.bucketLabels[i] + '</div>' +
         '<div class="tt-row" style="color:var(--viz-2)">savings <b>$' + C.savings[i].toFixed(0) + '</b></div>' +
-        '<div class="tt-row" style="color:var(--viz-7)">hit rate <b>' + C.hitRate[i].toFixed(1) + '%</b></div>';
+        '<div class="tt-row" style="color:var(--viz-7)">hit rate <b>' + (measuredHit ? C.hitRate[i].toFixed(1) + '%' : 'n/a') + '</b></div>';
     });
 
     return svg;
