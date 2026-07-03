@@ -551,10 +551,13 @@ cache-write (cache creation), cache-read, reasoning.
 ### Cost
 
 Cost is computed server-side at parse time from a pricing table compiled into the
-binary: a map of model glob to per-million-token rates for input, output,
-cache-write, and cache-read. There is no runtime catalog or refresh endpoint;
-updating prices means a new build. The computed cost is stored on each usage
-event.
+binary: a map of canonical model ID to per-million-token rates for input, output,
+cache-write, and cache-read. Matching is exact (a key prices only its own model,
+never a family), and each model maps to a list of date-effective rates so one ID can
+price pre-change and post-change usage differently (an introductory promo that
+reverts, a mid-life reprice); the usage event's time selects the window in effect
+when it occurred. There is no runtime catalog or refresh endpoint; updating prices
+means a new build. The computed cost is stored on each usage event.
 
 A turn whose model is not in the table records its token usage with no cost. The
 session's `total_cost_usd` is then the partial sum of the turns that did have

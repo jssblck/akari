@@ -84,6 +84,21 @@ func seedUsageAt(t *testing.T, st *store.Store, sessionID int64, model string, c
 	}
 }
 
+// seedUsageCacheAt is seedUsageCache with an explicit occurred_at, so a cached event
+// can be placed on a chosen side of a dated rate boundary (the pricing table's
+// date-effective windows). Cost is left NULL; the cache paths price from tokens, not
+// the stored cost.
+func seedUsageCacheAt(t *testing.T, st *store.Store, sessionID int64, model string, in, out, cacheRead, cacheWrite int64, at time.Time, dedup string) {
+	t.Helper()
+	_, err := st.Pool.Exec(context.Background(),
+		`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, occurred_at, dedup_key)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+		sessionID, model, in, out, cacheRead, cacheWrite, at, dedup)
+	if err != nil {
+		t.Fatalf("seed usage cache at: %v", err)
+	}
+}
+
 // seedUsageUnpriced inserts a dated usage event that carries real token volume but
 // a NULL cost, the shape an unpriced model produces. Its tokens count toward the
 // totals while its cost does not, which is exactly what should flag an aggregate as

@@ -95,7 +95,16 @@ import (
 // one session; bumping Version forces a rewind-and-replay so the whole session re-prices uniformly.
 // The reduce delta is otherwise unchanged and no golden fixture uses Sonnet 5, so the golden fixtures
 // do not move.
-const Version = 10
+//
+// Version 11 pairs with the Epoch 10 -> 11 reprice that gives claude-sonnet-5 its two-window
+// introductory rate ($2/$10 through 2026-08-31, $3/$15 after; see internal/pricing). pricing.Cost now
+// selects the window in effect at each row's OccurredAt, so a Sonnet 5 session logged inside the intro
+// window re-prices cheaper. A session parsed at version 10 holds rows priced at the flat $3/$15; an
+// incremental resume would price only newly appended rows at the windowed rate and leave the earlier
+// ones at the flat rate, blending two pricings in one session. Bumping Version forces a
+// rewind-and-replay so the whole session re-prices from the window at each row's OccurredAt. The reduce
+// delta is otherwise unchanged and no golden fixture uses Sonnet 5, so the golden fixtures do not move.
+const Version = 11
 
 // Advance parses any not-yet-parsed bytes of a session and applies them to the
 // projection, looping until the parse cursor catches up to the stored length. It
@@ -254,10 +263,11 @@ func toProjectionDelta(p parser.Delta) store.ProjectionDelta {
 			SourceOffset:   u.SourceOffset,
 			SourceIndex:    u.SourceIndex,
 		}
-		// Price the event here; whether it counts toward the session total is decided
-		// at insert time, where a duplicate usage line is dropped and only the
-		// surviving row folds into the rollup (cost_incomplete included).
-		if cost, known := pricing.Cost(u.Model, u.Input, u.Output, u.CacheWrite, u.CacheRead); known {
+		// Price the event here at the rate in effect when it occurred (OccurredAt
+		// selects the date-effective window); whether it counts toward the session
+		// total is decided at insert time, where a duplicate usage line is dropped and
+		// only the surviving row folds into the rollup (cost_incomplete included).
+		if cost, known := pricing.Cost(u.Model, u.OccurredAt, u.Input, u.Output, u.CacheWrite, u.CacheRead); known {
 			pu.CostUSD = &cost
 		}
 		d.Usage = append(d.Usage, pu)

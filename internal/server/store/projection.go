@@ -617,9 +617,12 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 		// Fold the prompt-cache saving the same way, over the same surviving rows. Pricing
 		// is linear in tokens, so summing each row's saving equals summing the model's
 		// grouped totals (what SessionCacheStats does over the whole session), which is what
-		// lets the rollup and that per-model recompute reconcile exactly. Cost is a stored
-		// per-row figure; the saving is not, so it is priced here rather than read off the row.
-		if saving, ok := pricing.CacheSavings(u.Model, int64(u.CacheRead), int64(u.CacheWrite)); ok {
+		// lets the rollup and that per-model recompute reconcile exactly. This prices per row
+		// at the window in effect at OccurredAt; SessionCacheStats groups by (model, UTC day)
+		// so every row in a bucket shares that window, keeping the two exactly reconciled even
+		// across a dated rate change. Cost is a stored per-row figure; the saving is not, so it
+		// is priced here rather than read off the row.
+		if saving, ok := pricing.CacheSavings(u.Model, u.OccurredAt, int64(u.CacheRead), int64(u.CacheWrite)); ok {
 			applied.CacheSavingsUSD += saving
 		} else if u.CacheRead > 0 || u.CacheWrite > 0 {
 			applied.CacheSavingsIncomplete = true
