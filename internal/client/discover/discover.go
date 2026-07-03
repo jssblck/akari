@@ -116,8 +116,10 @@ func Roots(cfg config.Client, env func(string) string, home string) []Root {
 }
 
 // Matches reports whether a filename is a session file for the given agent.
-// Codex files are named rollout-*.jsonl; Claude and pi use any *.jsonl (pi files
-// are further validated by their session header at resolve time).
+// Codex files are named rollout-*.jsonl; Claude and pi use any *.jsonl. This is
+// only a suffix gate: every agent's files are further validated by a positive
+// session-header signature at resolve time (see resolve.sessionSignature), which
+// is what keeps unrelated *.jsonl under a custom extra_root from being ingested.
 func Matches(agent, name string) bool {
 	if !strings.HasSuffix(name, ".jsonl") {
 		return false
