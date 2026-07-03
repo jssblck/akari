@@ -47,7 +47,8 @@ and "Example data for development".
 ## Signals and the reparse epoch
 
 Per-session signals (outcome, quality score and grade, tool health, prompt
-hygiene, context health) live in `session_signals`, derived from the projection.
+hygiene, context health, observed thinking) live in `session_signals`, derived
+from the projection.
 A row is materialized by the settle pass (`RefreshSettledSignals`, run on a timer
 from `cmd/akari-server` and available as `akari-server settle`) once the session
 has been idle past the abandoned threshold, and re-derived on reparse. The ingest
@@ -109,3 +110,59 @@ one leaves a half-migrated corpus:
 
 A new signal should default to a value that reads as "unmeasured" (NULL, or a
 zero the aggregate excludes) until the settle pass (or a backfill reparse) fills it.
+
+Observed thinking bands on an absolute token scale, not at settle time. The
+canonical unit is the per-turn estimated reasoning-token count, and a turn (or a
+session's headline turn) sits in the band its token count reaches: low (0, 128],
+medium (128, 512], high (512, 2048], xhigh above. The edges are baked constants
+(`quality.ThinkingLowMaxTokens` and friends), applied at read time by
+`quality.ThinkingBucketForTokens`, shared with the store's SQL aggregate as bound
+parameters so the two cannot drift. An absolute scale is deliberate: the first cut
+ranked each session against its model's cohort with a `cume_dist`, but quartiles are
+25%-each by construction, so a fleet distribution over them was tautological. A fixed
+token cut tracks the fleet's real distribution and shifts when behavior shifts.
+
+The settle pass stores raw per-session scalars (`assistant_turns`, `thinking_turns`,
+`thinking_tail_tokens`, `thinking_peak_tokens`; see `internal/quality/thinking.go`
+and migration 0041), never a band. The tail is the session's headline volume: the
+mean of the hardest tenth of its thinking turns (`ceil(thinking_turns / 10)`), a tail
+statistic rather than an all-turn average, because most turns barely reason so a plain
+mean collapses to the floor while a bare max lets one outlier define the session. The
+session band reads off the tail; the peak (the single hardest turn) rides alongside.
+All four are NULL together when the session had no assistant turns (nothing to
+measure, so the UI reads absence, not "off"). The fleet view
+(`observedThinkingFrom`) is a true per-turn distribution: it walks the assistant turns
+of measured sessions and counts them into the same bands, plus token percentiles
+(p50/p90/p99) over the thinking turns, so a light-thinking fleet reads mostly off/low
+and the percentiles expose the heavy tail an average hides.
+
+Each turn's tokens are its exact reasoning-token count where the agent reports one
+(Codex logs it per turn in `message_turn_usage.reasoning_tokens`), else its
+reasoning-trace bytes over an agent-calibrated bytes-per-token factor. `perTurnTokensExpr`
+(store) builds that expression once for both the settle derivation and the fleet
+aggregate, single-sourcing the divisors from `quality.ThinkingBytesPerToken` so the SQL
+matches the Go mapping. The byte estimate is trustworthy: measured against Codex's exact
+counts and the rare Claude blocks that kept their plaintext, the per-turn medians agree
+within ~2%, so a token figure is comparable across models without the per-model ranking
+the first cut needed.
+
+The trace bytes come from the reasoning the agents log, and the catch is that current
+Claude Code and Codex redact it: the reasoning ships encrypted (Claude leaves a
+`signature`, Codex an `encrypted_content` blob) with the plaintext dropped, so ~97% of
+real Claude thinking blocks carry no text. The parser weighs each turn by its
+reasoning-trace byte size (`messages.thinking_bytes`), plaintext where present and the
+encrypted payload length otherwise; the ciphertext length tracks the hidden reasoning
+volume closely (r=0.97 for Claude signatures, r=0.997 for Codex against the
+reasoning-token count it reports), and pi keeps its thinking in the clear. `has_thinking`
+is set on the presence of a reasoning block, not on non-empty text, so a redacted turn
+still counts. Because `thinking_bytes` is a plain parser-filled column (not generated), it
+is populated by a reparse: the `parse.Epoch 11 -> 12` bump reparses the corpus to fill it
+(and each turn's `reasoning_tokens`) and re-derives every `session_signals` row at the
+current `quality.Version` in the same pass.
+
+`quality.ThinkingScaleVersion` marks the calibration: the bytes-per-token factors and the
+band edges. Bump it on any change to either. A factor change moves the stored per-session
+tokens, so pair it with a `quality.Version` bump (the settle pass re-derives the scalars);
+an edge change only moves the read-time band and can ride the scale version alone. It is a
+human-facing marker of "what "high" means today", not a gate: the stored scalars already
+carry their derivation version through `signals_version`.

@@ -185,6 +185,18 @@ body.modal-open { overflow: hidden; }
 .thinking summary::marker { color: var(--faint); }
 .thinking-body { color: var(--muted); font-style: italic; white-space: pre-wrap; border-left: 1px solid var(--border); padding-left: var(--sp-md); margin-top: var(--sp-sm); }
 
+/* Per-turn observed-thinking band chip: a dim label with an intensity dot, shown above an
+   assistant turn that reasoned. The dot ramps cool to warm with the band so the reader scans
+   which turns the model worked hardest on; the scale is neutral (workload, not fault), so it
+   stops at amber rather than reading red for the top band. */
+.thinking-band { display: inline-flex; align-items: center; gap: 0.4em; margin-bottom: var(--sp-sm); font-size: 0.7rem; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); cursor: help; }
+.thinking-band-dot { width: 0.5em; height: 0.5em; border-radius: 50%; background: var(--faint); }
+.thinking-band.band-off .thinking-band-dot { background: var(--faint); }
+.thinking-band.band-low .thinking-band-dot { background: var(--info); }
+.thinking-band.band-medium .thinking-band-dot { background: var(--lilac); }
+.thinking-band.band-high .thinking-band-dot { background: var(--lilac-strong); }
+.thinking-band.band-xhigh .thinking-band-dot { background: var(--warn); }
+
 /* ---- Tool chips ---- */
 .tools { display: flex; flex-direction: column; gap: var(--sp-xs); margin-top: var(--sp-md); }
 .tool-chip {

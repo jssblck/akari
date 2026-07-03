@@ -96,7 +96,7 @@ templ SessionMain(d store.SessionDetail, msgs []store.Message, tools map[int][]s
 		</div>
 	}
 	<h2>Transcript</h2>
-	@Transcript(msgs, tools, attachments, FallbacksByOrdinal(hs.Fallbacks), SessionBlobBase(d.ID))
+	@Transcript(msgs, d.Agent, tools, attachments, FallbacksByOrdinal(hs.Fallbacks), SessionBlobBase(d.ID))
 }
 
 // Outline is the left pane of the session view: one entry per turn, with its
@@ -193,7 +193,7 @@ templ sessionStats(d store.SessionDetail, hs HeaderStats) {
 		@stat("User msgs", fmt.Sprintf("%d", d.UserMessageCount), "user")
 		@tokenStat(d, hs.Signals)
 		@statCache(hs.Cache)
-		@statQuality(hs.Signals)
+		@statQuality(hs.Signals, hs.Thinking)
 		if d.ModelFallbackCount > 0 {
 			@statFallback(d.ModelFallbackCount, hs.Fallbacks)
 		}
@@ -264,7 +264,11 @@ templ statFallback(count int, fbs []store.ModelFallback) {
 // A separate Input group lists the prompt-hygiene signals that fired (terse, repeated, or
 // no-code-context prompts, an unstructured opening); it reads the human's side and does
 // not feed the score, so it sits under its own ruled label rather than among the drivers.
-templ statQuality(s store.SessionSignals) {
+// A Thinking group reads the model's observed deliberation: the absolute band on the
+// estimated-token scale and the per-turn volumes behind it (the hard-turn mean the band
+// reads, the single hardest turn, and how many turns reasoned). Like Input it never feeds
+// the score; how hard the model had to think is workload, not fault.
+templ statQuality(s store.SessionSignals, t ThinkingReadout) {
 	<div class={ "stat quality-stat " + QualityGradeClass(s) } tabindex="0">
 		<div class="label">Quality</div>
 		<div class="value quality-value" data-stat-key="quality">{ QualityGrade(s) }</div>
@@ -307,6 +311,22 @@ templ statQuality(s store.SessionSignals) {
 						<dd>terse</dd>
 					}
 				</dl>
+			}
+			if t.Measured {
+				<div class="tt-sub">Thinking</div>
+				<dl class="tt-grid">
+					<dt>Observed</dt>
+					<dd>{ ThinkingBucketLabel(t.Bucket) }</dd>
+					if t.Turns > 0 {
+						<dt>Hard-turn mean</dt>
+						<dd>{ ThinkingTokensLabel(t.TailTokens) }</dd>
+						<dt>Hardest turn</dt>
+						<dd>{ ThinkingTokensLabel(t.PeakTokens) }</dd>
+						<dt>Reasoned</dt>
+						<dd>{ fmt.Sprintf("%d of %d turns", t.Turns, *s.AssistantTurns) }</dd>
+					}
+				</dl>
+				<div class="tt-note muted small">Observed deliberation on an absolute token scale: how hard the model actually thought, not a configured level. Per-turn tokens are exact where the agent reports them, else estimated from the reasoning trace.</div>
 			}
 			if s.Scored() {
 				// The score arithmetic explains the grade rather than asserting it: one row per
@@ -394,8 +414,10 @@ templ stat(label, value, key string) {
 // folded in the message read. The meta line carries a right-aligned cluster of stamps (latency,
 // then a context+cost stamp group that hosts a per-turn token breakdown card); a shed divider
 // hosting its own before/after breakdown card is drawn above the marked message; muted hygiene tags
-// sit after a user message's role tag.
-templ Transcript(msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, fallbacks map[int]store.ModelFallback, blobBase string) {
+// sit after a user message's role tag. An assistant turn that carried a reasoning block wears a thinking-band chip
+// above its content (MessageThinkingBand), reading the turn's own deliberation on the same absolute scale as the
+// header readout, so a reader sees which turns the model worked hardest on without opening the (often redacted) trace.
+templ Transcript(msgs []store.Message, agent string, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, fallbacks map[int]store.ModelFallback, blobBase string) {
 	if len(msgs) == 0 {
 		<div class="empty">No messages parsed yet.</div>
 	} else {
@@ -451,6 +473,12 @@ templ Transcript(msgs []store.Message, tools map[int][]store.ToolCallView, attac
 						</span>
 						<span class="muted small">{ FmtTime(ctx, m.Timestamp) }</span>
 					</div>
+					if band, ok := MessageThinkingBand(agent, m); ok {
+						<div class={ "thinking-band band-" + string(band) } title="observed deliberation on this turn, on an absolute token scale (exact where the agent reports it, else estimated from the reasoning trace)">
+							<span class="thinking-band-dot"></span>
+							<span class="thinking-band-label">thinking: { ThinkingBucketLabel(band) }</span>
+						</div>
+					}
 					if m.HasThinking && m.ThinkingText != "" {
 						<details class="thinking">
 							<summary>Thinking</summary>

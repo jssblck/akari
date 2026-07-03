@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -57,6 +58,18 @@ type SessionSignals struct {
 	// clears) it went through.
 	PeakContextTokens *int64
 	ContextResetCount *int
+	// Observed-thinking figures: like context health they describe the work's shape, not
+	// its quality, so they never feed the score. All four are measured together from the
+	// session's assistant turns and are nil when it had none (nothing to measure, so the
+	// UI reads absence rather than "off"). AssistantTurns is the denominator, ThinkingTurns
+	// how many carried a reasoning block (zero reads as "off"), ThinkingTailTokens the
+	// session's headline volume (the mean of the hardest tenth of its thinking turns, in
+	// estimated reasoning tokens), and ThinkingPeakTokens the single hardest turn. The band
+	// is an absolute cut on the token scale (see quality.ThinkingBucketForTokens).
+	AssistantTurns     *int
+	ThinkingTurns      *int
+	ThinkingTailTokens *int
+	ThinkingPeakTokens *int
 }
 
 // Scored reports whether the session carries a score and grade, so the UI can show a
@@ -82,6 +95,32 @@ func (s SessionSignals) HasHygieneSignal() bool {
 // context readout only when there is a real figure rather than a blank stand-in. Peak and
 // reset count are populated together, so testing the peak is enough.
 func (s SessionSignals) HasContextHealth() bool { return s.PeakContextTokens != nil }
+
+// HasThinkingMeasure reports whether the session had assistant turns to measure thinking
+// over. The four thinking fields are populated together, so testing the denominator is
+// enough. A measured session with zero ThinkingTurns reads as "off"; an unmeasured one
+// shows no thinking readout at all.
+func (s SessionSignals) HasThinkingMeasure() bool { return s.AssistantTurns != nil }
+
+// ThinkingBucket is the session's absolute band: off when no turn reasoned, else the band
+// its hardest-decile-mean volume reaches on the token scale (quality.ThinkingBucketForTokens).
+// It reads as ThinkingOff when unmeasured too, so a caller should gate on HasThinkingMeasure
+// first to tell "no read" from "measured off".
+func (s SessionSignals) ThinkingBucket() quality.ThinkingBucket {
+	if !s.HasThinkingMeasure() || s.ThinkingTurns == nil || *s.ThinkingTurns == 0 {
+		return quality.ThinkingOff
+	}
+	return quality.ThinkingBucketForTokens(float64(*s.ThinkingTailTokens))
+}
+
+// ThinkingCoverage is the share of the session's assistant turns that carried a reasoning
+// block, in [0, 1]. Zero when unmeasured or when no turn reasoned.
+func (s SessionSignals) ThinkingCoverage() float64 {
+	if !s.HasThinkingMeasure() || *s.AssistantTurns == 0 {
+		return 0
+	}
+	return float64(*s.ThinkingTurns) / float64(*s.AssistantTurns)
+}
 
 // signalFacts are the raw, projection-derived inputs a refresh gathers before scoring:
 // the tool-health counts that feed quality.Score and the outcome facts that feed
@@ -121,6 +160,14 @@ type signalFacts struct {
 	// inferred compaction/clear count.
 	peakContextTokens *int64
 	contextResets     *int
+
+	// Observed-thinking facts, derived per turn from has_thinking, thinking_bytes, and the
+	// exact reasoning-token count in message_turn_usage, reduced to the session's tail and
+	// peak volume. All nil when the session has no assistant turns.
+	assistantTurns     *int
+	thinkingTurns      *int
+	thinkingTailTokens *int
+	thinkingPeakTokens *int
 }
 
 // gatherSignalFacts reads a session's tool-health and outcome facts from its
@@ -237,7 +284,69 @@ func gatherSignalFacts(ctx context.Context, tx pgx.Tx, sessionID int64) (signalF
 	if err := gatherContextHealth(ctx, tx, sessionID, &f); err != nil {
 		return signalFacts{}, err
 	}
+
+	// Observed-thinking facts, one aggregate over the session's assistant turns.
+	if err := gatherObservedThinking(ctx, tx, sessionID, &f); err != nil {
+		return signalFacts{}, err
+	}
 	return f, nil
+}
+
+// gatherObservedThinking derives a session's observed-thinking scalars from its assistant
+// turns: how many turns reasoned, and the session's tail and peak per-turn volume in
+// estimated reasoning tokens. Each turn's tokens are its exact reasoning-token count where
+// the agent reports one (Codex, in message_turn_usage) else its trace bytes over the agent's
+// calibrated bytes-per-token factor (perTurnTokensExpr). A thinking turn is any assistant
+// message with has_thinking set (a reasoning block was present), decoupled from whether its
+// text survived redaction.
+//
+// The headline figure is the tail, not a mean over all turns: most turns barely reason, so an
+// all-turn average collapses to the floor, while the mean of the hardest tenth
+// (ceil(thinking_turns / 10) turns) reads "how hard it thought when it thought hard" without a
+// single outlier turn defining the session the way a bare max would. Peak (the hardest single
+// turn) rides alongside it. A session with no assistant turns leaves all four facts nil, so
+// the row stores NULL (absent, not "off"); one with assistant turns but none that reasoned
+// stores zero tail and peak (a measured "off").
+func gatherObservedThinking(ctx context.Context, tx pgx.Tx, sessionID int64, f *signalFacts) error {
+	var (
+		assistant, thinking int
+		tail, peak          float64
+	)
+	if err := tx.QueryRow(ctx,
+		`WITH t AS (
+		   SELECT m.has_thinking,
+		          CASE WHEN m.has_thinking THEN `+perTurnTokensExpr("m", "mtu", "s.agent")+` END AS tok
+		     FROM messages m
+		     JOIN sessions s ON s.id = m.session_id
+		     LEFT JOIN message_turn_usage mtu
+		       ON mtu.session_id = m.session_id AND mtu.message_ordinal = m.ordinal
+		    WHERE m.session_id = $1 AND m.role = 'assistant'
+		 ),
+		 r AS (
+		   SELECT tok,
+		          row_number() OVER (ORDER BY tok DESC) AS rn,
+		          count(*) OVER () AS cnt
+		     FROM t WHERE tok IS NOT NULL
+		 )
+		 SELECT (SELECT count(*) FROM t),
+		        (SELECT count(*) FROM t WHERE has_thinking),
+		        coalesce((SELECT avg(tok) FROM r WHERE rn <= GREATEST(1, ceil(cnt::float8 * 0.1))), 0),
+		        coalesce((SELECT max(tok) FROM r), 0)`,
+		sessionID).Scan(&assistant, &thinking, &tail, &peak); err != nil {
+		return fmt.Errorf("gather observed thinking for session %d: %w", sessionID, err)
+	}
+	if assistant == 0 {
+		return nil // nothing to measure: leave all four facts nil so the row stores NULL
+	}
+	// Round to whole tokens. tail <= peak holds before rounding (a mean over the top of a set
+	// never exceeds its max) and rounding is monotonic, so the peak >= tail check survives.
+	tailTok := int(math.Round(tail))
+	peakTok := int(math.Round(peak))
+	f.assistantTurns = &assistant
+	f.thinkingTurns = &thinking
+	f.thinkingTailTokens = &tailTok
+	f.thinkingPeakTokens = &peakTok
+	return nil
 }
 
 // gatherContextHealth reads a session's ordered per-turn context sizes and folds them
@@ -456,8 +565,9 @@ func refreshSignalsTx(ctx context.Context, tx pgx.Tx, sessionID int64) error {
 		    tool_calls, tool_failures, tool_retries, edit_churn, longest_failure_streak,
 		    prompt_count, short_prompt_count, duplicate_prompt_count, no_code_context_count, unstructured_start,
 		    peak_context_tokens, context_reset_count, prompt_facts_version,
+		    assistant_turns, thinking_turns, thinking_tail_tokens, thinking_peak_tokens,
 		    refreshed_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19, now())
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23, now())
 		 ON CONFLICT (session_id) DO UPDATE SET
 		   signals_version = EXCLUDED.signals_version,
 		   outcome = EXCLUDED.outcome,
@@ -477,11 +587,16 @@ func refreshSignalsTx(ctx context.Context, tx pgx.Tx, sessionID int64) error {
 		   peak_context_tokens = EXCLUDED.peak_context_tokens,
 		   context_reset_count = EXCLUDED.context_reset_count,
 		   prompt_facts_version = EXCLUDED.prompt_facts_version,
+		   assistant_turns = EXCLUDED.assistant_turns,
+		   thinking_turns = EXCLUDED.thinking_turns,
+		   thinking_tail_tokens = EXCLUDED.thinking_tail_tokens,
+		   thinking_peak_tokens = EXCLUDED.thinking_peak_tokens,
 		   refreshed_at = now()`,
 		sessionID, quality.Version, string(outcome), string(conf), scoreArg, gradeArg,
 		f.toolCalls, f.toolFailures, f.toolRetries, f.editChurn, f.longestFailureStreak,
 		f.promptCount, f.hygiene.Short, f.hygiene.Duplicate, f.hygiene.NoCodeContext, f.hygiene.UnstructuredStart,
-		f.peakContextTokens, f.contextResets, quality.PromptFactsVersion)
+		f.peakContextTokens, f.contextResets, quality.PromptFactsVersion,
+		f.assistantTurns, f.thinkingTurns, f.thinkingTailTokens, f.thinkingPeakTokens)
 	if err != nil {
 		return fmt.Errorf("upsert signals for session %d: %w", sessionID, err)
 	}
@@ -828,14 +943,16 @@ func (s *Store) SessionSignalsByID(ctx context.Context, sessionID int64) (Sessio
 		`SELECT sig.session_id, sig.signals_version, sig.outcome, sig.outcome_confidence, sig.score, sig.grade,
 		        sig.tool_calls, sig.tool_failures, sig.tool_retries, sig.edit_churn, sig.longest_failure_streak,
 		        sig.prompt_count, sig.short_prompt_count, sig.duplicate_prompt_count, sig.no_code_context_count, sig.unstructured_start,
-		        sig.peak_context_tokens, sig.context_reset_count, sig.prompt_facts_version
+		        sig.peak_context_tokens, sig.context_reset_count, sig.prompt_facts_version,
+		        sig.assistant_turns, sig.thinking_turns, sig.thinking_tail_tokens, sig.thinking_peak_tokens
 		   FROM session_signals sig
 		   JOIN sessions s ON s.id = sig.session_id
 		  WHERE sig.session_id = $1 AND sig.signals_version = $2 AND NOT s.signals_stale`, sessionID, quality.Version).Scan(
 		&sig.SessionID, &sig.Version, &sig.Outcome, &sig.OutcomeConfidence, &sig.Score, &sig.Grade,
 		&sig.ToolCalls, &sig.ToolFailures, &sig.ToolRetries, &sig.EditChurn, &sig.LongestFailureStreak,
 		&sig.PromptCount, &sig.ShortPromptCount, &sig.DuplicatePromptCount, &sig.NoCodeContextCount, &sig.UnstructuredStart,
-		&sig.PeakContextTokens, &sig.ContextResetCount, &promptFactsVersion)
+		&sig.PeakContextTokens, &sig.ContextResetCount, &promptFactsVersion,
+		&sig.AssistantTurns, &sig.ThinkingTurns, &sig.ThinkingTailTokens, &sig.ThinkingPeakTokens)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return SessionSignals{SessionID: sessionID, Outcome: string(quality.OutcomeUnknown), OutcomeConfidence: string(quality.ConfLow)}, nil
 	}

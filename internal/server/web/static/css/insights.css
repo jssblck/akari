@@ -25,6 +25,7 @@
 #insights:has(.ins-toolbar .htmx-request) .ins-tools,
 #insights:has(.ins-toolbar .htmx-request) .ins-hygiene,
 #insights:has(.ins-toolbar .htmx-request) .ins-context,
+#insights:has(.ins-toolbar .htmx-request) .ins-thinking,
 #insights:has(.ins-toolbar .htmx-request) .ins-grid,
 #insights:has(.ins-toolbar .htmx-request) .ins-churn {
   opacity: 0.5; pointer-events: none;
@@ -116,6 +117,15 @@
    reads how heavy the sessions got where hygiene reads how clearly they were prompted, so
    it rounds out the human-and-load bands before the quality distributions. */
 .ins-context { margin-bottom: var(--sp-xl); }
+
+/* The observed-thinking band is a full-width panel below the context band: the per-turn
+   off/low/medium/high/very-high split on the first figure row, then the token percentiles
+   on a second, both reusing the shared figure row. It reads how hard the models actually
+   thought where context reads how heavy their prompts got. The percentile row is set off
+   with a hairline rule and lighter type: the same tokens the bands cut on, read as a tail. */
+.ins-thinking { margin-bottom: var(--sp-xl); }
+.ins-thinking-pcts { margin-top: var(--sp-lg); padding-top: var(--sp-lg); border-top: 1px solid var(--border); }
+.ins-thinking-pcts .ins-fig-v { color: var(--subtext); }
 
 /* The file-churn list is a full-width panel below the distribution grid: a bar per path
    the window edited more than once, the session count muted beside the edit total, and the

@@ -28,15 +28,19 @@ var ErrParserVersionStale = errors.New("parser version changed since last parse:
 // MessageDelta is one message write. Each ordinal is written exactly once: the
 // ingest protocol keeps a whole turn inside one chunk, so Content and
 // ThinkingText are the complete text of the message, never a fragment to append.
+// ThinkingBytes is the reasoning-trace weight the observed-thinking signal sums
+// (see parser.Message.ThinkingBytes): the plaintext length where the agent logs it,
+// else the encrypted payload length, so a redacted turn still records its volume.
 type MessageDelta struct {
-	Ordinal      int
-	Role         string
-	Content      string
-	ThinkingText string
-	Model        string
-	HasThinking  bool
-	HasToolUse   bool
-	Timestamp    time.Time
+	Ordinal       int
+	Role          string
+	Content       string
+	ThinkingText  string
+	ThinkingBytes int
+	Model         string
+	HasThinking   bool
+	HasToolUse    bool
+	Timestamp     time.Time
 }
 
 // ProjToolCall is one tool_calls insert. The input body lives in the CAS, by one
@@ -405,12 +409,12 @@ func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDel
 		}
 		tag, err := tx.Exec(ctx,
 			`INSERT INTO messages
-			   (session_id, ordinal, role, content, thinking_text, model, timestamp, has_thinking, has_tool_use,
+			   (session_id, ordinal, role, content, thinking_text, thinking_bytes, model, timestamp, has_thinking, has_tool_use,
 			    prompt_short, prompt_no_code, prompt_bare_greeting, prompt_digest, prompt_facts_version, duplicate_prompt)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
 			 ON CONFLICT (session_id, ordinal) DO NOTHING`,
 			sessionID, m.Ordinal, sanitizeText(m.Role), content,
-			sanitizeText(m.ThinkingText), sanitizeText(m.Model),
+			sanitizeText(m.ThinkingText), m.ThinkingBytes, sanitizeText(m.Model),
 			nullTime(m.Timestamp), m.HasThinking, m.HasToolUse,
 			pShort, pNoCode, pGreeting, pDigest, pFactsVersion, pDuplicate)
 		if err != nil {

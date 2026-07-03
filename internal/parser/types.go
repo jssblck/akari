@@ -64,16 +64,30 @@ const (
 )
 
 // Message is one turn. Content holds the conversational text (stored inline and
-// searchable); ThinkingText holds concatenated reasoning blocks.
+// searchable); ThinkingText holds the concatenated reasoning plaintext, which is
+// empty when the agent redacts it (see ThinkingBytes).
+//
+// ThinkingBytes is the reasoning-trace weight: the byte size of the turn's
+// reasoning material, whether or not its plaintext survived. Current Claude Code
+// and Codex ship the reasoning encrypted (Claude leaves a "signature", Codex an
+// "encrypted_content" blob) and drop the plaintext, so ThinkingText is empty while
+// the reasoning still happened; the encrypted payload's length tracks the hidden
+// reasoning volume closely (measured r=0.97 for Claude signatures against the rare
+// blocks that kept their plaintext, r=0.997 for Codex encrypted_content against the
+// reasoning-token count it reports). pi keeps its thinking in the clear, so there
+// the weight is just the plaintext length. It is the per-turn volume the
+// observed-thinking signal ranks per model; HasThinking is true whenever a
+// reasoning block was present, decoupled from whether its text was redacted.
 type Message struct {
-	Ordinal      int
-	Role         Role
-	Content      string
-	ThinkingText string
-	Model        string
-	Timestamp    time.Time
-	HasThinking  bool
-	HasToolUse   bool
+	Ordinal       int
+	Role          Role
+	Content       string
+	ThinkingText  string
+	ThinkingBytes int
+	Model         string
+	Timestamp     time.Time
+	HasThinking   bool
+	HasToolUse    bool
 }
 
 // ToolCall is one tool invocation attached to a message. InputJSON and ResultBody

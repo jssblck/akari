@@ -104,7 +104,17 @@ import (
 // ones at the flat rate, blending two pricings in one session. Bumping Version forces a
 // rewind-and-replay so the whole session re-prices from the window at each row's OccurredAt. The reduce
 // delta is otherwise unchanged and no golden fixture uses Sonnet 5, so the golden fixtures do not move.
-const Version = 11
+//
+// Version 12 pairs with the Epoch 11 -> 12 reparse that records messages.thinking_bytes, the per-turn
+// reasoning-trace weight the observed-thinking signal sums (see parser.Message.ThinkingBytes and
+// migration 0041). The reducer now sets ThinkingBytes on every assistant turn (the reasoning plaintext
+// length where the agent logs it, else the encrypted signature/encrypted_content length) and marks
+// HasThinking whenever a reasoning block was present, decoupled from whether the text survived
+// redaction. That is a parser output change (a new message field, and HasThinking flips true on the
+// redacted turns current agents emit), so it pairs with the Epoch bump and moves the golden fixtures.
+// The column is not generated, so the reparse is what fills it: an incremental resume would leave
+// earlier turns at the DEFAULT 0 and blend measured and unmeasured turns in one session.
+const Version = 12
 
 // Advance parses any not-yet-parsed bytes of a session and applies them to the
 // projection, looping until the parse cursor catches up to the stored length. It
@@ -183,14 +193,15 @@ func toProjectionDelta(p parser.Delta) store.ProjectionDelta {
 
 	for _, m := range p.Messages {
 		d.Messages = append(d.Messages, store.MessageDelta{
-			Ordinal:      m.Ordinal,
-			Role:         string(m.Role),
-			Content:      m.Content,
-			ThinkingText: m.ThinkingText,
-			Model:        m.Model,
-			HasThinking:  m.HasThinking,
-			HasToolUse:   m.HasToolUse,
-			Timestamp:    m.Timestamp,
+			Ordinal:       m.Ordinal,
+			Role:          string(m.Role),
+			Content:       m.Content,
+			ThinkingText:  m.ThinkingText,
+			ThinkingBytes: m.ThinkingBytes,
+			Model:         m.Model,
+			HasThinking:   m.HasThinking,
+			HasToolUse:    m.HasToolUse,
+			Timestamp:     m.Timestamp,
 		})
 	}
 

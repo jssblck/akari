@@ -47,6 +47,9 @@ templ InsightsPage(p Page, ins store.Insights, rng string, ranges []RangeOption)
 				<div class="ins-context">
 					@contextPanel(ins.Context)
 				</div>
+				<div class="ins-thinking">
+					@thinkingPanel(ins.Thinking)
+				</div>
 				if len(ins.Users.Users) >= 2 {
 					// The People panel is a per-author leaderboard, so it earns its width only on a
 					// multi-user instance: a single-user instance's one row would just restate the
@@ -276,6 +279,71 @@ templ contextPanel(c store.ContextHealthStats) {
 				<div class="ins-fig">
 					<div class="ins-fig-v">{ FmtTokens(c.TotalResets) }</div>
 					<div class="ins-fig-k">context resets</div>
+				</div>
+			</div>
+		}
+	</div>
+}
+
+// thinkingTip is the shared definition tooltip for the observed-thinking figures: what the
+// bands measure and, as importantly, what they do not.
+const thinkingTip = "Observed thinking: how hard the model actually deliberated, per assistant turn, on an absolute reasoning-token scale (exact where the agent reports the count, else estimated from the reasoning trace: plaintext where logged, else the encrypted payload length). Bands are fixed token cuts, not a per-model ranking, so the split shifts when behavior shifts. It reflects workload, not any configured thinking level."
+
+// thinkingPanel is the observed-thinking split, read per assistant turn: what share of the
+// window's turns carried no reasoning block (off) and how the rest divide across the four
+// absolute token bands, plus the token percentiles over the thinking turns. The bands are
+// fixed cuts on the estimated-token scale (not a per-model quartile), so a fleet of light
+// thinkers reads mostly off/low and a shift toward harder work moves the bars, where
+// quartiles would always read 25% each. The percentiles expose the tail an average hides.
+// Like hygiene and context these figures never feed the quality score.
+templ thinkingPanel(t store.ObservedThinkingStats) {
+	<div class="ins-panel ins-thinking-panel">
+		<div class="ins-panel-head">
+			<span class="label">Observed thinking</span>
+			<span class="muted small ins-caption">how hard the models actually thought, per turn, on an absolute token scale</span>
+		</div>
+		if !t.HasData() {
+			<div class="muted small">No measured turns in this window.</div>
+		} else {
+			<div class="ins-figs">
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ HygienePct(t.Off, t.Turns) }</div>
+					<div class="ins-fig-k" title={ thinkingTip }>off</div>
+					<div class="ins-fig-sub muted small">{ HygieneCount(t.Off, t.Turns) }</div>
+				</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ HygienePct(t.Low, t.Turns) }</div>
+					<div class="ins-fig-k" title={ thinkingTip }>low</div>
+					<div class="ins-fig-sub muted small">{ HygieneCount(t.Low, t.Turns) }</div>
+				</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ HygienePct(t.Medium, t.Turns) }</div>
+					<div class="ins-fig-k" title={ thinkingTip }>medium</div>
+					<div class="ins-fig-sub muted small">{ HygieneCount(t.Medium, t.Turns) }</div>
+				</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ HygienePct(t.High, t.Turns) }</div>
+					<div class="ins-fig-k" title={ thinkingTip }>high</div>
+					<div class="ins-fig-sub muted small">{ HygieneCount(t.High, t.Turns) }</div>
+				</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ HygienePct(t.XHigh, t.Turns) }</div>
+					<div class="ins-fig-k" title={ thinkingTip }>very high</div>
+					<div class="ins-fig-sub muted small">{ HygieneCount(t.XHigh, t.Turns) }</div>
+				</div>
+			</div>
+			<div class="ins-figs ins-thinking-pcts">
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ ThinkingTokensLabel(int(t.P50)) }</div>
+					<div class="ins-fig-k" title="median reasoning tokens over the thinking turns">typical turn</div>
+				</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ ThinkingTokensLabel(int(t.P90)) }</div>
+					<div class="ins-fig-k" title="90th-percentile reasoning tokens over the thinking turns">p90</div>
+				</div>
+				<div class="ins-fig">
+					<div class="ins-fig-v">{ ThinkingTokensLabel(int(t.P99)) }</div>
+					<div class="ins-fig-k" title="99th-percentile reasoning tokens over the thinking turns">p99</div>
 				</div>
 			</div>
 		}

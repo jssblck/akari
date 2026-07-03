@@ -2,6 +2,7 @@ package parse
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -241,6 +242,45 @@ func TestCodexTurnFoldedInOneChunk(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("tool calls on the folded turn = %d, want 1", calls)
+	}
+}
+
+// TestRedactedThinkingReachesMessagesColumn drives a Claude turn whose reasoning is
+// redacted to empty text with only a signature (what the current client emits) through
+// the full ingest and parse path, and confirms the reasoning volume survives to
+// messages.thinking_bytes with has_thinking set. This is the end-to-end guard for the
+// Epoch 11 -> 12 change: the original observed-thinking implementation keyed on
+// thinking_text and read zero for every redacted turn, so this pins that the encrypted
+// payload length reaches the column the observed-thinking signal sums.
+func TestRedactedThinkingReachesMessagesColumn(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	sid := seedSession(t, st, "redacted-thinking")
+
+	sig := strings.Repeat("s", 500)
+	turn := `{"type":"user","timestamp":"2024-01-01T10:00:00Z","message":{"content":"think hard"}}` + "\n" +
+		`{"type":"assistant","timestamp":"2024-01-01T10:00:05Z","message":{"id":"m1","model":"claude-opus-4-8","content":[{"type":"thinking","thinking":"","signature":"` + sig + `"},{"type":"text","text":"Done."}]}}` + "\n"
+	if mc := uploadAndParse(t, st, sid, turn); mc != 2 {
+		t.Fatalf("message count = %d, want 2", mc)
+	}
+
+	var hasThinking bool
+	var thinkingText string
+	var thinkingBytes int
+	if err := st.Pool.QueryRow(ctx,
+		"SELECT has_thinking, thinking_text, thinking_bytes FROM messages WHERE session_id=$1 AND role='assistant'", sid).
+		Scan(&hasThinking, &thinkingText, &thinkingBytes); err != nil {
+		t.Fatal(err)
+	}
+	if !hasThinking {
+		t.Error("a redacted thinking block must still set has_thinking")
+	}
+	if thinkingText != "" {
+		t.Errorf("redacted thinking has no text, got %q", thinkingText)
+	}
+	if thinkingBytes != len(sig) {
+		t.Errorf("thinking_bytes = %d, want %d (signature length reaches the column)", thinkingBytes, len(sig))
 	}
 }
 

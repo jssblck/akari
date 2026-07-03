@@ -5,6 +5,7 @@
       "Role": "user",
       "Content": "Fix the auth bug",
       "ThinkingText": "",
+      "ThinkingBytes": 0,
       "Model": "",
       "HasThinking": false,
       "HasToolUse": false,
@@ -15,8 +16,9 @@
       "Role": "assistant",
       "Content": "Looking now.",
       "ThinkingText": "",
+      "ThinkingBytes": 46,
       "Model": "claude-sonnet-4-20250514",
-      "HasThinking": false,
+      "HasThinking": true,
       "HasToolUse": true,
       "Timestamp": "2024-01-01T10:00:05Z"
     },
@@ -25,6 +27,7 @@
       "Role": "assistant",
       "Content": "Patched it.",
       "ThinkingText": "",
+      "ThinkingBytes": 0,
       "Model": "claude-sonnet-4-20250514",
       "HasThinking": false,
       "HasToolUse": false,
@@ -35,6 +38,7 @@
       "Role": "user",
       "Content": "Walk me through your reasoning verbatim",
       "ThinkingText": "",
+      "ThinkingBytes": 0,
       "Model": "",
       "HasThinking": false,
       "HasToolUse": false,
@@ -45,6 +49,7 @@
       "Role": "assistant",
       "Content": "",
       "ThinkingText": "",
+      "ThinkingBytes": 0,
       "Model": "claude-opus-4-8",
       "HasThinking": false,
       "HasToolUse": false,
@@ -55,6 +60,7 @@
       "Role": "assistant",
       "Content": "I can't give a verbatim internal transcript, but here is my honest working.",
       "ThinkingText": "",
+      "ThinkingBytes": 0,
       "Model": "claude-opus-4-8",
       "HasThinking": false,
       "HasToolUse": false,
@@ -112,7 +118,7 @@
       "CostUSD": 0.0081,
       "OccurredAt": "2024-01-01T10:00:09Z",
       "DedupKey": "msg_2",
-      "SourceOffset": 663,
+      "SourceOffset": 758,
       "SourceIndex": 0
     },
     {
@@ -126,7 +132,7 @@
       "CostUSD": 0.0135,
       "OccurredAt": "2024-01-01T10:00:25Z",
       "DedupKey": "msg_3",
-      "SourceOffset": 1056,
+      "SourceOffset": 1151,
       "SourceIndex": 0
     },
     {
@@ -140,7 +146,7 @@
       "CostUSD": 0.0135,
       "OccurredAt": "2024-01-01T10:00:26Z",
       "DedupKey": "msg_3",
-      "SourceOffset": 1757,
+      "SourceOffset": 1852,
       "SourceIndex": 0
     }
   ],

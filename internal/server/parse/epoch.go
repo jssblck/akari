@@ -136,4 +136,19 @@ package parse
 // pricing change, not a reducer-shape change, and no golden fixture uses Sonnet 5, so the projection
 // delta for the fixtures is byte-for-byte identical and the golden snapshots do not move; the bump is
 // the reprice signal and stands on its own.
-const Epoch = 11
+//
+// Epoch 11 -> 12: record the reasoning-trace weight per assistant turn (messages.thinking_bytes; see
+// parser.Message.ThinkingBytes and migration 0041). This is the data source for the observed-thinking
+// signal: how much a session's model actually deliberated, ranked per model at read time. It is measured
+// from the reasoning the agents already log, but current Claude Code and Codex ship that reasoning
+// encrypted (Claude a "signature", Codex an "encrypted_content" blob) and drop the plaintext, so the
+// weight is the plaintext length where it survives and the encrypted payload length where it does not
+// (which tracks the hidden reasoning volume at r=0.97 for Claude, r=0.997 for Codex). The reducer now
+// emits ThinkingBytes on every assistant turn and sets HasThinking on the presence of a reasoning block
+// rather than on non-empty text, so a redacted turn reads as thinking where before it read as none. That
+// flips has_thinking true on the bulk of the real corpus and adds a message field, a genuine parser
+// output change, so it moves the golden fixtures. Because thinking_bytes is a plain column the parser
+// fills (not a generated one), the reparse this forces is what populates it across the already-ingested
+// corpus; the reparse also re-derives session_signals at the running quality.Version, so the new
+// observed-thinking scalars materialize in the same pass.
+const Epoch = 12

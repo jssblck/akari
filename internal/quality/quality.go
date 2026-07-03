@@ -46,7 +46,22 @@ import (
 // judged against the real opening prompt rather than the AGENTS.md block. That shifts stored hygiene
 // counts and grades, so the version bump makes the analytics count only rebuilt rows and the settle
 // pass re-stamp settled sessions once the reparse has re-derived their message roles.
-const Version = 3
+//
+// Version 4 added the observed-thinking scalars (informational like context health, never fed into
+// the score), riding the Epoch 11 -> 12 reparse that fills messages.thinking_bytes, the per-turn
+// reasoning-trace weight the reducer records (the reasoning plaintext length where the agent logs it,
+// else the encrypted payload length).
+//
+// Version 5 reworks the observed-thinking session scalars from a per-model quartile rank into an
+// absolute estimated-token scale (see thinking.go). The stored figures change from a byte sum plus a
+// cohort model to per-turn token summaries: thinking_tail_tokens (the hardest-decile mean, the session's
+// headline volume) and thinking_peak_tokens, each an estimated reasoning-token count (Codex's exact
+// per-turn count from message_turn_usage where present, else thinking_bytes divided by the agent's
+// bytes-per-token factor). No parse.Epoch bump rides this one: both inputs (messages.thinking_bytes and
+// message_turn_usage.reasoning_tokens) are already populated by earlier epochs, so the settle pass's
+// stale-version reconcile re-derives every row from them with no reparse. Scoring, weights, thresholds,
+// and outcome rules are unchanged.
+const Version = 5
 
 // PromptFactsVersion stamps the per-message prompt-hygiene facts ClassifyPrompt materializes on
 // each human message (see the messages.prompt_* columns and store.gatherPromptHygiene). It is

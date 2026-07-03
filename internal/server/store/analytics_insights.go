@@ -22,6 +22,7 @@ type Insights struct {
 	Hygiene     PromptHygiene
 	Churn       FileChurn
 	Context     ContextHealthStats
+	Thinking    ObservedThinkingStats
 	// Users is the per-author quality leaderboard: who ran the window's sessions and how
 	// their work graded. It shares the snapshot so its per-user session counts reconcile
 	// with the quality total the distributions read.
@@ -73,6 +74,9 @@ func (s *Store) Insights(ctx context.Context, f AnalyticsFilter) (Insights, erro
 				return err
 			}
 			if out.Context, err = s.contextHealthFrom(ctx, tx, f); err != nil {
+				return err
+			}
+			if out.Thinking, err = s.observedThinkingFrom(ctx, tx, f); err != nil {
 				return err
 			}
 			// The per-author leaderboard is skipped when the caller will not render it
