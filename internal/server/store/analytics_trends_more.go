@@ -74,13 +74,15 @@ type ChurnNode struct {
 
 // ChurnTrend is the edit-thrash read over time plus the tree the treemap drills: how much
 // re-editing happened per bucket and across how many hot files, and the per-file edit
-// counts grouped by project and folder.
+// counts grouped by project and folder. The re-edit figures count only hot files (edited more
+// than once across the window), the same set the tree renders, so the headline totals reconcile
+// with the file breakdown below them.
 type ChurnTrend struct {
-	ReEdits       []int // deduped edit calls per bucket
-	Files         []int // hot files (edited more than once) per bucket
+	ReEdits       []int // deduped edits of hot files per bucket
+	Files         []int // hot files (edited more than once in the window) per bucket
 	Tree          []ChurnNode
 	Clipped       int // hot files beyond the tree cap, noted rather than shown
-	TotalReEdits  int // deduped re-edits across the window
+	TotalReEdits  int // deduped edits of hot files across the window (sums the tree's edits, before the cap)
 	TotalHotFiles int // distinct files re-edited (more than once) across the window
 }
 
@@ -608,18 +610,22 @@ func (s *Store) toolFailureTrend(ctx context.Context, q querier, f AnalyticsFilt
 // thrash concentrates instead of fragmenting into one-off touches.
 const maxChurnTreeFiles = 150
 
-// churnTrendFrom computes the per-bucket edit volume and hot-file count, plus the
+// churnTrendFrom computes the per-bucket hot-file re-edit volume and hot-file count, plus the
 // project/folder/file tree the treemap drills. Edits dedupe replayed calls and bucket on the
-// session start; the tree keeps the busiest churned files with their project and folder.
+// session start; both the trend and the tree count only files edited more than once, so the
+// headline re-edit total reconciles with the file breakdown the tree renders.
 func (s *Store) churnTrendFrom(ctx context.Context, q querier, f AnalyticsFilter, g trendGrid) (ChurnTrend, error) {
 	out := ChurnTrend{ReEdits: make([]int, g.n()), Files: make([]int, g.n())}
 
-	// Per-bucket edit volume and hot-file count. A file is hot when it is edited more than once
+	// Per-bucket re-edit volume and hot-file count. A file is hot when it is edited more than once
 	// across the whole window (the same definition the tree and TotalHotFiles use), and it counts
 	// in each bucket it was edited in. Defining hot per bucket instead would drop a file edited
 	// once in each of two buckets: hot in the window total, invisible in every bucket. The totals
 	// CTE re-sums each file's per-bucket edits into its window total, then the final grouping
-	// counts, per bucket, the files whose window total clears the bar.
+	// counts, per bucket, the files whose window total clears the bar. Both the edit sum and the
+	// file count filter on that same hot predicate, so ReEdits/TotalReEdits count only edits of
+	// re-edited files and reconcile with the tree the treemap renders (whose files are the same
+	// HAVING count(*) > 1 set); a one-off edit to a unique file lands in neither.
 	filter, args := f.clauseFor("s.started_at")
 	rows, err := q.Query(ctx, fmt.Sprintf(
 		`WITH scoped AS (
@@ -647,7 +653,7 @@ func (s *Store) churnTrendFrom(ctx context.Context, q querier, f AnalyticsFilter
 		     FROM perfile GROUP BY project_id, churn_path
 		 )
 		 SELECT p.b,
-		        coalesce(sum(p.edits_in_bucket), 0)::bigint,
+		        coalesce(sum(p.edits_in_bucket) FILTER (WHERE t.edits_total > 1), 0)::bigint,
 		        count(*) FILTER (WHERE t.edits_total > 1)
 		   FROM perfile p JOIN totals t USING (project_id, churn_path)
 		  GROUP BY p.b`, g.sqlBucket("s.started_at"), filter), args...)

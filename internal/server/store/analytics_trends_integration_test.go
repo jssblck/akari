@@ -205,6 +205,19 @@ func TestInsightsTrends(t *testing.T) {
 	if tr.Churn.TotalHotFiles != 1 {
 		t.Errorf("churn TotalHotFiles = %d, want 1 (one distinct file edited more than once across the window)", tr.Churn.TotalHotFiles)
 	}
+	// Re-edits count only hot files, the same set the tree renders, so the headline total equals
+	// the tree's edit sum (the tree is well under its cap here). The one-off edits of the templ
+	// and main.go must not inflate it: a sum over every edited file would read six, not four.
+	var treeEdits int
+	for _, node := range tr.Churn.Tree {
+		treeEdits += node.Edits
+	}
+	if tr.Churn.TotalReEdits != 4 {
+		t.Errorf("churn TotalReEdits = %d, want 4 (only the hot file's four edits; the two one-off edits are excluded)", tr.Churn.TotalReEdits)
+	}
+	if tr.Churn.TotalReEdits != treeEdits {
+		t.Errorf("churn TotalReEdits %d != tree edit sum %d; the re-edit headline must reconcile with the rendered tree", tr.Churn.TotalReEdits, treeEdits)
+	}
 
 	// Context histogram counts both measured peaks, including the sub-8k one folded into the first
 	// bin, so its total reconciles with the two sessions given a peak.
