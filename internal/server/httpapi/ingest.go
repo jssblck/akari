@@ -31,6 +31,10 @@ type announceRequest struct {
 	GitBranch       string `json:"git_branch"`
 	Cwd             string `json:"cwd"`
 	Machine         string `json:"machine"`
+	// Terminal is set by `akari sync --finalize`: the client asserts this session is
+	// finished, so the server can grade it now instead of waiting out the idle window.
+	// Absent (older clients, an ordinary sync) it decodes false.
+	Terminal bool `json:"terminal"`
 }
 
 func (s *Server) handleAnnounce(w http.ResponseWriter, r *http.Request) {
@@ -85,6 +89,7 @@ func (s *Server) handleAnnounce(w http.ResponseWriter, r *http.Request) {
 		GitBranch:       req.GitBranch,
 		Cwd:             req.Cwd,
 		Machine:         req.Machine,
+		Terminal:        req.Terminal,
 	}, store.ProjectParams{
 		RemoteKey:   remoteKey,
 		Host:        host,
@@ -152,6 +157,29 @@ func (s *Server) handleChunk(w http.ResponseWriter, r *http.Request) {
 	// Wake any browsers watching this session so they re-fetch the body.
 	s.hub.publish(sessionID)
 	writeJSON(w, http.StatusOK, map[string]any{"stored_bytes": stored, "message_count": msgCount})
+}
+
+// handleFinalize grades a terminal session immediately, rather than leaving it for
+// the next settle tick. The client calls it at the end of an `akari sync --finalize`
+// once the whole transcript has landed: the session was announced terminal, so its
+// signals now derive with the idle checks satisfied. On an ephemeral host (CI, a
+// cloud sandbox) this lands the grade before the host disappears, instead of waiting
+// out the 30-minute abandoned-idle window (and a settle loop that may be disabled).
+//
+// It is idempotent and safe to call on any owned session: a session that is not
+// terminal simply grades under the ordinary rules (unknown until it settles), and a
+// re-call recomputes the same row. The grade is derived from the projection already
+// committed by the preceding chunks, so no request body is read.
+func (s *Server) handleFinalize(w http.ResponseWriter, r *http.Request) {
+	sessionID, _, ok := s.ownedSession(w, r)
+	if !ok {
+		return
+	}
+	if err := s.Store.RefreshSessionSignals(r.Context(), sessionID); err != nil {
+		writeError(w, http.StatusInternalServerError, "finalize session")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"finalized": true})
 }
 
 func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {

@@ -316,11 +316,17 @@ each tool body's reference from its sentinel rather than the CAS.
      "project_remote": "github.com/jssblck/akari",
      "git_branch": "main",
      "cwd": "/home/grace/projects/akari",
-     "machine": "grace-laptop"
+     "machine": "grace-laptop",
+     "terminal": false
    }
    ```
-   The server upserts the project and session rows (latest announce wins for
-   mutable metadata like `git_branch` and `cwd`) and replies with the session id,
+   `terminal` (default false) is the client's assertion that the session is
+   finished, set by `akari sync --finalize` on an ephemeral host. The server
+   persists it sticky (a later ordinary re-announce never clears it) and ORs it into
+   the two server-side idle checks that gate grading, so a terminal session is
+   gradeable immediately rather than after the 30-minute abandoned-idle window. The
+   server upserts the project and session rows (latest announce wins
+   for mutable metadata like `git_branch` and `cwd`) and replies with the session id,
    the number of raw bytes it holds, and the sha256 of those bytes:
    ```json
    {
@@ -441,6 +447,15 @@ each tool body's reference from its sentinel rather than the CAS.
    (its chunks, length, and hash), drops the derived rows, rewinds the parse
    cursor, and re-parses from zero on the next chunk. The client calls this when
    the announce divergence check fails.
+
+5. **Finalize.** `POST /api/v1/ingest/session/{id}/finalize` grades a terminal
+   session now, rather than leaving it for the settle pass. `akari sync --finalize`
+   calls it once a session's whole transcript has landed: the session was announced
+   terminal, so its signals derive with the idle checks satisfied and the grade is
+   materialized from the projection the chunks already built. On an ephemeral host
+   this lands the grade before the host disappears, instead of after the 30-minute
+   window (and a settle loop that may be disabled). It carries no body and is
+   idempotent: a non-terminal session simply grades under the ordinary rules.
 
 Because the server stores raw bytes and `stored_bytes` is the cursor, there is
 no separate client-visible sync watermark to keep coherent: the server is always

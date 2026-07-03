@@ -202,12 +202,17 @@ func gatherSignalFacts(ctx context.Context, tx pgx.Tx, sessionID int64) (signalF
 	// turns require non-empty content, tested through the stored content_length column
 	// (octet_length(content), a generated column) rather than content <> '' so the refresh
 	// reads fixed-size metadata and never the prompt body. idle is measured against the
-	// session's last activity.
+	// session's last activity, OR forced by the terminal flag: a session the client
+	// declared finished (`akari sync --finalize`) is treated as idle-long-enough now, so
+	// quality.Classify renders a verdict immediately instead of withholding it until the
+	// abandoned-idle window elapses. The ToolCallPending -> Unknown path in Classify is
+	// deliberately left to its own guard: a truncated transcript has no knowable ending
+	// whether or not the host called it terminal.
 	err = tx.QueryRow(ctx,
 		`SELECT s.user_message_count,
 		        coalesce((SELECT max(ordinal) FROM messages WHERE session_id = $1 AND role = 'assistant' AND content_length > 0), -1),
 		        coalesce((SELECT max(ordinal) FROM messages WHERE session_id = $1 AND role = 'user' AND content_length > 0), -1),
-		        (s.ended_at IS NOT NULL AND s.ended_at < now() - make_interval(mins => $2))
+		        (s.terminal OR (s.ended_at IS NOT NULL AND s.ended_at < now() - make_interval(mins => $2)))
 		   FROM sessions s WHERE s.id = $1`,
 		sessionID, abandonedIdleMinutes).Scan(
 		&f.userMessages, &f.lastAssistantOrd, &f.lastUserOrd, &f.idleLongEnough)
@@ -481,13 +486,14 @@ func refreshSignalsTx(ctx context.Context, tx pgx.Tx, sessionID int64) error {
 		return fmt.Errorf("upsert signals for session %d: %w", sessionID, err)
 	}
 	// Clear the settle-pass due flag now that the grade matches the projection, but only if
-	// the session has actually settled. A reparse runs refreshSignalsTx on whatever it
-	// rebuilds, including a still-live session whose outcome is not yet stable (abandoned
-	// versus unknown turns on the idle gap), so leaving signals_stale set there keeps the
-	// settle pass on the hook to re-grade once the session crosses the idle threshold. A
-	// settled session clears the flag and drops out of the settle index until its next
-	// projection change. now() is the transaction clock, so a settle refresh that just read
-	// idleLongEnough against it stays consistent with the clear.
+	// the session's outcome is stable, meaning idleLongEnough holds (it has settled past the
+	// idle window, or the client declared it terminal). A reparse runs refreshSignalsTx on
+	// whatever it rebuilds, including a still-live session whose outcome is not yet stable
+	// (abandoned versus unknown turns on the idle gap), so leaving signals_stale set there
+	// keeps the settle pass on the hook to re-grade once the session crosses the idle
+	// threshold. A settled or terminal session clears the flag and drops out of the settle
+	// index until its next projection change. now() is the transaction clock, so a settle
+	// refresh that just read idleLongEnough against it stays consistent with the clear.
 	if _, err := tx.Exec(ctx,
 		`UPDATE sessions SET signals_stale = $2 WHERE id = $1`, sessionID, !f.idleLongEnough); err != nil {
 		return fmt.Errorf("clear signals_stale for session %d: %w", sessionID, err)
@@ -513,12 +519,13 @@ func (s *Store) RefreshSessionSignals(ctx context.Context, sessionID int64) erro
 // (see AdvanceProjection), so a session's signals are computed once here, after it has been
 // idle past the abandoned threshold, off the ingest hot path.
 //
-// A session is due when it is settled (ended_at at least abandonedIdleMinutes in the past) AND
-// signals_stale is set. The flag is the single-table marker that replaces a cross-table due
-// predicate: applyAggregates and the reparse reset set it whenever the projection moves, and
-// refreshSignalsTx clears it only when it grades a settled session. So it captures every way a
-// stored grade can fall behind its source, without a join the settle scan would have to
-// evaluate per row:
+// A session is due when signals_stale is set AND it is either settled (ended_at at least
+// abandonedIdleMinutes in the past) or terminal (the client declared it finished via
+// `akari sync --finalize`, so it is gradeable now without waiting out the idle window). The
+// flag is the single-table marker that replaces a cross-table due predicate: applyAggregates
+// and the reparse reset set it whenever the projection moves, and refreshSignalsTx clears it
+// only when it grades a settled-or-terminal session. So it captures every way a stored grade
+// can fall behind its source, without a join the settle scan would have to evaluate per row:
 //
 //   - Never graded (a fresh ingest, or a session that predates signals): the column defaults
 //     true, so it is due from creation until the first settle grades it.
@@ -534,13 +541,20 @@ func (s *Store) RefreshSessionSignals(ctx context.Context, sessionID int64) erro
 // runs the inequality scan once per quality.Version change, gated on a parse_meta marker, so a
 // steady-state wake never pays it.
 //
-// It drains the whole due backlog in bounded batches, keyset-paging the settled-and-stale tail
-// once in (ended_at, id) order: each batch resumes strictly after the last row of the previous
-// one, and a session drops out of the settle index the moment it is graded, so the pass reads
-// only the due rows via the partial index (idx_sessions_signals_stale), O(D_due) per wake
-// rather than O(settled history). Each session is refreshed in its own transaction so one slow
-// session never holds a broad lock, cancellation stops the drain between sessions, and it
-// returns how many it refreshed.
+// It drains the whole due backlog in bounded batches through two keyset scans, each resuming
+// strictly after the last row of the previous batch, and a session drops out of its scan the
+// moment it is graded, so the pass reads only the due rows via a partial index, O(D_due) per
+// wake rather than O(settled history):
+//   - the settled-by-idle tail in (ended_at, id) order (idx_sessions_signals_stale), and
+//   - terminal stale sessions in id order (idx_sessions_terminal_stale), which are gradeable
+//     regardless of ended_at and so cannot ride the settled drain's ended_at cursor (a terminal
+//     transcript can carry a NULL ended_at yet still be gradeable, so keying the terminal drain
+//     on id keeps the due-query scope matched to gatherSignalFacts).
+//
+// A session that is both settled and terminal is graded by whichever scan reaches it first and
+// skipped by the other (its signals_stale is cleared), so it is never graded twice. Each session
+// is refreshed in its own transaction so one slow session never holds a broad lock, cancellation
+// stops the drain between sessions, and it returns how many it refreshed.
 func (s *Store) RefreshSettledSignals(ctx context.Context) (int, error) {
 	// A version bump leaves current signals_stale=false rows whose stored version is behind; mark
 	// them stale first so they drain through the same path as a projection change. This is gated
@@ -549,30 +563,67 @@ func (s *Store) RefreshSettledSignals(ctx context.Context) (int, error) {
 	if err := s.reconcileStaleVersionsIfNeeded(ctx); err != nil {
 		return 0, err
 	}
-	// The zero time sorts before every real ended_at, so the first batch starts at the
-	// oldest settled session and the cursor only moves forward from there.
+	total := 0
+	// Drain the settled-by-idle backlog first, keyset-paging the settled-and-stale tail in
+	// (ended_at, id) order. The zero time sorts before every real ended_at, so the first
+	// batch starts at the oldest settled session and the cursor only moves forward.
 	var afterEnded time.Time
 	var afterID int64
-	total := 0
 	for {
 		ids, lastEnded, lastID, err := s.dueSettledBatch(ctx, afterEnded, afterID, settledSignalBatch)
 		if err != nil {
 			return total, err
 		}
-		for _, id := range ids {
-			if err := ctx.Err(); err != nil {
-				return total, err
-			}
-			if err := s.RefreshSessionSignals(ctx, id); err != nil {
-				return total, fmt.Errorf("refresh settled session %d: %w", id, err)
-			}
-			total++
+		n, err := s.refreshBatch(ctx, ids)
+		total += n
+		if err != nil {
+			return total, err
 		}
 		if len(ids) < settledSignalBatch {
-			return total, nil // a short batch means the due backlog is drained
+			break // a short batch means the settled backlog is drained
 		}
 		afterEnded, afterID = lastEnded, lastID
 	}
+	// Then drain terminal sessions, which are gradeable regardless of ended_at and so ride
+	// their own id-keyed cursor rather than the settled drain's (ended_at, id) one (a terminal
+	// transcript can carry a NULL ended_at yet still be gradeable). A terminal session the
+	// settled drain already graded has its signals_stale cleared, so this fresh query skips it:
+	// no session is graded twice.
+	var afterTermID int64
+	for {
+		ids, lastID, err := s.dueTerminalBatch(ctx, afterTermID, settledSignalBatch)
+		if err != nil {
+			return total, err
+		}
+		n, err := s.refreshBatch(ctx, ids)
+		total += n
+		if err != nil {
+			return total, err
+		}
+		if len(ids) < settledSignalBatch {
+			return total, nil // a short batch means the terminal backlog is drained
+		}
+		afterTermID = lastID
+	}
+}
+
+// refreshBatch refreshes each session id in its own transaction, returning how many it
+// refreshed. It stops at the first error (returning the count so far) and checks cancellation
+// between sessions, so one slow or failing session neither holds a broad lock nor loses the
+// count of work already committed. It is the shared body of both settle drains (settled and
+// terminal).
+func (s *Store) refreshBatch(ctx context.Context, ids []int64) (int, error) {
+	n := 0
+	for _, id := range ids {
+		if err := ctx.Err(); err != nil {
+			return n, err
+		}
+		if err := s.RefreshSessionSignals(ctx, id); err != nil {
+			return n, fmt.Errorf("refresh settled session %d: %w", id, err)
+		}
+		n++
+	}
+	return n, nil
 }
 
 // reconcileStaleVersionsIfNeeded runs the version reconcile at most once per quality.Version
@@ -665,9 +716,11 @@ func (s *Store) reconcileStaleVersions(ctx context.Context, tx pgx.Tx) error {
 
 // dueSettledBatch returns up to limit due settled session ids strictly after the
 // (afterEnded, afterID) keyset cursor, in (ended_at, id) order, with the cursor to resume
-// from (the last row's ended_at and id). A session is due when it is settled and signals_stale
-// is set (see RefreshSettledSignals); both are columns of sessions, so the partial index
-// idx_sessions_signals_stale serves the whole predicate and the scan visits only due rows. The
+// from (the last row's ended_at and id). A session is due here when it is settled (ended_at
+// at least abandonedIdleMinutes in the past) and signals_stale is set; both are columns of
+// sessions, so the partial index idx_sessions_signals_stale serves the whole predicate and the
+// scan visits only due rows. Terminal sessions are drained separately (dueTerminalBatch), since
+// they are gradeable regardless of ended_at and so cannot ride this ended_at-keyed cursor. The
 // ids are read up front and the query's connection is released (deferred Close) before the
 // caller refreshes them, so the scan does not contend with the per-session refresh transactions.
 func (s *Store) dueSettledBatch(ctx context.Context, afterEnded time.Time, afterID int64, limit int) ([]int64, time.Time, int64, error) {
@@ -700,6 +753,49 @@ func (s *Store) dueSettledBatch(ctx context.Context, afterEnded time.Time, after
 		return nil, afterEnded, afterID, fmt.Errorf("iterate settled sessions: %w", err)
 	}
 	return ids, lastEnded, lastID, nil
+}
+
+// dueTerminalBatch returns up to limit due terminal session ids strictly after the afterID
+// keyset cursor, in id order, with the last id to resume from. A session is due here when it
+// is stale and terminal: the client declared it finished (`akari sync --finalize`), so it is
+// gradeable now regardless of its ended_at, which gatherSignalFacts already treats as
+// idle-long-enough. This is a separate drain from dueSettledBatch precisely because a terminal
+// transcript may carry no parseable timestamp (a NULL ended_at) yet still have gradeable
+// messages: the settled drain's (ended_at, id) cursor cannot order a NULL, so it would strand
+// such a session ungraded whenever the explicit finalize call was missed. Keying on id alone
+// (served by the partial idx_sessions_terminal_stale) covers every terminal stale row, NULL
+// ended_at included, so the due-query scope matches the derivation scope. The terminal set is
+// tiny and short-lived (a grade clears signals_stale), so this scan reads a handful of rows.
+// A terminal session that is also settled is graded by whichever drain reaches it first and
+// dropped from the other by the cleared flag, so it is never graded twice.
+func (s *Store) dueTerminalBatch(ctx context.Context, afterID int64, limit int) ([]int64, int64, error) {
+	rows, err := s.Pool.Query(ctx,
+		`SELECT s.id
+		   FROM sessions s
+		  WHERE s.signals_stale
+		    AND s.terminal
+		    AND s.id > $2
+		  ORDER BY s.id
+		  LIMIT $1`,
+		limit, afterID)
+	if err != nil {
+		return nil, afterID, fmt.Errorf("select terminal sessions for signal refresh: %w", err)
+	}
+	defer rows.Close()
+	var ids []int64
+	lastID := afterID
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, afterID, fmt.Errorf("scan terminal session id: %w", err)
+		}
+		ids = append(ids, id)
+		lastID = id
+	}
+	if err := rows.Err(); err != nil {
+		return nil, afterID, fmt.Errorf("iterate terminal sessions: %w", err)
+	}
+	return ids, lastID, nil
 }
 
 // settledSignalBatch bounds one due-session query and the run of per-session refreshes

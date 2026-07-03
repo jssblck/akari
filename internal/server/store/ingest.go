@@ -24,6 +24,12 @@ type AnnounceParams struct {
 	GitBranch       string
 	Cwd             string
 	Machine         string
+	// Terminal is the client's assertion that this session is finished (an
+	// `akari sync --finalize` on an ephemeral host). It is persisted sticky (OR'd
+	// onto the stored flag) and OR'd into the server-side idle checks so the session
+	// grades immediately rather than waiting out the abandoned-idle window. A normal
+	// watch-loop announce leaves it false.
+	Terminal bool
 }
 
 // ProjectParams is the project identity carried by an announce request before
@@ -209,6 +215,16 @@ func keepRemoteAttributionTx(ctx context.Context, tx pgx.Tx, p AnnounceParams) (
 	switch {
 	case err == nil && existingKind == "remote":
 		r.SessionID = existingID
+		// This guard bypasses announceIntoProjectTx, so persist the terminal flag here too:
+		// a --finalize sync of a session whose checkout lost its remote must still mark it
+		// terminal so the finalize refresh (and the settle pass) grade it immediately. It is
+		// sticky, set only when the client asserts terminal, never cleared.
+		if p.Terminal {
+			if _, err := tx.Exec(ctx,
+				`UPDATE sessions SET terminal = true WHERE id = $1`, existingID); err != nil {
+				return AnnounceResult{}, false, fmt.Errorf("mark kept remote session %d terminal: %w", existingID, err)
+			}
+		}
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO session_raw (session_id) VALUES ($1) ON CONFLICT DO NOTHING`, existingID); err != nil {
 			return AnnounceResult{}, false, err
@@ -237,17 +253,21 @@ func announceIntoProjectTx(ctx context.Context, tx pgx.Tx, p AnnounceParams) (An
 		p.UserID, p.Agent, p.SourceSessionID).Scan(&priorCwd); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return AnnounceResult{}, fmt.Errorf("read prior cwd for announce: %w", err)
 	}
+	// terminal is sticky: OR the incoming value onto the stored one so a --finalize
+	// announce sets it and a later ordinary re-announce (watch loop) of the same
+	// session never clears it. A once-terminal session stays terminal.
 	if err := tx.QueryRow(ctx,
-		`INSERT INTO sessions (user_id, project_id, agent, source_session_id, machine, cwd, git_branch)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)
+		`INSERT INTO sessions (user_id, project_id, agent, source_session_id, machine, cwd, git_branch, terminal)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		 ON CONFLICT (user_id, agent, source_session_id) DO UPDATE
 		   SET project_id = EXCLUDED.project_id,
 		       machine    = EXCLUDED.machine,
 		       cwd        = EXCLUDED.cwd,
 		       git_branch = EXCLUDED.git_branch,
+		       terminal   = sessions.terminal OR EXCLUDED.terminal,
 		       updated_at = now()
 		 RETURNING id`,
-		p.UserID, p.ProjectID, p.Agent, p.SourceSessionID, p.Machine, p.Cwd, p.GitBranch).Scan(&r.SessionID); err != nil {
+		p.UserID, p.ProjectID, p.Agent, p.SourceSessionID, p.Machine, p.Cwd, p.GitBranch, p.Terminal).Scan(&r.SessionID); err != nil {
 		return AnnounceResult{}, fmt.Errorf("upsert session for announce: %w", err)
 	}
 	// file_rel_path is a projection of the session's cwd and each tool call's file_path (derived at

@@ -84,6 +84,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/ingest/session", s.requireIngest(s.handleAnnounce))
 	mux.HandleFunc("POST /api/v1/ingest/session/{id}/chunk", s.requireIngest(s.handleChunk))
 	mux.HandleFunc("POST /api/v1/ingest/session/{id}/reset", s.requireIngest(s.handleReset))
+	// Grade a terminal session now (end of `akari sync --finalize`) rather than on the
+	// next settle tick, so an ephemeral host sees the grade before it is torn down.
+	mux.HandleFunc("POST /api/v1/ingest/session/{id}/finalize", s.requireIngest(s.handleFinalize))
 
 	// Client-side CAS upload: the client lifts tool bodies out of the transcript
 	// and uploads them here before sending the transcript that references them.

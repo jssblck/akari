@@ -91,6 +91,96 @@ func TestRefreshSettledSignalsMaterializesSettledOnly(t *testing.T) {
 	}
 }
 
+// TestRefreshSettledSignalsGradesTerminalImmediately pins the server-side half of
+// `akari sync --finalize`: a session the client declared terminal is due and grades on the
+// next settle pass even though it ended only minutes ago, nowhere near the 30-minute
+// abandoned-idle window. The same recent session without the flag stays ungraded (the fresh
+// case in TestRefreshSettledSignalsMaterializesSettledOnly), so this isolates the terminal
+// shortcut in both dueSettledBatch (it is selected) and gatherSignalFacts (idleLongEnough is
+// forced, so Classify renders a verdict). The user-last fixture reads abandoned once idle
+// long enough; terminal makes that verdict land now.
+func TestRefreshSettledSignalsGradesTerminalImmediately(t *testing.T) {
+	t.Parallel()
+	st, ctx, uid, pid := signalsEnv(t)
+	sid := seedSettledSession(t, st, ctx, uid, pid, "sess-terminal", 5) // ended 5 min ago: not settled
+	terminal := seedSettledSession(t, st, ctx, uid, pid, "sess-terminal-flagged", 5)
+	if _, err := st.Pool.Exec(ctx, "UPDATE sessions SET terminal = true WHERE id = $1", terminal); err != nil {
+		t.Fatalf("mark terminal: %v", err)
+	}
+
+	n, err := st.RefreshSettledSignals(ctx)
+	if err != nil {
+		t.Fatalf("refresh settled: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("refreshed %d, want 1 (only the terminal session, despite both ending recently)", n)
+	}
+	if got := signalsRowCount(t, st, ctx, sid); got != 0 {
+		t.Errorf("non-terminal recent session graded (row count %d), want 0 until it settles", got)
+	}
+	sig, err := st.SessionSignalsByID(ctx, terminal)
+	if err != nil {
+		t.Fatalf("read terminal signals: %v", err)
+	}
+	if sig.Outcome != string(quality.OutcomeAbandoned) {
+		t.Errorf("terminal outcome = %s, want abandoned (graded now, not held pre-settle)", sig.Outcome)
+	}
+	// The grade cleared signals_stale, so a terminal session drops out of the due set the
+	// same way a settled one does: a second pass finds nothing due.
+	if n2, err := st.RefreshSettledSignals(ctx); err != nil {
+		t.Fatalf("second pass: %v", err)
+	} else if n2 != 0 {
+		t.Errorf("second pass refreshed %d, want 0 (the terminal grade is stable)", n2)
+	}
+}
+
+// TestRefreshSettledSignalsGradesTerminalWithNullEndedAt pins the scope match between the
+// terminal derivation and the terminal drain. gatherSignalFacts treats any terminal session as
+// idle-long-enough, so a terminal transcript that parsed messages but carries no timestamp (a
+// NULL ended_at) is gradeable. The settled-by-idle drain orders by ended_at and so can never
+// select a NULL-ended row, which would strand such a session ungraded whenever the explicit
+// finalize call was missed; the terminal drain (keyed on id) must grade it. Without the separate
+// drain this session would never materialize a signal from the settle pass.
+func TestRefreshSettledSignalsGradesTerminalWithNullEndedAt(t *testing.T) {
+	t.Parallel()
+	st, ctx, uid, pid := signalsEnv(t)
+	sid := seedSession(t, st, uid, pid, "sess-terminal-null")
+	if err := st.ApplyProjectionDelta(ctx, sid, store.ProjectionDelta{
+		Messages: []store.MessageDelta{
+			{Ordinal: 0, Role: "user", Content: "first ask"},
+			{Ordinal: 1, Role: "assistant", Content: "here you go"},
+		},
+	}); err != nil {
+		t.Fatalf("apply delta: %v", err)
+	}
+	// Terminal, one human turn, and no ended_at at all: the settled drain cannot see it.
+	if _, err := st.Pool.Exec(ctx,
+		"UPDATE sessions SET user_message_count = 1, terminal = true, ended_at = NULL WHERE id = $1", sid); err != nil {
+		t.Fatalf("mark terminal with NULL ended_at: %v", err)
+	}
+
+	n, err := st.RefreshSettledSignals(ctx)
+	if err != nil {
+		t.Fatalf("refresh settled: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("refreshed %d, want 1 (the terminal drain must grade a NULL-ended terminal session)", n)
+	}
+	sig, err := st.SessionSignalsByID(ctx, sid)
+	if err != nil {
+		t.Fatalf("read signals: %v", err)
+	}
+	if sig.Outcome != string(quality.OutcomeCompleted) {
+		t.Errorf("outcome = %s, want completed (assistant had the last substantive word)", sig.Outcome)
+	}
+	// Stable: the grade cleared signals_stale, so a second pass finds nothing due.
+	if n2, err := st.RefreshSettledSignals(ctx); err != nil {
+		t.Fatalf("second pass: %v", err)
+	} else if n2 != 0 {
+		t.Errorf("second pass refreshed %d, want 0 (the terminal grade is stable)", n2)
+	}
+}
+
 // TestRefreshSettledSignalsReStampsStaleVersion confirms the version reconcile: a settled
 // session carrying a clean (signals_stale=false) row at a superseded signals_version is marked
 // stale by reconcileStaleVersions and re-stamped, even though its projection never changed so
