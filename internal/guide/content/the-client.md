@@ -24,7 +24,7 @@ finishes) and winds `watch` down gracefully; a second exits at once.
 ### login
 
 ```sh
-akari login --server https://akari.example.com --token <token>
+akari login --server https://akari.example.com --token <token> [--machine <name>]
 ```
 
 `login` writes the server URL and API token to the config file and exits. The
@@ -33,6 +33,11 @@ token is minted out of band on the server (its account page) and passed in;
 or a **full**-scope token if the same credential also drives the web API. It
 preserves any `extra_roots` and `excludes` already in the config, so re-running it
 to rotate a token or move servers does not wipe your discovery settings.
+
+`--machine <name>` sets the logical machine name this client reports for every
+session (see the `machine` config key below). Omit it to keep the OS hostname, or
+to leave an existing name untouched on a re-run; pass `--machine ""` to clear it
+back to the hostname.
 
 ### sync
 
@@ -124,6 +129,9 @@ Pass `--config <path>` to any command to use a different file. A full example:
 server_url = "https://akari.example.com"
 token      = "akari_ingest_..."
 
+# Report every session under one stable machine name instead of the hostname.
+machine = "sandbox-pool"
+
 # Discover sessions from extra locations, beyond each agent's standard root.
 [[extra_roots]]
 agent = "claude"
@@ -139,6 +147,12 @@ The keys:
 - **`token`** (required): the API token, used as a bearer credential. Ingest scope
   is the right choice for a push-only client. The file is written with owner-only
   permissions, since it holds a credential.
+- **`machine`** (optional): the logical machine name reported for every session
+  this client uploads. Empty falls back to the OS hostname. Set it to give a fleet
+  of ephemeral or containerized hosts (CI jobs, autoscaled workers, throwaway dev
+  containers) one stable identity such as `ci` or `sandbox-pool`, so the machine
+  filter does not fill with thousands of single-use hostnames. `AKARI_MACHINE`
+  overrides it per run.
 - **`extra_roots`** (optional): additional discovery roots, each an
   `{ agent, path }` pair where `agent` is `claude`, `codex`, or `pi`. Use these
   when your sessions live somewhere other than the standard location.
@@ -147,8 +161,30 @@ The keys:
   `**/scratch/**` ignores any path with a `scratch` segment, `*.private.jsonl`
   excludes by suffix. Empty discovers everything.
 
-The client defines no environment variables of its own, but it honors each
-agent's own root override (see below).
+## Machine identity
+
+Every session records the **machine** it came from, a dimension you can filter the
+feed and each project by. By default that is the OS hostname. On a workstation
+that is exactly what you want; on ephemeral or containerized hosts it is not,
+because each run gets a distinct one-off hostname and the machine filter fills with
+thousands of single-use values that mean nothing.
+
+Give such a fleet one stable logical machine instead. The name is resolved from
+three sources, highest priority first:
+
+1. the **`AKARI_MACHINE`** environment variable, a per-run override that needs no
+   config file (the easy path for a container that sets env far more readily than
+   it writes config);
+2. the **`machine`** config key, set at `akari login --machine <name>` or by hand,
+   for a stable per-host or per-fleet name;
+3. the **OS hostname**, the default when neither is set.
+
+The sessions still aggregate by project, user, and agent exactly as before; only
+the machine label changes, so an ephemeral fleet reporting as `ci` shows up as one
+machine rather than polluting the rail.
+
+`AKARI_MACHINE` is the only environment variable akari itself defines. The client
+also honors each agent's own root override for discovery (see below).
 
 ## Discovery
 

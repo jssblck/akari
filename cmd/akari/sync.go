@@ -108,7 +108,7 @@ func runSync(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("locate home directory: %w", err)
 	}
-	machine, _ := os.Hostname()
+	machine := config.ResolveMachine(cfg, os.Getenv, os.Hostname)
 
 	files, err := discover.Discover(discover.Roots(cfg, os.Getenv, home), discover.NewExcluder(cfg.Excludes))
 	if err != nil {

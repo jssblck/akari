@@ -46,7 +46,7 @@ func runWatch(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	machine, _ := os.Hostname()
+	machine := config.ResolveMachine(cfg, os.Getenv, os.Hostname)
 
 	roots := discover.Roots(cfg, os.Getenv, home)
 	resolver := resolve.New()
