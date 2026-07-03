@@ -92,245 +92,214 @@ func sampleInsights() store.Insights {
 // f64 boxes a float for the nullable AvgScore fixtures.
 func f64(v float64) *float64 { return &v }
 
-// The Insights page renders the three distribution panels with their bars, the unscored
-// grade bucket labeled rather than blank, the in-window session count, and the
-// window selector wired to swap the section.
-func TestInsightsPageRendersDistributions(t *testing.T) {
+// sampleTrends is a small two-bucket trend grid touching every series the insights data
+// serializer reads, so a page rendered with it draws the full instrument set and the
+// embedded AK_DATA payload carries every field. The numbers are illustrative but internally
+// consistent (shares sum sensibly, worst tools are a subset of the reliability list).
+func sampleTrends() *store.Trends {
+	rhythm := make([][]int, 7)
+	for d := range rhythm {
+		rhythm[d] = make([]int, 24)
+	}
+	rhythm[2][14] = 42 // a Wednesday-afternoon peak, so punchcardPeak has something to name
+
+	return &store.Trends{
+		Unit:         "week",
+		BucketStarts: []time.Time{time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC), time.Date(2026, 6, 8, 0, 0, 0, 0, time.UTC)},
+		Labels:       []string{"Jun 1", "Jun 8"},
+		FleetMix: store.FleetMix{Models: []store.ModelSeries{
+			{Model: "claude-sonnet-5", Share: []float64{60, 55}, First: 0},
+			{Model: "claude-opus-4-8", Share: []float64{40, 45}, First: 1},
+		}},
+		Gallery: store.Gallery{
+			Rows: []store.GallerySession{
+				{DurationS: 600, CostUSD: 1.2, Archetype: "quick", Grade: "A", Outcome: "completed"},
+				{DurationS: 1800, CostUSD: 3.5, Archetype: "standard", Grade: "B", Outcome: "completed"},
+				{DurationS: 3600, CostUSD: 8.4, Archetype: "deep", Grade: "C", Outcome: "abandoned"},
+				{DurationS: 300, CostUSD: 0.4, Archetype: "quick", Grade: "A", Outcome: "completed"},
+				{DurationS: 7200, CostUSD: 12.9, Archetype: "marathon", Grade: "B", Outcome: "completed"},
+				{DurationS: 120, CostUSD: 0.1, Archetype: "automation", Grade: "", Outcome: "completed"},
+				{DurationS: 2400, CostUSD: 5.1, Archetype: "deep", Grade: "A", Outcome: "completed"},
+				{DurationS: 900, CostUSD: 1.9, Archetype: "standard", Grade: "B", Outcome: "abandoned"},
+			},
+			Total: 8,
+			// Full-cohort summaries (store-computed in SQL): median of the eight durations is
+			// 1350s and of the costs 2.7; the priciest and longest are the same marathon session
+			// at $12.9 / 7200s; the six completed costs median to 2.35.
+			MedianDurationS: 1350, MedianCostUSD: 2.7, MedianCompletedCostUSD: 2.35,
+			PriciestDurationS: 7200, PriciestCostUSD: 12.9,
+			LongestDurationS: 7200, LongestCostUSD: 12.9,
+			CostIncomplete: true, // maps to the gallery's lower-bound cost markers
+		},
+		Velocity: store.VelocityTrends{
+			ActiveHours: []float64{5, 6}, WallHours: []float64{8, 9},
+			ResponseP50: []float64{12, 14}, ResponseP90: []float64{40, 44}, ResponseP99: []float64{90, 88},
+			MsgsPerMin: []float64{3.1, 3.4}, ToolsPerMin: []float64{1.8, 2.0},
+		},
+		Tools: store.ToolTrends{
+			Reliability: []store.ToolPoint{
+				{Name: "Read", Calls: 100, Failures: 0, Sessions: 20, Category: "read"},
+				{Name: "Edit", Calls: 60, Failures: 6, Sessions: 15, Category: "edit"},
+				{Name: "Bash", Calls: 80, Failures: 8, Sessions: 18, Category: "bash"},
+			},
+			MixOrder: []string{"read", "edit", "bash", "other"},
+			Mix: []map[string]float64{
+				{"read": 45, "edit": 30, "bash": 20, "other": 5},
+				{"read": 48, "edit": 28, "bash": 19, "other": 5},
+			},
+			FailFleet: []float64{2.1, 1.8},
+			FailWorst: []store.ToolFailSeries{
+				{Name: "Bash", Rate: []float64{5.0, 4.2}},
+				{Name: "Edit", Rate: []float64{3.1, 2.8}},
+			},
+		},
+		Churn: store.ChurnTrend{
+			ReEdits: []int{12, 9}, Files: []int{5, 4},
+			Tree: []store.ChurnNode{
+				{Project: "akari", Folder: "internal/server/store", Path: "internal/server/store/analytics.go", Edits: 6, Sessions: 2},
+				{Project: "akari", Folder: "internal/server/web", Path: "internal/server/web/insights.templ", Edits: 3, Sessions: 1},
+			},
+			// Three hot files in the window, two drawn in the tree, so one is clipped: the payload
+			// carries the clipped count and the panel notes the tail.
+			TotalReEdits: 21, TotalHotFiles: 3, Clipped: 1,
+		},
+		Signals: store.SignalTrends{
+			GradeShare: []map[string]float64{
+				{"A": 40, "B": 30, "C": 20, "D": 5, "F": 0, "": 5},
+				{"A": 42, "B": 31, "C": 18, "D": 4, "F": 0, "": 5},
+			},
+			GPA: []float64{3.1, 3.2},
+			// Raw outcome counts behind the rates: bucket 0 is 10 completed, 2 abandoned, 3 other of
+			// 15; bucket 1 is 13, 1, 4 of 18. The bars partition on these, the lines read the rates.
+			CompletedRate: []float64{66.7, 72.2}, AbandonedRate: []float64{13.3, 5.6}, OutcomeTotal: []int{15, 18},
+			CompletedCount: []int{10, 13}, AbandonedCount: []int{2, 1},
+			HygieneTerse: []float64{8, 7}, HygieneRepeated: []float64{3, 2},
+			HygieneNoCode: []float64{5, 4}, HygieneUnstructured: []float64{6, 5},
+			ContextResets: []int{2, 1},
+			ContextHistogram: []store.ContextBucket{
+				{Lo: 8000, Hi: 16000, Count: 3},
+				{Lo: 16000, Hi: 32000, Count: 5},
+			},
+			ContextMarkers: []store.ContextMarker{{Tokens: 128000, Label: "p50 128.0k"}},
+		},
+		Economics: store.Economics{
+			CostCompleted: []float64{100, 120}, CostAbandoned: []float64{20, 15}, CostOther: []float64{0, 0},
+			CacheSavings: []float64{50, 60}, CacheHitRate: []float64{72, 74}, CacheMeasured: []bool{true, true},
+			TotalSpend: 255, TotalAbandoned: 35, AbandonedSharePct: 13.7,
+			TotalCacheSavings: 110, CacheHitRateLatest: 74,
+			// Set so the serializer maps the lower-bound and partial markers through to the JSON.
+			CostIncomplete: true, CacheSavingsIncomplete: true,
+		},
+		Subagents: store.SubagentStats{
+			DelegateShare: []float64{20, 25}, CostShare: []float64{15, 18},
+			FanoutOrder: []string{"one", "twoThree", "fourSeven", "eightPlus"},
+			FanoutRows: []map[string]int{
+				{"one": 3, "twoThree": 2, "fourSeven": 1, "eightPlus": 0},
+				{"one": 4, "twoThree": 2, "fourSeven": 1, "eightPlus": 1},
+			},
+			SessionsThatDelegatePct: 22.5, SubagentSessionsInWindow: 14,
+			CostThroughSubagentsPct: 16.4, DeepestTree: 3,
+			CostShareIncomplete: true, // maps to the "partial" marker on the cost-share figure
+		},
+		Rhythm: store.RhythmGrid{Cells: rhythm},
+	}
+}
+
+// sampleInsightsWithTrends is the fleet insights fixture: the distributions of
+// sampleInsights plus a populated trend grid, so InsightsPage renders the full instrument
+// scaffolding and its embedded data payload rather than the empty state.
+func sampleInsightsWithTrends() store.Insights {
+	ins := sampleInsights()
+	ins.Trends = sampleTrends()
+	return ins
+}
+
+// The Insights page renders the seven instrument sections' scaffolding (headings, tab
+// strips, chart mount points), embeds the AK_DATA payload the chart engine reads, and wires
+// the window selector to swap the whole section. The charts themselves draw client-side, so
+// the server-rendered page is the static frame plus the data script.
+func TestInsightsPageRendersInstruments(t *testing.T) {
 	p := Page{Title: "Insights", LoggedIn: true, Active: "insights", Username: "ada"}
 	ranges := RangeOptions("/insights", nil, "30d")
-	html := renderComponent(t, InsightsPage(p, sampleInsights(), "30d", ranges))
+	html := renderComponent(t, InsightsPage(p, sampleInsightsWithTrends(), "30d", ranges))
 
 	for _, want := range []string{
-		`id="insights"`,                          // the swap target
-		`>Concurrency<`,                          // the headline band
-		`>Grades<`, `>Outcomes<`, `>Archetypes<`, // the three distribution panels
-		`title="A to F; unscored means the session was never graded"`, // the Grades definition moved to a tooltip
-		`15 sessions in window`,              // the summary count
-		`>4</div>`,                           // the fleet peak figure
-		`>peak at once<`,                     // its label
-		`ada (3)`,                            // the busiest user and their peak
-		`>1.7</div>`,                         // average concurrent, one decimal
-		`>Velocity<`,                         // the other headline band
-		`>25s</div>`,                         // response p50, formatted seconds
-		`>response p50<`,                     // its label
-		`>1m 30s</div>`,                      // response p90, formatted minutes and seconds
-		`>4.2</div>`,                         // messages per active minute, one decimal
-		`>msgs / active min<`,                // its label
-		`>Tools<`,                            // the tools band
-		`>120</div>`,                         // total tool calls
-		`>tool calls<`,                       // its label
-		`>10%</div>`,                         // fleet error rate (12/120)
-		`>tools / turn<`,                     // the tools-per-turn label
-		`>Read<`,                             // the busiest tool in the mix
-		`class="tool-err"`,                   // a failing tool carries its error rate
-		`>40%<`,                              // Bash's error rate suffix (8/20)
-		`+2 more tools not shown`,            // the clipped-tail note
-		`>Prompt hygiene<`,                   // the input-quality band
-		`>terse prompts<`,                    // a hygiene figure label
-		`>repeated prompts<`,                 // another hygiene figure label
-		`>no code pointer<`,                  // the no-code-context figure label
-		`>unstructured start<`,               // the per-session opener figure label
-		`20 of 200`,                          // the terse-prompt sub-count (unique to hygiene)
-		`3 of 15`,                            // the unstructured-start sub-count (over sessions, not prompts)
-		`>Context health<`,                   // the context-load band
-		`>median peak<`,                      // a context figure label
-		`>128.0k</div>`,                      // the median peak, compact tokens
-		`>p90 peak<`,                         // the p90 figure label
-		`>1.2M</div>`,                        // the heaviest peak, compact tokens
-		`>shed context<`,                     // the reset-rate figure label
-		`6 of 15 sessions`,                   // the shed-context sub-count (sessions that reset)
-		`>context resets<`,                   // the total-resets figure label
-		`Load, not spend.`,                   // the peak definition now lives on the figure label's title tooltip
-		`>File churn<`,                       // the churn panel
-		`internal/server/store/analytics.go`, // the churned path (full path in the label)
-		`6 edits`,                            // its edit count
-		`2 sessions`,                         // spread across two sessions
-		`+1 more churned file not shown`,     // the churn clip note
-		`>Unscored<`,                         // the empty grade key reads as a word, not a blank
-		`>Completed<`,                        // outcome label, title-cased
-		`>Quick<`,                            // archetype label, title-cased
-		`class="bar-fill"`,                   // reuses the breakdown bar markup
-		`data-color="` + barSage + `"`,       // a graded bar carries its tone
-		`73% graded`,                         // the Grades panel coverage note (11 of 15)
-		`class="bar-link"`,                   // a distribution bar renders as a drill-down link (the whole-row link)
-		// The drill-downs carry the active window (range=30d) and empty=1 so a bar's count and the
-		// feed it opens describe the same trailing window and the same empty-session policy the panel
-		// counted under, rather than the bar counting 30 days while the link opens the all-time feed.
-		`href="/sessions?empty=1&amp;outcome=completed&amp;range=30d"`, // the outcome bar drills into the windowed feed
-		`href="/sessions?empty=1&amp;grade=A&amp;range=30d"`,           // a grade bar drills into its letter, windowed
-		`href="/sessions?empty=1&amp;grade=unscored&amp;range=30d"`,    // the unscored bucket uses the sentinel
-		`>People<`, // the per-user quality panel
-		`href="/sessions?empty=1&amp;range=30d&amp;user=ada"`, // a username drills into that author's windowed sessions
-		`class="mix-bar"`, // the per-row stacked outcome bar
-		`6 completed, 1 abandoned, 1 errored, 1 unknown`, // the mix hover title spells out the counts
-		`7 of 9`,                      // ada's graded coverage
-		`>82.5<`,                      // ada's average score, one decimal
-		`+1 more user not shown`,      // the clipped-tail note
-		`hx-get="/insights?range=7d"`, // the window selector refetches this page
-		`hx-select="#insights"`,
+		`id="insights"`, // the swap target
+		// the seven instrument headings
+		`>Fleet mix<`, `>Session gallery<`, `>Velocity<`, `>Tools<`, `>Health<`, `>Economics<`, `>Subagents<`,
+		// representative chart mount points the engine looks up by id
+		`id="chart-fleetmix-full"`, `id="chart-gallery-full"`, `id="chart-punchcard"`,
+		`id="chart-reliability"`, `id="treemap"`, `id="chart-grades"`, `id="chart-cache-full"`, `id="chart-fanout-full"`,
+		// the cap-note hosts the engine fills when the scatter is a sample or the tree clipped hot files
+		`id="gallery-sample"`, `id="churn-clip"`,
+		// the four tab strips
+		`id="velocity-tabs"`, `id="tools-tabs"`, `id="health-tabs"`, `id="economics-tabs"`,
+		// a jump-to-tab mini multiple and the tooltip host
+		`data-jump="velocity-tabs:vtab-activehours"`, `id="tooltip"`,
+		// the embedded data payload and a couple of its keys, proving the serializer ran
+		`id="insights-data"`, `"nBuckets":2`, `"bucketLabels":["Jun 1","Jun 8"]`, `"deepestTree":3`,
+		// the live window selector: the active window is marked, the rest refetch and swap
+		`aria-current="true"`, `hx-get="/insights?range=7d"`, `hx-select="#insights"`,
+		// the session count in the header
+		`15 session`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("insights page missing %q", want)
 		}
 	}
+
+	// The old distribution-panel bars belong to the project quality band now, not the fleet
+	// page, so the fleet page renders none of that server-side bar markup.
+	for _, absent := range []string{`class="ins-grid"`, `class="mix-bar"`, `class="bar-fill"`} {
+		if strings.Contains(html, absent) {
+			t.Errorf("insights page should not render %q (that markup moved to the quality band)", absent)
+		}
+	}
 }
 
-// The People panel hides on a single-author instance (its one row would only restate the
-// fleet distributions under a name) and dashes an author whose average score is unmeasured.
-func TestInsightsPagePeoplePanel(t *testing.T) {
+// The range control drives the live window: every button refetches /insights for its window
+// and swaps the whole #insights section (carrying the fresh data script), and only the
+// active window is marked current.
+func TestInsightsPageRangeControlIsLive(t *testing.T) {
 	p := Page{Title: "Insights", LoggedIn: true, Active: "insights", Username: "ada"}
 	ranges := RangeOptions("/insights", nil, "30d")
+	html := renderComponent(t, InsightsPage(p, sampleInsightsWithTrends(), "30d", ranges))
 
-	// Two authors: the panel renders, and Grace's nil AvgScore dashes rather than reading 0.
-	two := renderComponent(t, InsightsPage(p, sampleInsights(), "30d", ranges))
-	if !strings.Contains(two, `>People<`) {
-		t.Error("people panel should render for two authors")
+	for _, want := range []string{
+		`hx-get="/insights?range=7d"`,
+		`hx-get="/insights?range=90d"`,
+		`hx-target="#insights"`,
+		`hx-swap="outerHTML"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("range control missing %q", want)
+		}
 	}
-	// Grace's Avg score cell is a dash (nil AvgScore), in the last column of her row. Her link
-	// carries the active window (range=30d) and empty=1 so it opens her windowed sessions under
-	// the same empty-session policy the panel counted them under.
-	if !strings.Contains(two, `href="/sessions?empty=1&amp;range=30d&amp;user=grace"`) {
-		t.Error("grace's row should link to her windowed sessions")
-	}
-
-	// One author: the panel hides entirely.
-	ins := sampleInsights()
-	ins.Users = store.UserQualityStats{Users: []store.UserQuality{
-		{Username: "ada", Sessions: 9, Graded: 7, Completed: 9, AvgScore: f64(82.5)},
-	}}
-	one := renderComponent(t, InsightsPage(p, ins, "30d", ranges))
-	if strings.Contains(one, `>People<`) {
-		t.Error("people panel should hide for a single author")
-	}
-	if strings.Contains(one, `id="ins-people"`) {
-		t.Error("people panel wrapper should not render for a single author")
+	// Exactly one button is marked current (the active 30d window).
+	if got := strings.Count(html, `aria-current="true"`); got != 1 {
+		t.Errorf("expected exactly one current range button, got %d", got)
 	}
 }
 
-// When the window has graded sessions but none carry a measured start and end, the
-// distribution grid still renders while the concurrency band falls back to a note
-// instead of showing a real-looking row of zeros.
-func TestInsightsPageConcurrencyNoSpans(t *testing.T) {
-	p := Page{Title: "Insights", LoggedIn: true, Active: "insights", Username: "ada"}
-	ranges := RangeOptions("/insights", nil, "30d")
-	ins := sampleInsights()
-	ins.Concurrency = store.ConcurrencyStats{} // no measured spans
-
-	html := renderComponent(t, InsightsPage(p, ins, "30d", ranges))
-
-	if !strings.Contains(html, "No sessions with a measured start and end in this window.") {
-		t.Error("concurrency band should note the missing spans")
-	}
-	if strings.Contains(html, `class="conc-figs"`) {
-		t.Error("concurrency band should not render figures when there are no spans")
-	}
-	if !strings.Contains(html, `>Grades<`) {
-		t.Error("the distribution grid should still render alongside the concurrency note")
-	}
-}
-
-// When the window has sessions but none carry a timed turn, the velocity band falls back
-// to a note instead of a row of dashes and zeros that would read as a real measurement.
-func TestInsightsPageVelocityNoTurns(t *testing.T) {
-	p := Page{Title: "Insights", LoggedIn: true, Active: "insights", Username: "ada"}
-	ranges := RangeOptions("/insights", nil, "30d")
-	ins := sampleInsights()
-	ins.Velocity = store.VelocityStats{} // no measured turns
-
-	html := renderComponent(t, InsightsPage(p, ins, "30d", ranges))
-
-	if !strings.Contains(html, "No timed turns in this window.") {
-		t.Error("velocity band should note the missing turns")
-	}
-	if !strings.Contains(html, `>Velocity<`) {
-		t.Error("the velocity band heading should still render")
-	}
-}
-
-// When the window has sessions but none ran a tool, the tools band shows a note instead of
-// an empty bar list, while the rest of the page renders as usual.
-func TestInsightsPageToolsEmpty(t *testing.T) {
-	p := Page{Title: "Insights", LoggedIn: true, Active: "insights", Username: "ada"}
-	ranges := RangeOptions("/insights", nil, "30d")
-	ins := sampleInsights()
-	ins.Tools = store.ToolStats{} // no tool calls
-
-	html := renderComponent(t, InsightsPage(p, ins, "30d", ranges))
-
-	if !strings.Contains(html, "No tool calls in this window.") {
-		t.Error("tools band should note the missing tool calls")
-	}
-	if !strings.Contains(html, `>Tools<`) {
-		t.Error("the tools band heading should still render")
-	}
-}
-
-// When the window edited no file more than once, the churn panel shows a note instead of
-// an empty bar list.
-func TestInsightsPageChurnEmpty(t *testing.T) {
-	p := Page{Title: "Insights", LoggedIn: true, Active: "insights", Username: "ada"}
-	ranges := RangeOptions("/insights", nil, "30d")
-	ins := sampleInsights()
-	ins.Churn = store.FileChurn{} // nothing edited twice
-
-	html := renderComponent(t, InsightsPage(p, ins, "30d", ranges))
-
-	if !strings.Contains(html, "No files were edited more than once in this window.") {
-		t.Error("churn panel should note the absence of repeated edits")
-	}
-	if !strings.Contains(html, `>File churn<`) {
-		t.Error("the churn panel heading should still render")
-	}
-}
-
-// When the window has sessions but none carry hygiene data, the prompt-hygiene band shows
-// a note instead of a row of zero-over-zero rates, while the rest of the page renders.
-func TestInsightsPageHygieneEmpty(t *testing.T) {
-	p := Page{Title: "Insights", LoggedIn: true, Active: "insights", Username: "ada"}
-	ranges := RangeOptions("/insights", nil, "30d")
-	ins := sampleInsights()
-	ins.Hygiene = store.PromptHygiene{} // no signalled prompts
-
-	html := renderComponent(t, InsightsPage(p, ins, "30d", ranges))
-
-	if !strings.Contains(html, "No prompts in this window.") {
-		t.Error("hygiene band should note the absence of prompts")
-	}
-	if !strings.Contains(html, `>Prompt hygiene<`) {
-		t.Error("the hygiene band heading should still render")
-	}
-}
-
-// When the window has sessions but none carry measured context, the context-health band
-// shows a note instead of a row of zeroes, while the rest of the page renders.
-func TestInsightsPageContextEmpty(t *testing.T) {
-	p := Page{Title: "Insights", LoggedIn: true, Active: "insights", Username: "ada"}
-	ranges := RangeOptions("/insights", nil, "30d")
-	ins := sampleInsights()
-	ins.Context = store.ContextHealthStats{} // no measured context
-
-	html := renderComponent(t, InsightsPage(p, ins, "30d", ranges))
-
-	if !strings.Contains(html, "No sessions with measured context in this window.") {
-		t.Error("context band should note the missing measurements")
-	}
-	if !strings.Contains(html, `>Context health<`) {
-		t.Error("the context band heading should still render")
-	}
-}
-
-// With no sessions in the window the page shows an empty state instead of a row of
-// zero-height bars.
+// With no trend grid the page shows the empty state and embeds no data script or instrument
+// scaffolding, so the chart engine finds nothing to draw and stays a quiet no-op.
 func TestInsightsPageEmptyState(t *testing.T) {
 	p := Page{Title: "Insights", LoggedIn: true, Active: "insights", Username: "ada"}
 	ranges := RangeOptions("/insights", nil, "7d")
-	empty := store.Insights{} // Quality.Sessions == 0
+	empty := store.Insights{} // Trends nil
 	html := renderComponent(t, InsightsPage(p, empty, "7d", ranges))
 
 	if !strings.Contains(html, "No sessions in this window yet.") {
 		t.Error("empty insights page should show the empty state")
 	}
-	if strings.Contains(html, `class="ins-grid"`) {
-		t.Error("empty insights page should not render the distribution grid")
+	for _, absent := range []string{`id="insights-data"`, `id="chart-fleetmix-full"`, `id="velocity-tabs"`} {
+		if strings.Contains(html, absent) {
+			t.Errorf("empty insights page should not render %q", absent)
+		}
+	}
+	// The swap target and live range control still render, so the empty page can refetch a
+	// populated window without a full reload.
+	if !strings.Contains(html, `id="insights"`) {
+		t.Error("empty insights page should still carry the swap target")
 	}
 }

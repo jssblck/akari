@@ -6,59 +6,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/a-h/templ"
-
 	"github.com/jssblck/akari/internal/server/store"
 )
 
-// ConcurrencyBusiest formats the busiest user's peak for the concurrency panel: the name
-// and their peak simultaneous sessions, or a dash when no user had a measurable span.
-func ConcurrencyBusiest(c store.ConcurrencyStats) string {
-	if c.BusiestUser == "" {
-		return "-"
-	}
-	return fmt.Sprintf("%s (%d)", c.BusiestUser, c.BusiestUserPeak)
-}
-
-// ConcurrencyBusiestHref drills the busiest-user figure into that user's sessions,
-// carrying the current Insights window (rng) so the list matches the panel's period. It
-// is called only when a busiest user exists (the template guards on BusiestUser != "").
-// IncludeEmpty rides along because the concurrency panel counts sessions regardless of
-// message_count, and RequireSpan narrows to the measured-span cohort the panel actually
-// sweeps (spanFilter): without it the drill would list sessions with no parsed span that
-// the panel never counted, so the feed and the figure would disagree.
-func ConcurrencyBusiestHref(c store.ConcurrencyStats, rng string) templ.SafeURL {
-	return SessionsHref(store.SessionFilter{Username: c.BusiestUser, Range: drillRange(rng), IncludeEmpty: true, RequireSpan: true})
-}
-
-// FmtAvgConcurrent renders the average concurrency to one decimal, the granularity that
-// reads as a rate ("1.4 concurrent") without implying false precision.
-func FmtAvgConcurrent(v float64) string {
-	return fmt.Sprintf("%.1f", v)
-}
-
-// FmtRate renders a per-minute throughput to one decimal, the same granularity as the
-// concurrency average so the velocity and concurrency figures read in one register.
+// FmtRate renders a per-minute throughput to one decimal, so the velocity figures read at a
+// granularity that reads as a rate without implying false precision.
 func FmtRate(v float64) string {
 	return fmt.Sprintf("%.1f", v)
-}
-
-// VelocityMsgsRate and VelocityToolsRate format the throughput figures, dashing them when
-// the scope had no active time to divide by (see VelocityStats.HasThroughput): a 0.0 over
-// an undefined denominator would read as a real "no work happened" rate rather than "no
-// rate to show".
-func VelocityMsgsRate(v store.VelocityStats) string {
-	if !v.HasThroughput() {
-		return "-"
-	}
-	return FmtRate(v.MsgsPerActiveMin)
-}
-
-func VelocityToolsRate(v store.VelocityStats) string {
-	if !v.HasThroughput() {
-		return "-"
-	}
-	return FmtRate(v.ToolsPerActiveMin)
 }
 
 // FmtLatency renders a turn-cycle latency at the coarsest unit that still reads honestly:
@@ -93,29 +47,6 @@ func FmtErrorRate(v float64) string {
 		return "<1%"
 	}
 	return fmt.Sprintf("%.0f%%", pct)
-}
-
-// HygienePct renders a prompt-hygiene rate (a count over the prompt or session total) as
-// a whole-percent figure. It keeps the "<1%" floor the tool error rate uses, so a rare
-// but present signal does not round away to a clean 0%. A zero count reads as a real 0%
-// (no such prompts), not a dash; the dash is only the guard for an empty denominator,
-// which the panel already avoids by gating on PromptHygiene.HasData.
-func HygienePct(n, d int) string {
-	if d <= 0 {
-		return "-"
-	}
-	pct := float64(n) / float64(d) * 100
-	if pct > 0 && pct < 1 {
-		return "<1%"
-	}
-	return fmt.Sprintf("%.0f%%", pct)
-}
-
-// HygieneCount renders the raw count behind a hygiene rate ("12 of 340"), the sub-line
-// under each figure, so a reader sees the magnitude and not only the proportion (3% of
-// 1000 prompts and 3% of 30 read very differently).
-func HygieneCount(n, d int) string {
-	return fmt.Sprintf("%d of %d", n, d)
 }
 
 // ToolBar is one tool's bar in the mix: sized by call volume, coloured by its error band,
@@ -460,74 +391,4 @@ func GradedNote(q store.QualityDistribution) string {
 		return "<1% graded"
 	}
 	return fmt.Sprintf("%.0f%% graded", pct)
-}
-
-// OutcomeSegment is one slice of a People-row outcome mix bar: its width (Pct of the
-// user's sessions), its color, and the count and label the title reads back.
-type OutcomeSegment struct {
-	Color string
-	Pct   float64
-	Count int
-	Label string
-}
-
-// OutcomeMixTitle is the hover title for a People-row outcome mix bar, spelling out the
-// four outcome counts the bar renders proportionally.
-func OutcomeMixTitle(u store.UserQuality) string {
-	return fmt.Sprintf("%d completed, %d abandoned, %d errored, %d unknown",
-		u.Completed, u.Abandoned, u.Errored, u.Unknown)
-}
-
-// OutcomeSegments splits a user's sessions into the proportional slices of their outcome
-// mix bar, dropping empty slices so a zero-count outcome adds no invisible segment. It
-// returns nil when the user has no sessions (the row shows a placeholder instead).
-func OutcomeSegments(u store.UserQuality) []OutcomeSegment {
-	if u.Sessions <= 0 {
-		return nil
-	}
-	raw := []OutcomeSegment{
-		{Color: barSage, Count: u.Completed, Label: "completed"},
-		{Color: barPeach, Count: u.Abandoned, Label: "abandoned"},
-		{Color: barRose, Count: u.Errored, Label: "errored"},
-		{Color: barMuted, Count: u.Unknown, Label: "unknown"},
-	}
-	out := make([]OutcomeSegment, 0, len(raw))
-	for _, s := range raw {
-		if s.Count <= 0 {
-			continue
-		}
-		s.Pct = float64(s.Count) / float64(u.Sessions) * 100
-		out = append(out, s)
-	}
-	return out
-}
-
-// SegmentStyle is the inline style for one outcome mix slice: its proportional width and
-// its color.
-func SegmentStyle(seg OutcomeSegment) string {
-	return fmt.Sprintf("width:%.2f%%;background:%s", seg.Pct, seg.Color)
-}
-
-// UserAvgScore formats a People-row average quality score, or a dash when the user has no
-// graded session to average.
-func UserAvgScore(u store.UserQuality) string {
-	if u.AvgScore == nil {
-		return "-"
-	}
-	return fmt.Sprintf("%.1f", *u.AvgScore)
-}
-
-// UserGradedLabel is the People-row coverage cell: how many of the user's sessions carry
-// a usable grade out of their total.
-func UserGradedLabel(u store.UserQuality) string {
-	return fmt.Sprintf("%d of %d", u.Graded, u.Sessions)
-}
-
-// UserQualityHref links a People row to the session feed scoped to that user, carrying the
-// active window so the drill-through opens the same cohort the row summarized. IncludeEmpty
-// rides along for the same reason the grade and outcome drills carry it: the People panel
-// counts a user's sessions regardless of message_count, so the drilled feed must show empties
-// too or its list would fall short of the row's count.
-func UserQualityHref(u store.UserQuality, rng string) templ.SafeURL {
-	return SessionsHref(store.SessionFilter{Username: u.Username, Range: drillRange(rng), IncludeEmpty: true})
 }

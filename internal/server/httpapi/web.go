@@ -138,7 +138,13 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 // window rides the URL via ?range=.
 func (s *Server) handleInsights(w http.ResponseWriter, r *http.Request) {
 	rng := web.ParseRange(r.URL.Query().Get("range"))
-	ins, err := s.Store.Insights(r.Context(), store.AnalyticsFilter{Since: web.RangeSince(rng, time.Now())})
+	// The Bucket names the trend grid's unit (day for short windows, week for long), which
+	// switches on the trend computation inside Insights: the fleet page draws time series,
+	// so it always asks for a grid, unlike the project quality band which leaves it unset.
+	ins, err := s.Store.Insights(r.Context(), store.AnalyticsFilter{
+		Since:  web.RangeSince(rng, time.Now()),
+		Bucket: web.TrendBucket(rng),
+	})
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "insights"), http.StatusInternalServerError, "Could not load insights."))
 		return

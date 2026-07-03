@@ -61,6 +61,31 @@
   --msg-user: #201e26;
   --msg-assistant: #1b1b1f;
 
+  /* Insights chart palette: eight qualitative hues for series that carry no
+     inherent status meaning (models, tool categories, projects). Kept apart
+     from the status colors above (ok/err/warn/info) so a chart series is
+     never mistaken for a status signal. See internal/server/web/static/js/insights.js. */
+  --viz-1: #c6a8f2;
+  --viz-2: #88cfce;
+  --viz-3: #f0bf92;
+  --viz-4: #ec98b0;
+  --viz-5: #a6d29e;
+  --viz-6: #95c0ef;
+  --viz-7: #ddc885;
+  --viz-8: #a98ad4;
+
+  /* Insights-mock token aliases: the ported insights.css/insights.js reference
+     the mock's own token names verbatim (see the port brief in insights.js's
+     header comment) rather than hundreds of individually renamed references. */
+  --accent: var(--lilac);
+  --accent-strong: var(--lilac-strong);
+  --accent-ink: var(--ink);
+  --font-ui: var(--sans);
+  --font-mono: var(--mono);
+  --radius-sm: var(--r-sm);
+  --radius-md: var(--r-md);
+  --radius-lg: var(--r-lg);
+
   --sans: "Geist", "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 

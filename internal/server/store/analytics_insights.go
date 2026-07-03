@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -26,6 +27,13 @@ type Insights struct {
 	// their work graded. It shares the snapshot so its per-user session counts reconcile
 	// with the quality total the distributions read.
 	Users UserQualityStats
+
+	// Trends is the time-bucketed read of the same cohort: every distribution above drawn
+	// as a series over the window's day or week buckets. It is computed only when the
+	// filter names a bucket (AnalyticsFilter.Bucket), so a distributions-only caller pays
+	// nothing for it and leaves it nil. It shares the snapshot transaction, so a bucket
+	// series reconciles exactly with the rolled-up number above it.
+	Trends *Trends
 }
 
 // HasData reports whether any scoped session carried signals, so the page can show an
@@ -51,6 +59,31 @@ func (s *Store) Insights(ctx context.Context, f AnalyticsFilter) (Insights, erro
 		pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly},
 		func(tx pgx.Tx) error {
 			var err error
+			// When the caller wants the trend grid, bound the whole page to the charted
+			// span first, on both edges. The grid caps an unbounded "all" window at
+			// maxTrendBuckets and stops at the current bucket, so pinning f.Since to the first
+			// rendered bucket and f.Until to the end of the last one makes the headline
+			// distributions and every trend total count the same rows the series draw, and keeps
+			// each panel's query from scanning history the charts will not show. Without the
+			// upper bound a row timestamped ahead of render time counts in the headline while the
+			// grid drops its future bucket (g.index < 0), so the two disagree. Both bounds only
+			// tighten the window: a bounded range already sits inside its grid, so f.Since never
+			// moves back and f.Until never moves forward.
+			if f.Bucket != "" {
+				now := time.Now()
+				since, terr := s.resolveTrendSince(ctx, tx, f, now)
+				if terr != nil {
+					return terr
+				}
+				if g := newTrendGrid(f.Bucket, since, now); g.n() > 0 {
+					if g.Starts[0].After(f.Since) {
+						f.Since = g.Starts[0]
+					}
+					if upper := advanceBucket(g.Unit, g.Starts[g.n()-1]); f.Until.IsZero() || upper.Before(f.Until) {
+						f.Until = upper
+					}
+				}
+			}
 			if out.Quality, err = s.qualityDistributionFrom(ctx, tx, f); err != nil {
 				return err
 			}
@@ -82,6 +115,14 @@ func (s *Store) Insights(ctx context.Context, f AnalyticsFilter) (Insights, erro
 			// outside every other panel's totals, so leaving Users zero changes nothing else.
 			if !f.OmitUsers {
 				if out.Users, err = s.userQualityFrom(ctx, tx, f); err != nil {
+					return err
+				}
+			}
+			// The trend grid is computed only when the caller names a bucket. It reuses the
+			// context stats already read above for the peak-context histogram markers, so the
+			// markers on the trend annotate the same cohort the context panel summarizes.
+			if f.Bucket != "" {
+				if out.Trends, err = s.trendsFrom(ctx, tx, f, out.Context); err != nil {
 					return err
 				}
 			}
