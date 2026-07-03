@@ -392,4 +392,3 @@ func GradedNote(q store.QualityDistribution) string {
 	}
 	return fmt.Sprintf("%.0f%% graded", pct)
 }
-
