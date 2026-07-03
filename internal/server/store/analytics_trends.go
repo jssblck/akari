@@ -104,12 +104,12 @@ type ContextMarker struct {
 // the abandon rate carries a dollar figure, not just a count), and what caching saved.
 type Economics struct {
 	CostCompleted []float64 // dollars spent in bucket i by sessions that completed
-	CostAbandoned []float64 // dollars spent by sessions that did not complete
+	CostAbandoned []float64 // dollars spent in bucket i by sessions that abandoned (outcome='abandoned')
 	CacheSavings  []float64 // dollars caching saved in bucket i, priced per day and model
-	CacheHitRate  []float64 // cache-read share of read+input tokens, percent
+	CacheHitRate  []float64 // cache-read share of all prompt-side tokens (input+read+write), percent
 
-	TotalSpend         float64 // completed + abandoned across the window
-	TotalAbandoned     float64
+	TotalSpend         float64 // all spend across the window, every outcome
+	TotalAbandoned     float64 // spend by abandoned sessions across the window
 	AbandonedSharePct  float64
 	TotalCacheSavings  float64
 	CacheHitRateLatest float64
@@ -603,8 +603,12 @@ func (s *Store) contextHistogramFrom(ctx context.Context, q querier, f Analytics
 		if err := rows.Scan(&peak); err != nil {
 			return nil, fmt.Errorf("scan context histogram: %w", err)
 		}
+		// First bin whose upper edge clears the peak, folding a sub-8k peak into the first
+		// bin and an over-1M peak into the last. Without the underflow fold a small measured
+		// session would fall through every bin and the histogram total would undercount the
+		// context cohort (ContextHealthStats.Sessions), which counts every non-null peak.
 		for i := range buckets {
-			if peak >= buckets[i].Lo && (peak < buckets[i].Hi || i == len(buckets)-1) {
+			if peak < buckets[i].Hi || i == len(buckets)-1 {
 				buckets[i].Count++
 				break
 			}
@@ -634,9 +638,11 @@ func (s *Store) economicsFrom(ctx context.Context, q querier, f AnalyticsFilter,
 	rows, err := q.Query(ctx, fmt.Sprintf(
 		`SELECT %s AS b,
 		        coalesce(sum(ue.cost_usd) FILTER (WHERE sig.outcome = 'completed'), 0),
-		        coalesce(sum(ue.cost_usd) FILTER (WHERE sig.outcome IS DISTINCT FROM 'completed'), 0),
+		        coalesce(sum(ue.cost_usd) FILTER (WHERE sig.outcome = 'abandoned'), 0),
+		        coalesce(sum(ue.cost_usd), 0),
 		        coalesce(sum(ue.cache_read_tokens), 0),
-		        coalesce(sum(ue.input_tokens), 0)
+		        coalesce(sum(ue.input_tokens), 0),
+		        coalesce(sum(ue.cache_write_tokens), 0)
 		   FROM usage_events ue
 		   JOIN sessions s ON s.id = ue.session_id
 		   LEFT JOIN session_signals sig
@@ -648,9 +654,9 @@ func (s *Store) economicsFrom(ctx context.Context, q querier, f AnalyticsFilter,
 	}
 	for rows.Next() {
 		var b time.Time
-		var comp, aband float64
-		var cacheRead, input int64
-		if err := rows.Scan(&b, &comp, &aband, &cacheRead, &input); err != nil {
+		var comp, aband, total float64
+		var cacheRead, input, cacheWrite int64
+		if err := rows.Scan(&b, &comp, &aband, &total, &cacheRead, &input, &cacheWrite); err != nil {
 			rows.Close()
 			return Economics{}, fmt.Errorf("scan cost of quality trend: %w", err)
 		}
@@ -658,10 +664,20 @@ func (s *Store) economicsFrom(ctx context.Context, q querier, f AnalyticsFilter,
 		if i < 0 {
 			continue
 		}
+		// Completed and abandoned are the outcome projection's own buckets, so these dollars
+		// read against the outcome distribution: abandoned is outcome='abandoned' only, not
+		// every non-completed session (an errored or ungraded session with cost is neither
+		// completed nor abandoned here, the same way the outcome split treats it). Total spend
+		// is the unfiltered sum, so it still covers every outcome including those two.
 		out.CostCompleted[i] = comp
 		out.CostAbandoned[i] = aband
-		if cacheRead+input > 0 {
-			out.CacheHitRate[i] = float64(cacheRead) / float64(cacheRead+input) * 100
+		out.TotalSpend += total
+		out.TotalAbandoned += aband
+		// Cache hit rate is cache_read over all prompt-side tokens (input + cache_read +
+		// cache_write), the same denominator the canonical cache tile uses, so the trend and
+		// the tile never disagree. Dropping cache_write would overstate the hit rate.
+		if denom := input + cacheRead + cacheWrite; denom > 0 {
+			out.CacheHitRate[i] = float64(cacheRead) / float64(denom) * 100
 		}
 	}
 	rows.Close()
@@ -673,9 +689,7 @@ func (s *Store) economicsFrom(ctx context.Context, q querier, f AnalyticsFilter,
 		return Economics{}, err
 	}
 
-	for i := range out.CostCompleted {
-		out.TotalSpend += out.CostCompleted[i] + out.CostAbandoned[i]
-		out.TotalAbandoned += out.CostAbandoned[i]
+	for i := range out.CacheSavings {
 		out.TotalCacheSavings += out.CacheSavings[i]
 	}
 	if out.TotalSpend > 0 {

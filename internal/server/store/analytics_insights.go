@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -58,6 +59,23 @@ func (s *Store) Insights(ctx context.Context, f AnalyticsFilter) (Insights, erro
 		pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly},
 		func(tx pgx.Tx) error {
 			var err error
+			// When the caller wants the trend grid, bound the whole page to the charted
+			// span first. The grid caps an unbounded "all" window at maxTrendBuckets, so
+			// pinning f.Since to the first rendered bucket makes the headline distributions
+			// and every trend total count the same sessions, and keeps each panel's query
+			// from scanning history the charts will not show. A bounded range already starts
+			// at or after its grid's first bucket, so its window is left unchanged (the grid
+			// start only moves f.Since forward, never back).
+			if f.Bucket != "" {
+				now := time.Now()
+				since, terr := s.resolveTrendSince(ctx, tx, f, now)
+				if terr != nil {
+					return terr
+				}
+				if g := newTrendGrid(f.Bucket, since, now); g.n() > 0 && g.Starts[0].After(f.Since) {
+					f.Since = g.Starts[0]
+				}
+			}
 			if out.Quality, err = s.qualityDistributionFrom(ctx, tx, f); err != nil {
 				return err
 			}

@@ -73,11 +73,11 @@ type ChurnNode struct {
 }
 
 // ChurnTrend is the edit-thrash read over time plus the tree the treemap drills: how much
-// re-editing happened per bucket and across how many distinct files, and the per-file edit
+// re-editing happened per bucket and across how many hot files, and the per-file edit
 // counts grouped by project and folder.
 type ChurnTrend struct {
 	ReEdits       []int // deduped edit calls per bucket
-	Files         []int // distinct files edited per bucket
+	Files         []int // hot files (edited more than once) per bucket
 	Tree          []ChurnNode
 	Clipped       int // hot files beyond the tree cap, noted rather than shown
 	TotalReEdits  int // deduped re-edits across the window
@@ -597,13 +597,15 @@ func (s *Store) toolFailureTrend(ctx context.Context, q querier, f AnalyticsFilt
 // thrash concentrates instead of fragmenting into one-off touches.
 const maxChurnTreeFiles = 150
 
-// churnTrendFrom computes the per-bucket edit volume and distinct-file breadth, plus the
+// churnTrendFrom computes the per-bucket edit volume and hot-file count, plus the
 // project/folder/file tree the treemap drills. Edits dedupe replayed calls and bucket on the
 // session start; the tree keeps the busiest churned files with their project and folder.
 func (s *Store) churnTrendFrom(ctx context.Context, q querier, f AnalyticsFilter, g trendGrid) (ChurnTrend, error) {
 	out := ChurnTrend{ReEdits: make([]int, g.n()), Files: make([]int, g.n())}
 
-	// Per-bucket edit volume and distinct file count.
+	// Per-bucket edit volume and hot-file count. Hot means edited more than once in the
+	// bucket, the same threshold the tree and the headline totals use, so a bucket of one-off
+	// edits does not report phantom hot files the treemap has nothing to show for.
 	filter, args := f.clauseFor("s.started_at")
 	rows, err := q.Query(ctx, fmt.Sprintf(
 		`WITH scoped AS (
@@ -621,9 +623,13 @@ func (s *Store) churnTrendFrom(ctx context.Context, q querier, f AnalyticsFilter
 		            ORDER BY message_ordinal, call_index
 		          ) AS rn
 		     FROM scoped
+		 ),
+		 perfile AS (
+		   SELECT b, project_id, churn_path, count(*) AS edits
+		     FROM ranked WHERE rn = 1 GROUP BY b, project_id, churn_path
 		 )
-		 SELECT b, count(*), count(DISTINCT (project_id, churn_path))
-		   FROM ranked WHERE rn = 1 GROUP BY b`, g.sqlBucket("s.started_at"), filter), args...)
+		 SELECT b, coalesce(sum(edits), 0)::bigint, count(*) FILTER (WHERE edits > 1)
+		   FROM perfile GROUP BY b`, g.sqlBucket("s.started_at"), filter), args...)
 	if err != nil {
 		return ChurnTrend{}, fmt.Errorf("churn trend: %w", err)
 	}
@@ -838,27 +844,33 @@ func (s *Store) subagentTrendsFrom(ctx context.Context, q querier, f AnalyticsFi
 		out.FanoutRows[i] = map[string]int{}
 	}
 
-	// Per-bucket root counts, delegating roots, and the fan-out spread. The kids CTE counts
-	// each session's subagent children (unwindowed, so a child outside the window still
-	// counts toward its root's fan-out).
+	// Per-bucket root counts, delegating roots, and the fan-out spread. The children are
+	// joined to the scoped roots (not grouped across the whole sessions table), so a 7-day or
+	// per-project request only touches children of in-window roots. The child join carries no
+	// window of its own, so a child that ran outside the window still counts toward its root's
+	// fan-out.
 	filter, args := f.clauseFor("s.started_at")
 	rows, err := q.Query(ctx, fmt.Sprintf(
-		`WITH kids AS (
-		   SELECT parent_session_id AS pid, count(*) AS n
-		     FROM sessions
-		    WHERE relationship_type = 'subagent' AND parent_session_id IS NOT NULL
-		    GROUP BY parent_session_id
+		`WITH roots AS (
+		   SELECT s.id, %s AS b
+		     FROM sessions s
+		    WHERE s.started_at IS NOT NULL AND s.relationship_type = ''%s
+		 ),
+		 kids AS (
+		   SELECT r.id, r.b, count(c.id) AS n
+		     FROM roots r
+		     LEFT JOIN sessions c
+		       ON c.parent_session_id = r.id AND c.relationship_type = 'subagent'
+		    GROUP BY r.id, r.b
 		 )
-		 SELECT %s AS b,
+		 SELECT b,
 		        count(*) AS roots,
-		        count(*) FILTER (WHERE coalesce(k.n, 0) >= 1) AS delegating,
-		        count(*) FILTER (WHERE k.n = 1) AS f1,
-		        count(*) FILTER (WHERE k.n BETWEEN 2 AND 3) AS f23,
-		        count(*) FILTER (WHERE k.n BETWEEN 4 AND 7) AS f47,
-		        count(*) FILTER (WHERE k.n >= 8) AS f8
-		   FROM sessions s
-		   LEFT JOIN kids k ON k.pid = s.id
-		  WHERE s.started_at IS NOT NULL AND s.relationship_type = ''%s
+		        count(*) FILTER (WHERE n >= 1) AS delegating,
+		        count(*) FILTER (WHERE n = 1) AS f1,
+		        count(*) FILTER (WHERE n BETWEEN 2 AND 3) AS f23,
+		        count(*) FILTER (WHERE n BETWEEN 4 AND 7) AS f47,
+		        count(*) FILTER (WHERE n >= 8) AS f8
+		   FROM kids
 		  GROUP BY b`, g.sqlBucket("s.started_at"), filter), args...)
 	if err != nil {
 		return SubagentStats{}, fmt.Errorf("subagent delegation trend: %w", err)

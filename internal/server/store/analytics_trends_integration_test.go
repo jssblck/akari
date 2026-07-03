@@ -78,6 +78,21 @@ func TestInsightsTrends(t *testing.T) {
 		t.Fatalf("link subagent: %v", err)
 	}
 
+	// An errored root with its own one-off file edit. Its dollars land in total spend but not in
+	// abandoned spend (abandoned counts outcome = 'abandoned' only, so an errored session is spend
+	// without being abandoned), and its single edit of a distinct file must not count as a hot file.
+	errSession := mkSession(grace, "t-err", 1, "errored", "F", "claude-opus-4-8", "cmd/akari-server/main.go")
+
+	// Two measured context peaks, one below the 8k first histogram edge so the underflow fold is
+	// exercised, and the histogram total reconciles with the measured-context cohort.
+	for sid, peak := range map[int64]int64{root1: 5000, errSession: 50000} {
+		if _, err := st.Pool.Exec(ctx,
+			`UPDATE session_signals SET peak_context_tokens = $2, context_reset_count = 0 WHERE session_id = $1`,
+			sid, peak); err != nil {
+			t.Fatalf("set peak context for %d: %v", sid, err)
+		}
+	}
+
 	since := time.Now().Add(-7 * 24 * time.Hour)
 	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: since, Bucket: "day"})
 	if err != nil {
@@ -100,22 +115,31 @@ func TestInsightsTrends(t *testing.T) {
 		t.Errorf("fleet mix = %+v, want at least two model bands", tr.FleetMix.Models)
 	}
 
-	// Signals: the outcomes are counted across buckets (four sessions have a shape and a
+	// Signals: the outcomes are counted across buckets (five sessions have a shape and a
 	// current-version signal in window).
 	var outcomeTotal int
 	for _, n := range tr.Signals.OutcomeTotal {
 		outcomeTotal += n
 	}
-	if outcomeTotal != 4 {
-		t.Errorf("signal outcome total = %d, want 4 (three roots + one subagent)", outcomeTotal)
+	if outcomeTotal != 5 {
+		t.Errorf("signal outcome total = %d, want 5 (four roots + one subagent)", outcomeTotal)
 	}
 
-	// Economics: real spend and a positive cache saving from the seeded cache tokens.
-	if tr.Economics.TotalSpend <= 0 {
-		t.Errorf("economics total spend = %v, want > 0", tr.Economics.TotalSpend)
+	// Economics: spend covers every outcome (five sessions at $1.50), abandoned spend covers only
+	// the one outcome = 'abandoned' session, so the errored and completed dollars are excluded.
+	if got := tr.Economics.TotalSpend; got < 7.49 || got > 7.51 {
+		t.Errorf("economics total spend = %v, want 7.5 (five sessions at $1.50 each)", got)
+	}
+	if got := tr.Economics.TotalAbandoned; got < 1.49 || got > 1.51 {
+		t.Errorf("abandoned spend = %v, want 1.5 (only the outcome='abandoned' session; errored and completed excluded)", got)
 	}
 	if tr.Economics.TotalCacheSavings <= 0 {
 		t.Errorf("economics cache savings = %v, want > 0 (cache tokens were seeded)", tr.Economics.TotalCacheSavings)
+	}
+	// Cache hit rate divides cache reads by every prompt-side token (input + cache read + cache
+	// write); the seed's 8000 / (4000 + 8000 + 3000) is ~53%. Dropping cache_write would read ~66%.
+	if got := tr.Economics.CacheHitRateLatest; got < 52 || got > 55 {
+		t.Errorf("cache hit rate = %v, want ~53 (8000/(4000+8000+3000)); a value near 66 means cache_write was dropped from the denominator", got)
 	}
 
 	// Tools: the reliability scatter carries the seeded tools, and the churn tree carries the
@@ -134,6 +158,29 @@ func TestInsightsTrends(t *testing.T) {
 	}
 	if !foundChurn {
 		t.Errorf("churn tree missing the twice-edited file %q: %+v", churn, tr.Churn.Tree)
+	}
+	// Only the file three sessions edited clears the hot-file bar; the two one-off edits (t3's
+	// templ and the errored session's main.go) must not, so the per-bucket hot-file series sums to
+	// exactly one.
+	var hotFiles int
+	for _, n := range tr.Churn.Files {
+		hotFiles += n
+	}
+	if hotFiles != 1 {
+		t.Errorf("churn hot-file total = %d, want 1 (only the thrice-edited file; one-off edits are not hot)", hotFiles)
+	}
+
+	// Context histogram counts both measured peaks, including the sub-8k one folded into the first
+	// bin, so its total reconciles with the two sessions given a peak.
+	var histTotal int
+	for _, b := range tr.Signals.ContextHistogram {
+		histTotal += b.Count
+	}
+	if histTotal != 2 {
+		t.Errorf("context histogram total = %d, want 2 (both measured peaks, including the sub-8k one)", histTotal)
+	}
+	if len(tr.Signals.ContextHistogram) > 0 && tr.Signals.ContextHistogram[0].Count < 1 {
+		t.Errorf("sub-8k peak did not fold into the first bin: %+v", tr.Signals.ContextHistogram[0])
 	}
 
 	// Subagents: the one child is detected, at least one root delegates, and the tree is two
