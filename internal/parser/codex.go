@@ -102,7 +102,7 @@ func (r *reducer) reduceCodex(region []byte, base int64) error {
 
 			case p.Get("type").String() == "reasoning":
 				r.ensureAssistant(ts)
-				r.addOpenThinking(blockText(p.Get("content")))
+				r.addCodexReasoning(p)
 
 			case p.Get("role").String() == "user":
 				r.closeTurn() // a user turn ends the current assistant turn
@@ -195,6 +195,35 @@ func isCodexContext(text string) bool {
 	return strings.HasPrefix(t, "# AGENTS.md instructions for ") ||
 		strings.HasPrefix(t, "<environment_context>") ||
 		strings.HasPrefix(t, "<user_instructions>")
+}
+
+// addCodexReasoning records one Codex reasoning item on the open turn. Codex ships
+// the reasoning either in the clear (older sessions: a "content" block, or a
+// "summary" of text blocks) or, in current builds, as an opaque "encrypted_content"
+// blob with the summary and content dropped. The weight sums whatever is present, so
+// an encrypted item still records its reasoning volume through the ciphertext length
+// (which tracks the reasoning-token count at r=0.997); ThinkingText carries whatever
+// plaintext survived.
+func (r *reducer) addCodexReasoning(p gjson.Result) {
+	text := joinNonEmpty(blockText(p.Get("content")), summaryText(p.Get("summary")))
+	weight := len(text) + len(p.Get("encrypted_content").String())
+	r.addOpenReasoning(text, weight)
+}
+
+// summaryText flattens a Codex reasoning "summary" (an array of summary_text blocks)
+// to its text. It is separate from blockText because a summary block's type is
+// "summary_text", which blockText's text-block set does not include.
+func summaryText(v gjson.Result) string {
+	if !v.IsArray() {
+		return ""
+	}
+	var parts []string
+	for _, b := range v.Array() {
+		if t := b.Get("text").String(); t != "" {
+			parts = append(parts, t)
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 func joinNonEmpty(a, b string) string {

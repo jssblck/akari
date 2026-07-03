@@ -154,7 +154,13 @@ type Message struct {
 	Model        string
 	HasThinking  bool
 	HasToolUse   bool
-	Timestamp    *time.Time
+	// ThinkingBytes is the turn's reasoning-trace weight (plaintext length where the agent
+	// logs it, else the encrypted payload length; see parser.Message.ThinkingBytes). The
+	// transcript's per-message thinking band estimates the turn's reasoning tokens from it
+	// when the agent reports no exact count (Usage.Reasoning), the same estimate the session
+	// and fleet reads use.
+	ThinkingBytes int
+	Timestamp     *time.Time
 	// Prompt-hygiene facts, meaningful only when PromptFactsCurrent is true.
 	PromptShort        bool
 	PromptNoCode       bool
@@ -1424,7 +1430,8 @@ func (s *Store) MessageCount(ctx context.Context, sessionID int64) (int, error) 
 // list: the full read folds them from the session's usage_events (messagesFullQuery), the bounded
 // window read leaves them empty (messagesWindowQuery), because its only caller, the MCP transcript
 // window, renders no per-turn usage. $2 is quality.PromptFactsVersion.
-const messageReadColumns = `m.ordinal, m.role, m.content, m.thinking_text, m.model, m.has_thinking, m.has_tool_use, m.timestamp,
+const messageReadColumns = `m.ordinal, m.role, m.content, m.thinking_text, m.model, m.has_thinking, m.has_tool_use,
+	coalesce(m.thinking_bytes, 0), m.timestamp,
 	coalesce(m.prompt_short, false), coalesce(m.prompt_no_code, false), coalesce(m.prompt_digest, 0),
 	(m.prompt_facts_version = $2 AND m.prompt_digest IS NOT NULL AND m.content_length > 0),
 	coalesce(m.duplicate_prompt, false)`
@@ -1541,7 +1548,7 @@ func (s *Store) scanMessages(ctx context.Context, sessionID int64, query string,
 		var costSum *float64
 		var costCount int64
 		if err := rows.Scan(&m.Ordinal, &m.Role, &m.Content, &m.ThinkingText, &m.Model,
-			&m.HasThinking, &m.HasToolUse, &m.Timestamp,
+			&m.HasThinking, &m.HasToolUse, &m.ThinkingBytes, &m.Timestamp,
 			&m.PromptShort, &m.PromptNoCode, &m.PromptDigest, &m.PromptFactsCurrent,
 			&m.DuplicatePrompt,
 			&hasUsage, &u.Input, &u.Output, &u.CacheRead, &u.CacheWrite, &u.Reasoning, &u.ContextTokens,

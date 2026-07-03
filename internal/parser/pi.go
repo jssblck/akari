@@ -43,7 +43,14 @@ func (r *reducer) reducePi(region []byte, base int64) error {
 					case "text":
 						textParts = append(textParts, b.Get("text").String())
 					case "thinking":
-						thinkParts = append(thinkParts, b.Get("thinking").String())
+						// pi keeps its thinking in the clear, so the plaintext length is the
+						// reasoning weight directly (no encrypted payload to fall back to).
+						t := b.Get("thinking").String()
+						if t != "" {
+							thinkParts = append(thinkParts, t)
+						}
+						op.ThinkingBytes += len(t)
+						op.HasThinking = true
 					case "toolCall":
 						op.HasToolUse = true
 						name := b.Get("name").String()
@@ -60,7 +67,6 @@ func (r *reducer) reducePi(region []byte, base int64) error {
 				}
 				op.Content = strings.Join(textParts, "\n")
 				op.ThinkingText = strings.Join(thinkParts, "\n")
-				op.HasThinking = op.ThinkingText != ""
 				r.d.Messages = append(r.d.Messages, op)
 
 				if u := msg.Get("usage"); u.Exists() {

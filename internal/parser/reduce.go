@@ -51,16 +51,20 @@ func (s State) Encode() ([]byte, error) { return json.Marshal(s) }
 // MessageOp is one message write in a Delta. Each ordinal is written exactly
 // once: a turn is folded whole within the region that contains it (the ingest
 // protocol keeps a turn inside one chunk), so Content and ThinkingText are the
-// complete text, not a fragment to append.
+// complete text, not a fragment to append. ThinkingBytes is the turn's
+// reasoning-trace weight (see Message.ThinkingBytes): plaintext length where the
+// agent logs it, else the encrypted payload length, so a redacted turn still
+// records how much it thought.
 type MessageOp struct {
-	Ordinal      int
-	Role         Role
-	Content      string
-	ThinkingText string
-	Model        string
-	HasThinking  bool
-	HasToolUse   bool
-	Timestamp    time.Time
+	Ordinal       int
+	Role          Role
+	Content       string
+	ThinkingText  string
+	ThinkingBytes int
+	Model         string
+	HasThinking   bool
+	HasToolUse    bool
+	Timestamp     time.Time
 }
 
 // ToolResultOp back-patches a tool call's result, matched by the agent's call id.
@@ -203,6 +207,12 @@ type reducer struct {
 	openCalls   int
 	openContent []string
 	openThink   []string
+	// openThinkBytes accumulates the open turn's reasoning-trace weight (plaintext
+	// where present, else the encrypted payload length), and openThinkSeen records
+	// that a reasoning block appeared at all, so a turn whose reasoning was redacted
+	// to empty text still marks HasThinking and carries its byte weight.
+	openThinkBytes int
+	openThinkSeen  bool
 
 	lastUsageOffset int64
 	lastUsageIndex  int
@@ -361,21 +371,29 @@ func (r *reducer) ensureAssistant(ts time.Time) int {
 	return ord
 }
 
-// addOpenContent and addOpenThinking collect a fragment of the open turn; they
-// are joined once when the op is emitted.
+// addOpenContent collects a fragment of the open turn's visible text; it is joined
+// once when the op is emitted.
 func (r *reducer) addOpenContent(s string) {
 	if s != "" {
 		r.openContent = append(r.openContent, s)
 	}
 }
 
-func (r *reducer) addOpenThinking(s string) {
-	if s != "" {
-		r.openThink = append(r.openThink, s)
-		if r.open != nil {
-			r.open.HasThinking = true
-		}
+// addOpenReasoning records one reasoning block on the open turn: its plaintext (kept
+// for search and display, empty when the agent redacted it) and its weight, the byte
+// size that stands in for the reasoning volume (the plaintext length where the agent
+// logs it, else the encrypted payload length). Seeing a reasoning block at all marks
+// the turn as having thought, so a redacted block with empty text and a nonzero
+// weight still reads as thinking.
+func (r *reducer) addOpenReasoning(text string, weight int) {
+	r.openThinkSeen = true
+	if r.open != nil {
+		r.open.HasThinking = true
 	}
+	if text != "" {
+		r.openThink = append(r.openThink, text)
+	}
+	r.openThinkBytes += weight
 }
 
 // buildOpen joins the open turn's collected fragments into its op and resets the
@@ -383,7 +401,12 @@ func (r *reducer) addOpenThinking(s string) {
 func (r *reducer) buildOpen() {
 	r.open.Content = strings.Join(r.openContent, "\n")
 	r.open.ThinkingText = strings.Join(r.openThink, "\n")
+	r.open.ThinkingBytes = r.openThinkBytes
+	if r.openThinkSeen {
+		r.open.HasThinking = true
+	}
 	r.openContent, r.openThink = nil, nil
+	r.openThinkBytes, r.openThinkSeen = 0, false
 }
 
 // closeTurn finalizes and emits the open assistant turn (a user line ends it).
@@ -459,8 +482,12 @@ func assemble(d Delta) Session {
 		}
 		m.Content = joinNonEmpty(m.Content, op.Content)
 		m.ThinkingText = joinNonEmpty(m.ThinkingText, op.ThinkingText)
+		m.ThinkingBytes += op.ThinkingBytes
 		if op.Model != "" {
 			m.Model = op.Model
+		}
+		if op.HasThinking {
+			m.HasThinking = true
 		}
 		if op.HasToolUse {
 			m.HasToolUse = true
@@ -468,9 +495,7 @@ func assemble(d Delta) Session {
 	}
 	sort.Ints(order)
 	for _, ord := range order {
-		m := byOrd[ord]
-		m.HasThinking = m.ThinkingText != ""
-		s.Messages = append(s.Messages, *m)
+		s.Messages = append(s.Messages, *byOrd[ord])
 	}
 
 	idxByUID := map[string]int{}

@@ -451,7 +451,23 @@ func (s *Server) sessionHeaderStats(ctx context.Context, d store.SessionDetail) 
 			return web.HeaderStats{}, err
 		}
 	}
-	return web.HeaderStats{Cache: cache, Signals: sig, Fallbacks: fallbacks}, nil
+	// The observed-thinking band is an absolute cut on the token scale, carried whole by the
+	// stored signals row, so the readout reads straight from the row with no extra query: the
+	// band, the tail and peak per-turn token volumes, and the coverage all come from the
+	// figures the settle pass already derived. An unmeasured session (no assistant turns)
+	// leaves the readout empty so the header shows no thinking block.
+	thinking := web.ThinkingReadout{}
+	if sig.HasThinkingMeasure() {
+		thinking = web.ThinkingReadout{
+			Measured:   true,
+			Bucket:     sig.ThinkingBucket(),
+			Turns:      *sig.ThinkingTurns,
+			TailTokens: *sig.ThinkingTailTokens,
+			PeakTokens: *sig.ThinkingPeakTokens,
+			Coverage:   sig.ThinkingCoverage(),
+		}
+	}
+	return web.HeaderStats{Cache: cache, Signals: sig, Fallbacks: fallbacks, Thinking: thinking}, nil
 }
 
 func (s *Server) handleSessionPage(w http.ResponseWriter, r *http.Request) {

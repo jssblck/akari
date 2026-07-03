@@ -57,7 +57,21 @@ func (r *reducer) reduceClaude(region []byte, base int64) error {
 				case "text":
 					textParts = append(textParts, b.Get("text").String())
 				case "thinking":
-					thinkParts = append(thinkParts, b.Get("thinking").String())
+					t := b.Get("thinking").String()
+					if t != "" {
+						thinkParts = append(thinkParts, t)
+					}
+					// The signature is the encrypted thinking Claude ships in place of the
+					// redacted plaintext; its length tracks the hidden reasoning volume
+					// (r=0.97 against blocks that kept their text), so it is the weight when
+					// the text is gone and rides alongside it when kept.
+					op.ThinkingBytes += len(t) + len(b.Get("signature").String())
+					op.HasThinking = true
+				case "redacted_thinking":
+					// A fully redacted block carries only an opaque "data" blob and no text;
+					// its length is the reasoning weight.
+					op.ThinkingBytes += len(b.Get("data").String())
+					op.HasThinking = true
 				case "tool_use":
 					op.HasToolUse = true
 					name := b.Get("name").String()
@@ -74,7 +88,6 @@ func (r *reducer) reduceClaude(region []byte, base int64) error {
 			}
 			op.Content = strings.Join(textParts, "\n")
 			op.ThinkingText = strings.Join(thinkParts, "\n")
-			op.HasThinking = op.ThinkingText != ""
 			r.d.Messages = append(r.d.Messages, op)
 
 			if u := msg.Get("usage"); u.Exists() {
