@@ -24,21 +24,21 @@
 ALTER TABLE sessions
   ADD COLUMN IF NOT EXISTS terminal BOOLEAN NOT NULL DEFAULT false;
 
--- The settle pass's due predicate (dueSettledBatch) now reads
---   WHERE signals_stale AND ended_at IS NOT NULL
---     AND (terminal OR ended_at < now() - interval '30 minutes')
---     AND (ended_at, id) > cursor
---   ORDER BY ended_at, id
--- The existing idx_sessions_signals_stale serves the settled disjunct (an ended_at
--- range seek), but a terminal session that ended moments ago sits at the recent end of
--- that index, past the cutoff, so without help the OR would force a scan of the whole
--- stale tail every wake to find it. This partial index carries exactly the terminal
--- stale rows in (ended_at, id) order, so Postgres can bitmap-OR it with the settled
--- range and read only the due rows. The set it indexes is tiny and short-lived: the
--- finalize refresh grades a terminal session seconds after upload and clears
--- signals_stale, so a row drops out of this index almost immediately; it exists to keep
--- the settle-pass backstop cheap for the window before that refresh lands (or if it
--- never does, when the settle loop is the only path). IF NOT EXISTS keeps it replayable.
+-- The settle pass grades terminal sessions in a dedicated drain (dueTerminalBatch),
+-- separate from the settled-by-idle drain, because a terminal session is gradeable
+-- regardless of its ended_at: the client asserted it is finished, and its transcript may
+-- carry no parseable timestamp (a NULL ended_at) yet still have gradeable messages. The
+-- settled drain keyset-pages by (ended_at, id), which cannot order a NULL ended_at, so the
+-- terminal drain keyset-pages by id alone:
+--   WHERE signals_stale AND terminal AND id > cursor
+--   ORDER BY id
+-- This partial index carries exactly the terminal stale rows in id order, so that scan is
+-- an index range read over only the due rows, never a walk of the whole stale tail. The set
+-- it indexes is tiny and short-lived: the finalize refresh grades a terminal session
+-- seconds after upload and clears signals_stale, so a row drops out of this index almost
+-- immediately; it keeps the settle-pass backstop cheap for the window before that refresh
+-- lands (or if it never does, when the settle loop is the only path). IF NOT EXISTS keeps it
+-- replayable on a schema-only dev dump that already carries the index.
 CREATE INDEX IF NOT EXISTS idx_sessions_terminal_stale
-  ON sessions (ended_at, id)
+  ON sessions (id)
   WHERE signals_stale AND terminal;

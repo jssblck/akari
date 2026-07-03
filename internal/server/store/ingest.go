@@ -222,7 +222,7 @@ func keepRemoteAttributionTx(ctx context.Context, tx pgx.Tx, p AnnounceParams) (
 		if p.Terminal {
 			if _, err := tx.Exec(ctx,
 				`UPDATE sessions SET terminal = true WHERE id = $1`, existingID); err != nil {
-				return AnnounceResult{}, false, err
+				return AnnounceResult{}, false, fmt.Errorf("mark kept remote session %d terminal: %w", existingID, err)
 			}
 		}
 		if _, err := tx.Exec(ctx,

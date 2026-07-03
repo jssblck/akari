@@ -969,5 +969,54 @@ func TestAnnounceTerminalIsSticky(t *testing.T) {
 	}
 }
 
+// TestAnnounceTerminalOnKeptRemoteSession covers the terminal flag on the sticky-remote
+// downgrade path: when a session already resolved to a git remote and a later standalone or
+// orphaned --finalize announce is kept on that remote attribution (rather than re-homed to a
+// local project), the announce bypasses the main session upsert, so the terminal flag has to be
+// persisted on that path too. Otherwise a --finalize sync of a session whose checkout lost its
+// remote would upload the transcript but never grade it promptly.
+func TestAnnounceTerminalOnKeptRemoteSession(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	u, err := st.Register(ctx, "grace", "hash", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// First announce resolves the session to a git-remote project.
+	if _, err := st.AnnounceWithProject(ctx, store.AnnounceParams{
+		UserID: u.ID, Agent: "claude", SourceSessionID: "sess-kept",
+		Kind: "remote", Cwd: "/home/grace/akari", Machine: "laptop",
+	}, store.ProjectParams{
+		RemoteKey: "github.com/jssblck/akari", Host: "github.com", Owner: "jssblck",
+		Repo: "akari", DisplayName: "akari", Kind: "remote",
+	}); err != nil {
+		t.Fatalf("remote announce: %v", err)
+	}
+
+	// A later --finalize sync from a checkout that lost its remote announces standalone with
+	// Terminal set. The sticky-remote guard keeps the remote attribution, but the terminal flag
+	// must still land.
+	if _, err := st.AnnounceWithProject(ctx, store.AnnounceParams{
+		UserID: u.ID, Agent: "claude", SourceSessionID: "sess-kept",
+		Kind: "standalone", Cwd: "/home/grace/akari", Machine: "laptop", Terminal: true,
+	}, store.ProjectParams{
+		RemoteKey: "local:laptop:/home/grace/akari", Host: "laptop",
+		Repo: "akari", DisplayName: "akari", Kind: "standalone",
+	}); err != nil {
+		t.Fatalf("kept-remote terminal announce: %v", err)
+	}
+
+	var terminal bool
+	if err := st.Pool.QueryRow(ctx,
+		"SELECT terminal FROM sessions WHERE user_id = $1 AND source_session_id = 'sess-kept'", u.ID).Scan(&terminal); err != nil {
+		t.Fatalf("read terminal: %v", err)
+	}
+	if !terminal {
+		t.Error("terminal flag not persisted on the kept-remote announce path")
+	}
+}
+
 func hashHex(s string) string      { return hashHexBytes([]byte(s)) }
 func hashHexBytes(b []byte) string { sum := sha256.Sum256(b); return hex.EncodeToString(sum[:]) }
