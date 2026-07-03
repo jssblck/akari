@@ -23,6 +23,11 @@ build: generate
 # Run the test suite (regenerating templ output first). The store/parse/web
 # integration tests skip themselves unless AKARI_TEST_DATABASE_URL is set; see
 # the README.
+#
+# No `-p` pin is needed: the storetest gate is a cross-process semaphore (file
+# locks keyed to the target Postgres), so the suite's peak connections are bounded
+# at maxLiveStores x poolMaxConns no matter how many package binaries run at once.
+# See the budget note in internal/server/storetest/gate.go.
 test: generate
 	go test -race ./...
 

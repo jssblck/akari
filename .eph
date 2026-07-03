@@ -35,6 +35,13 @@ AKARI_URL=http://localhost:${server.port}
 [postgres]
 image=postgres:18
 port=5432
+# Raise the connection ceiling above the postgres:18 default of ~100. The full
+# integration suite opens many per-test pools at once, and under `eph run` the dev
+# `server` below shares this instance, so the default tips into "sorry, too many
+# clients". The test harness bounds its own budget (see the note in
+# internal/server/storetest/gate.go); this gives that budget slack plus room
+# for the maintenance connections and the dev server's pool.
+command=postgres -c max_connections=200
 env.POSTGRES_DB=akari
 env.POSTGRES_USER=akari
 env.POSTGRES_PASSWORD=akari

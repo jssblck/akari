@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -65,6 +66,13 @@ func provision(t *testing.T) string {
 		t.Skipf("set %s to run integration tests", EnvDatabaseURL)
 	}
 
+	// Hold a gate slot for this test's whole database lifetime, so the suite's
+	// live-pool count stays under the connection budget. Registered here, before
+	// the drop cleanup below, so its release runs last (see storeGate). The gate is
+	// keyed to base (the target Postgres) so every binary aimed at that server
+	// shares one bound.
+	acquireStoreSlot(t, base)
+
 	admin, err := maintenanceURL(base)
 	if err != nil {
 		t.Fatalf("derive maintenance url: %v", err)
@@ -97,15 +105,14 @@ func maintenanceURL(databaseURL string) (string, error) {
 	return u.String(), nil
 }
 
-// testDBURL rewrites the base URL to address the per-test database and bounds its
-// connection pool. The cap keeps a fully parallel suite (many pools at once) well
-// under the server's default connection limit, since each test only needs a
-// handful of connections.
+// testDBURL rewrites the base URL to address the per-test database and caps its
+// connection pool at poolMaxConns. Paired with the storeGate semaphore, that cap
+// is the C in the connection budget documented above EnvDatabaseURL.
 func testDBURL(base, name string) string {
 	u, _ := url.Parse(base) // already parsed and validated by maintenanceURL
 	u.Path = "/" + name
 	q := u.Query()
-	q.Set("pool_max_conns", "4")
+	q.Set("pool_max_conns", strconv.Itoa(poolMaxConns))
 	u.RawQuery = q.Encode()
 	return u.String()
 }
