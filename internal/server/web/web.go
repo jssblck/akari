@@ -7,6 +7,7 @@ import (
 	"context"
 	"embed"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -362,8 +363,13 @@ func ThinkingTokensLabel(tokens int) string {
 // model deliberated on that turn without opening the (often redacted) trace. ok is false for
 // a turn that carried no reasoning block, so the caller shows no chip. The turn's tokens are
 // its exact reasoning count where the agent reports one (Codex, in the turn usage) else its
-// reasoning-trace bytes over the agent's calibrated factor, the same estimate the session and
-// fleet reads use, so the per-message chip and the session readout band the same scale.
+// reasoning-trace bytes over the agent's calibrated factor.
+//
+// The estimate is rounded to whole tokens BEFORE banding, the same rule the settle pass
+// applies in gatherObservedThinking (math.Round into the stored int scalar) so a one-turn
+// session bands identically in the chip and in the header readout. Banding the raw float here
+// would let a turn whose estimate lands just over an edge (thinking_bytes=1374 for Claude is
+// 128.4 tokens) read one band in the chip and another off the rounded scalar (128 -> low).
 func MessageThinkingBand(agent string, m store.Message) (quality.ThinkingBucket, bool) {
 	if !m.HasThinking {
 		return quality.ThinkingOff, false
@@ -374,7 +380,7 @@ func MessageThinkingBand(agent string, m store.Message) (quality.ThinkingBucket,
 	} else {
 		tokens = float64(m.ThinkingBytes) / quality.ThinkingBytesPerToken(agent)
 	}
-	return quality.ThinkingBucketForTokens(tokens), true
+	return quality.ThinkingBucketForTokens(math.Round(tokens)), true
 }
 
 // QualityGrade is the headline of the session Quality tile: the letter grade for a
