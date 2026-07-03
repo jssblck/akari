@@ -17,9 +17,12 @@ import (
 // unscored bucket (NULL grade and score).
 func insertSignal(t *testing.T, st *store.Store, ctx context.Context, sid int64, version int, outcome, grade string) {
 	t.Helper()
+	// score and grade must agree (a set grade equals GradeFor(score); see migration 0040), so
+	// derive a band-consistent score from the grade rather than a fixed 80 that would contradict
+	// any non-B letter.
 	var score, gradeArg any
 	if grade != "" {
-		score, gradeArg = 80, grade
+		score, gradeArg = representativeScore(grade), grade
 	}
 	if _, err := st.Pool.Exec(ctx,
 		`INSERT INTO session_signals (session_id, signals_version, outcome, outcome_confidence, score, grade)
@@ -284,9 +287,10 @@ func TestUserQuality(t *testing.T) {
 	}
 	recent := time.Now().Add(-24 * time.Hour)
 
-	// Score comes from insertSignal's fixed 80 for any graded row, so the average over a user's
-	// graded sessions is 80 when they have any and nil when they have none. mk stamps a shape so
-	// the session is windowed, then a signals row (empty grade = the unscored/unknown bucket).
+	// insertSignal derives a band-consistent score from the grade (A->95, B->82, C->67; see
+	// representativeScore), so a user's average score is the mean of those over their graded
+	// sessions, and nil when they have none. mk stamps a shape so the session is windowed, then a
+	// signals row (empty grade = the unscored/unknown bucket).
 	mk := func(user int64, src, outcome, grade string) int64 {
 		sid := seedSession(t, st, user, pid, src)
 		setSessionShape(t, st, ctx, sid, recent, recent.Add(10*time.Minute), 20, 2)
@@ -335,8 +339,9 @@ func TestUserQuality(t *testing.T) {
 	if ada0.Completed+ada0.Abandoned+ada0.Errored+ada0.Unknown != ada0.Sessions {
 		t.Errorf("ada outcome counts do not partition sessions: %+v", ada0)
 	}
-	if ada0.AvgScore == nil || *ada0.AvgScore != 80.0 {
-		t.Errorf("ada avg score = %v, want 80.0", ada0.AvgScore)
+	// Ada's graded scores are 95 (A), 82 (B), 67 (C); their mean, rounded to one decimal, is 81.3.
+	if ada0.AvgScore == nil || *ada0.AvgScore != 81.3 {
+		t.Errorf("ada avg score = %v, want 81.3", ada0.AvgScore)
 	}
 	grace0 := users[1]
 	if grace0.Sessions != 1 || grace0.Graded != 1 || grace0.Abandoned != 1 {

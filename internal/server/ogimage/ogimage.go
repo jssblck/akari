@@ -79,13 +79,14 @@ func blend(fg, bg color.NRGBA, alpha float64) color.NRGBA {
 // faces holds the parsed font faces at the sizes the card uses. Parsing a face is
 // cheap but not free, so a render builds them once up front. Geist Mono carries
 // every figure (the tabular-tolerance rule); Geist SemiBold carries the display
-// and label text.
+// and label text. sans is kept so the heading face can be re-fit per heading (a
+// long project key shrinks to fit; see Render), rather than pinned at one size.
 type faces struct {
 	num   font.Face // big mono figures (the two headline numbers)
-	name  font.Face // the username heading (semibold display)
 	label font.Face // the uppercase stat labels
 	brand font.Face // the wordmark
 	sub   font.Face // the "/ usage overview" subhead
+	sans  *opentype.Font
 }
 
 func newFaces() (*faces, error) {
@@ -100,14 +101,13 @@ func newFaces() (*faces, error) {
 	mk := func(f *opentype.Font, size float64) (font.Face, error) {
 		return opentype.NewFace(f, &opentype.FaceOptions{Size: size, DPI: 72, Hinting: font.HintingFull})
 	}
-	fc := &faces{}
+	fc := &faces{sans: sans}
 	specs := []struct {
 		dst  *font.Face
 		f    *opentype.Font
 		size float64
 	}{
 		{&fc.num, mono, 72},
-		{&fc.name, sans, 58},
 		{&fc.label, sans, 22},
 		{&fc.brand, sans, 34},
 		{&fc.sub, sans, 34},
@@ -122,6 +122,66 @@ func newFaces() (*faces, error) {
 	return fc, nil
 }
 
+// headingSize is the heading's largest (default) point size; nameMinSize is the
+// smallest the fit walks down to before it truncates instead. A short heading (an
+// ordinary username) renders at headingSize, so its card is byte-identical to one
+// rendered before the fit was added; only a heading wide enough to overrun the card
+// shrinks, and only a heading too long even at nameMinSize is clipped with an ellipsis.
+const (
+	headingSize = 58.0
+	nameMinSize = 30.0
+)
+
+// fitHeading returns the face and (possibly truncated) text for the card's heading so
+// it fits within maxWidth: the largest size from headingSize down to nameMinSize at
+// which the whole heading fits, or, when even nameMinSize overruns (a pathological
+// long name), the nameMinSize face with the text truncated to fit with a trailing
+// ellipsis. It never fails on width, so an unusually long project key or session
+// project label clips gracefully rather than failing the whole render.
+func fitHeading(f *opentype.Font, s string, maxWidth int) (font.Face, string, error) {
+	return fitTextTrunc(f, s, headingSize, nameMinSize, maxWidth)
+}
+
+// fitTextTrunc is the general size-fit-then-truncate the card headings and the session
+// title share: the largest whole-point size in [minSize, maxSize] at which s fits
+// maxWidth, or the minSize face with s truncated to an ellipsis when even that overruns.
+// Unlike fitFace (which errors when nothing fits), it always returns a drawable face and
+// string, so user-supplied text of any length clips rather than failing the render.
+func fitTextTrunc(f *opentype.Font, s string, maxSize, minSize float64, maxWidth int) (font.Face, string, error) {
+	for size := maxSize; size >= minSize; size-- {
+		face, err := opentype.NewFace(f, &opentype.FaceOptions{Size: size, DPI: 72, Hinting: font.HintingFull})
+		if err != nil {
+			return nil, "", err
+		}
+		if font.MeasureString(face, s).Round() <= maxWidth {
+			return face, s, nil
+		}
+	}
+	minFace, err := opentype.NewFace(f, &opentype.FaceOptions{Size: minSize, DPI: 72, Hinting: font.HintingFull})
+	if err != nil {
+		return nil, "", err
+	}
+	return minFace, truncateToWidth(minFace, s, maxWidth), nil
+}
+
+// truncateToWidth drops trailing runes and appends a single-character ellipsis until
+// s measures within maxWidth in face. It is the graceful fallback for a heading too
+// long to fit even at the smallest heading size, so the card clips rather than errors.
+func truncateToWidth(face font.Face, s string, maxWidth int) string {
+	if font.MeasureString(face, s).Round() <= maxWidth {
+		return s
+	}
+	r := []rune(s)
+	for len(r) > 1 {
+		r = r[:len(r)-1]
+		cand := strings.TrimRight(string(r), " ") + "…"
+		if font.MeasureString(face, cand).Round() <= maxWidth {
+			return cand
+		}
+	}
+	return "…"
+}
+
 func loadFont(name string) (*opentype.Font, error) {
 	b, err := fontFS.ReadFile(name)
 	if err != nil {
@@ -130,12 +190,22 @@ func loadFont(name string) (*opentype.Font, error) {
 	return opentype.Parse(b)
 }
 
-// Render draws the overview card for one account and returns the encoded PNG. The
-// heatmap and the two figures are scoped to whatever the analytics carry (the
-// caller queries the default trailing-year window, so the card matches the page a
-// visitor first lands on). now fixes the grid's trailing edge, injected so the
-// render is deterministic under test.
-func Render(username string, a store.Analytics, now time.Time) ([]byte, error) {
+// Render draws a "usage overview" card and returns the encoded PNG: heading, the
+// "/ usage overview" subhead, the trailing-year activity heatmap, and the two headline
+// figures (total tokens and session count). It backs both the per-user overview card
+// (heading = the username) and the per-project overview card (heading = the project
+// title): the two pages render the same aggregate panel, so their share cards are one
+// composition parameterized by the heading. The heatmap and figures are scoped to
+// whatever the analytics carry (the caller queries the default trailing-year window,
+// so the card matches the page a visitor first lands on). now fixes the grid's
+// trailing edge, injected so the render is deterministic under test.
+//
+// The foot always carries the two figures a shared overview most wants to convey, total
+// tokens and session count, and extra appends any additional figures the caller wants
+// beside them (the project card adds a QUALITY grade; the user overview passes none), so
+// the two cards stay one composition that differs only in its foot columns. The stats
+// are spread across equal columns, so two read as halves and three as thirds.
+func Render(heading string, a store.Analytics, now time.Time, extra ...stat) ([]byte, error) {
 	fc, err := newFaces()
 	if err != nil {
 		return nil, err
@@ -160,19 +230,27 @@ func Render(username string, a store.Analytics, now time.Time) ([]byte, error) {
 	// noise on a glanceable share thumbnail. The figures are the trailing-year totals
 	// as of the render, which is enough context for a preview.
 
-	// Heading: the username in the display face, then "/ usage overview" muted, the
-	// same scent as the page's own head.
+	// Heading: the subject in the display face, then "/ usage overview" muted, the
+	// same scent as the page's own head. The heading face is fit to the text so a long
+	// project key shrinks to share the line with the subhead instead of overrunning the
+	// right pad; a short heading (an ordinary username) stays at the full size, so its
+	// card is unchanged. The subhead's fixed width reserves the space the fit must leave.
+	const subhead = "/ usage overview"
+	subW := font.MeasureString(fc.sub, subhead).Round()
+	nameFace, nameText, err := fitHeading(fc.sans, heading, Width-2*pad-18-subW)
+	if err != nil {
+		return nil, err
+	}
 	headBase := pad + 150
-	nameEnd := drawText(img, fc.name, pad, headBase, colText, username)
-	drawText(img, fc.sub, nameEnd+18, headBase, colMuted, "/ usage overview")
+	nameEnd := drawText(img, nameFace, pad, headBase, colText, nameText)
+	drawText(img, fc.sub, nameEnd+18, headBase, colMuted, subhead)
 
 	// The activity grid sits in the card's middle band, full trailing year.
 	gridTop := pad + 196
 	drawHeatmap(img, a, now, pad, gridTop, Width-2*pad)
 
-	// The two headline figures, along the foot: total tokens and session count, each
-	// number (mono, for tabular tolerance) nested directly under its uppercase label
-	// so the two stat blocks read as two columns rather than one crowded row.
+	// The headline figures along the foot, each number (mono, for tabular tolerance)
+	// nested directly under its uppercase label so the stat blocks read as columns.
 	//
 	// The token figure is a single all-classes total, not the per-class breakdown the
 	// web UI shows. TotalTokens folds in every class (input, output, cache read, cache
@@ -180,25 +258,90 @@ func Render(username string, a store.Analytics, now time.Time) ([]byte, error) {
 	// pages attach a hover/focus breakdown card to each token figure, but a static
 	// 1200x630 unfurl image has nothing to hover, and five figures in fixed text is
 	// information overload on a thumbnail glanced at in a chat. The full breakdown is
-	// one click away on the /u/<username> page this card links to. (The token-consistency
-	// review policy scopes its breakdown-card rule to the web UI for exactly this reason.)
+	// one click away on the page this card links to. (The token-consistency review policy
+	// scopes its breakdown-card rule to the web UI for exactly this reason.)
+	stats := append([]stat{
+		{"TOTAL TOKENS", fmtScale(a.TotalTokens())},
+		{"SESSIONS", fmtScale(int64(a.Sessions))},
+	}, extra...)
 	numBase := Height - pad - 12
 	// Sit the label clear of the number rather than tight against it: the figures are
 	// 72pt, so a small offset would bury the label against the digits' caps. The 66px
 	// drop is the deliberate breathing room between each stat's label and its value.
 	labelY := numBase - 66
-	drawText(img, fc.label, pad, labelY, colMuted, "TOTAL TOKENS")
-	drawText(img, fc.num, pad, numBase, colText, fmtScale(a.TotalTokens()))
-
-	col2 := Width/2 + 120
-	drawText(img, fc.label, col2, labelY, colMuted, "SESSIONS")
-	drawText(img, fc.num, col2, numBase, colText, fmtScale(int64(a.Sessions)))
+	drawStats(img, fc.label, fc.num, pad, labelY, numBase, Width-2*pad, stats)
 
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, img); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// unmeasured is the dash a card shows for a figure it cannot fill (an unscored session's
+// grade, a project with no graded session, a session with no measured span), so an absent
+// value reads as "not measured" rather than a misleading zero or a bare F.
+const unmeasured = "—"
+
+// stat is one foot figure on a card: an uppercase label over its value. A card builds a
+// slice of these and draws them as equal columns (see drawStats), so it can carry two,
+// three, or four figures without hand-placing each one.
+type stat struct {
+	label string
+	value string
+}
+
+// drawStats lays the stats out as a justified row across width from x: each stat is a block
+// (its label at labelY in labelFace over its value at numBase in numFace, both left-aligned in
+// the block), and the blocks are spread with equal gaps between them, the first flush against
+// the left edge and the last flush against the right. Justifying on the measured block widths
+// (rather than dropping each block at an even column pitch) keeps the gaps between the figures
+// visually even even though the figures differ in width, and fills the foot rather than
+// clustering the blocks left with a ragged right margin. Both the overview/project card and the
+// session card draw their foot figures through it, so all cards share one even layout.
+//
+// The gap is the leftover width after the blocks, split evenly between them. A single stat just
+// sits at the left edge, and content too wide to justify (the sum of the blocks exceeds the
+// width, which the short card figures never reach) falls back to an even column pitch so blocks
+// can never collide off the card.
+func drawStats(img *image.NRGBA, labelFace, numFace font.Face, x, labelY, numBase, width int, stats []stat) {
+	if len(stats) == 0 {
+		return
+	}
+
+	widths := make([]int, len(stats))
+	total := 0
+	for i, s := range stats {
+		w := font.MeasureString(labelFace, s.label).Round()
+		if vw := font.MeasureString(numFace, s.value).Round(); vw > w {
+			w = vw
+		}
+		widths[i] = w
+		total += w
+	}
+
+	gap := 0
+	if len(stats) > 1 {
+		gap = (width - total) / (len(stats) - 1)
+	}
+	if gap < 0 {
+		// The blocks are wider than the band: justifying would overlap them, so fall back to an
+		// even left-edge pitch, the widest layout that cannot collide.
+		colW := width / len(stats)
+		for i, s := range stats {
+			cx := x + i*colW
+			drawText(img, labelFace, cx, labelY, colMuted, s.label)
+			drawText(img, numFace, cx, numBase, colText, s.value)
+		}
+		return
+	}
+
+	cx := x
+	for i, s := range stats {
+		drawText(img, labelFace, cx, labelY, colMuted, s.label)
+		drawText(img, numFace, cx, numBase, colText, s.value)
+		cx += widths[i] + gap
+	}
 }
 
 // drawHeatmap renders the simplified activity calendar: a trailing 53-week grid,

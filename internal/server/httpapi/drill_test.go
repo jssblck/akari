@@ -56,8 +56,8 @@ func TestSessionsDrillParsingAndChips(t *testing.T) {
 		t.Fatalf("seed session: %v", err)
 	}
 	if _, err := st.Pool.Exec(ctx,
-		`INSERT INTO session_signals (session_id, signals_version, outcome, outcome_confidence, grade)
-		 VALUES ($1,$2,'completed','high','A')`, sid, quality.Version); err != nil {
+		`INSERT INTO session_signals (session_id, signals_version, outcome, outcome_confidence, score, grade)
+		 VALUES ($1,$2,'completed','high',95,'A')`, sid, quality.Version); err != nil {
 		t.Fatalf("seed signal: %v", err)
 	}
 
@@ -163,7 +163,7 @@ func TestSessionsDrillCountAgreement(t *testing.T) {
 		t.Fatalf("project: %v", err)
 	}
 	now := time.Now()
-	seed := func(src, grade string) {
+	seed := func(src string, score int, grade string) {
 		var sid int64
 		if err := st.Pool.QueryRow(ctx,
 			`INSERT INTO sessions (user_id, project_id, agent, source_session_id, machine,
@@ -172,14 +172,16 @@ func TestSessionsDrillCountAgreement(t *testing.T) {
 			u.ID, pid, src, now.Add(-time.Hour), now.Add(-30*time.Minute)).Scan(&sid); err != nil {
 			t.Fatalf("seed session %s: %v", src, err)
 		}
+		// score and grade are seeded together (both non-NULL), the only shape the
+		// session_signals_score_grade_ck constraint permits for a graded row.
 		if _, err := st.Pool.Exec(ctx,
-			`INSERT INTO session_signals (session_id, signals_version, outcome, outcome_confidence, grade)
-			 VALUES ($1,$2,'completed','high',$3)`, sid, quality.Version, grade); err != nil {
+			`INSERT INTO session_signals (session_id, signals_version, outcome, outcome_confidence, score, grade)
+			 VALUES ($1,$2,'completed','high',$3,$4)`, sid, quality.Version, score, grade); err != nil {
 			t.Fatalf("seed signal %s: %v", src, err)
 		}
 	}
-	seed("drill-a", "A")
-	seed("drill-f", "F")
+	seed("drill-a", 95, "A")
+	seed("drill-f", 20, "F")
 
 	body := readBody(t, mustGet(t, c, srv.URL+"/sessions?grade=A"))
 	if !strings.Contains(body, "1 session") {

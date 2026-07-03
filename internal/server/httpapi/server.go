@@ -22,12 +22,16 @@ type Server struct {
 	// mcp is the Streamable-HTTP handler for the remote MCP server, built once and
 	// shared across requests; handleMCP wraps it per request with the bearer check.
 	mcp http.Handler
-	// ogRender coalesces concurrent on-demand renders of the same user's Open Graph
-	// card, keyed by user id. A crawler burst (or several unfurls landing at once on a
-	// cache miss or an expired card) would otherwise run the full year-window analytics
-	// and raster once per request; singleflight lets one render run while the rest wait
-	// for and serve its result.
-	ogRender singleflight.Group
+	// ogRender, ogProjectRender, and ogSessionRender coalesce concurrent on-demand
+	// renders of the same Open Graph card, keyed by the entity id. A crawler burst (or
+	// several unfurls landing at once on a cache miss or an expired card) would otherwise
+	// run the full render once per request; singleflight lets one render run while the
+	// rest wait for and serve its result. They are separate groups (not one shared group
+	// with prefixed keys) so a user id and a project id that happen to share a numeric
+	// value never collide on one in-flight render.
+	ogRender        singleflight.Group
+	ogProjectRender singleflight.Group
+	ogSessionRender singleflight.Group
 }
 
 // New builds a Server. The reparse service is shared with the startup auto-run and
@@ -132,11 +136,13 @@ func (s *Server) Routes() http.Handler {
 	// project across every account, with no session list. Gated during a reparse like
 	// the other public parsed pages.
 	mux.HandleFunc("GET /p/{id}", s.gatePublicParsed(s.handlePublicProject))
-	// The Open Graph preview card for that overview. It serves PNG bytes rendered on
-	// demand and held in a TTL cache (see handlePublicOverviewOGImage), so it is not
-	// reparse-gated: the more specific pattern wins over /u/{username} for this exact
-	// path.
+	// The Open Graph preview cards for the three per-entity public pages. Each serves
+	// PNG bytes rendered on demand and held in a TTL cache, so none is reparse-gated: the
+	// more specific /og.png pattern wins over the page pattern (/u/{username}, /p/{id},
+	// /s/{public_id}) for these exact paths.
 	mux.HandleFunc("GET /u/{username}/og.png", s.handlePublicOverviewOGImage)
+	mux.HandleFunc("GET /p/{id}/og.png", s.handlePublicProjectOGImage)
+	mux.HandleFunc("GET /s/{public_id}/og.png", s.handlePublicSessionOGImage)
 	// The Open Graph preview card for the instance root ("/"). It serves static PNG
 	// bytes memoized per binary (see handleLandingOGImage), so like the overview
 	// card route it needs no auth and no reparse gate.

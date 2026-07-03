@@ -405,6 +405,13 @@ func PublicOverviewHref(username string) templ.SafeURL {
 	return templ.URL(PublicOverviewPath(username))
 }
 
+// PublicOverviewOGPath is the path of the Open Graph preview card for a user's
+// published overview, the /u/<username>/og.png the page advertises as og:image and
+// the route serves the rendered PNG from. It is PublicOverviewPath with the card
+// suffix, so the page tag and the route stay one definition rather than two string
+// literals that could drift.
+func PublicOverviewOGPath(username string) string { return PublicOverviewPath(username) + "/og.png" }
+
 // PublicProjectPath is the plain-string path of a project's public usage overview,
 // rooted at /p/<id>. The range selector on the public page builds its buttons from
 // this base (via RangeOptions), so switching the window refetches the public path
@@ -417,6 +424,18 @@ func PublicProjectPath(id int64) string { return fmt.Sprintf("/p/%d", id) }
 func PublicProjectHref(id int64) templ.SafeURL {
 	return templ.URL(PublicProjectPath(id))
 }
+
+// PublicProjectOGPath is the path of the Open Graph preview card for a project's
+// published overview, the /p/<id>/og.png the page advertises as og:image and the
+// route serves the rendered PNG from. Built off PublicProjectPath so the tag and the
+// route share one definition.
+func PublicProjectOGPath(id int64) string { return PublicProjectPath(id) + "/og.png" }
+
+// PublicSessionOGPath is the path of the Open Graph preview card for a published
+// session, the /s/<public_id>/og.png the page advertises as og:image and the route
+// serves the rendered PNG from. Built off PublicPath so the tag and the route share
+// one definition.
+func PublicSessionOGPath(publicID string) string { return PublicPath(publicID) + "/og.png" }
 
 // ProjectPublishPath and ProjectUnpublishPath are the POST targets for the project
 // page's publicity control, mirroring the account overview toggles. They are plain

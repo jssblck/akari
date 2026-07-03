@@ -1621,6 +1621,188 @@ func TestLandingOGImage(t *testing.T) {
 	}
 }
 
+// TestPublicProjectOGImage drives the project preview card end to end, mirroring
+// TestPublicOverviewOGImage: the public /p/<id> page advertises the card on its default
+// range only, the /p/<id>/og.png route renders a valid 1200x630 PNG on demand and caches
+// it, a repeat fetch within the TTL is served from the cache, and making the project
+// private 404s the card just as it does the page.
+func TestPublicProjectOGImage(t *testing.T) {
+	t.Parallel()
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+
+	owner, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	ann, err := st.Announce(ctx, store.AnnounceParams{
+		UserID: owner.ID, Agent: "claude", SourceSessionID: "sess-grace",
+		ProjectID: projectID, Cwd: "/home/grace/akari", Machine: "laptop",
+	})
+	if err != nil {
+		t.Fatalf("announce: %v", err)
+	}
+	if _, err := st.Pool.Exec(ctx,
+		`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cost_usd, occurred_at, dedup_key)
+		 VALUES ($1, 'claude-opus-4-8', 100, 50, 1.0, now() - make_interval(days => 1), 'p1')`,
+		ann.SessionID); err != nil {
+		t.Fatalf("seed usage: %v", err)
+	}
+
+	anon := newClient(t)
+	anon.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	cardURL := fmt.Sprintf("%s/p/%d/og.png", srv.URL, projectID)
+	pageURL := fmt.Sprintf("%s/p/%d", srv.URL, projectID)
+
+	// Before publishing, the card 404s (the page does too).
+	resp := mustGet(t, anon, cardURL)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("og.png before publish = %d, want 404", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	if err := st.PublishProjectOverview(ctx, projectID); err != nil {
+		t.Fatalf("publish project overview: %v", err)
+	}
+
+	// The default-range public page advertises the card via Open Graph meta tags.
+	body := readBody(t, mustGet(t, anon, pageURL))
+	for _, want := range []string{
+		`property="og:image" content="`,
+		fmt.Sprintf(`/p/%d/og.png"`, projectID),
+		`name="twitter:card" content="summary_large_image"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("public project missing OG tag %q, got:\n%s", want, body)
+		}
+	}
+
+	// Under a narrower ?range the year-window card no longer matches the page totals, so
+	// it must not be advertised there.
+	ranged := readBody(t, mustGet(t, anon, pageURL+"?range=7d"))
+	if strings.Contains(ranged, "og:image") {
+		t.Fatalf("non-default range project page must not advertise the card, got:\n%s", ranged)
+	}
+
+	// The first fetch renders on demand: a valid, correctly sized PNG.
+	if b := fetchPNG(t, anon, cardURL); b.Dx() != 1200 || b.Dy() != 630 {
+		t.Fatalf("rendered og.png size = %dx%d, want 1200x630", b.Dx(), b.Dy())
+	}
+
+	// A repeat fetch within the TTL is served from the cache. Prove it with a sentinel.
+	sentinel := []byte("cached-sentinel-not-a-real-png")
+	if _, err := st.PutProjectOGImage(ctx, projectID, sentinel, time.Now()); err != nil {
+		t.Fatalf("seed sentinel card: %v", err)
+	}
+	resp = mustGet(t, anon, cardURL)
+	raw, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read cached og.png: %v", err)
+	}
+	if !bytes.Equal(raw, sentinel) {
+		t.Fatalf("fresh cache should serve the cached bytes unchanged, got %d bytes", len(raw))
+	}
+
+	// Making the project private 404s the card, matching the page.
+	if err := st.UnpublishProjectOverview(ctx, projectID); err != nil {
+		t.Fatalf("unpublish project overview: %v", err)
+	}
+	resp = mustGet(t, anon, cardURL)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("og.png after make-private = %d, want 404", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+// TestPublicSessionOGImage drives the session preview card end to end: the public
+// /s/<public_id> page advertises the card (unconditionally, since a session card has no
+// range), the /s/<public_id>/og.png route renders a valid 1200x630 PNG on demand and
+// caches it, a repeat fetch within the TTL serves the cache, and unpublishing the
+// session 404s the card just as it does the page.
+func TestPublicSessionOGImage(t *testing.T) {
+	t.Parallel()
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+
+	owner, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	ann, err := st.Announce(ctx, store.AnnounceParams{
+		UserID: owner.ID, Agent: "claude", SourceSessionID: "sess-grace",
+		ProjectID: projectID, Cwd: "/home/grace/akari", Machine: "laptop",
+	})
+	if err != nil {
+		t.Fatalf("announce: %v", err)
+	}
+	if _, err := st.Pool.Exec(ctx,
+		`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cost_usd, occurred_at, dedup_key)
+		 VALUES ($1, 'claude-opus-4-8', 100, 50, 1.0, now() - make_interval(days => 1), 's1')`,
+		ann.SessionID); err != nil {
+		t.Fatalf("seed usage: %v", err)
+	}
+	pubID, err := st.PublishSession(ctx, ann.SessionID, owner.ID, "pubsess1")
+	if err != nil {
+		t.Fatalf("publish session: %v", err)
+	}
+
+	anon := newClient(t)
+	anon.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	cardURL := srv.URL + "/s/" + pubID + "/og.png"
+	pageURL := srv.URL + "/s/" + pubID
+
+	// The public session page advertises the card via Open Graph meta tags.
+	body := readBody(t, mustGet(t, anon, pageURL))
+	for _, want := range []string{
+		`property="og:image" content="`,
+		"/s/" + pubID + `/og.png"`,
+		`name="twitter:card" content="summary_large_image"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("public session missing OG tag %q, got:\n%s", want, body)
+		}
+	}
+
+	// The first fetch renders on demand: a valid, correctly sized PNG.
+	if b := fetchPNG(t, anon, cardURL); b.Dx() != 1200 || b.Dy() != 630 {
+		t.Fatalf("rendered og.png size = %dx%d, want 1200x630", b.Dx(), b.Dy())
+	}
+
+	// A repeat fetch within the TTL serves the cache. Prove it with a sentinel.
+	sentinel := []byte("cached-sentinel-not-a-real-png")
+	if _, err := st.PutSessionOGImage(ctx, ann.SessionID, sentinel, time.Now()); err != nil {
+		t.Fatalf("seed sentinel card: %v", err)
+	}
+	resp := mustGet(t, anon, cardURL)
+	raw, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read cached og.png: %v", err)
+	}
+	if !bytes.Equal(raw, sentinel) {
+		t.Fatalf("fresh cache should serve the cached bytes unchanged, got %d bytes", len(raw))
+	}
+
+	// Unpublishing the session 404s the card, matching the page.
+	if err := st.UnpublishSession(ctx, ann.SessionID, owner.ID); err != nil {
+		t.Fatalf("unpublish session: %v", err)
+	}
+	resp = mustGet(t, anon, cardURL)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("og.png after unpublish = %d, want 404", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
 // fetchPNG GETs a URL, asserts a 200 image/png, and returns the decoded image's
 // bounds so a caller can check the card's dimensions.
 func fetchPNG(t *testing.T, c *http.Client, url string) image.Rectangle {

@@ -17,13 +17,37 @@ import (
 // that the read gate keys on.
 func insertGradeOutcomeSignal(t *testing.T, st *store.Store, ctx context.Context, sid int64, version int, grade *string, outcome string) {
 	t.Helper()
+	// score and grade are a matched pair (session_signals_score_grade_ck): seed a score
+	// whenever a grade is set, and leave both NULL for an ungraded (nil-grade) row.
+	var score any
+	if grade != nil {
+		score = representativeScore(*grade)
+	}
 	if _, err := st.Pool.Exec(ctx,
-		`INSERT INTO session_signals (session_id, signals_version, outcome, outcome_confidence, grade)
-		 VALUES ($1, $2, $3, 'high', $4)`,
-		sid, version, outcome, grade); err != nil {
+		`INSERT INTO session_signals (session_id, signals_version, outcome, outcome_confidence, score, grade)
+		 VALUES ($1, $2, $3, 'high', $4, $5)`,
+		sid, version, outcome, score, grade); err != nil {
 		t.Fatalf("insert grade/outcome signal for session %d: %v", sid, err)
 	}
 	markSignalsFresh(t, st, ctx, sid)
+}
+
+// representativeScore returns a score that bands to the given letter under quality.GradeFor,
+// so a test seeding a graded signals row can supply a score consistent with the grade (the
+// two must be set together). It is the mid-band value for each letter.
+func representativeScore(grade string) int {
+	switch grade {
+	case "A":
+		return 95
+	case "B":
+		return 82
+	case "C":
+		return 67
+	case "D":
+		return 50
+	default: // "F"
+		return 20
+	}
 }
 
 // markSignalsStaleFor sets the read gate's staleness flag, so a session with a

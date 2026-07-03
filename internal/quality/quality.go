@@ -231,7 +231,7 @@ func Score(s Signals) (score int, grade string, scored bool) {
 	if score < 0 {
 		score = 0
 	}
-	return score, gradeFor(score), true
+	return score, GradeFor(score), true
 }
 
 // ScoreBreakdownItem is one line of the score arithmetic: a human-readable label for a
@@ -353,8 +353,11 @@ func ClassifyArchetype(f ArchetypeFacts) Archetype {
 	}
 }
 
-// gradeFor maps a 0-100 score to its letter on the standard banding.
-func gradeFor(score int) string {
+// GradeFor maps a 0-100 score to its letter on the standard banding. It is the one
+// place the score-to-letter thresholds live, so a per-session grade and a figure
+// derived from an average score (the project card's representative grade) band the same
+// way rather than drifting apart.
+func GradeFor(score int) string {
 	switch {
 	case score >= 90:
 		return "A"

@@ -10,9 +10,11 @@ import (
 	"github.com/jssblck/akari/internal/server/storetest"
 )
 
-// TestCleanupExpiredOGImages exercises the background cleanup pass: it prunes a
-// cached card older than the TTL and leaves a fresh one in place, so a card for an
-// overview nobody is sharing does not linger while an actively shared one survives.
+// TestCleanupExpiredOGImages exercises the background cleanup pass across all three card
+// tables: it prunes a cached overview, project, and session card older than the TTL and
+// leaves a fresh one of each in place, so a card nobody is sharing does not linger while an
+// actively shared one survives. Covering the project and session tables here pins that the
+// pass sweeps the two per-entity tables the OG cards added, not just the overview table.
 func TestCleanupExpiredOGImages(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -43,15 +45,66 @@ func TestCleanupExpiredOGImages(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// One pass with a 1h TTL prunes ada's aged card and keeps grace's fresh one.
+	// A project and a session card too, one fresh and one aged of each, so the pass is
+	// exercised against every table it sweeps.
+	freshPID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stalePID, err := st.UpsertProject(ctx, "github.com/gracehopper/nanosecond", "github.com", "gracehopper", "nanosecond", "nanosecond", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.PutProjectOGImage(ctx, freshPID, []byte("fresh-project"), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.PutProjectOGImage(ctx, stalePID, []byte("stale-project"), time.Now().Add(-2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	freshSID := announceSession(t, st, ctx, fresh.ID, freshPID, "sess-fresh")
+	staleSID := announceSession(t, st, ctx, fresh.ID, freshPID, "sess-stale")
+	if _, err := st.PutSessionOGImage(ctx, freshSID, []byte("fresh-session"), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.PutSessionOGImage(ctx, staleSID, []byte("stale-session"), time.Now().Add(-2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	// One pass with a 1h TTL prunes every aged card and keeps every fresh one.
 	cleanupExpiredOGImages(ctx, st, time.Hour)
 
 	if _, err := st.OverviewOGImage(ctx, staleID); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("stale card after cleanup err = %v, want ErrNotFound (pruned)", err)
+		t.Fatalf("stale overview card after cleanup err = %v, want ErrNotFound (pruned)", err)
 	}
 	if _, err := st.OverviewOGImage(ctx, fresh.ID); err != nil {
-		t.Fatalf("fresh card after cleanup: %v (should have survived)", err)
+		t.Fatalf("fresh overview card after cleanup: %v (should have survived)", err)
 	}
+	if _, err := st.ProjectOGImage(ctx, stalePID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("stale project card after cleanup err = %v, want ErrNotFound (pruned)", err)
+	}
+	if _, err := st.ProjectOGImage(ctx, freshPID); err != nil {
+		t.Fatalf("fresh project card after cleanup: %v (should have survived)", err)
+	}
+	if _, err := st.SessionOGImage(ctx, staleSID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("stale session card after cleanup err = %v, want ErrNotFound (pruned)", err)
+	}
+	if _, err := st.SessionOGImage(ctx, freshSID); err != nil {
+		t.Fatalf("fresh session card after cleanup: %v (should have survived)", err)
+	}
+}
+
+// announceSession registers a session in a project and returns its numeric id, the fixture
+// the cleanup test uses to hang a session card off a real (FK-satisfying) session row.
+func announceSession(t *testing.T, st *store.Store, ctx context.Context, ownerID, projectID int64, source string) int64 {
+	t.Helper()
+	ann, err := st.Announce(ctx, store.AnnounceParams{
+		UserID: ownerID, Agent: "claude", SourceSessionID: source,
+		ProjectID: projectID, Cwd: "/home/grace/akari", Machine: "laptop",
+	})
+	if err != nil {
+		t.Fatalf("announce %s: %v", source, err)
+	}
+	return ann.SessionID
 }
 
 // TestCleanupExpiredOGImagesSwallowsError pins the pass's error branch: a failing

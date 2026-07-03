@@ -916,10 +916,11 @@ func TestSessionSignalsByIDVersionFilter(t *testing.T) {
 	sid := seedSession(t, st, uid, pid, "sess-stale-version")
 
 	// A stale row with a real grade. The version does not match the running one, so the read
-	// must ignore it rather than hand back the 'C'.
+	// must ignore it rather than hand back the 'C'. The score bands to that grade (65 -> C under
+	// GradeFor), the only shape migration 0040 permits for a graded row.
 	if _, err := st.Pool.Exec(ctx,
 		`INSERT INTO session_signals (session_id, signals_version, outcome, outcome_confidence, score, grade)
-		 VALUES ($1, $2, 'completed', 'high', 42, 'C')`,
+		 VALUES ($1, $2, 'completed', 'high', 65, 'C')`,
 		sid, quality.Version+999); err != nil {
 		t.Fatalf("insert stale signal: %v", err)
 	}
@@ -943,8 +944,8 @@ func TestSessionSignalsByIDVersionFilter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read signals (current row): %v", err)
 	}
-	if !sig.Scored() || *sig.Score != 42 || *sig.Grade != "C" || sig.Outcome != string(quality.OutcomeCompleted) {
-		t.Errorf("current-version read = (%s, score %v, grade %v), want (completed, 42, C)", sig.Outcome, sig.Score, sig.Grade)
+	if !sig.Scored() || *sig.Score != 65 || *sig.Grade != "C" || sig.Outcome != string(quality.OutcomeCompleted) {
+		t.Errorf("current-version read = (%s, score %v, grade %v), want (completed, 65, C)", sig.Outcome, sig.Score, sig.Grade)
 	}
 }
 
