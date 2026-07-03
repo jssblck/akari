@@ -158,6 +158,33 @@ func TestInsightsTrends(t *testing.T) {
 		t.Errorf("signal outcome total = %d, want 6 (five roots + one subagent)", outcomeTotal)
 	}
 
+	// The raw outcome counts back the magnitude bars and must partition OutcomeTotal the same way
+	// the rates do: completed + abandoned + other = total per bucket, with other the errored and
+	// unknown residue. This is what keeps the stacked bar's abandoned segment equal to the
+	// abandoned-rate line instead of colouring the errored session as abandoned. Across the grid
+	// the six settled sessions are four completed (root1, t3, child, churnDay1), one abandoned
+	// (t2), and one errored folded into other (errSession); the future session is off-grid.
+	var compCount, abandCount, otherCount int
+	for i := range tr.Signals.OutcomeTotal {
+		comp, aband := tr.Signals.CompletedCount[i], tr.Signals.AbandonedCount[i]
+		other := tr.Signals.OutcomeTotal[i] - comp - aband
+		if other < 0 {
+			t.Errorf("bucket %d: completed %d + abandoned %d exceeds total %d", i, comp, aband, tr.Signals.OutcomeTotal[i])
+		}
+		compCount += comp
+		abandCount += aband
+		otherCount += other
+	}
+	if compCount != 4 {
+		t.Errorf("completed count sum = %d, want 4 (root1, t3, child, churnDay1)", compCount)
+	}
+	if abandCount != 1 {
+		t.Errorf("abandoned count sum = %d, want 1 (t2)", abandCount)
+	}
+	if otherCount != 1 {
+		t.Errorf("other-outcome count sum = %d, want 1 (the errored session)", otherCount)
+	}
+
 	// The headline quality distribution and the bucketed outcome series read one cohort: the
 	// same started_at-windowed, signals-gated sessions, with no relationship filter on either.
 	// Once the page bounds its window to the charted grid they must count the same sessions, so

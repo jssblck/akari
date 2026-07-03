@@ -69,6 +69,12 @@ type SignalTrends struct {
 	CompletedRate []float64 // percent of bucket i's sessions that completed
 	AbandonedRate []float64 // percent that abandoned
 	OutcomeTotal  []int     // sessions in bucket i (the rate denominator)
+	// Raw per-bucket outcome counts behind the rates, so the outcome chart's magnitude bars draw
+	// the store's completed/abandoned/other partition exactly rather than deriving a warn segment
+	// as total-completed, which folds errored and unknown into the abandoned colour and drifts
+	// from the abandoned-rate line. Other is OutcomeTotal minus these two.
+	CompletedCount []int
+	AbandonedCount []int
 
 	// Hygiene rates, each a percent of the bucket's prompts (or sessions, for
 	// unstructured starts), gated on the current prompt-facts version.
@@ -499,6 +505,11 @@ func (s *Store) signalTrendsFrom(ctx context.Context, q querier, f AnalyticsFilt
 		out.CompletedRate[i] = float64(completed[i]) / float64(total) * 100
 		out.AbandonedRate[i] = float64(abandoned[i]) / float64(total) * 100
 	}
+	// Expose the raw counts the rates were built from, so the outcome chart's bars partition the
+	// same completed/abandoned/other split the store computed (both slices are already sized to
+	// the grid and zero for an empty bucket).
+	out.CompletedCount = completed
+	out.AbandonedCount = abandoned
 
 	// Hygiene: per-bucket sums over the gated cohort, additionally on the prompt-facts
 	// version (the facts ride the messages row, so a superseded classifier reads as

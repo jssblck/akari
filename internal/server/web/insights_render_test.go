@@ -168,8 +168,11 @@ func sampleTrends() *store.Trends {
 				{"A": 40, "B": 30, "C": 20, "D": 5, "F": 0, "": 5},
 				{"A": 42, "B": 31, "C": 18, "D": 4, "F": 0, "": 5},
 			},
-			GPA:           []float64{3.1, 3.2},
-			CompletedRate: []float64{70, 72}, AbandonedRate: []float64{10, 8}, OutcomeTotal: []int{15, 18},
+			GPA: []float64{3.1, 3.2},
+			// Raw outcome counts behind the rates: bucket 0 is 10 completed, 2 abandoned, 3 other of
+			// 15; bucket 1 is 13, 1, 4 of 18. The bars partition on these, the lines read the rates.
+			CompletedRate: []float64{66.7, 72.2}, AbandonedRate: []float64{13.3, 5.6}, OutcomeTotal: []int{15, 18},
+			CompletedCount: []int{10, 13}, AbandonedCount: []int{2, 1},
 			HygieneTerse: []float64{8, 7}, HygieneRepeated: []float64{3, 2},
 			HygieneNoCode: []float64{5, 4}, HygieneUnstructured: []float64{6, 5},
 			ContextResets: []int{2, 1},

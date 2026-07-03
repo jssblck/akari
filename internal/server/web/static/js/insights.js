@@ -1187,20 +1187,31 @@
     // plot as the completed/abandoned bars in Economics are.
     const barClip = A.clipGroup(svg, pL, pT, w - pL - pR, h - pT - pB);
     D.outcomes.forEach((r, i) => {
-      const completed = Math.round(r.total * (r.completedRate / 100));
-      const rest = r.total - completed;
+      // Partition the magnitude bar the way the store partitions the cohort: completed, abandoned,
+      // then the neutral rest (errored plus unknown). Drawing abandoned as its own warn segment
+      // from the canonical count keeps the bar's abandoned share equal to the abandoned-rate line
+      // above it; the old total-completed "rest" segment coloured errored and unknown as abandoned,
+      // so a bucket with an errored session read a taller warn bar than its abandoned line.
+      const completed = r.completed;
+      const abandoned = r.abandoned;
+      const other = Math.max(0, r.total - completed - abandoned);
       const x = xScale(i) - bw / 2;
+      const base = barsTop + (barH - 16);
       const hComp = barScale(completed);
-      const hRest = barScale(rest);
-      barClip.appendChild(A.svgEl('rect', { x, y: barsTop + (barH - 16 - hComp - hRest), width: bw, height: hComp, fill: 'var(--ok)', opacity: '0.55' }));
-      barClip.appendChild(A.svgEl('rect', { x, y: barsTop + (barH - 16 - hRest), width: bw, height: hRest, fill: 'var(--warn)', opacity: '0.55' }));
+      const hAband = barScale(abandoned);
+      const hOther = barScale(other);
+      barClip.appendChild(A.svgEl('rect', { x, y: base - hComp, width: bw, height: hComp, fill: 'var(--ok)', opacity: '0.55' }));
+      barClip.appendChild(A.svgEl('rect', { x, y: base - hComp - hAband, width: bw, height: hAband, fill: 'var(--warn)', opacity: '0.55' }));
+      barClip.appendChild(A.svgEl('rect', { x, y: base - hComp - hAband - hOther, width: bw, height: hOther, fill: 'var(--muted)', opacity: '0.45' }));
     });
 
     A.attachHoverBucket(svg, w, h, pL, pR, pT, pB, xScale, (i) => {
       const r = D.outcomes[i];
+      const other = Math.max(0, r.total - r.completed - r.abandoned);
       return '<div class="tt-title">' + D.bucketLabels[i] + '</div>' +
         '<div class="tt-row" style="color:var(--ok)">completed <b>' + r.completedRate.toFixed(1) + '%</b></div>' +
         '<div class="tt-row" style="color:var(--warn)">abandoned <b>' + r.abandonedRate.toFixed(1) + '%</b></div>' +
+        '<div class="tt-row" style="color:var(--muted)">other <b>' + other + '</b></div>' +
         '<div class="tt-row">sessions <b>' + r.total + '</b></div>';
     });
 

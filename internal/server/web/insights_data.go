@@ -331,10 +331,16 @@ func gradesData(s store.SignalTrends) []map[string]any {
 func outcomesData(s store.SignalTrends) []map[string]any {
 	out := make([]map[string]any, len(s.CompletedRate))
 	for i := range s.CompletedRate {
+		// Carry the raw completed/abandoned counts, not just the rates, so the magnitude bars draw
+		// the store's completed/abandoned/other partition. The abandoned bar segment then matches
+		// the abandoned-rate line instead of a total-completed "rest" segment that would fold
+		// errored and unknown into the abandoned colour.
 		out[i] = map[string]any{
 			"completedRate": s.CompletedRate[i],
 			"abandonedRate": s.AbandonedRate[i],
 			"total":         s.OutcomeTotal[i],
+			"completed":     s.CompletedCount[i],
+			"abandoned":     s.AbandonedCount[i],
 		}
 	}
 	return out

@@ -221,6 +221,12 @@ func TestInsightsDataMapping(t *testing.T) {
 	if len(d.Outcomes) != 2 || d.Outcomes[0]["total"] != 15 {
 		t.Errorf("outcomes[0].total = %v, want 15", d.Outcomes[0]["total"])
 	}
+	// The raw completed/abandoned counts back the magnitude bars' three-band partition; other is
+	// the residue (15 - 10 - 2 = 3). Without them the bar would derive a warn segment as
+	// total-completed and colour the errored/unknown sessions as abandoned.
+	if d.Outcomes[0]["completed"] != 10 || d.Outcomes[0]["abandoned"] != 2 {
+		t.Errorf("outcomes[0] completed/abandoned = %v/%v, want 10/2", d.Outcomes[0]["completed"], d.Outcomes[0]["abandoned"])
+	}
 	if len(d.Hygiene.NoPointer) != 2 || d.Hygiene.NoPointer[0] != 5 {
 		t.Errorf("hygiene.noPointer = %v, want [5 4]", d.Hygiene.NoPointer)
 	}
