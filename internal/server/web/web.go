@@ -338,8 +338,8 @@ type ThinkingReadout struct {
 	Coverage   float64 // share of assistant turns that reasoned, in [0, 1]
 }
 
-// ThinkingBucketLabel renders a band for the tooltip and the Insights panel. The xhigh
-// constant reads better spelled out.
+// ThinkingBucketLabel renders a band for the session tooltip and the per-message transcript
+// chip. The xhigh constant reads better spelled out.
 func ThinkingBucketLabel(b quality.ThinkingBucket) string {
 	if b == quality.ThinkingXHigh {
 		return "very high"
@@ -355,14 +355,6 @@ func ThinkingBucketLabel(b quality.ThinkingBucket) string {
 // framing comes from the surrounding label, so it is left off here.
 func ThinkingTokensLabel(tokens int) string {
 	return "~" + FmtTokensCompact(int64(tokens)) + " tok"
-}
-
-// ThinkingCoverageLabel renders the share of assistant turns that carried a reasoning block
-// as a whole percent ("67% of turns"), the companion to the volume figures: a session can
-// think hard on the few turns it reasons while most turns coast, and coverage separates the
-// two.
-func ThinkingCoverageLabel(coverage float64) string {
-	return fmt.Sprintf("%.0f%% of turns", coverage*100)
 }
 
 // MessageThinkingBand is the in-transcript per-message band: the absolute thinking band for

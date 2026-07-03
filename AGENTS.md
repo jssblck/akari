@@ -130,17 +130,30 @@ statistic rather than an all-turn average, because most turns barely reason so a
 mean collapses to the floor while a bare max lets one outlier define the session. The
 session band reads off the tail; the peak (the single hardest turn) rides alongside.
 All four are NULL together when the session had no assistant turns (nothing to
-measure, so the UI reads absence, not "off"). The fleet view
-(`observedThinkingFrom`) is a true per-turn distribution: it walks the assistant turns
-of measured sessions and counts them into the same bands, plus token percentiles
-(p50/p90/p99) over the thinking turns, so a light-thinking fleet reads mostly off/low
-and the percentiles expose the heavy tail an average hides.
+measure, so the UI reads absence, not "off"). These scalars back the session readout
+(the Quality tooltip's Thinking group) and, per message, the transcript's thinking-band
+chip.
+
+Known limitation, and why the fleet view is deferred. The "turn" unit is wrong for
+Claude today. A Claude Code assistant response is one API message, but the harness logs
+each of its content blocks on its own JSONL line, so the thinking block, the reply text,
+and every `tool_use` become separate `messages` rows that all share one `message.id`. The
+parser maps one line to one row (`reduceClaude`), so a row-level distribution is dominated
+by tool-call rows that structurally carry no thinking: on the real corpus ~51% of Claude
+assistant rows are pure tool-call rows and only ~18% carry a reasoning block, so a per-row
+"off" share reads ~82% while grouping the same rows by `message.id` puts it near ~15%
+(Codex is unaffected: `reduceCodex` already folds a whole turn into one row). The
+fleet/insights distribution over rows was therefore removed until the unit is fixed (group
+rows by the API message id, or collapse the split at parse time; see issue #98). The per-session tail and
+peak are volume figures per thinking block, so they are not distorted by the split and stay;
+the coverage figure ("N of M turns") shares the row-count denominator and is a known
+casualty folded into the same fix.
 
 Each turn's tokens are its exact reasoning-token count where the agent reports one
 (Codex logs it per turn in `message_turn_usage.reasoning_tokens`), else its
 reasoning-trace bytes over an agent-calibrated bytes-per-token factor. `perTurnTokensExpr`
-(store) builds that expression once for both the settle derivation and the fleet
-aggregate, single-sourcing the divisors from `quality.ThinkingBytesPerToken` so the SQL
+(store) builds that expression for the settle derivation (and the fleet aggregate when it
+returns), single-sourcing the divisors from `quality.ThinkingBytesPerToken` so the SQL
 matches the Go mapping. The byte estimate is trustworthy: measured against Codex's exact
 counts and the rare Claude blocks that kept their plaintext, the per-turn medians agree
 within ~2%, so a token figure is comparable across models without the per-model ranking
