@@ -312,6 +312,13 @@ func gatherObservedThinking(ctx context.Context, tx pgx.Tx, sessionID int64, f *
 		assistant, thinking int
 		tail, peak          float64
 	)
+	// The counts and the peak are plain aggregates over the session's assistant turns (no
+	// sort). The tail is the mean of the hardest decile, so it needs only the top
+	// ceil(thinking/10) turns by token count: an ORDER BY tok DESC LIMIT k, which Postgres runs
+	// as a bounded top-N heapsort holding k rows, not a full sort materializing every thinking
+	// turn. This runs in the settle pass (once per settled session, off the ingest hot path,
+	// alongside gatherContextHealth's ordered scan), and the bounded top-N keeps its sort memory
+	// to the decile rather than the whole accumulated turn history.
 	if err := tx.QueryRow(ctx,
 		`WITH t AS (
 		   SELECT m.has_thinking,
@@ -322,16 +329,22 @@ func gatherObservedThinking(ctx context.Context, tx pgx.Tx, sessionID int64, f *
 		       ON mtu.session_id = m.session_id AND mtu.message_ordinal = m.ordinal
 		    WHERE m.session_id = $1 AND m.role = 'assistant'
 		 ),
-		 r AS (
-		   SELECT tok,
-		          row_number() OVER (ORDER BY tok DESC) AS rn,
-		          count(*) OVER () AS cnt
-		     FROM t WHERE tok IS NOT NULL
+		 agg AS (
+		   SELECT count(*) AS assistant,
+		          count(*) FILTER (WHERE has_thinking) AS thinking,
+		          coalesce(max(tok), 0) AS peak
+		     FROM t
+		 ),
+		 tail AS (
+		   SELECT coalesce(avg(tok), 0) AS tail
+		     FROM (
+		       SELECT tok FROM t WHERE tok IS NOT NULL
+		        ORDER BY tok DESC
+		        LIMIT (SELECT GREATEST(1, ceil(thinking::float8 * 0.1))::bigint FROM agg)
+		     ) top
 		 )
-		 SELECT (SELECT count(*) FROM t),
-		        (SELECT count(*) FROM t WHERE has_thinking),
-		        coalesce((SELECT avg(tok) FROM r WHERE rn <= GREATEST(1, ceil(cnt::float8 * 0.1))), 0),
-		        coalesce((SELECT max(tok) FROM r), 0)`,
+		 SELECT agg.assistant, agg.thinking, tail.tail, agg.peak
+		   FROM agg, tail`,
 		sessionID).Scan(&assistant, &thinking, &tail, &peak); err != nil {
 		return fmt.Errorf("gather observed thinking for session %d: %w", sessionID, err)
 	}
