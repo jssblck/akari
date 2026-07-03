@@ -147,12 +147,7 @@ func (s *Store) WindowSessionPage(ctx context.Context, f SessionFilter) (Session
 		  FROM usage_events ue
 		  JOIN sessions s ON s.id = ue.session_id
 		  JOIN users u ON u.id = s.user_id
-		  LEFT JOIN LATERAL (
-		         SELECT left(m.content, ` + itoa(titleCap) + `) AS content
-		           FROM messages m
-		          WHERE m.session_id = s.id AND m.role = 'user'
-		          ORDER BY m.ordinal LIMIT 1
-		       ) title ON true
+		  ` + titleLateralSQL + `
 		 WHERE ` + where + `
 		 GROUP BY s.id, u.username, title.content
 		 ORDER BY s.last_active_at DESC, s.id DESC
@@ -261,12 +256,7 @@ func globalSessionSelect(matchLateral, matchCol, matchCutCol string) string {
 	  FROM sessions s
 	  JOIN users u ON u.id = s.user_id
 	  JOIN projects p ON p.id = s.project_id
-	  LEFT JOIN LATERAL (
-	         SELECT left(m.content, ` + itoa(titleCap) + `) AS content
-	           FROM messages m
-	          WHERE m.session_id = s.id AND m.role = 'user'
-	          ORDER BY m.ordinal LIMIT 1
-	       ) title ON true` + matchLateral
+	  ` + titleLateralSQL + matchLateral
 }
 
 // scanSessionRow reads one cross-project row. matchActive reports whether the query

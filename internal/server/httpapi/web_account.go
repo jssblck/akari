@@ -150,7 +150,7 @@ func (s *Server) handleCreateTokenForm(w http.ResponseWriter, r *http.Request) {
 	}
 	name := strings.TrimSpace(r.PostFormValue("name"))
 	scope := r.PostFormValue("scope")
-	if scope != scopeIngest && scope != scopeFull && scope != scopeRead {
+	if !isValidScope(scope) {
 		scope = scopeIngest
 	}
 	if name == "" {

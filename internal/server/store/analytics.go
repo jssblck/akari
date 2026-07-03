@@ -567,11 +567,7 @@ func (s *Store) analyticsByUser(ctx context.Context, q querier, f AnalyticsFilte
 	return out, nil
 }
 
-func scanBreakdowns(rows interface {
-	Next() bool
-	Scan(...any) error
-	Err() error
-}) ([]Breakdown, error) {
+func scanBreakdowns(rows pgx.Rows) ([]Breakdown, error) {
 	var out []Breakdown
 	for rows.Next() {
 		var b Breakdown

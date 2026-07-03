@@ -33,12 +33,7 @@ func (s *Store) scanDetailRow(ctx context.Context, where string, arg any) (Sessi
 		   FROM sessions s
 		   JOIN users u ON u.id = s.user_id
 		   JOIN projects p ON p.id = s.project_id
-		   LEFT JOIN LATERAL (
-		          SELECT left(m.content, `+itoa(titleCap)+`) AS content
-		            FROM messages m
-		           WHERE m.session_id = s.id AND m.role = 'user'
-		           ORDER BY m.ordinal LIMIT 1
-		        ) title ON true
+		   `+titleLateralSQL+`
 		  WHERE `+where,
 		arg).Scan(
 		&d.ID, &d.Agent, &d.Machine, &d.GitBranch, &d.Username,
@@ -87,19 +82,8 @@ func (s *Store) scanDetailRow(ctx context.Context, where string, arg any) (Sessi
 // the total_cache_savings_usd rollup exists to avoid. The marker check is one O(1) singleton read, and
 // the periodic reconcile re-prices the corpus to pricing.Version within a settle tick, so the partial
 // flag clears itself; until then it reads as provisional (the tile appends "partial") rather than
-// asserting a figure a recompute would contradict.
-//
-// When the marker is current (the steady state), the rollup is authoritative once cache_savings_backfilled
-// is set. A session that predates the column is seeded at 0 and left unbackfilled until it is priced,
-// and the startup BackfillCacheSavings runs asynchronously, so a detail read can arrive before it.
-// Serving the seeded value would put a wrong saving on the very session a reader opened, so this
-// backfills the row once on demand, under the same locked primitive the startup pass uses:
-// backfillCacheSavingsForSession prices the saving, persists it, and flips the flag (safe against the
-// live parse fold), after which this read and every later one serve the O(1) rollup from one consistent
-// scanDetailRow snapshot. Recomputing on every read, or reading the token split from the rollup while
-// recomputing only the saving from usage_events, are both rejected for the same reasons: the first is
-// O(K^2) under SSE, the second lets a concurrent append tear the tile by pairing an old split with a
-// newer saving.
+// asserting a figure a recompute would contradict. In the steady state (marker current), that
+// on-demand backfill described above is the whole story.
 func (s *Store) scanDetail(ctx context.Context, where string, arg any) (SessionDetail, error) {
 	marker, err := s.cacheSavingsPricedVersion(ctx)
 	if err != nil {

@@ -97,12 +97,7 @@ func (s *Store) sessionCardFrom(ctx context.Context, q querier, sessionID int64,
 		   FROM sessions s
 		   JOIN projects p ON p.id = s.project_id
 		   LEFT JOIN session_signals sig ON sig.session_id = s.id
-		   LEFT JOIN LATERAL (
-		          SELECT left(m.content, `+itoa(titleCap)+`) AS content
-		            FROM messages m
-		           WHERE m.session_id = s.id AND m.role = 'user'
-		           ORDER BY m.ordinal LIMIT 1
-		        ) title ON true
+		   `+titleLateralSQL+`
 		  WHERE s.id = $1`,
 		sessionID, quality.Version).Scan(
 		&card.ProjectKind, &card.ProjectName, &card.ProjectKey,

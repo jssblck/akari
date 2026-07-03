@@ -551,6 +551,18 @@ const windowSessionLimit = 100
 // every row while leaving the visible portion intact.
 const titleCap = 240
 
+// titleLateralSQL derives a session's display title: the first user message's
+// content, capped at titleCap. Every query that returns a session row splices in
+// this one fragment so a session titles the same on the detail page, the project
+// table, the global feed, and its OG card, and so the title rule changes in one
+// place. It assumes the outer query aliases the sessions row `s`.
+var titleLateralSQL = `LEFT JOIN LATERAL (
+	         SELECT left(m.content, ` + itoa(titleCap) + `) AS content
+	           FROM messages m
+	          WHERE m.session_id = s.id AND m.role = 'user'
+	          ORDER BY m.ordinal LIMIT 1
+	       ) title ON true`
+
 // snippetSQLWindowRadius and snippetSQLWindowLen bound the matching-message content
 // the search LATERAL pulls back per row. A page of results would otherwise
 // materialize every matching message in full (kilobytes each) only to window down to
