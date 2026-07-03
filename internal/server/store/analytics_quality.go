@@ -263,3 +263,45 @@ func (s *Store) userQualityFrom(ctx context.Context, q querier, f AnalyticsFilte
 	}
 	return out, nil
 }
+
+// AvgQualityScore is the mean quality score across the scoped sessions that carry a
+// gated (current-version, non-stale) grade, or nil when none is scored. It shares the
+// analytics filter (clauseFor on s.started_at, so a windowed scope counts sessions that
+// started in the window) and the same signals gate the quality distribution uses, so it
+// speaks for exactly the graded cohort the Insights Grades panel counts rather than a
+// different set. The public project OG card reads it and rounds it to a representative
+// letter grade (via quality.GradeFor), so the card's single QUALITY figure summarizes the
+// same graded sessions the page's grade distribution draws. It is nil, not zero, when no
+// scored session is in scope, so the card can dash an unmeasured figure rather than print
+// a zero that would read as a real (failing) average.
+func (s *Store) AvgQualityScore(ctx context.Context, f AnalyticsFilter) (*float64, error) {
+	return s.avgQualityScoreFrom(ctx, s.Pool, f)
+}
+
+// avgQualityScoreFrom is AvgQualityScore over one querier, so the standalone pooled read and
+// the project card's reparse-gated snapshot (ProjectCardSnapshot) run the identical query on
+// the same MVCC snapshot as the card's token totals rather than a second pooled connection
+// that could straddle a reparse. It returns nil, not zero, when no scored session is in scope.
+func (s *Store) avgQualityScoreFrom(ctx context.Context, q querier, f AnalyticsFilter) (*float64, error) {
+	filter, args := f.clauseFor("s.started_at")
+	args = append(args, quality.Version)
+	var avg *float64
+	// Scope the average to the exact graded cohort the Insights Grades panel counts: the panel
+	// (scopedSignalCounts on grade) defines graded as grade IS NOT NULL, so this matches it with
+	// the same predicate. Migration 0040 makes score and grade a consistent pair: both set or both
+	// NULL, and a set grade equals GradeFor(score). So every row in this grade-IS-NOT-NULL cohort
+	// carries a score (no silently-skipped NULL score), and each row's stored grade agrees with the
+	// letter its score bands to: the card's representative grade (GradeFor of the mean score) and
+	// the panel's stored-grade distribution are drawn from the same graded sessions under one
+	// score->grade mapping, so they reconcile rather than describing subtly different cohorts.
+	err := q.QueryRow(ctx, fmt.Sprintf(
+		`SELECT avg(sig.score)::float8
+		   FROM sessions s
+		   JOIN session_signals sig
+		     ON sig.session_id = s.id AND sig.signals_version = $%d AND NOT s.signals_stale
+		  WHERE sig.grade IS NOT NULL`+filter, len(args)), args...).Scan(&avg)
+	if err != nil {
+		return nil, fmt.Errorf("avg quality score: %w", err)
+	}
+	return avg, nil
+}

@@ -284,9 +284,53 @@ func (s *Store) analyticsFrom(ctx context.Context, q querier, f AnalyticsFilter)
 // render rather than caching a mixed aggregate. Unlike taking the reparse advisory
 // lock itself, this holds no lock, so it never makes the fleet read as "reparsing".
 func (s *Store) AnalyticsSnapshot(ctx context.Context, f AnalyticsFilter) (a Analytics, ok bool, err error) {
+	ok, err = s.reparseGatedSnapshot(ctx, func(tx pgx.Tx) error {
+		a, err = s.analyticsFrom(ctx, tx, f)
+		return err
+	})
+	if err != nil {
+		return Analytics{}, false, err
+	}
+	return a, ok, nil
+}
+
+// ProjectCardSnapshot reads everything the project OG card renders from (the windowed
+// analytics and the mean quality score) as one reparse-gated snapshot, so the card's
+// figures and its QUALITY grade describe the same instant. The two reads sat in separate
+// pooled queries before, which let a reparse or a signal refresh land in the gap: the card
+// could then cache pre-reparse token totals beside a partially rebuilt quality grade, a
+// torn projection the page a visitor lands on never shows. Folding both into the one
+// repeatable-read snapshot AnalyticsSnapshot already uses (and its reparse-lock gate) means
+// the average is read from the same MVCC snapshot as the totals, so the card reconciles with
+// the page's Insights grade distribution for the same project and window. ok is false when a
+// reparse holds the lock at the snapshot point, exactly as AnalyticsSnapshot, so the caller
+// skips the render rather than caching a mixed card.
+func (s *Store) ProjectCardSnapshot(ctx context.Context, f AnalyticsFilter) (a Analytics, avgScore *float64, ok bool, err error) {
+	ok, err = s.reparseGatedSnapshot(ctx, func(tx pgx.Tx) error {
+		if a, err = s.analyticsFrom(ctx, tx, f); err != nil {
+			return err
+		}
+		avgScore, err = s.avgQualityScoreFrom(ctx, tx, f)
+		return err
+	})
+	if err != nil {
+		return Analytics{}, nil, false, err
+	}
+	return a, avgScore, ok, nil
+}
+
+// reparseGatedSnapshot runs fn inside one REPEATABLE READ, read-only transaction whose first
+// statement is the reparse-lock check, so every read fn makes sees the one MVCC snapshot that
+// check established rather than several independently-timed reads. It is the shared spine of
+// the aggregate OG-card reads (AnalyticsSnapshot, ProjectCardSnapshot): fn is not run and ok is
+// false when a reparse holds the advisory lock at the snapshot point, since the corpus is then a
+// half-rebuilt mix; otherwise every session in the snapshot is settled and a reparse that starts
+// later cannot alter the frozen snapshot. Unlike taking the reparse lock itself, this holds no
+// lock, so it never makes the fleet read as "reparsing".
+func (s *Store) reparseGatedSnapshot(ctx context.Context, fn func(tx pgx.Tx) error) (ok bool, err error) {
 	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
-		return a, false, fmt.Errorf("begin analytics snapshot: %w", err)
+		return false, fmt.Errorf("begin gated snapshot: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
@@ -300,20 +344,19 @@ func (s *Store) AnalyticsSnapshot(ctx context.Context, f AnalyticsFilter) (a Ana
 		     AND objsubid = 2
 		     AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
 		 )`, reparseLockKey).Scan(&held); err != nil {
-		return a, false, fmt.Errorf("check reparse lock in snapshot: %w", err)
+		return false, fmt.Errorf("check reparse lock in snapshot: %w", err)
 	}
 	if held {
-		return a, false, nil
+		return false, nil
 	}
 
-	a, err = s.analyticsFrom(ctx, tx, f)
-	if err != nil {
-		return Analytics{}, false, err
+	if err := fn(tx); err != nil {
+		return false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return Analytics{}, false, fmt.Errorf("commit analytics snapshot: %w", err)
+		return false, fmt.Errorf("commit gated snapshot: %w", err)
 	}
-	return a, true, nil
+	return true, nil
 }
 
 // clause builds the conjunctive WHERE additions for a usage_events query joined to

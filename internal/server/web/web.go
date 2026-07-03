@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jssblck/akari/internal/durationfmt"
 	"github.com/jssblck/akari/internal/server/store"
 )
 
@@ -137,10 +138,17 @@ func ProjectTitle(p store.ProjectSummary) string {
 // name for a local session, the remote key otherwise. It keeps the synthetic
 // "local:machine:path" key out of the heading.
 func SessionProjectLabel(d store.SessionDetail) string {
-	if IsLocalKind(d.ProjectKind) {
-		return d.ProjectName
+	return ProjectLabel(d.ProjectKind, d.ProjectName, d.ProjectKey)
+}
+
+// ProjectLabel is the folder-name-or-remote-key choice SessionProjectLabel makes, taking the
+// three fields directly so the session OG card (which reads a store.SessionCard, not a full
+// SessionDetail) resolves its heading through the same rule the page's <h1> uses.
+func ProjectLabel(kind, name, key string) string {
+	if IsLocalKind(kind) {
+		return name
 	}
-	return d.ProjectKey
+	return key
 }
 
 // SessionPageTitle is the browser-tab title for a session view: the session's own
@@ -629,23 +637,11 @@ func grantName(name string) string {
 	return name
 }
 
-// FmtDuration renders the span between start and end, or a dash.
+// FmtDuration renders the span between start and end, or a dash. It delegates to durationfmt
+// so the session page's Duration tile and the session OG card, which both show this figure,
+// format it through one definition and cannot drift apart.
 func FmtDuration(start, end *time.Time) string {
-	if start == nil || end == nil || start.IsZero() || end.IsZero() {
-		return "-"
-	}
-	d := end.Sub(*start)
-	if d < 0 {
-		return "-"
-	}
-	switch {
-	case d >= time.Hour:
-		return fmt.Sprintf("%dh%dm", int(d.Hours()), int(d.Minutes())%60)
-	case d >= time.Minute:
-		return fmt.Sprintf("%dm%ds", int(d.Minutes()), int(d.Seconds())%60)
-	default:
-		return fmt.Sprintf("%ds", int(d.Seconds()))
-	}
+	return durationfmt.Span(start, end)
 }
 
 // BaseName returns the last path segment of a file path (handling both / and \

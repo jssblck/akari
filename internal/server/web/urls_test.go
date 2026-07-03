@@ -38,6 +38,11 @@ func TestPublicOverviewPath(t *testing.T) {
 		if got := string(PublicOverviewHref(in)); got != want {
 			t.Errorf("PublicOverviewHref(%q) = %q, want %q", in, got, want)
 		}
+		// The OG card path is the same escaped base with the card suffix, so the og:image tag
+		// and the route stay one definition and a space or slash in the name stays escaped.
+		if got := PublicOverviewOGPath(in); got != want+"/og.png" {
+			t.Errorf("PublicOverviewOGPath(%q) = %q, want %q", in, got, want+"/og.png")
+		}
 	}
 }
 
@@ -49,6 +54,14 @@ func TestPublicProjectPath(t *testing.T) {
 	}
 	if got := string(PublicProjectHref(68)); got != "/p/68" {
 		t.Errorf("PublicProjectHref(68) = %q, want /p/68", got)
+	}
+	// The OG card paths are the public bases with the card suffix, matching the routes and the
+	// og:image tags: /p/<id>/og.png for a project and /s/<public_id>/og.png for a session.
+	if got := PublicProjectOGPath(68); got != "/p/68/og.png" {
+		t.Errorf("PublicProjectOGPath(68) = %q, want /p/68/og.png", got)
+	}
+	if got := PublicSessionOGPath("abc123"); got != "/s/abc123/og.png" {
+		t.Errorf("PublicSessionOGPath(abc123) = %q, want /s/abc123/og.png", got)
 	}
 	// The POST targets for the publicity control match the routes registered in server.go.
 	if got := ProjectPublishPath(68); got != "/projects/68/overview/publish" {

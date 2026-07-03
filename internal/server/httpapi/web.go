@@ -653,6 +653,15 @@ func (s *Server) handlePublicProject(w http.ResponseWriter, r *http.Request) {
 		Description: "A snapshot of AI coding-agent usage on " + web.ProjectTitle(proj) + " on akari.",
 		URL:         s.baseURL(r) + web.PublicProjectPath(proj.ID),
 	}
+	// The preview card is a snapshot of the default trailing-year window, rendered on
+	// demand and cached per project (not per range) for a short TTL, so it may trail the
+	// live totals until the cache expires. It is advertised only on the default window (a
+	// narrower ?range is a different view the year-window card does not represent), exactly
+	// as the public user overview advertises its card; the page still carries a well-formed
+	// summary card via its title and description when the image is omitted.
+	if rng == web.DefaultRange {
+		og.Image = s.baseURL(r) + web.PublicProjectOGPath(proj.ID)
+	}
 	render(w, r, http.StatusOK, web.PublicProjectPage(proj, analytics, insights, rng, og))
 }
 
@@ -700,7 +709,7 @@ func (s *Server) handlePublicOverview(w http.ResponseWriter, r *http.Request) {
 	// the page still carries a well-formed summary card via its title and description
 	// when the image is omitted.
 	if rng == web.DefaultRange {
-		og.Image = s.baseURL(r) + "/u/" + url.PathEscape(u.Username) + "/og.png"
+		og.Image = s.baseURL(r) + web.PublicOverviewOGPath(u.Username)
 	}
 	render(w, r, http.StatusOK, web.PublicOverviewPage(u.Username, analytics, rng, og))
 }
@@ -798,6 +807,211 @@ func (s *Server) handlePublicOverviewOGImage(w http.ResponseWriter, r *http.Requ
 			return
 		}
 		http.Error(w, "Could not load preview image.", http.StatusInternalServerError)
+	}
+}
+
+// handlePublicProjectOGImage serves the Open Graph preview card for a published project
+// overview at /p/<id>/og.png. It is the project mirror of handlePublicOverviewOGImage:
+// the card is rendered lazily and cached, so a burst of crawler fetches after a share
+// costs one render, not one per fetch, and a card nobody shares is never rendered.
+// PublicProjectCard folds the public gate and the cached-card read into one query, so a
+// concurrent unpublish cannot slip between resolving the project and reading its card.
+// An unpublished or unknown id 404s, matching how /p/<id> itself resolves.
+func (s *Server) handlePublicProjectOGImage(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	now := time.Now()
+
+	proj, cached, found, err := s.Store.PublicProjectCard(r.Context(), id)
+	if err != nil {
+		http.Error(w, "Could not load preview image.", http.StatusInternalServerError)
+		return
+	}
+	if !found {
+		http.NotFound(w, r)
+		return
+	}
+	haveCache := cached.PNG != nil
+	if haveCache && now.Sub(cached.GeneratedAt) < s.ogCacheTTL() {
+		s.writeOGImage(w, cached.PNG)
+		return
+	}
+
+	// Cache miss or expired: render on demand through the per-project singleflight group,
+	// store, and serve the fresh bytes. GenerateProject aborts with ErrReparseInProgress
+	// rather than caching a card built from a half-rebuilt projection; in that case serve
+	// the last good card if we still hold one, else 404 (transient, clears once the
+	// reparse finishes). The heading is the same title the /p/<id> page shows, passed in
+	// so the ogimage package stays free of the web view layer.
+	png, genErr := s.renderProjectOGImage(r.Context(), id, web.ProjectTitle(proj), now)
+
+	// The client may have disconnected mid-render; nothing to serve and nothing broke, so
+	// return quietly (and skip the gate re-read below, which that cancelled context would
+	// fail anyway).
+	if r.Context().Err() != nil {
+		return
+	}
+
+	// Re-confirm the overview is still public before serving anything: an unpublish during
+	// the render must 404, not unfurl a card for a now-private overview. One gated read
+	// does double duty: it re-checks visibility and returns the canonical cached card the
+	// stale-fallback branches serve.
+	_, latest, stillPublic, gateErr := s.Store.PublicProjectCard(r.Context(), id)
+	switch {
+	case gateErr != nil:
+		log.Printf("project og: public re-check for project %d failed: %v", id, gateErr)
+		http.Error(w, "Could not load preview image.", http.StatusInternalServerError)
+		return
+	case !stillPublic:
+		http.NotFound(w, r)
+		return
+	}
+
+	switch {
+	case genErr == nil:
+		s.writeOGImage(w, png)
+	case errors.Is(genErr, ogimage.ErrReparseInProgress):
+		if latest.PNG != nil {
+			s.writeOGImage(w, latest.PNG)
+			return
+		}
+		http.NotFound(w, r)
+	default:
+		log.Printf("project og: render for project %d failed: %v", id, genErr)
+		if latest.PNG != nil {
+			s.writeOGImage(w, latest.PNG)
+			return
+		}
+		http.Error(w, "Could not load preview image.", http.StatusInternalServerError)
+	}
+}
+
+// renderProjectOGImage renders and caches one project's preview card through the
+// per-project singleflight group, so concurrent misses for the same overview share a
+// single render. It mirrors renderOGImage: the shared render runs under a bounded
+// context detached from any single caller (so one dropped crawler connection cannot
+// cancel it for the others), while each caller still waits on its own request context.
+func (s *Server) renderProjectOGImage(ctx context.Context, projectID int64, heading string, now time.Time) ([]byte, error) {
+	ch := s.ogProjectRender.DoChan(strconv.FormatInt(projectID, 10), func() (any, error) {
+		renderCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ogRenderTimeout)
+		defer cancel()
+		return ogimage.GenerateProject(renderCtx, s.Store, projectID, heading, now)
+	})
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case res := <-ch:
+		if res.Err != nil {
+			return nil, res.Err
+		}
+		return res.Val.([]byte), nil
+	}
+}
+
+// handlePublicSessionOGImage serves the Open Graph preview card for a published session
+// at /s/<public_id>/og.png. Like the overview and project cards it is rendered lazily
+// and cached, and PublicSessionCard folds the visibility gate and the cached-card read
+// into one query so a concurrent unpublish cannot slip between them. An unpublished or
+// unknown public id 404s, matching how /s/<public_id> resolves.
+//
+// The reparse handling is lighter than the aggregate cards. GenerateSession reads every
+// card input in one repeatable-read snapshot, and a single session is rebuilt atomically
+// during a reparse, so the render never sees a half-built session and needs no reparse-lock
+// gate. The render is still skipped while a reparse runs (serve the last good card, else
+// 404) so a card is not re-rendered from a session about to be rewritten, only to be
+// superseded moments later; it is a courtesy, not a correctness gate. The check is
+// best-effort, exactly as gatePublicParsed is: a reparse starting mid-render at worst
+// re-renders a card that self-heals on the TTL.
+func (s *Server) handlePublicSessionOGImage(w http.ResponseWriter, r *http.Request) {
+	pid := r.PathValue("public_id")
+	now := time.Now()
+
+	sessionID, cached, found, err := s.Store.PublicSessionCard(r.Context(), pid)
+	if err != nil {
+		http.Error(w, "Could not load preview image.", http.StatusInternalServerError)
+		return
+	}
+	if !found {
+		http.NotFound(w, r)
+		return
+	}
+	haveCache := cached.PNG != nil
+	if haveCache && now.Sub(cached.GeneratedAt) < s.ogCacheTTL() {
+		s.writeOGImage(w, cached.PNG)
+		return
+	}
+
+	// Skip the render while a reparse rewrites the corpus (see the doc comment): serve the
+	// last good card if we hold one, else 404 until the reparse ends and a later fetch
+	// renders it.
+	if s.reparser.FleetStatus(r.Context()).InProgress {
+		if haveCache {
+			s.writeOGImage(w, cached.PNG)
+			return
+		}
+		http.NotFound(w, r)
+		return
+	}
+
+	png, genErr := s.renderSessionOGImage(r.Context(), sessionID, now)
+
+	if r.Context().Err() != nil {
+		return
+	}
+
+	// Re-confirm the session is still public before serving: an unpublish during the
+	// render must 404, not unfurl a card for a now-private session.
+	_, latest, stillPublic, gateErr := s.Store.PublicSessionCard(r.Context(), pid)
+	switch {
+	case gateErr != nil:
+		log.Printf("session og: public re-check for session %d failed: %v", sessionID, gateErr)
+		http.Error(w, "Could not load preview image.", http.StatusInternalServerError)
+		return
+	case !stillPublic:
+		http.NotFound(w, r)
+		return
+	}
+
+	if genErr != nil {
+		// A real render failure. Log it, then serve the last good card if we hold one (it
+		// beats a 500 to a crawler), else report the error.
+		log.Printf("session og: render for session %d failed: %v", sessionID, genErr)
+		if latest.PNG != nil {
+			s.writeOGImage(w, latest.PNG)
+			return
+		}
+		http.Error(w, "Could not load preview image.", http.StatusInternalServerError)
+		return
+	}
+	s.writeOGImage(w, png)
+}
+
+// renderSessionOGImage renders and caches one session's preview card through the
+// per-session singleflight group. GenerateSession reads every card input in one store
+// snapshot inside the coalesced render, so a crawler burst on a cold cache runs one
+// read-and-render rather than one per request. The heading closure turns the card's project
+// identity into the label the page's heading shows, kept here so the ogimage package stays
+// free of the web view layer.
+func (s *Server) renderSessionOGImage(ctx context.Context, sessionID int64, now time.Time) ([]byte, error) {
+	ch := s.ogSessionRender.DoChan(strconv.FormatInt(sessionID, 10), func() (any, error) {
+		renderCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ogRenderTimeout)
+		defer cancel()
+		heading := func(c store.SessionCard) string {
+			return web.ProjectLabel(c.ProjectKind, c.ProjectName, c.ProjectKey)
+		}
+		return ogimage.GenerateSession(renderCtx, s.Store, sessionID, heading, now)
+	})
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case res := <-ch:
+		if res.Err != nil {
+			return nil, res.Err
+		}
+		return res.Val.([]byte), nil
 	}
 }
 
@@ -975,7 +1189,19 @@ func (s *Server) handlePublicSession(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load session."))
 		return
 	}
-	render(w, r, http.StatusOK, web.PublicSessionPage(d, msgs, web.ToolsByOrdinal(tools), web.AttachmentsByOrdinal(atts), publicSubs, hs))
+	// A published session's public id is non-nil (visibility gates on it), so the card
+	// URL and canonical URL both resolve. Unlike the overview and project cards the
+	// session card has no range, so it is advertised unconditionally: there is one card
+	// per session, not one per window. The title and description mirror the page's own
+	// head, so the link unfurls with the same identity whether or not a crawler fetches
+	// the image.
+	og := web.OGMeta{
+		Title:       web.SessionPageTitle(d),
+		Description: "A shared " + d.Agent + " session on " + web.SessionProjectLabel(d) + " in akari.",
+		URL:         s.baseURL(r) + web.PublicPath(*d.PublicID),
+		Image:       s.baseURL(r) + web.PublicSessionOGPath(*d.PublicID),
+	}
+	render(w, r, http.StatusOK, web.PublicSessionPage(d, msgs, web.ToolsByOrdinal(tools), web.AttachmentsByOrdinal(atts), publicSubs, hs, og))
 }
 
 // handleSessionBody serves just the live-updating body fragment, re-fetched by

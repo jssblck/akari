@@ -531,7 +531,7 @@ func TestPublicSessionPageWrapperAndModal(t *testing.T) {
 	pub := "k3y"
 	d.Visibility = "public"
 	d.PublicID = &pub
-	html := renderComponent(t, PublicSessionPage(d, msgs, tools, nil, nil, HeaderStats{}))
+	html := renderComponent(t, PublicSessionPage(d, msgs, tools, nil, nil, HeaderStats{}, OGMeta{}))
 
 	for _, want := range []string{`class="session-page"`, `id="session-modal"`, `id="session-inspector"`} {
 		if !strings.Contains(html, want) {

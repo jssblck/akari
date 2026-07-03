@@ -345,8 +345,8 @@ func TestGradeForBoundaries(t *testing.T) {
 		{60, "C"}, {59, "D"}, {40, "D"}, {39, "F"}, {0, "F"},
 	}
 	for _, c := range cases {
-		if got := gradeFor(c.score); got != c.grade {
-			t.Errorf("gradeFor(%d) = %q, want %q", c.score, got, c.grade)
+		if got := GradeFor(c.score); got != c.grade {
+			t.Errorf("GradeFor(%d) = %q, want %q", c.score, got, c.grade)
 		}
 	}
 }

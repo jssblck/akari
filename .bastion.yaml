@@ -41,6 +41,20 @@
 # can render side by side). docs/data-aggregation.md is the worked example, the token
 # instance written out in full.
 #
+# The opengraph-cards reviewer owns the Open Graph share surface: akari has public pages
+# a logged-out visitor can land on (the homepage, a user's overview at /u/<username>, a
+# project's overview at /p/<id>, and a published session at /s/<public_id>), and each one
+# a crawler unfurls wants a preview image. It gates two properties. First, coverage: every
+# public content page advertises an og:image (its handler sets web.OGMeta.Image and a
+# matching /og.png route renders the card), so a new public page cannot ship with a blank
+# unfurl. Second, fidelity: the card is a static raster snapshot of the page, so a change
+# to what a page shows (its default window, its headline figures, or the copy the card
+# also draws) must move the card and its reconciliation with it, or the shared link
+# unfurls a stale or wrong picture. The card's window is pinned equal to the page's
+# default-range window and the landing copy is a single shared constant precisely so this
+# cannot drift silently; the reviewer guards those seams. It is scoped to the public page
+# handlers, the routes, the ogimage renderers, and the public web templates.
+#
 # Gate reviewers carry a shared "severity bar": a block halts the author, so it
 # is spent only on a defect the change actually introduces or worsens, that is
 # reachable on akari's real inputs (JSONL from Claude/Codex/pi at realistic
@@ -515,3 +529,83 @@ reviewers:
       and give the fix: read the canonical source, thread every field through the fold
       or trigger, or add the test that pins the invariant. If the change keeps its
       projections consistent, pass.
+
+  - name: opengraph-cards
+    trigger:
+      - internal/server/httpapi/web.go
+      - internal/server/httpapi/server.go
+      - internal/server/ogimage/**/*.go
+      - internal/server/web/public.templ
+      - internal/server/web/landing.templ
+      - internal/server/web/layout.templ
+      - internal/server/web/urls.go
+    mode: gate
+    backend: codex
+    prompt: |
+      Review one concern only: the Open Graph share cards for akari's public pages, on
+      two properties. akari serves pages a logged-out visitor can land on and share, and
+      a link unfurler (Slack, Discord, iMessage) shows a preview image for each. The four
+      public content pages are the homepage ("/"), a user's usage overview
+      (/u/<username>), a project's usage overview (/p/<id>), and a published session
+      (/s/<public_id>). Each renders through publicLayout, builds a web.OGMeta, and emits
+      og:image only when OGMeta.Image is set; each entity card is served by a matching
+      GET .../og.png route and rendered by the ogimage package (Render / RenderSession and
+      the Generate* orchestrators), cached per entity. The homepage card is static per
+      binary; the three per-entity cards are snapshots of the page they preview.
+
+      Property 1, coverage: every public content page must advertise an og:image.
+      Block when the change adds a new public content page (a new handler rendered through
+      publicLayout, or a new logged-out page route) that ships without an og:image: no
+      OGMeta.Image set on the page's default view AND no corresponding og.png route,
+      handler, and ogimage renderer. Also block when a change silently drops the og:image
+      from an existing public page (removes OGMeta.Image, deletes the og.png route or
+      handler, or stops advertising it) with no stated reason. A conditional Image is fine
+      when it is deliberate and the default landing view still carries a card: the user and
+      project overviews advertise their card only on the default trailing-year range,
+      because the year-window card would misrepresent a narrower ?range, and the session
+      card (which has no range) advertises unconditionally. Error and reparse stand-in
+      pages (PublicErrorPage, PublicReparsePage) are not content pages and correctly pass
+      OGMeta{}; do not flag them.
+
+      Property 2, fidelity: a change to what a public page shows must keep its card a
+      faithful snapshot, or not advertise it. The card is a static raster that cannot
+      update on hover or reflow, so it must still match the page a visitor lands on.
+      Block when a change makes a card drift from its page:
+        - The page's default-range window, headline figures, or the copy the card also
+          draws change, but the card renderer (and the reconciliation that pins them) does
+          not move with it. akari pins these seams on purpose: the card's analytics window
+          equals the page's default-range window (ogimage.DefaultSince/DefaultUntil, pinned
+          to web.RangeSince(web.DefaultRange) by a reconciliation test, with the page
+          handler applying DefaultUntil to its own read), and the landing headline/subline
+          are one shared constant (ogimage.LandingHeadline/LandingSubline) the card, the
+          meta tags, and the hero all draw from. A change that edits one side of a pinned
+          pair without the other, or that removes the pin, is the finding.
+        - A card is advertised on a page view whose scope it does not represent (for
+          example advertising the trailing-year card on a narrowed ?range), or a card's
+          scope is changed so it no longer equals the default-range page it sits beside.
+        - A card figure is computed from a different base or filter than the page's own
+          figure for the same fact, so the two disagree (the card reads one scope, the page
+          another). The card may legitimately condense (a single all-classes token total
+          rather than the per-class split), but it must be the same total the page sums.
+
+      Severity bar before you block. A block halts the author until they act, so spend it
+      only on a coverage gap or a drift this change introduces or materially worsens:
+        - Scope to the diff. Do not block on a pre-existing page that already lacked a card
+          or a pre-existing card that already trailed its page; raise that as a non-blocking
+          note. These are deterministic properties, so a reachable counterexample is
+          concrete: name the public page with no card, or the page figure/window/copy the
+          card no longer matches. If you cannot, pass and leave a note.
+        - Credit stated rationale. If a comment, the PR, or a reconciliation test explains
+          why a page intentionally carries no card (a non-content stand-in), why the card is
+          advertised only on some views (a window the card does not represent), or why a
+          figure need not reconcile, evaluate that reasoning and, if it holds, pass.
+
+      Stay in your lane. You own card coverage and card-to-page fidelity only. Do not
+      comment on the card's visual design or pixel layout, on the token breakdown-card
+      rule for the interactive HTML (token-consistency owns that, and a static card is
+      out of its scope), or on general error handling and concurrency; other reviewers own
+      those. Cite file and line, name the uncovered page or the page figure the card no
+      longer matches, and give the fix: set OGMeta.Image and add the og.png route and
+      renderer, move the card and its reconciliation with the page, or stop advertising a
+      card the page's scope does not support. If every public page carries a faithful card,
+      pass.

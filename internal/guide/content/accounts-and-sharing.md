@@ -82,6 +82,33 @@ Published or not, a tool body is always fetched through a session that reference
 it, so a public link exposes only that session's own bodies, never an internal
 one that happens to share a hash.
 
+A published session also unfurls with an Open Graph preview card at
+`/s/<public-id>/og.png`: the session's title, an activity strip that plots the
+session's own usage over its span (the session card's take on the overview heatmap,
+each cell a slice of the run's length), and four foot figures (total tokens, message
+count, its quality grade, and its duration), rendered in the house style as a pure-Go
+PNG. A figure with nothing to show (an unscored session's grade, or an undated
+session's duration) reads as a dash rather than a misleading zero. Like the overview
+card below it is rendered on demand the first time it is fetched and served from cache
+until the TTL expires.
+
+### Sharing a project's overview
+
+Any signed-in user can publish a **project's usage overview** at `/p/<id>` from the
+project's page. Projects are shared across the whole server rather than owned, so
+there is no per-owner gate: the public page is the same aggregate panel and quality
+band the signed-in project page shows (totals, the activity heatmap, the by-model and
+by-agent breakdowns, and the grades/outcomes/tools band) scoped to that one repo. It
+lists no sessions and names no accounts, so it shares the repo's usage shape without
+exposing a session or which people ran in it. The address is the project id, so
+unpublishing hides the page without changing the link.
+
+Like the user overview, a published project overview gets an Open Graph preview card
+at `/p/<id>/og.png`, the same simplified heatmap in the house style, with three foot
+figures: total tokens, session count, and a single representative quality grade (the
+mean score across the project's graded sessions, rounded to a letter). The grade reads
+as a dash when no session in scope is scored.
+
 ### Sharing your usage overview
 
 From the Account page's Publicity control you can publish your own **usage
@@ -95,11 +122,14 @@ re-publishing brings the same URL back.
 A published overview also gets an Open Graph preview card at `/u/<username>/og.png`,
 so a shared link unfurls with an image: a simplified copy of your activity heatmap
 plus the headline figures, rendered in the house style as a pure-Go PNG (no
-headless browser). The card is rendered on demand, the first time it is fetched
+headless browser). All three per-entity cards (this one, the project overview's, and
+a session's) work the same way: rendered on demand the first time the card is fetched
 (typically when a share unfurls), then served from cache until the TTL expires
-([Self-hosting](./self-hosting.md#configuration) documents it, an hour by
-default); the next fetch after that renders a fresh one. A background sweep
-prunes expired cards. The card may trail the live page by up to the TTL.
+([Self-hosting](./self-hosting.md#configuration) documents it, an hour by default);
+the next fetch after that renders a fresh one. A background sweep prunes expired
+cards. A card may trail the live page by up to the TTL. The overview and project
+cards represent the default trailing-year window, so a link viewed under a narrower
+range carries no image rather than a mismatched one.
 
 ## Connected agents
 
