@@ -159,7 +159,9 @@ func sampleTrends() *store.Trends {
 				{Project: "akari", Folder: "internal/server/store", Path: "internal/server/store/analytics.go", Edits: 6, Sessions: 2},
 				{Project: "akari", Folder: "internal/server/web", Path: "internal/server/web/insights.templ", Edits: 3, Sessions: 1},
 			},
-			TotalReEdits: 21, TotalHotFiles: 3,
+			// Three hot files in the window, two drawn in the tree, so one is clipped: the payload
+			// carries the clipped count and the panel notes the tail.
+			TotalReEdits: 21, TotalHotFiles: 3, Clipped: 1,
 		},
 		Signals: store.SignalTrends{
 			GradeShare: []map[string]float64{
@@ -225,6 +227,8 @@ func TestInsightsPageRendersInstruments(t *testing.T) {
 		// representative chart mount points the engine looks up by id
 		`id="chart-fleetmix-full"`, `id="chart-gallery-full"`, `id="chart-punchcard"`,
 		`id="chart-reliability"`, `id="treemap"`, `id="chart-grades"`, `id="chart-cache-full"`, `id="chart-fanout-full"`,
+		// the cap-note hosts the engine fills when the scatter is a sample or the tree clipped hot files
+		`id="gallery-sample"`, `id="churn-clip"`,
 		// the four tab strips
 		`id="velocity-tabs"`, `id="tools-tabs"`, `id="health-tabs"`, `id="economics-tabs"`,
 		// a jump-to-tab mini multiple and the tooltip host

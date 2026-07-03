@@ -56,7 +56,10 @@ func TestNewTrendGrid(t *testing.T) {
 }
 
 // An unbounded window is capped to the most recent buckets so the payload stays bounded, and
-// the last bucket still lands on the truncated upper bound.
+// the last bucket still lands on the truncated upper bound. The first bucket lands exactly
+// maxTrendBuckets-1 buckets before it: the grid is built from that capped start rather than
+// walked from the years-back earliest session and trimmed, so its size is bounded by the cap,
+// not by the corpus age.
 func TestNewTrendGridCaps(t *testing.T) {
 	until := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	since := until.AddDate(-3, 0, 0) // three years of days, well over the cap
@@ -67,6 +70,10 @@ func TestNewTrendGridCaps(t *testing.T) {
 	}
 	if last := g.Starts[g.n()-1]; !last.Equal(truncBucket("day", until)) {
 		t.Errorf("last bucket = %v, want the truncated upper bound %v", last, truncBucket("day", until))
+	}
+	wantFirst := truncBucket("day", until).AddDate(0, 0, -(maxTrendBuckets - 1))
+	if first := g.Starts[0]; !first.Equal(wantFirst) {
+		t.Errorf("first bucket = %v, want %v (maxTrendBuckets-1 days before the last)", first, wantFirst)
 	}
 }
 

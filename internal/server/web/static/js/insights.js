@@ -456,6 +456,19 @@
     });
   }
 
+  // The scatter caps at the most recent maxGalleryPoints, but the figures above read the full
+  // cohort. When the window holds more sessions than the scatter shows, say so, so a reader does
+  // not take the dots for the whole population or hunt for a priciest session that was sampled out.
+  function renderSampleNote() {
+    const D = window.AK_DATA;
+    const el = document.getElementById('gallery-sample');
+    if (!el) return;
+    const G = D.sessionGallery;
+    el.textContent = G.shown < G.total
+      ? 'Scatter shows the ' + A.fmtInt(G.shown) + ' most recent of ' + A.fmtInt(G.total) + ' sessions; the figures cover all ' + A.fmtInt(G.total) + '.'
+      : '';
+  }
+
   function renderLegend() {
     const D = window.AK_DATA;
     const el = document.getElementById('gallery-legend');
@@ -477,6 +490,7 @@
   function renderGallery() {
     renderFigures();
     mount('chart-gallery-full', chartGallery());
+    renderSampleNote();
     renderLegend();
   }
 
@@ -1033,6 +1047,16 @@
       d.innerHTML = '<div class="figure">' + f.v + '</div><div class="figure-key">' + f.k + '</div>';
       el.appendChild(d);
     });
+    // The totals count every hot file in the window, but the treemap caps at the busiest
+    // maxChurnTreeFiles. When files were clipped, note the tail so the headline count does not
+    // read as more files than the tree draws.
+    const clipEl = document.getElementById('churn-clip');
+    if (clipEl) {
+      const c = D.churnTrend.clipped || 0;
+      clipEl.textContent = c > 0
+        ? '+' + A.fmtInt(c) + ' more hot file' + (c === 1 ? '' : 's') + ' beyond the treemap cap, counted in the totals above.'
+        : '';
+    }
   }
 
   function renderTools() {

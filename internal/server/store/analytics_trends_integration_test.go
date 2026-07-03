@@ -310,3 +310,107 @@ func TestInsightsTrends(t *testing.T) {
 		t.Error("Trends should be nil when the filter names no bucket")
 	}
 }
+
+// TestInsightsGalleryCap pins the session scatter's cap contract: the payload ships at most
+// maxGalleryPoints dots, but Total counts the whole cohort and the median duration reads all of
+// it, so a window past the cap can note "showing N of M" and its headline still describes every
+// session rather than the recent sample. Without both figures the panel would either silently
+// drop the note or describe sessions the dots omit.
+func TestInsightsGalleryCap(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	ada := seedUser(t, st, "ada")
+	pid, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// One more than the scatter cap, every session fully spanned inside the window at the same
+	// 20-minute duration. started_at trails now by gs+20 minutes and ended_at by gs, so each spans
+	// 20 minutes and all sit within the last few hours, comfortably inside the seven-day window.
+	const seeded = 401 // maxGalleryPoints (400) + 1
+	if _, err := st.Pool.Exec(ctx,
+		`INSERT INTO sessions (user_id, project_id, agent, source_session_id, machine, started_at, ended_at)
+		 SELECT $1, $2, 'claude', 'gallery-' || gs, 'laptop',
+		        now() - make_interval(mins => gs + 20),
+		        now() - make_interval(mins => gs)
+		   FROM generate_series(1, $3) gs`,
+		ada, pid, seeded); err != nil {
+		t.Fatalf("bulk seed gallery sessions: %v", err)
+	}
+
+	since := time.Now().Add(-7 * 24 * time.Hour)
+	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: since, Bucket: "day"})
+	if err != nil {
+		t.Fatalf("insights with trends: %v", err)
+	}
+	g := ins.Trends.Gallery
+	if g.Total != seeded {
+		t.Errorf("gallery total = %d, want %d (the full cohort, not the capped sample)", g.Total, seeded)
+	}
+	if len(g.Rows) != 400 {
+		t.Errorf("gallery rows = %d, want the cap 400 (maxGalleryPoints)", len(g.Rows))
+	}
+	if len(g.Rows) >= g.Total {
+		t.Errorf("gallery shown %d is not below total %d, so the sample note would never render", len(g.Rows), g.Total)
+	}
+	// Each session spans exactly 20 minutes, so the full-cohort median duration is 1200s. The
+	// summary is computed over Total, not the capped Rows, so this proves the headline is not
+	// silently the recent sample's.
+	if got := g.MedianDurationS; got < 1199 || got > 1201 {
+		t.Errorf("gallery median duration = %v, want 1200 (each session spans 20 minutes)", got)
+	}
+}
+
+// TestInsightsChurnTreeCap pins the churn tree's cap contract: the treemap ships at most
+// maxChurnTreeFiles nodes, but TotalHotFiles counts every hot file in the window and Clipped
+// carries the tail, so the headline count and the treemap reconcile through the clip note instead
+// of the headline silently exceeding the rendered breakdown.
+func TestInsightsChurnTreeCap(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	grace := seedUser(t, st, "grace")
+	pid, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid := seedSession(t, st, grace, pid, "churn-cap")
+	start := time.Now().Add(-2 * time.Hour).UTC()
+	setSessionShape(t, st, ctx, sid, start, start.Add(20*time.Minute), 4, 2)
+
+	// One more distinct hot file than the tree cap, each edited twice: two edit calls with distinct
+	// ordinals dedupe to two counted edits, clearing the "more than once" hot bar. The message
+	// ordinal fileno*2+editno is unique per (file, edit) pair, so the primary key and the dedup
+	// partition both see two separate edits per file.
+	const hot = 151 // maxChurnTreeFiles (150) + 1
+	if _, err := st.Pool.Exec(ctx,
+		`INSERT INTO tool_calls (session_id, message_ordinal, call_index, tool_name, category, file_path)
+		 SELECT $1, fileno * 2 + editno, 0, 'Edit', 'edit', 'src/f' || fileno || '.go'
+		   FROM generate_series(1, $2) fileno, generate_series(0, 1) editno`,
+		sid, hot); err != nil {
+		t.Fatalf("bulk seed churn edits: %v", err)
+	}
+
+	since := time.Now().Add(-7 * 24 * time.Hour)
+	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: since, Bucket: "day"})
+	if err != nil {
+		t.Fatalf("insights with trends: %v", err)
+	}
+	c := ins.Trends.Churn
+	if c.TotalHotFiles != hot {
+		t.Errorf("churn total hot files = %d, want %d (every seeded file edited more than once)", c.TotalHotFiles, hot)
+	}
+	if len(c.Tree) != 150 {
+		t.Errorf("churn tree = %d nodes, want the cap 150 (maxChurnTreeFiles)", len(c.Tree))
+	}
+	if c.Clipped != hot-150 {
+		t.Errorf("churn clipped = %d, want %d (hot files beyond the tree cap)", c.Clipped, hot-150)
+	}
+	// The clip note is the reconciliation: totals over the full window, tree over the cap, tail
+	// disclosed. If Clipped stayed zero the headline would read more hot files than the tree draws.
+	if c.Clipped == 0 {
+		t.Error("churn clipped = 0 with more hot files than the tree cap; the headline would exceed the treemap silently")
+	}
+}

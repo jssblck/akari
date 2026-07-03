@@ -161,6 +161,17 @@ func advanceBucket(unit string, t time.Time) time.Time {
 	return t.AddDate(0, 0, 1)
 }
 
+// retreatBuckets steps back n whole buckets from t, the inverse of applying advanceBucket n
+// times. Buckets are a fixed width in UTC (a day is 24h, a week is 7 days, with no DST to
+// stretch them), so subtracting n spans lands on the same bucket start advanceBucket would
+// have reached going forward, without the loop.
+func retreatBuckets(unit string, t time.Time, n int) time.Time {
+	if unit == "week" {
+		return t.AddDate(0, 0, -7*n)
+	}
+	return t.AddDate(0, 0, -n)
+}
+
 // maxTrendBuckets caps the grid so an unbounded "all" window still renders a readable,
 // bounded payload: past the cap the window is trimmed to the most recent buckets rather
 // than streaming years of weeks the chart could not show.
@@ -178,12 +189,18 @@ func newTrendGrid(unit string, since, until time.Time) trendGrid {
 	if end.Before(start) {
 		end = start
 	}
+	// Cap the start to the last maxTrendBuckets ending at end BEFORE building the spine, so an
+	// "all" window whose earliest session is years back does not allocate and walk one bucket per
+	// day of that history only to trim all but the final 120 away. Request time and peak memory
+	// then track the rendered span, not the corpus age. Retreating maxTrendBuckets-1 whole buckets
+	// from end lands the exact first bucket the old trailing slice produced (the buckets are a
+	// fixed width, so the step is exact), so the grid is unchanged, only cheaper to build.
+	if capped := retreatBuckets(unit, end, maxTrendBuckets-1); capped.After(start) {
+		start = capped
+	}
 	var starts []time.Time
 	for b := start; !b.After(end); b = advanceBucket(unit, b) {
 		starts = append(starts, b)
-	}
-	if len(starts) > maxTrendBuckets {
-		starts = starts[len(starts)-maxTrendBuckets:]
 	}
 	idx := make(map[time.Time]int, len(starts))
 	for i, b := range starts {

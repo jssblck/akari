@@ -28,6 +28,8 @@ type akData struct {
 		ArchColor       map[string]string `json:"archColor"`
 		MedianDurationS float64           `json:"medianDurationS"`
 		CostIncomplete  bool              `json:"costIncomplete"`
+		Total           int               `json:"total"`
+		Shown           int               `json:"shown"`
 		Priciest        struct {
 			CostUsd float64 `json:"costUsd"`
 		} `json:"priciest"`
@@ -85,6 +87,7 @@ type akData struct {
 	ChurnTrend struct {
 		TotalHotFiles int `json:"totalHotFiles"`
 		TotalReedits  int `json:"totalReedits"`
+		Clipped       int `json:"clipped"`
 	} `json:"churnTrend"`
 
 	CostQuality struct {
@@ -165,6 +168,11 @@ func TestInsightsDataMapping(t *testing.T) {
 	if d.SessionGallery.Priciest.CostUsd != 12.9 {
 		t.Errorf("gallery priciest = %v, want 12.9", d.SessionGallery.Priciest.CostUsd)
 	}
+	// The scatter's shown/total drive the sample note: the fixture's cohort fits under the cap, so
+	// they are equal here, but the serializer must carry both so a >cap window can note the sample.
+	if d.SessionGallery.Shown != 8 || d.SessionGallery.Total != 8 {
+		t.Errorf("gallery shown/total = %d/%d, want 8/8", d.SessionGallery.Shown, d.SessionGallery.Total)
+	}
 
 	// Concurrency comes from outside the grid (ConcurrencyStats).
 	if d.Concurrency.PeakConcurrent != 4 || d.Concurrency.AvgConcurrent != 1.7 {
@@ -241,6 +249,11 @@ func TestInsightsDataMapping(t *testing.T) {
 	}
 	if d.ChurnTrend.TotalHotFiles != 3 || d.ChurnTrend.TotalReedits != 21 {
 		t.Errorf("churnTrend totals = %+v, want 3 hot files / 21 re-edits", d.ChurnTrend)
+	}
+	// The clipped count feeds the treemap tail note: three hot files, two in the tree, so one is
+	// clipped and the serializer must carry it or the headline would exceed the visible breakdown.
+	if d.ChurnTrend.Clipped != 1 {
+		t.Errorf("churnTrend clipped = %d, want 1", d.ChurnTrend.Clipped)
 	}
 
 	// Economics: the median completed-session cost is read off the gallery cohort. Completed

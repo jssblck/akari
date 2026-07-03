@@ -422,6 +422,10 @@ func churnTrendData(c store.ChurnTrend) map[string]any {
 		"hotFiles":      c.Files,
 		"totalReedits":  c.TotalReEdits,
 		"totalHotFiles": c.TotalHotFiles,
+		// Hot files beyond the treemap cap. The totals above count every hot file in the window,
+		// but the tree renders only the busiest maxChurnTreeFiles, so the panel notes the clipped
+		// tail rather than letting the headline silently exceed the visible breakdown.
+		"clipped": c.Clipped,
 	}
 }
 
