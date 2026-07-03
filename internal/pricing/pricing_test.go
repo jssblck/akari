@@ -95,6 +95,29 @@ func TestTableWindowsSorted(t *testing.T) {
 	}
 }
 
+func TestDatedWindowsStartAtUTCMidnight(t *testing.T) {
+	// Every non-zero window boundary must fall on UTC midnight. The aggregate cache-savings
+	// paths (store/analytics_cache.go) price per UTC day, relying on a whole UTC day sitting
+	// inside one rate window so the day-bucketed recompute matches the exact per-row fold it
+	// reconciles against. A boundary at any other instant (a midday reprice) would split a day
+	// across two windows and make the two disagree. This pins that invariant at the table so a
+	// future dated rate cannot silently break it; a genuine midday change would need the
+	// aggregate paths reworked to bucket on the exact window first.
+	for model, rates := range table {
+		for i, dr := range rates {
+			if dr.From.IsZero() {
+				continue // the open first window is in effect from the beginning, no boundary
+			}
+			if dr.From.Location() != time.UTC {
+				t.Errorf("%s window %d From %v is not in UTC", model, i, dr.From)
+			}
+			if !dr.From.Equal(dr.From.Truncate(24 * time.Hour)) {
+				t.Errorf("%s window %d From %v is not on a UTC-midnight boundary", model, i, dr.From)
+			}
+		}
+	}
+}
+
 func TestKnownFableAndMythos(t *testing.T) {
 	// Fable 5, Mythos 5, and the Mythos preview all price at $10/$50.
 	for _, model := range []string{
@@ -154,6 +177,14 @@ func TestDateSnapshotNormalization(t *testing.T) {
 	// than collapsing onto the base model.
 	if r, ok := RateAt("gpt-5.4-mini", anytime); !ok || r.Input != 0.75 {
 		t.Errorf("variant suffix wrongly altered: %+v (ok=%v)", r, ok)
+	}
+
+	// Known normalizes the same way, so a dated, priced label reports known: this is what
+	// keeps charts.FoldUnknownModels from folding a dated model ID into the "Other" bucket.
+	for _, model := range []string{"claude-opus-4-8-20260115", "gpt-5-2025-08-07", "claude-sonnet-5"} {
+		if !Known(model) {
+			t.Errorf("Known(%q) = false, want true (dated/priced label must normalize to a table key)", model)
+		}
 	}
 }
 

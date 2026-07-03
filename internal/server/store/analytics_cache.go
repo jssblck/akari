@@ -51,52 +51,63 @@ func (c CacheStats) HitRate() float64 {
 // state instead of a 0% hit rate and a $0 saving on a scope with no usage.
 func (c CacheStats) HasData() bool { return c.PromptTokens() > 0 }
 
-// cacheModelRow is one model's cache-relevant token sums over a scope, the unit
-// CacheStats folds. The saving is priced per model (the input-versus-cache rate gap
-// differs across families, and is even negative on cache writes for Claude), so the
-// fold has to see each model, not just the grand totals.
+// foldCacheRows folds a (model, UTC day, token-sums) result set into a CacheStats as the
+// rows stream off the connection, pricing each bucket's saving at the rate in effect that
+// day and flagging the result incomplete when cached volume rode an unpriced model (so the
+// saving omits it). The token totals sum across the buckets, so the grand figures are
+// unaffected by the day split; only the saving is priced per bucket, which is what lets a
+// model with a dated rate change price each side at its own rate.
 //
-// Day is the UTC day the tokens were spent, the second grouping key alongside Model.
-// A model's rate can change on a date, and the boundaries are UTC-midnight-aligned, so
-// a whole UTC day sits inside one rate window: pricing the day's sum at that day's rate
-// is exact, and matches the per-row parse-time fold that reconciles against it. Day is
-// the zero value for an undated row (the session path counts undated usage too), which
-// selects the earliest window, the same choice parse-time pricing makes for a row with
-// no OccurredAt.
-type cacheModelRow struct {
-	Model      string
-	Day        time.Time
-	Input      int64
-	Output     int64
-	CacheRead  int64
-	CacheWrite int64
-}
-
-// cacheStatsFrom folds per-(model, day) token sums into a CacheStats, pricing each
-// bucket's saving at the rate in effect that day and flagging the result incomplete when
-// cached volume rode an unpriced model (so the saving omits it). The token totals sum
-// across the buckets, so the grand figures are unaffected by the day split; only the
-// saving is priced per bucket, which is what lets a model with a dated rate change price
-// each side at its own rate. It is the shared core of the scoped (CacheStats) and
-// per-session (SessionCacheStats) paths, so both compute the figure identically; only
-// the rows they feed it differ.
-func cacheStatsFrom(rows []cacheModelRow) CacheStats {
+// It folds each row directly rather than materializing the whole result, so peak memory is
+// the fixed accumulator regardless of how many buckets the query returns. That matters
+// because grouping by day can yield one bucket per model per day of the window, a count
+// driven by the corpus span (scoped) or session length (per-session), so buffering every
+// bucket would grow with input the server actually ingests.
+//
+// The saving is priced per model because the input-versus-cache rate gap differs across
+// families (and is even negative on cache writes for Claude), and per day because a
+// model's rate can change on a date. The rate boundaries are UTC-midnight-aligned (pinned
+// by TestDatedWindowsStartAtUTCMidnight in internal/pricing), so a whole UTC day sits
+// inside one rate window: pricing the day's sum at that day's rate is exact and matches
+// the per-row parse-time fold that reconciles against it. A NULL day (an undated row, which
+// the per-session path counts) folds as the zero time, selecting the earliest window, the
+// same choice parse-time pricing makes for a row with no OccurredAt.
+//
+// It is the shared core of the scoped (CacheStats) and per-session (SessionCacheStats)
+// paths, so both compute the figure identically; only the query feeding it differs. The
+// caller owns closing rows.
+func foldCacheRows(rows pgx.Rows) (CacheStats, error) {
 	var c CacheStats
-	for _, r := range rows {
-		c.Input += r.Input
-		c.Output += r.Output
-		c.CacheRead += r.CacheRead
-		c.CacheWrite += r.CacheWrite
-		if saving, ok := pricing.CacheSavings(r.Model, r.Day, r.CacheRead, r.CacheWrite); ok {
+	for rows.Next() {
+		var (
+			model                                string
+			day                                  *time.Time
+			input, output, cacheRead, cacheWrite int64
+		)
+		if err := rows.Scan(&model, &day, &input, &output, &cacheRead, &cacheWrite); err != nil {
+			return CacheStats{}, fmt.Errorf("scan cache model row: %w", err)
+		}
+		c.Input += input
+		c.Output += output
+		c.CacheRead += cacheRead
+		c.CacheWrite += cacheWrite
+		at := time.Time{}
+		if day != nil {
+			at = *day
+		}
+		if saving, ok := pricing.CacheSavings(model, at, cacheRead, cacheWrite); ok {
 			c.SavingsUSD += saving
-		} else if r.CacheRead > 0 || r.CacheWrite > 0 {
+		} else if cacheRead > 0 || cacheWrite > 0 {
 			// Cached volume on a model the pricing table does not know: the saving omits
 			// it and the flag says the figure is partial. The omitted term can be either
 			// sign, so this is not a lower bound the way cost_incomplete is for cost.
 			c.SavingsIncomplete = true
 		}
 	}
-	return c
+	if err := rows.Err(); err != nil {
+		return CacheStats{}, fmt.Errorf("iterate cache model rows: %w", err)
+	}
+	return c, nil
 }
 
 // CacheStats aggregates prompt-cache effectiveness over the analytics scope. It shares
@@ -123,7 +134,7 @@ func (s *Store) cacheStats(ctx context.Context, q querier, f AnalyticsFilter) (C
 	// Group by model AND the UTC day so a model with a dated rate change prices each
 	// day's cached volume at that day's rate; the day is always non-NULL here (the
 	// occurred_at IS NOT NULL guard below). The token sums fold back together in
-	// cacheStatsFrom, so the extra grouping key affects only how the saving is priced.
+	// foldCacheRows, so the extra grouping key affects only how the saving is priced.
 	rows, err := q.Query(ctx,
 		`SELECT ue.model,
 		        date_trunc('day', ue.occurred_at AT TIME ZONE 'UTC'),
@@ -139,11 +150,7 @@ func (s *Store) cacheStats(ctx context.Context, q querier, f AnalyticsFilter) (C
 		return CacheStats{}, fmt.Errorf("query cache stats: %w", err)
 	}
 	defer rows.Close()
-	mrows, err := scanCacheModelRows(rows)
-	if err != nil {
-		return CacheStats{}, err
-	}
-	return cacheStatsFrom(mrows), nil
+	return foldCacheRows(rows)
 }
 
 // SessionCacheStats recomputes one session's cache effectiveness by scanning its usage
@@ -186,11 +193,7 @@ func (s *Store) sessionCacheStatsFrom(ctx context.Context, q querier, sessionID 
 		return CacheStats{}, fmt.Errorf("query session cache stats for session %d: %w", sessionID, err)
 	}
 	defer rows.Close()
-	mrows, err := scanCacheModelRows(rows)
-	if err != nil {
-		return CacheStats{}, err
-	}
-	return cacheStatsFrom(mrows), nil
+	return foldCacheRows(rows)
 }
 
 // BackfillCacheSavings prices each not-yet-backfilled session's cached usage into the
@@ -461,24 +464,3 @@ func (s *Store) cacheSavingsBackfillBatch(ctx context.Context, afterID int64, li
 // cacheSavingsBackfillBatch bounds one candidate query and the run of per-session prices behind
 // it. It is a var so a test can shrink it to exercise the multi-batch keyset drain.
 var cacheSavingsBackfillBatch = 500
-
-func scanCacheModelRows(rows pgx.Rows) ([]cacheModelRow, error) {
-	var out []cacheModelRow
-	for rows.Next() {
-		var r cacheModelRow
-		// A NULL day (an undated usage row) scans to nil and leaves r.Day the zero
-		// time, which prices at the earliest rate window.
-		var day *time.Time
-		if err := rows.Scan(&r.Model, &day, &r.Input, &r.Output, &r.CacheRead, &r.CacheWrite); err != nil {
-			return nil, fmt.Errorf("scan cache model row: %w", err)
-		}
-		if day != nil {
-			r.Day = *day
-		}
-		out = append(out, r)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate cache model rows: %w", err)
-	}
-	return out, nil
-}
