@@ -3,6 +3,7 @@ package devseed
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math/rand"
 	"net/http/httptest"
 	"os"
@@ -298,12 +299,11 @@ func TestIngestSystemicFailureErrors(t *testing.T) {
 	claude := isolateDiscoveryRoots(t)
 
 	// Plant one discoverable claude session whose cwd exists, so it resolves and is
-	// uploaded rather than skipped. The header only needs cwd.
-	header, err := json.Marshal(map[string]string{"cwd": t.TempDir(), "gitBranch": "main"})
-	if err != nil {
-		t.Fatalf("marshal header: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(claude, "session.jsonl"), append(header, '\n'), 0o644); err != nil {
+	// uploaded rather than skipped. It must carry a real transcript shape (a typed
+	// user entry with a message), not just a cwd, or resolve's positive session
+	// detection skips it as non-session JSONL.
+	line := fmt.Sprintf(`{"type":"user","cwd":%q,"gitBranch":"main","message":{"content":"hi"}}`+"\n", t.TempDir())
+	if err := os.WriteFile(filepath.Join(claude, "session.jsonl"), []byte(line), 0o644); err != nil {
 		t.Fatalf("write session file: %v", err)
 	}
 
