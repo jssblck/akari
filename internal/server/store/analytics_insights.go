@@ -60,20 +60,28 @@ func (s *Store) Insights(ctx context.Context, f AnalyticsFilter) (Insights, erro
 		func(tx pgx.Tx) error {
 			var err error
 			// When the caller wants the trend grid, bound the whole page to the charted
-			// span first. The grid caps an unbounded "all" window at maxTrendBuckets, so
-			// pinning f.Since to the first rendered bucket makes the headline distributions
-			// and every trend total count the same sessions, and keeps each panel's query
-			// from scanning history the charts will not show. A bounded range already starts
-			// at or after its grid's first bucket, so its window is left unchanged (the grid
-			// start only moves f.Since forward, never back).
+			// span first, on both edges. The grid caps an unbounded "all" window at
+			// maxTrendBuckets and stops at the current bucket, so pinning f.Since to the first
+			// rendered bucket and f.Until to the end of the last one makes the headline
+			// distributions and every trend total count the same rows the series draw, and keeps
+			// each panel's query from scanning history the charts will not show. Without the
+			// upper bound a row timestamped ahead of render time counts in the headline while the
+			// grid drops its future bucket (g.index < 0), so the two disagree. Both bounds only
+			// tighten the window: a bounded range already sits inside its grid, so f.Since never
+			// moves back and f.Until never moves forward.
 			if f.Bucket != "" {
 				now := time.Now()
 				since, terr := s.resolveTrendSince(ctx, tx, f, now)
 				if terr != nil {
 					return terr
 				}
-				if g := newTrendGrid(f.Bucket, since, now); g.n() > 0 && g.Starts[0].After(f.Since) {
-					f.Since = g.Starts[0]
+				if g := newTrendGrid(f.Bucket, since, now); g.n() > 0 {
+					if g.Starts[0].After(f.Since) {
+						f.Since = g.Starts[0]
+					}
+					if upper := advanceBucket(g.Unit, g.Starts[g.n()-1]); f.Until.IsZero() || upper.Before(f.Until) {
+						f.Until = upper
+					}
 				}
 			}
 			if out.Quality, err = s.qualityDistributionFrom(ctx, tx, f); err != nil {

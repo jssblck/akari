@@ -99,6 +99,14 @@ func TestInsightsTrends(t *testing.T) {
 	// definition fixes, where a per-bucket definition would hide it.
 	mkSession(grace, "t-churn1", 1, "completed", "B", "claude-sonnet-5", churn)
 
+	// A session started two days ahead of render time (a machine with a skewed clock, or a
+	// backfilled log dated forward). The trend grid stops at the current bucket, so this
+	// session's bucket is off the grid and every series drops it (g.index < 0). The page pins
+	// its window to that grid on both edges, so the headline distributions must drop it too: a
+	// row the charts cannot show must not inflate the totals printed beside them. Without the
+	// f.Until bound the quality headline would count seven while the outcome series summed six.
+	mkSession(ada, "t-future", -2, "completed", "A", "claude-sonnet-5", "internal/server/web/future.go")
+
 	// An unpriced, token-bearing usage event on an unknown model (day 2). The pricing table
 	// cannot price it, so every cost figure in the window becomes a lower bound and the cache
 	// savings total becomes partial. Its cost is NULL, so it adds no dollars and the exact totals
@@ -148,6 +156,15 @@ func TestInsightsTrends(t *testing.T) {
 	}
 	if outcomeTotal != 6 {
 		t.Errorf("signal outcome total = %d, want 6 (five roots + one subagent)", outcomeTotal)
+	}
+
+	// The headline quality distribution and the bucketed outcome series read one cohort: the
+	// same started_at-windowed, signals-gated sessions, with no relationship filter on either.
+	// Once the page bounds its window to the charted grid they must count the same sessions, so
+	// the future-started session is absent from both. A mismatch here means a headline query
+	// escaped the f.Until bound and counted a row the series dropped off the grid's upper edge.
+	if ins.Quality.Sessions != outcomeTotal {
+		t.Errorf("quality headline sessions = %d, bucketed outcome total = %d; they must reconcile (a future-started row leaked into the headline but not the series)", ins.Quality.Sessions, outcomeTotal)
 	}
 
 	// Economics: spend covers every outcome (six sessions at $1.50), abandoned spend covers only
