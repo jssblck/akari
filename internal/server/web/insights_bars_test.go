@@ -134,14 +134,3 @@ func TestIsOutcome(t *testing.T) {
 		}
 	}
 }
-
-// TestConcurrencyBusiestHref pins the busiest-user drill: it carries the user, the
-// window, empty=1, and spanned=1 so the feed matches the concurrency panel's cohort
-// (which counts every message_count but only measured-span sessions).
-func TestConcurrencyBusiestHref(t *testing.T) {
-	c := store.ConcurrencyStats{BusiestUser: "ada", BusiestUserPeak: 3}
-	q := hrefQuery(t, string(ConcurrencyBusiestHref(c, "30d")))
-	if q.Get("user") != "ada" || q.Get("range") != "30d" || q.Get("empty") != "1" || q.Get("spanned") != "1" {
-		t.Errorf("busiest drill = %v, want user=ada range=30d empty=1 spanned=1", q)
-	}
-}

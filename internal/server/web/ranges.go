@@ -79,6 +79,22 @@ func RangeSince(key string, now time.Time) time.Time {
 	return time.Time{}
 }
 
+// TrendBucket picks the time-bucket unit the Insights trend charts aggregate a range
+// into: daily for the short windows (7d/30d) where a day still carries enough sessions
+// to read, weekly for the long windows (90d/year/all) where daily points would be noise.
+// The choice is the same for every chart in a view, so all the trend series share one
+// bucket grid and the range selector windows them together. An unknown key falls back to
+// the default range's unit, so a stale ?range still renders a sane grid.
+func TrendBucket(key string) string {
+	switch key {
+	case "7d", "30d":
+		return "day"
+	case "90d", "year", "all":
+		return "week"
+	}
+	return TrendBucket(DefaultRange)
+}
+
 // rangeSegClass marks the active button in the range selector.
 func rangeSegClass(active bool) string {
 	if active {

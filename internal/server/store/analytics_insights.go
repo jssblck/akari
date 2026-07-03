@@ -26,6 +26,13 @@ type Insights struct {
 	// their work graded. It shares the snapshot so its per-user session counts reconcile
 	// with the quality total the distributions read.
 	Users UserQualityStats
+
+	// Trends is the time-bucketed read of the same cohort: every distribution above drawn
+	// as a series over the window's day or week buckets. It is computed only when the
+	// filter names a bucket (AnalyticsFilter.Bucket), so a distributions-only caller pays
+	// nothing for it and leaves it nil. It shares the snapshot transaction, so a bucket
+	// series reconciles exactly with the rolled-up number above it.
+	Trends *Trends
 }
 
 // HasData reports whether any scoped session carried signals, so the page can show an
@@ -82,6 +89,14 @@ func (s *Store) Insights(ctx context.Context, f AnalyticsFilter) (Insights, erro
 			// outside every other panel's totals, so leaving Users zero changes nothing else.
 			if !f.OmitUsers {
 				if out.Users, err = s.userQualityFrom(ctx, tx, f); err != nil {
+					return err
+				}
+			}
+			// The trend grid is computed only when the caller names a bucket. It reuses the
+			// context stats already read above for the peak-context histogram markers, so the
+			// markers on the trend annotate the same cohort the context panel summarizes.
+			if f.Bucket != "" {
+				if out.Trends, err = s.trendsFrom(ctx, tx, f, out.Context); err != nil {
 					return err
 				}
 			}

@@ -131,6 +131,12 @@ type AnalyticsFilter struct {
 	// surfaces leave it false, since they render the by-user split once a scope has more
 	// than one user.
 	OmitUsers bool
+	// Bucket, when non-empty ("day" or "week"), asks Insights to also compute the trend
+	// series (Insights.Trends): the same scoped cohort aggregated into a time-bucket grid
+	// for the charts. It is the one Insights input the cost/token Analytics path ignores;
+	// leaving it empty (the OG card, any caller that renders no charts) skips the extra
+	// per-bucket scans entirely, so Insights stays the distributions-only snapshot it was.
+	Bucket string
 }
 
 // HasData reports whether there is anything worth charting, so the view can show

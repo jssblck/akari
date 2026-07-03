@@ -17,6 +17,10 @@ templ layout(p Page) {
 			<script src="/static/htmx.min.js" defer></script>
 			<script src="/static/charts.js" defer></script>
 			<script src="/static/app.js" defer></script>
+			// The insights chart engine self-guards on #insights-data, so it is a no-op on
+			// every page but /insights; loading it in the shared head keeps it warm for the
+			// htmx swaps the range control drives.
+			<script src="/static/js/insights.js" defer></script>
 		</head>
 		<body>
 			if p.LoggedIn {
