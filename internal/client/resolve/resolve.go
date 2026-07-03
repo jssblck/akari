@@ -3,12 +3,16 @@
 // directory's git origin remote to a canonical project key. Either hop can fail;
 // rather than dropping the session, a failure classifies it: a folder with no
 // usable git remote is standalone, a folder that no longer exists on disk is
-// orphaned. Only a file we cannot even read a header from is skipped.
+// orphaned. A file is skipped only when it cannot be read at all or when its
+// header carries no recognizable session signature, so an arbitrary *.jsonl that
+// merely shares the suffix (a tool-output log, an event feed) under a custom
+// extra_root is rejected rather than ingested as a junk session.
 package resolve
 
 import (
 	"bufio"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +24,12 @@ import (
 	"github.com/jssblck/akari/internal/gitremote"
 	"github.com/tidwall/gjson"
 )
+
+// errNotSession marks a file whose header could be read but carries no
+// recognizable session signature for its agent: the positive test that a
+// discovered *.jsonl actually is a session. Resolve maps it to a Skipped result
+// with a clear reason, distinct from an unreadable file. See sessionSignature.
+var errNotSession = errors.New("no recognizable session header")
 
 // Header is the minimum the client reads from a session file before deciding
 // where it belongs. The full parse is the server's job.
@@ -123,6 +133,9 @@ func NewWith(git GitRunner, aliases map[string]string) *Resolver {
 func (r *Resolver) Resolve(ctx context.Context, f discover.File) Result {
 	h, err := PeekHeader(f)
 	if err != nil {
+		if errors.Is(err, errNotSession) {
+			return Result{File: f, Skipped: true, Reason: "not a " + f.Agent + " session: " + err.Error()}
+		}
 		return Result{File: f, Skipped: true, Reason: "could not read header: " + err.Error()}
 	}
 	res := Result{File: f, Header: h}
@@ -233,6 +246,12 @@ func (r *Resolver) localRoot(ctx context.Context, cwd string) string {
 // sessionId in a main session file and in every subagent and workflow file under
 // it, so those need an id derived from the file's location, not just its
 // in-file sessionId.
+//
+// It also performs the positive session test: a file is a session only if at
+// least one peeked line matches its agent's session signature. A parseable
+// *.jsonl that never does (a tool-output log, an event feed under a custom
+// extra_root) returns errNotSession so Resolve can skip it with a clear reason
+// rather than upload it as a junk standalone/orphaned session.
 func PeekHeader(f discover.File) (Header, error) {
 	file, err := os.Open(f.Path)
 	if err != nil {
@@ -244,25 +263,70 @@ func PeekHeader(f discover.File) (Header, error) {
 	// Start from the filename-derived fallback; an in-file id overrides it below.
 	h.sessionID = sourceIDFromName(f)
 
+	sawSignature := false
 	sc := bufio.NewScanner(file)
 	sc.Buffer(make([]byte, 0, 64*1024), 8<<20)
-	const maxLines = 500 // cwd appears early in every format; cap the peek
+	const maxLines = 500 // cwd and the session signature appear early; cap the peek
 	for i := 0; sc.Scan() && i < maxLines; i++ {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" || !gjson.Valid(line) {
 			continue
 		}
-		applyHeaderLine(f.Agent, gjson.Parse(line), &h)
-		if h.Cwd != "" {
-			break // cwd is the field that gates resolution; stop once we have it
+		e := gjson.Parse(line)
+		applyHeaderLine(f.Agent, e, &h)
+		if !sawSignature && sessionSignature(f.Agent, e) {
+			sawSignature = true
+		}
+		if h.Cwd != "" && sawSignature {
+			break // have both the field that gates resolution and proof it is a session
 		}
 	}
 	if err := sc.Err(); err != nil {
 		return Header{}, err
 	}
+	if !sawSignature {
+		return Header{}, errNotSession
+	}
 
 	h.SourceID = sourceID(f, h.sessionID)
 	return h, nil
+}
+
+// sessionSignature reports whether one parsed line looks like a genuine session
+// record for the agent. It is the positive counterpart to discovery's suffix
+// match: discovery accepts any *.jsonl (any rollout-*.jsonl for codex), and
+// custom extra_roots point that walk at arbitrary trees, so without a content
+// signature any parseable JSONL would resolve as a standalone or orphaned
+// "session". Each agent's signature is a shape a real transcript always writes
+// but unrelated JSONL does not: Claude's typed user/assistant entries carry a
+// message object, Codex wraps every record in a payload, and pi opens with a
+// session header (or writes typed message lines with a role).
+func sessionSignature(agent string, e gjson.Result) bool {
+	switch agent {
+	case "claude":
+		switch e.Get("type").String() {
+		case "user", "assistant":
+			return e.Get("message").Exists()
+		}
+		return false
+	case "codex":
+		switch e.Get("type").String() {
+		case "session_meta", "response_item", "event_msg":
+			return e.Get("payload").Exists()
+		}
+		return false
+	case "pi":
+		switch e.Get("type").String() {
+		case "session":
+			// The opening header. A real one carries the session metadata resolution
+			// reads (its id and/or cwd); a bare {"type":"session"} does not.
+			return e.Get("id").Exists() || e.Get("cwd").Exists()
+		case "message":
+			return e.Get("message.role").Exists()
+		}
+		return false
+	}
+	return false
 }
 
 // applyHeaderLine pulls header fields out of one parsed line for the agent. It

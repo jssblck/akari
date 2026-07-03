@@ -2,6 +2,7 @@ package resolve
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -19,6 +20,18 @@ func writeFile(t *testing.T, dir, name, content string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// claudeLine renders a realistic Claude transcript entry for a cwd: a typed user
+// record carrying a message, which is the shape resolve's positive session
+// signature requires. Extra top-level fields (gitBranch, sessionId) may be
+// appended for tests that assert on them.
+func claudeLine(cwd string, extra ...string) string {
+	fields := fmt.Sprintf(`"type":"user","cwd":%q,"message":{"content":"hi"}`, cwd)
+	for _, x := range extra {
+		fields += "," + x
+	}
+	return "{" + fields + "}\n"
 }
 
 func TestPeekHeader(t *testing.T) {
@@ -65,6 +78,90 @@ func TestPeekHeaderFallsBackToFilename(t *testing.T) {
 	}
 }
 
+// TestPeekHeaderRejectsNonSession is the positive-detection guard: a parseable
+// *.jsonl that is not a session for its agent (a tool-output log, an event feed
+// under a custom extra_root) must return errNotSession rather than a header, even
+// when it happens to carry a cwd field. This is what keeps discovery's suffix
+// match from ingesting arbitrary JSONL as junk sessions.
+func TestPeekHeaderRejectsNonSession(t *testing.T) {
+	dir := t.TempDir()
+	cases := []struct {
+		agent, name, content string
+	}{
+		// A log line with a cwd but no session shape: the case that formerly resolved
+		// as a standalone/orphaned junk session.
+		{"claude", "log1.jsonl", `{"level":"info","msg":"built","cwd":"/home/grace/app"}` + "\n"},
+		// A Claude "type" that is not a transcript entry, and one that lacks a message.
+		{"claude", "log2.jsonl", `{"type":"user","cwd":"/home/grace/app"}` + "\n"},
+		{"claude", "log3.jsonl", `{"type":"event","payload":{"cwd":"/x"}}` + "\n"},
+		// Codex without the payload wrapper it always writes.
+		{"codex", "rollout-x.jsonl", `{"type":"log","cwd":"/home/ada/api"}` + "\n"},
+		// pi lines that are neither a session header (no id/cwd) nor a typed message.
+		{"pi", "n1.jsonl", `{"type":"session"}` + "\n"},
+		{"pi", "n2.jsonl", `{"type":"tool","output":"hello","cwd":"/x"}` + "\n"},
+		// Valid JSON that carries no recognizable shape at all.
+		{"claude", "n3.jsonl", `{"hello":"world"}` + "\n{}\n"},
+	}
+	for _, c := range cases {
+		path := writeFile(t, dir, c.name, c.content)
+		_, err := PeekHeader(discover.File{Agent: c.agent, Root: dir, Path: path})
+		if !errors.Is(err, errNotSession) {
+			t.Errorf("%s/%s: err = %v, want errNotSession", c.agent, c.name, err)
+		}
+	}
+}
+
+// TestPeekHeaderAcceptsRealSessions pins the other side: a minimal but genuine
+// header for each agent passes the signature and yields the expected cwd, so the
+// positive test never rejects a real session.
+func TestPeekHeaderAcceptsRealSessions(t *testing.T) {
+	dir := t.TempDir()
+	cases := []struct {
+		agent, name, content, wantCwd string
+	}{
+		{"claude", "c.jsonl", `{"type":"assistant","cwd":"/a","message":{"content":[]}}` + "\n", "/a"},
+		{"codex", "rollout-c.jsonl", `{"type":"session_meta","payload":{"cwd":"/b"}}` + "\n", "/b"},
+		{"pi", "p.jsonl", `{"type":"session","id":"p-1","cwd":"/c"}` + "\n", "/c"},
+		// A pi file that opens with a typed message line (a tail with no header) still
+		// reads as a session; it just has no cwd, so it resolves as orphaned later.
+		{"pi", "p2.jsonl", `{"type":"message","message":{"role":"user","content":"hi"}}` + "\n", ""},
+	}
+	for _, c := range cases {
+		path := writeFile(t, dir, c.name, c.content)
+		h, err := PeekHeader(discover.File{Agent: c.agent, Root: dir, Path: path})
+		if err != nil {
+			t.Errorf("%s/%s: unexpected err %v", c.agent, c.name, err)
+			continue
+		}
+		if h.Cwd != c.wantCwd {
+			t.Errorf("%s/%s: cwd = %q, want %q", c.agent, c.name, h.Cwd, c.wantCwd)
+		}
+	}
+}
+
+// TestResolveSkipsNonSession confirms the not-a-session verdict flows through
+// Resolve as a Skipped result with a clear, agent-named reason (not an upload as a
+// standalone/orphaned session), which is what the sync summary and watch log show.
+func TestResolveSkipsNonSession(t *testing.T) {
+	dir := t.TempDir()
+	// A noisy JSONL with a cwd that points at a real directory: without positive
+	// detection it would resolve all the way to a standalone/remote junk session.
+	path := writeFile(t, dir, "events.jsonl",
+		fmt.Sprintf(`{"level":"info","event":"tick","cwd":%q}`+"\n", dir))
+	r := NewWith(fakeGit(map[string]string{"rev-parse": "true",
+		"remote get-url": "git@github.com:owner/repo.git"}, nil), nil)
+	res := r.Resolve(context.Background(), discover.File{Agent: "claude", Root: dir, Path: path})
+	if !res.Skipped {
+		t.Fatalf("kind = %q, want skipped", res.Kind)
+	}
+	if res.ProjectKey != "" {
+		t.Errorf("skipped result carried project key %q", res.ProjectKey)
+	}
+	if !strings.Contains(res.Reason, "not a claude session") {
+		t.Errorf("reason = %q, want it to name the agent and the not-a-session cause", res.Reason)
+	}
+}
+
 // TestClaudeSourceIDUnique is the regression guard for the source-id collision:
 // a Claude main session file and every subagent and workflow file beneath it all
 // record the same in-file sessionId, so before the fix they folded onto one
@@ -77,7 +174,7 @@ func TestClaudeSourceIDUnique(t *testing.T) {
 
 	// All four files carry the parent sessionId in their first line, exactly as
 	// Claude writes subagent and workflow files.
-	line := fmt.Sprintf(`{"type":"user","cwd":"/home/ada/app","gitBranch":"main","sessionId":%q}`+"\n", sid)
+	line := fmt.Sprintf(`{"type":"user","cwd":"/home/ada/app","gitBranch":"main","sessionId":%q,"message":{"content":"hi"}}`+"\n", sid)
 
 	mustWrite := func(rel string) string {
 		path := filepath.Join(root, filepath.FromSlash(rel))
@@ -158,7 +255,7 @@ func TestClaudeForkedSessionDistinct(t *testing.T) {
 
 	// Both files carry the parent's sessionId in their first line; only their file
 	// names differ.
-	line := fmt.Sprintf(`{"type":"user","cwd":"/home/ada/app","sessionId":%q}`+"\n", parent)
+	line := fmt.Sprintf(`{"type":"user","cwd":"/home/ada/app","sessionId":%q,"message":{"content":"hi"}}`+"\n", parent)
 	mustWrite := func(name string) string {
 		path := filepath.Join(root, proj, name)
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -260,8 +357,7 @@ func hasArg(args []string, want string) bool {
 
 func TestResolveSuccess(t *testing.T) {
 	cwd := t.TempDir() // a directory that exists on disk
-	file := writeFile(t, cwd, "s1.jsonl",
-		fmt.Sprintf(`{"type":"user","cwd":%q,"gitBranch":"main","sessionId":"s1"}`+"\n", cwd))
+	file := writeFile(t, cwd, "s1.jsonl", claudeLine(cwd, `"gitBranch":"main"`, `"sessionId":"s1"`))
 
 	r := NewWith(fakeGit(map[string]string{
 		"rev-parse":      "true",
@@ -350,8 +446,7 @@ func TestResolveClassifies(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
-			file := writeFile(t, dir, "sess.jsonl",
-				fmt.Sprintf(`{"type":"user","cwd":%q}`+"\n", c.cwd))
+			file := writeFile(t, dir, "sess.jsonl", claudeLine(c.cwd))
 			r := NewWith(c.git, nil)
 			res := r.Resolve(context.Background(), discover.File{Agent: "claude", Path: file})
 			if res.Skipped {
@@ -388,7 +483,7 @@ func TestResolveStandaloneGroupsByCommonDir(t *testing.T) {
 	for _, wt := range []string{"feature-a", "feature-b"} {
 		dir := t.TempDir()
 		file := writeFile(t, dir, "sess.jsonl",
-			fmt.Sprintf(`{"type":"user","cwd":%q}`+"\n", dir))
+			claudeLine(dir))
 		r := NewWith(git, nil)
 		res := r.Resolve(context.Background(), discover.File{Agent: "claude", Path: file})
 		if res.Kind != KindStandalone {
@@ -435,7 +530,7 @@ func TestResolveStandaloneLocalRootAcrossBranches(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
 			file := writeFile(t, dir, "sess.jsonl",
-				fmt.Sprintf(`{"type":"user","cwd":%q}`+"\n", dir))
+				claudeLine(dir))
 			r := NewWith(fakeGit(c.responses, c.errs), nil)
 			res := r.Resolve(context.Background(), discover.File{Agent: "claude", Path: file})
 			if res.Kind != KindStandalone {
@@ -455,7 +550,7 @@ func TestResolveLocalRootBareRepoPreservesCommonDir(t *testing.T) {
 	bare := filepath.Join(t.TempDir(), "myrepo.git")
 	dir := t.TempDir()
 	file := writeFile(t, dir, "sess.jsonl",
-		fmt.Sprintf(`{"type":"user","cwd":%q}`+"\n", dir))
+		claudeLine(dir))
 	r := NewWith(fakeGit(map[string]string{"rev-parse": "true", "git-common-dir": bare},
 		map[string]error{"remote get-url": fmt.Errorf("no such remote")}), nil)
 	res := r.Resolve(context.Background(), discover.File{Agent: "claude", Path: file})
@@ -470,7 +565,7 @@ func TestResolveLocalRootBareRepoPreservesCommonDir(t *testing.T) {
 func TestResolveStandaloneNoRootWhenCommonDirUnavailable(t *testing.T) {
 	dir := t.TempDir()
 	file := writeFile(t, dir, "sess.jsonl",
-		fmt.Sprintf(`{"type":"user","cwd":%q}`+"\n", dir))
+		claudeLine(dir))
 	r := NewWith(fakeGit(map[string]string{"rev-parse": "true"}, map[string]error{
 		"remote get-url": fmt.Errorf("no such remote"),
 		"git-common-dir": fmt.Errorf("unsupported"),
@@ -524,7 +619,7 @@ func TestResolveRealWorktreeGroupsByCommonDir(t *testing.T) {
 	// Resolve a session whose cwd is each of the three checkouts.
 	rootFor := func(cwd string) Result {
 		file := writeFile(t, cwd, "sess.jsonl",
-			fmt.Sprintf(`{"type":"user","cwd":%q}`+"\n", cwd))
+			claudeLine(cwd))
 		return New().Resolve(ctx, discover.File{Agent: "claude", Path: file})
 	}
 	rMain := rootFor(main)
@@ -555,7 +650,7 @@ func TestResolveRealWorktreeGroupsByCommonDir(t *testing.T) {
 func TestResolveCachesPerDirectory(t *testing.T) {
 	cwd := t.TempDir()
 	file := writeFile(t, cwd, "sess.jsonl",
-		fmt.Sprintf(`{"type":"user","cwd":%q}`+"\n", cwd))
+		claudeLine(cwd))
 
 	calls := 0
 	git := func(_ context.Context, _ string, args ...string) (string, error) {
