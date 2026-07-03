@@ -99,7 +99,7 @@ func FoldUnknownModels(bs []store.Breakdown) []store.Breakdown {
 	other := store.Breakdown{Label: OtherModelLabel}
 	var folded bool
 	for _, b := range bs {
-		if _, known := pricing.Lookup(b.Label); known {
+		if pricing.Known(b.Label) {
 			out = append(out, b)
 			continue
 		}

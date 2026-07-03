@@ -60,6 +60,60 @@ func TestCacheStats(t *testing.T) {
 	}
 }
 
+// TestCacheStatsDatedWindowSplitsSaving pins the aggregate cache paths across a dated rate
+// change. Sonnet 5's introductory $2/$10 rate (cache read 0.20) reverts to the $3/$15 sticker
+// (cache read 0.30) on 2026-09-01, so cached reads spent on either side save a different gap.
+// The aggregate groups by (model, UTC day), and each UTC day sits inside one rate window, so
+// the scoped and per-session paths both price each side at its own rate rather than collapsing
+// the two into one flat rate, and the two paths agree with the hand-computed split.
+func TestCacheStatsDatedWindowSplitsSaving(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	admin, err := st.Register(ctx, "grace", "h", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	proj, err := st.UpsertProject(ctx, "github.com/ada/dated", "github.com", "ada", "dated", "dated", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+
+	s := seedSessionWithStats(t, st, admin.ID, proj, "claude", "s", 0, 0, 0)
+	intro := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)    // inside the $2/$10 promo
+	sticker := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC) // after the $3/$15 revert
+	seedUsageCacheAt(t, st, s, "claude-sonnet-5", 0, 0, 1_000_000, 0, intro, "intro")
+	seedUsageCacheAt(t, st, s, "claude-sonnet-5", 0, 0, 1_000_000, 0, sticker, "sticker")
+
+	// Intro read saves 1M*(2-0.20)=1.80; sticker read saves 1M*(3-0.30)=2.70; total 4.50.
+	// A flat single-window price would give 3.60 (both intro) or 5.40 (both sticker), so
+	// 4.50 proves each side was priced at its own window.
+	const want = 1.80 + 2.70
+
+	scoped, err := st.CacheStats(ctx, store.AnalyticsFilter{ProjectID: proj})
+	if err != nil {
+		t.Fatalf("cache stats: %v", err)
+	}
+	if math.Abs(scoped.SavingsUSD-want) > 1e-9 {
+		t.Errorf("scoped savings = %v, want %v (1.80 intro + 2.70 sticker)", scoped.SavingsUSD, want)
+	}
+	if scoped.SavingsIncomplete {
+		t.Error("savings should be complete: Sonnet 5 is priced in both windows")
+	}
+
+	// The per-session recompute is the oracle the parse-time rollup reconciles against, so it
+	// must land on the same windowed split; if it collapsed to one rate the two would drift and
+	// the reconciliation guard would fail.
+	sess, err := st.SessionCacheStats(ctx, s)
+	if err != nil {
+		t.Fatalf("session cache stats: %v", err)
+	}
+	if math.Abs(sess.SavingsUSD-want) > 1e-9 {
+		t.Errorf("session savings = %v, want %v (same windowed split as the scoped path)", sess.SavingsUSD, want)
+	}
+}
+
 // TestCacheStatsReconcilesWithSnapshotTotals pins the Cache tile to the token totals under
 // the snapshot path. AnalyticsSnapshot reads the whole aggregate from one repeatable-read
 // transaction, and the cache aggregate now threads that same transaction rather than a

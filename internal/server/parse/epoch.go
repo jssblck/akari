@@ -126,4 +126,14 @@ package parse
 // change, not a reducer-shape change, and no golden fixture uses Sonnet 5, so the projection delta for
 // the fixtures is byte-for-byte identical and the golden snapshots do not move; the bump is the reprice
 // signal and stands on its own.
-const Epoch = 10
+//
+// Epoch 10 -> 11: give claude-sonnet-5 its two-window introductory rate ($2/$10 per MTok through
+// 2026-08-31, $3/$15 after; see internal/pricing). pricing.Cost now selects the date-effective window
+// at each usage row's OccurredAt, so a Sonnet 5 row logged inside the intro window prices cheaper than
+// the flat $3/$15 the previous epoch stored. This bump reparses the corpus so every Sonnet 5 usage row
+// re-prices from the window in effect when it occurred, and pairs with the pricing.Version 2 -> 3 bump
+// that re-prices the per-session cache-savings rollup at the windowed rates. Like Epoch 10 it is a
+// pricing change, not a reducer-shape change, and no golden fixture uses Sonnet 5, so the projection
+// delta for the fixtures is byte-for-byte identical and the golden snapshots do not move; the bump is
+// the reprice signal and stands on its own.
+const Epoch = 11

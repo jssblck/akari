@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jssblck/akari/internal/pricing"
@@ -54,19 +55,31 @@ func (c CacheStats) HasData() bool { return c.PromptTokens() > 0 }
 // CacheStats folds. The saving is priced per model (the input-versus-cache rate gap
 // differs across families, and is even negative on cache writes for Claude), so the
 // fold has to see each model, not just the grand totals.
+//
+// Day is the UTC day the tokens were spent, the second grouping key alongside Model.
+// A model's rate can change on a date, and the boundaries are UTC-midnight-aligned, so
+// a whole UTC day sits inside one rate window: pricing the day's sum at that day's rate
+// is exact, and matches the per-row parse-time fold that reconciles against it. Day is
+// the zero value for an undated row (the session path counts undated usage too), which
+// selects the earliest window, the same choice parse-time pricing makes for a row with
+// no OccurredAt.
 type cacheModelRow struct {
 	Model      string
+	Day        time.Time
 	Input      int64
 	Output     int64
 	CacheRead  int64
 	CacheWrite int64
 }
 
-// cacheStatsFrom folds per-model token sums into a CacheStats, pricing each model's
-// saving through the rate table and flagging the result incomplete when cached volume
-// rode an unpriced model (so the saving omits it). It is the shared core of the scoped
-// (CacheStats) and per-session (SessionCacheStats) paths, so both compute the figure
-// identically; only the rows they feed it differ.
+// cacheStatsFrom folds per-(model, day) token sums into a CacheStats, pricing each
+// bucket's saving at the rate in effect that day and flagging the result incomplete when
+// cached volume rode an unpriced model (so the saving omits it). The token totals sum
+// across the buckets, so the grand figures are unaffected by the day split; only the
+// saving is priced per bucket, which is what lets a model with a dated rate change price
+// each side at its own rate. It is the shared core of the scoped (CacheStats) and
+// per-session (SessionCacheStats) paths, so both compute the figure identically; only
+// the rows they feed it differ.
 func cacheStatsFrom(rows []cacheModelRow) CacheStats {
 	var c CacheStats
 	for _, r := range rows {
@@ -74,7 +87,7 @@ func cacheStatsFrom(rows []cacheModelRow) CacheStats {
 		c.Output += r.Output
 		c.CacheRead += r.CacheRead
 		c.CacheWrite += r.CacheWrite
-		if saving, ok := pricing.CacheSavings(r.Model, r.CacheRead, r.CacheWrite); ok {
+		if saving, ok := pricing.CacheSavings(r.Model, r.Day, r.CacheRead, r.CacheWrite); ok {
 			c.SavingsUSD += saving
 		} else if r.CacheRead > 0 || r.CacheWrite > 0 {
 			// Cached volume on a model the pricing table does not know: the saving omits
@@ -107,8 +120,13 @@ func (s *Store) CacheStats(ctx context.Context, f AnalyticsFilter) (CacheStats, 
 // a snapshot render holding two pool connections at once.
 func (s *Store) cacheStats(ctx context.Context, q querier, f AnalyticsFilter) (CacheStats, error) {
 	filter, args := f.clause()
+	// Group by model AND the UTC day so a model with a dated rate change prices each
+	// day's cached volume at that day's rate; the day is always non-NULL here (the
+	// occurred_at IS NOT NULL guard below). The token sums fold back together in
+	// cacheStatsFrom, so the extra grouping key affects only how the saving is priced.
 	rows, err := q.Query(ctx,
 		`SELECT ue.model,
+		        date_trunc('day', ue.occurred_at AT TIME ZONE 'UTC'),
 		        coalesce(sum(ue.input_tokens), 0),
 		        coalesce(sum(ue.output_tokens), 0),
 		        coalesce(sum(ue.cache_read_tokens), 0),
@@ -116,7 +134,7 @@ func (s *Store) cacheStats(ctx context.Context, q querier, f AnalyticsFilter) (C
 		   FROM usage_events ue
 		   JOIN sessions s ON s.id = ue.session_id
 		  WHERE ue.occurred_at IS NOT NULL`+filter+`
-		  GROUP BY ue.model`, args...)
+		  GROUP BY ue.model, date_trunc('day', ue.occurred_at AT TIME ZONE 'UTC')`, args...)
 	if err != nil {
 		return CacheStats{}, fmt.Errorf("query cache stats: %w", err)
 	}
@@ -149,15 +167,21 @@ func (s *Store) SessionCacheStats(ctx context.Context, sessionID int64) (CacheSt
 // the pooled per-session read (SessionCacheStats) and the backfill's locked transaction share
 // one query and one pricing fold. See SessionCacheStats for the all-usage-versus-dated contract.
 func (s *Store) sessionCacheStatsFrom(ctx context.Context, q querier, sessionID int64) (CacheStats, error) {
+	// Group by model AND the UTC day so a dated rate change prices each day at its own
+	// rate, matching the per-row parse-time fold this recompute reconciles against. An
+	// undated row (occurred_at NULL) buckets to a NULL day, scanned as the zero time,
+	// which selects the earliest window: the same choice the parse-time fold makes for a
+	// row with no OccurredAt, so the two stay reconciled.
 	rows, err := q.Query(ctx,
 		`SELECT model,
+		        date_trunc('day', occurred_at AT TIME ZONE 'UTC'),
 		        coalesce(sum(input_tokens), 0),
 		        coalesce(sum(output_tokens), 0),
 		        coalesce(sum(cache_read_tokens), 0),
 		        coalesce(sum(cache_write_tokens), 0)
 		   FROM usage_events
 		  WHERE session_id = $1
-		  GROUP BY model`, sessionID)
+		  GROUP BY model, date_trunc('day', occurred_at AT TIME ZONE 'UTC')`, sessionID)
 	if err != nil {
 		return CacheStats{}, fmt.Errorf("query session cache stats for session %d: %w", sessionID, err)
 	}
@@ -442,8 +466,14 @@ func scanCacheModelRows(rows pgx.Rows) ([]cacheModelRow, error) {
 	var out []cacheModelRow
 	for rows.Next() {
 		var r cacheModelRow
-		if err := rows.Scan(&r.Model, &r.Input, &r.Output, &r.CacheRead, &r.CacheWrite); err != nil {
+		// A NULL day (an undated usage row) scans to nil and leaves r.Day the zero
+		// time, which prices at the earliest rate window.
+		var day *time.Time
+		if err := rows.Scan(&r.Model, &day, &r.Input, &r.Output, &r.CacheRead, &r.CacheWrite); err != nil {
 			return nil, fmt.Errorf("scan cache model row: %w", err)
+		}
+		if day != nil {
+			r.Day = *day
 		}
 		out = append(out, r)
 	}

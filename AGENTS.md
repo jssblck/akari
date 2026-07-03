@@ -96,10 +96,13 @@ one leaves a half-migrated corpus:
   `session_signals` versions).
 - `pricing.Version` (`internal/pricing`): bump on any rate change in the pricing
   table (a new or removed model, a different Input/Output/CacheWrite/CacheRead
-  number). It gates `reconcileCacheSavingsPricingIfNeeded`, which re-prices the
-  per-session cache-savings rollup across the cache-bearing corpus once per bump,
-  so a session whose reparse fails still re-prices from its usage_events at the new
-  rates (per-row cost rides the `Epoch` reparse instead). It is separate from
+  number, or a new or moved date-effective window). A model maps to a list of
+  date-effective rates and `Cost`/`CacheSavings` select the window in effect at the
+  usage event's time, so adding a window is still a reprice: a session logged inside
+  the new window re-prices. It gates `reconcileCacheSavingsPricingIfNeeded`, which
+  re-prices the per-session cache-savings rollup across the cache-bearing corpus once
+  per bump, so a session whose reparse fails still re-prices from its usage_events at
+  the new rates (per-row cost rides the `Epoch` reparse instead). It is separate from
   `parse.Epoch` on purpose: keying off Epoch would re-price the whole corpus on
   every unrelated parser change. Pair a `pricing.Version` bump with the
   `parse.Epoch` bump a reprice already requires.
