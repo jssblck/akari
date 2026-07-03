@@ -28,6 +28,24 @@
     return svg;
   }
 
+  // clipGroup returns a <g> whose children are clipped to the plot rectangle
+  // [x, y, w, h]. Value-driven marks (scatter dots, line and area paths, bars)
+  // go in this group, so a datum beyond the axis domain paints up to the plot
+  // edge and no further, never bleeding into the axis margins. Axis chrome
+  // (ticks, gridlines, callout labels, annotations) is appended to the svg
+  // directly, not this group, so labels that live in the margins stay visible.
+  // Each call mints a unique clipPath id, since one page holds many charts.
+  let clipSeq = 0;
+  function clipGroup(svg, x, y, w, h) {
+    const id = 'ak-clip-' + (++clipSeq);
+    const cp = svgEl('clipPath', { id: id });
+    cp.appendChild(svgEl('rect', { x: x, y: y, width: Math.max(0, w), height: Math.max(0, h) }));
+    svg.appendChild(cp);
+    const g = svgEl('g', { 'clip-path': 'url(#' + id + ')' });
+    svg.appendChild(g);
+    return g;
+  }
+
   /* linear scale factory */
   function scaleLinear(domain, range) {
     const [d0, d1] = domain, [r0, r1] = range;
@@ -199,7 +217,7 @@
 
   /* expose a tiny namespace for the rest of the scripts */
   window.AK = {
-    svgEl, svgRoot, scaleLinear, scaleLog,
+    svgEl, svgRoot, clipGroup, scaleLinear, scaleLog,
     pathLine, pathArea, pathBand, pathStep,
     axisTicksY, axisBaseline, bucketAxis, attachHoverBucket,
     fmtInt, fmtK, fmtPct, fmtS,
@@ -236,13 +254,14 @@
       svg.appendChild(A.svgEl('line', { x1: arrivalX, x2: arrivalX, y1: pT, y2: h - pB, stroke: 'var(--faint)', 'stroke-width': 1, 'stroke-dasharray': '2,3' }));
     }
 
+    const clip = A.clipGroup(svg, pL, pT, w - pL - pR, h - pT - pB);
     let cum = new Array(D.nBuckets).fill(0);
     M.order.forEach((key) => {
       const bottom = cum.slice();
       const top = cum.map((c, i) => c + M.rows[i][key]);
       const bottomPts = bottom.map((v, i) => [xScale(i), yScale(v)]);
       const topPts = top.map((v, i) => [xScale(i), yScale(v)]);
-      svg.appendChild(A.svgEl('path', { d: A.pathBand(topPts, bottomPts), fill: M.colors[key], opacity: '0.85' }));
+      clip.appendChild(A.svgEl('path', { d: A.pathBand(topPts, bottomPts), fill: M.colors[key], opacity: '0.85' }));
       cum = top;
     });
 
@@ -349,8 +368,19 @@
     const w = 1000, h = 380, pL = 46, pR = 24, pT = 16, pB = 30;
     const svg = A.svgRoot(w, h);
     const G = D.sessionGallery;
-    const xScale = A.scaleLog([30, 86400], [pL, w - pR]);
-    const yScale = A.scaleLog([0.01, 60], [h - pB, pT]);
+    // Fit the log axes to the data so the outliers (the priciest session, the
+    // longest run) sit inside the plot instead of painting past the axis. The
+    // gallery exists to stop outliers hiding, so clipping them away would defeat
+    // it; the fixed defaults still hold when the data stays inside them.
+    const durs = G.points.map((p) => p.durationS);
+    const costs = G.points.map((p) => p.costUsd);
+    (G.annotations || []).forEach((a) => { durs.push(a.durationS); costs.push(a.costUsd); });
+    const xLo = durs.length ? Math.max(1, Math.min(30, Math.min(...durs))) : 30;
+    const xHi = durs.length ? Math.max(86400, Math.max(...durs) * 1.05) : 86400;
+    const yLo = costs.length ? Math.max(0.001, Math.min(0.01, Math.min(...costs))) : 0.01;
+    const yHi = costs.length ? Math.max(60, Math.max(...costs) * 1.08) : 60;
+    const xScale = A.scaleLog([xLo, xHi], [pL, w - pR]);
+    const yScale = A.scaleLog([yLo, yHi], [h - pB, pT]);
 
     A.axisTicksY(svg, [0.01, 0.1, 1, 10, 60], pL, w - pR, yScale, (v) => (v < 1 ? '$' + v.toFixed(2) : '$' + v));
     [30, 300, 3600, 43200, 86400].forEach((v) => {
@@ -362,10 +392,13 @@
     });
     A.axisBaseline(svg, pL, w - pR, h - pB);
 
-    const dotsLayer = A.svgEl('g', {});
-    svg.appendChild(dotsLayer);
+    const dotsLayer = A.clipGroup(svg, pL, pT, w - pL - pR, h - pT - pB);
     G.points.forEach((p) => {
-      const cx = xScale(p.durationS), cy = yScale(p.costUsd);
+      // Fitting covers the high-end outliers, but a near-zero duration or cost
+      // underflows the log axis and would fly off the left/bottom. Pin those to
+      // the plot edge so every session stays visible instead of clipped away.
+      const cx = Math.max(pL, Math.min(w - pR, xScale(p.durationS)));
+      const cy = Math.max(pT, Math.min(h - pB, yScale(p.costUsd)));
       const dot = A.svgEl('circle', {
         cx, cy, r: 3.4, fill: G.archColor[p.arch], opacity: '0.7', class: 'scatter-dot',
       });
@@ -473,15 +506,16 @@
     A.axisTicksY(svg, mini ? [0, Math.round(maxV)] : [0, 15, 30, 45], pL, w - pR, yScale, (v) => v);
     A.bucketAxis(svg, w, h, pB, pL, pR, mini);
 
+    const clip = A.clipGroup(svg, pL, pT, w - pL - pR, h - pT - pB);
     const wallPts = H_.wallSpan.map((v, i) => [xScale(i), yScale(v)]);
 
     const bw = (w - pL - pR) / D.nBuckets;
     H_.active.forEach((v, i) => {
       const x = xScale(i) - bw * 0.32;
       const y = yScale(v);
-      svg.appendChild(A.svgEl('rect', { x, y, width: bw * 0.64, height: (h - pB) - y, fill: 'var(--viz-8)', opacity: '0.78' }));
+      clip.appendChild(A.svgEl('rect', { x, y, width: bw * 0.64, height: (h - pB) - y, fill: 'var(--viz-8)', opacity: '0.78' }));
     });
-    svg.appendChild(A.svgEl('path', { d: A.pathLine(wallPts), fill: 'none', stroke: 'var(--muted)', 'stroke-width': mini ? 1 : 1.4, 'stroke-dasharray': '3,3' }));
+    clip.appendChild(A.svgEl('path', { d: A.pathLine(wallPts), fill: 'none', stroke: 'var(--muted)', 'stroke-width': mini ? 1 : 1.4, 'stroke-dasharray': '3,3' }));
 
     if (!mini && D.activeHours.maxLabel != null && D.activeHours.maxIdx != null) {
       const mx = xScale(H_.maxIdx), my = yScale(H_.active[H_.maxIdx]);
@@ -506,27 +540,35 @@
     const w = mini ? MW : W, h = mini ? MH : H;
     const pL = mini ? mpadL : padL, pR = mini ? mpadR : (padR + 70), pT = mini ? mpadT : padT, pB = mini ? mpadB : padB;
     const svg = A.svgRoot(w, h);
-    const yMax = mini ? 40 : 120;
+    const RT = D.responseTime;
+    // Fit the ceiling to the tallest series drawn (p99 on the full chart, the
+    // p50/p90 band on the mini) so a latency spike stays inside the plot instead
+    // of painting over the top; the original fixed ceilings hold as the floor.
+    const drawn = mini ? RT.p50.concat(RT.p90) : RT.p50.concat(RT.p90, RT.p99);
+    const dataMax = drawn.length ? Math.max(...drawn) : 0;
+    const yMax = Math.max(mini ? 40 : 120, Math.ceil(dataMax * 1.1 / 10) * 10);
     const xScale = A.scaleLinear([0, D.nBuckets - 1], [pL, w - pR]);
     const yScale = A.scaleLinear([0, yMax], [h - pB, pT]);
 
-    A.axisTicksY(svg, mini ? [0, 40] : [0, 30, 60, 90, 120], pL, w - pR, yScale, (v) => v);
+    const yticks = mini ? [0, yMax] : [0, yMax * 0.25, yMax * 0.5, yMax * 0.75, yMax].map((v) => Math.round(v));
+    A.axisTicksY(svg, yticks, pL, w - pR, yScale, (v) => v);
     A.bucketAxis(svg, w, h, pB, pL, pR, mini);
 
-    const p50Pts = D.responseTime.p50.map((v, i) => [xScale(i), yScale(v)]);
-    const p90Pts = D.responseTime.p90.map((v, i) => [xScale(i), yScale(v)]);
+    const clip = A.clipGroup(svg, pL, pT, w - pL - pR, h - pT - pB);
+    const p50Pts = RT.p50.map((v, i) => [xScale(i), yScale(v)]);
+    const p90Pts = RT.p90.map((v, i) => [xScale(i), yScale(v)]);
 
     const band = A.svgEl('path', { d: A.pathBand(p90Pts, p50Pts), fill: 'var(--viz-2)', opacity: '0.16' });
-    svg.appendChild(band);
-    svg.appendChild(A.svgEl('path', { d: A.pathLine(p50Pts), fill: 'none', stroke: 'var(--viz-2)', 'stroke-width': mini ? 1.4 : 2 }));
+    clip.appendChild(band);
+    clip.appendChild(A.svgEl('path', { d: A.pathLine(p50Pts), fill: 'none', stroke: 'var(--viz-2)', 'stroke-width': mini ? 1.4 : 2 }));
     if (!mini) {
-      svg.appendChild(A.svgEl('path', { d: A.pathLine(p90Pts), fill: 'none', stroke: 'var(--viz-2)', 'stroke-width': 1, opacity: '0.5', 'stroke-dasharray': '2,3' }));
+      clip.appendChild(A.svgEl('path', { d: A.pathLine(p90Pts), fill: 'none', stroke: 'var(--viz-2)', 'stroke-width': 1, opacity: '0.5', 'stroke-dasharray': '2,3' }));
 
-      const p99Pts = D.responseTime.p99.map((v, i) => [xScale(i), yScale(v)]);
-      svg.appendChild(A.svgEl('path', { d: A.pathLine(p99Pts), fill: 'none', stroke: 'var(--warn)', 'stroke-width': 1.4, 'stroke-dasharray': '4,3' }));
+      const p99Pts = RT.p99.map((v, i) => [xScale(i), yScale(v)]);
+      clip.appendChild(A.svgEl('path', { d: A.pathLine(p99Pts), fill: 'none', stroke: 'var(--warn)', 'stroke-width': 1.4, 'stroke-dasharray': '4,3' }));
       const lastP99 = p99Pts[p99Pts.length - 1];
       const t99 = A.svgEl('text', { x: w - pR + 6, y: lastP99[1] + 3, class: 'callout-label', fill: 'var(--warn)' });
-      t99.textContent = 'p99 ' + A.fmtS(D.responseTime.p99[D.responseTime.p99.length - 1]);
+      t99.textContent = 'p99 ' + A.fmtS(RT.p99[RT.p99.length - 1]);
       svg.appendChild(t99);
     }
     A.axisBaseline(svg, pL, w - pR, h - pB);
@@ -558,6 +600,7 @@
     A.axisTicksY(svg, mini ? [0, +maxV.toFixed(1)] : [0, +(maxV / 2).toFixed(1), +maxV.toFixed(1)], pL, w - pR, yScale, (v) => v);
     A.bucketAxis(svg, w, h, pB, pL, pR, mini);
 
+    const clip = A.clipGroup(svg, pL, pT, w - pL - pR, h - pT - pB);
     const series = [
       { key: 'msgsPerMin', label: 'msgs/min', color: 'var(--viz-2)', width: mini ? 1.4 : 2 },
       { key: 'toolsPerMin', label: 'tools/min', color: 'var(--viz-5)', width: mini ? 1.2 : 1.7 },
@@ -565,7 +608,7 @@
     const pendingLabels = [];
     series.forEach((s) => {
       const pts = T[s.key].map((v, i) => [xScale(i), yScale(v)]);
-      svg.appendChild(A.svgEl('path', { d: A.pathLine(pts), fill: 'none', stroke: s.color, 'stroke-width': s.width }));
+      clip.appendChild(A.svgEl('path', { d: A.pathLine(pts), fill: 'none', stroke: s.color, 'stroke-width': s.width }));
       if (!mini && pts.length) {
         const last = pts[pts.length - 1];
         pendingLabels.push({ y: last[1], color: s.color, text: s.label + ' ' + T[s.key][T[s.key].length - 1].toFixed(1) });
@@ -780,8 +823,7 @@
       A.axisBaseline(svg, pL, w - pR, h - pB);
     }
 
-    const dotsLayer = A.svgEl('g', {});
-    svg.appendChild(dotsLayer);
+    const dotsLayer = A.clipGroup(svg, pL, pT, w - pL - pR, h - pT - pB);
 
     const labeled = new Set(['PowerShell', 'shell_command', 'Edit', 'Bash']);
 
@@ -840,13 +882,14 @@
     A.axisTicksY(svg, mini ? [0, 100] : [0, 25, 50, 75, 100], pL, w - pR, yScale, (v) => v + '%');
     A.bucketAxis(svg, w, h, pB, pL, pR, mini);
 
+    const clip = A.clipGroup(svg, pL, pT, w - pL - pR, h - pT - pB);
     let cum = new Array(D.nBuckets).fill(0);
     M.order.forEach((key) => {
       const bottom = cum.slice();
       const top = cum.map((c, i) => c + M.rows[i][key]);
       const bottomPts = bottom.map((v, i) => [xScale(i), yScale(v)]);
       const topPts = top.map((v, i) => [xScale(i), yScale(v)]);
-      svg.appendChild(A.svgEl('path', { d: A.pathBand(topPts, bottomPts), fill: M.colors[key], opacity: '0.82' }));
+      clip.appendChild(A.svgEl('path', { d: A.pathBand(topPts, bottomPts), fill: M.colors[key], opacity: '0.82' }));
       cum = top;
     });
     A.axisBaseline(svg, pL, w - pR, h - pB);
@@ -895,10 +938,11 @@
     const palette = ['var(--err)', 'var(--viz-4)', 'var(--viz-1)', 'var(--viz-6)'];
     const series = worst.map((s, i) => ({ rate: s.rate, label: s.name, color: palette[i % palette.length], width: mini ? 1 : 1.4 }));
     series.push({ rate: F.fleet, label: 'fleet', color: 'var(--text)', width: mini ? 1.4 : 2 });
+    const clip = A.clipGroup(svg, pL, pT, w - pL - pR, h - pT - pB);
     const pendingLabels = [];
     series.forEach((s) => {
       const pts = s.rate.map((v, i) => [xScale(i), yScale(v)]);
-      svg.appendChild(A.svgEl('path', { d: A.pathLine(pts), fill: 'none', stroke: s.color, 'stroke-width': s.width }));
+      clip.appendChild(A.svgEl('path', { d: A.pathLine(pts), fill: 'none', stroke: s.color, 'stroke-width': s.width }));
       if (!mini && pts.length) {
         const last = pts[pts.length - 1];
         pendingLabels.push({ y: last[1], color: s.color, text: s.label + ' ' + s.rate[s.rate.length - 1].toFixed(1) + '%' });
@@ -929,17 +973,20 @@
     const svg = A.svgRoot(w, h);
     const T = D.churnTrend;
     const xScale = A.scaleLinear([0, D.nBuckets - 1], [pL, w - pR]);
-    const maxV = Math.max(...T.reedits) * 1.15;
+    // Both series share this axis, so the ceiling covers whichever runs taller
+    // (the hot-file count can top the re-edit count), keeping both lines in the plot.
+    const maxV = Math.max(1, Math.max(...T.reedits, ...T.hotFiles)) * 1.15;
     const yScale = A.scaleLinear([0, maxV], [h - pB, pT]);
 
     A.axisTicksY(svg, mini ? [0, Math.round(maxV)] : [0, Math.round(maxV / 2), Math.round(maxV)], pL, w - pR, yScale, (v) => v);
     A.bucketAxis(svg, w, h, pB, pL, pR, mini);
 
+    const clip = A.clipGroup(svg, pL, pT, w - pL - pR, h - pT - pB);
     const rePts = T.reedits.map((v, i) => [xScale(i), yScale(v)]);
     const hotPts = T.hotFiles.map((v, i) => [xScale(i), yScale(v)]);
-    svg.appendChild(A.svgEl('path', { d: A.pathArea(rePts, yScale(0)), fill: 'var(--viz-3)', opacity: '0.16' }));
-    svg.appendChild(A.svgEl('path', { d: A.pathLine(rePts), fill: 'none', stroke: 'var(--viz-3)', 'stroke-width': mini ? 1.4 : 2 }));
-    svg.appendChild(A.svgEl('path', { d: A.pathLine(hotPts), fill: 'none', stroke: 'var(--muted)', 'stroke-width': mini ? 1 : 1.3, 'stroke-dasharray': '3,3' }));
+    clip.appendChild(A.svgEl('path', { d: A.pathArea(rePts, yScale(0)), fill: 'var(--viz-3)', opacity: '0.16' }));
+    clip.appendChild(A.svgEl('path', { d: A.pathLine(rePts), fill: 'none', stroke: 'var(--viz-3)', 'stroke-width': mini ? 1.4 : 2 }));
+    clip.appendChild(A.svgEl('path', { d: A.pathLine(hotPts), fill: 'none', stroke: 'var(--muted)', 'stroke-width': mini ? 1 : 1.3, 'stroke-dasharray': '3,3' }));
     A.axisBaseline(svg, pL, w - pR, h - pB);
 
     if (!mini) A.attachHoverBucket(svg, w, h, pL, pR, pT, pB, xScale, (i) => {
@@ -1030,18 +1077,19 @@
     const colors = { A: 'var(--viz-5)', B: 'var(--viz-2)', C: 'var(--viz-7)', D: 'var(--viz-3)', F: 'var(--viz-4)', U: 'var(--faint)' };
     const labels = { A: 'A', B: 'B', C: 'C', D: 'D', F: 'F', U: 'unscored' };
 
+    const clip = A.clipGroup(svg, pL, pT, w - pL - pR, h - pT - pB);
     let cum = new Array(D.nBuckets).fill(0);
     order.forEach((key) => {
       const bottom = cum.slice();
       const top = cum.map((c, i) => c + D.grades[i][key]);
       const bottomPts = bottom.map((v, i) => [xScale(i), yScale(v)]);
       const topPts = top.map((v, i) => [xScale(i), yScale(v)]);
-      svg.appendChild(A.svgEl('path', { d: A.pathBand(topPts, bottomPts), fill: colors[key], opacity: key === 'U' ? '0.5' : '0.82' }));
+      clip.appendChild(A.svgEl('path', { d: A.pathBand(topPts, bottomPts), fill: colors[key], opacity: key === 'U' ? '0.5' : '0.82' }));
       cum = top;
     });
 
     const gpaPts = D.grades.map((row, i) => [xScale(i), gpaScale(row.gpa)]);
-    svg.appendChild(A.svgEl('path', { d: A.pathLine(gpaPts), fill: 'none', stroke: 'var(--text)', 'stroke-width': 2 }));
+    clip.appendChild(A.svgEl('path', { d: A.pathLine(gpaPts), fill: 'none', stroke: 'var(--text)', 'stroke-width': 2 }));
     [0, 1, 2, 3, 4].forEach((v) => {
       const y = gpaScale(v);
       const t = A.svgEl('text', { x: w - pR + 6, y: y + 3, class: 'axis-tick-text', 'text-anchor': 'start' });
@@ -1096,8 +1144,11 @@
     const abandPts = D.outcomes.map((r, i) => [xScale(i), yScale(clampToDomain(r.abandonedRate))]);
     function clampToDomain(v) { return Math.max(60, v + 60); }
 
-    svg.appendChild(A.svgEl('path', { d: A.pathLine(compPts), fill: 'none', stroke: 'var(--ok)', 'stroke-width': 2.2 }));
-    svg.appendChild(A.svgEl('path', { d: A.pathLine(abandPts), fill: 'none', stroke: 'var(--warn)', 'stroke-width': 1.6, 'stroke-dasharray': '4,3' }));
+    // The line axis zooms to 60-100%, so a bucket below 60% completion would draw
+    // under the baseline and into the bars below. Clip to the line region alone.
+    const lineClip = A.clipGroup(svg, pL, pT, w - pL - pR, lineH - pT);
+    lineClip.appendChild(A.svgEl('path', { d: A.pathLine(compPts), fill: 'none', stroke: 'var(--ok)', 'stroke-width': 2.2 }));
+    lineClip.appendChild(A.svgEl('path', { d: A.pathLine(abandPts), fill: 'none', stroke: 'var(--warn)', 'stroke-width': 1.6, 'stroke-dasharray': '4,3' }));
 
     A.axisBaseline(svg, pL, w - pR, lineH);
 
@@ -1105,14 +1156,17 @@
     const barsTop = lineH + 16;
     const barScale = A.scaleLinear([0, maxTotal], [0, barH - 16]);
     const bw = (w - pL - pR) / D.nBuckets - 2;
+    // The edge bars sit half a bar-width past pL and w-pR, so clip them to the
+    // plot as the completed/abandoned bars in Economics are.
+    const barClip = A.clipGroup(svg, pL, pT, w - pL - pR, h - pT - pB);
     D.outcomes.forEach((r, i) => {
       const completed = Math.round(r.total * (r.completedRate / 100));
       const rest = r.total - completed;
       const x = xScale(i) - bw / 2;
       const hComp = barScale(completed);
       const hRest = barScale(rest);
-      svg.appendChild(A.svgEl('rect', { x, y: barsTop + (barH - 16 - hComp - hRest), width: bw, height: hComp, fill: 'var(--ok)', opacity: '0.55' }));
-      svg.appendChild(A.svgEl('rect', { x, y: barsTop + (barH - 16 - hRest), width: bw, height: hRest, fill: 'var(--warn)', opacity: '0.55' }));
+      barClip.appendChild(A.svgEl('rect', { x, y: barsTop + (barH - 16 - hComp - hRest), width: bw, height: hComp, fill: 'var(--ok)', opacity: '0.55' }));
+      barClip.appendChild(A.svgEl('rect', { x, y: barsTop + (barH - 16 - hRest), width: bw, height: hRest, fill: 'var(--warn)', opacity: '0.55' }));
     });
 
     A.attachHoverBucket(svg, w, h, pL, pR, pT, pB, xScale, (i) => {
@@ -1141,10 +1195,11 @@
       { key: 'noPointer', label: 'No code pointer', color: 'var(--viz-3)' },
       { key: 'unstructured', label: 'Unstructured start', color: 'var(--viz-8)' },
     ];
+    const clip = A.clipGroup(svg, pL, pT, w - pL - pR, h - pT - pB);
     const pendingLabels = [];
     series.forEach((s) => {
       const pts = D.hygiene[s.key].map((v, i) => [xScale(i), yScale(v)]);
-      svg.appendChild(A.svgEl('path', { d: A.pathLine(pts), fill: 'none', stroke: s.color, 'stroke-width': s.key === 'noPointer' ? 2 : 1.5 }));
+      clip.appendChild(A.svgEl('path', { d: A.pathLine(pts), fill: 'none', stroke: s.color, 'stroke-width': s.key === 'noPointer' ? 2 : 1.5 }));
       const last = pts[pts.length - 1];
       pendingLabels.push({ y: last[1], color: s.color, text: s.label + ' ' + D.hygiene[s.key][D.hygiene[s.key].length - 1].toFixed(1) + '%' });
     });
@@ -1191,10 +1246,11 @@
     const maxCount = Math.max(...buckets.map((b) => b.count));
     const yScale = A.scaleLinear([0, maxCount * 1.08], [h - pB, pT]);
 
+    const clip = A.clipGroup(svg, pL, pT, w - pL - pR, h - pT - pB);
     buckets.forEach((b) => {
       const x0 = xScale(b.lo), x1 = xScale(b.hi);
       const y = yScale(b.count);
-      svg.appendChild(A.svgEl('rect', {
+      clip.appendChild(A.svgEl('rect', {
         x: x0 + 1, y, width: Math.max(1, x1 - x0 - 2), height: (h - pB) - y,
         fill: 'var(--viz-1)', opacity: '0.75', class: 'scatter-dot',
       }));
@@ -1230,10 +1286,11 @@
     const yScale = A.scaleLinear([0, maxV], [h - pB, pT]);
     A.axisTicksY(svg, [0, Math.round(maxV / 2), Math.round(maxV)], pL, w - pR, yScale, (v) => v);
     A.bucketAxis(svg, w, h, pB, pL, pR, false);
+    const clip = A.clipGroup(svg, pL, pT, w - pL - pR, h - pT - pB);
     const pts = D.contextResets.map((v, i) => [xScale(i), yScale(v)]);
-    svg.appendChild(A.svgEl('path', { d: A.pathLine(pts), fill: 'none', stroke: 'var(--viz-4)', 'stroke-width': 2 }));
+    clip.appendChild(A.svgEl('path', { d: A.pathLine(pts), fill: 'none', stroke: 'var(--viz-4)', 'stroke-width': 2 }));
     D.contextResets.forEach((v, i) => {
-      svg.appendChild(A.svgEl('circle', { cx: xScale(i), cy: yScale(v), r: 2, fill: 'var(--viz-4)' }));
+      clip.appendChild(A.svgEl('circle', { cx: xScale(i), cy: yScale(v), r: 2, fill: 'var(--viz-4)' }));
     });
     A.axisBaseline(svg, pL, w - pR, h - pB);
     return svg;
@@ -1303,9 +1360,10 @@
     const svg = A.svgRoot(w, h);
     const xScale = A.scaleLinear([0, D.nBuckets - 1], [pL, w - pR]);
     const yScale = A.scaleLinear([0, domainMax], [h - pB, pT]);
+    const clip = A.clipGroup(svg, pL, pT, w - pL - pR, h - pT - pB);
     const pts = series.map((v, i) => [xScale(i), yScale(Math.min(v, domainMax))]);
-    svg.appendChild(A.svgEl('path', { d: A.pathArea(pts, yScale(0)), fill: color, opacity: '0.2' }));
-    svg.appendChild(A.svgEl('path', { d: A.pathLine(pts), fill: 'none', stroke: color, 'stroke-width': 1.6 }));
+    clip.appendChild(A.svgEl('path', { d: A.pathArea(pts, yScale(0)), fill: color, opacity: '0.2' }));
+    clip.appendChild(A.svgEl('path', { d: A.pathLine(pts), fill: 'none', stroke: color, 'stroke-width': 1.6 }));
     svg.appendChild(A.svgEl('line', { x1: pL, x2: w - pR, y1: yScale(0), y2: yScale(0), class: 'axis-line' }));
     return svg;
   }
@@ -1318,10 +1376,11 @@
     const xScale = A.scaleLog([8000, 1024000], [pL, w - pR]);
     const maxCount = Math.max(...buckets.map((b) => b.count));
     const yScale = A.scaleLinear([0, maxCount * 1.08], [h - pB, pT]);
+    const clip = A.clipGroup(svg, pL, pT, w - pL - pR, h - pT - pB);
     buckets.forEach((b) => {
       const x0 = xScale(b.lo), x1 = xScale(b.hi);
       const y = yScale(b.count);
-      svg.appendChild(A.svgEl('rect', { x: x0 + 1, y, width: Math.max(1, x1 - x0 - 2), height: (h - pB) - y, fill: 'var(--viz-1)', opacity: '0.7' }));
+      clip.appendChild(A.svgEl('rect', { x: x0 + 1, y, width: Math.max(1, x1 - x0 - 2), height: (h - pB) - y, fill: 'var(--viz-1)', opacity: '0.7' }));
     });
     return svg;
   }
@@ -1346,13 +1405,14 @@
     const yScale = A.scaleLinear([0, 100], [h - pB, pT]);
     const order = ['A', 'B', 'C', 'D', 'F', 'U'];
     const colors = { A: 'var(--viz-5)', B: 'var(--viz-2)', C: 'var(--viz-7)', D: 'var(--viz-3)', F: 'var(--viz-4)', U: 'var(--faint)' };
+    const clip = A.clipGroup(svg, pL, pT, w - pL - pR, h - pT - pB);
     let cum = new Array(D.nBuckets).fill(0);
     order.forEach((key) => {
       const bottom = cum.slice();
       const top = cum.map((c, i) => c + D.grades[i][key]);
       const bottomPts = bottom.map((v, i) => [xScale(i), yScale(v)]);
       const topPts = top.map((v, i) => [xScale(i), yScale(v)]);
-      svg.appendChild(A.svgEl('path', { d: A.pathBand(topPts, bottomPts), fill: colors[key], opacity: key === 'U' ? '0.5' : '0.82' }));
+      clip.appendChild(A.svgEl('path', { d: A.pathBand(topPts, bottomPts), fill: colors[key], opacity: key === 'U' ? '0.5' : '0.82' }));
       cum = top;
     });
     return svg;
@@ -1364,8 +1424,9 @@
     const svg = A.svgRoot(w, h);
     const xScale = A.scaleLinear([0, D.nBuckets - 1], [pL, w - pR]);
     const yScale = A.scaleLinear([60, 100], [h - pB, pT]);
+    const clip = A.clipGroup(svg, pL, pT, w - pL - pR, h - pT - pB);
     const compPts = D.outcomes.map((r, i) => [xScale(i), yScale(r.completedRate)]);
-    svg.appendChild(A.svgEl('path', { d: A.pathLine(compPts), fill: 'none', stroke: 'var(--ok)', 'stroke-width': 1.6 }));
+    clip.appendChild(A.svgEl('path', { d: A.pathLine(compPts), fill: 'none', stroke: 'var(--ok)', 'stroke-width': 1.6 }));
     return svg;
   }
 
@@ -1673,13 +1734,14 @@
     A.axisTicksY(svg, mini ? [0, Math.round(maxV)] : [0, Math.round(maxV / 2), Math.round(maxV)], pL, w - pR, yScale, (v) => '$' + A.fmtK(v));
     A.bucketAxis(svg, w, h, pB, pL, pR, mini);
 
+    const clip = A.clipGroup(svg, pL, pT, w - pL - pR, h - pT - pB);
     const bw = (w - pL - pR) / D.nBuckets - (mini ? 1 : 2);
     rows.forEach((r, i) => {
       const x = xScale(i) - bw / 2;
       const yComp = yScale(r.completed);
       const yTot = yScale(r.completed + r.abandoned);
-      svg.appendChild(A.svgEl('rect', { x, y: yComp, width: bw, height: (h - pB) - yComp, fill: 'var(--ok)', opacity: '0.78' }));
-      svg.appendChild(A.svgEl('rect', { x, y: yTot, width: bw, height: yComp - yTot, fill: 'var(--warn)', opacity: '0.82' }));
+      clip.appendChild(A.svgEl('rect', { x, y: yComp, width: bw, height: (h - pB) - yComp, fill: 'var(--ok)', opacity: '0.78' }));
+      clip.appendChild(A.svgEl('rect', { x, y: yTot, width: bw, height: yComp - yTot, fill: 'var(--warn)', opacity: '0.82' }));
     });
     A.axisBaseline(svg, pL, w - pR, h - pB);
 
@@ -1738,12 +1800,13 @@
     A.axisTicksY(svg, mini ? [0, Math.round(maxSavings)] : [0, Math.round(maxSavings / 2), Math.round(maxSavings)], pL, w - pR, yScale, (v) => '$' + v);
     A.bucketAxis(svg, w, h, pB, pL, pR, mini);
 
+    const clip = A.clipGroup(svg, pL, pT, w - pL - pR, h - pT - pB);
     const pts = C.savings.map((v, i) => [xScale(i), yScale(v)]);
-    svg.appendChild(A.svgEl('path', { d: A.pathArea(pts, yScale(0)), fill: 'var(--viz-2)', opacity: '0.22' }));
-    svg.appendChild(A.svgEl('path', { d: A.pathLine(pts), fill: 'none', stroke: 'var(--viz-2)', 'stroke-width': mini ? 1.4 : 2 }));
+    clip.appendChild(A.svgEl('path', { d: A.pathArea(pts, yScale(0)), fill: 'var(--viz-2)', opacity: '0.22' }));
+    clip.appendChild(A.svgEl('path', { d: A.pathLine(pts), fill: 'none', stroke: 'var(--viz-2)', 'stroke-width': mini ? 1.4 : 2 }));
 
     const hitPts = C.hitRate.map((v, i) => [xScale(i), yScaleHit(v)]);
-    svg.appendChild(A.svgEl('path', { d: A.pathLine(hitPts), fill: 'none', stroke: 'var(--viz-7)', 'stroke-width': mini ? 1.2 : 1.6, 'stroke-dasharray': '3,3' }));
+    clip.appendChild(A.svgEl('path', { d: A.pathLine(hitPts), fill: 'none', stroke: 'var(--viz-7)', 'stroke-width': mini ? 1.2 : 1.6, 'stroke-dasharray': '3,3' }));
 
     if (!mini) {
       [80, 85, 90].forEach((v) => {
@@ -1838,10 +1901,11 @@
     A.axisTicksY(svg, [0, Math.round(maxV / 2), Math.round(maxV)], pL, w - pR, yScale, (v) => v + '%');
     A.bucketAxis(svg, w, h, pB, pL, pR, false);
 
+    const clip = A.clipGroup(svg, pL, pT, w - pL - pR, h - pT - pB);
     const delPts = S.delegateShare.map((v, i) => [xScale(i), yScale(v)]);
     const costPts = S.costShare.map((v, i) => [xScale(i), yScale(v)]);
-    svg.appendChild(A.svgEl('path', { d: A.pathLine(delPts), fill: 'none', stroke: 'var(--accent)', 'stroke-width': 2.2 }));
-    svg.appendChild(A.svgEl('path', { d: A.pathLine(costPts), fill: 'none', stroke: 'var(--muted)', 'stroke-width': 1.6, 'stroke-dasharray': '3,3' }));
+    clip.appendChild(A.svgEl('path', { d: A.pathLine(delPts), fill: 'none', stroke: 'var(--accent)', 'stroke-width': 2.2 }));
+    clip.appendChild(A.svgEl('path', { d: A.pathLine(costPts), fill: 'none', stroke: 'var(--muted)', 'stroke-width': 1.6, 'stroke-dasharray': '3,3' }));
 
     const lastDel = delPts[delPts.length - 1], lastCost = costPts[costPts.length - 1];
     const pendingLabels = [
@@ -1909,6 +1973,7 @@
     A.axisTicksY(svg, [0, Math.round(maxV / 2), Math.round(maxV)], pL, w - pR, yScale, (v) => v);
     A.bucketAxis(svg, w, h, pB, pL, pR, false);
 
+    const clip = A.clipGroup(svg, pL, pT, w - pL - pR, h - pT - pB);
     let cum = new Array(D.nBuckets).fill(0);
     S.fanoutOrder.forEach((key) => {
       const bottom = cum.slice();
@@ -1917,7 +1982,7 @@
       const topPts = top.map((v, i) => [xScale(i), yScale(v)]);
       // fanoutColors already carries the ramp's opacity (faint buckets use
       // rgba), so no extra opacity attribute here to avoid double-attenuating.
-      svg.appendChild(A.svgEl('path', { d: A.pathBand(topPts, bottomPts), fill: S.fanoutColors[key] }));
+      clip.appendChild(A.svgEl('path', { d: A.pathBand(topPts, bottomPts), fill: S.fanoutColors[key] }));
       cum = top;
     });
     A.axisBaseline(svg, pL, w - pR, h - pB);
