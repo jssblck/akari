@@ -1,10 +1,14 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+// errAny stands in for any hostname lookup failure in ResolveMachine's tests.
+var errAny = errors.New("hostname lookup failed")
 
 func TestSaveLoadRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
@@ -29,6 +33,88 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 	if len(got.Excludes) != 1 || got.Excludes[0] != "**/tmp/**" {
 		t.Errorf("excludes not preserved: %+v", got.Excludes)
+	}
+}
+
+func TestResolveMachine(t *testing.T) {
+	const hostname = "host-from-os"
+	okHost := func() (string, error) { return hostname, nil }
+	env := func(vals map[string]string) func(string) string {
+		return func(k string) string { return vals[k] }
+	}
+
+	cases := []struct {
+		name string
+		cfg  Client
+		env  map[string]string
+		host func() (string, error)
+		want string
+	}{
+		{
+			name: "hostname is the default",
+			host: okHost,
+			want: hostname,
+		},
+		{
+			name: "config overrides hostname",
+			cfg:  Client{Machine: "sandbox-pool"},
+			host: okHost,
+			want: "sandbox-pool",
+		},
+		{
+			name: "env overrides config and hostname",
+			cfg:  Client{Machine: "sandbox-pool"},
+			env:  map[string]string{MachineEnvVar: "ci"},
+			host: okHost,
+			want: "ci",
+		},
+		{
+			name: "blank env falls through to config",
+			cfg:  Client{Machine: "sandbox-pool"},
+			env:  map[string]string{MachineEnvVar: "   "},
+			host: okHost,
+			want: "sandbox-pool",
+		},
+		{
+			name: "blank config falls through to hostname",
+			cfg:  Client{Machine: "  "},
+			host: okHost,
+			want: hostname,
+		},
+		{
+			name: "values are trimmed",
+			env:  map[string]string{MachineEnvVar: "  ci  "},
+			host: okHost,
+			want: "ci",
+		},
+		{
+			name: "a hostname error yields an empty machine, as before",
+			host: func() (string, error) { return "", errAny },
+			want: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ResolveMachine(tc.cfg, env(tc.env), tc.host)
+			if got != tc.want {
+				t.Errorf("ResolveMachine = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSaveLoadPreservesMachine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	in := Client{ServerURL: "https://akari.example", Token: "t", Machine: "ci"}
+	if err := SaveClient(path, in); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadClient(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Machine != "ci" {
+		t.Errorf("machine not round-tripped: %q", got.Machine)
 	}
 }
 

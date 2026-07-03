@@ -4,18 +4,32 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
 
+// MachineEnvVar overrides the machine identity a client reports for its sessions.
+// It is the only environment variable akari itself defines (the agent root
+// overrides discovery honors belong to the agents). It wins over the config's
+// machine field, which in turn wins over the OS hostname; see ResolveMachine.
+const MachineEnvVar = "AKARI_MACHINE"
+
 // Client holds the akari client configuration. All of it lives in one TOML file
 // at the platform per-user config location; the client keeps no other on-disk
-// state and defines no environment variables of its own.
+// state and defines a single environment variable of its own (AKARI_MACHINE, see
+// ResolveMachine).
 type Client struct {
 	// ServerURL is the base URL of the akari server, e.g. https://akari.example.
 	ServerURL string `toml:"server_url"`
 	// Token is an API token (ingest or full scope) used as a Bearer credential.
 	Token string `toml:"token"`
+	// Machine is the logical machine name reported for every session this client
+	// uploads. Empty falls back to the OS hostname. Set it (at login or by hand)
+	// to give a fleet of ephemeral or containerized hosts one stable identity
+	// instead of leaking a distinct one-off hostname per run. AKARI_MACHINE
+	// overrides it per run; see ResolveMachine.
+	Machine string `toml:"machine"`
 	// ExtraRoots are additional session directories to discover beyond each
 	// agent's standard roots.
 	ExtraRoots []ExtraRoot `toml:"extra_roots"`
@@ -25,6 +39,36 @@ type Client struct {
 	// `**/tmp/**` ignores any path with a `tmp` segment. Empty means discover
 	// everything.
 	Excludes []string `toml:"excludes"`
+}
+
+// ResolveMachine determines the machine identity a client reports for its
+// sessions. Ephemeral and containerized hosts (CI jobs, autoscaled workers,
+// throwaway dev containers) each get a distinct one-off hostname, so a fleet of
+// them otherwise pollutes the machine facet with thousands of single-use values.
+// An explicit identity lets that fleet share one stable logical machine (for
+// example "ci" or "sandbox-pool").
+//
+// Precedence, highest first:
+//  1. the AKARI_MACHINE environment variable, for a per-run override without
+//     touching the config, the natural fit for ephemeral hosts, which set an env
+//     var far more easily than they write a config file;
+//  2. the machine field in the client config, set at login for a stable per-host
+//     or per-fleet name;
+//  3. the OS hostname, the historical default.
+//
+// A blank env var or config value falls through rather than reporting an empty
+// machine, and surrounding whitespace is trimmed. hostname is injected (pass
+// os.Hostname) so the fallback is testable; its error is ignored exactly as the
+// bare `machine, _ := os.Hostname()` call sites it replaces did.
+func ResolveMachine(cfg Client, env func(string) string, hostname func() (string, error)) string {
+	if v := strings.TrimSpace(env(MachineEnvVar)); v != "" {
+		return v
+	}
+	if v := strings.TrimSpace(cfg.Machine); v != "" {
+		return v
+	}
+	h, _ := hostname()
+	return h
 }
 
 // ExtraRoot is a user-configured session directory for one agent.

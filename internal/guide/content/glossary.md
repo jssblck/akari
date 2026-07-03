@@ -49,7 +49,11 @@ rather than the Projects index, which lists git-remote projects only.
 A **machine** is a computer running the akari client. One machine can push
 sessions from every agent installed on it; one server collects machines from a
 whole team. Every session records the machine it came from, so you can filter a
-project or the feed down to one workstation.
+project or the feed down to one workstation. The name defaults to the OS hostname
+but is configurable (the `machine` config key or the `AKARI_MACHINE` environment
+variable), so a fleet of ephemeral hosts can report under one stable identity
+instead of a distinct one-off hostname per run. See
+[the client](./the-client.md#machine-identity).
 
 The **fleet** is everything a server holds: all projects, all sessions, all
 machines. The Overview page reports fleet-wide, and the per-project analytics

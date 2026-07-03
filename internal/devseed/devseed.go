@@ -243,7 +243,7 @@ func ingest(ctx context.Context, opts Options, token string) (ingestStats, error
 	if err != nil {
 		return stats, fmt.Errorf("locate home directory: %w", err)
 	}
-	machine, _ := os.Hostname()
+	machine := config.ResolveMachine(config.Client{}, os.Getenv, os.Hostname)
 
 	files, err := discover.Discover(discover.Roots(config.Client{}, os.Getenv, home), discover.Excluder{})
 	if err != nil {
