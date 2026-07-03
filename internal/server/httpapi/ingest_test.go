@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jssblck/akari/internal/quality"
 	"github.com/jssblck/akari/internal/server/auth"
 	"github.com/jssblck/akari/internal/server/store"
 )
@@ -71,6 +72,165 @@ func TestChunkRejectsUnterminated(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("terminated chunk status = %d, want 200", resp.StatusCode)
+	}
+}
+
+// terminalSession is a minimal assistant-only Claude transcript, enough to parse into
+// one message and a usage row. An automation-shaped session (no human turn) with a
+// substantive assistant last word reads "completed" once it is idle long enough, so it
+// is the clean fixture for asserting the terminal shortcut lands a real grade.
+const terminalSession = `{"type":"assistant","timestamp":"2024-01-01T10:00:00Z","message":{"id":"m1","model":"claude-sonnet-4-20250514","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":100,"output_tokens":50}}}` + "\n"
+
+// TestFinalizeGradesTerminalSession drives the whole server-side --finalize path over
+// HTTP: announce the session terminal, upload its transcript, then POST finalize. The
+// grade must land immediately even though the session ended moments ago, far short of the
+// abandoned-idle window, where an ordinary (non-terminal) session would stay ungraded
+// until it settled. This is what makes a CI or sandbox run's grade available before the
+// host is torn down.
+func TestFinalizeGradesTerminalSession(t *testing.T) {
+	t.Parallel()
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+
+	owner, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	rawToken, err := auth.NewToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateAPIToken(ctx, owner.ID, "laptop", "ingest", auth.HashToken(rawToken)); err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+
+	do := func(method, path, body string) *http.Response {
+		t.Helper()
+		req, err := http.NewRequest(method, srv.URL+path, strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+rawToken)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", method, path, err)
+		}
+		return resp
+	}
+
+	// Announce terminal, so the server persists sessions.terminal = true.
+	resp := do(http.MethodPost, "/api/v1/ingest/session",
+		`{"agent":"claude","source_session_id":"sess-final","kind":"remote","project_remote":"github.com/jssblck/akari","cwd":"/home/grace/akari","machine":"laptop","terminal":true}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("announce status = %d, want 200", resp.StatusCode)
+	}
+	var sid int64
+	if err := st.Pool.QueryRow(ctx,
+		"SELECT id FROM sessions WHERE user_id = $1 AND source_session_id = 'sess-final'", owner.ID).Scan(&sid); err != nil {
+		t.Fatalf("look up session: %v", err)
+	}
+	var terminal bool
+	if err := st.Pool.QueryRow(ctx, "SELECT terminal FROM sessions WHERE id = $1", sid).Scan(&terminal); err != nil {
+		t.Fatalf("read terminal: %v", err)
+	}
+	if !terminal {
+		t.Fatal("announce did not persist terminal = true")
+	}
+
+	// Upload the transcript.
+	resp = do(http.MethodPost, fmt.Sprintf("/api/v1/ingest/session/%d/chunk?offset=0", sid), terminalSession)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("chunk status = %d, want 200", resp.StatusCode)
+	}
+
+	// Move the parsed end to now, so the idle window is nowhere near elapsed: only the
+	// terminal flag can make this session gradeable.
+	if _, err := st.Pool.Exec(ctx, "UPDATE sessions SET ended_at = now() WHERE id = $1", sid); err != nil {
+		t.Fatalf("set recent ended_at: %v", err)
+	}
+
+	// Before finalize the session has no materialized grade, so the read self-heals to
+	// unknown: the settle pass has not run and the session is not idle long enough.
+	if sig, err := st.SessionSignalsByID(ctx, sid); err != nil {
+		t.Fatalf("pre-finalize read: %v", err)
+	} else if sig.Scored() {
+		t.Fatalf("session graded before finalize (outcome %s); want no grade yet", sig.Outcome)
+	}
+
+	// Finalize grades it now.
+	resp = do(http.MethodPost, fmt.Sprintf("/api/v1/ingest/session/%d/finalize", sid), "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("finalize status = %d, want 200", resp.StatusCode)
+	}
+
+	sig, err := st.SessionSignalsByID(ctx, sid)
+	if err != nil {
+		t.Fatalf("post-finalize read: %v", err)
+	}
+	if sig.Outcome != string(quality.OutcomeCompleted) {
+		t.Errorf("finalized outcome = %s, want completed (automation with a substantive last word)", sig.Outcome)
+	}
+	if !sig.Scored() {
+		t.Error("finalized session is unscored, want a grade")
+	}
+}
+
+// TestFinalizeRejectsForeignSession confirms the finalize endpoint is owner-scoped like
+// the other ingest routes: a principal cannot grade another user's session.
+func TestFinalizeRejectsForeignSession(t *testing.T) {
+	t.Parallel()
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+
+	owner, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), "")
+	if err != nil {
+		t.Fatalf("register owner: %v", err)
+	}
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	ann, err := st.Announce(ctx, store.AnnounceParams{
+		UserID: owner.ID, Agent: "claude", SourceSessionID: "sess-owned", ProjectID: projectID,
+	})
+	if err != nil {
+		t.Fatalf("announce: %v", err)
+	}
+
+	// A second user with their own ingest token. The first account is the invite-free
+	// bootstrap admin, so a second registration needs an invite the admin mints.
+	if _, err := st.CreateInvite(ctx, auth.HashToken("inv1"), owner.ID, "", nil); err != nil {
+		t.Fatalf("create invite: %v", err)
+	}
+	intruder, err := st.Register(ctx, "ada", mustHash(t, "lovelace-1843"), auth.HashToken("inv1"))
+	if err != nil {
+		t.Fatalf("register intruder: %v", err)
+	}
+	rawToken, err := auth.NewToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateAPIToken(ctx, intruder.ID, "laptop", "ingest", auth.HashToken(rawToken)); err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost,
+		fmt.Sprintf("%s/api/v1/ingest/session/%d/finalize", srv.URL, ann.SessionID), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+rawToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("cross-user finalize status = %d, want 403", resp.StatusCode)
 	}
 }
 

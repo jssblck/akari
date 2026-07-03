@@ -31,7 +31,8 @@ import (
 type fakeServer struct {
 	mu           sync.Mutex
 	buf          []byte
-	lastAnnounce map[string]string // the most recent announce request body, decoded
+	lastAnnounce map[string]any    // the most recent announce request body, decoded
+	finalizes    int               // count of finalize POSTs, for the --finalize refresh assertion
 	blobs        map[string][]byte // sha256 -> stored (possibly compressed) body bytes
 	blobCT       map[string]string // sha256 -> declared storage content_type
 	blobMedia    map[string]string // sha256 -> declared semantic media_type
@@ -77,7 +78,7 @@ func (s *fakeServer) handler() http.Handler {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/ingest/session", func(w http.ResponseWriter, r *http.Request) {
-		var body map[string]string
+		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -119,6 +120,12 @@ func (s *fakeServer) handler() http.Handler {
 		defer s.mu.Unlock()
 		s.buf = nil
 		writeJSON(w, map[string]any{"stored_bytes": 0})
+	})
+	mux.HandleFunc("POST /api/v1/ingest/session/{id}/finalize", func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.finalizes++
+		writeJSON(w, map[string]any{"finalized": true})
 	})
 	mux.HandleFunc("POST /api/v1/ingest/blobs/check", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -247,7 +254,7 @@ func TestAnnounceSerializesTargetFields(t *testing.T) {
 	if _, err := c.SyncFile(context.Background(), tgt); err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]string{
+	want := map[string]any{
 		"agent":             "claude",
 		"source_session_id": "s1",
 		"kind":              "standalone",
@@ -255,11 +262,66 @@ func TestAnnounceSerializesTargetFields(t *testing.T) {
 		"git_branch":        "feature-a",
 		"cwd":               "/home/grace/wt/feature-a",
 		"machine":           "grace-laptop",
+		// An ordinary (non-finalize) sync announces terminal=false, so the server keeps
+		// the idle-window grading behavior.
+		"terminal": false,
 	}
 	for k, v := range want {
 		if got := fs.lastAnnounce[k]; got != v {
-			t.Errorf("announce[%q] = %q, want %q", k, got, v)
+			t.Errorf("announce[%q] = %v, want %v", k, got, v)
 		}
+	}
+}
+
+// TestFinalizeAnnouncesTerminalAndRefreshes covers the client half of the server-side
+// --finalize fix: a finalized sync announces the session terminal and, once the whole
+// transcript has landed, calls the finalize endpoint so the server grades it now. A
+// non-finalized sync does neither, so ordinary syncs keep the idle-window behavior.
+func TestFinalizeAnnouncesTerminalAndRefreshes(t *testing.T) {
+	for _, finalize := range []bool{true, false} {
+		c, fs := newTestClient(t)
+		tgt := target(tempFile(t, "l1\nl2\n"))
+		tgt.Finalize = finalize
+		if _, err := c.SyncFile(context.Background(), tgt); err != nil {
+			t.Fatalf("finalize=%v: SyncFile: %v", finalize, err)
+		}
+		if got := fs.lastAnnounce["terminal"]; got != finalize {
+			t.Errorf("finalize=%v: announce[terminal] = %v, want %v", finalize, got, finalize)
+		}
+		wantFinalizes := 0
+		if finalize {
+			wantFinalizes = 1
+		}
+		if fs.finalizes != wantFinalizes {
+			t.Errorf("finalize=%v: finalize calls = %d, want %d", finalize, fs.finalizes, wantFinalizes)
+		}
+	}
+}
+
+// TestFinalizeRefreshesEvenWhenUpToDate proves the finalize refresh does not depend on
+// bytes moving: a session already fully on the server (a re-sync) still triggers the
+// grade, since an ephemeral host may finalize a transcript it uploaded on an earlier
+// tick that was never graded.
+func TestFinalizeRefreshesEvenWhenUpToDate(t *testing.T) {
+	c, fs := newTestClient(t)
+	path := tempFile(t, "l1\nl2\n")
+	if _, err := c.SyncFile(context.Background(), target(path)); err != nil {
+		t.Fatalf("initial sync: %v", err)
+	}
+	if fs.finalizes != 0 {
+		t.Fatalf("non-finalize sync triggered %d finalizes, want 0", fs.finalizes)
+	}
+	tgt := target(path)
+	tgt.Finalize = true
+	out, err := c.SyncFile(context.Background(), tgt)
+	if err != nil {
+		t.Fatalf("finalize re-sync: %v", err)
+	}
+	if out.Action != ActionUpToDate {
+		t.Errorf("action = %s, want uptodate (nothing new to send)", out.Action)
+	}
+	if fs.finalizes != 1 {
+		t.Errorf("up-to-date finalize triggered %d finalizes, want 1", fs.finalizes)
 	}
 }
 

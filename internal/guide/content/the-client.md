@@ -62,11 +62,16 @@ re-run sends only bytes the server does not already have.
   never races with itself.
 - `--finalize` treats every session as terminal, flushing each one's final turn
   now instead of waiting for the file to go idle (see "How the upload works"
-  below). Use it on a host that disappears right after the sync, a CI job or a
-  cloud sandbox, where the idle wait never elapses and the last turn would
-  otherwise never upload. Reach for it only when every session is genuinely
-  finished: on a workstation where a session may still be running, it would flush
-  a turn mid-stream, so let the idle wait do its job there instead.
+  below). It also tells the server the session is finished: the announce marks it
+  terminal and, once the whole transcript has landed, the client asks the server
+  to grade it immediately rather than waiting out the server-side settle window
+  (30 minutes idle). So on an ephemeral host the quality grade is available at the
+  end of the run, in time to report or gate on, instead of long after the host is
+  gone. Use it on a host that disappears right after the sync, a CI job or a cloud
+  sandbox, where neither wait would elapse and the last turn would otherwise never
+  upload and the grade would never land. Reach for it only when every session is
+  genuinely finished: on a workstation where a session may still be running, it
+  would flush a turn mid-stream, so let the idle wait do its job there instead.
 
 ### watch
 
@@ -230,7 +235,10 @@ Two consequences worth knowing:
   often has no closing line to mark it complete, so the client waits for the file
   to be untouched briefly before flushing it. On a host that is torn down right
   after the sync (CI, a cloud sandbox), that idle wait never elapses, so pass
-  `akari sync --finalize` to flush the final turns immediately.
+  `akari sync --finalize` to flush the final turns immediately. `--finalize` also
+  marks each session terminal on the server so its quality grade is computed at the
+  end of the run rather than after the server's own 30-minute settle window, which
+  the host would not be around to see.
 - **Re-running is cheap and safe.** Because the server tracks the cursor and the
   client re-derives everything from the file, `sync` after `sync` uploads only new
   bytes, and an interrupted upload resumes rather than restarting.

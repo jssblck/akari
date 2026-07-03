@@ -907,5 +907,67 @@ func TestAnnounceWithProjectRollsBackSessionUpsertFailure(t *testing.T) {
 	}
 }
 
+// TestAnnounceTerminalIsSticky pins the persistence rule for the terminal flag: a
+// --finalize announce sets it, and a later ordinary re-announce of the same session (a
+// watch loop that resyncs the file with terminal=false) must never clear it. The flag
+// records that a session ran on an ephemeral host and was closed out deliberately, so
+// once true it stays true regardless of subsequent syncs.
+func TestAnnounceTerminalIsSticky(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	u, err := st.Register(ctx, "grace", "hash", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	terminalOf := func() bool {
+		t.Helper()
+		var terminal bool
+		if err := st.Pool.QueryRow(ctx,
+			"SELECT terminal FROM sessions WHERE user_id = $1 AND agent = 'claude' AND source_session_id = 'sess-term'",
+			u.ID).Scan(&terminal); err != nil {
+			t.Fatalf("read terminal: %v", err)
+		}
+		return terminal
+	}
+
+	// A first ordinary announce leaves it false (the default): an ordinary sync never
+	// marks a session terminal.
+	if _, err := st.Announce(ctx, store.AnnounceParams{
+		UserID: u.ID, Agent: "claude", SourceSessionID: "sess-term", ProjectID: pid,
+	}); err != nil {
+		t.Fatalf("first announce: %v", err)
+	}
+	if terminalOf() {
+		t.Error("ordinary announce set terminal, want false")
+	}
+
+	// A --finalize announce sets it.
+	if _, err := st.Announce(ctx, store.AnnounceParams{
+		UserID: u.ID, Agent: "claude", SourceSessionID: "sess-term", ProjectID: pid, Terminal: true,
+	}); err != nil {
+		t.Fatalf("finalize announce: %v", err)
+	}
+	if !terminalOf() {
+		t.Error("finalize announce did not set terminal")
+	}
+
+	// A later ordinary re-announce (terminal=false) must not clear it: the flag is sticky.
+	if _, err := st.Announce(ctx, store.AnnounceParams{
+		UserID: u.ID, Agent: "claude", SourceSessionID: "sess-term", ProjectID: pid,
+	}); err != nil {
+		t.Fatalf("re-announce: %v", err)
+	}
+	if !terminalOf() {
+		t.Error("ordinary re-announce cleared a terminal flag; it must be sticky")
+	}
+}
+
 func hashHex(s string) string      { return hashHexBytes([]byte(s)) }
 func hashHexBytes(b []byte) string { sum := sha256.Sum256(b); return hex.EncodeToString(sum[:]) }

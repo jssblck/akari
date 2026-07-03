@@ -202,12 +202,17 @@ func gatherSignalFacts(ctx context.Context, tx pgx.Tx, sessionID int64) (signalF
 	// turns require non-empty content, tested through the stored content_length column
 	// (octet_length(content), a generated column) rather than content <> '' so the refresh
 	// reads fixed-size metadata and never the prompt body. idle is measured against the
-	// session's last activity.
+	// session's last activity, OR forced by the terminal flag: a session the client
+	// declared finished (`akari sync --finalize`) is treated as idle-long-enough now, so
+	// quality.Classify renders a verdict immediately instead of withholding it until the
+	// abandoned-idle window elapses. The ToolCallPending -> Unknown path in Classify is
+	// deliberately left to its own guard: a truncated transcript has no knowable ending
+	// whether or not the host called it terminal.
 	err = tx.QueryRow(ctx,
 		`SELECT s.user_message_count,
 		        coalesce((SELECT max(ordinal) FROM messages WHERE session_id = $1 AND role = 'assistant' AND content_length > 0), -1),
 		        coalesce((SELECT max(ordinal) FROM messages WHERE session_id = $1 AND role = 'user' AND content_length > 0), -1),
-		        (s.ended_at IS NOT NULL AND s.ended_at < now() - make_interval(mins => $2))
+		        (s.terminal OR (s.ended_at IS NOT NULL AND s.ended_at < now() - make_interval(mins => $2)))
 		   FROM sessions s WHERE s.id = $1`,
 		sessionID, abandonedIdleMinutes).Scan(
 		&f.userMessages, &f.lastAssistantOrd, &f.lastUserOrd, &f.idleLongEnough)
@@ -481,13 +486,14 @@ func refreshSignalsTx(ctx context.Context, tx pgx.Tx, sessionID int64) error {
 		return fmt.Errorf("upsert signals for session %d: %w", sessionID, err)
 	}
 	// Clear the settle-pass due flag now that the grade matches the projection, but only if
-	// the session has actually settled. A reparse runs refreshSignalsTx on whatever it
-	// rebuilds, including a still-live session whose outcome is not yet stable (abandoned
-	// versus unknown turns on the idle gap), so leaving signals_stale set there keeps the
-	// settle pass on the hook to re-grade once the session crosses the idle threshold. A
-	// settled session clears the flag and drops out of the settle index until its next
-	// projection change. now() is the transaction clock, so a settle refresh that just read
-	// idleLongEnough against it stays consistent with the clear.
+	// the session's outcome is stable, meaning idleLongEnough holds (it has settled past the
+	// idle window, or the client declared it terminal). A reparse runs refreshSignalsTx on
+	// whatever it rebuilds, including a still-live session whose outcome is not yet stable
+	// (abandoned versus unknown turns on the idle gap), so leaving signals_stale set there
+	// keeps the settle pass on the hook to re-grade once the session crosses the idle
+	// threshold. A settled or terminal session clears the flag and drops out of the settle
+	// index until its next projection change. now() is the transaction clock, so a settle
+	// refresh that just read idleLongEnough against it stays consistent with the clear.
 	if _, err := tx.Exec(ctx,
 		`UPDATE sessions SET signals_stale = $2 WHERE id = $1`, sessionID, !f.idleLongEnough); err != nil {
 		return fmt.Errorf("clear signals_stale for session %d: %w", sessionID, err)
@@ -513,12 +519,13 @@ func (s *Store) RefreshSessionSignals(ctx context.Context, sessionID int64) erro
 // (see AdvanceProjection), so a session's signals are computed once here, after it has been
 // idle past the abandoned threshold, off the ingest hot path.
 //
-// A session is due when it is settled (ended_at at least abandonedIdleMinutes in the past) AND
-// signals_stale is set. The flag is the single-table marker that replaces a cross-table due
-// predicate: applyAggregates and the reparse reset set it whenever the projection moves, and
-// refreshSignalsTx clears it only when it grades a settled session. So it captures every way a
-// stored grade can fall behind its source, without a join the settle scan would have to
-// evaluate per row:
+// A session is due when signals_stale is set AND it is either settled (ended_at at least
+// abandonedIdleMinutes in the past) or terminal (the client declared it finished via
+// `akari sync --finalize`, so it is gradeable now without waiting out the idle window). The
+// flag is the single-table marker that replaces a cross-table due predicate: applyAggregates
+// and the reparse reset set it whenever the projection moves, and refreshSignalsTx clears it
+// only when it grades a settled-or-terminal session. So it captures every way a stored grade
+// can fall behind its source, without a join the settle scan would have to evaluate per row:
 //
 //   - Never graded (a fresh ingest, or a session that predates signals): the column defaults
 //     true, so it is due from creation until the first settle grades it.
@@ -665,10 +672,16 @@ func (s *Store) reconcileStaleVersions(ctx context.Context, tx pgx.Tx) error {
 
 // dueSettledBatch returns up to limit due settled session ids strictly after the
 // (afterEnded, afterID) keyset cursor, in (ended_at, id) order, with the cursor to resume
-// from (the last row's ended_at and id). A session is due when it is settled and signals_stale
-// is set (see RefreshSettledSignals); both are columns of sessions, so the partial index
-// idx_sessions_signals_stale serves the whole predicate and the scan visits only due rows. The
-// ids are read up front and the query's connection is released (deferred Close) before the
+// from (the last row's ended_at and id). A session is due when it is stale and either
+// settled (ended_at at least abandonedIdleMinutes in the past) OR terminal (the client
+// declared it finished via `akari sync --finalize`, so it is gradeable now regardless of
+// the idle window; see RefreshSettledSignals). All three are columns of sessions:
+// idx_sessions_signals_stale serves the settled disjunct as an ended_at range seek, and the
+// partial idx_sessions_terminal_stale carries the terminal disjunct so a just-ended terminal
+// row (which sits past the settled cutoff) is found by an index scan rather than a walk of the
+// whole stale tail. Ordering by (ended_at, id) keeps the keyset total: a terminal session's
+// recent ended_at simply sorts it toward the end of the drain, visited once like any other.
+// The ids are read up front and the query's connection is released (deferred Close) before the
 // caller refreshes them, so the scan does not contend with the per-session refresh transactions.
 func (s *Store) dueSettledBatch(ctx context.Context, afterEnded time.Time, afterID int64, limit int) ([]int64, time.Time, int64, error) {
 	rows, err := s.Pool.Query(ctx,
@@ -676,7 +689,7 @@ func (s *Store) dueSettledBatch(ctx context.Context, afterEnded time.Time, after
 		   FROM sessions s
 		  WHERE s.signals_stale
 		    AND s.ended_at IS NOT NULL
-		    AND s.ended_at < now() - make_interval(mins => $1)
+		    AND (s.terminal OR s.ended_at < now() - make_interval(mins => $1))
 		    AND (s.ended_at, s.id) > ($3, $4)
 		  ORDER BY s.ended_at, s.id
 		  LIMIT $2`,

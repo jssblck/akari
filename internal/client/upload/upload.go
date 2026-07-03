@@ -81,6 +81,10 @@ type Outcome struct {
 	UploadedBytes int64
 	StoredBytes   int64
 	MessageCount  int
+	// SessionID is the server's id for the synced session, learned at announce. It
+	// lets SyncFile address the session after the upload (the finalize refresh), and
+	// is carried out to the caller for the same reason.
+	SessionID int64
 }
 
 // Client talks to one akari server with one bearer token.
@@ -270,6 +274,18 @@ func (c *Client) SyncFile(ctx context.Context, t Target) (Outcome, error) {
 			case totalUploaded > 0:
 				out.Action = ActionUploaded
 			}
+			// The whole transcript has landed. If this is a --finalize sync, ask the
+			// server to grade the session now rather than on the next settle tick: on an
+			// ephemeral host the grade has to land before teardown. The session was
+			// announced terminal, so this refresh derives its signals with the idle checks
+			// already satisfied. It runs once per file (each SyncFile is one session) and
+			// only after the successful upload, so a mid-upload conflict retry never
+			// finalizes a partial transcript.
+			if t.Finalize && out.SessionID != 0 {
+				if err := c.finalize(ctx, out.SessionID); err != nil {
+					return Outcome{}, fmt.Errorf("finalize %s: %w", t.Path, err)
+				}
+			}
 			return out, nil
 		}
 	}
@@ -330,7 +346,7 @@ func (c *Client) syncOnce(ctx context.Context, t Target, fs *fileSync, f *os.Fil
 		}
 	}
 
-	out := Outcome{StoredBytes: ann.StoredBytes}
+	out := Outcome{StoredBytes: ann.StoredBytes, SessionID: ann.SessionID}
 
 	// Transform the unsent original tail into boundary-aligned transformed chunks,
 	// streaming each chunk (and the bodies it references) to the CAS as it becomes
@@ -625,7 +641,7 @@ type announceResp struct {
 }
 
 func (c *Client) announce(ctx context.Context, t Target) (announceResp, error) {
-	body := map[string]string{
+	body := map[string]any{
 		"agent":             t.Agent,
 		"source_session_id": t.SourceID,
 		"kind":              t.Kind,
@@ -634,6 +650,9 @@ func (c *Client) announce(ctx context.Context, t Target) (announceResp, error) {
 		"git_branch":        t.GitBranch,
 		"cwd":               t.Cwd,
 		"machine":           t.Machine,
+		// A --finalize sync announces the session terminal so the server can grade it
+		// immediately (see Target.Finalize); an ordinary sync sends false.
+		"terminal": t.Finalize,
 	}
 	var out announceResp
 	if err := c.doJSON(ctx, http.MethodPost, "/api/v1/ingest/session", body, &out); err != nil {
@@ -644,6 +663,15 @@ func (c *Client) announce(ctx context.Context, t Target) (announceResp, error) {
 
 func (c *Client) reset(ctx context.Context, sessionID int64) error {
 	path := fmt.Sprintf("/api/v1/ingest/session/%d/reset", sessionID)
+	return c.doJSON(ctx, http.MethodPost, path, nil, nil)
+}
+
+// finalize asks the server to grade a terminal session now that its whole transcript
+// has landed, so an ephemeral host sees the grade before it is torn down instead of
+// waiting for the settle pass. It carries no body: the session was announced terminal
+// and the grade derives from the projection the chunks already built.
+func (c *Client) finalize(ctx context.Context, sessionID int64) error {
+	path := fmt.Sprintf("/api/v1/ingest/session/%d/finalize", sessionID)
 	return c.doJSON(ctx, http.MethodPost, path, nil, nil)
 }
 
