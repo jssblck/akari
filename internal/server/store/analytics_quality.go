@@ -119,9 +119,9 @@ func (s *Store) scopedSignalCounts(ctx context.Context, q querier, f AnalyticsFi
 		`SELECT coalesce(sig.%s, '%s'), count(*)
 		   FROM sessions s
 		   LEFT JOIN session_signals sig
-		     ON sig.session_id = s.id AND sig.signals_version = $%d AND NOT s.signals_stale
+		     ON sig.session_id = s.id AND `+signalsCurrent(len(args))+`
 		  WHERE TRUE`+filter+`
-		  GROUP BY 1`, col, missing, len(args)), args...)
+		  GROUP BY 1`, col, missing), args...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -229,7 +229,7 @@ func (s *Store) userQualityFrom(ctx context.Context, q querier, f AnalyticsFilte
 		     FROM sessions s
 		     JOIN users u ON u.id = s.user_id
 		     LEFT JOIN session_signals sig
-		       ON sig.session_id = s.id AND sig.signals_version = $%d AND NOT s.signals_stale
+		       ON sig.session_id = s.id AND `+signalsCurrent(versionArg)+`
 		    WHERE TRUE`+filter+`
 		    GROUP BY u.username
 		 )
@@ -237,7 +237,7 @@ func (s *Store) userQualityFrom(ctx context.Context, q querier, f AnalyticsFilte
 		        (SELECT count(*) FROM agg) AS authors
 		   FROM agg
 		  ORDER BY sessions DESC, username
-		  LIMIT $%d`, versionArg, limitArg), args...)
+		  LIMIT $%d`, limitArg), args...)
 	if err != nil {
 		return UserQualityStats{}, fmt.Errorf("query user quality: %w", err)
 	}
@@ -294,12 +294,12 @@ func (s *Store) avgQualityScoreFrom(ctx context.Context, q querier, f AnalyticsF
 	// letter its score bands to: the card's representative grade (GradeFor of the mean score) and
 	// the panel's stored-grade distribution are drawn from the same graded sessions under one
 	// score->grade mapping, so they reconcile rather than describing subtly different cohorts.
-	err := q.QueryRow(ctx, fmt.Sprintf(
+	err := q.QueryRow(ctx,
 		`SELECT avg(sig.score)::float8
 		   FROM sessions s
 		   JOIN session_signals sig
-		     ON sig.session_id = s.id AND sig.signals_version = $%d AND NOT s.signals_stale
-		  WHERE sig.grade IS NOT NULL`+filter, len(args)), args...).Scan(&avg)
+		     ON sig.session_id = s.id AND `+signalsCurrent(len(args))+`
+		  WHERE sig.grade IS NOT NULL`+filter, args...).Scan(&avg)
 	if err != nil {
 		return nil, fmt.Errorf("avg quality score: %w", err)
 	}

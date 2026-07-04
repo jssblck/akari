@@ -445,9 +445,9 @@ func (s *Store) signalTrendsFrom(ctx context.Context, q querier, f AnalyticsFilt
 		`SELECT %s AS b, coalesce(sig.grade, '') AS grade, coalesce(sig.outcome, 'unknown') AS outcome, count(*)
 		   FROM sessions s
 		   LEFT JOIN session_signals sig
-		     ON sig.session_id = s.id AND sig.signals_version = $%d AND NOT s.signals_stale
+		     ON sig.session_id = s.id AND `+signalsCurrent(len(args))+`
 		  WHERE s.started_at IS NOT NULL%s
-		  GROUP BY 1, 2, 3`, g.sqlBucket("s.started_at"), len(args), filter), args...)
+		  GROUP BY 1, 2, 3`, g.sqlBucket("s.started_at"), filter), args...)
 	if err != nil {
 		return SignalTrends{}, fmt.Errorf("grade/outcome trend: %w", err)
 	}
@@ -527,10 +527,9 @@ func (s *Store) signalTrendsFrom(ctx context.Context, q querier, f AnalyticsFilt
 		        count(*) FILTER (WHERE sig.unstructured_start)
 		   FROM sessions s
 		   LEFT JOIN session_signals sig
-		     ON sig.session_id = s.id AND sig.signals_version = $%d
-		        AND sig.prompt_facts_version = $%d AND NOT s.signals_stale
+		     ON sig.session_id = s.id AND `+signalsHygieneCurrent(len(args)-1, len(args))+`
 		  WHERE s.started_at IS NOT NULL%s
-		  GROUP BY 1`, g.sqlBucket("s.started_at"), len(args)-1, len(args), filter), args...)
+		  GROUP BY 1`, g.sqlBucket("s.started_at"), filter), args...)
 	if err != nil {
 		return SignalTrends{}, fmt.Errorf("hygiene trend: %w", err)
 	}
@@ -566,9 +565,9 @@ func (s *Store) signalTrendsFrom(ctx context.Context, q querier, f AnalyticsFilt
 		`SELECT %s AS b, coalesce(sum(sig.context_reset_count), 0)
 		   FROM sessions s
 		   JOIN session_signals sig
-		     ON sig.session_id = s.id AND sig.signals_version = $%d AND NOT s.signals_stale
+		     ON sig.session_id = s.id AND `+signalsCurrent(len(args))+`
 		  WHERE s.started_at IS NOT NULL AND sig.peak_context_tokens IS NOT NULL%s
-		  GROUP BY 1`, g.sqlBucket("s.started_at"), len(args), filter), args...)
+		  GROUP BY 1`, g.sqlBucket("s.started_at"), filter), args...)
 	if err != nil {
 		return SignalTrends{}, fmt.Errorf("context reset trend: %w", err)
 	}
@@ -626,9 +625,9 @@ func (s *Store) contextHistogramFrom(ctx context.Context, q querier, f Analytics
 		`SELECT sig.peak_context_tokens
 		   FROM sessions s
 		   JOIN session_signals sig
-		     ON sig.session_id = s.id AND sig.signals_version = $%d AND NOT s.signals_stale
+		     ON sig.session_id = s.id AND `+signalsCurrent(len(args))+`
 		  WHERE s.started_at IS NOT NULL AND sig.peak_context_tokens IS NOT NULL%s`,
-		len(args), filter), args...)
+		filter), args...)
 	if err != nil {
 		return nil, fmt.Errorf("context histogram: %w", err)
 	}
@@ -688,9 +687,9 @@ func (s *Store) economicsFrom(ctx context.Context, q querier, f AnalyticsFilter,
 		   FROM usage_events ue
 		   JOIN sessions s ON s.id = ue.session_id
 		   LEFT JOIN session_signals sig
-		     ON sig.session_id = s.id AND sig.signals_version = $%d AND NOT s.signals_stale
+		     ON sig.session_id = s.id AND `+signalsCurrent(len(args))+`
 		  WHERE ue.occurred_at IS NOT NULL%s
-		  GROUP BY 1`, g.sqlBucket("ue.occurred_at"), len(args), filter), args...)
+		  GROUP BY 1`, g.sqlBucket("ue.occurred_at"), filter), args...)
 	if err != nil {
 		return Economics{}, fmt.Errorf("cost of quality trend: %w", err)
 	}
