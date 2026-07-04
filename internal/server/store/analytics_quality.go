@@ -38,10 +38,9 @@ type QualityDistribution struct {
 	Graded int
 }
 
-// gradeOrder and outcomeOrder fix the bar order so a distribution reads the same every
-// render (best to worst, common to rare) rather than in whatever order the GROUP BY
-// happened to return. The empty grade is the unscored bucket, shown last.
-var gradeOrder = []string{"A", "B", "C", "D", "F", ""}
+// outcomeOrder fixes the bar order so a distribution reads the same every render
+// (common to rare) rather than in whatever order the GROUP BY happened to return.
+// Grades use quality.GradeOrder, the canonical best-to-worst-then-unscored order.
 var outcomeOrder = []string{
 	string(quality.OutcomeCompleted),
 	string(quality.OutcomeErrored),
@@ -91,7 +90,7 @@ func (s *Store) qualityDistributionFrom(ctx context.Context, q querier, f Analyt
 	// FILTER clause or second pass: subtracting the one bucket the same scan produced is
 	// exact and cheaper than re-counting.
 	return QualityDistribution{
-		Grades:   orderedCounts(gradeOrder, grades),
+		Grades:   orderedCounts(quality.GradeOrder, grades),
 		Outcomes: orderedCounts(outcomeOrder, outcomes),
 		Sessions: gTotal,
 		Graded:   gTotal - grades[""],

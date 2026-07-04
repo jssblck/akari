@@ -79,6 +79,42 @@ func render(w http.ResponseWriter, r *http.Request, status int, c templ.Componen
 	_ = c.Render(r.Context(), w)
 }
 
+// errorTitle is the page title an error status renders under. Deriving it here keeps
+// every error page's tab title consistent with its status, instead of each call site
+// restating the pairing.
+func errorTitle(status int) string {
+	switch status {
+	case http.StatusNotFound:
+		return "Not found"
+	case http.StatusBadRequest:
+		return "Bad request"
+	case http.StatusForbidden:
+		return "Forbidden"
+	case http.StatusInternalServerError:
+		return "Error"
+	default:
+		return http.StatusText(status)
+	}
+}
+
+// renderError writes the signed-in error page. The status is named once and drives
+// both the response code and the page body, so the two cannot disagree.
+func (s *Server) renderError(w http.ResponseWriter, r *http.Request, status int, msg string) {
+	render(w, r, status, web.ErrorPage(s.pageFor(r, errorTitle(status)), status, msg))
+}
+
+// renderErrorNav is renderError with the given nav tab kept highlighted, for errors
+// raised inside one of the app's main surfaces.
+func (s *Server) renderErrorNav(w http.ResponseWriter, r *http.Request, status int, nav, msg string) {
+	render(w, r, status, web.ErrorPage(s.pageForNav(r, errorTitle(status), nav), status, msg))
+}
+
+// renderPublicError writes the logged-out error page used by public share links and
+// the guide, where no viewer chrome exists to wrap the message.
+func renderPublicError(w http.ResponseWriter, r *http.Request, status int, msg string) {
+	render(w, r, status, web.PublicErrorPage(status, msg))
+}
+
 // handleRoot serves the site root at /: the marketing landing page explaining
 // what akari is, shown to every visitor regardless of sign-in state. A signed-in
 // reader gets the same page with a topbar that points back into the app (an
@@ -117,13 +153,13 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	rng := web.ParseRange(r.URL.Query().Get("range"))
 	users, err := s.Store.ListUsers(r.Context())
 	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "overview"), http.StatusInternalServerError, "Could not load users."))
+		s.renderErrorNav(w, r, http.StatusInternalServerError, "overview", "Could not load users.")
 		return
 	}
 	selected := web.SelectedUserIDs(r.URL.Query()["user"], users)
 	analytics, err := s.Store.Analytics(r.Context(), store.AnalyticsFilter{Since: web.RangeSince(rng, time.Now()), UserIDs: selected})
 	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "overview"), http.StatusInternalServerError, "Could not load analytics."))
+		s.renderErrorNav(w, r, http.StatusInternalServerError, "overview", "Could not load analytics.")
 		return
 	}
 	render(w, r, http.StatusOK, web.OverviewPage(s.pageForNav(r, "Overview", "overview"), analytics, rng, users, selected))
@@ -144,7 +180,7 @@ func (s *Server) handleInsights(w http.ResponseWriter, r *http.Request) {
 		Bucket: web.TrendBucket(rng),
 	})
 	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "insights"), http.StatusInternalServerError, "Could not load insights."))
+		s.renderErrorNav(w, r, http.StatusInternalServerError, "insights", "Could not load insights.")
 		return
 	}
 	ranges := web.RangeOptions("/insights", nil, rng)
@@ -156,7 +192,7 @@ func (s *Server) handleInsights(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleProjectsIndex(w http.ResponseWriter, r *http.Request) {
 	projects, err := s.Store.ListProjects(r.Context())
 	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "projects"), http.StatusInternalServerError, "Could not load projects."))
+		s.renderErrorNav(w, r, http.StatusInternalServerError, "projects", "Could not load projects.")
 		return
 	}
 	// The index lists git-remote projects only. Local (standalone/orphaned)
@@ -170,7 +206,7 @@ func (s *Server) handleProjectsIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	spark, err := s.Store.ProjectSparklines(r.Context(), 30)
 	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "projects"), http.StatusInternalServerError, "Could not load analytics."))
+		s.renderErrorNav(w, r, http.StatusInternalServerError, "projects", "Could not load analytics.")
 		return
 	}
 	render(w, r, http.StatusOK, web.ProjectsPage(s.pageForNav(r, "Projects", "projects"), remotes, spark))
@@ -191,7 +227,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	if v := strings.TrimSpace(q.Get("project")); v != "" {
 		pid, err := strconv.ParseInt(v, 10, 64)
 		if err != nil {
-			render(w, r, http.StatusBadRequest, web.ErrorPage(s.pageForNav(r, "Bad request", "sessions"), http.StatusBadRequest, "Invalid project filter."))
+			s.renderErrorNav(w, r, http.StatusBadRequest, "sessions", "Invalid project filter.")
 			return
 		}
 		filter.ProjectID = pid
@@ -217,14 +253,14 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	// fall-through to the unfiltered list, matching the project-filter precedent above.
 	if v := strings.TrimSpace(q.Get("grade")); v != "" {
 		if !web.IsGrade(v) {
-			render(w, r, http.StatusBadRequest, web.ErrorPage(s.pageForNav(r, "Bad request", "sessions"), http.StatusBadRequest, "Invalid grade filter."))
+			s.renderErrorNav(w, r, http.StatusBadRequest, "sessions", "Invalid grade filter.")
 			return
 		}
 		filter.Grade = v
 	}
 	if v := strings.TrimSpace(q.Get("outcome")); v != "" {
 		if !web.IsOutcome(v) {
-			render(w, r, http.StatusBadRequest, web.ErrorPage(s.pageForNav(r, "Bad request", "sessions"), http.StatusBadRequest, "Invalid outcome filter."))
+			s.renderErrorNav(w, r, http.StatusBadRequest, "sessions", "Invalid outcome filter.")
 			return
 		}
 		filter.Outcome = v
@@ -273,7 +309,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	// cost stays linear in the page, not the corpus.
 	rows, hasMore, err := s.Store.ListAllSessions(r.Context(), filter)
 	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "sessions"), http.StatusInternalServerError, "Could not load sessions."))
+		s.renderErrorNav(w, r, http.StatusInternalServerError, "sessions", "Could not load sessions.")
 		return
 	}
 	// The empty-hidden toggle needs only whether any empty session exists in scope, not
@@ -285,7 +321,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	// rather than a "showing empty · hide" that would hide nothing.
 	hasEmpty, err := s.Store.HasEmptySessions(r.Context(), filter)
 	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "sessions"), http.StatusInternalServerError, "Could not load sessions."))
+		s.renderErrorNav(w, r, http.StatusInternalServerError, "sessions", "Could not load sessions.")
 		return
 	}
 	footer := web.BuildSessionFooter(filter, len(rows), hasMore, hasEmpty)
@@ -295,7 +331,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	facets, err := s.Store.GlobalFacets(r.Context())
 	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "sessions"), http.StatusInternalServerError, "Could not load filters."))
+		s.renderErrorNav(w, r, http.StatusInternalServerError, "sessions", "Could not load filters.")
 		return
 	}
 	render(w, r, http.StatusOK, web.SessionsPage(s.pageForNav(r, "Sessions", "sessions"), rows, facets, filter, footer))
@@ -309,16 +345,16 @@ const maxSearchQueryLen = 200
 func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(r, "Not found"), http.StatusNotFound, "Project not found."))
+		s.renderError(w, r, http.StatusNotFound, "Project not found.")
 		return
 	}
 	proj, err := s.Store.Project(r.Context(), id)
 	if errors.Is(err, store.ErrNotFound) {
-		render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(r, "Not found"), http.StatusNotFound, "Project not found."))
+		s.renderError(w, r, http.StatusNotFound, "Project not found.")
 		return
 	}
 	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load project."))
+		s.renderError(w, r, http.StatusInternalServerError, "Could not load project.")
 		return
 	}
 
@@ -345,13 +381,13 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 	// carries a remainder aggregate so the table still reconciles with the headline.
 	page, err := s.Store.WindowSessionPage(r.Context(), filter)
 	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load sessions."))
+		s.renderError(w, r, http.StatusInternalServerError, "Could not load sessions.")
 		return
 	}
 
 	facets, err := s.Store.SessionFacets(r.Context(), id)
 	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load filters."))
+		s.renderError(w, r, http.StatusInternalServerError, "Could not load filters.")
 		return
 	}
 	// The usage panel scopes to the same agent/user/machine the session table does, so
@@ -365,7 +401,7 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 	}
 	analytics, err := s.Store.Analytics(r.Context(), af)
 	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load analytics."))
+		s.renderError(w, r, http.StatusInternalServerError, "Could not load analytics.")
 		return
 	}
 	// The quality band draws from the same scope as the usage panel and the table (the same
@@ -382,7 +418,7 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 	// this window") instead. See projectQuality for the matching caption.
 	insights, err := s.Store.Insights(r.Context(), af)
 	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load quality signals."))
+		s.renderError(w, r, http.StatusInternalServerError, "Could not load quality signals.")
 		return
 	}
 	wf := web.Facets{Agents: facets.Agents, Machines: facets.Machines, Users: facets.Users}
@@ -477,28 +513,28 @@ func (s *Server) sessionHeaderStats(ctx context.Context, d store.SessionDetail) 
 func (s *Server) handleSessionPage(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(r, "Not found"), http.StatusNotFound, "Session not found."))
+		s.renderError(w, r, http.StatusNotFound, "Session not found.")
 		return
 	}
 	d, msgs, tools, atts, subs, err := s.sessionView(r, id)
 	if errors.Is(err, store.ErrNotFound) {
-		render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(r, "Not found"), http.StatusNotFound, "Session not found."))
+		s.renderError(w, r, http.StatusNotFound, "Session not found.")
 		return
 	}
 	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load session."))
+		s.renderError(w, r, http.StatusInternalServerError, "Could not load session.")
 		return
 	}
 	// A bounded scalar (the GROUP BY runs in the database), so flagging a repeated
 	// tool-call id costs one count query, not an in-process scan of every tool call.
 	dupIDs, err := s.Store.DuplicateCallUIDCount(r.Context(), id)
 	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load session."))
+		s.renderError(w, r, http.StatusInternalServerError, "Could not load session.")
 		return
 	}
 	hs, err := s.sessionHeaderStats(r.Context(), d)
 	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load session."))
+		s.renderError(w, r, http.StatusInternalServerError, "Could not load session.")
 		return
 	}
 	title := web.SessionPageTitle(d)

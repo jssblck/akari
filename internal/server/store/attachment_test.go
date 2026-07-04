@@ -179,7 +179,7 @@ func TestAttachmentReferencePathAndRebuildPin(t *testing.T) {
 	}
 
 	// The sentinel reference: SHA256 set, no inline body, so the projection takes the
-	// reference branch (pinBlobRefTx) rather than writing the bytes again.
+	// reference branch (a blobRef in resolveBlobsTx) rather than writing the bytes again.
 	refDelta := store.ProjectionDelta{
 		Messages: []store.MessageDelta{{Ordinal: 0, Role: "user", Content: "trace this"}},
 		Attachments: []store.AttachmentDelta{{

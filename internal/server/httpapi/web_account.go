@@ -15,12 +15,12 @@ func (s *Server) handleAccountPage(w http.ResponseWriter, r *http.Request) {
 	p, _ := principalFrom(r.Context())
 	tokens, err := s.Store.ListAPITokens(r.Context(), p.UserID)
 	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load tokens."))
+		s.renderError(w, r, http.StatusInternalServerError, "Could not load tokens.")
 		return
 	}
 	grants, err := s.Store.ListOAuthGrants(r.Context(), p.UserID)
 	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load connected apps."))
+		s.renderError(w, r, http.StatusInternalServerError, "Could not load connected apps.")
 		return
 	}
 	page := s.pageForNav(r, "Account", "account")
@@ -30,7 +30,7 @@ func (s *Server) handleAccountPage(w http.ResponseWriter, r *http.Request) {
 	if page.IsAdmin {
 		invites, err = s.Store.ListInvites(r.Context())
 		if err != nil {
-			render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load invites."))
+			s.renderError(w, r, http.StatusInternalServerError, "Could not load invites.")
 			return
 		}
 	}
@@ -180,7 +180,7 @@ func (s *Server) handleRevokeTokenForm(w http.ResponseWriter, r *http.Request) {
 	// redirect would tell the user the token is gone while it stays live, matching the
 	// connection- and invite-revoke handlers.
 	if err := s.Store.RevokeAPIToken(r.Context(), p.UserID, id); err != nil {
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not revoke the token. Try again."))
+		s.renderError(w, r, http.StatusInternalServerError, "Could not revoke the token. Try again.")
 		return
 	}
 	s.setNotice(w, "Token revoked")
@@ -198,7 +198,7 @@ func (s *Server) handleRevokeConnectionForm(w http.ResponseWriter, r *http.Reque
 		// silent redirect would tell the user the app is disconnected while its
 		// tokens stay live.
 		if err := s.Store.RevokeOAuthGrant(r.Context(), p.UserID, clientID); err != nil {
-			render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not disconnect the app. Try again."))
+			s.renderError(w, r, http.StatusInternalServerError, "Could not disconnect the app. Try again.")
 			return
 		}
 	}
@@ -234,7 +234,7 @@ func (s *Server) handleRevokeInviteForm(w http.ResponseWriter, r *http.Request) 
 	// redirect would tell the admin the invite is gone while it stays redeemable,
 	// matching the connection-revoke handler's ErrorPage on failure.
 	if err := s.Store.RevokeInvite(r.Context(), id); err != nil {
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not revoke the invite. Try again."))
+		s.renderError(w, r, http.StatusInternalServerError, "Could not revoke the invite. Try again.")
 		return
 	}
 	s.setNotice(w, "Invite revoked")

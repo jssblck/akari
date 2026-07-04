@@ -74,15 +74,26 @@ func writeBlobTx(ctx context.Context, tx pgx.Tx, content string, mediaType strin
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return "", err
 	}
+	if err := storeNewBlobTx(ctx, tx, sum, content, mediaType); err != nil {
+		return "", err
+	}
+	return sum, nil
+}
 
+// storeNewBlobTx streams content into a new large object and inserts its blobs row,
+// for a hash an existence check just reported absent. A concurrent transaction can
+// still insert the same hash between that check and this insert; ON CONFLICT DO
+// NOTHING absorbs the race, and the loser unlinks the large object it created so a
+// duplicate is never stranded.
+func storeNewBlobTx(ctx context.Context, tx pgx.Tx, sum, content, mediaType string) error {
 	los := tx.LargeObjects()
 	oid, err := los.Create(ctx, 0) // 0 lets Postgres assign the oid
 	if err != nil {
-		return "", err
+		return err
 	}
 	lo, err := los.Open(ctx, oid, pgx.LargeObjectModeWrite)
 	if err != nil {
-		return "", err
+		return err
 	}
 	// Write in bounded slices so the body is not duplicated whole: each iteration
 	// materializes at most blobWriteChunk bytes, never the full body a second time.
@@ -93,11 +104,11 @@ func writeBlobTx(ctx context.Context, tx pgx.Tx, content string, mediaType strin
 		}
 		if _, err := lo.Write([]byte(content[i:j])); err != nil {
 			_ = lo.Close()
-			return "", err
+			return err
 		}
 	}
 	if err := lo.Close(); err != nil {
-		return "", err
+		return err
 	}
 
 	if mediaType == "" {
@@ -108,16 +119,16 @@ func writeBlobTx(ctx context.Context, tx pgx.Tx, content string, mediaType strin
 		 VALUES ($1, $2, $3, $4) ON CONFLICT (sha256) DO NOTHING`,
 		sum, oid, len(content), mediaType)
 	if err != nil {
-		return "", err
+		return err
 	}
 	if tag.RowsAffected() == 0 {
 		// Another transaction won the race for this hash; drop the duplicate large
 		// object we just created so it does not leak.
 		if err := los.Unlink(ctx, oid); err != nil {
-			return "", err
+			return err
 		}
 	}
-	return sum, nil
+	return nil
 }
 
 // ErrBlobNotUploaded reports that a tool body the transcript references by sha256
@@ -127,21 +138,77 @@ func writeBlobTx(ctx context.Context, tx pgx.Tx, content string, mediaType strin
 // dangling reference.
 var ErrBlobNotUploaded = errors.New("referenced tool body is not present in the CAS")
 
-// pinBlobRefTx locks an already-present blob FOR KEY SHARE so a concurrent sweep
-// cannot reclaim it between this check and the referencing tool_calls insert in
-// the same transaction. It is the read-side analogue of the lock writeBlobTx
-// takes when it finds the hash already present: the sweep's FOR UPDATE conflicts
-// with this lock, so the blob survives until the reference commits. A missing
-// blob is ErrBlobNotUploaded: the client uploads bodies before the transcript, so
-// the row must exist by the time the reference is recorded.
-func pinBlobRefTx(ctx context.Context, tx pgx.Tx, sha string) error {
-	var dummy int
-	err := tx.QueryRow(ctx, "SELECT 1 FROM blobs WHERE sha256 = $1 FOR KEY SHARE", sha).Scan(&dummy)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrBlobNotUploaded
+// blobRef is one client-lifted blob reference a projection write must resolve: the
+// hash, plus the error context a missing blob reports under. localWrite marks a
+// reference collected after an inline write of the same hash in the same batch,
+// which the write order inside the transaction satisfies by itself.
+type blobRef struct {
+	sha        string
+	localWrite bool
+	errCtx     string
+}
+
+// blobWrite is one inline body a projection write must store, pre-hashed so the
+// batched existence check covers it alongside the references.
+type blobWrite struct {
+	sha    string
+	body   string
+	media  string
+	errCtx string
+}
+
+// resolveBlobsTx does a projection write's blob work in bulk: one check-and-lock
+// query over every hash the write touches (client-lifted references and inline
+// bodies alike), then a large-object write for only the truly new content. A
+// per-body probe would cost a rebuild one sequential round trip per tool body,
+// hundreds for a tool-heavy session and corpus-wide on an epoch bump; the batch
+// costs one query regardless of body count.
+//
+// The SELECT takes FOR KEY SHARE on every present row, so a concurrent sweep (whose
+// FOR UPDATE conflicts and skips locked rows) cannot reclaim a blob between this
+// check and the referencing insert in the same transaction. A reference to a hash
+// the CAS does not hold is ErrBlobNotUploaded: the client uploads bodies before the
+// transcript, so the row must exist by the time the reference is recorded.
+func resolveBlobsTx(ctx context.Context, tx pgx.Tx, refs []blobRef, writes []blobWrite) error {
+	if len(refs) == 0 && len(writes) == 0 {
+		return nil
 	}
+	shas := make([]string, 0, len(refs)+len(writes))
+	for _, r := range refs {
+		shas = append(shas, r.sha)
+	}
+	for _, w := range writes {
+		shas = append(shas, w.sha)
+	}
+	rows, err := tx.Query(ctx, "SELECT sha256 FROM blobs WHERE sha256 = ANY($1) FOR KEY SHARE", shas)
 	if err != nil {
-		return fmt.Errorf("lock referenced blob %s: %w", sha, err)
+		return fmt.Errorf("lock %d referenced blobs: %w", len(shas), err)
+	}
+	present := make(map[string]bool, len(shas))
+	for rows.Next() {
+		var sha string
+		if err := rows.Scan(&sha); err != nil {
+			rows.Close()
+			return fmt.Errorf("iterate locked blob hashes: %w", err)
+		}
+		present[sha] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate locked blob hashes: %w", err)
+	}
+	for _, r := range refs {
+		if !present[r.sha] && !r.localWrite {
+			return fmt.Errorf("%s: %w", r.errCtx, ErrBlobNotUploaded)
+		}
+	}
+	for _, w := range writes {
+		if present[w.sha] {
+			continue // already stored, and the batch SELECT locked it against the sweep
+		}
+		if err := storeNewBlobTx(ctx, tx, w.sha, w.body, w.media); err != nil {
+			return fmt.Errorf("%s: %w", w.errCtx, err)
+		}
 	}
 	return nil
 }

@@ -40,17 +40,17 @@ func (s *Server) handleGuidePage(w http.ResponseWriter, r *http.Request) {
 func (s *Server) serveGuideChapter(w http.ResponseWriter, r *http.Request, slug string) {
 	c, ok := guide.Lookup(slug)
 	if !ok {
-		render(w, r, http.StatusNotFound, web.PublicErrorPage(http.StatusNotFound, "That guide page does not exist."))
+		renderPublicError(w, r, http.StatusNotFound, "That guide page does not exist.")
 		return
 	}
 	rendered, err := c.Render()
 	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not render the guide."))
+		renderPublicError(w, r, http.StatusInternalServerError, "Could not render the guide.")
 		return
 	}
 	raw, err := c.Raw()
 	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load the guide."))
+		renderPublicError(w, r, http.StatusInternalServerError, "Could not load the guide.")
 		return
 	}
 

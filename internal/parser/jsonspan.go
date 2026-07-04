@@ -945,7 +945,7 @@ func decodeKey(raw []byte) string {
 		case 'u':
 			r := decodeHex4(body[i+1:])
 			i += 4
-			out = appendRune(out, r)
+			out = appendRune4(out, r)
 		default:
 			out = append(out, body[i])
 		}
@@ -977,18 +977,4 @@ func decodeHex4(b []byte) rune {
 		r = r<<4 | v
 	}
 	return r
-}
-
-// appendRune appends the UTF-8 encoding of r to out without importing
-// unicode/utf8 for a single call site; it handles the basic-multilingual-plane
-// range that JSON \u escapes for keys realistically use.
-func appendRune(out []byte, r rune) []byte {
-	switch {
-	case r < 0x80:
-		return append(out, byte(r))
-	case r < 0x800:
-		return append(out, byte(0xC0|r>>6), byte(0x80|r&0x3F))
-	default:
-		return append(out, byte(0xE0|r>>12), byte(0x80|(r>>6)&0x3F), byte(0x80|r&0x3F))
-	}
 }

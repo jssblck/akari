@@ -180,7 +180,7 @@ func sampleTrends() *store.Trends {
 				{Lo: 8000, Hi: 16000, Count: 3},
 				{Lo: 16000, Hi: 32000, Count: 5},
 			},
-			ContextMarkers: []store.ContextMarker{{Tokens: 128000, Label: "p50 128.0k"}},
+			ContextMarkers: []store.ContextMarker{{Tokens: 128000, Kind: "p50"}},
 		},
 		Economics: store.Economics{
 			CostCompleted: []float64{100, 120}, CostAbandoned: []float64{20, 15}, CostOther: []float64{0, 0},

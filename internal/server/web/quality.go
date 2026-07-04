@@ -6,6 +6,7 @@ package web
 import (
 	"fmt"
 
+	"github.com/jssblck/akari/internal/quality"
 	"github.com/jssblck/akari/internal/server/store"
 )
 
@@ -40,22 +41,15 @@ func QualityGrade(s store.SessionSignals) string {
 	return "-"
 }
 
-// QualityGradeClass is the CSS modifier for the Quality tile, banding its colour the
-// way a report card reads: A and B good, C watch, D and F poor, an unscored session
-// neutral. It maps to the status palette already in the sheet (sage, peach, rose)
-// rather than introducing new hues, keeping to the One Voice Rule.
+// QualityGradeClass is the CSS modifier for the Quality tile. The good/watch/poor
+// tiering itself lives in quality.GradeBand; this only maps the band onto the status
+// palette already in the sheet (sage, peach, rose) rather than introducing new hues,
+// keeping to the One Voice Rule.
 func QualityGradeClass(s store.SessionSignals) string {
 	if !s.Scored() {
 		return "q-none"
 	}
-	switch *s.Grade {
-	case "A", "B":
-		return "q-good"
-	case "C":
-		return "q-watch"
-	default: // D, F
-		return "q-poor"
-	}
+	return "q-" + quality.GradeBand(*s.Grade)
 }
 
 // OutcomeLabel renders a stored outcome string title-cased for display. An empty or

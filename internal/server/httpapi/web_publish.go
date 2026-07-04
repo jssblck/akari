@@ -23,13 +23,13 @@ func (s *Server) handlePublishSession(w http.ResponseWriter, r *http.Request) {
 	}
 	candidate, err := auth.NewPublicID()
 	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not publish session."))
+		s.renderError(w, r, http.StatusInternalServerError, "Could not publish session.")
 		return
 	}
 	if _, err := s.Store.PublishSession(r.Context(), id, p.UserID, candidate); err != nil {
 		// A session the caller does not own (or one that does not exist) is a 404,
 		// not a hint that it belongs to someone else.
-		render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(r, "Not found"), http.StatusNotFound, "Session not found."))
+		s.renderError(w, r, http.StatusNotFound, "Session not found.")
 		return
 	}
 	s.setNotice(w, "Published")
@@ -44,7 +44,7 @@ func (s *Server) handlePublishSession(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handlePublishOverview(w http.ResponseWriter, r *http.Request) {
 	p, _ := principalFrom(r.Context())
 	if err := s.Store.PublishOverview(r.Context(), p.UserID); err != nil {
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not publish overview."))
+		s.renderError(w, r, http.StatusInternalServerError, "Could not publish overview.")
 		return
 	}
 	s.setNotice(w, "Overview published")
@@ -56,7 +56,7 @@ func (s *Server) handlePublishOverview(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUnpublishOverview(w http.ResponseWriter, r *http.Request) {
 	p, _ := principalFrom(r.Context())
 	if err := s.Store.UnpublishOverview(r.Context(), p.UserID); err != nil {
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not update overview."))
+		s.renderError(w, r, http.StatusInternalServerError, "Could not update overview.")
 		return
 	}
 	s.setNotice(w, "Overview unpublished")
@@ -78,10 +78,10 @@ func (s *Server) handlePublishProjectOverview(w http.ResponseWriter, r *http.Req
 		// is not misreported as "project not found" (which would read as the caller's
 		// mistake rather than the server's).
 		if errors.Is(err, store.ErrNotFound) {
-			render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(r, "Not found"), http.StatusNotFound, "Project not found."))
+			s.renderError(w, r, http.StatusNotFound, "Project not found.")
 			return
 		}
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not publish overview."))
+		s.renderError(w, r, http.StatusInternalServerError, "Could not publish overview.")
 		return
 	}
 	s.setNotice(w, "Overview published")
@@ -100,10 +100,10 @@ func (s *Server) handleUnpublishProjectOverview(w http.ResponseWriter, r *http.R
 		// Split ErrNotFound (a 404) from a backend failure (a 500), so a database error
 		// while making a project private is not disguised as a missing project.
 		if errors.Is(err, store.ErrNotFound) {
-			render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(r, "Not found"), http.StatusNotFound, "Project not found."))
+			s.renderError(w, r, http.StatusNotFound, "Project not found.")
 			return
 		}
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not update overview."))
+		s.renderError(w, r, http.StatusInternalServerError, "Could not update overview.")
 		return
 	}
 	s.setNotice(w, "Overview unpublished")
@@ -120,7 +120,7 @@ func (s *Server) handleUnpublishProjectOverview(w http.ResponseWriter, r *http.R
 func (s *Server) handlePublicProject(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		render(w, r, http.StatusNotFound, web.PublicErrorPage(http.StatusNotFound, "This project overview is not published, or the link has expired."))
+		renderPublicError(w, r, http.StatusNotFound, "This project overview is not published, or the link has expired.")
 		return
 	}
 	// The public gate and the aggregate reads below are deliberately not one atomic
@@ -132,11 +132,11 @@ func (s *Server) handlePublicProject(w http.ResponseWriter, r *http.Request) {
 	// a stale read would persist in a TTL cache rather than vanishing on the next load.
 	proj, err := s.Store.PublicProjectOverview(r.Context(), id)
 	if errors.Is(err, store.ErrNotFound) {
-		render(w, r, http.StatusNotFound, web.PublicErrorPage(http.StatusNotFound, "This project overview is not published, or the link has expired."))
+		renderPublicError(w, r, http.StatusNotFound, "This project overview is not published, or the link has expired.")
 		return
 	}
 	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load project overview."))
+		renderPublicError(w, r, http.StatusInternalServerError, "Could not load project overview.")
 		return
 	}
 	// The window bounds both the usage panel and the quality band, exactly as the
@@ -166,12 +166,12 @@ func (s *Server) handlePublicProject(w http.ResponseWriter, r *http.Request) {
 	af := store.AnalyticsFilter{ProjectID: id, Since: since, Until: ogimage.DefaultUntil(now), OmitUsers: true}
 	analytics, err := s.Store.Analytics(r.Context(), af)
 	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load project overview."))
+		renderPublicError(w, r, http.StatusInternalServerError, "Could not load project overview.")
 		return
 	}
 	insights, err := s.Store.Insights(r.Context(), af)
 	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load project overview."))
+		renderPublicError(w, r, http.StatusInternalServerError, "Could not load project overview.")
 		return
 	}
 	og := web.OGMeta{
@@ -201,11 +201,11 @@ func (s *Server) handlePublicOverview(w http.ResponseWriter, r *http.Request) {
 	username := r.PathValue("username")
 	u, err := s.Store.PublicOverviewUser(r.Context(), username)
 	if errors.Is(err, store.ErrNotFound) {
-		render(w, r, http.StatusNotFound, web.PublicErrorPage(http.StatusNotFound, "This overview is not published, or the link has expired."))
+		renderPublicError(w, r, http.StatusNotFound, "This overview is not published, or the link has expired.")
 		return
 	}
 	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load overview."))
+		renderPublicError(w, r, http.StatusInternalServerError, "Could not load overview.")
 		return
 	}
 	rng := web.ParseRange(r.URL.Query().Get("range"))
@@ -220,7 +220,7 @@ func (s *Server) handlePublicOverview(w http.ResponseWriter, r *http.Request) {
 		UserIDs: []int64{u.ID},
 	})
 	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load overview."))
+		renderPublicError(w, r, http.StatusInternalServerError, "Could not load overview.")
 		return
 	}
 	og := web.OGMeta{
@@ -249,7 +249,7 @@ func (s *Server) handleUnpublishSession(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if err := s.Store.UnpublishSession(r.Context(), id, p.UserID); err != nil {
-		render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(r, "Not found"), http.StatusNotFound, "Session not found."))
+		s.renderError(w, r, http.StatusNotFound, "Session not found.")
 		return
 	}
 	s.setNotice(w, "Unpublished")
@@ -267,18 +267,18 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	}
 	d, err := s.Store.SessionDetailByID(r.Context(), id)
 	if err != nil {
-		render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(r, "Not found"), http.StatusNotFound, "Session not found."))
+		s.renderError(w, r, http.StatusNotFound, "Session not found.")
 		return
 	}
 	if p.UserID != d.OwnerID {
 		// Only the owner or an admin may delete a session.
 		if u, err := s.Store.UserByID(r.Context(), p.UserID); err != nil || !u.IsAdmin {
-			render(w, r, http.StatusForbidden, web.ErrorPage(s.pageFor(r, "Forbidden"), http.StatusForbidden, "You cannot delete this session."))
+			s.renderError(w, r, http.StatusForbidden, "You cannot delete this session.")
 			return
 		}
 	}
 	if err := s.Store.DeleteSession(r.Context(), id); err != nil {
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not delete session."))
+		s.renderError(w, r, http.StatusInternalServerError, "Could not delete session.")
 		return
 	}
 	s.setNotice(w, "Session deleted")
@@ -292,27 +292,27 @@ func (s *Server) handlePublicSession(w http.ResponseWriter, r *http.Request) {
 	pid := r.PathValue("public_id")
 	d, err := s.Store.SessionDetailByPublicID(r.Context(), pid)
 	if err != nil {
-		render(w, r, http.StatusNotFound, web.PublicErrorPage(http.StatusNotFound, "This session is not published, or the link has expired."))
+		renderPublicError(w, r, http.StatusNotFound, "This session is not published, or the link has expired.")
 		return
 	}
 	msgs, err := s.Store.Messages(r.Context(), d.ID)
 	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load session."))
+		renderPublicError(w, r, http.StatusInternalServerError, "Could not load session.")
 		return
 	}
 	tools, err := s.Store.ToolCalls(r.Context(), d.ID)
 	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load session."))
+		renderPublicError(w, r, http.StatusInternalServerError, "Could not load session.")
 		return
 	}
 	atts, err := s.Store.Attachments(r.Context(), d.ID)
 	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load session."))
+		renderPublicError(w, r, http.StatusInternalServerError, "Could not load session.")
 		return
 	}
 	subs, err := s.Store.Subagents(r.Context(), d.ID)
 	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load session."))
+		renderPublicError(w, r, http.StatusInternalServerError, "Could not load session.")
 		return
 	}
 	// Only public subagents may appear on a public page; a public parent does not
@@ -325,7 +325,7 @@ func (s *Server) handlePublicSession(w http.ResponseWriter, r *http.Request) {
 	}
 	hs, err := s.sessionHeaderStats(r.Context(), d)
 	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load session."))
+		renderPublicError(w, r, http.StatusInternalServerError, "Could not load session.")
 		return
 	}
 	// A published session's public id is non-nil (visibility gates on it), so the card
