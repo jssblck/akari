@@ -459,36 +459,37 @@ func writeToolCalls(ctx context.Context, tx pgx.Tx, sessionID int64, calls []Pro
 		if tr.CallUID == "" {
 			continue
 		}
-		idxs := byUID[sanitizeText(tr.CallUID)]
-		// Write or pin the result body once per result, but only when at least one
-		// call is still pending: a result whose id matches nothing (or whose copies
-		// are all resolved) stores no blob.
+		uid := sanitizeText(tr.CallUID)
+		idxs := byUID[uid]
+		if len(idxs) == 0 {
+			// The id matches no call, or an earlier result already resolved (and
+			// consumed) its copies: first result wins, and store no blob.
+			continue
+		}
+		// The first result for an id resolves every copy at once, so consume the
+		// index list: a later duplicate result (a resumed transcript replaying the
+		// result line) falls out on the empty lookup above instead of rescanning
+		// the already-resolved copies.
+		delete(byUID, uid)
 		var sha any
-		stored := false
+		switch {
+		case tr.BodySHA256 != "":
+			if err := pinBlobRefTx(ctx, tx, tr.BodySHA256); err != nil {
+				return fmt.Errorf("reference tool result blob %s for session %d call %q: %w", tr.BodySHA256, sessionID, tr.CallUID, err)
+			}
+			sha = tr.BodySHA256
+		case len(tr.Body) > 0:
+			s, err := writeBlobTx(ctx, tx, tr.Body, tr.MediaType)
+			if err != nil {
+				return fmt.Errorf("write tool result blob for session %d call %q: %w", sessionID, tr.CallUID, err)
+			}
+			sha = s
+		}
+		media := sanitizeText(tr.MediaType)
+		if media == "" {
+			media = "text/plain"
+		}
 		for _, i := range idxs {
-			if resolved[i].set {
-				continue
-			}
-			if !stored {
-				switch {
-				case tr.BodySHA256 != "":
-					if err := pinBlobRefTx(ctx, tx, tr.BodySHA256); err != nil {
-						return fmt.Errorf("reference tool result blob %s for session %d call %q: %w", tr.BodySHA256, sessionID, tr.CallUID, err)
-					}
-					sha = tr.BodySHA256
-				case len(tr.Body) > 0:
-					s, err := writeBlobTx(ctx, tx, tr.Body, tr.MediaType)
-					if err != nil {
-						return fmt.Errorf("write tool result blob for session %d call %q: %w", sessionID, tr.CallUID, err)
-					}
-					sha = s
-				}
-				stored = true
-			}
-			media := sanitizeText(tr.MediaType)
-			if media == "" {
-				media = "text/plain"
-			}
 			resolved[i] = resolvedResult{sha: sha, bytes: tr.Bytes, mediaType: media, status: sanitizeText(tr.Status), set: true}
 		}
 	}

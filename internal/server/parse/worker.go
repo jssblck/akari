@@ -17,8 +17,8 @@ import (
 var duePageSize = 256
 
 // defaultFleetCacheTTL is how long a positive cross-instance "a fleet rebuild
-// is draining" answer is cached, so gating a parsed-page request does not count
-// epoch-stale rows on every request. The negative answer is never cached (see
+// is draining" answer is cached, so gating a parsed-page request does not probe
+// the epoch-stale set on every request. The negative answer is never cached (see
 // FleetStatus), mirroring the old advisory-lock gate's asymmetry: briefly
 // over-gating after a rebuild finishes is safe, serving mixed pages is not.
 const defaultFleetCacheTTL = 2 * time.Second
@@ -48,7 +48,9 @@ type Status struct {
 // RebuildSession, woken in-process by the ingest chunk handler and backstopped
 // by a periodic maintenance tick that also grades settled sessions. Multiple
 // instances need no coordination: two rebuilds of one session serialize on its
-// row locks, and whichever binary rebuilds a session last wins.
+// row locks, same-epoch rebuilds are identical so whichever commits last wins,
+// and across a rolling deploy the monotonic due predicate (store.DueSessions)
+// keeps an older binary off sessions a newer one already stamped.
 type Worker struct {
 	st          *store.Store
 	concurrency int
@@ -189,10 +191,9 @@ func (w *Worker) drain(ctx context.Context) {
 		w.beginFleet(staleTotal)
 		log.Printf("parse worker: fleet rebuild starting (%d session(s) behind epoch %d)", staleTotal, Epoch)
 	}
-	// attempted dedups within this drain so a session that fails operationally
-	// (rebuild rolled back, still due) is not retried in a hot loop; the next
-	// wake or tick retries it fresh.
-	attempted := map[int64]bool{}
+	// The drain is one forward keyset pass: afterID only grows, so no session is
+	// visited twice within it, including sessions that fail operationally (still
+	// due, but behind the cursor; the next wake or tick retries them).
 	var done, failed, staleDone int
 	var afterID int64
 	for ctx.Err() == nil {
@@ -207,26 +208,15 @@ func (w *Worker) drain(ctx context.Context) {
 			break
 		}
 		afterID = page[len(page)-1].ID
-		var todo []store.DueSession
-		for _, d := range page {
-			if !attempted[d.ID] {
-				attempted[d.ID] = true
-				todo = append(todo, d)
-			}
-		}
-		d, f, sd := w.rebuildBatch(ctx, todo)
+		d, f, sd := w.rebuildBatch(ctx, page)
 		done += d
 		failed += f
 		staleDone += sd
 		if fleet {
 			// Progress counts only the epoch-stale subset: a fleet drain also picks
 			// up byte-dirty live sessions, and counting those would run Done past
-			// the backlog total. Sessions announced mid-drain start at parser_epoch
-			// 0 and join the backlog instead; the count re-read lets Total grow to
-			// cover them. A count error skips the update; the next page retries.
-			if remaining, err := w.st.EpochStaleCount(ctx, Epoch); err == nil {
-				w.advanceFleet(staleDone, remaining, failed)
-			}
+			// the backlog total counted when the drain began.
+			w.advanceFleet(staleDone, failed)
 		}
 	}
 	if fleet {
@@ -288,8 +278,8 @@ func (w *Worker) rebuildBatch(ctx context.Context, batch []store.DueSession) (do
 				log.Printf("parse worker: session %d (%s): %v", t.ID, t.Agent, err)
 			default:
 				// Operational error: the rebuild rolled back and the session stays due.
-				// The drain's attempted set stops an immediate retry; the next wake or
-				// tick retries it.
+				// The drain's keyset cursor is already past it, so it is not retried in
+				// a hot loop; the next wake or tick retries it.
 				log.Printf("parse worker: session %d (%s): %v", t.ID, t.Agent, err)
 			}
 		}(t)
@@ -367,12 +357,12 @@ func (w *Worker) fleetStaleExists(ctx context.Context) bool {
 	}
 	w.mu.Unlock()
 
-	n, err := w.st.EpochStaleCount(ctx, Epoch)
+	stale, err := w.st.EpochStaleExists(ctx, Epoch)
 	if err != nil {
 		return false
 	}
 	w.mu.Lock()
-	if n > 0 {
+	if stale {
 		w.fleetStale = true
 		w.fleetCheckedAt = time.Now()
 	} else {
@@ -380,7 +370,7 @@ func (w *Worker) fleetStaleExists(ctx context.Context) bool {
 		w.fleetCheckedAt = time.Time{}
 	}
 	w.mu.Unlock()
-	return n > 0
+	return stale
 }
 
 func (w *Worker) beginFleet(total int) {
@@ -390,14 +380,19 @@ func (w *Worker) beginFleet(total int) {
 	w.emit()
 }
 
-// advanceFleet publishes fleet progress: done epoch-stale rebuilds completed,
-// remaining still in the backlog. Total grows when done+remaining outruns it
-// (sessions announced mid-drain join the backlog), so Done never overtakes it
-// and both stay monotone for a watching progress stream.
-func (w *Worker) advanceFleet(done, remaining, failed int) {
+// advanceFleet publishes fleet progress from completion counts alone: done is
+// how many epoch-stale rebuilds this drain has finished against the backlog
+// total counted once when it began. Sessions announced mid-drain start at
+// parser_epoch 0 with higher ids, so the same keyset pass reaches them; their
+// completions can push done past the opening total, and Total grows to cover
+// them. Counting completions instead of re-counting the backlog per page keeps
+// a fleet drain's progress bookkeeping O(pages) rather than re-scanning the
+// stale set every page, and both numbers stay monotone for a watching
+// progress stream.
+func (w *Worker) advanceFleet(done, failed int) {
 	w.mu.Lock()
-	if done+remaining > w.status.Total {
-		w.status.Total = done + remaining
+	if done > w.status.Total {
+		w.status.Total = done
 	}
 	w.status.Done = done
 	w.status.Failed = failed

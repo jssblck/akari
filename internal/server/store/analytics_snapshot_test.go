@@ -213,4 +213,15 @@ func TestAnalyticsSnapshotSkipsDuringRebuild(t *testing.T) {
 	if _, ok, err := st.AnalyticsSnapshot(ctx, filter); err != nil || !ok {
 		t.Fatalf("snapshot with a failed-at-current-epoch session: ok=%v err=%v, want ok=true (gate must not wedge)", ok, err)
 	}
+
+	// New bytes un-pin the failure: the worker now has a concrete rebuild path at
+	// the running epoch (the appended tail might parse), so the session is due
+	// again and the gate must agree and decline rather than declaring the corpus
+	// current while that rebuild is pending.
+	if _, err := st.AppendChunk(ctx, ann.SessionID, int64(len("bad bytes\n")), []byte("more bytes\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := st.AnalyticsSnapshot(ctx, filter); err != nil || ok {
+		t.Fatalf("snapshot after appending to the failed session: ok=%v err=%v, want ok=false (a current-epoch rebuild is pending)", ok, err)
+	}
 }

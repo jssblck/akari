@@ -332,15 +332,17 @@ func (s *Store) ProjectCardSnapshot(ctx context.Context, f AnalyticsFilter) (a A
 // snapshot is a single-epoch corpus and a rebuild that starts later cannot alter it. It
 // deliberately does NOT gate on byte-dirtiness (parsed_byte_len <> byte_len): a live
 // session's not-yet-rebuilt append is ordinary steady state, not a corpus-wide mix, and
-// gating on it would flap the cards on every active instance. A session whose parse
-// failed at the running epoch is excluded the same way EpochStaleCount excludes it: its
-// projection is permanently behind (the drain can never advance it), so gating on it
-// would blank the cards forever rather than for the duration of a rebuild.
+// gating on it would flap the cards on every active instance.
 //
-// The check is written as two range predicates rather than parser_epoch <> $1 so the btree
-// index on parser_epoch serves it; in steady state (every row at the running epoch) both
-// ranges are empty and the EXISTS is an index-only touch. An unset epoch (0, a store wired
-// without SetParserEpoch, as in tests) gates nothing.
+// The check is EpochStaleCount's predicate verbatim (behind the running epoch, minus
+// failures pinned by parseFailurePinned), so the gate and the drain agree exactly: any
+// session the worker still has a rebuild path for gates the snapshot, and a session it
+// can never advance (a failure pinned to the current bytes and epoch) does not, since
+// gating on that would blank the cards forever rather than for the duration of a
+// rebuild. New bytes on a failed session un-pin it for both at once. In steady state
+// (every row at the running epoch) the range is empty and the EXISTS is an index-only
+// touch. An unset epoch (0, a store wired without SetParserEpoch, as in tests) gates
+// nothing.
 func (s *Store) epochGatedSnapshot(ctx context.Context, fn func(tx pgx.Tx) error) (ok bool, err error) {
 	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
@@ -353,8 +355,8 @@ func (s *Store) epochGatedSnapshot(ctx context.Context, fn func(tx pgx.Tx) error
 		if err := tx.QueryRow(ctx,
 			`SELECT EXISTS (
 			   SELECT 1 FROM session_raw
-			   WHERE (parser_epoch < $1 OR parser_epoch > $1)
-			     AND (parse_error = '' OR parse_error_epoch <> $1)
+			   WHERE parser_epoch < $1
+			     AND NOT `+parseFailurePinned("")+`
 			 )`, s.parserEpoch).Scan(&stale); err != nil {
 			return false, fmt.Errorf("check epoch staleness in snapshot: %w", err)
 		}

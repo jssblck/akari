@@ -482,8 +482,13 @@ in atomically.
 **Dirty tracking.** `session_raw` carries two bookkeeping columns beside the raw
 cursor: `parsed_byte_len`, the raw length the last successful rebuild covered,
 and `parser_epoch`, the `parse.Epoch` it ran at. A session is due when
-`parsed_byte_len <> byte_len` or when `parser_epoch` differs from the running
-binary's constant. An append makes a session due by construction (it grows
+`parsed_byte_len <> byte_len` or when `parser_epoch` is behind the running
+binary's constant. The epoch comparison is monotonic on purpose: a session
+stamped ahead of the running epoch (a newer binary's work, seen by the older
+binary during a rolling deploy) is never due, even when byte-dirty, so an old
+worker cannot rebuild it back down to the older parser; the newer instance
+picks up its appends on its next wake or tick. An append makes a session due
+by construction (it grows
 `byte_len`), so there is no flag to race on: a chunk that lands while a rebuild
 is committing leaves the comparison unequal and the session is simply rebuilt
 again. A deploy with a bumped epoch makes the whole corpus due the same way,
@@ -535,10 +540,13 @@ scoring). The due scan skips the session only while the recorded failure
 matches its current bytes and the running epoch, so it neither hot-loops on the
 same bad bytes nor goes silent forever: new bytes or a bumped epoch retry it.
 The epoch-staleness gates (the fleet progress count, the OG-card snapshot
-check) likewise exclude sessions that already failed at the running epoch,
-since the drain can never advance them and counting them would wedge the gate
-short of done. An operational error (a store or CAS failure, a shutdown)
-records nothing, so the next drain retries it.
+check) exclude failed sessions with the exact same predicate the due scan
+uses (same bytes, same epoch), so "due" and "gated" can never drift apart:
+a pinned failure is invisible to both (counting it would wedge the gate short
+of done, since the drain can never advance it), and new bytes readmit the
+session to the scan and the gates in the same instant. An operational error
+(a store or CAS failure, a shutdown) records nothing, so the next drain
+retries it.
 
 **Scheduling.** The worker drains due sessions continuously, woken in-process
 by the chunk handler and backstopped by the periodic maintenance tick that also
@@ -547,9 +555,12 @@ is one wake plus one rebuild, so SSE viewers see a session grow within a moment
 of its chunks landing, and a burst of chunks coalesces into a few rebuilds
 instead of paying a parse per chunk. Distinct sessions rebuild on a small pool;
 two rebuilds of one session serialize on its row locks. Multiple server
-instances need no coordination: whichever rebuilds a session last wins, an
-older binary's stamp reads as due to a newer binary, and a rolling deploy
-converges on the newest epoch because the newest binary outlives the rest.
+instances need no coordination. At one epoch, two rebuilds of a session are
+identical, so whichever commits last wins. Across a rolling deploy the
+monotonic due predicate keeps the binaries out of each other's way: the older
+binary skips sessions the newer one already stamped, the newer binary sees the
+older stamps as due, and the corpus converges on the newest epoch because the
+newest binary outlives the rest.
 
 **The epoch.** `parse.Epoch` is the single version constant for everything
 derived from raw bytes. Bump it in the same commit as any change to parser or

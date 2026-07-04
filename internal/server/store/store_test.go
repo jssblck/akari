@@ -532,10 +532,16 @@ func TestRebuildSessionCursorAndReplace(t *testing.T) {
 	if isDue(testEpoch) {
 		t.Fatal("rebuilt session still reads as due")
 	}
-	// The same session is due again under any other epoch: that is how a bumped
-	// binary rolls a parser change over the corpus.
+	// The same session is due again under a LATER epoch: that is how a bumped
+	// binary rolls a parser change over the corpus. It is NOT due under an
+	// earlier one: during a rolling deploy the not-yet-updated binary must leave
+	// sessions the new binary already stamped alone rather than rebuilding them
+	// with the older parser and downgrading the projection.
 	if !isDue(testEpoch + 1) {
-		t.Fatal("session should be due under a different epoch")
+		t.Fatal("session should be due under a later epoch")
+	}
+	if isDue(testEpoch - 1) {
+		t.Fatal("session stamped ahead of the running epoch must not be due: an old binary would downgrade it")
 	}
 
 	// A second rebuild replaces the projection wholesale: one message, different
@@ -557,12 +563,17 @@ func TestRebuildSessionCursorAndReplace(t *testing.T) {
 		t.Fatalf("after replace: rows=%d message_count=%d user=%d input=%d, want 1, 1, 0, 7", rows, mc, umc, in)
 	}
 
-	// New bytes make it due again.
+	// New bytes make it due again, but still only at (or above) the epoch that
+	// stamped it: even a byte-dirty session is off-limits to an older binary,
+	// which would otherwise reparse the whole session with the older parser.
 	if _, err := st.AppendChunk(ctx, ann.SessionID, int64(len(raw)), []byte("line three\n")); err != nil {
 		t.Fatal(err)
 	}
 	if !isDue(testEpoch) {
 		t.Fatal("session with appended bytes should be due again")
+	}
+	if isDue(testEpoch - 1) {
+		t.Fatal("byte-dirty session stamped ahead of the running epoch must wait for the newer binary")
 	}
 }
 
