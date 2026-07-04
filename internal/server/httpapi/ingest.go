@@ -100,6 +100,12 @@ func (s *Server) handleAnnounce(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "announce session")
 		return
 	}
+	// A fresh announce creates a session_raw row at parser_epoch 0, which is due
+	// (the rebuild stamps the epoch even over zero bytes). Chunks normally follow
+	// and their wakes cover it, but an announce that no chunk ever follows (a
+	// client that dies, a transcript with nothing to upload yet) must not depend
+	// on the maintenance tick, which can be disabled, to leave the due set.
+	s.worker.Wake()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"session_id":    res.SessionID,
 		"stored_bytes":  res.StoredBytes,
@@ -194,6 +200,12 @@ func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "reset session")
 		return
 	}
+	// The reset put the session back at parser_epoch 0 (due). The client usually
+	// re-uploads immediately and those chunk wakes cover it, but a reset that no
+	// chunk follows (a file truncated to zero) must drain without relying on the
+	// maintenance tick, or the session would sit epoch-stale and hold the fleet
+	// gate up.
+	s.worker.Wake()
 	writeJSON(w, http.StatusOK, map[string]any{"stored_bytes": 0})
 }
 

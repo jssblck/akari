@@ -58,8 +58,14 @@ func attemptedEpoch(tbl string) string {
 // recorded failure covers its current bytes at the running epoch or above:
 // retrying identical input at the same epoch would fail identically, and an
 // attempt recorded ahead of the running epoch belongs to a newer binary. New
-// bytes or a bumped epoch retry it. Operational failures record nothing and
-// stay due for the next drain.
+// bytes or a bumped epoch retry it. An operational failure records nothing
+// about the parse, but the worker defers the session's next attempt
+// (RecordRebuildBackoff), and the scan honors that deferral so a backlog of
+// persistent operational failures is not re-attempted on every chunk wake. The
+// epoch-staleness gates deliberately do NOT honor it: a backing-off rebuild is
+// deferred, not cancelled, so the corpus is still mixed and the gate staying
+// up is the honest answer (the safe direction of asymmetry; the gates must
+// never read done while the scan still has work).
 func (s *Store) DueSessions(ctx context.Context, epoch int, afterID int64, limit int) ([]DueSession, error) {
 	rows, err := s.Pool.Query(ctx,
 		`SELECT sr.session_id, s.agent, `+attemptedEpoch("sr.")+` < $1 AS epoch_stale
@@ -71,6 +77,7 @@ func (s *Store) DueSessions(ctx context.Context, epoch int, afterID int64, limit
 		    AND (sr.parse_error = ''
 		         OR sr.parse_error_byte_len <> sr.byte_len
 		         OR sr.parse_error_epoch < $1)
+		    AND (sr.parse_retry_at IS NULL OR sr.parse_retry_at <= now())
 		  ORDER BY sr.session_id
 		  LIMIT $3`, epoch, afterID, limit)
 	if err != nil {
@@ -127,6 +134,29 @@ func (s *Store) EpochStaleExists(ctx context.Context, epoch int) (bool, error) {
 	return stale, nil
 }
 
+// RecordRebuildBackoff defers a session's next rebuild attempt after an
+// operational failure (the rebuild rolled back; the session is still due). It
+// runs in its own transaction, after the failed one, and is best-effort: if
+// this write fails too, the session simply retries on the next wake, which is
+// the pre-backoff behavior. The deferral doubles on consecutive failures, from
+// 30 seconds to a one-hour ceiling, so a failure that does not clear on its
+// own (a CAS blob the client never uploaded) costs the drain one attempt per
+// backoff window instead of one per chunk wake. Everything that changes the
+// situation clears the marker for an immediate retry: a successful rebuild, a
+// recorded deterministic failure, new bytes, a raw reset, an operator reparse.
+func (s *Store) RecordRebuildBackoff(ctx context.Context, sessionID int64) error {
+	// SET expressions all read the OLD row, so both columns derive the new
+	// backoff from the same pre-update value.
+	if _, err := s.Pool.Exec(ctx,
+		`UPDATE session_raw
+		    SET parse_retry_backoff_secs = LEAST(GREATEST(parse_retry_backoff_secs * 2, 30), 3600),
+		        parse_retry_at = now() + make_interval(secs => LEAST(GREATEST(parse_retry_backoff_secs * 2, 30), 3600))
+		  WHERE session_id = $1`, sessionID); err != nil {
+		return fmt.Errorf("record rebuild backoff for session %d: %w", sessionID, err)
+	}
+	return nil
+}
+
 // MarkEpochStale forces a rebuild of every session (or one agent's sessions) by
 // resetting their stored parser_epoch to 0, which is behind every real epoch.
 // It is how the admin Reparse button and the `akari-server reparse` CLI
@@ -136,7 +166,8 @@ func (s *Store) EpochStaleExists(ctx context.Context, epoch int) (bool, error) {
 // attempt (and re-record their failure if the bytes still do not parse). It
 // returns how many sessions were marked.
 func (s *Store) MarkEpochStale(ctx context.Context, agent string) (int, error) {
-	q := `UPDATE session_raw sr SET parser_epoch = 0, parse_error_epoch = 0, parse_error_byte_len = 0`
+	q := `UPDATE session_raw sr SET parser_epoch = 0, parse_error_epoch = 0, parse_error_byte_len = 0,
+	                                parse_retry_at = NULL, parse_retry_backoff_secs = 0`
 	var args []any
 	if agent != "" {
 		q += ` FROM sessions s WHERE s.id = sr.session_id AND s.agent = $1`

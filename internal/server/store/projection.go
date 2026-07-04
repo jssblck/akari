@@ -225,9 +225,13 @@ func (s *Store) RebuildSession(ctx context.Context, sessionID int64, epoch int, 
 				// let the prior projection read as current after an epoch bump. The
 				// markers are what keep the due scan from hot-looping on the same bad
 				// bytes; new bytes or a new epoch no longer match them and retry.
+				// The pin supersedes any operational backoff: the due scan now skips
+				// on the markers alone, and the next retryable state (new bytes, a
+				// new epoch) deserves an immediate attempt.
 				if _, serr := tx.Exec(ctx,
 					`UPDATE session_raw
-					    SET parse_error = $2, parse_error_epoch = $3, parse_error_byte_len = $4
+					    SET parse_error = $2, parse_error_epoch = $3, parse_error_byte_len = $4,
+					        parse_retry_at = NULL, parse_retry_backoff_secs = 0
 					  WHERE session_id = $1`,
 					sessionID, sanitizeText(feedErr.Error()), epoch, byteLen); serr != nil {
 					return fmt.Errorf("record parse error for session %d: %w", sessionID, serr)
@@ -340,7 +344,8 @@ func rebuildTx(ctx context.Context, tx pgx.Tx, sessionID int64, epoch int, byteL
 	if _, err := tx.Exec(ctx,
 		`UPDATE session_raw
 		    SET parsed_byte_len = $2, parser_epoch = $3,
-		        parse_error = '', parse_error_epoch = 0, parse_error_byte_len = 0
+		        parse_error = '', parse_error_epoch = 0, parse_error_byte_len = 0,
+		        parse_retry_at = NULL, parse_retry_backoff_secs = 0
 		  WHERE session_id = $1`,
 		sessionID, byteLen, epoch); err != nil {
 		return fmt.Errorf("stamp parse cursor for session %d: %w", sessionID, err)

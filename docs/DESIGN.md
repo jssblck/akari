@@ -550,7 +550,13 @@ epochs, outside the behind-range the hot probes scan, so probe cost tracks
 the actual backlog rather than the accumulated failure history. New bytes
 break the pin and readmit the session to the scan and the gates in the same
 instant. An operational error (a store or CAS failure, a shutdown) records
-nothing, so the next drain retries it.
+nothing about the parse, but the worker defers the session's next attempt with
+a doubling backoff (30s to a 1h ceiling): the session must not fall out of the
+due set (the failure may clear on its own), yet a persistent one (a CAS blob
+the client never uploaded) must not be re-attempted on every chunk wake, since
+each wake drains the whole due set. New bytes, a reset, or an operator reparse
+clear the deferral for an immediate retry; the epoch gates ignore it (deferred
+is not done).
 
 **Scheduling.** The worker drains due sessions continuously, woken in-process
 by the chunk handler and backstopped by the periodic maintenance tick that also
@@ -751,6 +757,8 @@ CREATE TABLE session_raw (
   parse_error     TEXT NOT NULL DEFAULT '',     -- last deterministic parse failure, '' when clean
   parse_error_epoch    INT NOT NULL DEFAULT 0,     -- epoch that failure was attempted at
   parse_error_byte_len BIGINT NOT NULL DEFAULT 0,  -- raw length that failure covered
+  parse_retry_at           TIMESTAMPTZ,            -- operational-failure backoff: due scan skips until then
+  parse_retry_backoff_secs INT NOT NULL DEFAULT 0, -- doubles per consecutive failure, 30s..1h
   CHECK (parsed_byte_len <= byte_len)
 );
 -- The attempted epoch (parser_epoch, raised to parse_error_epoch while the

@@ -1,0 +1,21 @@
+-- 0045: back off operational rebuild failures.
+--
+-- An operational rebuild failure (a store or CAS error: the transaction rolled
+-- back, nothing was recorded) leaves the session due, which is the retry path.
+-- But every chunk wake drains the WHOLE due set, so a backlog of sessions
+-- whose operational failure does not clear on its own (the classic case is a
+-- CAS blob the client lifted but never uploaded) was re-attempted on every
+-- unrelated append, and that backlog can grow with the corpus. The retry
+-- marker makes the due scan skip a failed session until its backoff elapses,
+-- doubling from 30s to a 1h ceiling on consecutive failures.
+--
+-- Anything that changes the situation clears the marker for an immediate
+-- retry: a successful rebuild, a recorded deterministic failure (the pin
+-- supersedes the backoff), new bytes (the re-sync that finally uploads a
+-- missing blob also appends), a raw reset, and an operator reparse.
+--
+-- The epoch-staleness gates deliberately ignore the marker: a backing-off
+-- rebuild is deferred, not cancelled, so the corpus is still mixed and the
+-- gate staying up is the honest answer.
+ALTER TABLE session_raw ADD COLUMN parse_retry_at TIMESTAMPTZ;
+ALTER TABLE session_raw ADD COLUMN parse_retry_backoff_secs INT NOT NULL DEFAULT 0;

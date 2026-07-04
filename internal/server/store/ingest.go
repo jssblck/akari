@@ -499,9 +499,13 @@ func (s *Store) AppendChunk(ctx context.Context, sessionID, offset int64, data [
 			sessionID, offset, int64(len(data)), data); err != nil {
 			return fmt.Errorf("insert raw chunk for session %d at offset %d: %w", sessionID, offset, err)
 		}
+		// New bytes clear any operational-failure backoff: the situation changed
+		// (a re-sync that finally uploaded a missing CAS blob also appends), so
+		// the wake this append triggers should retry immediately.
 		if _, err := tx.Exec(ctx,
 			`UPDATE session_raw
-			    SET byte_len = $2, content_sha256 = $3, sha256_state = $4
+			    SET byte_len = $2, content_sha256 = $3, sha256_state = $4,
+			        parse_retry_at = NULL, parse_retry_backoff_secs = 0
 			  WHERE session_id = $1`,
 			sessionID, newStoredBytes, hex.EncodeToString(h.Sum(nil)), newState); err != nil {
 			return fmt.Errorf("advance raw cursor and hash for session %d: %w", sessionID, err)
@@ -557,14 +561,17 @@ func (s *Store) ResetRaw(ctx context.Context, sessionID int64) error {
 				return fmt.Errorf("reset session %d (%s): %w", sessionID, q, err)
 			}
 		}
-		// parser_epoch 0 differs from every real epoch, so the session reads as due
+		// parser_epoch 0 sits behind every real epoch, so the session reads as due
 		// and the worker rebuilds (to an empty projection if no bytes ever arrive,
-		// re-stamping the epoch either way).
+		// re-stamping the epoch either way). The failure markers and any
+		// operational backoff clear with it: the reset changed the situation, so
+		// the next attempt is immediate.
 		_, err := tx.Exec(ctx,
 			`UPDATE session_raw
 			    SET byte_len = 0, content_sha256 = $2, sha256_state = NULL,
 			        parsed_byte_len = 0, parser_epoch = 0,
-			        parse_error = '', parse_error_epoch = 0, parse_error_byte_len = 0
+			        parse_error = '', parse_error_epoch = 0, parse_error_byte_len = 0,
+			        parse_retry_at = NULL, parse_retry_backoff_secs = 0
 			  WHERE session_id = $1`, sessionID, emptySHA256)
 		if err != nil {
 			return fmt.Errorf("reset raw cursor for session %d: %w", sessionID, err)

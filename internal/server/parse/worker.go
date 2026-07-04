@@ -284,6 +284,15 @@ func (w *Worker) rebuildBatch(ctx context.Context, batch []store.DueSession) (do
 			defer wg.Done()
 			defer func() { <-sem }()
 			err := Rebuild(ctx, w.st, t.ID, t.Agent)
+			if err != nil && ctx.Err() == nil && !isParserError(err) {
+				// Operational failure: defer the retry so a persistent one (a CAS
+				// blob that never arrives) is not re-attempted on every chunk wake.
+				// Best-effort by design: if this write fails too, the session simply
+				// retries on the next wake, the pre-backoff behavior.
+				if berr := w.st.RecordRebuildBackoff(ctx, t.ID); berr != nil {
+					log.Printf("parse worker: session %d (%s): %v", t.ID, t.Agent, berr)
+				}
+			}
 			mu.Lock()
 			defer mu.Unlock()
 			switch {

@@ -389,3 +389,130 @@ func TestEpochGatesAgreeWithDueScan(t *testing.T) {
 	check(testEpoch, false, false, "byte-dirty but failed by a newer binary")
 	check(testEpoch+2, true, true, "a further epoch bump retries the failure")
 }
+
+// TestRebuildBackoffDefersDueRetry pins the operational-failure backoff: the
+// deferral takes the session out of the due scan (so a persistent failure is
+// not re-attempted on every chunk wake) without touching the epoch gates (the
+// rebuild is deferred, not cancelled, so the corpus is still honestly mixed),
+// it doubles to a ceiling on consecutive failures, and every event that
+// changes the situation (new bytes, an operator reparse, a successful rebuild)
+// clears it for an immediate retry.
+func TestRebuildBackoffDefersDueRetry(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	uid, err := st.Register(ctx, "grace", "hash", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	pid, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatalf("upsert project: %v", err)
+	}
+	ann, err := st.Announce(ctx, store.AnnounceParams{
+		UserID: uid.ID, Agent: "claude", SourceSessionID: "backoff", ProjectID: pid,
+	})
+	if err != nil {
+		t.Fatalf("announce: %v", err)
+	}
+	sid := ann.SessionID
+	raw := "first line\n"
+	if _, err := st.AppendChunk(ctx, sid, 0, []byte(raw)); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+
+	isDue := func() bool {
+		t.Helper()
+		due, err := st.DueSessions(ctx, testEpoch, 0, 100)
+		if err != nil {
+			t.Fatalf("due scan: %v", err)
+		}
+		for _, d := range due {
+			if d.ID == sid {
+				return true
+			}
+		}
+		return false
+	}
+	backoffSecs := func() int {
+		t.Helper()
+		var secs int
+		if err := st.Pool.QueryRow(ctx,
+			`SELECT parse_retry_backoff_secs FROM session_raw WHERE session_id = $1`, sid).Scan(&secs); err != nil {
+			t.Fatalf("read backoff: %v", err)
+		}
+		return secs
+	}
+
+	if !isDue() {
+		t.Fatal("fresh session with bytes should be due")
+	}
+	if err := st.RecordRebuildBackoff(ctx, sid); err != nil {
+		t.Fatalf("record backoff: %v", err)
+	}
+	if isDue() {
+		t.Fatal("backing-off session must leave the due scan until the deferral elapses")
+	}
+	if got := backoffSecs(); got != 30 {
+		t.Fatalf("first backoff = %ds, want 30", got)
+	}
+	// The gates ignore the deferral: the rebuild is still pending work.
+	if n, err := st.EpochStaleCount(ctx, testEpoch); err != nil || n != 1 {
+		t.Fatalf("EpochStaleCount with a backing-off session = %d (err %v), want 1 (deferred, not cancelled)", n, err)
+	}
+	// Consecutive failures double toward the ceiling.
+	if err := st.RecordRebuildBackoff(ctx, sid); err != nil {
+		t.Fatal(err)
+	}
+	if got := backoffSecs(); got != 60 {
+		t.Fatalf("second backoff = %ds, want 60", got)
+	}
+	if _, err := st.Pool.Exec(ctx,
+		`UPDATE session_raw SET parse_retry_backoff_secs = 3000 WHERE session_id = $1`, sid); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordRebuildBackoff(ctx, sid); err != nil {
+		t.Fatal(err)
+	}
+	if got := backoffSecs(); got != 3600 {
+		t.Fatalf("clamped backoff = %ds, want the 3600 ceiling", got)
+	}
+
+	// New bytes clear the deferral: the situation changed, retry now.
+	if _, err := st.AppendChunk(ctx, sid, int64(len(raw)), []byte("second line\n")); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if !isDue() {
+		t.Fatal("new bytes should clear the backoff and retry immediately")
+	}
+	if got := backoffSecs(); got != 0 {
+		t.Fatalf("backoff after append = %ds, want 0", got)
+	}
+
+	// An operator reparse clears it too.
+	if err := st.RecordRebuildBackoff(ctx, sid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.MarkEpochStale(ctx, ""); err != nil {
+		t.Fatal(err)
+	}
+	if !isDue() {
+		t.Fatal("MarkEpochStale should clear the backoff for a fresh attempt")
+	}
+
+	// A successful rebuild clears both columns.
+	if err := st.RecordRebuildBackoff(ctx, sid); err != nil {
+		t.Fatal(err)
+	}
+	rebuildWith(t, st, sid, store.ProjectionDelta{})
+	var retryAt any
+	var secs int
+	if err := st.Pool.QueryRow(ctx,
+		`SELECT parse_retry_at, parse_retry_backoff_secs FROM session_raw WHERE session_id = $1`, sid).Scan(&retryAt, &secs); err != nil {
+		t.Fatal(err)
+	}
+	if retryAt != nil || secs != 0 {
+		t.Fatalf("successful rebuild left backoff state (retry_at=%v secs=%d), want cleared", retryAt, secs)
+	}
+}

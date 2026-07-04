@@ -185,16 +185,40 @@ func TestWorkerDrainReportsOperationalFailure(t *testing.T) {
 	if status.Failed != 0 {
 		t.Fatalf("status.Failed = %d, want 0 (an operational failure is not a recorded parser failure)", status.Failed)
 	}
-	due, derr := st.DueSessions(ctx, Epoch, 0, 10)
-	if derr != nil {
-		t.Fatal(derr)
+	// The failure recorded a retry backoff, so the session is deferred (not in
+	// the due scan right now) but the work is still incomplete and the retry
+	// path is intact: once the backoff elapses it is due again.
+	isDue := func() bool {
+		t.Helper()
+		due, err := st.DueSessions(ctx, Epoch, 0, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range due {
+			if d.ID == sid {
+				return true
+			}
+		}
+		return false
 	}
-	stillDue := false
-	for _, d := range due {
-		stillDue = stillDue || d.ID == sid
+	if isDue() {
+		t.Fatal("operationally-failed session should be backing off, not immediately due (it would retry on every wake)")
 	}
-	if !stillDue {
-		t.Fatal("operationally-failed session left the due set; the retry path is gone")
+	var parsed, byteLen int64
+	if err := st.Pool.QueryRow(ctx,
+		`SELECT parsed_byte_len, byte_len FROM session_raw WHERE session_id = $1
+		    AND parse_retry_at > now()`, sid).Scan(&parsed, &byteLen); err != nil {
+		t.Fatalf("read backoff state: %v (want a future parse_retry_at)", err)
+	}
+	if parsed == byteLen {
+		t.Fatal("operational failure advanced the parse cursor; the work would read as done")
+	}
+	if _, err := st.Pool.Exec(ctx,
+		`UPDATE session_raw SET parse_retry_at = now() - interval '1 second' WHERE session_id = $1`, sid); err != nil {
+		t.Fatal(err)
+	}
+	if !isDue() {
+		t.Fatal("operationally-failed session not due after its backoff elapsed; the retry path is gone")
 	}
 }
 
