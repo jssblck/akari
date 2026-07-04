@@ -332,7 +332,10 @@ func (s *Store) ProjectCardSnapshot(ctx context.Context, f AnalyticsFilter) (a A
 // snapshot is a single-epoch corpus and a rebuild that starts later cannot alter it. It
 // deliberately does NOT gate on byte-dirtiness (parsed_byte_len <> byte_len): a live
 // session's not-yet-rebuilt append is ordinary steady state, not a corpus-wide mix, and
-// gating on it would flap the cards on every active instance.
+// gating on it would flap the cards on every active instance. A session whose parse
+// failed at the running epoch is excluded the same way EpochStaleCount excludes it: its
+// projection is permanently behind (the drain can never advance it), so gating on it
+// would blank the cards forever rather than for the duration of a rebuild.
 //
 // The check is written as two range predicates rather than parser_epoch <> $1 so the btree
 // index on parser_epoch serves it; in steady state (every row at the running epoch) both
@@ -350,7 +353,8 @@ func (s *Store) epochGatedSnapshot(ctx context.Context, fn func(tx pgx.Tx) error
 		if err := tx.QueryRow(ctx,
 			`SELECT EXISTS (
 			   SELECT 1 FROM session_raw
-			   WHERE parser_epoch < $1 OR parser_epoch > $1
+			   WHERE (parser_epoch < $1 OR parser_epoch > $1)
+			     AND (parse_error = '' OR parse_error_epoch <> $1)
 			 )`, s.parserEpoch).Scan(&stale); err != nil {
 			return false, fmt.Errorf("check epoch staleness in snapshot: %w", err)
 		}

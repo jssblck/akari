@@ -19,15 +19,16 @@ type DueSession struct {
 // the afterID keyset cursor, in id order. A session is due when the last
 // successful rebuild did not cover its current bytes (parsed_byte_len <>
 // byte_len) or ran at a different epoch. The epoch inequality is written as two
-// range predicates so the parser_epoch btree serves it; the byte comparison has
-// no index, but the epoch index carries the fleet-rebuild case and the byte
-// case is bounded by the live-session set the worker was just woken for.
+// range predicates so the parser_epoch btree serves it, and the byte comparison
+// is carried by the partial index on dirty rows (near-empty in steady state),
+// so the every-chunk wake never scans the corpus.
 //
-// The scan deliberately has no "attempted" filter: a deterministic parse
-// failure stamps the session's bookkeeping as consumed (see RebuildSession), so
-// it leaves this set on its own, and an operational failure should be retried.
-// The worker dedups within one drain pass to avoid hot-looping on a session
-// that fails operationally.
+// A session whose last attempt failed deterministically is skipped only while
+// the recorded failure matches its current bytes and the running epoch (see
+// RebuildSession): retrying identical input at the same epoch would fail
+// identically, but new bytes or a new epoch retry it. Operational failures
+// record nothing and stay due; the worker dedups within one drain pass to avoid
+// hot-looping on those.
 func (s *Store) DueSessions(ctx context.Context, epoch int, afterID int64, limit int) ([]DueSession, error) {
 	rows, err := s.Pool.Query(ctx,
 		`SELECT sr.session_id, s.agent, sr.parser_epoch <> $1 AS epoch_stale
@@ -36,6 +37,9 @@ func (s *Store) DueSessions(ctx context.Context, epoch int, afterID int64, limit
 		  WHERE sr.session_id > $2
 		    AND (sr.parsed_byte_len <> sr.byte_len
 		         OR sr.parser_epoch < $1 OR sr.parser_epoch > $1)
+		    AND NOT (sr.parse_error <> ''
+		             AND sr.parse_error_epoch = $1
+		             AND sr.parse_error_byte_len = sr.byte_len)
 		  ORDER BY sr.session_id
 		  LIMIT $3`, epoch, afterID, limit)
 	if err != nil {
@@ -57,16 +61,21 @@ func (s *Store) DueSessions(ctx context.Context, epoch int, afterID int64, limit
 }
 
 // EpochStaleCount counts the sessions whose projection was last rebuilt at a
-// different epoch than the running one. A nonzero count means a fleet rebuild
-// is draining (a deploy with a bumped epoch, a first boot after the pipeline
-// migration, or an operator-marked scope), which is what the parsed-page gate
-// and the rebuild progress bar key on. The inequality is written as two ranges
-// so the parser_epoch btree serves it; in steady state both ranges are empty.
+// different epoch than the running one and can still be rebuilt at it. A
+// nonzero count means a fleet rebuild is draining (a deploy with a bumped
+// epoch, a first boot after the pipeline migration, or an operator-marked
+// scope), which is what the parsed-page gate and the rebuild progress bar key
+// on. A session whose parse already failed at the running epoch is excluded:
+// its projection stays honestly behind, but the drain can never advance it, so
+// counting it would wedge the gate and the bar short of done forever. The
+// inequality is written as two ranges so the parser_epoch btree serves it; in
+// steady state both ranges are empty.
 func (s *Store) EpochStaleCount(ctx context.Context, epoch int) (int, error) {
 	var n int
 	if err := s.Pool.QueryRow(ctx,
 		`SELECT count(*) FROM session_raw
-		  WHERE parser_epoch < $1 OR parser_epoch > $1`, epoch).Scan(&n); err != nil {
+		  WHERE (parser_epoch < $1 OR parser_epoch > $1)
+		    AND (parse_error = '' OR parse_error_epoch <> $1)`, epoch).Scan(&n); err != nil {
 		return 0, fmt.Errorf("count epoch-stale sessions: %w", err)
 	}
 	return n, nil
@@ -76,9 +85,12 @@ func (s *Store) EpochStaleCount(ctx context.Context, epoch int) (int, error) {
 // resetting their stored parser_epoch to 0, which differs from every real
 // epoch. It is how the admin Reparse button and the `akari-server reparse` CLI
 // trigger a fleet rebuild: mark the scope due, wake the worker, and the
-// ordinary drain does the rest. It returns how many sessions were marked.
+// ordinary drain does the rest. The failure markers reset too: the operator
+// asked for the whole scope, so previously failed sessions get one fresh
+// attempt (and re-record their failure if the bytes still do not parse). It
+// returns how many sessions were marked.
 func (s *Store) MarkEpochStale(ctx context.Context, agent string) (int, error) {
-	q := `UPDATE session_raw sr SET parser_epoch = 0`
+	q := `UPDATE session_raw sr SET parser_epoch = 0, parse_error_epoch = 0, parse_error_byte_len = 0`
 	var args []any
 	if agent != "" {
 		q += ` FROM sessions s WHERE s.id = sr.session_id AND s.agent = $1`

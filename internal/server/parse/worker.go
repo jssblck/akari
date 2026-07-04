@@ -61,14 +61,16 @@ type Worker struct {
 	// session due).
 	wake chan struct{}
 
+	mu sync.Mutex
 	// onRebuilt is called after each successful rebuild commits, with the
 	// session id, so the HTTP layer can push an SSE refresh to watching
 	// browsers. onStatus is called whenever the fleet-rebuild status changes,
-	// for the progress stream. Both are set once at wiring time, before Run.
-	onRebuilt func(sessionID int64)
-	onStatus  func(Status)
-
-	mu             sync.Mutex
+	// for the progress stream. Both are guarded by mu: they are set at wiring
+	// time, but the worker may already be draining (a fresh migration makes
+	// every session due at boot), so the setters race the drain's reads
+	// without the lock.
+	onRebuilt      func(sessionID int64)
+	onStatus       func(Status)
 	status         Status
 	fleetCheckedAt time.Time
 	fleetStale     bool
@@ -91,12 +93,28 @@ func NewWorker(st *store.Store, concurrency int, settleEvery time.Duration) *Wor
 }
 
 // SetRebuiltHook registers the per-session post-rebuild callback (the SSE
-// publish). Set once at wiring time, before Run.
-func (w *Worker) SetRebuiltHook(fn func(sessionID int64)) { w.onRebuilt = fn }
+// publish). Set once at wiring time.
+func (w *Worker) SetRebuiltHook(fn func(sessionID int64)) {
+	w.mu.Lock()
+	w.onRebuilt = fn
+	w.mu.Unlock()
+}
 
 // SetStatusHook registers the fleet-rebuild progress callback. Set once at
-// wiring time, before Run.
-func (w *Worker) SetStatusHook(fn func(Status)) { w.onStatus = fn }
+// wiring time.
+func (w *Worker) SetStatusHook(fn func(Status)) {
+	w.mu.Lock()
+	w.onStatus = fn
+	w.mu.Unlock()
+}
+
+// rebuiltHook snapshots the rebuilt callback under the lock; rebuildBatch calls
+// it outside the lock so a slow SSE publish never serializes the pool.
+func (w *Worker) rebuiltHook() func(sessionID int64) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.onRebuilt
+}
 
 // Wake nudges the worker to drain. It never blocks: the channel holds one
 // pending signal, and a drain is already guaranteed for anything the buffered
@@ -231,6 +249,7 @@ func (w *Worker) rebuildBatch(ctx context.Context, batch []store.DueSession) (do
 		return 0, 0, 0
 	}
 	sem := make(chan struct{}, w.concurrency)
+	rebuilt := w.rebuiltHook()
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	for _, t := range batch {
@@ -251,16 +270,16 @@ func (w *Worker) rebuildBatch(ctx context.Context, batch []store.DueSession) (do
 				if t.EpochStale {
 					staleDone++
 				}
-				if w.onRebuilt != nil {
-					w.onRebuilt(t.ID)
+				if rebuilt != nil {
+					rebuilt(t.ID)
 				}
 			case ctx.Err() != nil:
 				// Shutdown landed mid-rebuild; the transaction rolled back and the
 				// session stays due for the next start.
 			case isParserError(err):
-				// Deterministic parser failure: the store recorded it on parse_error and
-				// stamped the bookkeeping consumed, so the session has left the due set
-				// until its bytes or the epoch move. The prior projection survives.
+				// Deterministic parser failure: the store recorded the attempt on the
+				// failure markers, so the session has left the due set until its bytes
+				// or the epoch move. The prior projection survives.
 				done++
 				failed++
 				if t.EpochStale {

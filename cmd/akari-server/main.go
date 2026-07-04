@@ -109,6 +109,10 @@ func run() error {
 	// reads while another instance drains a fleet rebuild this process cannot see.
 	st.SetParserEpoch(parse.Epoch)
 	worker := parse.NewWorker(st, cfg.ParseWorkers, cfg.SignalsSettleInterval)
+	// httpapi.New installs the worker's SSE hooks, so it must run before the
+	// worker's first drain can fire them; Run starts further down, right before
+	// the server begins listening.
+	handler := httpapi.New(st, cfg, worker).Routes()
 	workerDone := make(chan struct{})
 	go func() {
 		defer close(workerDone)
@@ -155,7 +159,7 @@ func run() error {
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           httpapi.New(st, cfg, worker).Routes(),
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		// These are absolute deadlines sized for the small, fast requests that make
 		// up almost all traffic. The two large-body routes (chunk uploads up to

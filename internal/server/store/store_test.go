@@ -567,10 +567,13 @@ func TestRebuildSessionCursorAndReplace(t *testing.T) {
 }
 
 // TestRebuildSessionParserErrorStamps pins the deterministic-failure contract: a
-// reducer that rejects the bytes has its error recorded on parse_error with the
-// bookkeeping stamped consumed (so the session leaves the due set instead of
-// hot-looping), the prior projection survives untouched, and the error is still
-// returned to the caller. A later successful rebuild clears the recorded error.
+// reducer that rejects the bytes has the attempt recorded on the failure markers
+// (parse_error plus the epoch and byte length it tried) WITHOUT advancing the
+// last-successful-rebuild bookkeeping, so the surviving projection keeps reading
+// as the epoch that built it. The session leaves the due set only for that exact
+// input and epoch (no hot loop), its signals flip stale, the prior projection
+// survives untouched, and the error is still returned to the caller. A later
+// successful rebuild clears the markers.
 func TestRebuildSessionParserErrorStamps(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -607,18 +610,39 @@ func TestRebuildSessionParserErrorStamps(t *testing.T) {
 		t.Fatalf("rebuild with failing reducer returned %v, want the reducer's error", err)
 	}
 
-	var parsed, byteLen int64
+	var parsed, byteLen, failedLen int64
+	var parserEpoch, failedEpoch int
 	var parseErr string
-	if err := st.Pool.QueryRow(ctx,
-		"SELECT parsed_byte_len, byte_len, parse_error FROM session_raw WHERE session_id=$1",
-		ann.SessionID).Scan(&parsed, &byteLen, &parseErr); err != nil {
-		t.Fatal(err)
+	var signalsStale bool
+	readBookkeeping := func() {
+		t.Helper()
+		if err := st.Pool.QueryRow(ctx,
+			`SELECT sr.parsed_byte_len, sr.byte_len, sr.parser_epoch,
+			        sr.parse_error, sr.parse_error_epoch, sr.parse_error_byte_len,
+			        s.signals_stale
+			   FROM session_raw sr JOIN sessions s ON s.id = sr.session_id
+			  WHERE sr.session_id = $1`,
+			ann.SessionID).Scan(&parsed, &byteLen, &parserEpoch, &parseErr, &failedEpoch, &failedLen, &signalsStale); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if parsed != byteLen {
-		t.Fatalf("failed parse did not stamp consumed: parsed=%d byte_len=%d", parsed, byteLen)
+	readBookkeeping()
+	// The failure recorded what it tried but did not advance the successful-rebuild
+	// bookkeeping: the surviving projection still reads as the epoch that built it,
+	// covering only the bytes it actually parsed.
+	if parsed != int64(len("good line\n")) || parserEpoch != testEpoch {
+		t.Fatalf("failed parse moved the success bookkeeping: parsed=%d parser_epoch=%d, want %d and %d",
+			parsed, parserEpoch, len("good line\n"), testEpoch)
 	}
 	if !strings.Contains(parseErr, "malformed transcript") {
 		t.Fatalf("parse_error = %q, want the reducer's message recorded", parseErr)
+	}
+	if failedEpoch != testEpoch || failedLen != byteLen {
+		t.Fatalf("failure markers = epoch %d len %d, want the attempted epoch %d and byte_len %d",
+			failedEpoch, failedLen, testEpoch, byteLen)
+	}
+	if !signalsStale {
+		t.Fatal("failed parse left signals fresh; the stored grade no longer matches the binary that scores")
 	}
 	var content string
 	if err := st.Pool.QueryRow(ctx,
@@ -628,28 +652,53 @@ func TestRebuildSessionParserErrorStamps(t *testing.T) {
 	if content != "keep me" {
 		t.Fatalf("prior projection disturbed by failed parse: content=%q", content)
 	}
-	due, err := st.DueSessions(ctx, testEpoch, 0, 100)
-	if err != nil {
+	isDue := func(epoch int) bool {
+		t.Helper()
+		due, err := st.DueSessions(ctx, epoch, 0, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range due {
+			if d.ID == ann.SessionID {
+				return true
+			}
+		}
+		return false
+	}
+	if isDue(testEpoch) {
+		t.Fatal("failed session still due at the failed epoch and bytes: it would hot-loop")
+	}
+	// The failed session must not wedge the fleet gates: it is not counted
+	// epoch-stale at the epoch it already failed, but a NEW epoch retries it.
+	if n, err := st.EpochStaleCount(ctx, testEpoch); err != nil || n != 0 {
+		t.Fatalf("EpochStaleCount at the failed epoch = %d (err %v), want 0 (the drain cannot advance it)", n, err)
+	}
+	if !isDue(testEpoch + 1) {
+		t.Fatal("a bumped epoch should retry the failed session")
+	}
+	// New bytes at the failed epoch retry it too (the new tail might parse).
+	if _, err := st.AppendChunk(ctx, ann.SessionID, byteLen, []byte("more bytes\n")); err != nil {
 		t.Fatal(err)
 	}
-	for _, d := range due {
-		if d.ID == ann.SessionID {
-			t.Fatal("failed session still due: it would hot-loop on the same bad bytes")
-		}
+	if !isDue(testEpoch) {
+		t.Fatal("new bytes should retry the failed session at the same epoch")
 	}
 
-	// A successful rebuild (a fixed parser shipping under a new epoch) clears the error.
+	// A successful rebuild (a fixed parser shipping under a new epoch) clears the
+	// markers and stamps the success bookkeeping forward.
 	if err := st.RebuildSession(ctx, ann.SessionID, testEpoch+1, stubReducer{store.ProjectionDelta{
 		Messages: []store.MessageDelta{{Ordinal: 0, Role: "user", Content: "fixed"}},
 	}}); err != nil {
 		t.Fatalf("recovery rebuild: %v", err)
 	}
-	if err := st.Pool.QueryRow(ctx,
-		"SELECT parse_error FROM session_raw WHERE session_id=$1", ann.SessionID).Scan(&parseErr); err != nil {
-		t.Fatal(err)
+	readBookkeeping()
+	if parseErr != "" || failedEpoch != 0 || failedLen != 0 {
+		t.Fatalf("recovery rebuild left failure markers: error=%q epoch=%d len=%d, want all cleared",
+			parseErr, failedEpoch, failedLen)
 	}
-	if parseErr != "" {
-		t.Fatalf("recovery rebuild left parse_error = %q, want cleared", parseErr)
+	if parsed != byteLen || parserEpoch != testEpoch+1 {
+		t.Fatalf("recovery rebuild bookkeeping = parsed %d of %d at epoch %d, want fully covered at %d",
+			parsed, byteLen, parserEpoch, testEpoch+1)
 	}
 }
 

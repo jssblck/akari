@@ -8,9 +8,9 @@ import (
 
 // TestParserErrorClassification confirms the worker can tell a deterministic
 // parser failure apart from an operational one even after the error is wrapped
-// with region context, which is what lets it count the former as consumed (the
-// store stamped the session's bookkeeping with the error recorded) and leave the
-// latter due for the next drain to retry.
+// with region context, which is what lets it count the former as done (the
+// store recorded the attempt on the failure markers) and leave the latter due
+// for the next drain to retry.
 func TestParserErrorClassification(t *testing.T) {
 	cause := errors.New("malformed transcript line")
 	// Wrapped the way RebuildSession wraps a reducer failure: with region context.

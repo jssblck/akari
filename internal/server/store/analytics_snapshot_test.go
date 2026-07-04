@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -191,5 +192,25 @@ func TestAnalyticsSnapshotSkipsDuringRebuild(t *testing.T) {
 	}
 	if a.TotalIn != 100 {
 		t.Fatalf("snapshot TotalIn = %d, want 100", a.TotalIn)
+	}
+
+	// A session that FAILED its rebuild at the running epoch must not wedge the
+	// gate: its projection is permanently behind (the drain cannot advance it),
+	// so the snapshot serves rather than blanking the cards forever. An epoch
+	// bump (a different running epoch) gates again: the failed session gets a
+	// fresh attempt there.
+	if _, err := st.AppendChunk(ctx, ann.SessionID, 0, []byte("bad bytes\n")); err != nil {
+		t.Fatal(err)
+	}
+	rerr := errors.New("malformed transcript")
+	if err := st.RebuildSession(ctx, ann.SessionID, testEpoch, failingReducer{rerr}); !errors.Is(err, rerr) {
+		t.Fatalf("failing rebuild returned %v, want the reducer's error", err)
+	}
+	if _, err := st.Pool.Exec(ctx,
+		"UPDATE session_raw SET parser_epoch = $1 WHERE session_id = $2", testEpoch-1, ann.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := st.AnalyticsSnapshot(ctx, filter); err != nil || !ok {
+		t.Fatalf("snapshot with a failed-at-current-epoch session: ok=%v err=%v, want ok=true (gate must not wedge)", ok, err)
 	}
 }

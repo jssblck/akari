@@ -563,7 +563,8 @@ func (s *Store) ResetRaw(ctx context.Context, sessionID int64) error {
 		_, err := tx.Exec(ctx,
 			`UPDATE session_raw
 			    SET byte_len = 0, content_sha256 = $2, sha256_state = NULL,
-			        parsed_byte_len = 0, parser_epoch = 0, parse_error = ''
+			        parsed_byte_len = 0, parser_epoch = 0,
+			        parse_error = '', parse_error_epoch = 0, parse_error_byte_len = 0
 			  WHERE session_id = $1`, sessionID, emptySHA256)
 		if err != nil {
 			return fmt.Errorf("reset raw cursor for session %d: %w", sessionID, err)

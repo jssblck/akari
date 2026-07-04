@@ -184,16 +184,20 @@ type SessionReducer interface {
 // transcript in one buffer; the folded delta is whole-session by design.
 //
 // Failures split in two. A reducer error (r.Feed rejecting the bytes) is
-// deterministic: re-running would fail identically, so the error is recorded on
-// session_raw.parse_error and the bookkeeping is stamped as consumed at the
-// byte length this parse read, all committed with no projection writes (the
-// feed runs before any). The prior projection survives, and the session leaves
-// the due set until its bytes or the epoch move, rather than hot-looping on the
-// same bad bytes; a chunk that landed mid-parse keeps it due (the stamp records
-// the length that was read, not the newer one). The reducer's error is still
-// returned so the worker can log and count it. An operational error (a store or
-// CAS failure, a cancellation) rolls everything back and stamps nothing, so the
-// next drain retries.
+// deterministic: re-running would fail identically, so the attempt is recorded
+// on the failure markers (parse_error plus the epoch and raw length it tried),
+// committed with no projection writes (the feed runs before any). The
+// bookkeeping of the last successful rebuild (parsed_byte_len, parser_epoch) is
+// deliberately NOT advanced: the surviving projection keeps reading as the
+// epoch that actually built it, and the session's signals flip stale so the
+// settle pass regrades them under the current scoring. The due scan skips a
+// session only while its recorded failure matches its current bytes and the
+// running epoch, so it neither hot-loops on the same bad bytes nor goes silent
+// forever: new bytes or a new epoch retry it, and a chunk that landed mid-parse
+// keeps it due (the marker records the length that was read, not the newer
+// one). The reducer's error is still returned so the worker can log and count
+// it. An operational error (a store or CAS failure, a cancellation) rolls
+// everything back and stamps nothing, so the next drain retries.
 func (s *Store) RebuildSession(ctx context.Context, sessionID int64, epoch int, r SessionReducer) error {
 	var feedErr error
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
@@ -215,14 +219,28 @@ func (s *Store) RebuildSession(ctx context.Context, sessionID int64, epoch int, 
 			}
 			if err := r.Feed(region, parsedLen); err != nil {
 				feedErr = fmt.Errorf("parse session %d region [%d,%d): %w", sessionID, parsedLen, regionEnd, err)
+				// Record what this attempt tried (the error, the epoch, the raw length
+				// it read) without touching parsed_byte_len or parser_epoch: those
+				// describe the last SUCCESSFUL rebuild, and advancing them here would
+				// let the prior projection read as current after an epoch bump. The
+				// markers are what keep the due scan from hot-looping on the same bad
+				// bytes; new bytes or a new epoch no longer match them and retry.
 				if _, serr := tx.Exec(ctx,
 					`UPDATE session_raw
-					    SET parsed_byte_len = $2, parser_epoch = $3, parse_error = $4
+					    SET parse_error = $2, parse_error_epoch = $3, parse_error_byte_len = $4
 					  WHERE session_id = $1`,
-					sessionID, byteLen, epoch, sanitizeText(feedErr.Error())); serr != nil {
+					sessionID, sanitizeText(feedErr.Error()), epoch, byteLen); serr != nil {
 					return fmt.Errorf("record parse error for session %d: %w", sessionID, serr)
 				}
-				return nil // commit the stamp; the parse error itself is returned below
+				// The projection this session serves is now behind the binary that
+				// scored its signals, so flag them stale: signal readers show the
+				// session as unmeasured, and the settle pass regrades it from the
+				// surviving projection with the current scoring.
+				if _, serr := tx.Exec(ctx,
+					`UPDATE sessions SET signals_stale = true WHERE id = $1`, sessionID); serr != nil {
+					return fmt.Errorf("flag signals stale for failed parse of session %d: %w", sessionID, serr)
+				}
+				return nil // commit the markers; the parse error itself is returned below
 			}
 			parsedLen = regionEnd
 		}
@@ -321,7 +339,8 @@ func rebuildTx(ctx context.Context, tx pgx.Tx, sessionID int64, epoch int, byteL
 	// leaves it due and the next worker pass retries from the raw bytes.
 	if _, err := tx.Exec(ctx,
 		`UPDATE session_raw
-		    SET parsed_byte_len = $2, parser_epoch = $3, parse_error = ''
+		    SET parsed_byte_len = $2, parser_epoch = $3,
+		        parse_error = '', parse_error_epoch = 0, parse_error_byte_len = 0
 		  WHERE session_id = $1`,
 		sessionID, byteLen, epoch); err != nil {
 		return fmt.Errorf("stamp parse cursor for session %d: %w", sessionID, err)

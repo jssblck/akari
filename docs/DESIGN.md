@@ -524,12 +524,21 @@ the transformed transcript, which the CAS lifting keeps small however large the
 original tool bodies were.
 
 **Failure model.** A reducer error on malformed bytes is deterministic
-(re-running fails identically), so the worker rolls the rebuild back, records
-the error on `session_raw.parse_error`, and stamps the session's bookkeeping as
-consumed; the prior projection survives and the session retries automatically
-when new bytes arrive or the epoch bumps, rather than hot-looping on the same
-bad bytes. An operational error (a store or CAS failure, a shutdown) stamps
-nothing, so the next drain retries it.
+(re-running fails identically), so the worker rolls the rebuild back and
+records the attempt on the failure markers: `session_raw.parse_error` plus the
+epoch and raw length the attempt covered. The last-successful-rebuild
+bookkeeping (`parsed_byte_len`, `parser_epoch`) is deliberately left alone, so
+the surviving projection keeps reading as the epoch that actually built it
+rather than masquerading as current, and the session's signals flip stale (the
+settle pass regrades them from the surviving projection under the current
+scoring). The due scan skips the session only while the recorded failure
+matches its current bytes and the running epoch, so it neither hot-loops on the
+same bad bytes nor goes silent forever: new bytes or a bumped epoch retry it.
+The epoch-staleness gates (the fleet progress count, the OG-card snapshot
+check) likewise exclude sessions that already failed at the running epoch,
+since the drain can never advance them and counting them would wedge the gate
+short of done. An operational error (a store or CAS failure, a shutdown)
+records nothing, so the next drain retries it.
 
 **Scheduling.** The worker drains due sessions continuously, woken in-process
 by the chunk handler and backstopped by the periodic maintenance tick that also
@@ -725,6 +734,8 @@ CREATE TABLE session_raw (
   parsed_byte_len BIGINT NOT NULL DEFAULT 0,    -- raw length the last successful rebuild covered
   parser_epoch    INT NOT NULL DEFAULT 0,       -- parse.Epoch that rebuild ran at
   parse_error     TEXT NOT NULL DEFAULT '',     -- last deterministic parse failure, '' when clean
+  parse_error_epoch    INT NOT NULL DEFAULT 0,     -- epoch that failure was attempted at
+  parse_error_byte_len BIGINT NOT NULL DEFAULT 0,  -- raw length that failure covered
   CHECK (parsed_byte_len <= byte_len)
 );
 

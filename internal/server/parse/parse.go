@@ -21,10 +21,10 @@ import (
 // transcript bytes the reducer cannot turn into a projection. It is distinct from an
 // operational error (a store query, a CAS read, a cancelled context), which travels
 // up un-wrapped. The worker uses this distinction: a parser error is per-session and
-// deterministic (re-running fails the same way), so the store stamps the session's
-// bookkeeping as consumed with the error recorded on session_raw.parse_error, and
-// the session retries only when its bytes or the epoch move; an operational error
-// stamps nothing, so the next drain retries it.
+// deterministic (re-running fails the same way), so the store records the attempt on
+// session_raw's failure markers (parse_error plus the epoch and raw length it tried)
+// and the session retries only when its bytes or the epoch move; an operational
+// error records nothing, so the next drain retries it.
 type ParserError struct{ err error }
 
 func (e *ParserError) Error() string { return e.err.Error() }
