@@ -26,6 +26,13 @@ const (
 	scopeRead = "read"
 )
 
+// isValidScope reports whether s is one of the three token scopes. Both the JSON
+// and the account-form token-creation handlers gate against this one predicate so
+// the scope vocabulary has a single source of truth.
+func isValidScope(s string) bool {
+	return s == scopeIngest || s == scopeFull || s == scopeRead
+}
+
 type principal struct {
 	UserID int64
 	Scope  string
@@ -308,7 +315,7 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 	if req.Scope == "" {
 		req.Scope = scopeIngest
 	}
-	if req.Scope != scopeIngest && req.Scope != scopeFull && req.Scope != scopeRead {
+	if !isValidScope(req.Scope) {
 		writeError(w, http.StatusBadRequest, "scope must be 'ingest', 'read', or 'full'")
 		return
 	}

@@ -138,6 +138,7 @@ yourself. It reads `AKARI_DATABASE_URL` and the upload target from `AKARI_URL`
 - `migrations` holds the embedded SQL schema.
 
 See [docs/DESIGN.md](./DESIGN.md) for the full engineering design and rationale,
-[DESIGN.md](../DESIGN.md) for the visual design system,
+[docs/signals.md](./signals.md) for the per-session signals and reparse-epoch
+machinery, [DESIGN.md](../DESIGN.md) for the visual design system,
 [docs/releases.md](./releases.md) for the release process, and
 [CONTRIBUTING.md](../CONTRIBUTING.md) for contribution expectations.
