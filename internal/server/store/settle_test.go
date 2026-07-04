@@ -356,3 +356,46 @@ func TestRefreshSettledSignalsReRefreshesOnLateProjectionChange(t *testing.T) {
 		t.Errorf("re-refreshed after late chunk settled: %d, want 0", n2)
 	}
 }
+
+// TestRefreshSettledSignalsSkipsProjectionAheadOfEpoch pins the rolling-deploy guard on
+// the settle path: a projection stamped by a NEWER binary must not be graded by an older
+// one. The old binary's scoring code does not match the newer projection, and grading
+// would clear signals_stale, leaving no marker for the newer binary to redo the grade
+// (the session is not due to it either, since its projection is current). The skip
+// leaves signals_stale set, and the pass at the newer epoch grades it normally.
+func TestRefreshSettledSignalsSkipsProjectionAheadOfEpoch(t *testing.T) {
+	t.Parallel()
+	st, ctx, uid, pid := signalsEnv(t)
+	sid := seedSettledSession(t, st, ctx, uid, pid, "sess-ahead", 120)
+	// Stand in for a newer binary's rebuild: the projection is stamped one epoch
+	// ahead of the epoch this store instance runs at.
+	if _, err := st.Pool.Exec(ctx,
+		"UPDATE session_raw SET parser_epoch = $2 WHERE session_id = $1", sid, testEpoch+1); err != nil {
+		t.Fatalf("stamp projection ahead: %v", err)
+	}
+	st.SetParserEpoch(testEpoch)
+
+	if _, err := st.RefreshSettledSignals(ctx); err != nil {
+		t.Fatalf("refresh at the older epoch: %v", err)
+	}
+	if got := signalsRowCount(t, st, ctx, sid); got != 0 {
+		t.Errorf("older-epoch settle pass graded a newer projection (row count %d), want 0", got)
+	}
+	var stale bool
+	if err := st.Pool.QueryRow(ctx, "SELECT signals_stale FROM sessions WHERE id = $1", sid).Scan(&stale); err != nil {
+		t.Fatal(err)
+	}
+	if !stale {
+		t.Fatal("the skip must leave signals_stale set so the newer binary's tick grades it")
+	}
+
+	// Once this instance runs the epoch that built the projection (the deploy
+	// finished), the same pass grades it.
+	st.SetParserEpoch(testEpoch + 1)
+	if _, err := st.RefreshSettledSignals(ctx); err != nil {
+		t.Fatalf("refresh at the newer epoch: %v", err)
+	}
+	if got := signalsRowCount(t, st, ctx, sid); got != 1 {
+		t.Errorf("newer-epoch settle pass signals row count = %d, want 1", got)
+	}
+}

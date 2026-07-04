@@ -536,17 +536,21 @@ bookkeeping (`parsed_byte_len`, `parser_epoch`) is deliberately left alone, so
 the surviving projection keeps reading as the epoch that actually built it
 rather than masquerading as current, and the session's signals flip stale (the
 settle pass regrades them from the surviving projection under the current
-scoring). The due scan skips the session only while the recorded failure
-matches its current bytes and the running epoch, so it neither hot-loops on the
-same bad bytes nor goes silent forever: new bytes or a bumped epoch retry it.
-The epoch-staleness gates (the fleet progress count, the OG-card snapshot
-check) exclude failed sessions with the exact same predicate the due scan
-uses (same bytes, same epoch), so "due" and "gated" can never drift apart:
-a pinned failure is invisible to both (counting it would wedge the gate short
-of done, since the drain can never advance it), and new bytes readmit the
-session to the scan and the gates in the same instant. An operational error
-(a store or CAS failure, a shutdown) records nothing, so the next drain
-retries it.
+scoring). The due scan skips the session while the recorded failure covers its
+current bytes at the running epoch or ahead (an attempt stamped ahead belongs
+to a newer binary and is off-limits the same way a newer success is), so it
+neither hot-loops on the same bad bytes nor goes silent forever: new bytes or
+a bumped epoch retry it. Every staleness surface shares one indexed
+expression, the attempted epoch (the last successful rebuild's epoch, raised
+to the failure epoch while the failure still covers the current bytes): the
+due scan's epoch branch, the fleet progress count, and the OG-card snapshot
+check all test it against the running epoch, so "due" and "gated" can never
+drift apart, and a corpus full of pinned failures indexes AT its failure
+epochs, outside the behind-range the hot probes scan, so probe cost tracks
+the actual backlog rather than the accumulated failure history. New bytes
+break the pin and readmit the session to the scan and the gates in the same
+instant. An operational error (a store or CAS failure, a shutdown) records
+nothing, so the next drain retries it.
 
 **Scheduling.** The worker drains due sessions continuously, woken in-process
 by the chunk handler and backstopped by the periodic maintenance tick that also
@@ -748,6 +752,14 @@ CREATE TABLE session_raw (
   parse_error_epoch    INT NOT NULL DEFAULT 0,     -- epoch that failure was attempted at
   parse_error_byte_len BIGINT NOT NULL DEFAULT 0,  -- raw length that failure covered
   CHECK (parsed_byte_len <= byte_len)
+);
+-- The attempted epoch (parser_epoch, raised to parse_error_epoch while the
+-- failure covers the current bytes): one range over this expression answers
+-- every epoch-staleness probe, with pinned failures indexed out of the range.
+CREATE INDEX idx_session_raw_attempted_epoch ON session_raw (
+  (CASE WHEN parse_error <> '' AND parse_error_byte_len = byte_len
+        THEN GREATEST(parser_epoch, parse_error_epoch)
+        ELSE parser_epoch END)
 );
 
 -- One row per uploaded chunk. The client already trims each chunk to a newline,

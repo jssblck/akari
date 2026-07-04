@@ -374,4 +374,18 @@ func TestEpochGatesAgreeWithDueScan(t *testing.T) {
 		t.Fatalf("append: %v", err)
 	}
 	check(testEpoch+1, true, true, "new bytes after the pinned failure")
+	// The append broke the pin's byte match, so the session is also due to the
+	// binary that stamped it (ordinary byte-dirtiness, no epoch staleness).
+	check(testEpoch, true, false, "new bytes at the stamping epoch")
+
+	// The pin is monotonic like the rest of the predicate: a failure the NEWER
+	// binary records over the current bytes blocks the older binary too, which
+	// must not retry input the fleet's parser has already rejected (its rebuild
+	// would just downgrade the projection's epoch), while a further epoch bump
+	// retries it as usual.
+	if err := st.RebuildSession(ctx, sid, testEpoch+1, failingReducer{rerr}); !errors.Is(err, rerr) {
+		t.Fatalf("second failing rebuild returned %v, want the reducer's error", err)
+	}
+	check(testEpoch, false, false, "byte-dirty but failed by a newer binary")
+	check(testEpoch+2, true, true, "a further epoch bump retries the failure")
 }

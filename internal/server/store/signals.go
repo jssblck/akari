@@ -540,10 +540,33 @@ func refreshSignalsTx(ctx context.Context, tx pgx.Tx, sessionID int64) error {
 // standalone form the settle tick (RefreshSettledSignals) and the tests use; a rebuild
 // calls refreshSignalsTx inside its existing transaction instead, so the signals commit
 // with the projection rather than in a second round trip.
+//
+// It grades only projections at or behind the running parser epoch. During a rolling
+// deploy a newer binary can rebuild a live session at epoch N+1 and leave signals_stale
+// set for the settle tick; if the OLD binary's tick then graded that newer projection, it
+// would write signals under the older scoring code and clear the flag, and nothing would
+// remain to mark the grade for redoing (the projection is current to the newer binary, so
+// it is not due). Skipping leaves signals_stale set, and the newer instance's tick grades
+// it. The rebuild path needs no such check: it grades the projection it just stamped, at
+// its own epoch, inside the same transaction. An unset epoch (0, a store wired without
+// SetParserEpoch, as in tests) skips nothing, matching the other epoch gates.
 func (s *Store) RefreshSessionSignals(ctx context.Context, sessionID int64) error {
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		if err := lockSession(ctx, tx, sessionID); err != nil {
 			return err
+		}
+		if s.parserEpoch != 0 {
+			var ahead bool
+			if err := tx.QueryRow(ctx,
+				`SELECT EXISTS (
+				   SELECT 1 FROM session_raw
+				    WHERE session_id = $1 AND parser_epoch > $2
+				 )`, sessionID, s.parserEpoch).Scan(&ahead); err != nil {
+				return fmt.Errorf("check projection epoch for session %d: %w", sessionID, err)
+			}
+			if ahead {
+				return nil
+			}
 		}
 		return refreshSignalsTx(ctx, tx, sessionID)
 	})
