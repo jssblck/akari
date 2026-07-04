@@ -15,12 +15,14 @@ import (
 //
 // Claude Code logs each content block of one API assistant response on its own
 // JSONL line (the thinking, the text, and every tool_use arrive as separate
-// assistant entries sharing the response's message.id), so consecutive assistant
-// lines with one id fold into a single turn: one messages row per API response,
-// not per content block (issue #98). The fold does not reach across a gap: a
-// user line closes it, and a line with a different (or missing) id starts a new
-// turn, so a resumed or compacted transcript that replays an old id later still
-// produces its own row, exactly as the replayed tool calls do.
+// assistant entries sharing the response's message.id), so assistant lines with
+// one id fold into a single turn: one messages row per API response, not per
+// content block (issue #98). Tool-result-only user lines are transparent to the
+// fold, because a response with parallel tool calls logs each call's result
+// between its own tool_use lines. What ends a turn is a real user message or an
+// assistant line with a different (or missing) id, so a resumed or compacted
+// transcript that replays an old id later still produces its own row, exactly
+// as the replayed tool calls do.
 func (r *reducer) reduceClaude(region []byte, base int64) error {
 	return eachLine(region, base, func(line []byte, offset int64) error {
 		if !gjson.ValidBytes(line) {
@@ -50,18 +52,21 @@ func (r *reducer) reduceClaude(region []byte, base int64) error {
 				}
 			}
 			if strings.TrimSpace(text) == "" {
-				// A turn that only delivers tool results is not a message, but it still
-				// ends the API response before it: the next assistant line is a new call.
-				r.closeTurn()
+				// A turn that only delivers tool results is not a message, and it does
+				// not close the open assistant turn either: when one response carries
+				// parallel tool calls, Claude Code logs each call's result between that
+				// response's own content-block lines, so the response's remaining
+				// tool_use lines (same message.id) are still part of the open turn. A
+				// real user message or a different id is what ends the response.
 				return nil
 			}
 			r.addUser(text, ts)
 
 		case "assistant":
 			msg := e.Get("message")
-			// Fold consecutive assistant lines sharing one API message id into one
-			// turn. A different id (or none) closes the open turn and starts fresh, so
-			// an id is never folded across a gap.
+			// Fold assistant lines sharing one API message id into one turn. A
+			// different id (or none) closes the open turn and starts fresh; a real
+			// user message in between closes it too (addUser does that itself).
 			id := msg.Get("id").String()
 			if r.open == nil || id == "" || id != r.openClaudeID {
 				r.closeTurn()

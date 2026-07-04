@@ -161,4 +161,13 @@ package parse
 // in-memory fold over complete information rather than by ON CONFLICT arithmetic; the fold is
 // value-identical for well-formed transcripts, and migration 0042 makes every session read as due
 // (parser_epoch DEFAULT 0), so the first boot rebuilds the corpus into the new shape.
-const Epoch = 13
+//
+// Epoch 13 -> 14: make tool-result-only user lines transparent to the Claude turn
+// fold. A response with parallel tool calls logs each call's result between its own
+// tool_use lines, and Epoch 13's fold treated any user line as ending the response,
+// so the second and later calls of such a response landed as bare assistant rows
+// with no usage attached. The fold now closes a turn only on a real user message or
+// a different message.id, so every tool_use of one response folds into its one row.
+// A parser output change: the golden fixtures move (the fixture carries the
+// interleaved shape), and the rebuild re-folds the corpus.
+const Epoch = 14

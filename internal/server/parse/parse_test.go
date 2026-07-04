@@ -428,6 +428,61 @@ func TestCodexTrailingTurnFlushedWhole(t *testing.T) {
 // the whole parse back. With the index non-unique (migration 0010) both rows keep
 // the id, and the fold's result patching stamps the same result onto each, so every
 // replayed copy of the turn renders with its result rather than one looking pending.
+// TestClaudeParallelCallsInterleavedResultsFold pins the fold across a parallel
+// tool-call response: Claude Code logs each call's result between the response's
+// own tool_use lines, so a tool-result-only user line must not end the open
+// turn. One API response with two parallel calls lands as one assistant row
+// carrying both calls, however the results interleave; a different message id
+// still starts its own row. Needs no database: the reducer is pure.
+func TestClaudeParallelCallsInterleavedResultsFold(t *testing.T) {
+	t.Parallel()
+	raw := `{"type":"user","timestamp":"2024-01-01T10:00:00Z","message":{"content":"Trace the auth flow"}}` + "\n" +
+		`{"type":"assistant","timestamp":"2024-01-01T10:00:01Z","message":{"id":"msg_par","model":"claude-sonnet-4-20250514","content":[{"type":"thinking","thinking":"two reads at once"},{"type":"tool_use","id":"toolu_p1","name":"Grep","input":{"pattern":"verifyToken"}}],"usage":{"input_tokens":100,"output_tokens":10}}}` + "\n" +
+		`{"type":"user","timestamp":"2024-01-01T10:00:02Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_p1","content":"auth.go:42","is_error":false}]}}` + "\n" +
+		`{"type":"assistant","timestamp":"2024-01-01T10:00:02Z","message":{"id":"msg_par","model":"claude-sonnet-4-20250514","content":[{"type":"tool_use","id":"toolu_p2","name":"Read","input":{"file_path":"token.go"}}],"usage":{"input_tokens":100,"output_tokens":10}}}` + "\n" +
+		`{"type":"user","timestamp":"2024-01-01T10:00:03Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_p2","content":"package token","is_error":false}]}}` + "\n" +
+		`{"type":"assistant","timestamp":"2024-01-01T10:00:04Z","message":{"id":"msg_next","model":"claude-sonnet-4-20250514","content":[{"type":"text","text":"Both read."}],"usage":{"input_tokens":120,"output_tokens":8}}}` + "\n"
+
+	r, err := newSessionReducer("claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Feed([]byte(raw), 0); err != nil {
+		t.Fatal(err)
+	}
+	d := r.Finish()
+
+	if len(d.Messages) != 3 {
+		t.Fatalf("messages = %d, want 3 (user, the folded parallel turn, the next turn)", len(d.Messages))
+	}
+	turn := d.Messages[1]
+	if turn.Role != "assistant" || !turn.HasToolUse || !turn.HasThinking {
+		t.Fatalf("folded turn = %+v, want an assistant row carrying the tool use and the thinking", turn)
+	}
+	if d.Messages[2].Role != "assistant" || d.Messages[2].Content != "Both read." {
+		t.Fatalf("next turn = %+v, want the msg_next text on its own row", d.Messages[2])
+	}
+	if len(d.ToolCalls) != 2 {
+		t.Fatalf("tool calls = %d, want both parallel calls", len(d.ToolCalls))
+	}
+	for i, tc := range d.ToolCalls {
+		if tc.MessageOrdinal != turn.Ordinal || tc.CallIndex != i {
+			t.Errorf("call %d = ordinal %d index %d, want ordinal %d index %d (both on the folded turn)",
+				i, tc.MessageOrdinal, tc.CallIndex, turn.Ordinal, i)
+		}
+	}
+	if len(d.ToolResults) != 2 {
+		t.Fatalf("tool results = %d, want both interleaved results captured", len(d.ToolResults))
+	}
+	// Both usage lines of the folded response key on the shared message id and
+	// point at the folded turn, so the store's dedup keeps exactly one of them.
+	for _, u := range d.Usage {
+		if u.DedupKey == "msg_par" && (u.MessageOrdinal == nil || *u.MessageOrdinal != turn.Ordinal) {
+			t.Errorf("usage %+v should ride the folded turn's ordinal %d", u, turn.Ordinal)
+		}
+	}
+}
+
 func TestClaudeDuplicateCallUIDDoesNotAbort(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
