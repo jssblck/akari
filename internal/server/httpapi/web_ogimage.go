@@ -45,69 +45,20 @@ func (s *Server) handlePublicOverviewOGImage(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Cache miss or expired: render on demand, store, and serve the fresh bytes.
-	// A reparse rebuilding the projection makes a consistent snapshot impossible;
-	// rather than cache a half-rebuilt total, Generate aborts. In that case serve the
-	// last good card if we still hold one, else 404 (transient, clears once the
-	// reparse finishes and a later request renders the card).
-	//
-	// Coalesce concurrent renders for this user through singleflight, so a burst of
-	// unfurls on a cold or expired cache runs the render once and the rest serve its
-	// result. renderOGImage detaches the shared render from any single request (so one
-	// crawler dropping its connection cannot cancel it for the others) but bounds it
-	// with a timeout, and lets this handler return early if its own request is
-	// cancelled while the render continues for whoever is still waiting.
-	png, genErr := s.renderOGImage(r.Context(), u, now)
-
-	// The client may have disconnected mid-render: renderOGImage returns the request
-	// context's error when it does. Nothing to serve and nothing broke, so return
-	// quietly (and skip the gate re-read below, which that cancelled context would fail
-	// anyway) rather than logging a spurious failure.
-	if r.Context().Err() != nil {
-		return
-	}
-
-	// Re-confirm the overview is still public before serving anything: an unpublish
-	// during the render must 404, not unfurl a card (fresh or stale) for a now-private
-	// overview. One gated read does double duty: it re-checks visibility and returns
-	// the canonical cached card the stale-fallback branches serve. A real lookup error
-	// is distinct from a closed gate: withhold the card either way, but surface the
-	// backend failure rather than disguising it as a missing card.
-	_, latest, stillPublic, gateErr := s.Store.PublicOverviewCard(r.Context(), username)
-	switch {
-	case gateErr != nil:
-		log.Printf("overview og: public re-check for user %d (%s) failed: %v", u.ID, u.Username, gateErr)
-		http.Error(w, "Could not load preview image.", http.StatusInternalServerError)
-		return
-	case !stillPublic:
-		http.NotFound(w, r)
-		return
-	}
-
-	switch {
-	case genErr == nil:
-		s.writeOGImage(w, png)
-	case errors.Is(genErr, ogimage.ErrReparseInProgress):
-		// A reparse blocked the fresh render. Serve the last good card if the gated
-		// re-read still holds one, else 404 (transient, clears once the reparse ends).
-		if latest.PNG != nil {
-			s.writeOGImage(w, latest.PNG)
-			return
-		}
-		http.NotFound(w, r)
-	default:
-		// A real render failure. Log it regardless of whether a stale card saves the
-		// response: serving stale masks the failure from the crawler, but the refresh
-		// still broke, and a persistently failing render must stay diagnosable rather
-		// than hiding behind an ever-staler card. Then serve the last good card if we
-		// hold one (it beats a 500 to a crawler), else report the error.
-		log.Printf("overview og: render for user %d (%s) failed: %v", u.ID, u.Username, genErr)
-		if latest.PNG != nil {
-			s.writeOGImage(w, latest.PNG)
-			return
-		}
-		http.Error(w, "Could not load preview image.", http.StatusInternalServerError)
-	}
+	// Cache miss or expired: render on demand through the per-user singleflight group,
+	// re-confirm the overview is still public, then serve the fresh card, fall back to the
+	// last good one, or fail. serveOGCard owns that shared tail. reparseAware is true: a
+	// reparse rebuilding the projection makes a consistent snapshot impossible, so Generate
+	// aborts with ErrReparseInProgress, a transient stale-or-404 rather than a logged
+	// failure.
+	s.serveOGCard(w, r,
+		"overview og", fmt.Sprintf("user %d (%s)", u.ID, u.Username), true,
+		func() ([]byte, error) { return s.renderOGImage(r.Context(), u, now) },
+		func() ([]byte, bool, error) {
+			_, latest, stillPublic, gateErr := s.Store.PublicOverviewCard(r.Context(), username)
+			return latest.PNG, stillPublic, gateErr
+		},
+	)
 }
 
 // handlePublicProjectOGImage serves the Open Graph preview card for a published project
@@ -141,52 +92,22 @@ func (s *Server) handlePublicProjectOGImage(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Cache miss or expired: render on demand through the per-project singleflight group,
-	// store, and serve the fresh bytes. GenerateProject aborts with ErrReparseInProgress
-	// rather than caching a card built from a half-rebuilt projection; in that case serve
-	// the last good card if we still hold one, else 404 (transient, clears once the
-	// reparse finishes). The heading is the same title the /p/<id> page shows, passed in
-	// so the ogimage package stays free of the web view layer.
-	png, genErr := s.renderProjectOGImage(r.Context(), id, web.ProjectTitle(proj), now)
-
-	// The client may have disconnected mid-render; nothing to serve and nothing broke, so
-	// return quietly (and skip the gate re-read below, which that cancelled context would
-	// fail anyway).
-	if r.Context().Err() != nil {
-		return
-	}
-
-	// Re-confirm the overview is still public before serving anything: an unpublish during
-	// the render must 404, not unfurl a card for a now-private overview. One gated read
-	// does double duty: it re-checks visibility and returns the canonical cached card the
-	// stale-fallback branches serve.
-	_, latest, stillPublic, gateErr := s.Store.PublicProjectCard(r.Context(), id)
-	switch {
-	case gateErr != nil:
-		log.Printf("project og: public re-check for project %d failed: %v", id, gateErr)
-		http.Error(w, "Could not load preview image.", http.StatusInternalServerError)
-		return
-	case !stillPublic:
-		http.NotFound(w, r)
-		return
-	}
-
-	switch {
-	case genErr == nil:
-		s.writeOGImage(w, png)
-	case errors.Is(genErr, ogimage.ErrReparseInProgress):
-		if latest.PNG != nil {
-			s.writeOGImage(w, latest.PNG)
-			return
-		}
-		http.NotFound(w, r)
-	default:
-		log.Printf("project og: render for project %d failed: %v", id, genErr)
-		if latest.PNG != nil {
-			s.writeOGImage(w, latest.PNG)
-			return
-		}
-		http.Error(w, "Could not load preview image.", http.StatusInternalServerError)
-	}
+	// re-confirm the project is still public, then serve the fresh card, fall back to the
+	// last good one, or fail. serveOGCard owns that shared tail. reparseAware is true:
+	// GenerateProject aborts with ErrReparseInProgress rather than caching a card built
+	// from a half-rebuilt projection, a transient stale-or-404 rather than a logged
+	// failure. The heading is the same title the /p/<id> page shows, passed in so the
+	// ogimage package stays free of the web view layer.
+	s.serveOGCard(w, r,
+		"project og", fmt.Sprintf("project %d", id), true,
+		func() ([]byte, error) {
+			return s.renderProjectOGImage(r.Context(), id, web.ProjectTitle(proj), now)
+		},
+		func() ([]byte, bool, error) {
+			_, latest, stillPublic, gateErr := s.Store.PublicProjectCard(r.Context(), id)
+			return latest.PNG, stillPublic, gateErr
+		},
+	)
 }
 
 // renderProjectOGImage renders and caches one project's preview card through the
@@ -256,37 +177,20 @@ func (s *Server) handlePublicSessionOGImage(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	png, genErr := s.renderSessionOGImage(r.Context(), sessionID, now)
-
-	if r.Context().Err() != nil {
-		return
-	}
-
-	// Re-confirm the session is still public before serving: an unpublish during the
-	// render must 404, not unfurl a card for a now-private session.
-	_, latest, stillPublic, gateErr := s.Store.PublicSessionCard(r.Context(), pid)
-	switch {
-	case gateErr != nil:
-		log.Printf("session og: public re-check for session %d failed: %v", sessionID, gateErr)
-		http.Error(w, "Could not load preview image.", http.StatusInternalServerError)
-		return
-	case !stillPublic:
-		http.NotFound(w, r)
-		return
-	}
-
-	if genErr != nil {
-		// A real render failure. Log it, then serve the last good card if we hold one (it
-		// beats a 500 to a crawler), else report the error.
-		log.Printf("session og: render for session %d failed: %v", sessionID, genErr)
-		if latest.PNG != nil {
-			s.writeOGImage(w, latest.PNG)
-			return
-		}
-		http.Error(w, "Could not load preview image.", http.StatusInternalServerError)
-		return
-	}
-	s.writeOGImage(w, png)
+	// Render on demand, re-confirm the session is still public, then serve the fresh card,
+	// fall back to the last good one, or fail. serveOGCard owns that shared tail.
+	// reparseAware is false: GenerateSession reads every card input in one snapshot and
+	// never aborts with ErrReparseInProgress (the up-front FleetStatus gate above stands in
+	// for it), so every render error is a real failure, logged and stale-or-500, with no
+	// reparse special case.
+	s.serveOGCard(w, r,
+		"session og", fmt.Sprintf("session %d", sessionID), false,
+		func() ([]byte, error) { return s.renderSessionOGImage(r.Context(), sessionID, now) },
+		func() ([]byte, bool, error) {
+			_, latest, stillPublic, gateErr := s.Store.PublicSessionCard(r.Context(), pid)
+			return latest.PNG, stillPublic, gateErr
+		},
+	)
 }
 
 // renderSessionOGImage renders and caches one session's preview card through the
@@ -312,6 +216,90 @@ func (s *Server) renderSessionOGImage(ctx context.Context, sessionID int64, now 
 			return nil, res.Err
 		}
 		return res.Val.([]byte), nil
+	}
+}
+
+// serveOGCard runs the render-recheck-serve tail the three public OG card handlers share.
+// By the time it is called each handler has resolved its subject, served a fresh cache hit,
+// and (for the session card) cleared the up-front reparse gate; what remains was near
+// byte-identical across the three. The handler supplies two closures: render coalesces the
+// on-demand render through its own singleflight group and returns the request context's
+// error if the caller disconnected, and regate re-reads the publish gate, returning the
+// last good card's bytes (nil if none), whether the subject is still public, and any real
+// lookup error.
+//
+// The flow: bail quietly if the client already disconnected mid-render (nothing to serve,
+// nothing broke, and the cancelled context would only fail the gate re-read below); re-read
+// the gate so an unpublish during the render 404s instead of unfurling a card for a
+// now-private subject, surfacing a real lookup error as a 500 rather than disguising it as a
+// missing card; then serve the fresh card, or on failure fall back to the last good one,
+// otherwise report the error. logPrefix and subject name the card in the two log lines,
+// e.g. ("overview og", "user 5 (grace)").
+//
+// reparseAware is the one real difference between the callers. The overview and project
+// renders abort with ogimage.ErrReparseInProgress when a reparse makes a consistent snapshot
+// impossible; that is a transient, unlogged stale-or-404. The session render reads its
+// inputs in one snapshot and never returns that error (its handler gates on the reparse up
+// front instead), so it treats every render error as a real failure: logged, stale-or-500.
+// Passing reparseAware=false routes ErrReparseInProgress through the default branch, keeping
+// the session handler's exact behavior.
+func (s *Server) serveOGCard(
+	w http.ResponseWriter,
+	r *http.Request,
+	logPrefix, subject string,
+	reparseAware bool,
+	render func() ([]byte, error),
+	regate func() (stalePNG []byte, stillPublic bool, err error),
+) {
+	png, genErr := render()
+
+	// The client may have disconnected mid-render: render returns the request context's
+	// error when it does. Nothing to serve and nothing broke, so return quietly (and skip
+	// the gate re-read below, which that cancelled context would fail anyway) rather than
+	// logging a spurious failure.
+	if r.Context().Err() != nil {
+		return
+	}
+
+	// Re-confirm the subject is still public before serving anything. One gated read does
+	// double duty: it re-checks visibility and returns the canonical cached card the
+	// stale-fallback branches serve. A real lookup error is distinct from a closed gate:
+	// withhold the card either way, but surface the backend failure rather than disguising
+	// it as a missing card.
+	stalePNG, stillPublic, gateErr := regate()
+	switch {
+	case gateErr != nil:
+		log.Printf("%s: public re-check for %s failed: %v", logPrefix, subject, gateErr)
+		http.Error(w, "Could not load preview image.", http.StatusInternalServerError)
+		return
+	case !stillPublic:
+		http.NotFound(w, r)
+		return
+	}
+
+	switch {
+	case genErr == nil:
+		s.writeOGImage(w, png)
+	case reparseAware && errors.Is(genErr, ogimage.ErrReparseInProgress):
+		// A reparse blocked the fresh render. Serve the last good card if the gated re-read
+		// still holds one, else 404 (transient, clears once the reparse ends).
+		if stalePNG != nil {
+			s.writeOGImage(w, stalePNG)
+			return
+		}
+		http.NotFound(w, r)
+	default:
+		// A real render failure. Log it regardless of whether a stale card saves the
+		// response: serving stale masks the failure from the crawler, but the refresh still
+		// broke, and a persistently failing render must stay diagnosable rather than hiding
+		// behind an ever-staler card. Then serve the last good card if we hold one (it beats
+		// a 500 to a crawler), else report the error.
+		log.Printf("%s: render for %s failed: %v", logPrefix, subject, genErr)
+		if stalePNG != nil {
+			s.writeOGImage(w, stalePNG)
+			return
+		}
+		http.Error(w, "Could not load preview image.", http.StatusInternalServerError)
 	}
 }
 
