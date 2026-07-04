@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jssblck/akari/internal/quality"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/storetest"
 )
@@ -42,7 +41,7 @@ func TestInsightsTrends(t *testing.T) {
 	mkSession := func(user int64, src string, daysAgo int, outcome, grade, model, churnPath string) int64 {
 		sid := seedSession(t, st, user, pid, src)
 		start := day(daysAgo, 14)
-		if err := st.ApplyProjectionDelta(ctx, sid, store.ProjectionDelta{
+		rebuildWith(t, st, sid, store.ProjectionDelta{
 			Messages: []store.MessageDelta{
 				{Ordinal: 0, Role: "user", Content: "go", Timestamp: start},
 				{Ordinal: 1, Role: "assistant", Content: "on it", HasToolUse: true, Timestamp: start.Add(12 * time.Second)},
@@ -53,11 +52,9 @@ func TestInsightsTrends(t *testing.T) {
 				{MessageOrdinal: 1, CallIndex: 0, ToolName: "Read", Category: "read", CallUID: src + "-r"},
 				{MessageOrdinal: 3, CallIndex: 0, ToolName: "Edit", Category: "edit", FilePath: churnPath, CallUID: src + "-e"},
 			},
-		}); err != nil {
-			t.Fatalf("apply delta %s: %v", src, err)
-		}
+		})
 		setSessionShape(t, st, ctx, sid, start, start.Add(20*time.Minute), 4, 2)
-		insertSignal(t, st, ctx, sid, quality.Version, outcome, grade)
+		insertSignal(t, st, ctx, sid, outcome, grade)
 		seedUsageCache(t, st, sid, model, 1.5, 4000, 2000, 8000, 3000, daysAgo, src+"-u")
 		return sid
 	}

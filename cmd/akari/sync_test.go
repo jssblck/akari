@@ -77,7 +77,7 @@ func mixedOutcomes() []outcome {
 		return outcome{sync: &syncer.Result{File: file(name), Kind: k, Action: upload.ActionUpToDate}}
 	}
 	return []outcome{
-		{sync: &syncer.Result{File: file("hopper"), Kind: resolve.KindRemote, ProjectKey: "github.com/x/y", Action: upload.ActionUploaded, UploadedBytes: 100, MessageCount: 3}},
+		{sync: &syncer.Result{File: file("hopper"), Kind: resolve.KindRemote, ProjectKey: "github.com/x/y", Action: upload.ActionUploaded, UploadedBytes: 100}},
 		{sync: &syncer.Result{File: file("lovelace"), Kind: resolve.KindStandalone, Cwd: "/home/ada", Action: upload.ActionReset, UploadedBytes: 50}},
 		upTo("winlock", resolve.KindRemote),
 		upTo("johnson", resolve.KindOrphaned),
@@ -147,7 +147,7 @@ func TestSyncAllCountsMatchSequential(t *testing.T) {
 	outcomeFor := func(f discover.File, i int) outcome {
 		switch i % 5 {
 		case 0:
-			return outcome{sync: &syncer.Result{File: f, Kind: resolve.KindRemote, Action: upload.ActionUploaded, UploadedBytes: 10, MessageCount: 1}}
+			return outcome{sync: &syncer.Result{File: f, Kind: resolve.KindRemote, Action: upload.ActionUploaded, UploadedBytes: 10}}
 		case 1:
 			return outcome{sync: &syncer.Result{File: f, Kind: resolve.KindStandalone, Action: upload.ActionReset, UploadedBytes: 5}}
 		case 2:

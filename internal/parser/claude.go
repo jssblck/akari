@@ -12,6 +12,15 @@ import (
 // of typed blocks (text, thinking, tool_use, tool_result). Token usage rides on
 // the assistant entry. Tool results arrive as blocks in a following user entry
 // and are back-patched to their tool_use by id.
+//
+// Claude Code logs each content block of one API assistant response on its own
+// JSONL line (the thinking, the text, and every tool_use arrive as separate
+// assistant entries sharing the response's message.id), so consecutive assistant
+// lines with one id fold into a single turn: one messages row per API response,
+// not per content block (issue #98). The fold does not reach across a gap: a
+// user line closes it, and a line with a different (or missing) id starts a new
+// turn, so a resumed or compacted transcript that replays an old id later still
+// produces its own row, exactly as the replayed tool calls do.
 func (r *reducer) reduceClaude(region []byte, base int64) error {
 	return eachLine(region, base, func(line []byte, offset int64) error {
 		if !gjson.ValidBytes(line) {
@@ -41,60 +50,64 @@ func (r *reducer) reduceClaude(region []byte, base int64) error {
 				}
 			}
 			if strings.TrimSpace(text) == "" {
-				return nil // a turn that only delivers tool results is not a message
+				// A turn that only delivers tool results is not a message, but it still
+				// ends the API response before it: the next assistant line is a new call.
+				r.closeTurn()
+				return nil
 			}
 			r.addUser(text, ts)
 
 		case "assistant":
 			msg := e.Get("message")
-			ord := r.st.NextOrdinal
-			r.st.NextOrdinal++
-			op := MessageOp{Ordinal: ord, Role: RoleAssistant, Model: msg.Get("model").String(), Timestamp: ts}
-			var textParts, thinkParts []string
-			callIndex := 0
+			// Fold consecutive assistant lines sharing one API message id into one
+			// turn. A different id (or none) closes the open turn and starts fresh, so
+			// an id is never folded across a gap.
+			id := msg.Get("id").String()
+			if r.open == nil || id == "" || id != r.openClaudeID {
+				r.closeTurn()
+			}
+			ord := r.ensureAssistant(ts)
+			r.openClaudeID = id
+			if m := msg.Get("model").String(); m != "" {
+				r.open.Model = m
+			}
 			for _, b := range msg.Get("content").Array() {
 				switch b.Get("type").String() {
 				case "text":
-					textParts = append(textParts, b.Get("text").String())
+					r.addOpenContent(b.Get("text").String())
 				case "thinking":
-					t := b.Get("thinking").String()
-					if t != "" {
-						thinkParts = append(thinkParts, t)
-					}
 					// The signature is the encrypted thinking Claude ships in place of the
 					// redacted plaintext; its length tracks the hidden reasoning volume
 					// (r=0.97 against blocks that kept their text), so it is the weight when
 					// the text is gone and rides alongside it when kept.
-					op.ThinkingBytes += len(t) + len(b.Get("signature").String())
-					op.HasThinking = true
+					t := b.Get("thinking").String()
+					r.addOpenReasoning(t, len(t)+len(b.Get("signature").String()))
 				case "redacted_thinking":
 					// A fully redacted block carries only an opaque "data" blob and no text;
 					// its length is the reasoning weight.
-					op.ThinkingBytes += len(b.Get("data").String())
-					op.HasThinking = true
+					r.addOpenReasoning("", len(b.Get("data").String()))
 				case "tool_use":
-					op.HasToolUse = true
+					r.open.HasToolUse = true
 					name := b.Get("name").String()
 					tc := ToolCall{
-						MessageOrdinal: ord, CallIndex: callIndex,
+						MessageOrdinal: ord, CallIndex: r.openCalls,
 						ToolName: name, Category: toolCategory(name),
 						FilePath: b.Get("input.file_path").String(),
 						CallUID:  b.Get("id").String(),
 					}
 					setToolInput(&tc, b.Get("input"), "application/json")
 					r.d.ToolCalls = append(r.d.ToolCalls, tc)
-					callIndex++
+					r.openCalls++
 				}
 			}
-			op.Content = strings.Join(textParts, "\n")
-			op.ThinkingText = strings.Join(thinkParts, "\n")
-			r.d.Messages = append(r.d.Messages, op)
 
+			// Every line of the response repeats the same usage block; each is emitted
+			// and the rebuild's dedup keeps one per DedupKey (the API message id).
 			if u := msg.Get("usage"); u.Exists() {
 				o := ord
 				r.addUsage(Usage{
 					MessageOrdinal: &o,
-					Model:          op.Model,
+					Model:          msg.Get("model").String(),
 					Input:          int(u.Get("input_tokens").Int()),
 					Output:         int(u.Get("output_tokens").Int()),
 					CacheWrite:     int(u.Get("cache_creation_input_tokens").Int()),

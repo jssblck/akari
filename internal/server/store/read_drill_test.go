@@ -5,17 +5,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jssblck/akari/internal/quality"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/storetest"
 )
 
-// insertGradeOutcomeSignal seeds a session_signals row with a chosen grade, outcome, and
-// version, standing in for a settled graded session. grade is a pointer so a test can
-// store NULL (the explicit-unscored case). The row is left with signals_stale cleared
-// unless the caller marks it stale afterward, matching the settle pass's post-grade state
-// that the read gate keys on.
-func insertGradeOutcomeSignal(t *testing.T, st *store.Store, ctx context.Context, sid int64, version int, grade *string, outcome string) {
+// insertGradeOutcomeSignal seeds a session_signals row with a chosen grade and outcome,
+// standing in for a settled graded session. grade is a pointer so a test can store NULL (the
+// explicit-unscored case). markSignalsFresh clears signals_stale afterward, matching the
+// settle pass's post-grade state that the read gate keys on.
+func insertGradeOutcomeSignal(t *testing.T, st *store.Store, ctx context.Context, sid int64, grade *string, outcome string) {
 	t.Helper()
 	// score and grade are a matched pair (session_signals_score_grade_ck): seed a score
 	// whenever a grade is set, and leave both NULL for an ungraded (nil-grade) row.
@@ -24,9 +22,9 @@ func insertGradeOutcomeSignal(t *testing.T, st *store.Store, ctx context.Context
 		score = representativeScore(*grade)
 	}
 	if _, err := st.Pool.Exec(ctx,
-		`INSERT INTO session_signals (session_id, signals_version, outcome, outcome_confidence, score, grade)
-		 VALUES ($1, $2, $3, 'high', $4, $5)`,
-		sid, version, outcome, score, grade); err != nil {
+		`INSERT INTO session_signals (session_id, outcome, outcome_confidence, score, grade)
+		 VALUES ($1, $2, 'high', $3, $4)`,
+		sid, outcome, score, grade); err != nil {
 		t.Fatalf("insert grade/outcome signal for session %d: %v", sid, err)
 	}
 	markSignalsFresh(t, st, ctx, sid)
@@ -50,10 +48,10 @@ func representativeScore(grade string) int {
 	}
 }
 
-// markSignalsStaleFor sets the read gate's staleness flag, so a session with a
-// current-version signals row still reads as ungraded: the letter and concrete-outcome
-// filters (which require NOT s.signals_stale) drop it, and the unscored/unknown
-// catch-alls pick it up, mirroring how the Insights distributions fold it.
+// markSignalsStaleFor sets the read gate's staleness flag, so a session with a signals row
+// still reads as ungraded: the letter and concrete-outcome filters (which require NOT
+// s.signals_stale) drop it, and the unscored/unknown catch-alls pick it up, mirroring how the
+// Insights distributions fold it.
 func markSignalsStaleFor(t *testing.T, st *store.Store, ctx context.Context, sid int64) {
 	t.Helper()
 	if _, err := st.Pool.Exec(ctx, `UPDATE sessions SET signals_stale = true WHERE id = $1`, sid); err != nil {
@@ -72,11 +70,10 @@ func idSet(rows []store.SessionRow) map[int64]bool {
 
 // TestSessionFilterGradeOutcome pins the drill-through filters against the exact buckets
 // the Insights distributions count. A letter grade or a concrete outcome matches only
-// through a current-version, non-stale signals row; the unscored and unknown catch-alls
-// match the complement, folding in the explicit NULL-grade or unknown row, the stale or
-// non-current-version row, and the session with no row at all, exactly as the panel's
-// LEFT JOIN + coalesce does. It also confirms CountAllSessions agrees with the list
-// through the shared conds().
+// through a non-stale signals row; the unscored and unknown catch-alls match the complement,
+// folding in the explicit NULL-grade or unknown row, the stale row, and the session with no
+// row at all, exactly as the panel's LEFT JOIN + coalesce does. It also confirms
+// CountAllSessions agrees with the list through the shared conds().
 func TestSessionFilterGradeOutcome(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -91,20 +88,19 @@ func TestSessionFilterGradeOutcome(t *testing.T) {
 	// A signals-bearing session needs a non-zero message_count so the default empty-hide
 	// does not drop it; setSessionShape stamps that along with the timestamps.
 	now := time.Now()
-	seed := func(src string, version int, g *string, outcome string) int64 {
+	seed := func(src string, g *string, outcome string) int64 {
 		sid := seedSession(t, st, ada, pid, src)
 		setSessionShape(t, st, ctx, sid, now.Add(-time.Hour), now.Add(-30*time.Minute), 10, 3)
-		insertGradeOutcomeSignal(t, st, ctx, sid, version, g, outcome)
+		insertGradeOutcomeSignal(t, st, ctx, sid, g, outcome)
 		return sid
 	}
 
-	aID := seed("s-a", quality.Version, grade("A"), "completed")
-	fID := seed("s-f", quality.Version, grade("F"), "errored")
-	unscoredID := seed("s-unscored", quality.Version, nil, "unknown") // explicit: current row, NULL grade, unknown outcome
-	abandonedID := seed("s-abandoned", quality.Version, grade("C"), "abandoned")
-	staleID := seed("s-stale", quality.Version, grade("A"), "completed") // current version but flagged stale
+	aID := seed("s-a", grade("A"), "completed")
+	fID := seed("s-f", grade("F"), "errored")
+	unscoredID := seed("s-unscored", nil, "unknown") // explicit: current row, NULL grade, unknown outcome
+	abandonedID := seed("s-abandoned", grade("C"), "abandoned")
+	staleID := seed("s-stale", grade("A"), "completed") // graded but flagged stale
 	markSignalsStaleFor(t, st, ctx, staleID)
-	oldVerID := seed("s-oldver", quality.Version+999, grade("A"), "completed") // non-current version
 	// A session with no signals row at all: seed the session but no signal.
 	noRowID := seedSession(t, st, ada, pid, "s-norow")
 	setSessionShape(t, st, ctx, noRowID, now.Add(-time.Hour), now.Add(-30*time.Minute), 10, 3)
@@ -134,8 +130,8 @@ func TestSessionFilterGradeOutcome(t *testing.T) {
 		}
 	}
 
-	// Grade A: only the current, non-stale A session. The stale-flag A and the
-	// non-current-version A both fold into unscored instead, matching the panel's bars.
+	// Grade A: only the non-stale A session. The stale-flag A folds into unscored instead,
+	// matching the panel's bars.
 	if got := idSet(list(store.SessionFilter{Grade: "A"})); len(got) != 1 || !got[aID] {
 		t.Errorf("grade A = %v, want only session %d", got, aID)
 	}
@@ -145,34 +141,34 @@ func TestSessionFilterGradeOutcome(t *testing.T) {
 		t.Errorf("grade F = %v, want only session %d", got, fID)
 	}
 
-	// Unscored: the panel's catch-all, all three cases INCLUDED: the explicit NULL-grade
-	// row, the stale-flag and non-current-version rows, and the session with no row.
-	if got := idSet(list(store.SessionFilter{Grade: "unscored"})); len(got) != 4 ||
-		!got[unscoredID] || !got[staleID] || !got[oldVerID] || !got[noRowID] {
-		t.Errorf("grade unscored = %v, want exactly explicit NULL %d + stale %d + old-version %d + no-row %d",
-			got, unscoredID, staleID, oldVerID, noRowID)
+	// Unscored: the panel's catch-all, all cases INCLUDED: the explicit NULL-grade row, the
+	// stale-flag row, and the session with no row.
+	if got := idSet(list(store.SessionFilter{Grade: "unscored"})); len(got) != 3 ||
+		!got[unscoredID] || !got[staleID] || !got[noRowID] {
+		t.Errorf("grade unscored = %v, want exactly explicit NULL %d + stale %d + no-row %d",
+			got, unscoredID, staleID, noRowID)
 	}
-	countAgrees(store.SessionFilter{Grade: "unscored"}, 4)
+	countAgrees(store.SessionFilter{Grade: "unscored"}, 3)
 
-	// Outcome abandoned: only the abandoned session; the stale and old-version rows fold
-	// into unknown, not into their stored outcome.
+	// Outcome abandoned: only the abandoned session; the stale row folds into unknown, not
+	// into its stored outcome.
 	if got := idSet(list(store.SessionFilter{Outcome: "abandoned"})); len(got) != 1 || !got[abandonedID] {
 		t.Errorf("outcome abandoned = %v, want only session %d", got, abandonedID)
 	}
 	countAgrees(store.SessionFilter{Outcome: "abandoned"}, 1)
 
 	if got := idSet(list(store.SessionFilter{Outcome: "completed"})); len(got) != 1 || !got[aID] {
-		t.Errorf("outcome completed = %v, want only session %d (stale %d, old-version %d fold to unknown)", got, aID, staleID, oldVerID)
+		t.Errorf("outcome completed = %v, want only session %d (stale %d folds to unknown)", got, aID, staleID)
 	}
 
-	// Unknown: the outcome catch-all, same fold as unscored: the explicit unknown row
-	// plus the stale, old-version, and no-row sessions.
-	if got := idSet(list(store.SessionFilter{Outcome: "unknown"})); len(got) != 4 ||
-		!got[unscoredID] || !got[staleID] || !got[oldVerID] || !got[noRowID] {
-		t.Errorf("outcome unknown = %v, want explicit unknown %d + stale %d + old-version %d + no-row %d",
-			got, unscoredID, staleID, oldVerID, noRowID)
+	// Unknown: the outcome catch-all, same fold as unscored: the explicit unknown row plus
+	// the stale and no-row sessions.
+	if got := idSet(list(store.SessionFilter{Outcome: "unknown"})); len(got) != 3 ||
+		!got[unscoredID] || !got[staleID] || !got[noRowID] {
+		t.Errorf("outcome unknown = %v, want explicit unknown %d + stale %d + no-row %d",
+			got, unscoredID, staleID, noRowID)
 	}
-	countAgrees(store.SessionFilter{Outcome: "unknown"}, 4)
+	countAgrees(store.SessionFilter{Outcome: "unknown"}, 3)
 
 	// A grade with no matching current row returns nothing rather than the catch-all set.
 	if got := list(store.SessionFilter{Grade: "B"}); len(got) != 0 {
@@ -188,19 +184,19 @@ func TestSessionFilterGradeOutcome(t *testing.T) {
 	if got := list(store.SessionFilter{Grade: "A", Outcome: "errored"}); len(got) != 0 {
 		t.Errorf("grade A + errored = %d rows, want 0", len(got))
 	}
-	// The catch-alls combine too: every unscored session here is also outcome-unknown
-	// (the fold is the same missing-row set), so pairing them keeps all four.
-	if got := idSet(list(store.SessionFilter{Grade: "unscored", Outcome: "unknown"})); len(got) != 4 {
-		t.Errorf("unscored + unknown = %v, want the 4 catch-all sessions", got)
+	// The catch-alls combine too: every unscored session here is also outcome-unknown (the
+	// fold is the same missing-row set), so pairing them keeps all three.
+	if got := idSet(list(store.SessionFilter{Grade: "unscored", Outcome: "unknown"})); len(got) != 3 {
+		t.Errorf("unscored + unknown = %v, want the 3 catch-all sessions", got)
 	}
 }
 
 // TestDrillFiltersMatchQualityDistribution is the drift guard: it seeds the same session
 // shape TestQualityDistribution uses (letters across users, an explicit unscored row, a
-// stale-version row, a no-row session, and every concrete outcome), then asserts every
-// Grades and Outcomes bar count equals CountAllSessions for the drill-through filter that
-// bar links to. If the panel's definition and the filter's ever diverge again, this fails
-// on the exact bucket.
+// stale row, a no-row session, and every concrete outcome), then asserts every Grades and
+// Outcomes bar count equals CountAllSessions for the drill-through filter that bar links to.
+// If the panel's definition and the filter's ever diverge again, this fails on the exact
+// bucket.
 func TestDrillFiltersMatchQualityDistribution(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -213,18 +209,21 @@ func TestDrillFiltersMatchQualityDistribution(t *testing.T) {
 	}
 
 	recent := time.Now().Add(-24 * time.Hour)
-	mk := func(user int64, src string, version int, outcome, grade string) {
+	mk := func(user int64, src string, outcome, grade string) {
 		sid := seedSession(t, st, user, pid, src)
 		setSessionShape(t, st, ctx, sid, recent, recent.Add(10*time.Minute), 20, 2)
-		insertSignal(t, st, ctx, sid, version, outcome, grade)
+		insertSignal(t, st, ctx, sid, outcome, grade)
 	}
-	mk(ada, "d1", quality.Version, "completed", "A")
-	mk(ada, "d2", quality.Version, "completed", "A")
-	mk(ada, "d3", quality.Version, "errored", "C")
-	mk(ada, "d4", quality.Version, "unknown", "")             // explicitly unscored
-	mk(ada, "d6stale", quality.Version+999, "completed", "A") // stale version -> catch-all
-	mk(grace, "d7", quality.Version, "abandoned", "B")
-	mk(grace, "d8", quality.Version, "completed", "F")
+	mk(ada, "d1", "completed", "A")
+	mk(ada, "d2", "completed", "A")
+	mk(ada, "d3", "errored", "C")
+	mk(ada, "d4", "unknown", "") // explicitly unscored
+	staleID := seedSession(t, st, ada, pid, "d6stale")
+	setSessionShape(t, st, ctx, staleID, recent, recent.Add(10*time.Minute), 20, 2)
+	insertSignal(t, st, ctx, staleID, "completed", "A")
+	markSignalsStaleFor(t, st, ctx, staleID) // stale -> catch-all
+	mk(grace, "d7", "abandoned", "B")
+	mk(grace, "d8", "completed", "F")
 	noneID := seedSession(t, st, ada, pid, "d9none") // no signals row at all -> catch-all
 	setSessionShape(t, st, ctx, noneID, recent, recent.Add(10*time.Minute), 20, 2)
 	// A zero-message graded session: the panel counts sessions regardless of
@@ -235,7 +234,7 @@ func TestDrillFiltersMatchQualityDistribution(t *testing.T) {
 	// count would fall one short of the bar.
 	emptyGraded := seedSession(t, st, grace, pid, "d10empty")
 	setSessionShape(t, st, ctx, emptyGraded, recent, recent.Add(10*time.Minute), 0, 0)
-	insertSignal(t, st, ctx, emptyGraded, quality.Version, "abandoned", "B")
+	insertSignal(t, st, ctx, emptyGraded, "abandoned", "B")
 
 	dist, err := st.QualityDistribution(ctx, store.AnalyticsFilter{})
 	if err != nil {

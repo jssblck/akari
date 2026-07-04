@@ -512,13 +512,13 @@ func (s *Store) AppendChunk(ctx context.Context, sessionID, offset int64, data [
 }
 
 // ResetRaw clears a session's raw store and its derived rows so the next chunk
-// re-parses from zero. Dropping the tool_calls and attachments can orphan CAS
-// blobs; like any deletion or re-parse, those are reclaimed by a later
+// starts from zero. Dropping the tool_calls and attachments can orphan CAS
+// blobs; like any deletion or rebuild, those are reclaimed by a later
 // SweepBlobs rather than synchronously here, so a client reset stays cheap.
 //
 // It takes the parent session row lock and then the session_raw lock, the locks
-// AppendChunk and AdvanceProjection serialize on, so a reset cannot interleave
-// with an in-flight append or parse and leave behind a chunk row or projection
+// AppendChunk and RebuildSession serialize on, so a reset cannot interleave
+// with an in-flight append or rebuild and leave behind a chunk row or projection
 // rows for a session it just zeroed. Taking the session row before session_raw
 // matches DeleteSession's order, so the two cannot deadlock.
 func (s *Store) ResetRaw(ctx context.Context, sessionID int64) error {
@@ -548,10 +548,8 @@ func (s *Store) ResetRaw(ctx context.Context, sessionID int64) error {
 			// re-upload of the same raw merge into the stale rows instead of inserting, so the
 			// re-count never fires and the rollup stays 0.
 			"DELETE FROM model_fallbacks WHERE session_id = $1",
-			// Derived signals clear with the projection they summarize; the settle pass
-			// rebuilds the row from the re-parsed messages and tool calls once the
-			// re-ingested session settles (the append path that re-parses the chunks does
-			// not touch signals, so the row does not return on catch-up).
+			// Derived signals clear with the projection they summarize; the rebuild
+			// that follows the re-uploaded bytes re-grades the session.
 			"DELETE FROM session_signals WHERE session_id = $1",
 			"DELETE FROM session_raw_chunks WHERE session_id = $1",
 		} {
@@ -559,15 +557,34 @@ func (s *Store) ResetRaw(ctx context.Context, sessionID int64) error {
 				return fmt.Errorf("reset session %d (%s): %w", sessionID, q, err)
 			}
 		}
+		// parser_epoch 0 differs from every real epoch, so the session reads as due
+		// and the worker rebuilds (to an empty projection if no bytes ever arrive,
+		// re-stamping the epoch either way).
 		_, err := tx.Exec(ctx,
 			`UPDATE session_raw
 			    SET byte_len = 0, content_sha256 = $2, sha256_state = NULL,
-			        parsed_byte_len = 0, parse_state = '{}'::jsonb,
-			        parse_state_version = 0, parse_error = ''
+			        parsed_byte_len = 0, parser_epoch = 0, parse_error = ''
 			  WHERE session_id = $1`, sessionID, emptySHA256)
 		if err != nil {
 			return fmt.Errorf("reset raw cursor for session %d: %w", sessionID, err)
 		}
-		return resetSessionAggregates(ctx, tx, sessionID)
+		// Zero the rollups so the session reads as empty until the rebuild refills
+		// them from the re-uploaded bytes. The projection moved, so the stored grade
+		// is behind: signals_stale keeps the settle tick on the hook meanwhile.
+		if _, err := tx.Exec(ctx,
+			`UPDATE sessions SET
+			   message_count = 0, user_message_count = 0,
+			   model_fallback_count = 0,
+			   total_input_tokens = 0, total_output_tokens = 0,
+			   total_cache_write_tokens = 0, total_cache_read_tokens = 0,
+			   total_cost_usd = 0, cost_incomplete = FALSE,
+			   total_cache_savings_usd = 0, cache_savings_incomplete = FALSE,
+			   started_at = NULL, ended_at = NULL,
+			   updated_at = now(),
+			   signals_stale = true
+			 WHERE id = $1`, sessionID); err != nil {
+			return fmt.Errorf("reset aggregates for session %d: %w", sessionID, err)
+		}
+		return nil
 	})
 }

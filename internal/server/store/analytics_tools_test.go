@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jssblck/akari/internal/quality"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/storetest"
 )
@@ -46,7 +45,7 @@ func TestToolStats(t *testing.T) {
 	// collapse), two Edits (one failing), two Bash calls (both failing). Deduped that is 7
 	// calls and 3 failures; two prompts.
 	s1 := seedSession(t, st, ada, pid, "t1")
-	if err := st.ApplyProjectionDelta(ctx, s1, store.ProjectionDelta{
+	rebuildWith(t, st, s1, store.ProjectionDelta{
 		Messages: []store.MessageDelta{
 			{Ordinal: 0, Role: "user", Content: "go"},
 			{Ordinal: 1, Role: "assistant", Content: "work", HasToolUse: true},
@@ -71,15 +70,13 @@ func TestToolStats(t *testing.T) {
 			{CallUID: "e1", Status: "ok"}, {CallUID: "e2", Status: "error"},
 			{CallUID: "b1", Status: "error"}, {CallUID: "b2", Status: "error"},
 		},
-	}); err != nil {
-		t.Fatalf("apply s1: %v", err)
-	}
+	})
 	setSessionShape(t, st, ctx, s1, recent, recent.Add(10*time.Minute), 6, 2)
 
 	// Grace's session: a Read and a Grep, started long ago so a window drops it and a
 	// per-user scope excludes it. One prompt.
 	s2 := seedSession(t, st, grace, pid, "t2")
-	if err := st.ApplyProjectionDelta(ctx, s2, store.ProjectionDelta{
+	rebuildWith(t, st, s2, store.ProjectionDelta{
 		Messages: []store.MessageDelta{
 			{Ordinal: 0, Role: "user", Content: "hi"},
 			{Ordinal: 1, Role: "assistant", Content: "sure", HasToolUse: true},
@@ -91,9 +88,7 @@ func TestToolStats(t *testing.T) {
 		ToolResults: []store.ToolResultDelta{
 			{CallUID: "gr", Status: "ok"}, {CallUID: "gg", Status: "ok"},
 		},
-	}); err != nil {
-		t.Fatalf("apply s2: %v", err)
-	}
+	})
 	setSessionShape(t, st, ctx, s2, old, old.Add(5*time.Minute), 2, 1)
 
 	// Ada only: 7 deduped calls, 3 failures, 2 prompts.
@@ -172,12 +167,8 @@ func TestToolStatsCrossSessionNoCollapse(t *testing.T) {
 		},
 		ToolResults: []store.ToolResultDelta{{CallUID: "shared", Status: "ok"}},
 	}
-	if err := st.ApplyProjectionDelta(ctx, seedSession(t, st, ada, pid, "x-a"), same); err != nil {
-		t.Fatalf("apply session a: %v", err)
-	}
-	if err := st.ApplyProjectionDelta(ctx, seedSession(t, st, grace, pid, "x-b"), same); err != nil {
-		t.Fatalf("apply session b: %v", err)
-	}
+	rebuildWith(t, st, seedSession(t, st, ada, pid, "x-a"), same)
+	rebuildWith(t, st, seedSession(t, st, grace, pid, "x-b"), same)
 
 	ts, err := st.ToolStats(ctx, store.AnalyticsFilter{})
 	if err != nil {
@@ -204,7 +195,7 @@ func TestToolStatsNullUidNamespace(t *testing.T) {
 		t.Fatal(err)
 	}
 	sid := seedSession(t, st, u, pid, "ns")
-	if err := st.ApplyProjectionDelta(ctx, sid, store.ProjectionDelta{
+	rebuildWith(t, st, sid, store.ProjectionDelta{
 		Messages: []store.MessageDelta{
 			{Ordinal: 0, Role: "user", Content: "go"},
 			{Ordinal: 1, Role: "assistant", Content: "work", HasToolUse: true},
@@ -214,9 +205,7 @@ func TestToolStatsNullUidNamespace(t *testing.T) {
 			{MessageOrdinal: 1, CallIndex: 1, ToolName: "Read", Category: "read", CallUID: ""},    // no id, otherwise identical
 			{MessageOrdinal: 1, CallIndex: 2, ToolName: "Read", Category: "read", CallUID: "1:0"}, // real id resembling the synthetic key
 		},
-	}); err != nil {
-		t.Fatalf("apply: %v", err)
-	}
+	})
 
 	ts, err := st.ToolStats(ctx, store.AnalyticsFilter{})
 	if err != nil {
@@ -239,14 +228,12 @@ func TestToolStatsNoTools(t *testing.T) {
 		t.Fatal(err)
 	}
 	sid := seedSession(t, st, u, pid, "chat-only")
-	if err := st.ApplyProjectionDelta(ctx, sid, store.ProjectionDelta{
+	rebuildWith(t, st, sid, store.ProjectionDelta{
 		Messages: []store.MessageDelta{
 			{Ordinal: 0, Role: "user", Content: "explain this"},
 			{Ordinal: 1, Role: "assistant", Content: "here is the explanation"},
 		},
-	}); err != nil {
-		t.Fatalf("apply: %v", err)
-	}
+	})
 	setSessionShape(t, st, ctx, sid, time.Now().Add(-time.Hour), time.Now().Add(-50*time.Minute), 2, 3)
 
 	ts, err := st.ToolStats(ctx, store.AnalyticsFilter{})
@@ -287,16 +274,14 @@ func TestToolStatsClips(t *testing.T) {
 		results = append(results, store.ToolResultDelta{CallUID: uid, Status: "ok"})
 	}
 	sid := seedSession(t, st, u, pid, "clip")
-	if err := st.ApplyProjectionDelta(ctx, sid, store.ProjectionDelta{
+	rebuildWith(t, st, sid, store.ProjectionDelta{
 		Messages: []store.MessageDelta{
 			{Ordinal: 0, Role: "user", Content: "go"},
 			{Ordinal: 1, Role: "assistant", Content: "work", HasToolUse: true},
 		},
 		ToolCalls:   calls,
 		ToolResults: results,
-	}); err != nil {
-		t.Fatalf("apply clip session: %v", err)
-	}
+	})
 
 	ts, err := st.ToolStats(ctx, store.AnalyticsFilter{})
 	if err != nil {
@@ -380,7 +365,7 @@ func TestToolStatsReconcilesWithSessionSignals(t *testing.T) {
 
 	for _, sd := range seeds {
 		sid := seedSession(t, st, ada, pid, sd.name)
-		if err := st.ApplyProjectionDelta(ctx, sid, store.ProjectionDelta{
+		rebuildWith(t, st, sid, store.ProjectionDelta{
 			Messages: []store.MessageDelta{
 				{Ordinal: 0, Role: "user", Content: "please refactor the retry loop in internal/server/store/signals.go"},
 				{Ordinal: 1, Role: "assistant", Content: "working", HasToolUse: true},
@@ -388,9 +373,7 @@ func TestToolStatsReconcilesWithSessionSignals(t *testing.T) {
 			},
 			ToolCalls:   sd.calls,
 			ToolResults: sd.res,
-		}); err != nil {
-			t.Fatalf("apply %s: %v", sd.name, err)
-		}
+		})
 		setSessionShape(t, st, ctx, sid, recent, recent.Add(10*time.Minute), 3, 1)
 		settleSession(t, st, ctx, sid)
 		if err := st.RefreshSessionSignals(ctx, sid); err != nil {
@@ -404,19 +387,18 @@ func TestToolStatsReconcilesWithSessionSignals(t *testing.T) {
 	}
 
 	// Every cohort session is settled and graded, so the summed per-session signal counts must equal
-	// the fleet totals exactly. The version filter mirrors the analytics reads: only current-version
-	// rows count.
+	// the fleet totals exactly.
 	var sigCalls, sigFailures, sigRows int
 	if err := st.Pool.QueryRow(ctx,
 		`SELECT coalesce(sum(sig.tool_calls), 0), coalesce(sum(sig.tool_failures), 0), count(*)
 		   FROM session_signals sig
 		   JOIN sessions s ON s.id = sig.session_id
-		  WHERE s.project_id = $1 AND sig.signals_version = $2`,
-		pid, quality.Version).Scan(&sigCalls, &sigFailures, &sigRows); err != nil {
+		  WHERE s.project_id = $1`,
+		pid).Scan(&sigCalls, &sigFailures, &sigRows); err != nil {
 		t.Fatalf("sum session signals: %v", err)
 	}
 	if sigRows != len(seeds) {
-		t.Fatalf("graded %d sessions, want %d (every cohort session must carry a current-version signal row)", sigRows, len(seeds))
+		t.Fatalf("graded %d sessions, want %d (every cohort session must carry a signals row)", sigRows, len(seeds))
 	}
 	if ts.TotalCalls != sigCalls {
 		t.Errorf("ToolStats.TotalCalls %d != sum(session_signals.tool_calls) %d", ts.TotalCalls, sigCalls)

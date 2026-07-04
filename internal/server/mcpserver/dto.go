@@ -311,10 +311,9 @@ type getSessionInput struct {
 
 type sessionDetailDTO struct {
 	sessionDTO
-	OwnerID       int64  `json:"owner_id"`
-	Cwd           string `json:"cwd,omitempty"`
-	ParentID      *int64 `json:"parent_session_id,omitempty"`
-	ParserVersion int    `json:"parser_version"`
+	OwnerID  int64  `json:"owner_id"`
+	Cwd      string `json:"cwd,omitempty"`
+	ParentID *int64 `json:"parent_session_id,omitempty"`
 	// DuplicateToolCallIDs counts tool-call ids that appear on more than one row, a
 	// sign the transcript replayed a turn (a resumed or compacted run); normally 0. It
 	// is a session-wide aggregate, returned only on the first view (the header-only call
@@ -399,11 +398,10 @@ type transcriptDTO struct {
 
 func sessionDetailToDTO(d store.SessionDetail) sessionDetailDTO {
 	out := sessionDetailDTO{
-		sessionDTO:    sessionSummaryToDTO(d.SessionSummary),
-		OwnerID:       d.OwnerID,
-		Cwd:           d.Cwd,
-		ParentID:      d.ParentID,
-		ParserVersion: d.ParserVersion,
+		sessionDTO: sessionSummaryToDTO(d.SessionSummary),
+		OwnerID:    d.OwnerID,
+		Cwd:        d.Cwd,
+		ParentID:   d.ParentID,
 	}
 	out.ProjectID, out.ProjectKey, out.ProjectName, out.ProjectKind = d.ProjectID, d.ProjectKey, d.ProjectName, d.ProjectKind
 	return out

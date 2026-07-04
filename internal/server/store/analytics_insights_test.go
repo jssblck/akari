@@ -15,7 +15,7 @@ import (
 // session's grade and outcome without driving the whole computation (which signals_test
 // already covers). A scored row gets an arbitrary valid score; an empty grade is the
 // unscored bucket (NULL grade and score).
-func insertSignal(t *testing.T, st *store.Store, ctx context.Context, sid int64, version int, outcome, grade string) {
+func insertSignal(t *testing.T, st *store.Store, ctx context.Context, sid int64, outcome, grade string) {
 	t.Helper()
 	// score and grade must agree (a set grade equals GradeFor(score); see migration 0040), so
 	// derive a band-consistent score from the grade rather than a fixed 80 that would contradict
@@ -25,11 +25,23 @@ func insertSignal(t *testing.T, st *store.Store, ctx context.Context, sid int64,
 		score, gradeArg = representativeScore(grade), grade
 	}
 	if _, err := st.Pool.Exec(ctx,
-		`INSERT INTO session_signals (session_id, signals_version, outcome, outcome_confidence, score, grade)
-		 VALUES ($1, $2, $3, 'high', $4, $5)`, sid, version, outcome, score, gradeArg); err != nil {
+		`INSERT INTO session_signals (session_id, outcome, outcome_confidence, score, grade)
+		 VALUES ($1, $2, 'high', $3, $4)`, sid, outcome, score, gradeArg); err != nil {
 		t.Fatalf("insert signal for session %d: %v", sid, err)
 	}
 	markSignalsFresh(t, st, ctx, sid)
+}
+
+// insertStaleSignal writes a session_signals row exactly like insertSignal, but leaves
+// signals_stale set. It stands in for a session that was graded and then had its
+// projection move (a rebuild landed after the grade), which the fleet read must still
+// treat as ungraded until the next settle pass regrades it.
+func insertStaleSignal(t *testing.T, st *store.Store, ctx context.Context, sid int64, outcome, grade string) {
+	t.Helper()
+	insertSignal(t, st, ctx, sid, outcome, grade)
+	if _, err := st.Pool.Exec(ctx, `UPDATE sessions SET signals_stale = true WHERE id = $1`, sid); err != nil {
+		t.Fatalf("set signals_stale for session %d: %v", sid, err)
+	}
 }
 
 // setSessionShape stamps the facts the archetype banding and the windowing read: the
@@ -53,8 +65,8 @@ func countByKey(rows []store.LabeledCount) map[string]int {
 }
 
 // TestQualityDistribution confirms the grade and outcome splits fold into the canonical
-// order with zero-filled buckets, count only current-version rows, and respect the
-// analytics scoping (window and user).
+// order with zero-filled buckets, count only fresh (non-stale) signals rows, and respect
+// the analytics scoping (window and user).
 func TestQualityDistribution(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -69,28 +81,30 @@ func TestQualityDistribution(t *testing.T) {
 	recent := time.Now().Add(-24 * time.Hour)
 	old := time.Now().Add(-400 * 24 * time.Hour)
 
-	mk := func(user int64, src string, started time.Time, version int, outcome, grade string) int64 {
+	mk := func(user int64, src string, started time.Time, outcome, grade string) int64 {
 		sid := seedSession(t, st, user, pid, src)
 		setSessionShape(t, st, ctx, sid, started, started.Add(10*time.Minute), 20, 2)
-		insertSignal(t, st, ctx, sid, version, outcome, grade)
+		insertSignal(t, st, ctx, sid, outcome, grade)
 		return sid
 	}
-	// Ada: current-version A, A, C, and an explicit unscored row, all in window; a fifth
-	// in-window session with NO signals row and a sixth with a STALE-version row, both of
-	// which must fold into the unscored/unknown bucket (the missing-row path) rather than
-	// drop out; plus an old F outside a 90-day window.
-	mk(ua, "a1", recent, quality.Version, "completed", "A")
-	mk(ua, "a2", recent, quality.Version, "completed", "A")
-	mk(ua, "a3", recent, quality.Version, "errored", "C")
-	mk(ua, "a4", recent, quality.Version, "unknown", "")             // explicitly unscored
-	mk(ua, "a6stale", recent, quality.Version+999, "completed", "A") // stale version -> missing bucket
-	mk(ua, "a5old", old, quality.Version, "completed", "F")          // outside the window
+	// Ada: A, A, C, and an explicit unscored row, all in window; a fifth in-window session
+	// with NO signals row and a sixth whose signals row is STALE (graded, but the
+	// projection moved since), both of which must fold into the unscored/unknown bucket
+	// (the missing-row path) rather than drop out; plus an old F outside a 90-day window.
+	mk(ua, "a1", recent, "completed", "A")
+	mk(ua, "a2", recent, "completed", "A")
+	mk(ua, "a3", recent, "errored", "C")
+	mk(ua, "a4", recent, "unknown", "") // explicitly unscored
+	stale := seedSession(t, st, ua, pid, "a6stale")
+	setSessionShape(t, st, ctx, stale, recent, recent.Add(10*time.Minute), 20, 2)
+	insertStaleSignal(t, st, ctx, stale, "completed", "A") // graded but the projection moved since -> missing bucket
+	mk(ua, "a5old", old, "completed", "F")                 // outside the window
 	// A session with no signals row at all (mid-parse, pre-backfill): still counted.
 	noneID := seedSession(t, st, ua, pid, "a7none")
 	setSessionShape(t, st, ctx, noneID, recent, recent.Add(10*time.Minute), 20, 2)
-	mk(ub, "b1", recent, quality.Version, "abandoned", "B") // other user
+	mk(ub, "b1", recent, "abandoned", "B") // other user
 
-	// Window: last 90 days, all users. The old F drops out; the stale-version and the
+	// Window: last 90 days, all users. The old F drops out; the stale and the
 	// no-row sessions stay, counted as unscored/unknown.
 	since := time.Now().Add(-90 * 24 * time.Hour)
 	dist, err := st.QualityDistribution(ctx, store.AnalyticsFilter{Since: since})
@@ -158,7 +172,7 @@ func TestQualityDrilldownWindowsOnStartedAt(t *testing.T) {
 	// lists it.
 	inside := seedSession(t, st, ada, pid, "started-inside")
 	setSessionShape(t, st, ctx, inside, inWindow, inWindow.Add(10*time.Minute), 20, 2)
-	insertSignal(t, st, ctx, inside, quality.Version, "completed", "A")
+	insertSignal(t, st, ctx, inside, "completed", "A")
 
 	// A session started BEFORE the window but re-activated inside it: its last event
 	// (ended_at, and thus the generated last_active_at) lands in range while started_at does
@@ -168,7 +182,7 @@ func TestQualityDrilldownWindowsOnStartedAt(t *testing.T) {
 	// session having actually changed).
 	early := seedSession(t, st, ada, pid, "started-before")
 	setSessionShape(t, st, ctx, early, beforeWindow, activeNow, 20, 2)
-	insertSignal(t, st, ctx, early, quality.Version, "completed", "A")
+	insertSignal(t, st, ctx, early, "completed", "A")
 
 	since := now.Add(-7 * 24 * time.Hour)
 
@@ -294,7 +308,7 @@ func TestUserQuality(t *testing.T) {
 	mk := func(user int64, src, outcome, grade string) int64 {
 		sid := seedSession(t, st, user, pid, src)
 		setSessionShape(t, st, ctx, sid, recent, recent.Add(10*time.Minute), 20, 2)
-		insertSignal(t, st, ctx, sid, quality.Version, outcome, grade)
+		insertSignal(t, st, ctx, sid, outcome, grade)
 		return sid
 	}
 	// Ada: three graded (two completed A/B, one errored C) plus one ungraded/unknown session,
@@ -384,11 +398,11 @@ func TestUserQualityAvgScoreNilWhenUnscored(t *testing.T) {
 	for _, src := range []string{"a1", "a2"} {
 		sid := seedSession(t, st, ada, pid, src)
 		setSessionShape(t, st, ctx, sid, recent, recent.Add(10*time.Minute), 20, 2)
-		insertSignal(t, st, ctx, sid, quality.Version, "unknown", "")
+		insertSignal(t, st, ctx, sid, "unknown", "")
 	}
 	g := seedSession(t, st, grace, pid, "g1")
 	setSessionShape(t, st, ctx, g, recent, recent.Add(10*time.Minute), 20, 2)
-	insertSignal(t, st, ctx, g, quality.Version, "completed", "A")
+	insertSignal(t, st, ctx, g, "completed", "A")
 
 	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: time.Now().Add(-90 * 24 * time.Hour)})
 	if err != nil {
@@ -515,7 +529,7 @@ func TestVelocityStats(t *testing.T) {
 	// under the active cap, so the active span is 90s; five messages, two tool calls.
 	b1 := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
 	s1 := seedSession(t, st, ada, pid, "v1")
-	if err := st.ApplyProjectionDelta(ctx, s1, store.ProjectionDelta{
+	rebuildWith(t, st, s1, store.ProjectionDelta{
 		Messages: []store.MessageDelta{
 			{Ordinal: 0, Role: "user", Content: "go", Timestamp: b1},
 			{Ordinal: 1, Role: "assistant", Content: "on it", HasToolUse: true, Timestamp: b1.Add(10 * time.Second)},
@@ -527,9 +541,7 @@ func TestVelocityStats(t *testing.T) {
 			{MessageOrdinal: 1, CallIndex: 0, ToolName: "Read", Category: "read", CallUID: "a"},
 			{MessageOrdinal: 1, CallIndex: 1, ToolName: "Edit", Category: "edit", FilePath: "x.go", CallUID: "b"},
 		},
-	}); err != nil {
-		t.Fatalf("apply s1: %v", err)
-	}
+	})
 	setSessionShape(t, st, ctx, s1, recent, recent.Add(2*time.Minute), 5, 2)
 
 	// Session two (Ada): turn one replies 20s after the prompt (the opening reply); then a
@@ -538,7 +550,7 @@ func TestVelocityStats(t *testing.T) {
 	// one tool call.
 	b2 := time.Date(2026, 6, 1, 11, 0, 0, 0, time.UTC)
 	s2 := seedSession(t, st, ada, pid, "v2")
-	if err := st.ApplyProjectionDelta(ctx, s2, store.ProjectionDelta{
+	rebuildWith(t, st, s2, store.ProjectionDelta{
 		Messages: []store.MessageDelta{
 			{Ordinal: 0, Role: "user", Content: "start", Timestamp: b2},
 			{Ordinal: 1, Role: "assistant", Content: "reply", HasToolUse: true, Timestamp: b2.Add(20 * time.Second)},
@@ -548,23 +560,19 @@ func TestVelocityStats(t *testing.T) {
 		ToolCalls: []store.ProjToolCall{
 			{MessageOrdinal: 1, CallIndex: 0, ToolName: "Bash", Category: "bash", CallUID: "c"},
 		},
-	}); err != nil {
-		t.Fatalf("apply s2: %v", err)
-	}
+	})
 	setSessionShape(t, st, ctx, s2, recent, recent.Add(70*time.Minute), 4, 2)
 
 	// Session three (Grace): a single 100s turn, started long ago so a trailing window
 	// drops it. It is the only non-Ada session, so per-user scoping drops it too.
 	b3 := time.Date(2026, 6, 1, 13, 0, 0, 0, time.UTC)
 	s3 := seedSession(t, st, grace, pid, "v3")
-	if err := st.ApplyProjectionDelta(ctx, s3, store.ProjectionDelta{
+	rebuildWith(t, st, s3, store.ProjectionDelta{
 		Messages: []store.MessageDelta{
 			{Ordinal: 0, Role: "user", Content: "hello", Timestamp: b3},
 			{Ordinal: 1, Role: "assistant", Content: "hi", Timestamp: b3.Add(100 * time.Second)},
 		},
-	}); err != nil {
-		t.Fatalf("apply s3: %v", err)
-	}
+	})
 	setSessionShape(t, st, ctx, s3, old, old.Add(2*time.Minute), 2, 1)
 
 	// Ada only: latencies are [10, 30, 20, 50]. percentile_cont gives p50 = 25s, p90 = 44s;
@@ -635,9 +643,7 @@ func TestVelocityStatsEdges(t *testing.T) {
 	apply := func(user, src string, msgs []store.MessageDelta) store.AnalyticsFilter {
 		uid := seedUser(t, st, user)
 		sid := seedSession(t, st, uid, pid, src)
-		if err := st.ApplyProjectionDelta(ctx, sid, store.ProjectionDelta{Messages: msgs}); err != nil {
-			t.Fatalf("apply %s: %v", src, err)
-		}
+		rebuildWith(t, st, sid, store.ProjectionDelta{Messages: msgs})
 		return store.AnalyticsFilter{Username: user}
 	}
 

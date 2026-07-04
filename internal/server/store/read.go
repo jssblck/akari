@@ -8,8 +8,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-
-	"github.com/jssblck/akari/internal/quality"
 )
 
 // ProjectSummary is one row of the projects index: a project plus rolled-up
@@ -113,36 +111,32 @@ type SessionSummary struct {
 // per-model-priced rollup rides only the single-session read that needs it.
 type SessionDetail struct {
 	SessionSummary
-	OwnerID       int64
-	ProjectID     int64
-	ProjectKey    string
-	ProjectName   string
-	ProjectKind   string
-	Cwd           string
-	ParentID      *int64
-	ParserVersion int
-	// TotalCacheSavingsUSD is the session's rolled-up prompt-cache saving (folded at parse
-	// time beside total_cost_usd), so the Cache tile reads it in O(1) instead of scanning
-	// usage_events on every live refresh. A session whose rollup is not yet backfilled is
-	// priced and persisted once on read (see scanDetail), so the tile is never served the
-	// seeded value and later reads stay O(1). CacheSavingsIncomplete flags that some cached
-	// volume rode an unpriced model, so the figure is partial (and, unlike cost, not a clean
-	// lower bound: an omitted model's saving can be either sign).
+	OwnerID     int64
+	ProjectID   int64
+	ProjectKey  string
+	ProjectName string
+	ProjectKind string
+	Cwd         string
+	ParentID    *int64
+	// TotalCacheSavingsUSD is the session's rolled-up prompt-cache saving (folded by the
+	// rebuild beside total_cost_usd), so the Cache tile reads it in O(1) instead of
+	// scanning usage_events on every live refresh. CacheSavingsIncomplete flags that some
+	// cached volume rode an unpriced model, so the figure is partial (and, unlike cost,
+	// not a clean lower bound: an omitted model's saving can be either sign).
 	TotalCacheSavingsUSD   float64
 	CacheSavingsIncomplete bool
 }
 
 // Message is one transcript row for rendering. The prompt-hygiene facts (PromptShort,
 // PromptNoCode, PromptDigest) are the fixed-size verdicts quality.ClassifyPrompt materialized
-// on the row when the message was written (migration 0022); they carry no prompt body, so the
-// full-transcript read stays fixed-size per row and never re-reads content to classify it.
+// on the row when the message was written; they carry no prompt body, so the full-transcript
+// read stays fixed-size per row and never re-reads content to classify it.
 //
-// PromptFactsCurrent gates them: it is true only when the row's stored prompt_facts_version
-// matches the running quality.PromptFactsVersion AND the digest is non-NULL (a real classified
-// human turn). The version gate is why the renderer keys off this flag rather than the raw
-// booleans: a message classified under a superseded classifier (or a pre-migration row that
-// never carried facts) must render as nothing (no badge) rather than as a stale, possibly-wrong
-// badge. An epoch reparse re-derives the facts at the current version and flips this back on.
+// PromptFactsCurrent gates them: it is true only when the digest is non-NULL (a real
+// classified human turn). Every row is rewritten by the epoch rebuild, so stored facts are
+// always the running classifier's output; the flag only distinguishes a classified prompt
+// from a non-prompt row (assistant turn, empty user turn), so the renderer badges exactly
+// the turns the aggregate counted.
 type Message struct {
 	Ordinal      int
 	Role         string
@@ -312,24 +306,21 @@ func (f SessionFilter) conds(sinceCol string) (conds []string, args []any) {
 	// Grade and outcome match the Insights distributions' definition exactly, so a
 	// drill-through from a panel bar opens precisely the sessions that bar counted
 	// (pinned bucket by bucket in TestDrillFiltersMatchQualityDistribution). The panel's
-	// scan (qualityDistributionFrom in analytics_quality.go) LEFT JOINs the current-version,
-	// non-stale signals row and coalesces a missing one into the catch-all bucket (grade ''
+	// scan (qualityDistributionFrom in analytics_quality.go) LEFT JOINs the non-stale
+	// signals row and coalesces a missing one into the catch-all bucket (grade ''
 	// / outcome 'unknown'), so the buckets split two ways:
 	//
 	//   - A letter grade or a concrete outcome is an EXISTS: the session has a usable row
-	//     (signals_version = quality.Version AND NOT s.signals_stale) carrying that value.
-	//     Only NULL grades and missing rows fold in the panel, so EXISTS matches its
-	//     letter and concrete-outcome bars exactly.
+	//     (NOT s.signals_stale) carrying that value. Only NULL grades and missing rows
+	//     fold in the panel, so EXISTS matches its letter and concrete-outcome bars
+	//     exactly.
 	//   - The catch-all buckets are the complement, a NOT EXISTS: "unscored" is no usable
 	//     row with a non-NULL grade, which folds in the explicit NULL-grade row, the stale
-	//     or non-current-version row, and the session with no row at all, the same three
-	//     cases the panel test names (analytics_insights_test.go, "unscored = a4
-	//     (explicit) + a6stale (stale row) + a7none (no row)"). "unknown" is likewise no
-	//     usable row with a different outcome, folding the explicit 'unknown' row together
-	//     with the missing-row cases.
+	//     row, and the session with no row at all. "unknown" is likewise no usable row
+	//     with a different outcome, folding the explicit 'unknown' row together with the
+	//     missing-row cases.
 	if g := f.Grade; g != "" {
-		args = append(args, quality.Version)
-		gate := signalsCurrent(len(args))
+		gate := signalsCurrent()
 		if g == "unscored" {
 			conds = append(conds, "NOT EXISTS (SELECT 1 FROM session_signals sig WHERE sig.session_id = s.id AND "+
 				gate+" AND sig.grade IS NOT NULL)")
@@ -340,8 +331,7 @@ func (f SessionFilter) conds(sinceCol string) (conds []string, args []any) {
 		}
 	}
 	if o := f.Outcome; o != "" {
-		args = append(args, quality.Version)
-		gate := signalsCurrent(len(args))
+		gate := signalsCurrent()
 		args = append(args, o)
 		if o == "unknown" {
 			conds = append(conds, "NOT EXISTS (SELECT 1 FROM session_signals sig WHERE sig.session_id = s.id AND "+
@@ -583,21 +573,21 @@ const facetLimit = 50
 
 // messageReadColumns is the transcript-row column list shared by the full read and the bounded
 // window read, so both scan into the same Message shape through scanMessages. It selects the
-// message row's own columns, the prompt-hygiene facts gated by content_length > 0 and the current
-// classifier version (PromptFactsCurrent), and the stored duplicate-prompt verdict. gatherPromptHygiene
+// message row's own columns, the prompt-hygiene facts gated by content_length > 0 and a real
+// classified digest (PromptFactsCurrent), and the stored duplicate-prompt verdict. gatherPromptHygiene
 // in signals.go counts only user turns with content_length > 0 (an empty or attachment-only turn is
 // tool plumbing, not a prompt), so an empty user row must not render a transcript badge the aggregate
-// excluded. duplicate_prompt is materialized at insert over that same eligible set (projection.go),
-// so the transcript "repeat" badge and the stored duplicate_prompt_count read one set; it is read
-// here as a bounded column rather than folded from a whole-session window on every render. The
+// excluded. duplicate_prompt is materialized over that same eligible set (the rebuild's in-memory
+// fold), so the transcript "repeat" badge and the stored duplicate_prompt_count read one set; it is
+// read here as a bounded column rather than folded from a whole-session window on every render. The
 // remaining scanned columns (the per-turn usage fold) are supplied by whichever query wraps this
 // list: the full read folds them from the session's usage_events (messagesFullQuery), the bounded
 // window read leaves them empty (messagesWindowQuery), because its only caller, the MCP transcript
-// window, renders no per-turn usage. $2 is quality.PromptFactsVersion.
+// window, renders no per-turn usage.
 const messageReadColumns = `m.ordinal, m.role, m.content, m.thinking_text, m.model, m.has_thinking, m.has_tool_use,
 	coalesce(m.thinking_bytes, 0), m.timestamp,
 	coalesce(m.prompt_short, false), coalesce(m.prompt_no_code, false), coalesce(m.prompt_digest, 0),
-	(m.prompt_facts_version = $2 AND m.prompt_digest IS NOT NULL AND m.content_length > 0),
+	(m.prompt_digest IS NOT NULL AND m.content_length > 0),
 	coalesce(m.duplicate_prompt, false)`
 
 // messagesFullQuery is the whole-transcript read behind Messages. It LEFT JOINs the materialized
@@ -630,7 +620,7 @@ const messageReadColumns = `m.ordinal, m.role, m.content, m.thinking_text, m.mod
 // insert, see projection.go) rather than folded from a whole-session window here. Both the per-turn
 // usage and the duplicate flag are now stored per row, so the live body refresh (handleSessionBody
 // re-fetching this on every SSE append) reads bounded indexed rows and does no growing whole-session
-// usage scan or message window. $1 is the session id and $2 is quality.PromptFactsVersion.
+// usage scan or message window. $1 is the session id.
 const messagesFullQuery = `
 	SELECT ` + messageReadColumns + `,
 	       mtu.message_ordinal IS NOT NULL,
@@ -647,8 +637,8 @@ const messagesFullQuery = `
 // row's columns (including the stored duplicate_prompt, a bounded column read) and emits the usage
 // columns as empty constants (no usage), so it does no whole-session usage scan: its only caller,
 // the MCP transcript window, renders no per-turn usage stamps. The keyset predicate and LIMIT the
-// caller appends keep each page bounded to the requested ordinal range. $1 is the session id, $2 is
-// quality.PromptFactsVersion; the caller's window args start at $3.
+// caller appends keep each page bounded to the requested ordinal range. $1 is the session id; the
+// caller's window args start at $2.
 const messagesWindowQuery = `
 	SELECT ` + messageReadColumns + `,
 	       false, 0::bigint, 0::bigint, 0::bigint, 0::bigint, 0::bigint, 0::bigint, NULL::double precision, 0::bigint, false

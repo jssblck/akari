@@ -21,7 +21,7 @@ import (
 	"github.com/jssblck/akari/internal/config"
 	"github.com/jssblck/akari/internal/server/auth"
 	"github.com/jssblck/akari/internal/server/ogimage"
-	"github.com/jssblck/akari/internal/server/reparse"
+	"github.com/jssblck/akari/internal/server/parse"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/storetest"
 	"github.com/jssblck/akari/internal/server/web"
@@ -47,15 +47,18 @@ func newTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 	return srv, st
 }
 
-// newTestServerWithReparse is newTestServer that also returns the reparse service
+// newTestServerWithReparse is newTestServer that also returns the parse worker
 // wired into the server, so a test can force its status to exercise the UI gating.
-func newTestServerWithReparse(t *testing.T) (*httptest.Server, *store.Store, *reparse.Service) {
+// The worker's Run loop is deliberately never started here: tests either drive a
+// rebuild explicitly (worker.Drain) or force a status directly, so nothing races
+// a background drain.
+func newTestServerWithReparse(t *testing.T) (*httptest.Server, *store.Store, *parse.Worker) {
 	t.Helper()
 	st := storetest.NewStore(t)
-	rp := reparse.New(context.Background(), st)
-	srv := httptest.NewServer(New(st, config.Server{}, rp).Routes())
+	worker := parse.NewWorker(st, 1, 0)
+	srv := httptest.NewServer(New(st, config.Server{}, worker).Routes())
 	t.Cleanup(srv.Close)
-	return srv, st, rp
+	return srv, st, worker
 }
 
 // newClient returns an http.Client that follows redirects and keeps cookies, so
@@ -67,6 +70,44 @@ func newClient(t *testing.T) *http.Client {
 		t.Fatalf("cookiejar: %v", err)
 	}
 	return &http.Client{Jar: jar}
+}
+
+// stubReducer satisfies store.SessionReducer with a canned whole-session delta,
+// ignoring whatever raw bytes the rebuild feeds it. It is the seam these HTTP
+// tests use to seed a projection without composing real transcript bytes or
+// running it through the worker.
+type stubReducer struct{ delta store.ProjectionDelta }
+
+func (r stubReducer) Feed([]byte, int64) error      { return nil }
+func (r stubReducer) Finish() store.ProjectionDelta { return r.delta }
+
+// rebuildWith replaces sid's whole projection with the canned delta, the way a
+// real parse would: Announce already created the session_raw row the rebuild
+// locks, so this works on any announced session even before a chunk lands. A
+// rebuild also re-grades signals in the same transaction (settled or terminal
+// sessions get a fresh, non-stale session_signals row; a live session has any
+// existing row deleted and stays signals_stale), so a caller that hand-inserts a
+// signals row afterward must clear that flag itself.
+func rebuildWith(t *testing.T, st *store.Store, sid int64, d store.ProjectionDelta) {
+	t.Helper()
+	if err := st.RebuildSession(context.Background(), sid, parse.Epoch, stubReducer{d}); err != nil {
+		t.Fatalf("rebuild session %d: %v", sid, err)
+	}
+}
+
+// stampSessionCurrent marks an announced session's raw row as already rebuilt at
+// the running parser epoch, without running a real rebuild. A freshly announced
+// session sits at parser_epoch 0, which the fleet-rebuild gate (gateParsed,
+// gatePublicParsed, the epoch-gated OG snapshots) reads as a corpus-wide rebuild
+// draining, so a test that seeds a session outside a rebuild and then exercises an
+// ungated parsed page or public card must call this or the gate serves the
+// "reparse in progress" stand-in for every such page in the test.
+func stampSessionCurrent(t *testing.T, st *store.Store, sid int64) {
+	t.Helper()
+	if _, err := st.Pool.Exec(context.Background(),
+		"UPDATE session_raw SET parser_epoch = $2 WHERE session_id = $1", sid, parse.Epoch); err != nil {
+		t.Fatalf("stamp session %d current: %v", sid, err)
+	}
 }
 
 func TestWebFlow(t *testing.T) {
@@ -400,6 +441,13 @@ func TestStandaloneOrphanedIndex(t *testing.T) {
 	announce("standalone", "sess-standalone", "/home/grace/scratch", "")
 	announce("orphaned", "sess-orphaned", "/home/grace/deleted", "")
 
+	// None of these sessions is ever rebuilt, so each sits at parser_epoch 0;
+	// stamp them current so the parsed /projects index this test reads is not
+	// gated behind the "fleet rebuild in progress" stand-in.
+	if _, err := st.Pool.Exec(ctx, "UPDATE session_raw SET parser_epoch = $1", parse.Epoch); err != nil {
+		t.Fatalf("stamp sessions current: %v", err)
+	}
+
 	// The projects index lists the git-remote project and nothing else: no local
 	// folders, no "Sessions" section, and never the synthetic local: key.
 	resp, err := c.Get(srv.URL + "/projects")
@@ -503,13 +551,11 @@ func TestPublicSessionFlow(t *testing.T) {
 		t.Fatalf("announce: %v", err)
 	}
 	sid := ann.SessionID
-	if err := st.ApplyProjectionDelta(ctx, sid, store.ProjectionDelta{
+	rebuildWith(t, st, sid, store.ProjectionDelta{
 		Messages: []store.MessageDelta{
 			{Ordinal: 0, Role: "user", Content: "Fix the secret login bug"},
 		},
-	}); err != nil {
-		t.Fatalf("apply projection: %v", err)
-	}
+	})
 
 	// Log in as the owner.
 	if _, err := c.PostForm(srv.URL+"/login", url.Values{
@@ -614,6 +660,7 @@ func TestOverviewRangeWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("announce: %v", err)
 	}
+	stampSessionCurrent(t, st, ann.SessionID)
 	if _, err := st.Pool.Exec(ctx,
 		`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cost_usd, occurred_at, dedup_key)
 		 VALUES ($1, 'claude-opus-4-8', 100, 50, 1.0, now() - make_interval(days => 1), 'u1')`,
@@ -671,6 +718,7 @@ func TestProjectPageRangeWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("announce: %v", err)
 	}
+	stampSessionCurrent(t, st, ann.SessionID)
 	if _, err := st.Pool.Exec(ctx,
 		`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cost_usd, occurred_at, dedup_key)
 		 VALUES ($1, 'claude-opus-4-8', 100, 50, 1.0, now() - make_interval(days => 1), 'u1')`,
@@ -690,6 +738,7 @@ func TestProjectPageRangeWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("announce old: %v", err)
 	}
+	stampSessionCurrent(t, st, annOld.SessionID)
 	if _, err := st.Pool.Exec(ctx,
 		`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cost_usd, occurred_at, dedup_key)
 		 VALUES ($1, 'claude-opus-4-8', 200, 100, 2.0, now() - make_interval(days => 60), 'u-old')`,
@@ -798,6 +847,7 @@ func TestSessionsFeedRangeWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("announce new: %v", err)
 	}
+	stampSessionCurrent(t, st, annNew.SessionID)
 	annOld, err := st.Announce(ctx, store.AnnounceParams{
 		UserID: owner.ID, Agent: "claude", SourceSessionID: "sess-old",
 		ProjectID: projectID, Cwd: "/home/grace/akari", Machine: "laptop",
@@ -805,6 +855,7 @@ func TestSessionsFeedRangeWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("announce old: %v", err)
 	}
+	stampSessionCurrent(t, st, annOld.SessionID)
 	// Stamp a message on each so they clear the feed's default empty-session hide (a bare
 	// announce parses no message), then set their started_at so the 30-day window keeps one
 	// and drops the other.
@@ -942,6 +993,7 @@ func TestOverviewUserFilter(t *testing.T) {
 		if err != nil {
 			t.Fatalf("announce %s: %v", src, err)
 		}
+		stampSessionCurrent(t, st, ann.SessionID)
 		if _, err := st.Pool.Exec(ctx,
 			`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cost_usd, occurred_at, dedup_key)
 			 VALUES ($1, $2, 100, 50, 1.0, now() - make_interval(days => 1), $3)`,
@@ -1014,7 +1066,7 @@ func TestSessionPageDuplicateIDChip(t *testing.T) {
 	sid := ann.SessionID
 
 	// Two assistant turns whose tool calls share id "toolu_dup": the replayed turn.
-	if err := st.ApplyProjectionDelta(ctx, sid, store.ProjectionDelta{
+	rebuildWith(t, st, sid, store.ProjectionDelta{
 		Messages: []store.MessageDelta{
 			{Ordinal: 0, Role: "assistant", Content: "first", HasToolUse: true},
 			{Ordinal: 1, Role: "assistant", Content: "replay", HasToolUse: true},
@@ -1023,9 +1075,7 @@ func TestSessionPageDuplicateIDChip(t *testing.T) {
 			{MessageOrdinal: 0, CallIndex: 0, ToolName: "Read", CallUID: "toolu_dup"},
 			{MessageOrdinal: 1, CallIndex: 0, ToolName: "Read", CallUID: "toolu_dup"},
 		},
-	}); err != nil {
-		t.Fatalf("apply projection: %v", err)
-	}
+	})
 
 	if _, err := c.PostForm(srv.URL+"/login", url.Values{
 		"username": {"grace"}, "password": {"hopper-1906"},
@@ -1081,6 +1131,7 @@ func TestPublicOverviewFlow(t *testing.T) {
 		if err != nil {
 			t.Fatalf("announce %s: %v", src, err)
 		}
+		stampSessionCurrent(t, st, ann.SessionID)
 		if _, err := st.Pool.Exec(ctx,
 			`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cost_usd, occurred_at, dedup_key)
 			 VALUES ($1, $2, 100, 50, 1.0, now() - make_interval(days => 1), $3)`,
@@ -1241,6 +1292,7 @@ func TestPublicProjectFlow(t *testing.T) {
 		if err != nil {
 			t.Fatalf("announce %s: %v", src, err)
 		}
+		stampSessionCurrent(t, st, ann.SessionID)
 		if _, err := st.Pool.Exec(ctx,
 			`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cost_usd, occurred_at, dedup_key)
 			 VALUES ($1, $2, 100, 50, 1.0, now() - make_interval(days => 1), $3)`,
@@ -1469,6 +1521,7 @@ func TestPublicOverviewOGImage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("announce: %v", err)
 	}
+	stampSessionCurrent(t, st, ann.SessionID)
 	if _, err := st.Pool.Exec(ctx,
 		`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cost_usd, occurred_at, dedup_key)
 		 VALUES ($1, 'claude-opus-4-8', 100, 50, 1.0, now() - make_interval(days => 1), 'u1')`,
@@ -1646,6 +1699,7 @@ func TestPublicProjectOGImage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("announce: %v", err)
 	}
+	stampSessionCurrent(t, st, ann.SessionID)
 	if _, err := st.Pool.Exec(ctx,
 		`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cost_usd, occurred_at, dedup_key)
 		 VALUES ($1, 'claude-opus-4-8', 100, 50, 1.0, now() - make_interval(days => 1), 'p1')`,
@@ -1744,6 +1798,7 @@ func TestPublicSessionOGImage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("announce: %v", err)
 	}
+	stampSessionCurrent(t, st, ann.SessionID)
 	if _, err := st.Pool.Exec(ctx,
 		`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cost_usd, occurred_at, dedup_key)
 		 VALUES ($1, 'claude-opus-4-8', 100, 50, 1.0, now() - make_interval(days => 1), 's1')`,
@@ -1826,20 +1881,34 @@ func fetchPNG(t *testing.T, c *http.Client, url string) image.Rectangle {
 	return img.Bounds()
 }
 
-// TestOGImageDuringReparse guards the on-demand render's reparse gate: rendering a
-// card while a reparse rebuilds the projection must not serve a card from a
-// half-rebuilt aggregate. It holds the real reparse advisory lock (as a live reparse
-// does for its whole run) so ogimage.Generate takes its abort path. With a cold
-// cache the request 404s (nothing good to serve yet); once the reparse clears, the
-// next request renders and serves the card.
+// TestOGImageDuringReparse guards the on-demand render's epoch gate: rendering a
+// card while a session sits behind the running parser epoch (standing in for a
+// fleet rebuild in progress) must not serve a card from a half-rebuilt aggregate.
+// A freshly announced session defaults to parser_epoch 0, so stamping the store
+// with a nonzero running epoch reproduces exactly the corpus state a live rebuild
+// leaves behind, without needing a real worker drain. With a cold cache the
+// request 404s (nothing good to serve yet); once the session's rebuild "catches
+// up" to the running epoch, the next request renders and serves the card.
 func TestOGImageDuringReparse(t *testing.T) {
 	t.Parallel()
 	srv, st := newTestServer(t)
 	ctx := context.Background()
 	c := newClient(t)
 
-	if _, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), ""); err != nil {
+	owner, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), "")
+	if err != nil {
 		t.Fatalf("register: %v", err)
+	}
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	ann, err := st.Announce(ctx, store.AnnounceParams{
+		UserID: owner.ID, Agent: "claude", SourceSessionID: "sess-grace",
+		ProjectID: projectID, Cwd: "/home/grace/akari", Machine: "laptop",
+	})
+	if err != nil {
+		t.Fatalf("announce: %v", err)
 	}
 	if _, err := c.PostForm(srv.URL+"/login", url.Values{
 		"username": {"grace"}, "password": {"hopper-1906"},
@@ -1853,33 +1922,28 @@ func TestOGImageDuringReparse(t *testing.T) {
 	anon := newClient(t)
 	anon.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
-	// Hold the reparse advisory lock, standing in for a running reparse: an on-demand
-	// render against a cold cache aborts, so /og.png 404s rather than caching a
-	// half-rebuilt aggregate.
-	lock, ok, err := st.AcquireReparseLock(ctx)
-	if err != nil || !ok {
-		t.Fatalf("acquire reparse lock: ok=%v err=%v", ok, err)
-	}
+	// The announced session sits at parser_epoch 0; running the store at a nonzero
+	// epoch makes the corpus epoch-stale, standing in for a rebuild in progress. An
+	// on-demand render against a cold cache aborts, so /og.png 404s rather than
+	// caching a half-rebuilt aggregate.
+	st.SetParserEpoch(1)
 	resp := mustGet(t, anon, srv.URL+"/u/grace/og.png")
 	if resp.StatusCode != http.StatusNotFound {
-		lock.Release(ctx)
 		t.Fatalf("og.png during reparse (cold cache) = %d, want 404 (render skipped)", resp.StatusCode)
 	}
 	resp.Body.Close()
 
 	// The aborted render must not have cached anything: a half-rebuilt aggregate is
 	// never stored, so the cache is still empty (not a bad card waiting to be served).
-	owner, err := st.UserByUsername(ctx, "grace")
-	if err != nil {
-		t.Fatalf("lookup grace: %v", err)
-	}
 	if _, err := st.OverviewOGImage(ctx, owner.ID); !errors.Is(err, store.ErrNotFound) {
-		lock.Release(ctx)
 		t.Fatalf("card cached during aborted render (err = %v), want ErrNotFound (nothing stored)", err)
 	}
 
-	// With the lock cleared, the next fetch renders the card.
-	lock.Release(ctx)
+	// Stamp the session at the running epoch, standing in for the reparse
+	// clearing: the corpus is single-epoch again, so the next fetch renders.
+	if _, err := st.Pool.Exec(ctx, "UPDATE session_raw SET parser_epoch = 1 WHERE session_id = $1", ann.SessionID); err != nil {
+		t.Fatalf("stamp session current: %v", err)
+	}
 	resp = mustGet(t, anon, srv.URL+"/u/grace/og.png")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("og.png after reparse cleared = %d, want 200", resp.StatusCode)
@@ -1902,6 +1966,16 @@ func TestOGImageServesStaleCardDuringReparse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	if _, err := st.Announce(ctx, store.AnnounceParams{
+		UserID: owner.ID, Agent: "claude", SourceSessionID: "sess-grace",
+		ProjectID: projectID, Cwd: "/home/grace/akari", Machine: "laptop",
+	}); err != nil {
+		t.Fatalf("announce: %v", err)
+	}
 	if _, err := c.PostForm(srv.URL+"/login", url.Values{
 		"username": {"grace"}, "password": {"hopper-1906"},
 	}); err != nil {
@@ -1913,17 +1987,15 @@ func TestOGImageServesStaleCardDuringReparse(t *testing.T) {
 
 	// Seed a stale cached card (stamped two hours back, well past the 1h TTL) with a
 	// sentinel body so a cache hit is unmistakable. A fresh render would replace it,
-	// but the held reparse lock blocks that, so the stale bytes must come back.
+	// but the epoch-stale corpus below blocks that, so the stale bytes must come back.
 	stale := []byte("stale-card-served-during-reparse")
 	if _, err := st.PutOverviewOGImage(ctx, owner.ID, stale, time.Now().Add(-2*time.Hour)); err != nil {
 		t.Fatalf("seed stale card: %v", err)
 	}
 
-	lock, ok, err := st.AcquireReparseLock(ctx)
-	if err != nil || !ok {
-		t.Fatalf("acquire reparse lock: ok=%v err=%v", ok, err)
-	}
-	defer lock.Release(ctx)
+	// The announced session sits at parser_epoch 0; running the store at a nonzero
+	// epoch reproduces a fleet rebuild in progress without a real worker drain.
+	st.SetParserEpoch(1)
 
 	anon := newClient(t)
 	resp := mustGet(t, anon, srv.URL+"/u/grace/og.png")
@@ -1949,8 +2021,8 @@ func TestOGImageCacheControlHonorsTTL(t *testing.T) {
 	t.Parallel()
 	const ttl = 15 * time.Minute
 	st := storetest.NewStore(t)
-	rp := reparse.New(context.Background(), st)
-	srv := httptest.NewServer(New(st, config.Server{OGCacheTTL: ttl}, rp).Routes())
+	worker := parse.NewWorker(st, 1, 0)
+	srv := httptest.NewServer(New(st, config.Server{OGCacheTTL: ttl}, worker).Routes())
 	t.Cleanup(srv.Close)
 
 	ctx := context.Background()

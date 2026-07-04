@@ -9,7 +9,7 @@ import (
 
 	"github.com/jssblck/akari/internal/config"
 	"github.com/jssblck/akari/internal/server/auth"
-	"github.com/jssblck/akari/internal/server/reparse"
+	"github.com/jssblck/akari/internal/server/parse"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/storetest"
 )
@@ -89,8 +89,8 @@ func TestProxyIdentityGates(t *testing.T) {
 func newProxyAuthServer(t *testing.T, cfg config.Server) (*httptest.Server, *store.Store) {
 	t.Helper()
 	st := storetest.NewStore(t)
-	rp := reparse.New(context.Background(), st)
-	srv := httptest.NewServer(New(st, cfg, rp).Routes())
+	worker := parse.NewWorker(st, 1, 0)
+	srv := httptest.NewServer(New(st, cfg, worker).Routes())
 	t.Cleanup(srv.Close)
 	return srv, st
 }

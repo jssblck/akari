@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jssblck/akari/internal/quality"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/storetest"
 )
@@ -169,12 +168,11 @@ func TestSessionCard(t *testing.T) {
 	start := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
 	end := start.Add(time.Hour)
 	// A first user message gives the card its title.
-	if err := st.ApplyProjectionDelta(ctx, sid, store.ProjectionDelta{
+	rebuildWith(t, st, sid, store.ProjectionDelta{
 		Messages: []store.MessageDelta{{Ordinal: 0, Role: "user", Content: "Ada asks about caching"}},
-	}); err != nil {
-		t.Fatalf("apply message: %v", err)
-	}
-	// The session rollups and span the card reads (ApplyProjectionDelta leaves these alone).
+	})
+	// The session rollups and span the card reads (the rebuild above set them from the delta;
+	// this stamps the figures the card actually asserts against).
 	if _, err := st.Pool.Exec(ctx,
 		`UPDATE sessions SET message_count = 12,
 		        total_input_tokens = 100, total_output_tokens = 20,
@@ -183,7 +181,7 @@ func TestSessionCard(t *testing.T) {
 		sid, start, end); err != nil {
 		t.Fatalf("set session facts: %v", err)
 	}
-	insertScoredSignals(t, st, ctx, sid, quality.Version, 91, "A", false)
+	insertScoredSignals(t, st, ctx, sid, 91, "A", false)
 	// Dated usage across the span, plus an undated event the strip must exclude.
 	seedUsageCacheAt(t, st, sid, "claude", 10, 2, 3, 1, start.Add(5*time.Minute), "e-early")
 	seedUsageCacheAt(t, st, sid, "claude", 100, 20, 300, 5, start.Add(55*time.Minute), "e-late")
@@ -252,7 +250,7 @@ func TestSessionCardGatingAndEdges(t *testing.T) {
 	if _, err := st.Pool.Exec(ctx, `UPDATE sessions SET started_at = $2 WHERE id = $1`, sid, start); err != nil {
 		t.Fatalf("set started_at: %v", err)
 	}
-	insertScoredSignals(t, st, ctx, sid, quality.Version, 80, "B", true) // stale → gated out
+	insertScoredSignals(t, st, ctx, sid, 80, "B", true) // stale → gated out
 	seedUsageCacheAt(t, st, sid, "claude", 10, 2, 3, 1, start.Add(time.Minute), "e1")
 
 	card, found, err := st.SessionCard(ctx, sid, 8)

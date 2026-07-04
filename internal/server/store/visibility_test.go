@@ -231,9 +231,7 @@ func TestDeleteSessionCascadesAndOrphansBlob(t *testing.T) {
 			CallUID: "c1", Body: string(body), Bytes: int64(len(body)), MediaType: "text/plain", Status: "ok",
 		}},
 	}
-	if err := st.ApplyProjectionDelta(ctx, sid, proj); err != nil {
-		t.Fatal(err)
-	}
+	rebuildWith(t, st, sid, proj)
 
 	if err := st.DeleteSession(ctx, sid); err != nil {
 		t.Fatalf("delete: %v", err)

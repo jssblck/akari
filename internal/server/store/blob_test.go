@@ -50,12 +50,8 @@ func TestCASWriteDedupReadSweep(t *testing.T) {
 			InputBody: string(body), InputBytes: int64(len(body)), InputMediaType: "application/json", CallUID: "c1",
 		}},
 	}
-	if err := st.ApplyProjectionDelta(ctx, s1, withInput); err != nil {
-		t.Fatalf("apply projection s1: %v", err)
-	}
-	if err := st.ApplyProjectionDelta(ctx, s2, withInput); err != nil {
-		t.Fatalf("apply projection s2: %v", err)
-	}
+	rebuildWith(t, st, s1, withInput)
+	rebuildWith(t, st, s2, withInput)
 
 	var blobCount int
 	if err := st.Pool.QueryRow(ctx, "SELECT count(*) FROM blobs WHERE sha256 = $1", bodySHA).Scan(&blobCount); err != nil {
@@ -142,9 +138,7 @@ func TestSweepSkipsBlobLockedByWriter(t *testing.T) {
 			CallUID: "c1", Body: string(body), Bytes: int64(len(body)), MediaType: "text/plain", Status: "ok",
 		}},
 	}
-	if err := st.ApplyProjectionDelta(ctx, sid, withBlob); err != nil {
-		t.Fatal(err)
-	}
+	rebuildWith(t, st, sid, withBlob)
 	// Drop the reference in committed state: the blob is now an orphan a naive
 	// sweep would remove.
 	if err := st.ResetRaw(ctx, sid); err != nil {

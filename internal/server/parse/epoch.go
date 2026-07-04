@@ -1,40 +1,35 @@
 package parse
 
-// Epoch is the fleet-wide reparse signal: a binary constant the running server
-// compares against parse_meta.reparsed_epoch to decide whether already-ingested
-// data needs rebuilding. When Epoch != reparsed_epoch the server reparses every
-// session in the background and, on success, writes Epoch back, so a deploy is all
-// it takes to roll a parser improvement out to old data. Bump it in the same commit
-// as any change that alters parser or reducer output: new or removed rows, changed
-// field values, a different fold, or a pricing-table change that re-prices stored
-// usage (the projection carries cost, so a reprice is an output change too).
+// Epoch is the single version constant for everything derived from a session's
+// raw bytes. Each session_raw row stores the epoch its last successful rebuild
+// ran at; a session is due for a rebuild whenever that stamp differs from this
+// constant (or its bytes moved past the last rebuilt length), so a deploy with
+// a bumped Epoch makes the whole corpus due and the parse worker rebuilds it in
+// the background. Bump it in the same commit as any change to what a rebuild
+// produces: parser or reducer output, a rebuild-derived column, the signal set
+// or scoring, prompt classification, or the pricing table (the projection
+// carries cost, so a reprice is an output change too). Nothing else needs
+// versioning, because nothing derived can stay behind for longer than one
+// rebuild.
 //
-// Why a constant and not a migration: parser behavior lives in the binary, not the
-// schema. The most recent parser change (PR #18, "Lift Codex image payloads to the
-// CAS; stop refusing bodyless big lines") shipped with no database migration at
-// all, so a migration-versioned trigger would have missed it and the maintainer
-// had to reparse by hand over SSH. The epoch travels with the binary, so the
-// signal fires exactly when the code that produces the projection changes,
-// migration or not.
+// Why a constant and not a migration: parser behavior lives in the binary, not
+// the schema. Parser changes often ship with no database migration at all (PR
+// #18, "Lift Codex image payloads to the CAS", was one), so a
+// migration-versioned trigger would miss them. The epoch travels with the
+// binary, so the signal fires exactly when the code that produces the
+// projection changes, migration or not.
 //
-// Relationship to Version: Version (see parse.go) is the per-session
-// incremental-resume marker stored on each session_raw row; it stops two parser
-// versions' output from blending on the live append path. Epoch is the global
-// "has the whole corpus been reparsed since the last output change" marker. They
-// move together in practice, so bump both when output changes. The golden-fixtures
-// test (epoch_test.go) is the guardrail that makes the Epoch bump impossible to
-// forget: it snapshots the projection for representative fixtures and fails, by
-// name, when that output drifts.
-//
-// An Epoch bump is also a way to backfill a derived projection table that did not
-// exist before. A caught-up session never re-enters AdvanceProjection, and the append
-// path does not fill session_signals (the settle pass does, once a session settles),
-// so on the first deploy of a new derived table an Epoch bump reparses the corpus to
-// populate it in one pass, independent of whether the settle loop is enabled. The
-// reparse also rebuilds session_signals at the running quality.Version, so a
-// scoring-model change rides the same signal. Such a bump leaves the parser's projection
-// delta byte-for-byte identical, so the golden fixtures do not move; the bump is
+// The golden-fixtures test (epoch_test.go) is the guardrail that makes the
+// Epoch bump impossible to forget: it snapshots the projection for
+// representative fixtures and fails, by name, when that output drifts. A bump
+// whose change lives outside the reducer (a store-side derived column, a
+// scoring change, a reprice) leaves the fixtures unmoved; the bump is
 // intentional and stands on its own.
+//
+// Entries below Epoch 13 predate the rebuild pipeline and describe the old
+// incremental machinery (a parse.Version resume marker, a separate reparse
+// service, per-table version stamps); they are kept as the history of what each
+// epoch's data change was.
 //
 // Epoch 1 -> 2: introduce session_signals, the per-session derived behavioral signals
 // (an outcome classification, a quality score and grade, tool-health counts,
@@ -151,4 +146,19 @@ package parse
 // fills (not a generated one), the reparse this forces is what populates it across the already-ingested
 // corpus; the reparse also re-derives session_signals at the running quality.Version, so the new
 // observed-thinking scalars materialize in the same pass.
-const Epoch = 12
+//
+// Epoch 12 -> 13: the rebuild pipeline. Parsing becomes rebuild-on-dirty (see docs/DESIGN.md
+// "Server-side parsing pipeline"): a background worker refolds a session's whole projection from
+// byte zero whenever its bytes or this epoch move, and the incremental machinery goes away
+// (parse.Version, serialized reducer state, the reparse service, and the quality.Version /
+// quality.PromptFactsVersion / pricing.Version stamps all collapse into this one constant). Two
+// output changes ride the same bump. First, the Claude reducer now folds the content-block lines
+// that share one API message.id into a single assistant turn, so a messages row is one semantic
+// turn for every agent, has_tool_use and thinking land on the turn that produced them, and the
+// per-turn usage rollup keys one row per API response; this fixes the observed-thinking turn
+// denominator (issue #98) and moves the golden fixtures. Second, usage dedup, tool-result
+// patching, fallback merging, prompt facts, and the rollups are now computed by the rebuild's
+// in-memory fold over complete information rather than by ON CONFLICT arithmetic; the fold is
+// value-identical for well-formed transcripts, and migration 0042 makes every session read as due
+// (parser_epoch DEFAULT 0), so the first boot rebuilds the corpus into the new shape.
+const Epoch = 13

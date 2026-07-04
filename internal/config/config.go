@@ -8,6 +8,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -67,15 +68,18 @@ type Server struct {
 	// (AKARI_PROXY_AUTH_SECRET_HEADER). Defaults to "X-Akari-Proxy-Secret". Only
 	// consulted when ProxyAuthSecret is set.
 	ProxyAuthSecretHeader string
-	// SignalsSettleInterval is how often the server wakes to compute per-session
-	// signals for sessions that have settled (AKARI_SIGNALS_SETTLE_INTERVAL). The
-	// ingest append path deliberately does not recompute signals per message (that
-	// would be quadratic and would grade a still-running session with a
-	// time-dependent outcome), so a settled session's grade is filled in here, once,
-	// after it has been idle past the abandoned threshold. Defaults to 5m; set "0"
-	// to disable the background pass (signals then land only on reparse or via the
-	// subcommand).
+	// SignalsSettleInterval is how often the parse worker's maintenance tick fires
+	// (AKARI_SIGNALS_SETTLE_INTERVAL). The tick backstops the wake-driven rebuild
+	// drain and grades sessions that settled between rebuilds: a rebuild grades a
+	// session only once it is settled or terminal, so a session whose last rebuild
+	// ran while it was live is graded here, once, after it has been idle past the
+	// abandoned threshold. Defaults to 5m; set "0" to disable the tick (rebuilds
+	// then run only on ingest wakes, and settle grading only via the subcommand).
 	SignalsSettleInterval time.Duration
+	// ParseWorkers is how many sessions the parse worker rebuilds concurrently
+	// (AKARI_PARSE_WORKERS). Distinct sessions rebuild in parallel; two rebuilds
+	// of one session serialize on its row locks. Defaults to 4.
+	ParseWorkers int
 }
 
 // LoadServer reads server configuration from the environment, applying defaults
@@ -116,7 +120,28 @@ func LoadServer() (Server, error) {
 		return Server{}, fmt.Errorf("AKARI_SIGNALS_SETTLE_INTERVAL: %w", err)
 	}
 	s.SignalsSettleInterval = settleInterval
+	workers, err := parsePositiveInt(os.Getenv("AKARI_PARSE_WORKERS"), 4)
+	if err != nil {
+		return Server{}, fmt.Errorf("AKARI_PARSE_WORKERS: %w", err)
+	}
+	s.ParseWorkers = workers
 	return s, nil
+}
+
+// parsePositiveInt reads a positive integer, returning fallback when unset.
+func parsePositiveInt(v string, fallback int) (int, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return fallback, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, err
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("must be positive")
+	}
+	return n, nil
 }
 
 // parseDuration reads a Go duration string, returning fallback when unset and

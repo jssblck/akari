@@ -12,10 +12,10 @@ import (
 // and reasoning; event_msg of type token_count carries usage whose combined input
 // must be split into uncached input and cache-read. A turn is a run of reasoning
 // and function_call items followed by the assistant message, all folded into one
-// assistant message; that fold can span a chunk boundary, which is why the open
-// turn lives in the carry-over state.
+// assistant message; the open turn lives in the reducer, so the fold crosses
+// region boundaries freely and Finish flushes the last one.
 func (r *reducer) reduceCodex(region []byte, base int64) error {
-	err := eachLine(region, base, func(line []byte, offset int64) error {
+	return eachLine(region, base, func(line []byte, offset int64) error {
 		if !gjson.ValidBytes(line) {
 			return nil
 		}
@@ -25,7 +25,7 @@ func (r *reducer) reduceCodex(region []byte, base int64) error {
 		ts := parseTime(e.Get("timestamp").String())
 		r.observe(ts)
 		if m := p.Get("model").String(); m != "" {
-			r.st.Model = m
+			r.model = m
 		}
 
 		switch typ {
@@ -105,7 +105,7 @@ func (r *reducer) reduceCodex(region []byte, base int64) error {
 				r.addCodexReasoning(p)
 
 			case p.Get("role").String() == "user":
-				r.closeTurn() // a user turn ends the current assistant turn
+				// addUser/addContext close the open assistant turn themselves.
 				text := blockText(p.Get("content"))
 				if isCodexContext(text) {
 					// Codex prepends the project's AGENTS.md instructions and an
@@ -128,8 +128,8 @@ func (r *reducer) reduceCodex(region []byte, base int64) error {
 			case p.Get("role").String() == "assistant":
 				r.ensureAssistant(ts)
 				r.addOpenContent(blockText(p.Get("content")))
-				if r.st.Model != "" {
-					r.open.Model = r.st.Model
+				if r.model != "" {
+					r.open.Model = r.model
 				}
 			}
 
@@ -147,7 +147,7 @@ func (r *reducer) reduceCodex(region []byte, base int64) error {
 					input = 0
 				}
 				usage := Usage{
-					Model: r.st.Model, Input: input, Output: int(u.Get("output_tokens").Int()),
+					Model: r.model, Input: input, Output: int(u.Get("output_tokens").Int()),
 					CacheRead: cached, Reasoning: int(u.Get("reasoning_output_tokens").Int()),
 					OccurredAt: ts,
 				}
@@ -174,12 +174,6 @@ func (r *reducer) reduceCodex(region []byte, base int64) error {
 		}
 		return nil
 	})
-	if err != nil {
-		return err
-	}
-	// Keep any still-open turn open so the next region continues its row.
-	r.flushRegion()
-	return nil
 }
 
 // isCodexContext reports whether a Codex user turn is injected framing rather than a

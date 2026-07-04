@@ -18,40 +18,9 @@ import (
 	"time"
 )
 
-// Version stamps the rate table below. Bump it whenever a rate in `table` changes: a new or
-// removed model, a different Input/Output/CacheWrite/CacheRead number for an existing one, or a
-// new or moved date-effective window.
-//
-// It exists because a reprice makes two stored figures go stale in different ways, and only one
-// of them is fixed by the reparse that a reprice already triggers. Per-row cost is stored on each
-// usage_events row at parse time, so a reprice reparses the corpus (via parse.Epoch) to rewrite
-// every row's cost; a session that fails to reparse keeps old cost, which is the honest state for
-// a transcript the parser can no longer rebuild. The per-session cache-savings rollup is
-// different: it is priced from usage_events, not stored per row, and a failed-reparse session
-// keeps its old-priced rollup with cache_savings_backfilled=true, so nothing re-prices it and its
-// tile drifts from a live SessionCacheStats recompute forever. The cache-savings reconcile
-// (store.reconcileCacheSavingsPricingIfNeeded) closes that gap by re-pricing every cache-bearing
-// session on a Version change, independent of whether its reparse succeeds.
-//
-// Version is deliberately separate from parse.Epoch. Epoch bumps for any parser or reducer change
-// (a new projection column, a changed field), most of which do not touch rates; keying the
-// cache-savings reconcile off Epoch would re-price the whole corpus on every unrelated Epoch bump.
-// A dedicated pricing Version fires that reconcile only on an actual rate change. Pair a Version
-// bump with a parse.Epoch bump, as any reprice already must, so per-row cost and the cache-savings
-// rollup are both rebuilt on the same deploy.
-//
-// Version 1 -> 2: add claude-sonnet-5 (Sonnet 5 at the standard $3/$15 Sonnet rate). Sonnet 5
-// priced as unknown before, so a cache-bearing Sonnet 5 session carried an unpriced cache-savings
-// rollup; this bump fires reconcileCacheSavingsPricingIfNeeded to re-price the cache-bearing corpus,
-// paired with the parse.Epoch 9 -> 10 reparse that rewrites each Sonnet 5 usage row's per-row cost.
-//
-// Version 2 -> 3: give claude-sonnet-5 its two-window introductory rate ($2/$10 per MTok through
-// 2026-08-31, reverting to the $3/$15 sticker on 2026-09-01), replacing the single flat $3/$15
-// entry Version 2 encoded. A Sonnet 5 event logged inside the intro window now prices cheaper, so
-// this is a reprice: it fires reconcileCacheSavingsPricingIfNeeded to re-price the cache-bearing
-// corpus at the windowed rates, paired with the parse.Epoch 10 -> 11 reparse that rewrites each
-// Sonnet 5 usage row's per-row cost from the window in effect at its OccurredAt.
-const Version = 3
+// A rate change in `table` is a reprice: pair it with a parse.Epoch bump (see
+// internal/server/parse/epoch.go). Per-row cost and the per-session cache-savings
+// rollup are both re-derived by the epoch rebuild, so the bump is all a reprice needs.
 
 // Rate holds per-million-token prices for one model family.
 type Rate struct {

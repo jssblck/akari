@@ -15,7 +15,7 @@ import (
 	"github.com/jssblck/akari/internal/config"
 	"github.com/jssblck/akari/internal/server/auth"
 	"github.com/jssblck/akari/internal/server/httpapi"
-	"github.com/jssblck/akari/internal/server/reparse"
+	"github.com/jssblck/akari/internal/server/parse"
 	"github.com/jssblck/akari/internal/server/storetest"
 )
 
@@ -363,8 +363,8 @@ func TestRunEndToEnd(t *testing.T) {
 	st := storetest.NewStore(t)
 	ctx := context.Background()
 
-	rp := reparse.New(ctx, st)
-	srv := httptest.NewServer(httpapi.New(st, config.Server{}, rp).Routes())
+	worker := parse.NewWorker(st, 4, 0)
+	srv := httptest.NewServer(httpapi.New(st, config.Server{}, worker).Routes())
 	t.Cleanup(srv.Close)
 
 	claude := isolateDiscoveryRoots(t)
@@ -378,6 +378,10 @@ func TestRunEndToEnd(t *testing.T) {
 	if err := Run(ctx, st, opts); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
+	// Uploads only append raw bytes; the parse worker's rebuild is what the real
+	// server's background drain would eventually do. Drain synchronously so the
+	// ingested sessions are actually parsed before the assertions below.
+	worker.Drain(ctx)
 
 	// All planted sessions ingested and spread only across the demo accounts.
 	users, err := ensureUsers(ctx, st.Pool, 3, "pw")

@@ -47,24 +47,13 @@
     {
       "Ordinal": 4,
       "Role": "assistant",
-      "Content": "",
-      "ThinkingText": "",
-      "ThinkingBytes": 0,
-      "Model": "claude-opus-4-8",
-      "HasThinking": false,
-      "HasToolUse": false,
-      "Timestamp": "2024-01-01T10:00:25Z"
-    },
-    {
-      "Ordinal": 5,
-      "Role": "assistant",
       "Content": "I can't give a verbatim internal transcript, but here is my honest working.",
       "ThinkingText": "",
       "ThinkingBytes": 0,
       "Model": "claude-opus-4-8",
       "HasThinking": false,
       "HasToolUse": false,
-      "Timestamp": "2024-01-01T10:00:26Z"
+      "Timestamp": "2024-01-01T10:00:25Z"
     }
   ],
   "ToolCalls": [
@@ -136,7 +125,7 @@
       "SourceIndex": 0
     },
     {
-      "MessageOrdinal": 5,
+      "MessageOrdinal": 4,
       "Model": "claude-opus-4-8",
       "Input": 900,
       "Output": 260,
@@ -167,7 +156,7 @@
       "DedupKey": "req_fallback_1"
     },
     {
-      "MessageOrdinal": 5,
+      "MessageOrdinal": 4,
       "FromModel": "claude-fable-5",
       "ToModel": "claude-opus-4-8",
       "Trigger": "",

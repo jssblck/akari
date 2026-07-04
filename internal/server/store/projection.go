@@ -12,25 +12,19 @@ import (
 	"github.com/jssblck/akari/internal/quality"
 )
 
-// parseBatchBytes bounds how much raw content one AdvanceProjection call parses
-// under the session_raw lock, so catching up a large backlog (after a parser
-// upgrade and reparse, or a run of failed parses) does not hold the lock for the
-// whole session at once. At least one whole chunk is always processed. It is a
-// var so tests can shrink it to force multi-batch catch-up.
-var parseBatchBytes int64 = 16 << 20
+// rebuildRegionBytes bounds how much raw content one readRawRegion call holds
+// resident while feeding the reducer, so streaming a large session's bytes into
+// the fold never concatenates the whole transcript into one buffer. The fold's
+// own output (the ProjectionDelta) is whole-session by design; this bounds only
+// the raw side. It is a var so tests can shrink it to force multi-region feeds.
+var rebuildRegionBytes int64 = 16 << 20
 
-// ErrParserVersionStale reports that a session was partially parsed by a
-// different parser version than the caller's, so incremental parsing cannot
-// safely continue from the stored cursor. The fix is a reparse, which resets the
-// projection and cursor and replays from zero. The raw bytes are untouched.
-var ErrParserVersionStale = errors.New("parser version changed since last parse: reparse required")
-
-// MessageDelta is one message write. Each ordinal is written exactly once: the
-// ingest protocol keeps a whole turn inside one chunk, so Content and
-// ThinkingText are the complete text of the message, never a fragment to append.
-// ThinkingBytes is the reasoning-trace weight the observed-thinking signal sums
-// (see parser.Message.ThinkingBytes): the plaintext length where the agent logs it,
-// else the encrypted payload length, so a redacted turn still records its volume.
+// MessageDelta is one message row. Each ordinal appears exactly once: the
+// reducer folds a whole session in one pass, so Content and ThinkingText are the
+// complete text of the turn. ThinkingBytes is the reasoning-trace weight the
+// observed-thinking signal sums (see parser.Message.ThinkingBytes): the
+// plaintext length where the agent logs it, else the encrypted payload length,
+// so a redacted turn still records its volume.
 type MessageDelta struct {
 	Ordinal       int
 	Role          string
@@ -43,17 +37,16 @@ type MessageDelta struct {
 	Timestamp     time.Time
 }
 
-// ProjToolCall is one tool_calls insert. The input body lives in the CAS, by one
-// of two paths: InputBody holds the bulky input inline and AdvanceProjection
-// writes it and records the sha256; or InputSHA256 is already set because the
-// client lifted the body to the CAS at upload time and left a sentinel, so the
-// reference is recorded with no blob write. Exactly one of InputBody / InputSHA256
-// is set when there is an input. CallUID is the agent's call id, used to
-// back-patch the result that arrives on a later line (and possibly a later
-// region, for Claude). Detail is the bounded human-scannable summary of the input
-// (a command, pattern, URL, or description) the UI shows when a call has no
-// file_path; it is empty when the input has no summarizable key or was lifted
-// before the field existed.
+// ProjToolCall is one tool_calls row. The input body lives in the CAS, by one
+// of two paths: InputBody holds the bulky input inline and the rebuild writes it
+// and records the sha256; or InputSHA256 is already set because the client
+// lifted the body to the CAS at upload time and left a sentinel, so the
+// reference is recorded with no blob write. Exactly one of InputBody /
+// InputSHA256 is set when there is an input. CallUID is the agent's call id,
+// which the fold uses to patch the result that arrives on a later line. Detail
+// is the bounded human-scannable summary of the input (a command, pattern, URL,
+// or description) the UI shows when a call has no file_path; it is empty when
+// the input has no summarizable key or was lifted before the field existed.
 type ProjToolCall struct {
 	MessageOrdinal int
 	CallIndex      int
@@ -68,10 +61,10 @@ type ProjToolCall struct {
 	CallUID        string
 }
 
-// ToolResultDelta back-patches a tool call's result, matched by call id. The
-// result body reaches the CAS by one of two paths, mirroring ProjToolCall: Body
-// holds it inline for the server to write, or BodySHA256 is the reference the
-// client already uploaded. Both are empty when the result carries no body.
+// ToolResultDelta patches a tool call's result, matched by call id. The result
+// body reaches the CAS by one of two paths, mirroring ProjToolCall: Body holds
+// it inline for the server to write, or BodySHA256 is the reference the client
+// already uploaded. Both are empty when the result carries no body.
 type ToolResultDelta struct {
 	CallUID    string
 	Body       string
@@ -81,8 +74,9 @@ type ToolResultDelta struct {
 	Status     string
 }
 
-// ProjUsage is one usage_events insert. SourceOffset and SourceIndex make the
-// insert idempotent (the unique index absorbs a replay via ON CONFLICT).
+// ProjUsage is one usage event as the reducer saw it, pre-dedup. SourceOffset
+// and SourceIndex identify the transcript line it came from; together with
+// DedupKey they drive the in-memory dedup (see foldUsage).
 type ProjUsage struct {
 	MessageOrdinal *int
 	Model          string
@@ -98,12 +92,12 @@ type ProjUsage struct {
 	SourceIndex    int
 }
 
-// AttachmentDelta is one attachments insert (today a lifted image). Like a tool
+// AttachmentDelta is one attachments row (today a lifted image). Like a tool
 // body it reaches the CAS by one of two paths: when the client lifted the image,
-// SHA256 names the already-uploaded blob and applyDelta records the reference with no
-// blob write; otherwise Body holds the decoded bytes inline for the server to store.
-// Bytes and MediaType describe the decoded image so the row carries its size and type
-// without fetching the blob.
+// SHA256 names the already-uploaded blob and the rebuild records the reference
+// with no blob write; otherwise Body holds the decoded bytes inline for the
+// server to store. Bytes and MediaType describe the decoded image so the row
+// carries its size and type without fetching the blob.
 type AttachmentDelta struct {
 	MessageOrdinal int
 	SHA256         string
@@ -113,15 +107,17 @@ type AttachmentDelta struct {
 	Filename       string
 }
 
-// ProjFallback is one model_fallbacks insert: a Claude Fable turn the safety classifier
-// declined and re-served on a lower model. One logical fallback arrives across several
-// transcript lines that share DedupKey (Claude splits one API message into several
-// assistant entries, plus a separate system entry for the refusal detail), so applyDelta
-// merges rows on (session_id, dedup_key): the assistant side brings MessageOrdinal and the
-// declined token counts, the system side brings Trigger/RefusalCategory/RefusalExplanation,
-// and each column fills from whichever line carried it. A field the source did not observe
-// is left at its unset default (MessageOrdinal nil, token counts nil, strings empty) so the
-// merge can tell "unset" from a real value and never overwrites a filled field with a blank.
+// ProjFallback is one model-fallback observation: a Claude Fable turn the safety
+// classifier declined and re-served on a lower model. One logical fallback
+// arrives across several transcript lines that share DedupKey (Claude splits one
+// API message into several assistant entries, plus a separate system entry for
+// the refusal detail), so the fold merges observations on DedupKey: the
+// assistant side brings MessageOrdinal and the declined token counts, the system
+// side brings Trigger/RefusalCategory/RefusalExplanation, and each field fills
+// from whichever line carried it. A field the source did not observe is left at
+// its unset default (MessageOrdinal nil, token counts nil, strings empty) so the
+// merge can tell "unset" from a real value and never overwrites a filled field
+// with a blank.
 type ProjFallback struct {
 	MessageOrdinal     *int
 	FromModel          string
@@ -137,14 +133,11 @@ type ProjFallback struct {
 	DedupKey           string
 }
 
-// ProjectionDelta is the incremental projection write for one parsed region: the
-// rows to add and the region's timestamp span. The session rollups are not folded
-// from precomputed counters carried here. They are derived from the rows that
-// actually persist (see appliedDelta), because the row inserts dedup on conflict
-// and the rollups must count exactly the surviving set. Claude streams one
-// assistant message across several transcript lines that share its message id, so a
-// region can carry the same usage block several times while the ledger keeps one;
-// folding precomputed per-region deltas over-counted those duplicates.
+// ProjectionDelta is everything one whole-session parse produces: the rows to
+// write and the session's timestamp span. It carries the reducer's raw view;
+// the rebuild's in-memory fold (dedup, result patching, fallback merge, prompt
+// facts, rollups) runs over it with the complete session in hand, so no row or
+// counter here needs to be correct under partial information.
 type ProjectionDelta struct {
 	Messages    []MessageDelta
 	ToolCalls   []ProjToolCall
@@ -157,163 +150,684 @@ type ProjectionDelta struct {
 	Ended   time.Time
 }
 
-// appliedDelta is what one region's writes actually persisted: the rows that
-// inserted rather than the rows the reducer proposed. The ON CONFLICT DO NOTHING
-// guards on messages and usage drop replays and Claude's duplicated usage blocks,
-// so only the inserted rows contribute here. Folding this into the session rollups
-// is what holds the invariant that, for every agent, sessions.total_* equals the
-// matching sum over usage_events and message_count equals the count of messages
-// rows. Tool calls and results carry no rollup column, so they do not appear here.
-type appliedDelta struct {
-	MessagesAdded     int
-	UserMessagesAdded int
-	// FallbacksAdded counts only the model_fallbacks rows that were freshly inserted, not
-	// the ones a later line merged into an existing (session_id, dedup_key). The several
-	// transcript lines of one logical fallback share a dedup_key, so the first inserts and
-	// the rest merge; counting only inserts keeps sessions.model_fallback_count equal to
-	// the number of distinct fallback events.
-	FallbacksAdded int
-	Input          int64
-	Output         int64
-	CacheWrite     int64
-	CacheRead      int64
-	CostUSD        float64
-	CostIncomplete bool
-	// CacheSavingsUSD is the prompt-cache dollars the surviving rows saved versus paying
-	// the uncached input rate for the same cached volume, priced per model (the rate gap
-	// differs by family and is negative on a Claude cache write). It folds into the session
-	// rollup like CostUSD so the session header's Cache tile reads one row rather than
-	// rescanning usage_events on every live refresh. CacheSavingsIncomplete is sticky like
-	// CostIncomplete: set when a surviving row carried cached volume on an unpriced model,
-	// so that row's saving is omitted. Unlike cost it is not a clean lower bound (the
-	// omitted term can be either sign), which the UI reflects as "partial" rather than "+".
-	CacheSavingsUSD        float64
-	CacheSavingsIncomplete bool
-}
-
 // roleUser is the message role that counts toward user_message_count. The reducer
 // emits it as the normalized parser.RoleUser string; the store compares the stored
 // string so it does not depend on the parser package.
 const roleUser = "user"
 
-// ReduceFunc parses a raw region beginning at baseOffset, given the prior
-// serialized parser state, and returns the new state plus the projection delta.
-// It is pure CPU: AdvanceProjection runs it inside the parse transaction, so it
-// must not perform I/O.
-type ReduceFunc func(state, region []byte, baseOffset int64) (newState []byte, d ProjectionDelta, err error)
-
-// ReparseTarget identifies a session to re-parse. The reparse loop fetches targets
-// a bounded page at a time (see SessionsForReparsePage), so the server never holds
-// the whole session list resident at once.
-type ReparseTarget struct {
-	ID    int64
-	Agent string
+// SessionReducer folds a session's raw bytes into one whole-session delta.
+// RebuildSession constructs one per rebuild, feeds it every stored region in
+// offset order, and calls Finish exactly once for the completed delta. Feed is
+// pure CPU: it runs inside the rebuild transaction, so it must not perform I/O.
+type SessionReducer interface {
+	Feed(region []byte, baseOffset int64) error
+	Finish() ProjectionDelta
 }
 
-// AdvanceProjection parses the next unparsed region of a session and applies it
-// incrementally. It locks the session_raw row, reads up to parseBatchBytes of raw
-// content past the parse cursor, runs reduce, applies the delta, and advances the
-// cursor and parser state, all in one transaction. It returns the new parse
-// cursor and whether the session is now fully parsed.
+// RebuildSession rebuilds a session's entire projection from its stored raw
+// bytes in one transaction: it streams the raw regions through the reducer,
+// folds the resulting whole-session delta in memory (usage dedup, tool-result
+// patching, fallback merging, prompt facts, rollups), deletes the old derived
+// rows, bulk-inserts the new ones, stamps the parse cursor and epoch, and
+// re-grades the session's signals. It is the ONLY write path for derived data:
+// ingest appends raw bytes and wakes the parse worker, and the worker calls
+// this.
 //
-// It is a no-op (caughtUp=true) when the cursor already equals the stored length.
-// It returns ErrParserVersionStale when a partially parsed session was last
-// touched by a different parser version, leaving the projection for a reparse to
-// rebuild. The raw bytes are never modified here.
-func (s *Store) AdvanceProjection(ctx context.Context, sessionID int64, parserVersion int, reduce ReduceFunc) (parsedTo int64, caughtUp bool, err error) {
-	err = pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+// Because the delete and the rewrite commit together, a concurrent reader never
+// sees the session empty or half built: it sees the prior projection until this
+// transaction commits, then the new one. Any failure rolls the whole rebuild
+// back, so a parser error on malformed bytes or an operational store/CAS error
+// leaves the prior projection intact rather than a cleared session.
+//
+// The raw bytes are never modified. Raw regions are read in bounded batches
+// (rebuildRegionBytes), so the raw side of the parse never holds the whole
+// transcript in one buffer; the folded delta is whole-session by design.
+//
+// Failures split in two. A reducer error (r.Feed rejecting the bytes) is
+// deterministic: re-running would fail identically, so the error is recorded on
+// session_raw.parse_error and the bookkeeping is stamped as consumed at the
+// byte length this parse read, all committed with no projection writes (the
+// feed runs before any). The prior projection survives, and the session leaves
+// the due set until its bytes or the epoch move, rather than hot-looping on the
+// same bad bytes; a chunk that landed mid-parse keeps it due (the stamp records
+// the length that was read, not the newer one). The reducer's error is still
+// returned so the worker can log and count it. An operational error (a store or
+// CAS failure, a cancellation) rolls everything back and stamps nothing, so the
+// next drain retries.
+func (s *Store) RebuildSession(ctx context.Context, sessionID int64, epoch int, r SessionReducer) error {
+	var feedErr error
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		// Lock the parent session row before session_raw. DeleteSession locks
 		// sessions first and cascades into session_raw, so taking the two rows in
-		// that same order here keeps a concurrent delete and parse from deadlocking.
+		// that same order here keeps a concurrent delete and rebuild from deadlocking.
 		if err := lockSession(ctx, tx, sessionID); err != nil {
 			return err
 		}
-		var byteLen, parsedLen int64
-		var stateJSON []byte
-		var stateVer int
-		if err := tx.QueryRow(ctx,
-			`SELECT byte_len, parsed_byte_len, parse_state, parse_state_version
-			   FROM session_raw WHERE session_id = $1 FOR UPDATE`, sessionID).
-			Scan(&byteLen, &parsedLen, &stateJSON, &stateVer); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return ErrNotFound
+		byteLen, err := lockSessionRaw(ctx, tx, sessionID)
+		if err != nil {
+			return err
+		}
+		var parsedLen int64
+		for parsedLen < byteLen {
+			region, regionEnd, err := readRawRegion(ctx, tx, sessionID, parsedLen, rebuildRegionBytes)
+			if err != nil {
+				return err
 			}
-			return fmt.Errorf("load parse cursor for session %d: %w", sessionID, err)
+			if err := r.Feed(region, parsedLen); err != nil {
+				feedErr = fmt.Errorf("parse session %d region [%d,%d): %w", sessionID, parsedLen, regionEnd, err)
+				if _, serr := tx.Exec(ctx,
+					`UPDATE session_raw
+					    SET parsed_byte_len = $2, parser_epoch = $3, parse_error = $4
+					  WHERE session_id = $1`,
+					sessionID, byteLen, epoch, sanitizeText(feedErr.Error())); serr != nil {
+					return fmt.Errorf("record parse error for session %d: %w", sessionID, serr)
+				}
+				return nil // commit the stamp; the parse error itself is returned below
+			}
+			parsedLen = regionEnd
 		}
-		if parsedLen >= byteLen {
-			parsedTo, caughtUp = parsedLen, true
-			return nil
-		}
-		// A session parsed from byte 0 adopts the caller's version; one parsed past
-		// 0 by a different version cannot be resumed and needs a reparse.
-		if parsedLen > 0 && stateVer != parserVersion {
-			return ErrParserVersionStale
-		}
-
-		region, regionEnd, err := readRawRegion(ctx, tx, sessionID, parsedLen, parseBatchBytes)
-		if err != nil {
-			return err
-		}
-
-		newState, d, err := reduce(stateJSON, region, parsedLen)
-		if err != nil {
-			return fmt.Errorf("parse session %d region [%d,%d): %w", sessionID, parsedLen, regionEnd, err)
-		}
-		applied, err := applyDelta(ctx, tx, sessionID, d)
-		if err != nil {
-			return err
-		}
-
-		if _, err := tx.Exec(ctx,
-			`UPDATE session_raw
-			    SET parsed_byte_len = $2, parse_state = $3, parse_state_version = $4, parse_error = ''
-			  WHERE session_id = $1`,
-			sessionID, regionEnd, newState, parserVersion); err != nil {
-			return fmt.Errorf("advance parse cursor for session %d to %d: %w", sessionID, regionEnd, err)
-		}
-		if err := applyAggregates(ctx, tx, sessionID, parserVersion, applied, d.Started, d.Ended); err != nil {
-			return err
-		}
-
-		parsedTo, caughtUp = regionEnd, regionEnd >= byteLen
-		// The append path deliberately does NOT refresh signals. Signals read the whole
-		// session (the last word, failure streaks across the transcript, the per-turn
-		// context sequence), so refreshing them here would recompute the entire session on
-		// every caught-up append, turning a live session's K appends into O(K^2) ingest
-		// work. It would also bake a time-dependent verdict into the row: the abandoned
-		// versus unknown outcome depends on how long the session has been idle, so a refresh
-		// taken mid-session stores a verdict that drifts once the session crosses the idle
-		// threshold. Both are avoided by computing signals once, after the session settles,
-		// off the ingest path: RefreshSettledSignals (a periodic pass) refreshes a session
-		// only once it has been idle past the abandoned threshold, so the append path stays
-		// linear and the stored outcome is computed when it is stable. A reparse still
-		// refreshes at the end of its full replay (that is the versioned backfill, not the
-		// append path).
-		return nil
+		return rebuildTx(ctx, tx, sessionID, epoch, byteLen, r.Finish())
 	})
-	return parsedTo, caughtUp, err
-}
-
-// ApplyProjectionDelta applies a projection delta to a session in one
-// transaction (message upserts, tool-call inserts with their CAS bodies,
-// tool-result back-patches, and usage inserts) without advancing the parse
-// cursor or the session aggregates. AdvanceProjection wraps applyDelta with that
-// bookkeeping; this exposes just the row writes, which is the seam tests use to
-// exercise the projection and CAS directly.
-func (s *Store) ApplyProjectionDelta(ctx context.Context, sessionID int64, d ProjectionDelta) error {
-	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-		_, err := applyDelta(ctx, tx, sessionID, d)
+	if err != nil {
 		return err
-	})
+	}
+	return feedErr
 }
 
-// readRawRegion concatenates the raw chunks for one parse batch: the chunks whose
-// start falls in [from, from+cap). The bound is in SQL, so a backlog catch-up of
-// many AdvanceProjection calls fetches only each batch's chunks rather than
-// rescanning the whole tail every time. Chunks are contiguous and line aligned,
-// so the returned region always ends on a JSONL line boundary, and the chunk at
-// `from` always qualifies (so a batch is never empty when bytes remain). It
-// returns the bytes and the offset just past them.
+// rebuildTx replaces a session's derived rows with the folded form of one
+// whole-session delta, inside the caller's transaction (which must hold the
+// session and session_raw locks).
+func rebuildTx(ctx context.Context, tx pgx.Tx, sessionID int64, epoch int, byteLen int64, d ProjectionDelta) error {
+	// Pin every blob the OLD projection references (lifted tool inputs and
+	// results, and image attachments) before deleting the rows that reference
+	// them, so a concurrent sweep cannot reclaim a blob the rewrite is about to
+	// re-reference. The pin (FOR KEY SHARE via the FK) conflicts with the sweep's
+	// FOR UPDATE.
+	if err := pinSessionBlobsTx(ctx, tx, sessionID); err != nil {
+		return err
+	}
+	for _, q := range []string{
+		"DELETE FROM messages WHERE session_id = $1",
+		"DELETE FROM tool_calls WHERE session_id = $1",
+		"DELETE FROM usage_events WHERE session_id = $1",
+		"DELETE FROM message_turn_usage WHERE session_id = $1",
+		"DELETE FROM attachments WHERE session_id = $1",
+		"DELETE FROM model_fallbacks WHERE session_id = $1",
+	} {
+		if _, err := tx.Exec(ctx, q, sessionID); err != nil {
+			return fmt.Errorf("clear projection for rebuild of session %d (%s): %w", sessionID, q, err)
+		}
+	}
+
+	if err := writeMessages(ctx, tx, sessionID, d.Messages); err != nil {
+		return err
+	}
+	if err := writeToolCalls(ctx, tx, sessionID, d.ToolCalls, d.ToolResults); err != nil {
+		return err
+	}
+	roll, err := writeUsage(ctx, tx, sessionID, d.Usage)
+	if err != nil {
+		return err
+	}
+	if err := writeAttachments(ctx, tx, sessionID, d.Attachments); err != nil {
+		return err
+	}
+	fallbackCount, err := writeFallbacks(ctx, tx, sessionID, d.Fallbacks)
+	if err != nil {
+		return err
+	}
+
+	// The rollups are set absolutely from the folded rows, never incremented, so
+	// they equal the ledger by construction (sessions.total_* == sum over
+	// usage_events, message_count == count of messages rows). signals_stale is
+	// set here and re-settled by refreshSignalsTx below: it stays true for a
+	// still-live session (whose outcome is not yet stable) and clears for a
+	// settled or terminal one.
+	userMessages := 0
+	for _, m := range d.Messages {
+		if m.Role == roleUser {
+			userMessages++
+		}
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE sessions SET
+		   message_count = $2,
+		   user_message_count = $3,
+		   model_fallback_count = $4,
+		   total_input_tokens = $5,
+		   total_output_tokens = $6,
+		   total_cache_write_tokens = $7,
+		   total_cache_read_tokens = $8,
+		   total_cost_usd = $9,
+		   cost_incomplete = $10,
+		   total_cache_savings_usd = $11,
+		   cache_savings_incomplete = $12,
+		   started_at = $13,
+		   ended_at = $14,
+		   updated_at = now(),
+		   signals_stale = true
+		 WHERE id = $1`,
+		sessionID, len(d.Messages), userMessages, fallbackCount,
+		roll.input, roll.output, roll.cacheWrite, roll.cacheRead,
+		roll.costUSD, roll.costIncomplete,
+		roll.cacheSavingsUSD, roll.cacheSavingsIncomplete,
+		nullTime(d.Started), nullTime(d.Ended)); err != nil {
+		return fmt.Errorf("update aggregates for session %d: %w", sessionID, err)
+	}
+
+	// Stamp the cursor and epoch LAST, in the same transaction as the rows they
+	// describe: a session is due for rebuild exactly while parsed_byte_len <>
+	// byte_len or parser_epoch <> the running epoch, so a crash before commit
+	// leaves it due and the next worker pass retries from the raw bytes.
+	if _, err := tx.Exec(ctx,
+		`UPDATE session_raw
+		    SET parsed_byte_len = $2, parser_epoch = $3, parse_error = ''
+		  WHERE session_id = $1`,
+		sessionID, byteLen, epoch); err != nil {
+		return fmt.Errorf("stamp parse cursor for session %d: %w", sessionID, err)
+	}
+
+	// The projection is fully rebuilt; recompute the session's signals from it in
+	// this same transaction when the session is gradeable (settled past the idle
+	// window, or declared terminal), so the grade commits atomically with the
+	// projection it summarizes. A still-live session instead has its now-stale
+	// signals row dropped and stays flagged signals_stale: its outcome is
+	// time-dependent (abandoned versus unknown turns on the idle gap), so storing
+	// a verdict now would bake in a value that drifts, and the settle tick grades
+	// it once it crosses the threshold.
+	var gradeable bool
+	if err := tx.QueryRow(ctx,
+		`SELECT s.terminal OR (s.ended_at IS NOT NULL AND s.ended_at < now() - make_interval(mins => $2))
+		   FROM sessions s WHERE s.id = $1`,
+		sessionID, abandonedIdleMinutes).Scan(&gradeable); err != nil {
+		return fmt.Errorf("check gradeability for session %d: %w", sessionID, err)
+	}
+	if !gradeable {
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM session_signals WHERE session_id = $1`, sessionID); err != nil {
+			return fmt.Errorf("drop stale signals for session %d: %w", sessionID, err)
+		}
+		return nil
+	}
+	return refreshSignalsTx(ctx, tx, sessionID)
+}
+
+// writeMessages derives each user turn's prompt facts and duplicate verdict over
+// the complete ordered transcript, then bulk-inserts the rows. The duplicate
+// verdict needs only an in-memory digest set: the fold sees every earlier turn,
+// so no per-insert index probe or window scan is involved. Facts columns are
+// NULL on non-user rows, so the hygiene aggregate's role='user' reads see
+// exactly the classified set.
+func writeMessages(ctx context.Context, tx pgx.Tx, sessionID int64, msgs []MessageDelta) error {
+	if len(msgs) == 0 {
+		return nil
+	}
+	rows := make([][]any, 0, len(msgs))
+	seenDigests := map[int64]bool{}
+	for _, m := range msgs {
+		content := sanitizeText(m.Content)
+		var pShort, pNoCode, pGreeting, pDigest, pDuplicate any
+		if m.Role == roleUser {
+			facts := quality.ClassifyPrompt(content)
+			pShort, pNoCode, pGreeting, pDigest = facts.Short, facts.NoCodeContext, facts.BareGreeting, facts.Digest
+			// Only duplicate-eligible turns (non-empty, not short) carry a verdict; an
+			// ineligible row stays NULL (no badge), matching gatherPromptHygiene's
+			// exclusion of short and empty prompts from the duplicate count.
+			if content != "" && !facts.Short {
+				pDuplicate = seenDigests[facts.Digest]
+				seenDigests[facts.Digest] = true
+			}
+		}
+		rows = append(rows, []any{
+			sessionID, m.Ordinal, sanitizeText(m.Role), content,
+			sanitizeText(m.ThinkingText), m.ThinkingBytes, sanitizeText(m.Model),
+			nullTime(m.Timestamp), m.HasThinking, m.HasToolUse,
+			pShort, pNoCode, pGreeting, pDigest, pDuplicate,
+		})
+	}
+	if _, err := tx.CopyFrom(ctx, pgx.Identifier{"messages"},
+		[]string{"session_id", "ordinal", "role", "content", "thinking_text", "thinking_bytes", "model",
+			"timestamp", "has_thinking", "has_tool_use",
+			"prompt_short", "prompt_no_code", "prompt_bare_greeting", "prompt_digest", "duplicate_prompt"},
+		pgx.CopyFromRows(rows)); err != nil {
+		return fmt.Errorf("copy messages for session %d: %w", sessionID, err)
+	}
+	return nil
+}
+
+// writeToolCalls resolves each call's input body into the CAS (writing inline
+// bodies, pinning client-lifted references), patches results onto their calls by
+// call id, and bulk-inserts the completed rows.
+//
+// Result patching runs over the complete session, so a call and its result meet
+// here no matter how many regions apart they were logged. A result patches every
+// still-unresolved call sharing its id: a resumed or compacted Claude transcript
+// replays prior turns verbatim, so the same call_uid legitimately rides several
+// rows, and each visible copy should carry the same result rather than one
+// looking pending. A second result for an already-resolved id is dropped, the
+// same first-result-wins the old pending-only back-patch had.
+func writeToolCalls(ctx context.Context, tx pgx.Tx, sessionID int64, calls []ProjToolCall, results []ToolResultDelta) error {
+	if len(calls) == 0 {
+		return nil
+	}
+	// Load the session's cwd once for the whole rebuild: it anchors each call's
+	// worktree-invariant relative path. It is empty when the session announced no
+	// cwd, which sessionRelPath treats as "no anchor" (relative path NULL for
+	// absolute paths).
+	var sessionCwd string
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(cwd, '') FROM sessions WHERE id = $1`, sessionID).Scan(&sessionCwd); err != nil {
+		return fmt.Errorf("load cwd for session %d: %w", sessionID, err)
+	}
+
+	// resolved carries each call's result columns once a result patches it.
+	type resolvedResult struct {
+		sha       any
+		bytes     int64
+		mediaType string
+		status    string
+		set       bool
+	}
+	resolved := make([]resolvedResult, len(calls))
+	byUID := map[string][]int{}
+	for i, t := range calls {
+		// Key on the sanitized id: the row stores the sanitized form, so the match
+		// must compare like with like when a transcript id carried invalid bytes.
+		if uid := sanitizeText(t.CallUID); uid != "" {
+			byUID[uid] = append(byUID[uid], i)
+		}
+	}
+	for _, tr := range results {
+		if tr.CallUID == "" {
+			continue
+		}
+		idxs := byUID[sanitizeText(tr.CallUID)]
+		// Write or pin the result body once per result, but only when at least one
+		// call is still pending: a result whose id matches nothing (or whose copies
+		// are all resolved) stores no blob.
+		var sha any
+		stored := false
+		for _, i := range idxs {
+			if resolved[i].set {
+				continue
+			}
+			if !stored {
+				switch {
+				case tr.BodySHA256 != "":
+					if err := pinBlobRefTx(ctx, tx, tr.BodySHA256); err != nil {
+						return fmt.Errorf("reference tool result blob %s for session %d call %q: %w", tr.BodySHA256, sessionID, tr.CallUID, err)
+					}
+					sha = tr.BodySHA256
+				case len(tr.Body) > 0:
+					s, err := writeBlobTx(ctx, tx, tr.Body, tr.MediaType)
+					if err != nil {
+						return fmt.Errorf("write tool result blob for session %d call %q: %w", sessionID, tr.CallUID, err)
+					}
+					sha = s
+				}
+				stored = true
+			}
+			media := sanitizeText(tr.MediaType)
+			if media == "" {
+				media = "text/plain"
+			}
+			resolved[i] = resolvedResult{sha: sha, bytes: tr.Bytes, mediaType: media, status: sanitizeText(tr.Status), set: true}
+		}
+	}
+
+	rows := make([][]any, 0, len(calls))
+	for i, t := range calls {
+		var inputSHA, inputMedia any
+		switch {
+		case t.InputSHA256 != "":
+			// The client lifted the input to the CAS and left a sentinel; the blob is
+			// already present (and pinned against the sweep), so record the reference
+			// without re-storing the body. Re-lock it FOR KEY SHARE so a sweep racing
+			// this insert cannot delete the blob between here and the FK check.
+			if err := pinBlobRefTx(ctx, tx, t.InputSHA256); err != nil {
+				return fmt.Errorf("reference tool input blob %s for session %d call %d/%d: %w", t.InputSHA256, sessionID, t.MessageOrdinal, t.CallIndex, err)
+			}
+			inputSHA, inputMedia = t.InputSHA256, sanitizeText(t.InputMediaType)
+		case len(t.InputBody) > 0:
+			sha, err := writeBlobTx(ctx, tx, t.InputBody, t.InputMediaType)
+			if err != nil {
+				return fmt.Errorf("write tool input blob for session %d call %d/%d: %w", sessionID, t.MessageOrdinal, t.CallIndex, err)
+			}
+			inputSHA, inputMedia = sha, sanitizeText(t.InputMediaType)
+		}
+		// Store the session-relative form of the path beside the absolute one.
+		// file_path is absolute, so the same repo file edited from two worktrees of
+		// one repo fragments into separate churn rows; file_rel_path is the
+		// worktree-invariant key that (paired with the project, which already
+		// collapses worktrees on the canonical remote) collapses them back together.
+		// It is NULL when no stable relative form exists (a path outside the
+		// workspace, or an absolute path with no announced cwd), which churn
+		// coalesces back onto file_path so an unanchored edit still counts under its
+		// absolute name rather than vanishing.
+		var relPath any
+		if rel, ok := sessionRelPath(sessionCwd, sanitizeText(t.FilePath)); ok {
+			relPath = rel
+		}
+		var resSHA, resBytes, resMedia, resStatus any
+		if resolved[i].set {
+			resSHA, resBytes, resMedia, resStatus = resolved[i].sha, resolved[i].bytes, resolved[i].mediaType, resolved[i].status
+		}
+		rows = append(rows, []any{
+			sessionID, t.MessageOrdinal, t.CallIndex, sanitizeText(t.ToolName), sanitizeText(t.Category),
+			nullString(sanitizeText(t.FilePath)), relPath,
+			inputSHA, t.InputBytes, inputMedia, nullString(sanitizeText(t.CallUID)),
+			nullString(sanitizeText(t.Detail)),
+			resSHA, resBytes, resMedia, resStatus,
+		})
+	}
+	if _, err := tx.CopyFrom(ctx, pgx.Identifier{"tool_calls"},
+		[]string{"session_id", "message_ordinal", "call_index", "tool_name", "category",
+			"file_path", "file_rel_path",
+			"input_sha256", "input_bytes", "input_media_type", "call_uid", "detail",
+			"result_sha256", "result_bytes", "result_media_type", "result_status"},
+		pgx.CopyFromRows(rows)); err != nil {
+		return fmt.Errorf("copy tool calls for session %d: %w", sessionID, err)
+	}
+	return nil
+}
+
+// usageRollup is the session-total fold over the surviving usage rows: the
+// figures rebuildTx writes onto the sessions row.
+type usageRollup struct {
+	input, output, cacheWrite, cacheRead int64
+	costUSD                              float64
+	costIncomplete                       bool
+	cacheSavingsUSD                      float64
+	cacheSavingsIncomplete               bool
+}
+
+// writeUsage dedups the reducer's usage events in memory, bulk-inserts the
+// survivors and their per-turn rollup, and returns the session totals.
+//
+// The dedup mirrors the two unique indexes on usage_events, which remain as
+// integrity backstops: rows sharing a non-empty dedup_key collapse to their
+// first occurrence (Claude logs one API response's usage on every content-block
+// line of the message), and rows sharing (source_offset, source_index) collapse
+// likewise (one transcript line is one event). First-occurrence-wins matches the
+// old ON CONFLICT DO NOTHING insert order.
+func writeUsage(ctx context.Context, tx pgx.Tx, sessionID int64, usage []ProjUsage) (usageRollup, error) {
+	var roll usageRollup
+	if len(usage) == 0 {
+		return roll, nil
+	}
+	type sourceKey struct {
+		offset int64
+		index  int
+	}
+	seenKey := map[string]bool{}
+	seenSource := map[sourceKey]bool{}
+	rows := make([][]any, 0, len(usage))
+
+	// Per-turn rollup, keyed by ordinal, accumulated over the same surviving set.
+	type turnAgg struct {
+		input, output, cacheWrite, cacheRead, reasoning int64
+		costSum                                         float64
+		costCount                                       int64
+		costIncomplete                                  bool
+	}
+	turns := map[int]*turnAgg{}
+	var turnOrder []int
+
+	for _, u := range usage {
+		key := sanitizeText(u.DedupKey)
+		if key != "" && seenKey[key] {
+			continue
+		}
+		src := sourceKey{u.SourceOffset, u.SourceIndex}
+		if seenSource[src] {
+			continue
+		}
+		if key != "" {
+			seenKey[key] = true
+		}
+		seenSource[src] = true
+
+		var ord, cost any
+		if u.MessageOrdinal != nil {
+			ord = *u.MessageOrdinal
+		}
+		if u.CostUSD != nil {
+			cost = *u.CostUSD
+		}
+		rows = append(rows, []any{
+			sessionID, ord, sanitizeText(u.Model), u.Input, u.Output, u.CacheWrite, u.CacheRead,
+			u.Reasoning, cost, nullTime(u.OccurredAt), key, u.SourceOffset, u.SourceIndex,
+		})
+
+		hasTokens := u.Input+u.Output+u.CacheWrite+u.CacheRead+u.Reasoning > 0
+		// Fold this surviving row into its turn's rollup, so the transcript reads one
+		// row per turn instead of re-grouping usage_events on every render. A
+		// NULL-ordinal row belongs to the session totals, not to any one message.
+		if u.MessageOrdinal != nil {
+			t := turns[*u.MessageOrdinal]
+			if t == nil {
+				t = &turnAgg{}
+				turns[*u.MessageOrdinal] = t
+				turnOrder = append(turnOrder, *u.MessageOrdinal)
+			}
+			t.input += int64(u.Input)
+			t.output += int64(u.Output)
+			t.cacheWrite += int64(u.CacheWrite)
+			t.cacheRead += int64(u.CacheRead)
+			t.reasoning += int64(u.Reasoning)
+			if u.CostUSD != nil {
+				t.costSum += *u.CostUSD
+				t.costCount++
+			} else if hasTokens {
+				t.costIncomplete = true
+			}
+		}
+
+		roll.input += int64(u.Input)
+		roll.output += int64(u.Output)
+		roll.cacheWrite += int64(u.CacheWrite)
+		roll.cacheRead += int64(u.CacheRead)
+		switch {
+		case u.CostUSD != nil:
+			roll.costUSD += *u.CostUSD
+		case hasTokens:
+			// Tokens spent on a model the pricing table does not know: the session
+			// total is a partial sum and the flag says so.
+			roll.costIncomplete = true
+		}
+		// Fold the prompt-cache saving over the same surviving rows. Pricing is
+		// linear in tokens, so summing each row's saving equals summing the model's
+		// grouped totals (what SessionCacheStats does over the whole session), which
+		// is what lets the rollup and that per-model recompute reconcile exactly.
+		if saving, ok := pricing.CacheSavings(u.Model, u.OccurredAt, int64(u.CacheRead), int64(u.CacheWrite)); ok {
+			roll.cacheSavingsUSD += saving
+		} else if u.CacheRead > 0 || u.CacheWrite > 0 {
+			roll.cacheSavingsIncomplete = true
+		}
+	}
+
+	if _, err := tx.CopyFrom(ctx, pgx.Identifier{"usage_events"},
+		[]string{"session_id", "message_ordinal", "model", "input_tokens", "output_tokens",
+			"cache_write_tokens", "cache_read_tokens", "reasoning_tokens", "cost_usd",
+			"occurred_at", "dedup_key", "source_offset", "source_index"},
+		pgx.CopyFromRows(rows)); err != nil {
+		return usageRollup{}, fmt.Errorf("copy usage events for session %d: %w", sessionID, err)
+	}
+
+	if len(turnOrder) > 0 {
+		turnRows := make([][]any, 0, len(turnOrder))
+		for _, ord := range turnOrder {
+			t := turns[ord]
+			var costSum any
+			if t.costCount > 0 {
+				costSum = t.costSum
+			} else {
+				costSum = 0.0
+			}
+			turnRows = append(turnRows, []any{
+				sessionID, ord, t.input, t.output, t.cacheWrite, t.cacheRead, t.reasoning,
+				costSum, t.costCount, t.costIncomplete,
+			})
+		}
+		if _, err := tx.CopyFrom(ctx, pgx.Identifier{"message_turn_usage"},
+			[]string{"session_id", "message_ordinal", "input_tokens", "output_tokens",
+				"cache_write_tokens", "cache_read_tokens", "reasoning_tokens",
+				"cost_sum", "cost_count", "cost_incomplete"},
+			pgx.CopyFromRows(turnRows)); err != nil {
+			return usageRollup{}, fmt.Errorf("copy turn usage for session %d: %w", sessionID, err)
+		}
+	}
+	return roll, nil
+}
+
+// writeAttachments stores each attachment's body (or pins its client-lifted
+// reference) and bulk-inserts the rows. The reducer dedups attachments by
+// content key across the whole session, so the rows are unique by construction.
+func writeAttachments(ctx context.Context, tx pgx.Tx, sessionID int64, atts []AttachmentDelta) error {
+	if len(atts) == 0 {
+		return nil
+	}
+	rows := make([][]any, 0, len(atts))
+	for _, a := range atts {
+		var sha string
+		switch {
+		case a.SHA256 != "":
+			if err := pinBlobRefTx(ctx, tx, a.SHA256); err != nil {
+				return fmt.Errorf("reference attachment blob %s for session %d ordinal %d: %w", a.SHA256, sessionID, a.MessageOrdinal, err)
+			}
+			sha = a.SHA256
+		case len(a.Body) > 0:
+			s, err := writeBlobTx(ctx, tx, a.Body, a.MediaType)
+			if err != nil {
+				return fmt.Errorf("write attachment blob for session %d ordinal %d: %w", sessionID, a.MessageOrdinal, err)
+			}
+			sha = s
+		default:
+			continue // an attachment with no body is nothing to store
+		}
+		media := sanitizeText(a.MediaType)
+		if media == "" {
+			media = "application/octet-stream"
+		}
+		rows = append(rows, []any{
+			sessionID, a.MessageOrdinal, sha, nullString(sanitizeText(a.Filename)), media, a.Bytes,
+		})
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	if _, err := tx.CopyFrom(ctx, pgx.Identifier{"attachments"},
+		[]string{"session_id", "message_ordinal", "sha256", "filename", "media_type", "byte_len"},
+		pgx.CopyFromRows(rows)); err != nil {
+		return fmt.Errorf("copy attachments for session %d: %w", sessionID, err)
+	}
+	return nil
+}
+
+// writeFallbacks merges the reducer's fallback observations by dedup key and
+// bulk-inserts one row per logical fallback, returning how many there were (the
+// sessions.model_fallback_count rollup).
+//
+// The merge fills each field from whichever line carried it. message_ordinal is
+// first-wins: it binds to the assistant line that owns the turn, staying in
+// lockstep with the usage fold (which also keeps the first assistant line's
+// event), and the system entry's NULL never moves it. occurred_at tracks
+// whichever line owns that ordinal: once an assistant line has set the ordinal
+// the timestamp is frozen to that line's, so a system entry's later timestamp
+// never drifts the notice off the turn the usage describes. The descriptive
+// fields are fill-toward-complete: a later non-empty value overrides an earlier
+// empty one (trigger/category/explanation live only on the system entry, the
+// declined token counts only on the specific assistant line), and a blank never
+// clears a filled value.
+func writeFallbacks(ctx context.Context, tx pgx.Tx, sessionID int64, fbs []ProjFallback) (int, error) {
+	if len(fbs) == 0 {
+		return 0, nil
+	}
+	merged := map[string]*ProjFallback{}
+	var order []string
+	for _, fb := range fbs {
+		key := sanitizeText(fb.DedupKey)
+		m, ok := merged[key]
+		if !ok {
+			cp := fb
+			cp.DedupKey = key
+			merged[key] = &cp
+			order = append(order, key)
+			continue
+		}
+		hadOrdinal := m.MessageOrdinal != nil
+		if m.MessageOrdinal == nil {
+			m.MessageOrdinal = fb.MessageOrdinal
+		}
+		if fb.FromModel != "" {
+			m.FromModel = fb.FromModel
+		}
+		if fb.ToModel != "" {
+			m.ToModel = fb.ToModel
+		}
+		if fb.Trigger != "" {
+			m.Trigger = fb.Trigger
+		}
+		if fb.RefusalCategory != "" {
+			m.RefusalCategory = fb.RefusalCategory
+		}
+		if fb.RefusalExplanation != "" {
+			m.RefusalExplanation = fb.RefusalExplanation
+		}
+		if fb.DeclinedInput != nil {
+			m.DeclinedInput = fb.DeclinedInput
+		}
+		if fb.DeclinedOutput != nil {
+			m.DeclinedOutput = fb.DeclinedOutput
+		}
+		if fb.DeclinedCacheWrite != nil {
+			m.DeclinedCacheWrite = fb.DeclinedCacheWrite
+		}
+		if fb.DeclinedCacheRead != nil {
+			m.DeclinedCacheRead = fb.DeclinedCacheRead
+		}
+		switch {
+		case hadOrdinal:
+			// The turn-owning line already stamped the timestamp; keep it.
+		case fb.MessageOrdinal != nil:
+			m.OccurredAt = fb.OccurredAt
+		case m.OccurredAt.IsZero():
+			m.OccurredAt = fb.OccurredAt
+		}
+	}
+	rows := make([][]any, 0, len(order))
+	for _, key := range order {
+		m := merged[key]
+		var ord any
+		if m.MessageOrdinal != nil {
+			ord = *m.MessageOrdinal
+		}
+		rows = append(rows, []any{
+			sessionID, ord, sanitizeText(m.FromModel), sanitizeText(m.ToModel), sanitizeText(m.Trigger),
+			nullString(sanitizeText(m.RefusalCategory)), nullString(sanitizeText(m.RefusalExplanation)),
+			nullInt(m.DeclinedInput), nullInt(m.DeclinedOutput),
+			nullInt(m.DeclinedCacheWrite), nullInt(m.DeclinedCacheRead),
+			nullTime(m.OccurredAt), key,
+		})
+	}
+	if _, err := tx.CopyFrom(ctx, pgx.Identifier{"model_fallbacks"},
+		[]string{"session_id", "message_ordinal", "from_model", "to_model", "trigger",
+			"refusal_category", "refusal_explanation",
+			"declined_input_tokens", "declined_output_tokens",
+			"declined_cache_write_tokens", "declined_cache_read_tokens",
+			"occurred_at", "dedup_key"},
+		pgx.CopyFromRows(rows)); err != nil {
+		return 0, fmt.Errorf("copy model fallbacks for session %d: %w", sessionID, err)
+	}
+	return len(rows), nil
+}
+
+// readRawRegion concatenates the raw chunks for one feed batch: the chunks whose
+// start falls in [from, from+cap). The bound is in SQL, so a rebuild fetches
+// only each batch's chunks rather than rescanning the whole tail every time.
+// Chunks are contiguous and line aligned, so the returned region always ends on
+// a JSONL line boundary, and the chunk at `from` always qualifies (so a batch is
+// never empty when bytes remain). It returns the bytes and the offset just past
+// them.
 func readRawRegion(ctx context.Context, tx pgx.Tx, sessionID, from int64, cap int64) ([]byte, int64, error) {
 	rows, err := tx.Query(ctx,
 		`SELECT byte_offset, byte_len, content
@@ -345,579 +859,9 @@ func readRawRegion(ctx context.Context, tx pgx.Tx, sessionID, from int64, cap in
 	return region, end, nil
 }
 
-// applyDelta writes one region's rows (message upserts, tool-call inserts with
-// their input bodies in the CAS, tool-result back-patches, and usage inserts) and
-// returns the aggregates that actually persisted. Each insert that survives its
-// ON CONFLICT guard contributes to the returned appliedDelta; a row dropped as a
-// duplicate does not, so the caller folds the deduped set into the session rollups
-// rather than the reducer's pre-dedup proposal.
-func applyDelta(ctx context.Context, tx pgx.Tx, sessionID int64, d ProjectionDelta) (appliedDelta, error) {
-	var applied appliedDelta
-
-	// Each ordinal is inserted once: a turn is folded whole within the region that
-	// carries it, so there is no in-place content rewrite and no quadratic append.
-	// The ON CONFLICT DO NOTHING is a replay guard (a region is parsed once, since
-	// the cursor advances in the same transaction, and a reparse deletes these rows
-	// first), so a retried region never duplicates or rewrites a row. Counting only
-	// rows that inserted keeps message_count equal to the count of messages rows
-	// even if a region is ever replayed.
-	for _, m := range d.Messages {
-		content := sanitizeText(m.Content)
-		// Derive the prompt's hygiene facts here, where the body is already resident, and store
-		// them beside the row as fixed-size columns. The settle pass then aggregates those columns
-		// instead of reading every prompt body back to re-classify it, so its peak memory does not
-		// track the largest prompt a session held (see quality.ClassifyPrompt and gatherPromptHygiene).
-		// Only real human turns carry facts; other rows leave the columns NULL and the hygiene
-		// aggregate reads role='user' only. The facts are stamped with quality.PromptFactsVersion so a
-		// later change to the classifier is told apart from the current rules: the settle pass treats an
-		// old-version row like an unfilled one until the reparse re-derives it (see gatherPromptHygiene).
-		var pShort, pNoCode, pGreeting, pDigest, pFactsVersion any
-		// duplicateEligible marks a user turn the duplicate check applies to: the same eligibility
-		// gatherPromptHygiene's duplicate_prompt_count uses (non-empty content, not short, a real
-		// digest). Only such rows carry a non-NULL duplicate_prompt; an ineligible row leaves it NULL
-		// (no badge), matching the hygiene aggregate's exclusion of short/empty prompts.
-		duplicateEligible := false
-		if m.Role == roleUser {
-			facts := quality.ClassifyPrompt(content)
-			pShort, pNoCode, pGreeting, pDigest = facts.Short, facts.NoCodeContext, facts.BareGreeting, facts.Digest
-			pFactsVersion = quality.PromptFactsVersion
-			duplicateEligible = content != "" && !facts.Short
-		}
-		// Materialize the duplicate-prompt verdict here, in the ordered insert, rather than folding a
-		// whole-session window on every transcript render (the live body re-fetches on each SSE
-		// append, so a windowed read would redo O(session) work per refresh). For an eligible user
-		// row the flag is a scalar subquery: does an earlier eligible user row in this session already
-		// carry the same digest? Messages apply in ordinal order and the reparse re-inserts them in
-		// that same order, so the subquery sees exactly the earlier prefix the old window counted; the
-		// idx_messages_session_digest partial index (migration 0031) makes it a bounded probe, not a
-		// per-insert session rescan, so ingest stays linear. The first occurrence of a digest reads
-		// false (the original); every later eligible occurrence reads true. An ineligible row passes
-		// NULL so the column stays unset (no badge).
-		var pDuplicate any
-		if duplicateEligible {
-			var isDup bool
-			if err := tx.QueryRow(ctx,
-				`SELECT EXISTS (
-				   SELECT 1 FROM messages
-				    WHERE session_id = $1 AND role = 'user' AND ordinal < $2
-				      AND prompt_digest = $3 AND NOT coalesce(prompt_short, false)
-				      AND content_length > 0 AND prompt_facts_version = $4)`,
-				sessionID, m.Ordinal, pDigest, quality.PromptFactsVersion).Scan(&isDup); err != nil {
-				return appliedDelta{}, fmt.Errorf("check duplicate prompt for message %d in session %d: %w", m.Ordinal, sessionID, err)
-			}
-			pDuplicate = isDup
-		}
-		tag, err := tx.Exec(ctx,
-			`INSERT INTO messages
-			   (session_id, ordinal, role, content, thinking_text, thinking_bytes, model, timestamp, has_thinking, has_tool_use,
-			    prompt_short, prompt_no_code, prompt_bare_greeting, prompt_digest, prompt_facts_version, duplicate_prompt)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
-			 ON CONFLICT (session_id, ordinal) DO NOTHING`,
-			sessionID, m.Ordinal, sanitizeText(m.Role), content,
-			sanitizeText(m.ThinkingText), m.ThinkingBytes, sanitizeText(m.Model),
-			nullTime(m.Timestamp), m.HasThinking, m.HasToolUse,
-			pShort, pNoCode, pGreeting, pDigest, pFactsVersion, pDuplicate)
-		if err != nil {
-			return appliedDelta{}, fmt.Errorf("write message %d for session %d: %w", m.Ordinal, sessionID, err)
-		}
-		if tag.RowsAffected() > 0 {
-			applied.MessagesAdded++
-			if m.Role == roleUser {
-				applied.UserMessagesAdded++
-			}
-		}
-	}
-
-	// Load the session's cwd once for the whole delta, not per tool call, so deriving each
-	// call's worktree-invariant relative path (see below) costs one SELECT per region rather
-	// than one per edit. It is empty when the session announced no cwd, which sessionRelPath
-	// treats as "no anchor" and leaves the relative path NULL for absolute paths.
-	var sessionCwd string
-	if len(d.ToolCalls) > 0 {
-		if err := tx.QueryRow(ctx, `SELECT COALESCE(cwd, '') FROM sessions WHERE id = $1`, sessionID).Scan(&sessionCwd); err != nil {
-			return appliedDelta{}, fmt.Errorf("load cwd for session %d: %w", sessionID, err)
-		}
-	}
-
-	for _, t := range d.ToolCalls {
-		var inputSHA, inputMedia any
-		switch {
-		case t.InputSHA256 != "":
-			// The client lifted the input to the CAS and left a sentinel; the blob is
-			// already present (and pinned against the sweep), so record the reference
-			// without re-storing the body. Re-lock it FOR KEY SHARE so a sweep racing
-			// this insert cannot delete the blob between here and the FK check.
-			if err := pinBlobRefTx(ctx, tx, t.InputSHA256); err != nil {
-				return appliedDelta{}, fmt.Errorf("reference tool input blob %s for session %d call %d/%d: %w", t.InputSHA256, sessionID, t.MessageOrdinal, t.CallIndex, err)
-			}
-			inputSHA, inputMedia = t.InputSHA256, sanitizeText(t.InputMediaType)
-		case len(t.InputBody) > 0:
-			sha, err := writeBlobTx(ctx, tx, t.InputBody, t.InputMediaType)
-			if err != nil {
-				return appliedDelta{}, fmt.Errorf("write tool input blob for session %d call %d/%d: %w", sessionID, t.MessageOrdinal, t.CallIndex, err)
-			}
-			inputSHA, inputMedia = sha, sanitizeText(t.InputMediaType)
-		}
-		// call_uid is the agent's own tool_use id, and the tool-result back-patch keys
-		// on it. The (session_id, call_uid) index is deliberately non-unique (migration
-		// 0010): a resumed or compacted Claude transcript replays prior assistant turns
-		// verbatim, so the same id legitimately rides more than one row, and under a
-		// unique index the second insert tripped the constraint and rolled back the whole
-		// parse (the reparse failure on four sessions). Storing the id on every row lets
-		// the back-patch UPDATE ... WHERE call_uid = $1 stamp the same result onto each
-		// replayed copy, which is what a reader expects to see. The ON CONFLICT still
-		// guards the (message_ordinal, call_index) key against a region replay. A session
-		// that carries a duplicate id is surfaced in the UI (DuplicateCallUIDCount), so a
-		// genuinely malformed id reuse, the only case where stamping both rows is wrong,
-		// is visible rather than silent.
-		// Store the session-relative form of the path beside the absolute one. file_path is
-		// absolute, so the same repo file edited from two worktrees of one repo fragments into
-		// separate churn rows; file_rel_path is the worktree-invariant key that (paired with the
-		// project, which already collapses worktrees on the canonical remote) collapses them back
-		// together. The projection is the one place that sees both the session's cwd and the parsed
-		// path, so it is where the two are reconciled. It is NULL when no stable relative form
-		// exists (a path outside the workspace, or an absolute path with no announced cwd), which
-		// churn coalesces back onto file_path so an unanchored edit still counts under its absolute
-		// name rather than vanishing.
-		var relPath any
-		if rel, ok := sessionRelPath(sessionCwd, sanitizeText(t.FilePath)); ok {
-			relPath = rel
-		}
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO tool_calls
-			   (session_id, message_ordinal, call_index, tool_name, category, file_path, file_rel_path,
-			    input_sha256, input_bytes, input_media_type, call_uid, detail)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-			 ON CONFLICT (session_id, message_ordinal, call_index) DO NOTHING`,
-			sessionID, t.MessageOrdinal, t.CallIndex, sanitizeText(t.ToolName), sanitizeText(t.Category),
-			nullString(sanitizeText(t.FilePath)), relPath,
-			inputSHA, t.InputBytes, inputMedia, nullString(sanitizeText(t.CallUID)),
-			nullString(sanitizeText(t.Detail))); err != nil {
-			return appliedDelta{}, fmt.Errorf("insert tool call %d/%d for session %d: %w", t.MessageOrdinal, t.CallIndex, sessionID, err)
-		}
-	}
-
-	for _, tr := range d.ToolResults {
-		if tr.CallUID == "" {
-			continue
-		}
-		var resultSHA any
-		switch {
-		case tr.BodySHA256 != "":
-			if err := pinBlobRefTx(ctx, tx, tr.BodySHA256); err != nil {
-				return appliedDelta{}, fmt.Errorf("reference tool result blob %s for session %d call %q: %w", tr.BodySHA256, sessionID, tr.CallUID, err)
-			}
-			resultSHA = tr.BodySHA256
-		case len(tr.Body) > 0:
-			sha, err := writeBlobTx(ctx, tx, tr.Body, tr.MediaType)
-			if err != nil {
-				return appliedDelta{}, fmt.Errorf("write tool result blob for session %d call %q: %w", sessionID, tr.CallUID, err)
-			}
-			resultSHA = sha
-		}
-		media := sanitizeText(tr.MediaType)
-		if media == "" {
-			media = "text/plain"
-		}
-		// Patches one row in the common case and every still-pending copy when a
-		// transcript repeated the call's id (the index is non-unique by design), so each
-		// visible copy of a duplicated turn carries the same result rather than one
-		// looking pending. The result_status IS NULL predicate both makes the write
-		// once-per-row and lets the pending-only partial index (idx_tool_calls_pending_result,
-		// migration 0011) serve the lookup: a row leaves that index when its result lands,
-		// so a replayed turn that delivers its tool_result K times probes only the copies
-		// still pending rather than re-scanning all K accumulated rows each time. That
-		// keeps the back-patch linear in the number of rows instead of O(K^2).
-		if _, err := tx.Exec(ctx,
-			`UPDATE tool_calls
-			    SET result_sha256 = $3, result_bytes = $4, result_media_type = $5, result_status = $6
-			  WHERE session_id = $1 AND call_uid = $2 AND result_status IS NULL`,
-			sessionID, sanitizeText(tr.CallUID), resultSHA, tr.Bytes, media, sanitizeText(tr.Status)); err != nil {
-			return appliedDelta{}, fmt.Errorf("back-patch tool result for session %d call %q: %w", sessionID, tr.CallUID, err)
-		}
-	}
-
-	// Only usage rows that actually insert fold into the rollups. Claude streams one
-	// assistant message across several transcript lines that share a dedup_key, and
-	// Codex's replays collide on (source_offset, source_index); ON CONFLICT DO NOTHING
-	// keeps one in the ledger, and counting RowsAffected here keeps the rollup in
-	// lockstep with that surviving set. cost_incomplete is derived the same way: a
-	// surviving row that carries tokens but no priced cost is what makes the session
-	// total a partial sum.
-	//
-	// DO NOTHING (not DO UPDATE) is deliberate: a DO UPDATE would fold a duplicate's
-	// tokens into the rollup (its RowsAffected is 1 too), breaking the
-	// sessions.total_* == sum(usage_events) invariant.
-	for _, u := range d.Usage {
-		var ord, cost any
-		if u.MessageOrdinal != nil {
-			ord = *u.MessageOrdinal
-		}
-		if u.CostUSD != nil {
-			cost = *u.CostUSD
-		}
-		tag, err := tx.Exec(ctx,
-			`INSERT INTO usage_events
-			   (session_id, message_ordinal, model, input_tokens, output_tokens,
-			    cache_write_tokens, cache_read_tokens, reasoning_tokens, cost_usd,
-			    occurred_at, dedup_key, source_offset, source_index)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-			 ON CONFLICT DO NOTHING`,
-			sessionID, ord, sanitizeText(u.Model), u.Input, u.Output, u.CacheWrite, u.CacheRead,
-			u.Reasoning, cost, nullTime(u.OccurredAt), sanitizeText(u.DedupKey), u.SourceOffset, u.SourceIndex)
-		if err != nil {
-			return appliedDelta{}, fmt.Errorf("insert usage event for session %d at offset %d: %w", sessionID, u.SourceOffset, err)
-		}
-		if tag.RowsAffected() == 0 {
-			continue
-		}
-		// Fold this surviving row into its turn's usage rollup, the same accumulate the session
-		// totals do below but keyed by message_ordinal so the transcript reads one row per turn
-		// instead of re-grouping usage_events on every render. Only rows attributable to a turn
-		// contribute: a NULL-ordinal row belongs to the session totals, not to any one message
-		// (the same WHERE message_ordinal IS NOT NULL the old fold applied), so it is skipped
-		// here. cost_count counts the priced rows so the read can tell an all-unpriced turn (nil
-		// cost) from a summed zero; cost_incomplete flags a token-bearing but unpriced row so the
-		// turn's cost reads as a lower bound, mirroring the session-total cost_incomplete rule.
-		if u.MessageOrdinal != nil {
-			costDelta := 0.0
-			costCountDelta := int64(0)
-			if u.CostUSD != nil {
-				costDelta = *u.CostUSD
-				costCountDelta = 1
-			}
-			costIncomplete := u.CostUSD == nil && u.Input+u.Output+u.CacheWrite+u.CacheRead+u.Reasoning > 0
-			if _, err := tx.Exec(ctx,
-				`INSERT INTO message_turn_usage
-				   (session_id, message_ordinal, input_tokens, output_tokens, cache_write_tokens,
-				    cache_read_tokens, reasoning_tokens, cost_sum, cost_count, cost_incomplete)
-				 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-				 ON CONFLICT (session_id, message_ordinal) DO UPDATE SET
-				   input_tokens       = message_turn_usage.input_tokens       + EXCLUDED.input_tokens,
-				   output_tokens      = message_turn_usage.output_tokens      + EXCLUDED.output_tokens,
-				   cache_write_tokens = message_turn_usage.cache_write_tokens + EXCLUDED.cache_write_tokens,
-				   cache_read_tokens  = message_turn_usage.cache_read_tokens  + EXCLUDED.cache_read_tokens,
-				   reasoning_tokens   = message_turn_usage.reasoning_tokens   + EXCLUDED.reasoning_tokens,
-				   cost_sum           = message_turn_usage.cost_sum           + EXCLUDED.cost_sum,
-				   cost_count         = message_turn_usage.cost_count         + EXCLUDED.cost_count,
-				   cost_incomplete    = message_turn_usage.cost_incomplete    OR EXCLUDED.cost_incomplete`,
-				sessionID, *u.MessageOrdinal, int64(u.Input), int64(u.Output), int64(u.CacheWrite),
-				int64(u.CacheRead), int64(u.Reasoning), costDelta, costCountDelta, costIncomplete); err != nil {
-				return appliedDelta{}, fmt.Errorf("fold turn usage for session %d ordinal %d: %w", sessionID, *u.MessageOrdinal, err)
-			}
-		}
-		applied.Input += int64(u.Input)
-		applied.Output += int64(u.Output)
-		applied.CacheWrite += int64(u.CacheWrite)
-		applied.CacheRead += int64(u.CacheRead)
-		switch {
-		case u.CostUSD != nil:
-			applied.CostUSD += *u.CostUSD
-		case u.Input+u.Output+u.CacheWrite+u.CacheRead+u.Reasoning > 0:
-			// Tokens spent on a model the pricing table does not know: the session
-			// total is a partial sum and the flag says so.
-			applied.CostIncomplete = true
-		}
-		// Fold the prompt-cache saving the same way, over the same surviving rows. Pricing
-		// is linear in tokens, so summing each row's saving equals summing the model's
-		// grouped totals (what SessionCacheStats does over the whole session), which is what
-		// lets the rollup and that per-model recompute reconcile exactly. This prices per row
-		// at the window in effect at OccurredAt; SessionCacheStats groups by (model, UTC day)
-		// so every row in a bucket shares that window, keeping the two exactly reconciled even
-		// across a dated rate change. Cost is a stored per-row figure; the saving is not, so it
-		// is priced here rather than read off the row.
-		if saving, ok := pricing.CacheSavings(u.Model, u.OccurredAt, int64(u.CacheRead), int64(u.CacheWrite)); ok {
-			applied.CacheSavingsUSD += saving
-		} else if u.CacheRead > 0 || u.CacheWrite > 0 {
-			applied.CacheSavingsIncomplete = true
-		}
-	}
-	// Attachments carry no rollup column, so they do not fold into appliedDelta; they
-	// are inserted here for their blob references and metadata. Like a tool body each
-	// reaches the CAS by one of two paths: a client-lifted image names an already
-	// uploaded blob (record the reference, re-locking it FOR KEY SHARE so a racing sweep
-	// cannot reclaim it before the FK is checked), and an inline image is written here.
-	for _, a := range d.Attachments {
-		var sha any
-		switch {
-		case a.SHA256 != "":
-			if err := pinBlobRefTx(ctx, tx, a.SHA256); err != nil {
-				return appliedDelta{}, fmt.Errorf("reference attachment blob %s for session %d ordinal %d: %w", a.SHA256, sessionID, a.MessageOrdinal, err)
-			}
-			sha = a.SHA256
-		case len(a.Body) > 0:
-			s, err := writeBlobTx(ctx, tx, a.Body, a.MediaType)
-			if err != nil {
-				return appliedDelta{}, fmt.Errorf("write attachment blob for session %d ordinal %d: %w", sessionID, a.MessageOrdinal, err)
-			}
-			sha = s
-		default:
-			continue // an attachment with no body is nothing to store
-		}
-		media := sanitizeText(a.MediaType)
-		if media == "" {
-			media = "application/octet-stream"
-		}
-		// The unique index (session_id, message_ordinal, sha256) makes a replayed region
-		// a no-op, so a retried chunk never double-inserts an attachment.
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO attachments (session_id, message_ordinal, sha256, filename, media_type, byte_len)
-			 VALUES ($1,$2,$3,$4,$5,$6)
-			 ON CONFLICT (session_id, message_ordinal, sha256) DO NOTHING`,
-			sessionID, a.MessageOrdinal, sha, nullString(sanitizeText(a.Filename)), media, a.Bytes); err != nil {
-			return appliedDelta{}, fmt.Errorf("insert attachment for session %d ordinal %d: %w", sessionID, a.MessageOrdinal, err)
-		}
-	}
-
-	// Model fallbacks merge on (session_id, dedup_key): the several transcript lines of one
-	// logical fallback share a dedup_key (Claude's split assistant entries plus the system
-	// entry), so the first line inserts the row and the rest fill the columns their line
-	// carries. Two kinds of column merge here, and they resolve conflicts in opposite
-	// directions on purpose.
-	//
-	// message_ordinal and occurred_at are turn identity, and both bind to the assistant line
-	// that owns the turn, so they stay in lockstep with the usage projection. usage_events
-	// only ever exists for an assistant line (its insert is ON CONFLICT DO NOTHING, pinning
-	// the first assistant line's ordinal and timestamp), so the fallback row must read the
-	// same turn: the assistant line's ordinal and the assistant line's timestamp. The system
-	// entry carries a NULL ordinal and its own, often later, timestamp, and must never move
-	// the fallback notice onto a different turn time than the usage it describes.
-	//
-	// message_ordinal is first-wins (the existing value leads the COALESCE), so once an
-	// assistant line sets it, no later line moves it. occurred_at then tracks whichever line
-	// owns that ordinal, not merely whichever arrived first: once the row has an ordinal its
-	// timestamp is frozen (the assistant line's, matching usage_events), so a later system
-	// merge cannot overwrite it. Ordering matters because the system entry can arrive first:
-	// with only its NULL-ordinal row present the timestamp is a placeholder, and when the
-	// assistant line later fills the ordinal the CASE adopts that line's timestamp too,
-	// replacing the placeholder so both projections land on the one canonical turn time.
-	//
-	// The descriptive columns are the opposite, fill-toward-complete: a non-empty string
-	// wins over an empty one and a non-null value over NULL (via COALESCE, EXCLUDED first so
-	// a new value overrides a prior NULL but a NULL never clears a filled value). These are
-	// fields one side carries and the other lacks (trigger/category/explanation live only on
-	// the system entry, the declined token counts only on the specific assistant line), so
-	// whichever line arrives first, the later lines still fill in what it was missing.
-	//
-	// Only a fresh insert counts toward model_fallback_count: `xmax = 0` is true exactly for the row this statement inserted
-	// (a row updated by ON CONFLICT has a non-zero xmax), which distinguishes insert from
-	// merge where RowsAffected cannot (it is 1 for both). The nullable refusal columns pass
-	// through nullString so an assistant-first row stores NULL, not '', and a later system
-	// merge fills them via COALESCE; reads backfill '' for display.
-	for _, fb := range d.Fallbacks {
-		var ord, declIn, declOut, declCW, declCR any
-		if fb.MessageOrdinal != nil {
-			ord = *fb.MessageOrdinal
-		}
-		if fb.DeclinedInput != nil {
-			declIn = *fb.DeclinedInput
-		}
-		if fb.DeclinedOutput != nil {
-			declOut = *fb.DeclinedOutput
-		}
-		if fb.DeclinedCacheWrite != nil {
-			declCW = *fb.DeclinedCacheWrite
-		}
-		if fb.DeclinedCacheRead != nil {
-			declCR = *fb.DeclinedCacheRead
-		}
-		var inserted bool
-		if err := tx.QueryRow(ctx,
-			`INSERT INTO model_fallbacks
-			   (session_id, message_ordinal, from_model, to_model, trigger, refusal_category,
-			    refusal_explanation, declined_input_tokens, declined_output_tokens,
-			    declined_cache_write_tokens, declined_cache_read_tokens, occurred_at, dedup_key)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-			 ON CONFLICT (session_id, dedup_key) DO UPDATE SET
-			   message_ordinal     = COALESCE(model_fallbacks.message_ordinal, EXCLUDED.message_ordinal),
-			   from_model          = CASE WHEN EXCLUDED.from_model <> '' THEN EXCLUDED.from_model ELSE model_fallbacks.from_model END,
-			   to_model            = CASE WHEN EXCLUDED.to_model   <> '' THEN EXCLUDED.to_model   ELSE model_fallbacks.to_model   END,
-			   trigger             = CASE WHEN EXCLUDED.trigger    <> '' THEN EXCLUDED.trigger    ELSE model_fallbacks.trigger    END,
-			   refusal_category    = COALESCE(EXCLUDED.refusal_category, model_fallbacks.refusal_category),
-			   refusal_explanation = COALESCE(EXCLUDED.refusal_explanation, model_fallbacks.refusal_explanation),
-			   declined_input_tokens       = COALESCE(EXCLUDED.declined_input_tokens, model_fallbacks.declined_input_tokens),
-			   declined_output_tokens      = COALESCE(EXCLUDED.declined_output_tokens, model_fallbacks.declined_output_tokens),
-			   declined_cache_write_tokens = COALESCE(EXCLUDED.declined_cache_write_tokens, model_fallbacks.declined_cache_write_tokens),
-			   declined_cache_read_tokens  = COALESCE(EXCLUDED.declined_cache_read_tokens, model_fallbacks.declined_cache_read_tokens),
-			   occurred_at         = CASE
-			       WHEN model_fallbacks.message_ordinal IS NOT NULL THEN model_fallbacks.occurred_at
-			       WHEN EXCLUDED.message_ordinal IS NOT NULL THEN EXCLUDED.occurred_at
-			       ELSE COALESCE(model_fallbacks.occurred_at, EXCLUDED.occurred_at)
-			   END
-			 RETURNING (xmax = 0)`,
-			sessionID, ord, sanitizeText(fb.FromModel), sanitizeText(fb.ToModel), sanitizeText(fb.Trigger),
-			nullString(sanitizeText(fb.RefusalCategory)), nullString(sanitizeText(fb.RefusalExplanation)),
-			declIn, declOut, declCW, declCR, nullTime(fb.OccurredAt), sanitizeText(fb.DedupKey)).Scan(&inserted); err != nil {
-			return appliedDelta{}, fmt.Errorf("upsert model fallback for session %d key %q: %w", sessionID, fb.DedupKey, err)
-		}
-		if inserted {
-			applied.FallbacksAdded++
-		}
-	}
-	return applied, nil
-}
-
-// applyAggregates folds a region's persisted increments into the session rollups.
-// The counts and token/cost totals come from appliedDelta, the rows that actually
-// inserted, not from a pre-dedup per-region count, so the rollups equal the ledger
-// (sessions.total_* == sum over usage_events, message_count == count of messages
-// rows) for every agent. The span widens by LEAST/GREATEST (both ignore NULLs, so
-// a region with no timestamps leaves the bounds unchanged); cost_incomplete and
-// cache_savings_incomplete are both sticky once any surviving unpriced usage row is
-// seen. total_cache_savings_usd folds like total_cost_usd, so the session header's Cache
-// tile reads the saving off this one row rather than rescanning usage_events per refresh.
-//
-// The one wrinkle is a pricing rolling deploy. This fold prices the region's saving with the running
-// binary's rate table (CacheSavings, in applyDelta), so a fold is consistent with the stored rollup
-// only when the corpus is priced at that same table, which the singleton marker records as
-// cache_savings_priced_version == pricing.Version. When the marker differs, in either direction, a fold
-// onto a backfilled=true row would mix rate tables and leave the row flagged authoritative. Marker
-// ahead of this binary: a newer binary priced the corpus at newer rates, so this older binary's fold
-// would splice an old-rate saving in. Marker behind: this newer binary's reconcile has not run yet, so
-// the row is still at the OLD rates while this fold adds a new-rate saving. So when this region carried
-// cache volume and the marker is not equal to pricing.Version, the fold drops cache_savings_backfilled
-// to false, returning the session to the backfill candidate set for the reconcile and drain to re-price
-// the whole saving from usage_events at the settled rate table. In steady state (marker current) the
-// flag is untouched and the O(1) rollup stays authoritative.
-func applyAggregates(ctx context.Context, tx pgx.Tx, sessionID int64, parserVersion int, a appliedDelta, started, ended time.Time) error {
-	regionHasCache := a.CacheRead > 0 || a.CacheWrite > 0
-	_, err := tx.Exec(ctx,
-		`UPDATE sessions SET
-		   message_count = message_count + $2,
-		   user_message_count = user_message_count + $3,
-		   model_fallback_count = model_fallback_count + $17,
-		   total_input_tokens = total_input_tokens + $4,
-		   total_output_tokens = total_output_tokens + $5,
-		   total_cache_write_tokens = total_cache_write_tokens + $6,
-		   total_cache_read_tokens = total_cache_read_tokens + $7,
-		   total_cost_usd = total_cost_usd + $8,
-		   cost_incomplete = cost_incomplete OR $9,
-		   total_cache_savings_usd = total_cache_savings_usd + $10,
-		   cache_savings_incomplete = cache_savings_incomplete OR $11,
-		   -- Drop the authoritative flag when this cache-bearing region was folded while the corpus
-		   -- pricing marker differs from this binary's pricing.Version (a rollout in either direction),
-		   -- so the reconcile and drain re-price the whole saving at the settled rate table. The COALESCE
-		   -- reads a missing singleton as 0, which differs from any real version, so the safe direction
-		   -- (treat as in-flight, drop the flag) also covers a pre-migration database.
-		   cache_savings_backfilled = cache_savings_backfilled
-		     AND NOT ($15 AND COALESCE((SELECT cache_savings_priced_version FROM parse_meta WHERE id = TRUE), 0) <> $16),
-		   started_at = LEAST(started_at, $12),
-		   ended_at = GREATEST(ended_at, $13),
-		   parser_version = $14,
-		   updated_at = now(),
-		   -- The projection moved, so any stored grade is now behind it. Mark the session for
-		   -- the settle pass to re-grade; refreshSignalsTx clears this once it grades a settled
-		   -- session (see signals.go). This is what lets the settle pass find due sessions by an
-		   -- index seek instead of rescanning the settled tail every wake.
-		   signals_stale = true
-		 WHERE id = $1`,
-		sessionID, a.MessagesAdded, a.UserMessagesAdded,
-		a.Input, a.Output, a.CacheWrite, a.CacheRead,
-		a.CostUSD, a.CostIncomplete,
-		a.CacheSavingsUSD, a.CacheSavingsIncomplete,
-		nullTime(started), nullTime(ended), parserVersion,
-		regionHasCache, pricing.Version, a.FallbacksAdded)
-	if err != nil {
-		return fmt.Errorf("update aggregates for session %d: %w", sessionID, err)
-	}
-	return nil
-}
-
-// ResetProjectionForReparse clears a session's parser-owned projection rows and its
-// aggregates, and rewinds the parse cursor to zero at the given version, keeping the
-// raw bytes and their hash. It is the standalone clear without the replay: the server
-// reparses through ReparseSession, which composes this clear with an in-transaction
-// replay so the rebuild is atomic. This form is kept for store tests that exercise the
-// clear and its blob pin on their own. Attachments are parser-owned (the reducer emits
-// them from the transcript's image events), so they are cleared here too; a reparse
-// rewrites them, and the orphan sweep reclaims any blob left unreferenced.
-func (s *Store) ResetProjectionForReparse(ctx context.Context, sessionID int64, parserVersion int) error {
-	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-		// Parent session first, then session_raw: the same order DeleteSession takes,
-		// so a concurrent delete cannot deadlock with a reparse.
-		if err := lockSession(ctx, tx, sessionID); err != nil {
-			return err
-		}
-		if _, err := lockSessionRaw(ctx, tx, sessionID); err != nil {
-			return err
-		}
-		return clearProjectionForReparseTx(ctx, tx, sessionID, parserVersion)
-	})
-}
-
-// ReparseSession rebuilds a session's projection from its stored raw bytes in a
-// single transaction: it clears the derived rows and rewinds the cursor, then
-// replays the whole session through reduce, all atomically. Because the clear and
-// the replay commit together, two correctness properties hold that the older
-// reset-then-advance path did not provide:
-//
-//   - A concurrent reader never sees the session empty or half rebuilt. It sees the
-//     prior projection until this transaction commits, then the new one; there is no
-//     window of cleared-but-not-yet-replayed rows.
-//   - Any failure rolls the whole rebuild back. A parser error on malformed bytes or
-//     an operational store/CAS error leaves the prior projection intact rather than a
-//     cleared session, so a per-session parser failure loses no data and an
-//     operational failure is safe to retry.
-//
-// The raw bytes are never modified. The replay is bounded to one region at a time
-// (parseBatchBytes), so peak memory does not scale with session size even though the
-// whole session is rebuilt in one transaction.
-func (s *Store) ReparseSession(ctx context.Context, sessionID int64, parserVersion int, reduce ReduceFunc) error {
-	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-		if err := lockSession(ctx, tx, sessionID); err != nil {
-			return err
-		}
-		byteLen, err := lockSessionRaw(ctx, tx, sessionID)
-		if err != nil {
-			return err
-		}
-		if err := clearProjectionForReparseTx(ctx, tx, sessionID, parserVersion); err != nil {
-			return err
-		}
-		// Replay every region from the rewound cursor in this same transaction.
-		// readRawRegion guarantees the chunk at the cursor always qualifies, so the
-		// loop makes progress and ends exactly on the stored length.
-		state := []byte("{}")
-		var parsedLen int64
-		for parsedLen < byteLen {
-			region, regionEnd, err := readRawRegion(ctx, tx, sessionID, parsedLen, parseBatchBytes)
-			if err != nil {
-				return err
-			}
-			newState, d, err := reduce(state, region, parsedLen)
-			if err != nil {
-				return fmt.Errorf("parse session %d region [%d,%d): %w", sessionID, parsedLen, regionEnd, err)
-			}
-			applied, err := applyDelta(ctx, tx, sessionID, d)
-			if err != nil {
-				return err
-			}
-			if _, err := tx.Exec(ctx,
-				`UPDATE session_raw
-				    SET parsed_byte_len = $2, parse_state = $3, parse_state_version = $4, parse_error = ''
-				  WHERE session_id = $1`,
-				sessionID, regionEnd, newState, parserVersion); err != nil {
-				return fmt.Errorf("advance parse cursor for session %d to %d: %w", sessionID, regionEnd, err)
-			}
-			if err := applyAggregates(ctx, tx, sessionID, parserVersion, applied, d.Started, d.Ended); err != nil {
-				return err
-			}
-			state = newState
-			parsedLen = regionEnd
-		}
-		// The projection is fully rebuilt; recompute the session's signals from it in
-		// this same transaction. A reparse is also the versioned backfill: a caught-up
-		// session never re-enters AdvanceProjection, so an Epoch bump that reparses the
-		// corpus is what fills signals for sessions ingested before they existed, and
-		// what re-grades every session when the scoring version changes.
-		return refreshSignalsTx(ctx, tx, sessionID)
-	})
-}
-
 // lockSessionRaw locks the session_raw row (the caller must already hold the parent
 // session row, per the (session, session_raw) order DeleteSession takes) and returns
-// the stored byte length. It centralizes the FOR UPDATE the reparse and reset paths
-// share.
+// the stored byte length.
 func lockSessionRaw(ctx context.Context, tx pgx.Tx, sessionID int64) (int64, error) {
 	var byteLen int64
 	if err := tx.QueryRow(ctx,
@@ -930,79 +874,8 @@ func lockSessionRaw(ctx context.Context, tx pgx.Tx, sessionID int64) (int64, err
 	return byteLen, nil
 }
 
-// clearProjectionForReparseTx clears the parser-owned rows, pins the session's blobs,
-// rewinds the cursor to zero at parserVersion, and zeroes the aggregates, within the
-// caller's transaction (which must already hold the session and session_raw locks).
-// It is shared by ReparseSession and the standalone ResetProjectionForReparse.
-func clearProjectionForReparseTx(ctx context.Context, tx pgx.Tx, sessionID int64, parserVersion int) error {
-	// Pin every blob this session references (lifted tool inputs and results, and
-	// image attachments) before clearing the rows that reference them, so a concurrent
-	// sweep cannot reclaim a still-live blob. In ReparseSession the clear and rebuild
-	// commit together so this is belt-and-suspenders; in the standalone reset it is
-	// load-bearing for the window before a separate rebuild re-records the reference.
-	// The pin (FOR KEY SHARE via the FK) conflicts with the sweep's FOR UPDATE.
-	if err := pinSessionBlobsTx(ctx, tx, sessionID); err != nil {
-		return err
-	}
-	for _, q := range []string{
-		"DELETE FROM messages WHERE session_id = $1",
-		"DELETE FROM tool_calls WHERE session_id = $1",
-		"DELETE FROM usage_events WHERE session_id = $1",
-		// message_turn_usage is a per-turn rollup OF usage_events, rebuilt as the replay re-inserts
-		// them, so it clears with the ledger it summarizes rather than lingering with stale sums.
-		"DELETE FROM message_turn_usage WHERE session_id = $1",
-		"DELETE FROM attachments WHERE session_id = $1",
-		// model_fallbacks is parser-owned (the reducer emits it from the transcript's fallback
-		// markers), so it clears with the rest and the replay re-detects it; resetSessionAggregates
-		// zeroes model_fallback_count so the reparse re-accumulates it from the surviving inserts.
-		"DELETE FROM model_fallbacks WHERE session_id = $1",
-		// session_signals is parser-owned too (derived from messages and tool_calls), so
-		// it clears with the rest. ReparseSession rebuilds it at the end of its replay;
-		// the standalone reset leaves it absent until the settle pass refreshes it, once
-		// the re-parsed session has settled (the append path that catches the cursor back
-		// up no longer touches signals, so the row does not come back on catch-up).
-		"DELETE FROM session_signals WHERE session_id = $1",
-	} {
-		if _, err := tx.Exec(ctx, q, sessionID); err != nil {
-			return fmt.Errorf("clear projection for reparse of session %d (%s): %w", sessionID, q, err)
-		}
-	}
-	if _, err := tx.Exec(ctx,
-		`UPDATE session_raw
-		    SET parsed_byte_len = 0, parse_state = '{}'::jsonb,
-		        parse_state_version = $2, parse_error = ''
-		  WHERE session_id = $1`, sessionID, parserVersion); err != nil {
-		return fmt.Errorf("rewind parse cursor for session %d: %w", sessionID, err)
-	}
-	return resetSessionAggregates(ctx, tx, sessionID)
-}
-
-// resetSessionAggregates zeroes a session's rollups so a from-scratch parse can
-// re-accumulate them.
-func resetSessionAggregates(ctx context.Context, tx pgx.Tx, sessionID int64) error {
-	_, err := tx.Exec(ctx,
-		`UPDATE sessions SET
-		   message_count = 0, user_message_count = 0,
-		   model_fallback_count = 0,
-		   total_input_tokens = 0, total_output_tokens = 0,
-		   total_cache_write_tokens = 0, total_cache_read_tokens = 0,
-		   total_cost_usd = 0, cost_incomplete = FALSE,
-		   total_cache_savings_usd = 0, cache_savings_incomplete = FALSE,
-		   started_at = NULL, ended_at = NULL,
-		   updated_at = now(),
-		   -- Clearing the projection moves it, so the stored grade is behind. The reparse
-		   -- replays and then refreshSignalsTx re-settles this flag (false only if the rebuilt
-		   -- session is settled), so a reparse of a still-live session leaves it due.
-		   signals_stale = true
-		 WHERE id = $1`, sessionID)
-	if err != nil {
-		return fmt.Errorf("reset aggregates for session %d: %w", sessionID, err)
-	}
-	return nil
-}
-
-// lockSession takes the row lock on the parent session before the parse and reset
-// paths lock session_raw and update the session aggregates. DeleteSession locks
+// lockSession takes the row lock on the parent session before the rebuild path
+// locks session_raw and updates the session aggregates. DeleteSession locks
 // the session row (its DELETE) and then cascades into session_raw and the child
 // projection tables, so acquiring the session row first here gives one global lock
 // order (session, then session_raw) and rules out the parent/child deadlock where
@@ -1034,10 +907,17 @@ func nullString(s string) any {
 	return s
 }
 
+func nullInt(n *int) any {
+	if n == nil {
+		return nil
+	}
+	return *n
+}
+
 // sanitizeText makes a session-derived string safe for a Postgres text column.
 // Postgres rejects a NUL byte (0x00) outright and any byte sequence that is not
 // valid UTF-8, and a single offending byte fails the whole INSERT: that is how a
-// reparse of one Claude session (a message body carrying a raw NUL) rolled back
+// rebuild of one Claude session (a message body carrying a raw NUL) rolled back
 // and kept its stale projection. Replacing the bad bytes with U+FFFD keeps the
 // row writable and marks where the transcript was malformed, rather than dropping
 // the message or stranding the session. NUL is itself valid UTF-8, so ToValidUTF8

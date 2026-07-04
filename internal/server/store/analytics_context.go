@@ -3,8 +3,6 @@ package store
 import (
 	"context"
 	"fmt"
-
-	"github.com/jssblck/akari/internal/quality"
 )
 
 // ContextHealthStats is the cohort's context-load picture over a scope: how heavy the
@@ -38,20 +36,19 @@ func (s *Store) ContextHealth(ctx context.Context, f AnalyticsFilter) (ContextHe
 
 // contextHealthFrom aggregates the scoped sessions' context-load figures for the Insights page
 // from one querier. It shares the analytics filter (clauseFor on s.started_at, so a windowed
-// view counts sessions that started in the window) and INNER joins the current-version signals
-// row with a non-null peak, so the percentiles and sums cover exactly the sessions whose
-// context has been measured at the running model. The join also requires the row to be usable
-// (NOT s.signals_stale), so a session whose usage grew after its last grade, or that was graded
-// while still live, drops out until the settle pass re-measures it rather than contributing a
-// peak from an earlier or not-yet-settled run. Gating on the flag rather than a
-// refreshed_at >= updated_at comparison is deliberate: updated_at also moves on metadata-only
-// writes that leave the grade valid, and the flag is set at exactly the projection-change sites.
+// view counts sessions that started in the window) and INNER joins the usable signals row
+// with a non-null peak, so the percentiles and sums cover exactly the sessions whose
+// context has been measured. The join requires the row to be usable (NOT s.signals_stale),
+// so a session whose usage grew after its last grade, or that was graded while still live,
+// drops out until it is re-measured rather than contributing a peak from an earlier or
+// not-yet-settled run. Gating on the flag rather than a refreshed_at >= updated_at
+// comparison is deliberate: updated_at also moves on metadata-only writes that leave the
+// grade valid.
 // percentile_disc returns an actual stored peak (a real session's token count, not an
 // interpolated value), which is the honest thing to report for a "how heavy did a typical
 // session get" figure.
 func (s *Store) contextHealthFrom(ctx context.Context, q querier, f AnalyticsFilter) (ContextHealthStats, error) {
 	filter, args := f.clauseFor("s.started_at")
-	args = append(args, quality.Version)
 	var h ContextHealthStats
 	err := q.QueryRow(ctx,
 		`SELECT count(*),
@@ -62,7 +59,7 @@ func (s *Store) contextHealthFrom(ctx context.Context, q querier, f AnalyticsFil
 		        coalesce(sum(CASE WHEN sig.context_reset_count > 0 THEN 1 ELSE 0 END), 0)
 		   FROM sessions s
 		   JOIN session_signals sig
-		     ON sig.session_id = s.id AND `+signalsCurrent(len(args))+`
+		     ON sig.session_id = s.id AND `+signalsCurrent()+`
 		    AND sig.peak_context_tokens IS NOT NULL
 		  WHERE TRUE`+filter,
 		args...).Scan(&h.Sessions, &h.PeakTokensP50, &h.PeakTokensP90, &h.PeakTokensMax,

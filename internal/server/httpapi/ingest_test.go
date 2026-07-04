@@ -89,7 +89,7 @@ const terminalSession = `{"type":"assistant","timestamp":"2024-01-01T10:00:00Z",
 // host is torn down.
 func TestFinalizeGradesTerminalSession(t *testing.T) {
 	t.Parallel()
-	srv, st := newTestServer(t)
+	srv, st, worker := newTestServerWithReparse(t)
 	ctx := context.Background()
 
 	owner, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), "")
@@ -139,16 +139,22 @@ func TestFinalizeGradesTerminalSession(t *testing.T) {
 		t.Fatal("announce did not persist terminal = true")
 	}
 
-	// Upload the transcript.
+	// Upload the transcript, then drain the worker so the chunk actually parses into
+	// a projection: the chunk handler only appends raw bytes and wakes the worker, it
+	// no longer parses inline.
 	resp = do(http.MethodPost, fmt.Sprintf("/api/v1/ingest/session/%d/chunk?offset=0", sid), terminalSession)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("chunk status = %d, want 200", resp.StatusCode)
 	}
+	worker.Drain(ctx)
 
 	// Move the parsed end to now, so the idle window is nowhere near elapsed: only the
-	// terminal flag can make this session gradeable.
-	if _, err := st.Pool.Exec(ctx, "UPDATE sessions SET ended_at = now() WHERE id = $1", sid); err != nil {
+	// terminal flag can make this session gradeable. The rebuild the drain just ran
+	// stamped ended_at from the fixture's fixed 2024 timestamp and graded inline, so
+	// this stamp (and the read below) exercise finalize's own re-grade rather than the
+	// rebuild's.
+	if _, err := st.Pool.Exec(ctx, "UPDATE sessions SET ended_at = now(), signals_stale = true WHERE id = $1", sid); err != nil {
 		t.Fatalf("set recent ended_at: %v", err)
 	}
 

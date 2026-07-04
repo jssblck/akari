@@ -6,13 +6,14 @@ import (
 	"testing"
 )
 
-// TestParserErrorClassification confirms the reparse service can tell a deterministic
-// parser failure apart from an operational one even after the error is wrapped with
-// region context, which is what lets it tolerate the former (count and continue, the
-// epoch still advances) and abort on the latter (retry, the epoch is left behind).
+// TestParserErrorClassification confirms the worker can tell a deterministic
+// parser failure apart from an operational one even after the error is wrapped
+// with region context, which is what lets it count the former as consumed (the
+// store stamped the session's bookkeeping with the error recorded) and leave the
+// latter due for the next drain to retry.
 func TestParserErrorClassification(t *testing.T) {
 	cause := errors.New("malformed transcript line")
-	// Wrapped the way ReparseSession wraps a reducer failure: with region context.
+	// Wrapped the way RebuildSession wraps a reducer failure: with region context.
 	wrapped := fmt.Errorf("parse session 7 region [0,20): %w", &ParserError{err: cause})
 
 	var pe *ParserError
@@ -23,10 +24,13 @@ func TestParserErrorClassification(t *testing.T) {
 		t.Fatal("a ParserError should unwrap to its underlying cause")
 	}
 
-	// An operational error (a store query or CAS failure) must not classify as a parser
-	// error, so the service aborts the run instead of stamping the epoch over it.
-	operational := fmt.Errorf("reparse session 7: %w", errors.New("connection reset by peer"))
+	// An operational error (a store query or CAS failure) must not classify as a
+	// parser error, so the session stays due and the next drain retries it.
+	operational := fmt.Errorf("rebuild session 7: %w", errors.New("connection reset by peer"))
 	if errors.As(operational, &pe) {
 		t.Fatal("an operational error must not classify as a ParserError")
+	}
+	if !isParserError(wrapped) || isParserError(operational) {
+		t.Fatal("isParserError must agree with the errors.As classification")
 	}
 }

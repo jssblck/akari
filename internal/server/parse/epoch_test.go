@@ -26,13 +26,13 @@ var goldenFixtures = []struct {
 }
 
 // TestGoldenProjection is the guardrail that makes the parse.Epoch bump impossible
-// to forget. It parses each fixture through the exact reducer + pricing path the
-// live and reparse code use (reduceFunc), snapshots the resulting projection
-// delta, and compares it to a committed golden file. Any change to parser or
-// reducer output, or to the pricing the projection carries, makes a snapshot
-// differ and fails this test by name, so a developer cannot change what the parser
-// produces without being told to bump parse.Epoch (the fleet-wide reparse signal)
-// and refresh the goldens. It needs no database: the reducer and pricing are pure.
+// to forget. It parses each fixture through the exact reducer + pricing path a
+// rebuild uses (sessionReducer), snapshots the resulting projection delta, and
+// compares it to a committed golden file. Any change to parser or reducer output,
+// or to the pricing the projection carries, makes a snapshot differ and fails this
+// test by name, so a developer cannot change what the parser produces without
+// being told to bump parse.Epoch (the fleet-wide rebuild signal) and refresh the
+// goldens. It needs no database: the reducer and pricing are pure.
 func TestGoldenProjection(t *testing.T) {
 	for _, f := range goldenFixtures {
 		t.Run(f.name, func(t *testing.T) {
@@ -42,13 +42,17 @@ func TestGoldenProjection(t *testing.T) {
 				t.Fatalf("read fixture %s: %v", rawPath, err)
 			}
 
-			// Drive the same seam the store calls: decode empty state, reduce the whole
-			// session in one region from offset 0, and price the usage. The returned
-			// delta is exactly what would be written to the projection.
-			_, delta, err := reduceFunc(f.agent)(nil, raw, 0)
+			// Drive the same seam the store calls: feed the whole session as one
+			// region from offset 0, then finish and price. The returned delta is
+			// exactly what a rebuild would write to the projection.
+			r, err := newSessionReducer(f.agent)
 			if err != nil {
+				t.Fatalf("reducer for %s: %v", f.agent, err)
+			}
+			if err := r.Feed(raw, 0); err != nil {
 				t.Fatalf("reduce %s fixture: %v", f.name, err)
 			}
+			delta := r.Finish()
 			if len(delta.Messages) == 0 {
 				t.Fatalf("%s fixture produced no messages; the fixture or parser is broken", f.name)
 			}

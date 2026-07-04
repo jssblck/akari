@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jssblck/akari/internal/quality"
 )
 
 // SessionCard is everything the session OG card renders from, read as one consistent
@@ -76,12 +75,12 @@ func (s *Store) SessionCard(ctx context.Context, sessionID int64, buckets int) (
 // sessionCardFrom assembles the card from one querier: the facts read (project, title,
 // rollups, span, and the gated grade) and then, only when the facts carry a positive span,
 // the bucketed activity read. Both run on the same querier, so under SessionCard they share
-// one MVCC snapshot. $2 gates the grade to the running scoring version so a superseded or
-// stale grade reads as unscored. The grade also requires grade IS NOT NULL, which under the
-// score/grade coupling constraint (migration 0040) is exactly SessionSignals.Scored() (score
-// and grade are both set or both NULL): the session page's Quality tile shows a grade only
-// when Scored() holds, so the card applies the equivalent predicate and never advertises a
-// grade the page reads as unscored.
+// one MVCC snapshot. The grade is gated on NOT s.signals_stale so a stale grade reads as
+// unscored. The grade also requires grade IS NOT NULL, which under the score/grade coupling
+// constraint (migration 0040) is exactly SessionSignals.Scored() (score and grade are both
+// set or both NULL): the session page's Quality tile shows a grade only when Scored() holds,
+// so the card applies the equivalent predicate and never advertises a grade the page reads
+// as unscored.
 func (s *Store) sessionCardFrom(ctx context.Context, q querier, sessionID int64, buckets int) (SessionCard, bool, error) {
 	var card SessionCard
 	err := q.QueryRow(ctx,
@@ -91,7 +90,7 @@ func (s *Store) sessionCardFrom(ctx context.Context, q querier, sessionID int64,
 		        s.total_input_tokens + s.total_output_tokens
 		          + s.total_cache_read_tokens + s.total_cache_write_tokens,
 		        s.started_at, s.ended_at,
-		        CASE WHEN `+signalsCurrent(2)+`
+		        CASE WHEN `+signalsCurrent()+`
 		                  AND sig.grade IS NOT NULL
 		             THEN sig.grade END
 		   FROM sessions s
@@ -99,7 +98,7 @@ func (s *Store) sessionCardFrom(ctx context.Context, q querier, sessionID int64,
 		   LEFT JOIN session_signals sig ON sig.session_id = s.id
 		   `+titleLateralSQL+`
 		  WHERE s.id = $1`,
-		sessionID, quality.Version).Scan(
+		sessionID).Scan(
 		&card.ProjectKind, &card.ProjectName, &card.ProjectKey,
 		&card.Title, &card.MessageCount, &card.TotalTokens,
 		&card.StartedAt, &card.EndedAt, &card.Grade)

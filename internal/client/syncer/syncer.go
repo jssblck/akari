@@ -25,7 +25,6 @@ type Result struct {
 	Err           error
 	Action        upload.Action
 	UploadedBytes int64
-	MessageCount  int
 }
 
 // Destination is a short label for where the file was backed up, for logs and
@@ -110,6 +109,5 @@ func (s *Syncer) SyncOne(ctx context.Context, f discover.File) Result {
 		Reason:        res.Reason,
 		Action:        out.Action,
 		UploadedBytes: out.UploadedBytes,
-		MessageCount:  out.MessageCount,
 	}
 }

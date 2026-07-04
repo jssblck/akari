@@ -138,11 +138,12 @@ func TestPublicAndAuthedProjectAnalyticsReconcile(t *testing.T) {
 	}
 }
 
-// TestAnalyticsSnapshotSkipsDuringReparse guards the card render's reparse
-// coordination at the store layer: while the reparse advisory lock is held, the
-// snapshot reports not-ok (so Generate skips) rather than reading a projection that
-// may be mid-rebuild; once the lock clears, it returns the analytics.
-func TestAnalyticsSnapshotSkipsDuringReparse(t *testing.T) {
+// TestAnalyticsSnapshotSkipsDuringRebuild guards the card render's epoch coordination
+// at the store layer: while any session sits behind the store's running parser epoch,
+// the snapshot reports not-ok (so Generate skips) rather than reading a projection that
+// is a half-rebuilt mix of old and new parses; once every session is back at the
+// running epoch, it returns the analytics.
+func TestAnalyticsSnapshotSkipsDuringRebuild(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
 	ctx := context.Background()
@@ -160,21 +161,33 @@ func TestAnalyticsSnapshotSkipsDuringReparse(t *testing.T) {
 
 	filter := store.AnalyticsFilter{Since: time.Now().Add(-365 * 24 * time.Hour), UserIDs: []int64{u.ID}}
 
-	// Hold the reparse advisory lock: the snapshot must decline.
-	lock, ok, err := st.AcquireReparseLock(ctx)
-	if err != nil || !ok {
-		t.Fatalf("acquire reparse lock: ok=%v err=%v", ok, err)
+	// A session freshly seeded by direct SQL has no session_raw row, so it never trips
+	// the epoch check; announce one and mark it stale to stand in for a fleet rebuild
+	// still draining. The store is gated on testEpoch so rebuildWith's stub reducer
+	// (which always rebuilds at testEpoch) is what brings the corpus current below.
+	st.SetParserEpoch(testEpoch)
+	ann, err := st.Announce(ctx, store.AnnounceParams{
+		UserID: u.ID, Agent: "claude", SourceSessionID: "sess-1-raw", ProjectID: projectID, Machine: "box",
+	})
+	if err != nil {
+		t.Fatalf("announce: %v", err)
 	}
-	if _, ok, err := st.AnalyticsSnapshot(ctx, filter); err != nil || ok {
-		lock.Release(ctx)
-		t.Fatalf("snapshot during reparse: ok=%v err=%v, want ok=false", ok, err)
+	if _, err := st.MarkEpochStale(ctx, ""); err != nil {
+		t.Fatalf("mark epoch stale: %v", err)
 	}
-	lock.Release(ctx)
 
-	// With the lock clear, the snapshot returns the analytics.
+	// While the announced session sits behind the running epoch, the snapshot declines.
+	if _, ok, err := st.AnalyticsSnapshot(ctx, filter); err != nil || ok {
+		t.Fatalf("snapshot mid-rebuild: ok=%v err=%v, want ok=false", ok, err)
+	}
+
+	// Rebuild it up to the running epoch: the corpus is single-epoch again.
+	rebuildWith(t, st, ann.SessionID, store.ProjectionDelta{})
+
+	// With every session at the running epoch, the snapshot returns the analytics.
 	a, ok, err := st.AnalyticsSnapshot(ctx, filter)
 	if err != nil || !ok {
-		t.Fatalf("snapshot after reparse: ok=%v err=%v, want ok=true", ok, err)
+		t.Fatalf("snapshot after rebuild: ok=%v err=%v, want ok=true", ok, err)
 	}
 	if a.TotalIn != 100 {
 		t.Fatalf("snapshot TotalIn = %d, want 100", a.TotalIn)

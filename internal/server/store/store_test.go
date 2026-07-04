@@ -454,11 +454,13 @@ func TestResetRawClearsModelFallbacks(t *testing.T) {
 	}
 }
 
-// TestAdvanceProjectionCursorAndVersionGate exercises the incremental applier
-// directly with a stub reducer: the parse cursor advances to the stored length
-// and folds the delta into the aggregates, a caught-up session is a no-op, and a
-// session partially parsed by one version refuses to continue under another.
-func TestAdvanceProjectionCursorAndVersionGate(t *testing.T) {
+// TestRebuildSessionCursorAndReplace exercises the rebuild path directly with a
+// stub reducer: the cursor and epoch stamp to the stored length, the rollups
+// derive from the delta's rows, and a second rebuild REPLACES the projection
+// rather than accumulating onto it. It also pins the due predicate around the
+// rebuild: new bytes or a different epoch make the session due, and a rebuild
+// takes it back out.
+func TestRebuildSessionCursorAndReplace(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
 	ctx := context.Background()
@@ -472,87 +474,207 @@ func TestAdvanceProjectionCursorAndVersionGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	ann, err := st.Announce(ctx, store.AnnounceParams{
-		UserID: u.ID, Agent: "claude", SourceSessionID: "sess-adv", ProjectID: projectID,
+		UserID: u.ID, Agent: "claude", SourceSessionID: "sess-rebuild", ProjectID: projectID,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.AppendChunk(ctx, ann.SessionID, 0, []byte("line one\nline two\n")); err != nil {
+	raw := "line one\nline two\n"
+	if _, err := st.AppendChunk(ctx, ann.SessionID, 0, []byte(raw)); err != nil {
 		t.Fatal(err)
 	}
 
-	// A stub reducer that emits one user message and one usage row per call, keyed
-	// by the region's base offset so repeated calls never collide on the messages
-	// primary key or the usage source identity. The rollups are derived from the
-	// rows that actually insert, so the delta carries rows, not precomputed counts.
-	var calls int
-	reduce := func(state, region []byte, base int64) ([]byte, store.ProjectionDelta, error) {
-		calls++
-		return []byte("{}"), store.ProjectionDelta{
-			Messages: []store.MessageDelta{{Ordinal: int(base), Role: "user", Content: "x"}},
-			Usage:    []store.ProjUsage{{Model: "m", Input: 5, SourceOffset: base, SourceIndex: 0}},
-		}, nil
+	isDue := func(epoch int) bool {
+		t.Helper()
+		due, err := st.DueSessions(ctx, epoch, 0, 100)
+		if err != nil {
+			t.Fatalf("due scan: %v", err)
+		}
+		for _, d := range due {
+			if d.ID == ann.SessionID {
+				return true
+			}
+		}
+		return false
+	}
+	if !isDue(testEpoch) {
+		t.Fatal("session with unparsed bytes should be due")
 	}
 
-	parsedTo, caughtUp, err := st.AdvanceProjection(ctx, ann.SessionID, 1, reduce)
-	if err != nil {
-		t.Fatalf("advance: %v", err)
-	}
-	if !caughtUp || parsedTo != int64(len("line one\nline two\n")) {
-		t.Fatalf("advance: caughtUp=%v parsedTo=%d", caughtUp, parsedTo)
-	}
+	rebuildWith(t, st, ann.SessionID, store.ProjectionDelta{
+		Messages: []store.MessageDelta{
+			{Ordinal: 0, Role: "user", Content: "x"},
+			{Ordinal: 1, Role: "assistant", Content: "y"},
+		},
+		Usage: []store.ProjUsage{{Model: "m", Input: 5, SourceOffset: 0, SourceIndex: 0}},
+	})
 
-	var mc int
+	var mc, umc int
 	var in int64
+	if err := st.Pool.QueryRow(ctx,
+		"SELECT message_count, user_message_count, total_input_tokens FROM sessions WHERE id=$1",
+		ann.SessionID).Scan(&mc, &umc, &in); err != nil {
+		t.Fatal(err)
+	}
+	if mc != 2 || umc != 1 || in != 5 {
+		t.Fatalf("rollups: message_count=%d user=%d input=%d, want 2, 1, 5", mc, umc, in)
+	}
 	var parsed int64
-	if err := st.Pool.QueryRow(ctx, "SELECT message_count, total_input_tokens FROM sessions WHERE id=$1", ann.SessionID).Scan(&mc, &in); err != nil {
+	var epoch int
+	if err := st.Pool.QueryRow(ctx,
+		"SELECT parsed_byte_len, parser_epoch FROM session_raw WHERE session_id=$1",
+		ann.SessionID).Scan(&parsed, &epoch); err != nil {
 		t.Fatal(err)
 	}
-	if mc != 1 || in != 5 {
-		t.Fatalf("aggregates: message_count=%d input=%d, want 1 and 5", mc, in)
+	if parsed != int64(len(raw)) || epoch != testEpoch {
+		t.Fatalf("stamp: parsed=%d epoch=%d, want %d and %d", parsed, epoch, len(raw), testEpoch)
+	}
+	if isDue(testEpoch) {
+		t.Fatal("rebuilt session still reads as due")
+	}
+	// The same session is due again under any other epoch: that is how a bumped
+	// binary rolls a parser change over the corpus.
+	if !isDue(testEpoch + 1) {
+		t.Fatal("session should be due under a different epoch")
 	}
 
-	// A second advance with nothing new is a no-op: the reducer is not called and
-	// the aggregates do not move.
-	before := calls
-	if _, caughtUp, err = st.AdvanceProjection(ctx, ann.SessionID, 1, reduce); err != nil || !caughtUp {
-		t.Fatalf("advance no-op: caughtUp=%v err=%v", caughtUp, err)
+	// A second rebuild replaces the projection wholesale: one message, different
+	// usage, and every rollup reflects only the new delta.
+	rebuildWith(t, st, ann.SessionID, store.ProjectionDelta{
+		Messages: []store.MessageDelta{{Ordinal: 0, Role: "assistant", Content: "z"}},
+		Usage:    []store.ProjUsage{{Model: "m", Input: 7, SourceOffset: 0, SourceIndex: 0}},
+	})
+	var rows int
+	if err := st.Pool.QueryRow(ctx, "SELECT count(*) FROM messages WHERE session_id=$1", ann.SessionID).Scan(&rows); err != nil {
+		t.Fatal(err)
 	}
-	if calls != before {
-		t.Fatalf("reducer ran on a caught-up session: %d calls", calls-before)
+	if err := st.Pool.QueryRow(ctx,
+		"SELECT message_count, user_message_count, total_input_tokens FROM sessions WHERE id=$1",
+		ann.SessionID).Scan(&mc, &umc, &in); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 || mc != 1 || umc != 0 || in != 7 {
+		t.Fatalf("after replace: rows=%d message_count=%d user=%d input=%d, want 1, 1, 0, 7", rows, mc, umc, in)
 	}
 
-	// More bytes arrive, but under a different parser version the partially parsed
-	// session refuses to continue until a reparse rewinds it.
-	if _, err := st.AppendChunk(ctx, ann.SessionID, int64(len("line one\nline two\n")), []byte("line three\n")); err != nil {
+	// New bytes make it due again.
+	if _, err := st.AppendChunk(ctx, ann.SessionID, int64(len(raw)), []byte("line three\n")); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := st.AdvanceProjection(ctx, ann.SessionID, 2, reduce); !errors.Is(err, store.ErrParserVersionStale) {
-		t.Fatalf("version gate: want ErrParserVersionStale, got %v", err)
-	}
-	if err := st.Pool.QueryRow(ctx, "SELECT parsed_byte_len FROM session_raw WHERE session_id=$1", ann.SessionID).Scan(&parsed); err != nil {
-		t.Fatal(err)
-	}
-	if parsed != int64(len("line one\nline two\n")) {
-		t.Fatalf("version gate advanced the cursor to %d", parsed)
+	if !isDue(testEpoch) {
+		t.Fatal("session with appended bytes should be due again")
 	}
 }
 
-// TestAdvanceProjectionBatching forces a backlog larger than one parse batch and
-// confirms catch-up advances in bounded steps, parsing each chunk's bytes exactly
-// once and contiguously (the readRawRegion SQL bound, not a client-side rescan of
-// the whole tail).
-//
-// This test is deliberately not parallel: through the SetParseBatchBytes seam it
-// overrides a package-global in store. A non-parallel test runs to completion
-// (restoring the global) before any t.Parallel test resumes, so the override
-// never races a reader.
-func TestAdvanceProjectionBatching(t *testing.T) {
+// TestRebuildSessionParserErrorStamps pins the deterministic-failure contract: a
+// reducer that rejects the bytes has its error recorded on parse_error with the
+// bookkeeping stamped consumed (so the session leaves the due set instead of
+// hot-looping), the prior projection survives untouched, and the error is still
+// returned to the caller. A later successful rebuild clears the recorded error.
+func TestRebuildSessionParserErrorStamps(t *testing.T) {
+	t.Parallel()
 	st := storetest.NewStore(t)
 	ctx := context.Background()
 
-	// A batch smaller than the gap between chunk starts, so each chunk batches alone.
-	defer store.SetParseBatchBytes(2)()
+	u, err := st.Register(ctx, "grace", "hash", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ann, err := st.Announce(ctx, store.AnnounceParams{
+		UserID: u.ID, Agent: "claude", SourceSessionID: "sess-badbytes", ProjectID: projectID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AppendChunk(ctx, ann.SessionID, 0, []byte("good line\n")); err != nil {
+		t.Fatal(err)
+	}
+	// A first good parse leaves a projection the failure must not disturb.
+	rebuildWith(t, st, ann.SessionID, store.ProjectionDelta{
+		Messages: []store.MessageDelta{{Ordinal: 0, Role: "user", Content: "keep me"}},
+	})
+
+	// New bytes arrive and the (changed) parser rejects them.
+	if _, err := st.AppendChunk(ctx, ann.SessionID, int64(len("good line\n")), []byte("bad line\n")); err != nil {
+		t.Fatal(err)
+	}
+	rerr := errors.New("malformed transcript")
+	if err := st.RebuildSession(ctx, ann.SessionID, testEpoch, failingReducer{rerr}); !errors.Is(err, rerr) {
+		t.Fatalf("rebuild with failing reducer returned %v, want the reducer's error", err)
+	}
+
+	var parsed, byteLen int64
+	var parseErr string
+	if err := st.Pool.QueryRow(ctx,
+		"SELECT parsed_byte_len, byte_len, parse_error FROM session_raw WHERE session_id=$1",
+		ann.SessionID).Scan(&parsed, &byteLen, &parseErr); err != nil {
+		t.Fatal(err)
+	}
+	if parsed != byteLen {
+		t.Fatalf("failed parse did not stamp consumed: parsed=%d byte_len=%d", parsed, byteLen)
+	}
+	if !strings.Contains(parseErr, "malformed transcript") {
+		t.Fatalf("parse_error = %q, want the reducer's message recorded", parseErr)
+	}
+	var content string
+	if err := st.Pool.QueryRow(ctx,
+		"SELECT content FROM messages WHERE session_id=$1 AND ordinal=0", ann.SessionID).Scan(&content); err != nil {
+		t.Fatal(err)
+	}
+	if content != "keep me" {
+		t.Fatalf("prior projection disturbed by failed parse: content=%q", content)
+	}
+	due, err := st.DueSessions(ctx, testEpoch, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range due {
+		if d.ID == ann.SessionID {
+			t.Fatal("failed session still due: it would hot-loop on the same bad bytes")
+		}
+	}
+
+	// A successful rebuild (a fixed parser shipping under a new epoch) clears the error.
+	if err := st.RebuildSession(ctx, ann.SessionID, testEpoch+1, stubReducer{store.ProjectionDelta{
+		Messages: []store.MessageDelta{{Ordinal: 0, Role: "user", Content: "fixed"}},
+	}}); err != nil {
+		t.Fatalf("recovery rebuild: %v", err)
+	}
+	if err := st.Pool.QueryRow(ctx,
+		"SELECT parse_error FROM session_raw WHERE session_id=$1", ann.SessionID).Scan(&parseErr); err != nil {
+		t.Fatal(err)
+	}
+	if parseErr != "" {
+		t.Fatalf("recovery rebuild left parse_error = %q, want cleared", parseErr)
+	}
+}
+
+// failingReducer rejects every region, standing in for a parser hitting
+// malformed bytes.
+type failingReducer struct{ err error }
+
+func (r failingReducer) Feed([]byte, int64) error      { return r.err }
+func (r failingReducer) Finish() store.ProjectionDelta { return store.ProjectionDelta{} }
+
+// TestRebuildSessionRegionBatching forces a raw store larger than one feed
+// region and confirms the rebuild streams the reducer every byte exactly once,
+// contiguously, in bounded regions (the readRawRegion SQL bound, not a
+// client-side rescan of the whole tail).
+//
+// This test is deliberately not parallel: through the SetRebuildRegionBytes seam
+// it overrides a package-global in store. A non-parallel test runs to completion
+// (restoring the global) before any t.Parallel test resumes, so the override
+// never races a reader.
+func TestRebuildSessionRegionBatching(t *testing.T) {
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	// A region smaller than the gap between chunk starts, so each chunk feeds alone.
+	defer store.SetRebuildRegionBytes(2)()
 
 	u, err := st.Register(ctx, "grace", "hash", "")
 	if err != nil {
@@ -569,8 +691,6 @@ func TestAdvanceProjectionBatching(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Three chunks, each a short line, appended before any parse runs: the parse
-	// cursor must catch up across several bounded batches.
 	chunks := []string{"a\n", "bb\n", "ccc\n"}
 	var offset int64
 	for _, c := range chunks {
@@ -581,52 +701,48 @@ func TestAdvanceProjectionBatching(t *testing.T) {
 		offset = stored
 	}
 
-	var bases []int64
-	reduce := func(state, region []byte, base int64) ([]byte, store.ProjectionDelta, error) {
-		bases = append(bases, base)
-		return []byte("{}"), store.ProjectionDelta{
-			Messages: []store.MessageDelta{{Ordinal: int(base), Role: "assistant", Content: string(region)}},
-		}, nil
+	rec := &recordingReducer{}
+	if err := st.RebuildSession(ctx, ann.SessionID, testEpoch, rec); err != nil {
+		t.Fatalf("rebuild: %v", err)
 	}
 
-	iterations := 0
-	for {
-		_, caughtUp, err := st.AdvanceProjection(ctx, ann.SessionID, 1, reduce)
-		if err != nil {
-			t.Fatalf("advance: %v", err)
+	// One region per chunk, each starting exactly where the previous ended, and
+	// the concatenation is the raw bytes verbatim.
+	wantBases := []int64{0, 2, 5}
+	if len(rec.bases) != len(wantBases) {
+		t.Fatalf("fed %d regions, want %d (one per chunk): bases=%v", len(rec.bases), len(wantBases), rec.bases)
+	}
+	for i, b := range rec.bases {
+		if b != wantBases[i] {
+			t.Fatalf("region %d started at %d, want %d (bases=%v)", i, b, wantBases[i], rec.bases)
 		}
-		iterations++
-		if caughtUp {
-			break
-		}
-		if iterations > 10 {
-			t.Fatal("catch-up did not converge")
-		}
+	}
+	if got := strings.Join(rec.regions, ""); got != "a\nbb\nccc\n" {
+		t.Fatalf("fed bytes = %q, want the raw store verbatim", got)
 	}
 
-	// One batch per chunk, each starting exactly where the previous ended.
-	if len(bases) != 3 {
-		t.Fatalf("parsed in %d batches, want 3 (one per chunk): bases=%v", len(bases), bases)
-	}
-	want := []int64{0, 2, 5}
-	for i, b := range bases {
-		if b != want[i] {
-			t.Fatalf("batch %d started at %d, want %d (bases=%v)", i, b, want[i], bases)
-		}
-	}
-
-	var mc int
 	var parsed, byteLen int64
-	if err := st.Pool.QueryRow(ctx, "SELECT message_count FROM sessions WHERE id=$1", ann.SessionID).Scan(&mc); err != nil {
-		t.Fatal(err)
-	}
 	if err := st.Pool.QueryRow(ctx, "SELECT parsed_byte_len, byte_len FROM session_raw WHERE session_id=$1", ann.SessionID).Scan(&parsed, &byteLen); err != nil {
 		t.Fatal(err)
 	}
-	if mc != 3 || parsed != byteLen {
-		t.Fatalf("after catch-up: message_count=%d parsed=%d byte_len=%d", mc, parsed, byteLen)
+	if parsed != byteLen {
+		t.Fatalf("after rebuild: parsed=%d byte_len=%d", parsed, byteLen)
 	}
 }
+
+// recordingReducer records each Feed call so a test can assert what the rebuild
+// streamed.
+type recordingReducer struct {
+	bases   []int64
+	regions []string
+}
+
+func (r *recordingReducer) Feed(region []byte, base int64) error {
+	r.bases = append(r.bases, base)
+	r.regions = append(r.regions, string(region))
+	return nil
+}
+func (r *recordingReducer) Finish() store.ProjectionDelta { return store.ProjectionDelta{} }
 
 // TestUpsertProjectKindTransition confirms a standalone folder that is later
 // deleted transitions to orphaned in place: same key, same row, updated kind.

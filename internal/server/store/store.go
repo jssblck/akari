@@ -16,7 +16,20 @@ import (
 // Store wraps a Postgres connection pool.
 type Store struct {
 	Pool *pgxpool.Pool
+
+	// parserEpoch is the running binary's parse.Epoch, injected at wiring time
+	// (SetParserEpoch) because the store cannot import the parse package. It
+	// drives the epoch-staleness gate on the aggregate OG-card snapshots: while
+	// any session's projection is behind this epoch, a cross-session view could
+	// mix old and new parses, so those snapshots decline to cache. Zero (never
+	// set) gates nothing, which is what tests that never touch epochs want.
+	parserEpoch int
 }
+
+// SetParserEpoch records the running binary's parser epoch for the
+// epoch-staleness gate (see epochGatedSnapshot). Call it once at wiring time,
+// before serving traffic.
+func (s *Store) SetParserEpoch(epoch int) { s.parserEpoch = epoch }
 
 // Open connects to Postgres and verifies the connection.
 func Open(ctx context.Context, databaseURL string) (*Store, error) {

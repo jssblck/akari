@@ -234,7 +234,7 @@ func (s *summary) foldSync(r syncer.Result) (line string, stderr bool) {
 		s.uploaded++
 		s.countKind(r.Kind)
 		s.uploadedBytes += r.UploadedBytes
-		return fmt.Sprintf("uploaded %s -> %s (%d bytes, %d messages)", r.File.Path, r.Destination(), r.UploadedBytes, r.MessageCount), false
+		return fmt.Sprintf("uploaded %s -> %s (%d bytes)", r.File.Path, r.Destination(), r.UploadedBytes), false
 	case r.Action == upload.ActionReset:
 		s.reset++
 		s.countKind(r.Kind)

@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/jssblck/akari/internal/server/auth"
-	"github.com/jssblck/akari/internal/server/reparse"
+	"github.com/jssblck/akari/internal/server/parse"
 )
 
 // registerAdmin registers the first account (which becomes admin) on a fresh
@@ -79,7 +79,7 @@ func TestReparseButtonRequiresAdmin(t *testing.T) {
 // and the normal pages return once the reparse clears.
 func TestParsedEndpointsGateDuringReparse(t *testing.T) {
 	t.Parallel()
-	srv, _, rp := newTestServerWithReparse(t)
+	srv, _, worker := newTestServerWithReparse(t)
 	c := registerAdmin(t, srv.URL)
 
 	// Before any reparse, the overview renders normally.
@@ -88,7 +88,7 @@ func TestParsedEndpointsGateDuringReparse(t *testing.T) {
 	}
 
 	// Force an in-progress reparse without running one.
-	rp.SetStatusForTest(reparse.Status{InProgress: true, Done: 2, Total: 5, Failed: 1})
+	worker.SetStatusForTest(parse.Status{InProgress: true, Done: 2, Total: 5, Failed: 1})
 
 	// Parsed pages are gated: they show the progress stand-in. The public homepage
 	// at "/" is not parsed data, so it is not in this set.
@@ -117,7 +117,7 @@ func TestParsedEndpointsGateDuringReparse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status endpoint: %v", err)
 	}
-	var got reparse.Status
+	var got parse.Status
 	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
 		t.Fatalf("decode status: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestParsedEndpointsGateDuringReparse(t *testing.T) {
 	}
 
 	// Once the reparse clears, the parsed pages return.
-	rp.SetStatusForTest(reparse.Status{})
+	worker.SetStatusForTest(parse.Status{})
 	if body := getBody(t, c, srv.URL+"/overview"); !strings.Contains(body, "Overview") || strings.Contains(body, "Reparse in progress") {
 		t.Fatalf("overview should render normally after the reparse clears, got:\n%s", body)
 	}

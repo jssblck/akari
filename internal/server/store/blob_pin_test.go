@@ -3,6 +3,7 @@ package store_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -221,9 +222,7 @@ func TestApplyDeltaReferencesUploadedBlob(t *testing.T) {
 			CallUID: "c1", BodySHA256: resultSHA, Bytes: int64(len(result)), MediaType: "text/plain", Status: "ok",
 		}},
 	}
-	if err := st.ApplyProjectionDelta(ctx, sid, delta); err != nil {
-		t.Fatalf("apply projection: %v", err)
-	}
+	rebuildWith(t, st, sid, delta)
 
 	// The row carries the references with the declared metadata.
 	var gotInput, gotResult string
@@ -310,9 +309,7 @@ func TestToolCallDetailRoundTrip(t *testing.T) {
 			},
 		},
 	}
-	if err := st.ApplyProjectionDelta(ctx, sid, delta); err != nil {
-		t.Fatalf("apply projection: %v", err)
-	}
+	rebuildWith(t, st, sid, delta)
 
 	calls, err := st.ToolCalls(ctx, sid)
 	if err != nil {
@@ -376,7 +373,8 @@ func TestApplyDeltaMissingUploadedBlobFails(t *testing.T) {
 			InputSHA256: store.HashString("never uploaded"), InputBytes: 5, InputMediaType: "application/json", CallUID: "c1",
 		}},
 	}
-	if err := st.ApplyProjectionDelta(ctx, sid, delta); err == nil {
-		t.Fatal("expected ErrBlobNotUploaded for a reference to an absent body")
+	err = st.RebuildSession(ctx, sid, testEpoch, stubReducer{delta})
+	if !errors.Is(err, store.ErrBlobNotUploaded) {
+		t.Fatalf("rebuild with a dangling blob reference = %v, want ErrBlobNotUploaded", err)
 	}
 }

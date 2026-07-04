@@ -6,8 +6,6 @@ import (
 	"path"
 	"sort"
 	"time"
-
-	"github.com/jssblck/akari/internal/quality"
 )
 
 // VelocityTrends is the per-bucket cadence: how much hands-on time the fleet logged against
@@ -762,8 +760,6 @@ const maxGalleryPoints = 400
 func (s *Store) galleryFrom(ctx context.Context, q querier, f AnalyticsFilter) (Gallery, error) {
 	var out Gallery
 	filter, args := f.clauseFor("s.started_at")
-	args = append(args, quality.Version)
-	versionArg := len(args)
 	limitArg := fmt.Sprintf("$%d", len(args)+1)
 	args = append(args, maxGalleryPoints)
 	rows, err := q.Query(ctx, fmt.Sprintf(
@@ -776,7 +772,7 @@ func (s *Store) galleryFrom(ctx context.Context, q querier, f AnalyticsFilter) (
 		        count(*) OVER () AS total
 		   FROM sessions s
 		   LEFT JOIN session_signals sig
-		     ON sig.session_id = s.id AND `+signalsCurrent(versionArg)+`
+		     ON sig.session_id = s.id AND `+signalsCurrent()+`
 		  WHERE s.started_at IS NOT NULL AND s.ended_at IS NOT NULL AND s.ended_at >= s.started_at%s
 		  ORDER BY s.started_at DESC
 		  LIMIT %s`, archetypeCaseExpr, filter, limitArg), args...)
@@ -803,7 +799,6 @@ func (s *Store) galleryFrom(ctx context.Context, q querier, f AnalyticsFilter) (
 	// duration, ties by cost) session in a single pass: max over a numeric array compares
 	// element by element, so the leading key wins and the trailing key breaks ties.
 	sfilter, sargs := f.clauseFor("s.started_at")
-	sargs = append(sargs, quality.Version)
 	var medDur, medCost, medComp float64
 	var priciest, longest []float64
 	if err := q.QueryRow(ctx, fmt.Sprintf(
@@ -814,7 +809,7 @@ func (s *Store) galleryFrom(ctx context.Context, q querier, f AnalyticsFilter) (
 		          coalesce(sig.outcome, 'unknown') AS outcome
 		     FROM sessions s
 		     LEFT JOIN session_signals sig
-		       ON sig.session_id = s.id AND `+signalsCurrent(len(sargs))+`
+		       ON sig.session_id = s.id AND `+signalsCurrent()+`
 		    WHERE s.started_at IS NOT NULL AND s.ended_at IS NOT NULL AND s.ended_at >= s.started_at%s
 		 )
 		 SELECT coalesce(percentile_cont(0.5) WITHIN GROUP (ORDER BY dur), 0),

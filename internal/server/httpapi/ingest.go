@@ -3,12 +3,10 @@ package httpapi
 import (
 	"errors"
 	"io"
-	"log"
 	"net/http"
 	"strconv"
 	"strings"
 
-	"github.com/jssblck/akari/internal/server/parse"
 	"github.com/jssblck/akari/internal/server/store"
 )
 
@@ -110,7 +108,7 @@ func (s *Server) handleAnnounce(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleChunk(w http.ResponseWriter, r *http.Request) {
-	sessionID, agent, ok := s.ownedSession(w, r)
+	sessionID, _, ok := s.ownedSession(w, r)
 	if !ok {
 		return
 	}
@@ -146,17 +144,14 @@ func (s *Server) handleChunk(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "append chunk")
 		return
 	}
-	// Parse the newly appended bytes into the projection. The raw bytes are
-	// already committed, so a parse failure (including a parser-version change
-	// awaiting a reparse) does not fail the upload: it is logged and the cursor is
-	// left for the next chunk or a reparse to advance.
-	msgCount, perr := parse.Advance(r.Context(), s.Store, sessionID, agent)
-	if perr != nil {
-		log.Printf("parse session %d (%s): %v", sessionID, agent, perr)
-	}
-	// Wake any browsers watching this session so they re-fetch the body.
-	s.hub.publish(sessionID)
-	writeJSON(w, http.StatusOK, map[string]any{"stored_bytes": stored, "message_count": msgCount})
+	// The raw bytes are committed; parsing is the worker's job. The append itself
+	// marked the session due (byte_len moved past the last rebuilt length), so the
+	// wake buys latency, not correctness, and client ingest health never depends
+	// on parser correctness. The SSE publish to watching browsers happens when the
+	// rebuild commits (the worker's rebuilt hook), when there is actually a new
+	// projection to fetch.
+	s.worker.Wake()
+	writeJSON(w, http.StatusOK, map[string]any{"stored_bytes": stored})
 }
 
 // handleFinalize grades a terminal session immediately, rather than leaving it for

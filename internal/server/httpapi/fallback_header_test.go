@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/jssblck/akari/internal/config"
-	"github.com/jssblck/akari/internal/server/reparse"
+	"github.com/jssblck/akari/internal/server/parse"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/storetest"
 )
@@ -19,7 +19,7 @@ func TestSessionHeaderStatsLoadsFallbacks(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
 	ctx := context.Background()
-	srv := New(st, config.Server{}, reparse.New(ctx, st))
+	srv := New(st, config.Server{}, parse.NewWorker(st, 1, 0))
 
 	u, err := st.Register(ctx, "grace", "hash", "")
 	if err != nil {

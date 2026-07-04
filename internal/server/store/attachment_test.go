@@ -12,9 +12,9 @@ import (
 // TestAttachmentProjectionWriteReadSweep exercises the inline attachment path end to
 // end against the store: two inline attachments are written to the CAS and keyed by
 // their content, both rows read back through Attachments with their media and size, a
-// replayed region is idempotent, and the sweep keeps an attachment-only blob alive until
-// the session is reset. The client-lifted reference path and the reparse pin are covered
-// by TestAttachmentReferencePathAndReparsePin.
+// repeated rebuild from the same delta is idempotent, and the sweep keeps an
+// attachment-only blob alive until the session is reset. The client-lifted reference
+// path and the rebuild pin are covered by TestAttachmentReferencePathAndRebuildPin.
 func TestAttachmentProjectionWriteReadSweep(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -38,29 +38,26 @@ func TestAttachmentProjectionWriteReadSweep(t *testing.T) {
 
 	sid := seedSession(t, st, u.ID, projectID, "sess-1")
 
-	// The pasted image, inline on the user turn.
-	pastedDelta := store.ProjectionDelta{
-		Messages: []store.MessageDelta{{Ordinal: 0, Role: "user", Content: "trace this"}},
-		Attachments: []store.AttachmentDelta{{
-			MessageOrdinal: 0, Body: string(pasted), Bytes: int64(len(pasted)),
-			MediaType: "image/jpeg", Filename: "pasted.jpg",
-		}},
+	// The pasted image, inline on the user turn, and the generated image, inline
+	// (server writes it) on the assistant turn: both messages belong to the same
+	// whole-session delta a rebuild folds together.
+	delta := store.ProjectionDelta{
+		Messages: []store.MessageDelta{
+			{Ordinal: 0, Role: "user", Content: "trace this"},
+			{Ordinal: 1, Role: "assistant", Content: "here you go", HasToolUse: true},
+		},
+		Attachments: []store.AttachmentDelta{
+			{
+				MessageOrdinal: 0, Body: string(pasted), Bytes: int64(len(pasted)),
+				MediaType: "image/jpeg", Filename: "pasted.jpg",
+			},
+			{
+				MessageOrdinal: 1, Body: string(generated), Bytes: int64(len(generated)),
+				MediaType: "image/png", Filename: "kitten.png",
+			},
+		},
 	}
-	if err := st.ApplyProjectionDelta(ctx, sid, pastedDelta); err != nil {
-		t.Fatalf("apply pasted attachment: %v", err)
-	}
-
-	// The generated image, both inline (server writes it) on the assistant turn.
-	genDelta := store.ProjectionDelta{
-		Messages: []store.MessageDelta{{Ordinal: 1, Role: "assistant", Content: "here you go", HasToolUse: true}},
-		Attachments: []store.AttachmentDelta{{
-			MessageOrdinal: 1, Body: string(generated), Bytes: int64(len(generated)),
-			MediaType: "image/png", Filename: "kitten.png",
-		}},
-	}
-	if err := st.ApplyProjectionDelta(ctx, sid, genDelta); err != nil {
-		t.Fatalf("apply generated attachment: %v", err)
-	}
+	rebuildWith(t, st, sid, delta)
 
 	// Both blobs exist and read back byte-for-byte under their image media types.
 	for _, c := range []struct {
@@ -112,21 +109,25 @@ func TestAttachmentProjectionWriteReadSweep(t *testing.T) {
 		t.Fatalf("sweep with live attachments removed=%d err=%v, want 0", removed, err)
 	}
 
-	// Re-applying the same generated delta is idempotent: the unique key
-	// (session, ordinal, sha256) makes a replayed region a no-op.
-	if err := st.ApplyProjectionDelta(ctx, sid, genDelta); err != nil {
-		t.Fatalf("re-apply generated attachment: %v", err)
-	}
+	// Rebuilding again from the same delta is idempotent: a rebuild replaces the
+	// whole projection, so re-running it lands the identical two rows rather than
+	// duplicating or losing either attachment.
+	rebuildWith(t, st, sid, delta)
 	atts, err = st.Attachments(ctx, sid)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(atts) != 2 {
-		t.Fatalf("after replay, read %d attachments, want 2 (idempotent)", len(atts))
+		t.Fatalf("after re-rebuild, read %d attachments, want 2 (idempotent)", len(atts))
 	}
 
-	// Resetting the session orphans both attachment blobs; the sweep reclaims them.
+	// Resetting the session orphans both attachment blobs; the sweep reclaims them
+	// once the rebuild pins lapse (each rebuild pins the prior projection's blobs
+	// for the pin TTL, so expire the pins rather than waiting an hour).
 	if err := st.ResetRaw(ctx, sid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, "UPDATE blob_pins SET expires_at = now() - interval '1 hour'"); err != nil {
 		t.Fatal(err)
 	}
 	removed, err := st.SweepBlobs(ctx)
@@ -138,13 +139,14 @@ func TestAttachmentProjectionWriteReadSweep(t *testing.T) {
 	}
 }
 
-// TestAttachmentReferencePathAndReparsePin covers the client-lifted attachment path and
-// the reparse pin. A blob the client already uploaded is referenced by a sentinel
+// TestAttachmentReferencePathAndRebuildPin covers the client-lifted attachment path and
+// the rebuild pin. A blob the client already uploaded is referenced by a sentinel
 // (SHA256 set, no inline body), so the projection records the reference rather than
-// writing bytes. The reparse reset then clears the attachment row but pins the blob
-// first, so a sweep racing in the window between the clear and the rebuild keeps it
-// instead of reclaiming a live image.
-func TestAttachmentReferencePathAndReparsePin(t *testing.T) {
+// writing bytes. A later rebuild whose delta drops the attachment (say the client
+// removed it from the transcript) pins every blob the OLD projection referenced before
+// deleting its rows, so a sweep racing between the pin and the new rows landing keeps
+// the blob alive instead of reclaiming a still-recent image.
+func TestAttachmentReferencePathAndRebuildPin(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
 	ctx := context.Background()
@@ -185,9 +187,7 @@ func TestAttachmentReferencePathAndReparsePin(t *testing.T) {
 			MediaType: "image/jpeg", Filename: "pasted.jpg",
 		}},
 	}
-	if err := st.ApplyProjectionDelta(ctx, sid, refDelta); err != nil {
-		t.Fatalf("apply referenced attachment: %v", err)
-	}
+	rebuildWith(t, st, sid, refDelta)
 
 	// The reference reads back with the pre-stored blob's sha and the delta's metadata.
 	atts, err := st.Attachments(ctx, sid)
@@ -207,24 +207,25 @@ func TestAttachmentReferencePathAndReparsePin(t *testing.T) {
 		t.Fatalf("sweep with a referenced attachment removed=%d err=%v, want 0", removed, err)
 	}
 
-	// Reparse clears the attachment row but pins the blob first. After it commits, the
-	// row is gone (so the blob is unreferenced), yet a sweep in the gap before the rebuild
-	// must keep it: the reparse pin protects it. Without the pin this sweep would reclaim
-	// the live image and the rebuild's reference would then fail.
-	if err := st.ResetProjectionForReparse(ctx, sid, 3); err != nil {
-		t.Fatalf("reset for reparse: %v", err)
-	}
+	// A later rebuild's delta drops the attachment (the transcript no longer
+	// references it). rebuildTx pins every blob the OLD projection referenced
+	// before it deletes those rows, so even though the new projection carries no
+	// reference to the image, the pin (not yet expired) keeps a concurrent sweep
+	// from reclaiming it.
+	rebuildWith(t, st, sid, store.ProjectionDelta{
+		Messages: []store.MessageDelta{{Ordinal: 0, Role: "user", Content: "trace this"}},
+	})
 	atts, err = st.Attachments(ctx, sid)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(atts) != 0 {
-		t.Fatalf("reparse left %d attachment rows, want 0", len(atts))
+		t.Fatalf("rebuild left %d attachment rows, want 0", len(atts))
 	}
 	if removed, err := st.SweepBlobs(ctx); err != nil || removed != 0 {
-		t.Fatalf("sweep in the reparse gap removed=%d err=%v, want 0 (blob is pinned)", removed, err)
+		t.Fatalf("sweep right after the rebuild removed=%d err=%v, want 0 (blob is pinned)", removed, err)
 	}
 	if _, err := st.BlobMeta(ctx, pastedSHA); err != nil {
-		t.Fatalf("reparse-pinned blob should survive the sweep: %v", err)
+		t.Fatalf("rebuild-pinned blob should survive the sweep: %v", err)
 	}
 }

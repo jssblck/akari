@@ -100,26 +100,24 @@ func (s *Store) qualityDistributionFrom(ctx context.Context, q querier, f Analyt
 
 // scopedSignalCounts groups the scoped sessions by one signals column (grade or outcome)
 // and returns the per-key counts plus the total. It scopes over sessions and LEFT JOINs
-// the current-version signals row, so a session whose row is missing or stale folds into
-// the missing bucket rather than dropping out: that keeps the count equal to the scoped
+// the usable signals row, so a session whose row is missing or stale folds into the
+// missing bucket rather than dropping out: that keeps the count equal to the scoped
 // session total and reconciles the grade and outcome splits with the archetype split. The
-// join also requires the row to be usable (NOT s.signals_stale), so a session that gained an
-// appended region after its last grade, or was graded while still live, reads as unscored/unknown
-// until the settle pass re-grades it, rather than counting a grade for an earlier or not-yet-
-// settled state; that is the read-side mirror of the signals_stale flag the settle pass drains
-// on. The flag rather than a refreshed_at >= updated_at comparison is deliberate: updated_at also
-// moves on metadata-only writes that leave the grade valid, and the flag is set at exactly the
-// projection-change sites, so it is the precise staleness signal. col and missing are internal
-// constants (the column name and the bucket a session with no usable row reads as, "" for grade
-// or "unknown" for outcome), never caller input, so interpolating them is safe.
+// join requires the row to be usable (NOT s.signals_stale), so a session that gained an
+// appended region after its last grade, or was graded while still live, reads as
+// unscored/unknown until it is re-graded, rather than counting a grade for an earlier or
+// not-yet-settled state. The flag rather than a refreshed_at >= updated_at comparison is
+// deliberate: updated_at also moves on metadata-only writes that leave the grade valid.
+// col and missing are internal constants (the column name and the bucket a session with no
+// usable row reads as, "" for grade or "unknown" for outcome), never caller input, so
+// interpolating them is safe.
 func (s *Store) scopedSignalCounts(ctx context.Context, q querier, f AnalyticsFilter, col, missing string) (map[string]int, int, error) {
 	filter, args := f.clauseFor("s.started_at")
-	args = append(args, quality.Version)
 	rows, err := q.Query(ctx, fmt.Sprintf(
 		`SELECT coalesce(sig.%s, '%s'), count(*)
 		   FROM sessions s
 		   LEFT JOIN session_signals sig
-		     ON sig.session_id = s.id AND `+signalsCurrent(len(args))+`
+		     ON sig.session_id = s.id AND `+signalsCurrent()+`
 		  WHERE TRUE`+filter+`
 		  GROUP BY 1`, col, missing), args...)
 	if err != nil {
@@ -195,10 +193,10 @@ type UserQualityStats struct {
 // author with an 'unknown' outcome and no score rather than dropping out. Every figure derives
 // from that one gated join with FILTER aggregates, so the row is one scan per author.
 //
-// The gate is the shared idiom (sig.signals_version = quality.Version AND NOT s.signals_stale):
-// a missing, superseded, or stale row reads as ungraded, so Graded and AvgScore speak only for
-// the sessions a current grade actually covers, matching the distribution buckets and the
-// session-list drill-down. Unknown is Sessions minus the three known outcomes, computed in Go so
+// The gate is the shared idiom (NOT s.signals_stale): a missing or stale row reads as
+// ungraded, so Graded and AvgScore speak only for the sessions a current grade actually
+// covers, matching the distribution buckets and the session-list drill-down. Unknown is
+// Sessions minus the three known outcomes, computed in Go so
 // the four counts partition Sessions exactly (a coalesced 'unknown' from the join and the residue
 // are the same set). AvgScore rounds to one decimal and is left nil when the author has no scored
 // session in scope, the "unmeasured" default a zero would misread as a real average.
@@ -213,8 +211,6 @@ func (s *Store) userQualityFrom(ctx context.Context, q querier, f AnalyticsFilte
 	var out UserQualityStats
 
 	filter, args := f.clauseFor("s.started_at")
-	versionArg := len(args) + 1
-	args = append(args, quality.Version)
 	limitArg := len(args) + 1
 	args = append(args, maxUserQualityRows)
 	rows, err := q.Query(ctx, fmt.Sprintf(
@@ -229,7 +225,7 @@ func (s *Store) userQualityFrom(ctx context.Context, q querier, f AnalyticsFilte
 		     FROM sessions s
 		     JOIN users u ON u.id = s.user_id
 		     LEFT JOIN session_signals sig
-		       ON sig.session_id = s.id AND `+signalsCurrent(versionArg)+`
+		       ON sig.session_id = s.id AND `+signalsCurrent()+`
 		    WHERE TRUE`+filter+`
 		    GROUP BY u.username
 		 )
@@ -265,7 +261,7 @@ func (s *Store) userQualityFrom(ctx context.Context, q querier, f AnalyticsFilte
 }
 
 // AvgQualityScore is the mean quality score across the scoped sessions that carry a
-// gated (current-version, non-stale) grade, or nil when none is scored. It shares the
+// gated (non-stale) grade, or nil when none is scored. It shares the
 // analytics filter (clauseFor on s.started_at, so a windowed scope counts sessions that
 // started in the window) and the same signals gate the quality distribution uses, so it
 // speaks for exactly the graded cohort the Insights Grades panel counts rather than a
@@ -284,7 +280,6 @@ func (s *Store) AvgQualityScore(ctx context.Context, f AnalyticsFilter) (*float6
 // that could straddle a reparse. It returns nil, not zero, when no scored session is in scope.
 func (s *Store) avgQualityScoreFrom(ctx context.Context, q querier, f AnalyticsFilter) (*float64, error) {
 	filter, args := f.clauseFor("s.started_at")
-	args = append(args, quality.Version)
 	var avg *float64
 	// Scope the average to the exact graded cohort the Insights Grades panel counts: the panel
 	// (scopedSignalCounts on grade) defines graded as grade IS NOT NULL, so this matches it with
@@ -298,7 +293,7 @@ func (s *Store) avgQualityScoreFrom(ctx context.Context, q querier, f AnalyticsF
 		`SELECT avg(sig.score)::float8
 		   FROM sessions s
 		   JOIN session_signals sig
-		     ON sig.session_id = s.id AND `+signalsCurrent(len(args))+`
+		     ON sig.session_id = s.id AND `+signalsCurrent()+`
 		  WHERE sig.grade IS NOT NULL`+filter, args...).Scan(&avg)
 	if err != nil {
 		return nil, fmt.Errorf("avg quality score: %w", err)
