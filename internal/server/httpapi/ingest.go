@@ -163,8 +163,12 @@ func (s *Server) handleChunk(w http.ResponseWriter, r *http.Request) {
 //
 // It is idempotent and safe to call on any owned session: a session that is not
 // terminal simply grades under the ordinary rules (unknown until it settles), and a
-// re-call recomputes the same row. The grade is derived from the projection already
-// committed by the preceding chunks, so no request body is read.
+// re-call recomputes the same row. No request body is read. When the last chunk's
+// rebuild has not landed yet (finalize races the parse worker), the refresh skips
+// rather than grading a projection that does not cover the bytes (see
+// store.RefreshSessionSignals); the pending rebuild then grades the terminal session
+// itself, in the same transaction that parses it, so the grade still lands without a
+// settle tick and without the client staying alive.
 func (s *Server) handleFinalize(w http.ResponseWriter, r *http.Request) {
 	sessionID, _, ok := s.ownedSession(w, r)
 	if !ok {

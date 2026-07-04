@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/jssblck/akari/internal/config"
+	"github.com/jssblck/akari/internal/server/parse"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/migrations"
 )
@@ -32,6 +33,10 @@ func runSettle(args []string) error {
 	if err := st.Migrate(migrateCtx, migrations.FS); err != nil {
 		return err
 	}
+	// The grading guard keys on the running epoch (RefreshSessionSignals skips
+	// projections another epoch owns); without this an old settle binary would
+	// run unguarded and could clobber a newer binary's work.
+	st.SetParserEpoch(parse.Epoch)
 
 	refreshed, err := st.RefreshSettledSignals(ctx)
 	if err != nil {

@@ -43,6 +43,9 @@ func runReparse(args []string) error {
 	if err := st.Migrate(migrateCtx, migrations.FS); err != nil {
 		return err
 	}
+	// Every store that grades signals carries the running epoch, so the grading
+	// guard (RefreshSessionSignals) holds on this path the same as on the server.
+	st.SetParserEpoch(parse.Epoch)
 
 	marked, err := st.MarkEpochStale(ctx, *agent)
 	if err != nil {
@@ -50,12 +53,19 @@ func runReparse(args []string) error {
 	}
 	fmt.Printf("marked %d session(s) due\n", marked)
 
-	res := parse.NewWorker(st, cfg.ParseWorkers, 0).Drain(ctx)
+	res, drainErr := parse.NewWorker(st, cfg.ParseWorkers, 0).Drain(ctx)
 	swept, err := st.SweepBlobs(ctx)
 	if err != nil {
 		return err
 	}
 	fmt.Printf("reparsed %d session(s), %d failed; swept %d orphaned blob(s)\n",
 		res.Done-res.Failed, res.Failed, swept)
+	// An operational drain error means sessions are still due (a rolled-back
+	// rebuild, a scan failure), so the reparse did NOT complete; exit nonzero
+	// rather than telling the operator it did. Deterministic parser failures are
+	// complete work (recorded per session, printed above) and do not fail the run.
+	if drainErr != nil {
+		return fmt.Errorf("reparse incomplete: %w", drainErr)
+	}
 	return nil
 }

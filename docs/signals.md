@@ -21,6 +21,18 @@ docs/DESIGN.md):
   (`akari sync --finalize`, which also triggers the grade inline so an ephemeral
   host does not wait for the tick).
 
+Both standalone grading paths (the tick and the finalize request) grade only a
+session whose parse state is settled at the running epoch: the raw bytes are
+covered by the last rebuild (or by a deterministic failure pinned at the running
+epoch, whose surviving projection is what gets graded), and neither the stamp
+nor a recorded failure sits ahead of the running epoch. Anything else skips,
+leaving `signals_stale` set: a pending rebuild grades the session itself when it
+commits, and a state stamped ahead belongs to a newer binary during a rolling
+deploy, whose own tick grades it. Without the skip, a finalize racing the parse
+worker could grade a projection that does not cover the bytes, and an older
+binary could overwrite a newer binary's work with old scoring and clear the one
+flag that would trigger a redo.
+
 `sessions.signals_stale` tracks the second case: a rebuild of a still-live
 session sets it and drops the now-stale signals row; grading clears it. Signals
 sit outside the rollup/ledger invariant (docs/data-aggregation.md): a new signal

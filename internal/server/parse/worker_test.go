@@ -57,7 +57,10 @@ func TestWorkerDrainRebuildsDueSessions(t *testing.T) {
 		mu.Unlock()
 	})
 
-	status := w.Drain(ctx)
+	status, err := w.Drain(ctx)
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
 	if status.InProgress || status.Total != 2 || status.Done != 2 || status.Failed != 0 {
 		t.Fatalf("drain status = %+v, want a completed 2/2 fleet rebuild", status)
 	}
@@ -92,8 +95,8 @@ func TestWorkerTriggerRedrains(t *testing.T) {
 	}
 
 	w := NewWorker(st, 1, 0)
-	if status := w.Drain(ctx); status.Done != 1 {
-		t.Fatalf("initial drain = %+v, want 1 done", status)
+	if status, err := w.Drain(ctx); err != nil || status.Done != 1 {
+		t.Fatalf("initial drain = %+v (err %v), want 1 done", status, err)
 	}
 
 	marked, err := w.Trigger(ctx, "")
@@ -107,8 +110,8 @@ func TestWorkerTriggerRedrains(t *testing.T) {
 	if fs := w.FleetStatus(ctx); !fs.InProgress {
 		t.Fatal("FleetStatus after Trigger should report in progress (the corpus is epoch-stale)")
 	}
-	if status := w.Drain(ctx); status.Done != 1 || status.Failed != 0 || status.InProgress {
-		t.Fatalf("post-trigger drain = %+v, want a completed 1/1 pass", status)
+	if status, err := w.Drain(ctx); err != nil || status.Done != 1 || status.Failed != 0 || status.InProgress {
+		t.Fatalf("post-trigger drain = %+v (err %v), want a completed 1/1 pass", status, err)
 	}
 	if fs := w.FleetStatus(ctx); fs.InProgress {
 		t.Fatalf("FleetStatus after redrain = %+v, want not in progress", fs)
@@ -148,9 +151,50 @@ func TestWorkerDrainGrowsTotalForMidDrainArrivals(t *testing.T) {
 		}
 	})
 
-	status := w.Drain(ctx)
+	status, err := w.Drain(ctx)
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
 	if status.Total != 2 || status.Done != 2 || status.Failed != 0 || status.InProgress {
 		t.Fatalf("drain status = %+v, want the mid-drain arrival absorbed as a completed 2/2", status)
+	}
+}
+
+// TestWorkerDrainReportsOperationalFailure pins the foreground contract the
+// reparse CLI relies on: an operational rebuild failure (here a tool input
+// lifted to the CAS whose blob was never uploaded, so the rebuild rolls back
+// mid-transaction) surfaces as Drain's error rather than an exit-zero "done",
+// and the session stays due so a later drain can complete it. A deterministic
+// parser failure would instead be recorded and counted in Status.Failed; this
+// one must not be, since nothing was recorded and the work is not done.
+func TestWorkerDrainReportsOperationalFailure(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	sid := seedSession(t, st, "worker-op-fail")
+	missingBlob := `{"type":"assistant","timestamp":"2024-01-01T10:00:05Z","message":{"id":"msg_op","model":"claude-sonnet-4-20250514","content":[{"type":"tool_use","id":"toolu_op","name":"Read","input":{"__akari_cas__":1,"sha256":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef","bytes":12,"media_type":"application/json"}}]}}` + "\n"
+	if _, err := st.AppendChunk(ctx, sid, 0, []byte(claudeLines[0]+missingBlob)); err != nil {
+		t.Fatal(err)
+	}
+
+	status, err := NewWorker(st, 1, 0).Drain(ctx)
+	if err == nil {
+		t.Fatal("Drain swallowed an operational rebuild failure; the reparse CLI would report success")
+	}
+	if status.Failed != 0 {
+		t.Fatalf("status.Failed = %d, want 0 (an operational failure is not a recorded parser failure)", status.Failed)
+	}
+	due, derr := st.DueSessions(ctx, Epoch, 0, 10)
+	if derr != nil {
+		t.Fatal(derr)
+	}
+	stillDue := false
+	for _, d := range due {
+		stillDue = stillDue || d.ID == sid
+	}
+	if !stillDue {
+		t.Fatal("operationally-failed session left the due set; the retry path is gone")
 	}
 }
 

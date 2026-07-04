@@ -541,13 +541,24 @@ func refreshSignalsTx(ctx context.Context, tx pgx.Tx, sessionID int64) error {
 // calls refreshSignalsTx inside its existing transaction instead, so the signals commit
 // with the projection rather than in a second round trip.
 //
-// It grades only projections at or behind the running parser epoch. During a rolling
-// deploy a newer binary can rebuild a live session at epoch N+1 and leave signals_stale
-// set for the settle tick; if the OLD binary's tick then graded that newer projection, it
-// would write signals under the older scoring code and clear the flag, and nothing would
-// remain to mark the grade for redoing (the projection is current to the newer binary, so
-// it is not due). Skipping leaves signals_stale set, and the newer instance's tick grades
-// it. The rebuild path needs no such check: it grades the projection it just stamped, at
+// It grades only a session whose parse state is settled at the running epoch: the
+// attempted epoch (see attemptedEpoch) equals it, and the raw bytes are either fully
+// parsed or covered by the recorded deterministic failure. Anything else is skipped,
+// leaving signals_stale set, because a grade written now would be cleared as current
+// while it is not:
+//
+//   - Attempted epoch ahead (a newer binary's rebuild OR its recorded failure, seen
+//     during a rolling deploy): this binary's scoring code does not match, and grading
+//     would clear the flag with nothing left to make the newer binary redo it.
+//   - Attempted epoch behind, or bytes neither parsed nor pinned (a rebuild is due,
+//     e.g. a finalize racing the parse worker right after the last chunk landed): the
+//     pending rebuild supersedes anything graded from the current projection, so
+//     grading now could stamp signals from a projection that does not cover the bytes.
+//   - Pinned failure at the running epoch: gradeable. The drain will never advance the
+//     session, so the settle pass grades the surviving projection under the current
+//     scoring, which is the failure model's contract.
+//
+// The rebuild path needs no such check: it grades the projection it just stamped, at
 // its own epoch, inside the same transaction. An unset epoch (0, a store wired without
 // SetParserEpoch, as in tests) skips nothing, matching the other epoch gates.
 func (s *Store) RefreshSessionSignals(ctx context.Context, sessionID int64) error {
@@ -556,15 +567,20 @@ func (s *Store) RefreshSessionSignals(ctx context.Context, sessionID int64) erro
 			return err
 		}
 		if s.parserEpoch != 0 {
-			var ahead bool
-			if err := tx.QueryRow(ctx,
-				`SELECT EXISTS (
-				   SELECT 1 FROM session_raw
-				    WHERE session_id = $1 AND parser_epoch > $2
-				 )`, sessionID, s.parserEpoch).Scan(&ahead); err != nil {
-				return fmt.Errorf("check projection epoch for session %d: %w", sessionID, err)
-			}
-			if ahead {
+			var gradeable bool
+			err := tx.QueryRow(ctx,
+				`SELECT `+attemptedEpoch("")+` = $2
+				        AND (parsed_byte_len = byte_len
+				             OR (parse_error <> '' AND parse_error_byte_len = byte_len))
+				   FROM session_raw
+				  WHERE session_id = $1`, sessionID, s.parserEpoch).Scan(&gradeable)
+			switch {
+			case errors.Is(err, pgx.ErrNoRows):
+				// No raw bytes were ever uploaded (a bare announce): no rebuild can be
+				// pending, so grade whatever projection exists.
+			case err != nil:
+				return fmt.Errorf("check parse state for session %d: %w", sessionID, err)
+			case !gradeable:
 				return nil
 			}
 		}

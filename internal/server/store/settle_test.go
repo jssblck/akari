@@ -2,7 +2,9 @@ package store_test
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/jssblck/akari/internal/quality"
 	"github.com/jssblck/akari/internal/server/store"
@@ -397,5 +399,101 @@ func TestRefreshSettledSignalsSkipsProjectionAheadOfEpoch(t *testing.T) {
 	}
 	if got := signalsRowCount(t, st, ctx, sid); got != 1 {
 		t.Errorf("newer-epoch settle pass signals row count = %d, want 1", got)
+	}
+}
+
+// TestRefreshSettledSignalsSkipsPendingRebuild pins the finalize race guard: raw
+// bytes past the last rebuild mean a rebuild is due, so a signal refresh (a
+// finalize request racing the parse worker, or a settle tick landing in the gap)
+// must skip rather than grade a projection that does not cover the bytes and
+// clear signals_stale as if it did. The pending rebuild then grades the settled
+// session itself, in the transaction that parses the bytes.
+func TestRefreshSettledSignalsSkipsPendingRebuild(t *testing.T) {
+	t.Parallel()
+	st, ctx, uid, pid := signalsEnv(t)
+	sid := seedSettledSession(t, st, ctx, uid, pid, "sess-pending", 120)
+	if _, err := st.AppendChunk(ctx, sid, 0, []byte("late chunk\n")); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	st.SetParserEpoch(testEpoch)
+
+	if _, err := st.RefreshSettledSignals(ctx); err != nil {
+		t.Fatalf("refresh with dirty bytes: %v", err)
+	}
+	if got := signalsRowCount(t, st, ctx, sid); got != 0 {
+		t.Errorf("refresh graded a projection with unparsed bytes pending (row count %d), want 0", got)
+	}
+	var stale bool
+	if err := st.Pool.QueryRow(ctx, "SELECT signals_stale FROM sessions WHERE id = $1", sid).Scan(&stale); err != nil {
+		t.Fatal(err)
+	}
+	if !stale {
+		t.Fatal("the skip must leave signals_stale set for the rebuild to settle")
+	}
+
+	// The due rebuild covers the bytes and, since the session is settled (the
+	// delta's Ended keeps the rederived ended_at past the idle window), grades
+	// it in the same transaction: no separate refresh needed.
+	rebuildWith(t, st, sid, store.ProjectionDelta{
+		Messages: []store.MessageDelta{{Ordinal: 0, Role: "user", Content: "late chunk"}},
+		Started:  time.Now().Add(-3 * time.Hour),
+		Ended:    time.Now().Add(-2 * time.Hour),
+	})
+	if got := signalsRowCount(t, st, ctx, sid); got != 1 {
+		t.Errorf("rebuild of the settled session did not grade it (row count %d), want 1", got)
+	}
+}
+
+// TestRefreshSettledSignalsHonorsFailurePins pins the two failure-marker cases of
+// the grading guard. A deterministic failure PINNED AT THE RUNNING EPOCH is
+// gradeable: the drain can never advance the session, so the settle pass grades
+// the surviving projection under the current scoring (the failure model's
+// contract; without this, the byte-dirty skip would strand every failed session
+// ungraded forever). A failure recorded AHEAD of the running epoch is the
+// opposite: it is a newer binary's attempt, and the older binary must leave the
+// grade alone the same way it leaves a newer successful stamp alone.
+func TestRefreshSettledSignalsHonorsFailurePins(t *testing.T) {
+	t.Parallel()
+	st, ctx, uid, pid := signalsEnv(t)
+	pinnedCurrent := seedSettledSession(t, st, ctx, uid, pid, "sess-pin-current", 120)
+	pinnedAhead := seedSettledSession(t, st, ctx, uid, pid, "sess-pin-ahead", 120)
+
+	// pinnedCurrent: new bytes arrive and the running parser rejects them, so the
+	// failure covers the current bytes at the running epoch.
+	if _, err := st.AppendChunk(ctx, pinnedCurrent, 0, []byte("bad bytes\n")); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	rerr := errors.New("malformed transcript")
+	if err := st.RebuildSession(ctx, pinnedCurrent, testEpoch, failingReducer{rerr}); !errors.Is(err, rerr) {
+		t.Fatalf("failing rebuild returned %v, want the reducer's error", err)
+	}
+	// pinnedAhead: a newer binary's failed attempt, recorded without advancing
+	// the success bookkeeping (byte_len is 0: no raw was uploaded, so the pin
+	// covers the current bytes trivially).
+	if _, err := st.Pool.Exec(ctx,
+		`UPDATE session_raw SET parse_error = 'newer parser rejected', parse_error_epoch = $2 WHERE session_id = $1`,
+		pinnedAhead, testEpoch+1); err != nil {
+		t.Fatalf("pin ahead: %v", err)
+	}
+	st.SetParserEpoch(testEpoch)
+
+	if _, err := st.RefreshSettledSignals(ctx); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if got := signalsRowCount(t, st, ctx, pinnedCurrent); got != 1 {
+		t.Errorf("failure pinned at the running epoch was not graded (row count %d), want 1: failed sessions must not be stranded ungraded", got)
+	}
+	if got := signalsRowCount(t, st, ctx, pinnedAhead); got != 0 {
+		t.Errorf("failure pinned ahead of the running epoch was graded (row count %d), want 0", got)
+	}
+
+	// The instance running the epoch that recorded the ahead pin grades the
+	// surviving projection normally.
+	st.SetParserEpoch(testEpoch + 1)
+	if _, err := st.RefreshSettledSignals(ctx); err != nil {
+		t.Fatalf("refresh at the newer epoch: %v", err)
+	}
+	if got := signalsRowCount(t, st, ctx, pinnedAhead); got != 1 {
+		t.Errorf("ahead pin at its own epoch was not graded (row count %d), want 1", got)
 	}
 }
