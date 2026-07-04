@@ -190,7 +190,7 @@ func TestWorkerDrainReportsOperationalFailure(t *testing.T) {
 	// path is intact: once the backoff elapses it is due again.
 	isDue := func() bool {
 		t.Helper()
-		due, err := st.DueSessions(ctx, Epoch, 0, 10)
+		due, err := st.DueSessions(ctx, Epoch, 10)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -212,6 +212,13 @@ func TestWorkerDrainReportsOperationalFailure(t *testing.T) {
 	}
 	if parsed == byteLen {
 		t.Fatal("operational failure advanced the parse cursor; the work would read as done")
+	}
+	// While the deferral is parked, another wake is a silent no-op: no ready
+	// work, no retry, no error. This is the point of the backoff: a persistent
+	// operational failure costs one attempt per backoff window, not one per
+	// chunk wake.
+	if _, err := NewWorker(st, 1, 0).Drain(ctx); err != nil {
+		t.Fatalf("drain during the backoff should be a no-op, got %v", err)
 	}
 	if _, err := st.Pool.Exec(ctx,
 		`UPDATE session_raw SET parse_retry_at = now() - interval '1 second' WHERE session_id = $1`, sid); err != nil {

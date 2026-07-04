@@ -40,46 +40,71 @@ func attemptedEpoch(tbl string) string {
 		       ELSE %[1]sparser_epoch END)`, tbl)
 }
 
-// DueSessions returns up to limit sessions due for a rebuild, strictly after
-// the afterID keyset cursor, in id order. A session is due when the last
-// successful rebuild did not cover its current bytes (parsed_byte_len <>
-// byte_len) or ran at an earlier epoch (attemptedEpoch behind the running
-// one). The epoch comparisons are deliberately monotonic (behind-only, never
-// <>): during a rolling deploy the old binary would otherwise see the new
-// binary's stamps as "different" and rebuild them with the old parser,
-// downgrading projections the fleet already advanced. Rows stamped ahead of
-// the running epoch are left alone entirely, even when byte-dirty; the
-// instance running the newer binary picks them up on its next wake or tick.
-// The epoch branch is one range over idx_session_raw_attempted_epoch and the
-// byte comparison is carried by the partial index on dirty rows (near-empty
-// in steady state), so the every-chunk wake never scans the corpus.
+// DueSessions returns up to limit sessions due for a rebuild, in no particular
+// order. A session is due when the last successful rebuild did not cover its
+// current bytes (parsed_byte_len <> byte_len) or ran at an earlier epoch
+// (attemptedEpoch behind the running one). The epoch comparisons are
+// deliberately monotonic (behind-only, never <>): during a rolling deploy the
+// old binary would otherwise see the new binary's stamps as "different" and
+// rebuild them with the old parser, downgrading projections the fleet already
+// advanced. Rows stamped ahead of the running epoch are left alone entirely,
+// even when byte-dirty; the instance running the newer binary picks them up
+// on its next wake or tick.
 //
-// A session whose last attempt failed deterministically is skipped while the
-// recorded failure covers its current bytes at the running epoch or above:
-// retrying identical input at the same epoch would fail identically, and an
-// attempt recorded ahead of the running epoch belongs to a newer binary. New
-// bytes or a bumped epoch retry it. An operational failure records nothing
-// about the parse, but the worker defers the session's next attempt
-// (RecordRebuildBackoff), and the scan honors that deferral so a backlog of
-// persistent operational failures is not re-attempted on every chunk wake. The
-// epoch-staleness gates deliberately do NOT honor it: a backing-off rebuild is
-// deferred, not cancelled, so the corpus is still mixed and the gate staying
-// up is the honest answer (the safe direction of asymmetry; the gates must
-// never read done while the scan still has work).
-func (s *Store) DueSessions(ctx context.Context, epoch int, afterID int64, limit int) ([]DueSession, error) {
+// There is no page cursor because none is needed: every session a drain
+// processes leaves this scan's result set before the next page is fetched. A
+// successful rebuild stamps it current, a deterministic parser failure pins it
+// (parse_error markers covering its bytes at the running epoch), and an
+// operational failure parks it on a retry backoff (RecordRebuildBackoff; the
+// worker treats a failure of THAT write as fatal to the drain, which is what
+// makes this guarantee hold). So "the next page" is simply the first limit
+// ready sessions again, and a drain loops until the page comes back empty.
+//
+// The query is a UNION of three arms rather than one OR so that each arm
+// terminates at its own LIMIT on its own partial index, whatever the planner's
+// current statistics say (a single OR-ed predicate under an outer LIMIT has
+// been observed to plan as a full index walk). Each arm reads an index that
+// already excludes what the drain must not visit, so rows parked on a future
+// retry cost nothing here however many the corpus accumulates:
+//
+//   - dirty_ready: byte-dirty, undeferred (the every-chunk wake's arm);
+//   - epoch_ready: attemptedEpoch behind the running epoch, undeferred (the
+//     fleet-rebuild arm; the expression folds the failed-parse pin in, so a
+//     session whose failure covers its current bytes at the running epoch or
+//     above is absent: retrying identical input would fail identically, and an
+//     attempt recorded ahead belongs to a newer binary);
+//   - retry_elapsed: one range over deferral times picks up exactly the parked
+//     retries whose backoff has elapsed. This arm needs no dirty-or-stale
+//     recheck because a deferral only exists on a session that was due when
+//     its rebuild failed, and everything that advances a session clears the
+//     deferral in the same statement.
+//
+// The epoch-staleness gates deliberately do NOT honor the deferral: a
+// backing-off rebuild is deferred, not cancelled, so the corpus is still mixed
+// and the gate staying up is the honest answer (the safe direction of
+// asymmetry; the gates must never read done while the scan still has work).
+func (s *Store) DueSessions(ctx context.Context, epoch int, limit int) ([]DueSession, error) {
+	arm := func(where string) string {
+		return `(SELECT sr.session_id, ` + attemptedEpoch("sr.") + ` < $1 AS epoch_stale
+		           FROM session_raw sr
+		          WHERE sr.parser_epoch <= $1
+		            AND (sr.parse_error = ''
+		                 OR sr.parse_error_byte_len <> sr.byte_len
+		                 OR sr.parse_error_epoch < $1)
+		            AND ` + where + `
+		          LIMIT $2)`
+	}
 	rows, err := s.Pool.Query(ctx,
-		`SELECT sr.session_id, s.agent, `+attemptedEpoch("sr.")+` < $1 AS epoch_stale
-		   FROM session_raw sr
-		   JOIN sessions s ON s.id = sr.session_id
-		  WHERE sr.session_id > $2
-		    AND sr.parser_epoch <= $1
-		    AND (sr.parsed_byte_len <> sr.byte_len OR `+attemptedEpoch("sr.")+` < $1)
-		    AND (sr.parse_error = ''
-		         OR sr.parse_error_byte_len <> sr.byte_len
-		         OR sr.parse_error_epoch < $1)
-		    AND (sr.parse_retry_at IS NULL OR sr.parse_retry_at <= now())
-		  ORDER BY sr.session_id
-		  LIMIT $3`, epoch, afterID, limit)
+		`SELECT u.session_id, s.agent, u.epoch_stale
+		   FROM (`+
+			arm(`sr.parse_retry_at IS NULL AND sr.parsed_byte_len <> sr.byte_len`)+
+			` UNION `+
+			arm(`sr.parse_retry_at IS NULL AND `+attemptedEpoch("sr.")+` < $1`)+
+			` UNION `+
+			arm(`sr.parse_retry_at <= now()`)+
+			`) u
+		   JOIN sessions s ON s.id = u.session_id
+		  LIMIT $2`, epoch, limit)
 	if err != nil {
 		return nil, fmt.Errorf("select due sessions: %w", err)
 	}
@@ -113,6 +138,28 @@ func (s *Store) EpochStaleCount(ctx context.Context, epoch int) (int, error) {
 		`SELECT count(*) FROM session_raw
 		  WHERE `+attemptedEpoch("")+` < $1`, epoch).Scan(&n); err != nil {
 		return 0, fmt.Errorf("count epoch-stale sessions: %w", err)
+	}
+	return n, nil
+}
+
+// EpochStaleReadyCount counts the epoch-stale sessions a drain can rebuild
+// RIGHT NOW: EpochStaleCount minus the rows parked on a future retry backoff.
+// It is the drain's opening count (fleet mode and the progress denominator),
+// which runs on every chunk wake: counting the honest total there would pay
+// O(deferred backlog) per append just to decide there is nothing to do, since
+// persistent operational failures stay epoch-stale for as long as they keep
+// failing. The two arms mirror the due scan's, so each lands on a ready index
+// (epoch_ready, retry_elapsed) and parked rows are never visited. The fleet
+// GATE keeps the honest total-side answer (EpochStaleExists over the full
+// index): a deferred rebuild still makes the corpus mixed; it is only not this
+// drain's workload.
+func (s *Store) EpochStaleReadyCount(ctx context.Context, epoch int) (int, error) {
+	var n int
+	if err := s.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM session_raw
+		  WHERE (parse_retry_at IS NULL AND `+attemptedEpoch("")+` < $1)
+		     OR (parse_retry_at <= now() AND `+attemptedEpoch("")+` < $1)`, epoch).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count ready epoch-stale sessions: %w", err)
 	}
 	return n, nil
 }

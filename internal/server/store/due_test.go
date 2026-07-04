@@ -104,12 +104,14 @@ func TestRebuildSessionIsAtomic(t *testing.T) {
 	}
 }
 
-// TestDueSessionsKeysetScan pins the worker's due scan: a fresh corpus is
-// entirely due (parser_epoch 0 sits behind every real epoch), the scan pages
-// by id with a strict keyset cursor, carries each session's agent, and a
-// rebuilt session drops out while new bytes or a later running epoch bring
-// it back.
-func TestDueSessionsKeysetScan(t *testing.T) {
+// TestDueSessionsDrainScan pins the worker's cursorless due scan: a fresh
+// corpus is entirely due (parser_epoch 0 sits behind every real epoch), and a
+// drain-shaped loop (fetch a page, rebuild what it returns, fetch again)
+// terminates having covered the whole corpus exactly once with the right
+// agents, because each rebuild removes the session from the ready set. A
+// rebuilt session drops out while new bytes or a later running epoch bring it
+// back.
+func TestDueSessionsDrainScan(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
 	ctx := context.Background()
@@ -135,14 +137,14 @@ func TestDueSessionsKeysetScan(t *testing.T) {
 	s2 := announce("codex", "due-2")
 	s3 := announce("claude", "due-3")
 
-	// Page through with limit 1: every page advances strictly, and the union is
-	// the whole corpus with the right agents.
+	// Drive the drain loop with limit 1: each page must return a session the
+	// loop has not processed (rebuilding removed it from the ready set), and
+	// the loop must end after exactly the three sessions.
 	agents := map[int64]string{}
-	var afterID int64
-	for {
-		page, err := st.DueSessions(ctx, testEpoch, afterID, 1)
+	for range 4 {
+		page, err := st.DueSessions(ctx, testEpoch, 1)
 		if err != nil {
-			t.Fatalf("due page after %d: %v", afterID, err)
+			t.Fatalf("due page: %v", err)
 		}
 		if len(page) == 0 {
 			break
@@ -150,51 +152,36 @@ func TestDueSessionsKeysetScan(t *testing.T) {
 		if len(page) != 1 {
 			t.Fatalf("limit 1 returned %d rows", len(page))
 		}
-		if page[0].ID <= afterID {
-			t.Fatalf("keyset did not advance: got id %d after cursor %d", page[0].ID, afterID)
+		if _, seen := agents[page[0].ID]; seen {
+			t.Fatalf("session %d returned twice; a processed session must leave the ready set", page[0].ID)
 		}
-		afterID = page[0].ID
 		agents[page[0].ID] = page[0].Agent
+		rebuildWith(t, st, page[0].ID, store.ProjectionDelta{})
 	}
 	want := map[int64]string{s1: "claude", s2: "codex", s3: "claude"}
 	if len(agents) != len(want) {
-		t.Fatalf("due scan found %d sessions, want %d: %v", len(agents), len(want), agents)
+		t.Fatalf("drain loop covered %d sessions, want %d: %v", len(agents), len(want), agents)
 	}
 	for id, agent := range want {
 		if agents[id] != agent {
 			t.Errorf("session %d agent = %q, want %q", id, agents[id], agent)
 		}
 	}
-
-	// Rebuilding takes a session out of the due set; the other two remain.
-	rebuildWith(t, st, s1, store.ProjectionDelta{})
-	due, err := st.DueSessions(ctx, testEpoch, 0, 100)
-	if err != nil {
-		t.Fatalf("due scan: %v", err)
-	}
-	ids := map[int64]bool{}
-	for _, d := range due {
-		ids[d.ID] = true
-	}
-	if ids[s1] || !ids[s2] || !ids[s3] {
-		t.Fatalf("after rebuilding s1, due = %v, want exactly s2 and s3", ids)
+	if page, err := st.DueSessions(ctx, testEpoch, 100); err != nil || len(page) != 0 {
+		t.Fatalf("drained corpus still returns due sessions: %v (err %v)", page, err)
 	}
 
-	// New bytes bring a rebuilt session back (byte-dirtiness), and a later
-	// running epoch makes even a byte-clean one due again.
+	// New bytes bring a rebuilt session back (byte-dirtiness), and only that
+	// session: the other two stay drained.
 	if _, err := st.AppendChunk(ctx, s1, 0, []byte("new line\n")); err != nil {
 		t.Fatalf("append: %v", err)
 	}
-	due, err = st.DueSessions(ctx, testEpoch, 0, 100)
+	due, err := st.DueSessions(ctx, testEpoch, 100)
 	if err != nil {
 		t.Fatalf("due scan: %v", err)
 	}
-	found := false
-	for _, d := range due {
-		found = found || d.ID == s1
-	}
-	if !found {
-		t.Fatal("byte-dirty session missing from the due set")
+	if len(due) != 1 || due[0].ID != s1 {
+		t.Fatalf("after appending to s1, due = %v, want exactly s1", due)
 	}
 }
 
@@ -251,7 +238,7 @@ func TestMarkEpochStaleAndCount(t *testing.T) {
 	if n, _ := st.EpochStaleCount(ctx, testEpoch); n != 2 {
 		t.Fatalf("stale count after agent mark = %d, want 2", n)
 	}
-	due, err := st.DueSessions(ctx, testEpoch, 0, 100)
+	due, err := st.DueSessions(ctx, testEpoch, 100)
 	if err != nil {
 		t.Fatalf("due scan: %v", err)
 	}
@@ -320,7 +307,7 @@ func TestEpochGatesAgreeWithDueScan(t *testing.T) {
 
 	check := func(epoch int, wantDue, wantStale bool, when string) {
 		t.Helper()
-		due, err := st.DueSessions(ctx, epoch, 0, 100)
+		due, err := st.DueSessions(ctx, epoch, 100)
 		if err != nil {
 			t.Fatalf("%s: due scan: %v", when, err)
 		}
@@ -424,7 +411,7 @@ func TestRebuildBackoffDefersDueRetry(t *testing.T) {
 
 	isDue := func() bool {
 		t.Helper()
-		due, err := st.DueSessions(ctx, testEpoch, 0, 100)
+		due, err := st.DueSessions(ctx, testEpoch, 100)
 		if err != nil {
 			t.Fatalf("due scan: %v", err)
 		}
@@ -457,9 +444,13 @@ func TestRebuildBackoffDefersDueRetry(t *testing.T) {
 	if got := backoffSecs(); got != 30 {
 		t.Fatalf("first backoff = %ds, want 30", got)
 	}
-	// The gates ignore the deferral: the rebuild is still pending work.
+	// The gates ignore the deferral (the rebuild is still pending work), while
+	// the drain's ready count excludes it (it is not this drain's workload).
 	if n, err := st.EpochStaleCount(ctx, testEpoch); err != nil || n != 1 {
 		t.Fatalf("EpochStaleCount with a backing-off session = %d (err %v), want 1 (deferred, not cancelled)", n, err)
+	}
+	if n, err := st.EpochStaleReadyCount(ctx, testEpoch); err != nil || n != 0 {
+		t.Fatalf("EpochStaleReadyCount with a backing-off session = %d (err %v), want 0 (parked until the deferral elapses)", n, err)
 	}
 	// Consecutive failures double toward the ceiling.
 	if err := st.RecordRebuildBackoff(ctx, sid); err != nil {
@@ -479,7 +470,23 @@ func TestRebuildBackoffDefersDueRetry(t *testing.T) {
 		t.Fatalf("clamped backoff = %ds, want the 3600 ceiling", got)
 	}
 
+	// An elapsed deferral is ready work again, via the retry arm of the scan
+	// and the ready count.
+	if _, err := st.Pool.Exec(ctx,
+		`UPDATE session_raw SET parse_retry_at = now() - interval '1 second' WHERE session_id = $1`, sid); err != nil {
+		t.Fatal(err)
+	}
+	if !isDue() {
+		t.Fatal("session with an elapsed backoff should be due again")
+	}
+	if n, err := st.EpochStaleReadyCount(ctx, testEpoch); err != nil || n != 1 {
+		t.Fatalf("EpochStaleReadyCount with an elapsed backoff = %d (err %v), want 1", n, err)
+	}
+
 	// New bytes clear the deferral: the situation changed, retry now.
+	if err := st.RecordRebuildBackoff(ctx, sid); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := st.AppendChunk(ctx, sid, int64(len(raw)), []byte("second line\n")); err != nil {
 		t.Fatalf("append: %v", err)
 	}

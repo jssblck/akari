@@ -554,9 +554,12 @@ nothing about the parse, but the worker defers the session's next attempt with
 a doubling backoff (30s to a 1h ceiling): the session must not fall out of the
 due set (the failure may clear on its own), yet a persistent one (a CAS blob
 the client never uploaded) must not be re-attempted on every chunk wake, since
-each wake drains the whole due set. New bytes, a reset, or an operator reparse
-clear the deferral for an immediate retry; the epoch gates ignore it (deferred
-is not done).
+each wake drains the whole due set. The deferral is indexed the same way the
+failure pin is: parked rows leave the ready-work indexes the due scan and the
+drain's opening count read (an elapsed retry comes back via one range scan on
+its ready time), so a parked backlog costs the hot paths nothing. New bytes, a
+reset, or an operator reparse clear the deferral for an immediate retry; the
+epoch gates ignore it (deferred is not done).
 
 **Scheduling.** The worker drains due sessions continuously, woken in-process
 by the chunk handler and backstopped by the periodic maintenance tick that also

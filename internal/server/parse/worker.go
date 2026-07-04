@@ -11,10 +11,11 @@ import (
 	"github.com/jssblck/akari/internal/server/store"
 )
 
-// duePageSize bounds one due-scan query and the run of rebuilds behind it. The
-// drain pages by session id, so peak memory is one page plus the sessions being
-// rebuilt, not the whole backlog. It is a var so tests can shrink it to
-// exercise the multi-page drain.
+// duePageSize bounds one due-scan query and the run of rebuilds behind it.
+// Each page is simply the first ready sessions (processing removes them from
+// the set, so no cursor is needed), and peak memory is one page plus the
+// sessions being rebuilt, not the whole backlog. It is a var so tests can
+// shrink it to exercise the multi-page drain.
 var duePageSize = 256
 
 // defaultFleetCacheTTL is how long a positive cross-instance "a fleet rebuild
@@ -198,49 +199,63 @@ func (w *Worker) Drain(ctx context.Context) (Status, error) {
 // A context cancellation is not an error: shutdown mid-drain is the designed
 // resume point.
 func (w *Worker) drain(ctx context.Context) error {
-	staleTotal, err := w.st.EpochStaleCount(ctx, Epoch)
+	// The opening count runs on every chunk wake, so it counts only the READY
+	// epoch-stale work (deferred operational failures excluded): a corpus with a
+	// parked failure backlog then pays nothing here per append, and it neither
+	// enters fleet mode nor logs on wakes that have no rebuildable backlog. The
+	// parsed-page gate stays honest independently (FleetStatus probes the full
+	// stale set, deferred rows included).
+	staleTotal, err := w.st.EpochStaleReadyCount(ctx, Epoch)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil
 		}
-		return fmt.Errorf("count epoch-stale sessions: %w", err)
+		return fmt.Errorf("count ready epoch-stale sessions: %w", err)
 	}
 	fleet := staleTotal > 0
 	if fleet {
 		w.beginFleet(staleTotal)
 		log.Printf("parse worker: fleet rebuild starting (%d session(s) behind epoch %d)", staleTotal, Epoch)
 	}
-	// The drain is one forward keyset pass: afterID only grows, so no session is
-	// visited twice within it, including sessions that fail operationally (still
-	// due, but behind the cursor; the next wake or tick retries them).
+	// The loop needs no cursor: every session a page processes leaves the ready
+	// set before the next page is fetched (stamped current, pinned by a
+	// deterministic failure, or parked on a retry backoff), so each iteration
+	// simply takes the first ready sessions again until the page comes back
+	// empty. rebuildBatch reports fatal when it cannot uphold that guarantee
+	// (the backoff write itself failed) and the drain stops rather than
+	// refetching the same session in a hot loop.
 	var done, failed, staleDone, opFailed int
-	var firstOpErr, scanErr error
-	var afterID int64
+	var firstOpErr, abortErr error
 	for ctx.Err() == nil {
-		page, err := w.st.DueSessions(ctx, Epoch, afterID, duePageSize)
+		page, err := w.st.DueSessions(ctx, Epoch, duePageSize)
 		if err != nil {
 			if ctx.Err() == nil {
-				scanErr = fmt.Errorf("due scan after id %d: %w", afterID, err)
+				abortErr = fmt.Errorf("due scan: %w", err)
 			}
 			break
 		}
 		if len(page) == 0 {
 			break
 		}
-		afterID = page[len(page)-1].ID
-		d, f, sd, op, opErr := w.rebuildBatch(ctx, page)
-		done += d
-		failed += f
-		staleDone += sd
-		opFailed += op
+		res := w.rebuildBatch(ctx, page)
+		done += res.done
+		failed += res.failed
+		staleDone += res.staleDone
+		opFailed += res.opFailed
 		if firstOpErr == nil {
-			firstOpErr = opErr
+			firstOpErr = res.firstOpErr
 		}
 		if fleet {
 			// Progress counts only the epoch-stale subset: a fleet drain also picks
 			// up byte-dirty live sessions, and counting those would run Done past
 			// the backlog total counted when the drain began.
 			w.advanceFleet(staleDone, failed)
+		}
+		if res.fatal != nil {
+			if ctx.Err() == nil {
+				abortErr = res.fatal
+			}
+			break
 		}
 	}
 	if fleet {
@@ -251,24 +266,35 @@ func (w *Worker) drain(ctx context.Context) error {
 			log.Printf("parse worker: fleet rebuild interrupted after %d rebuild(s); it resumes on next start", done)
 		}
 	}
-	if scanErr != nil {
-		return scanErr
+	if abortErr != nil {
+		return abortErr
 	}
 	if opFailed > 0 {
-		return fmt.Errorf("%d session(s) failed operationally and stay due (first: %w)", opFailed, firstOpErr)
+		return fmt.Errorf("%d session(s) failed operationally and are parked for retry (first: %w)", opFailed, firstOpErr)
 	}
 	return nil
 }
 
-// rebuildBatch rebuilds one page of due sessions across the worker pool,
-// returning how many completed, how many of those were deterministic parser
-// failures, how many were epoch-stale (the fleet progress numerator), and how
-// many failed operationally (rolled back, still due) along with the first such
-// error. Distinct sessions rebuild in parallel; the pool bounds concurrent
+// batchResult summarizes one page of rebuilds: how many completed, how many of
+// those were deterministic parser failures, how many were epoch-stale (the
+// fleet progress numerator), how many failed operationally (rolled back and
+// parked for retry) with the first such error, and fatal when the drain must
+// stop because a session could not be parked and would be refetched
+// immediately by the cursorless scan.
+type batchResult struct {
+	done, failed, staleDone int
+	opFailed                int
+	firstOpErr              error
+	fatal                   error
+}
+
+// rebuildBatch rebuilds one page of due sessions across the worker pool.
+// Distinct sessions rebuild in parallel; the pool bounds concurrent
 // transactions.
-func (w *Worker) rebuildBatch(ctx context.Context, batch []store.DueSession) (done, failed, staleDone, opFailed int, firstOpErr error) {
+func (w *Worker) rebuildBatch(ctx context.Context, batch []store.DueSession) batchResult {
+	var res batchResult
 	if len(batch) == 0 {
-		return 0, 0, 0, 0, nil
+		return res
 	}
 	sem := make(chan struct{}, w.concurrency)
 	rebuilt := w.rebuiltHook()
@@ -284,22 +310,21 @@ func (w *Worker) rebuildBatch(ctx context.Context, batch []store.DueSession) (do
 			defer wg.Done()
 			defer func() { <-sem }()
 			err := Rebuild(ctx, w.st, t.ID, t.Agent)
+			var parkErr error
 			if err != nil && ctx.Err() == nil && !isParserError(err) {
-				// Operational failure: defer the retry so a persistent one (a CAS
+				// Operational failure: park the retry so a persistent one (a CAS
 				// blob that never arrives) is not re-attempted on every chunk wake.
-				// Best-effort by design: if this write fails too, the session simply
-				// retries on the next wake, the pre-backoff behavior.
-				if berr := w.st.RecordRebuildBackoff(ctx, t.ID); berr != nil {
-					log.Printf("parse worker: session %d (%s): %v", t.ID, t.Agent, berr)
-				}
+				// The park is also what lets the due scan run without a cursor, so
+				// its failure is fatal to the drain (handled below), not ignored.
+				parkErr = w.st.RecordRebuildBackoff(ctx, t.ID)
 			}
 			mu.Lock()
 			defer mu.Unlock()
 			switch {
 			case err == nil:
-				done++
+				res.done++
 				if t.EpochStale {
-					staleDone++
+					res.staleDone++
 				}
 				if rebuilt != nil {
 					rebuilt(t.ID)
@@ -311,26 +336,29 @@ func (w *Worker) rebuildBatch(ctx context.Context, batch []store.DueSession) (do
 				// Deterministic parser failure: the store recorded the attempt on the
 				// failure markers, so the session has left the due set until its bytes
 				// or the epoch move. The prior projection survives.
-				done++
-				failed++
+				res.done++
+				res.failed++
 				if t.EpochStale {
-					staleDone++
+					res.staleDone++
 				}
 				log.Printf("parse worker: session %d (%s): %v", t.ID, t.Agent, err)
 			default:
-				// Operational error: the rebuild rolled back and the session stays due.
-				// The drain's keyset cursor is already past it, so it is not retried in
-				// a hot loop; the next wake or tick retries it.
-				opFailed++
-				if firstOpErr == nil {
-					firstOpErr = fmt.Errorf("session %d (%s): %w", t.ID, t.Agent, err)
+				// Operational error: the rebuild rolled back; the backoff above parked
+				// the session, and its retry rides the next drain after the deferral.
+				res.opFailed++
+				if res.firstOpErr == nil {
+					res.firstOpErr = fmt.Errorf("session %d (%s): %w", t.ID, t.Agent, err)
 				}
 				log.Printf("parse worker: session %d (%s): %v", t.ID, t.Agent, err)
+				if parkErr != nil && res.fatal == nil {
+					res.fatal = fmt.Errorf("park session %d (%s) after an operational failure: %w", t.ID, t.Agent, parkErr)
+					log.Printf("parse worker: %v; stopping this drain", res.fatal)
+				}
 			}
 		}(t)
 	}
 	wg.Wait()
-	return done, failed, staleDone, opFailed, firstOpErr
+	return res
 }
 
 func isParserError(err error) bool {
@@ -428,7 +456,7 @@ func (w *Worker) beginFleet(total int) {
 // advanceFleet publishes fleet progress from completion counts alone: done is
 // how many epoch-stale rebuilds this drain has finished against the backlog
 // total counted once when it began. Sessions announced mid-drain start at
-// parser_epoch 0 with higher ids, so the same keyset pass reaches them; their
+// parser_epoch 0, so a later page of the same drain picks them up; their
 // completions can push done past the opening total, and Total grows to cover
 // them. Counting completions instead of re-counting the backlog per page keeps
 // a fleet drain's progress bookkeeping O(pages) rather than re-scanning the

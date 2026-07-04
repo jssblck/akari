@@ -486,7 +486,7 @@ func TestRebuildSessionCursorAndReplace(t *testing.T) {
 
 	isDue := func(epoch int) bool {
 		t.Helper()
-		due, err := st.DueSessions(ctx, epoch, 0, 100)
+		due, err := st.DueSessions(ctx, epoch, 100)
 		if err != nil {
 			t.Fatalf("due scan: %v", err)
 		}
@@ -665,7 +665,7 @@ func TestRebuildSessionParserErrorStamps(t *testing.T) {
 	}
 	isDue := func(epoch int) bool {
 		t.Helper()
-		due, err := st.DueSessions(ctx, epoch, 0, 100)
+		due, err := st.DueSessions(ctx, epoch, 100)
 		if err != nil {
 			t.Fatal(err)
 		}
