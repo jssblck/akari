@@ -7,8 +7,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/jssblck/akari/internal/quality"
 )
 
 // registerFirstUser registers the first account (admin, no invite) through the browser
@@ -56,8 +54,8 @@ func TestSessionsDrillParsingAndChips(t *testing.T) {
 		t.Fatalf("seed session: %v", err)
 	}
 	if _, err := st.Pool.Exec(ctx,
-		`INSERT INTO session_signals (session_id, signals_version, outcome, outcome_confidence, score, grade)
-		 VALUES ($1,$2,'completed','high',95,'A')`, sid, quality.Version); err != nil {
+		`INSERT INTO session_signals (session_id, outcome, outcome_confidence, score, grade)
+		 VALUES ($1,'completed','high',95,'A')`, sid); err != nil {
 		t.Fatalf("seed signal: %v", err)
 	}
 
@@ -175,8 +173,8 @@ func TestSessionsDrillCountAgreement(t *testing.T) {
 		// score and grade are seeded together (both non-NULL), the only shape the
 		// session_signals_score_grade_ck constraint permits for a graded row.
 		if _, err := st.Pool.Exec(ctx,
-			`INSERT INTO session_signals (session_id, signals_version, outcome, outcome_confidence, score, grade)
-			 VALUES ($1,$2,'completed','high',$3,$4)`, sid, quality.Version, score, grade); err != nil {
+			`INSERT INTO session_signals (session_id, outcome, outcome_confidence, score, grade)
+			 VALUES ($1,'completed','high',$2,$3)`, sid, score, grade); err != nil {
 			t.Fatalf("seed signal %s: %v", src, err)
 		}
 	}

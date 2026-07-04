@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jssblck/akari/internal/pricing"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/storetest"
 )
@@ -21,20 +20,21 @@ import (
 // backs the analytics surfaces (the overview and project usage panels, the
 // project sparklines); the sessions.total_* rollups back the projects index and
 // every per-session figure (the session list, the session header). The two
-// reconcile only because the rollups are folded from exactly the usage rows that
-// survive their ON CONFLICT dedup (see applyDelta / applyAggregates), so the
+// reconcile only because the rebuild folds the rollups from exactly the usage
+// rows that survive its in-memory dedup (see writeUsage / rebuildTx), so the
 // rollup equals the ledger by construction. That equality is unenforced at the
 // schema level, so it is exactly the kind of thing that rots; these tests assert
-// it directly, on the live ingest path and after a reparse, and check that the
-// cross-base views built on top of it reconcile. See docs/data-aggregation.md for
-// the full inventory of aggregation sites and which base each reads.
+// it directly, after a first rebuild and again after a repeat rebuild (the
+// epoch-rollout path), and check that the cross-base views built on top of it
+// reconcile. See docs/data-aggregation.md for the full inventory of aggregation
+// sites and which base each reads.
 //
 // user_message_count is pinned here for the same reason: the archetype banding, the
 // session-outcome fold, and the tools-per-turn denominator all read that rollup as if
-// it equaled count(messages WHERE role='user'). It does, because applyAggregates folds
-// it from exactly the user-role message rows that inserted and resetSessionAggregates
-// zeroes it before a reparse re-folds, but that too is unenforced at the schema level,
-// so the assertion below keeps every consumer of the rollup honest.
+// it equaled count(messages WHERE role='user'). It does, because rebuildTx sets it
+// from exactly the user-role message rows the rebuild inserts, but that too is
+// unenforced at the schema level, so the assertion below keeps every consumer of
+// the rollup honest.
 
 // usageRow is one usage_events insert for a test ingest, named so a delta reads
 // like the transcript it stands in for. A zero At means an undated event (NULL
@@ -50,32 +50,14 @@ type usageRow struct {
 	SourceIndex     int
 }
 
-// fixedReduce returns a ReduceFunc that emits the same delta on every region,
-// ignoring the raw bytes (the same stub shape reparse_test.go uses). A
-// single-chunk session is one region, so AdvanceProjection applies the delta once
-// on the live path and ReparseSession replays the identical delta on reparse.
-// Usage rows dedup on their keys, so replaying the same delta is idempotent: that
-// is what lets a test assert the rollups land on the same totals after ingest and
-// after reparse rather than doubling.
-func fixedReduce(d store.ProjectionDelta) store.ReduceFunc {
-	return func(_, _ []byte, _ int64) ([]byte, store.ProjectionDelta, error) {
-		return []byte("{}"), d, nil
-	}
-}
-
-// ingestVersion is an arbitrary parser version for the test ingest path. The
-// value does not matter to the invariant; it only has to be consistent between
-// the advance and the reparse so neither trips the parser-version-stale guard.
-const ingestVersion = 1
-
-// ingestSession drives one session through the real live path (announce, append a
-// raw chunk, advance the projection), so its rollups are folded by the production
-// applyDelta / applyAggregates rather than hand-written. It returns the session id
-// and the reducer it ingested with, so a later reparse can replay the identical
-// fold. The usage rows are emitted by a fixed reducer, so the raw bytes are a
-// placeholder the reducer ignores; what is exercised is the store's fold, which is
-// where the invariant is forged.
-func ingestSession(t *testing.T, st *store.Store, userID, projectID int64, agent, src string, msgs []store.MessageDelta, usage []usageRow) (int64, store.ReduceFunc) {
+// ingestSession drives one session through the real pipeline (announce, append a
+// raw chunk, rebuild the projection), so its rollups are folded by the production
+// writeUsage / rebuildTx rather than hand-written. It returns the session id and
+// the delta it rebuilt with, so a later repeat rebuild (the epoch-rollout path)
+// can replay the identical fold. The delta comes from a stub reducer, so the raw
+// bytes are a placeholder the reducer ignores; what is exercised is the store's
+// fold, which is where the invariant is forged.
+func ingestSession(t *testing.T, st *store.Store, userID, projectID int64, agent, src string, msgs []store.MessageDelta, usage []usageRow) (int64, store.ProjectionDelta) {
 	t.Helper()
 	ctx := context.Background()
 	ann, err := st.Announce(ctx, store.AnnounceParams{
@@ -102,23 +84,12 @@ func ingestSession(t *testing.T, st *store.Store, userID, projectID int64, agent
 			SourceIndex:  u.SourceIndex,
 		})
 	}
-	reduce := fixedReduce(d)
-	// Loop to catch up exactly as parse.Advance does, so a session larger than one
-	// batch would still be fully applied (here it is one small chunk, one region).
-	for {
-		_, caughtUp, err := st.AdvanceProjection(ctx, ann.SessionID, ingestVersion, reduce)
-		if err != nil {
-			t.Fatalf("advance %s: %v", src, err)
-		}
-		if caughtUp {
-			break
-		}
-	}
-	return ann.SessionID, reduce
+	rebuildWith(t, st, ann.SessionID, d)
+	return ann.SessionID, d
 }
 
-// ingestOnly drives a session through the live path and drops the reducer, for
-// tests that never reparse.
+// ingestOnly drives a session through the pipeline and drops the delta, for
+// tests that never rebuild a second time.
 func ingestOnly(t *testing.T, st *store.Store, userID, projectID int64, agent, src string, msgs []store.MessageDelta, usage []usageRow) int64 {
 	t.Helper()
 	sid, _ := ingestSession(t, st, userID, projectID, agent, src, msgs, usage)
@@ -214,10 +185,11 @@ func adversarialUsage() []usageRow {
 
 // TestSessionRollupMatchesLedger is the direct invariant test the audit calls for:
 // for every session, sessions.total_* equals the sum over its usage_events, after
-// the live ingest path and again after a reparse. It runs across several sessions,
-// agents, models, cache tokens, duplicate usage, undated usage, and unpriced usage,
-// so a fold that drops a class, double-counts a duplicate, or fails to zero-and-
-// rebuild a class on reparse is caught.
+// a first rebuild and again after a repeat rebuild of the identical delta (the
+// epoch-rollout path). It runs across several sessions, agents, models, cache
+// tokens, duplicate usage, undated usage, and unpriced usage, so a fold that drops
+// a class, double-counts a duplicate, or fails to clear-and-rewrite a class on the
+// repeat rebuild is caught.
 func TestSessionRollupMatchesLedger(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -241,13 +213,13 @@ func TestSessionRollupMatchesLedger(t *testing.T) {
 		{Ordinal: 1, Role: "assistant", Content: "done"},
 	}
 	type ingested struct {
-		id     int64
-		reduce store.ReduceFunc
+		id    int64
+		delta store.ProjectionDelta
 	}
 	var sessions []ingested
 	add := func(projectID int64, agent, src string, usage []usageRow) {
-		id, reduce := ingestSession(t, st, user.ID, projectID, agent, src, msgs, usage)
-		sessions = append(sessions, ingested{id, reduce})
+		id, delta := ingestSession(t, st, user.ID, projectID, agent, src, msgs, usage)
+		sessions = append(sessions, ingested{id, delta})
 	}
 	add(projA, "claude", "s-claude", adversarialUsage())
 	add(projA, "codex", "s-codex", adversarialUsage())
@@ -260,13 +232,12 @@ func TestSessionRollupMatchesLedger(t *testing.T) {
 		assertRollupMatchesLedger(t, st, s.id, "after ingest")
 	}
 
-	// Reparse every session through the identical fold and re-check: the reset must
-	// zero every class and the rebuild must re-accumulate to the same totals.
+	// Rebuild every session again through the identical fold and re-check: the
+	// clear must drop every old row and the rewrite must land on the same totals
+	// rather than doubling.
 	for _, s := range sessions {
-		if err := st.ReparseSession(ctx, s.id, ingestVersion, s.reduce); err != nil {
-			t.Fatalf("reparse session %d: %v", s.id, err)
-		}
-		assertRollupMatchesLedger(t, st, s.id, "after reparse")
+		rebuildWith(t, st, s.id, s.delta)
+		assertRollupMatchesLedger(t, st, s.id, "after repeat rebuild")
 	}
 }
 
@@ -290,15 +261,15 @@ func cacheSavingsUsage() []usageRow {
 }
 
 // TestCacheSavingsRollupMatchesRecompute pins the per-session cache-savings rollup
-// (sessions.total_cache_savings_usd, folded per surviving usage row at parse time) against
+// (sessions.total_cache_savings_usd, folded per surviving usage row by the rebuild) against
 // SessionCacheStats, the from-scratch per-model recompute over the same rows. Pricing is
 // linear in tokens, so the per-row fold and the per-model recompute must land on the same
-// dollars and the same incomplete flag, after the live ingest path and again after a reparse.
-// It is the savings analogue of TestSessionRollupMatchesLedger: a fold that doubles a deduped
-// row, drops a model, mishandles the unpriced-with-cache case, swaps the read and write terms,
-// or fails to zero-and-rebuild on reparse diverges from the recompute here. The rollup is what
-// the session header's Cache tile now reads in O(1), so this is the guard that the O(1) tile
-// shows the same figure the per-row scan would.
+// dollars and the same incomplete flag, after a first rebuild and again after a repeat
+// rebuild. It is the savings analogue of TestSessionRollupMatchesLedger: a fold that doubles
+// a deduped row, drops a model, mishandles the unpriced-with-cache case, swaps the read and
+// write terms, or fails to clear-and-rewrite on the repeat rebuild diverges from the
+// recompute here. The rollup is what the session header's Cache tile reads in O(1), so this
+// is the guard that the O(1) tile shows the same figure the per-row scan would.
 func TestCacheSavingsRollupMatchesRecompute(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -314,14 +285,8 @@ func TestCacheSavingsRollupMatchesRecompute(t *testing.T) {
 	}
 	msgs := []store.MessageDelta{{Ordinal: 0, Role: "user", Content: "go"}}
 
-	// The detail read serves the stored rollup as authoritative only while pricing is current
-	// (marker == pricing.Version), the state a booted server reaches once its startup reconcile has
-	// advanced the migration-seeded marker. Establish that precondition so the rollup matches the
-	// live recompute rather than being flagged partial by a rollout-in-flight.
-	setCacheSavingsPricedVersion(t, st, ctx, pricing.Version)
-
 	// reconcile pins the rollup to the independent recompute for one session, so a failure
-	// says which phase (ingest or reparse) and which session broke it.
+	// says which phase (first or repeat rebuild) and which session broke it.
 	reconcile := func(t *testing.T, id int64, when string) {
 		t.Helper()
 		d, err := st.SessionDetailByID(ctx, id)
@@ -340,8 +305,8 @@ func TestCacheSavingsRollupMatchesRecompute(t *testing.T) {
 		}
 	}
 
-	sMixed, reduceMixed := ingestSession(t, st, user.ID, proj, "claude", "s-mixed", msgs, cacheSavingsUsage())
-	sEmpty, reduceEmpty := ingestSession(t, st, user.ID, proj, "claude", "s-empty", msgs, nil)
+	sMixed, deltaMixed := ingestSession(t, st, user.ID, proj, "claude", "s-mixed", msgs, cacheSavingsUsage())
+	sEmpty, deltaEmpty := ingestSession(t, st, user.ID, proj, "claude", "s-empty", msgs, nil)
 
 	reconcile(t, sMixed, "after ingest")
 	reconcile(t, sEmpty, "after ingest")
@@ -367,16 +332,15 @@ func TestCacheSavingsRollupMatchesRecompute(t *testing.T) {
 		t.Errorf("empty session should carry a zero complete saving; got %v incomplete=%v", dEmpty.TotalCacheSavingsUSD, dEmpty.CacheSavingsIncomplete)
 	}
 
-	// Reparse both through the identical fold: the reset must zero the saving and its flag and
-	// the rebuild must re-fold to the same figure, so the rollup does not double or drift.
+	// Rebuild both again through the identical fold: the clear must drop the old
+	// rows and the rewrite must re-fold to the same figure, so the rollup does not
+	// double or drift.
 	for _, s := range []struct {
-		id     int64
-		reduce store.ReduceFunc
-	}{{sMixed, reduceMixed}, {sEmpty, reduceEmpty}} {
-		if err := st.ReparseSession(ctx, s.id, ingestVersion, s.reduce); err != nil {
-			t.Fatalf("reparse session %d: %v", s.id, err)
-		}
-		reconcile(t, s.id, "after reparse")
+		id    int64
+		delta store.ProjectionDelta
+	}{{sMixed, deltaMixed}, {sEmpty, deltaEmpty}} {
+		rebuildWith(t, st, s.id, s.delta)
+		reconcile(t, s.id, "after repeat rebuild")
 	}
 }
 
@@ -396,14 +360,14 @@ func datedCacheSavingsUsage() []usageRow {
 
 // TestCacheSavingsRollupMatchesRecomputeAcrossDatedWindow is the end-to-end guard for
 // date-effective pricing on the savings rollup. It drives a Sonnet 5 session with cache reads
-// on both sides of the 2026-09-01 boundary through the live ingest fold (applyDelta, which
+// on both sides of the 2026-09-01 boundary through the rebuild fold (writeUsage, which
 // prices each row at its exact OccurredAt) and reconciles sessions.total_cache_savings_usd
-// against SessionCacheStats (the per-(model, UTC day) recompute), after ingest and again after
-// a reparse. The two price on different bases (exact instant versus UTC-day bucket) and must
-// still agree, which they do only because the rate boundary is UTC-midnight aligned; the
-// windowed total (4.50 = 1.80 intro + 2.70 sticker) is pinned directly so a fold that
-// collapsed the two windows to one rate would fail here rather than reconcile with a matching
-// but wrong recompute.
+// against SessionCacheStats (the per-(model, UTC day) recompute), after a first rebuild and
+// again after a repeat rebuild. The two price on different bases (exact instant versus
+// UTC-day bucket) and must still agree, which they do only because the rate boundary is
+// UTC-midnight aligned; the windowed total (4.50 = 1.80 intro + 2.70 sticker) is pinned
+// directly so a fold that collapsed the two windows to one rate would fail here rather than
+// reconcile with a matching but wrong recompute.
 func TestCacheSavingsRollupMatchesRecomputeAcrossDatedWindow(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -418,10 +382,6 @@ func TestCacheSavingsRollupMatchesRecomputeAcrossDatedWindow(t *testing.T) {
 		t.Fatalf("project: %v", err)
 	}
 	msgs := []store.MessageDelta{{Ordinal: 0, Role: "user", Content: "go"}}
-
-	// Pricing current, so the detail read serves the stored rollup as authoritative rather than
-	// flagging it partial for a rollout in flight (see TestCacheSavingsRollupMatchesRecompute).
-	setCacheSavingsPricedVersion(t, st, ctx, pricing.Version)
 
 	// The intro read saves 1M*(2-0.20)=1.80; the sticker read saves 1M*(3-0.30)=2.70; total 4.50.
 	// A flat single-window price would give 3.60 (both intro) or 5.40 (both sticker).
@@ -448,13 +408,11 @@ func TestCacheSavingsRollupMatchesRecomputeAcrossDatedWindow(t *testing.T) {
 		}
 	}
 
-	s, reduce := ingestSession(t, st, user.ID, proj, "claude", "s-windowed", msgs, datedCacheSavingsUsage())
+	s, delta := ingestSession(t, st, user.ID, proj, "claude", "s-windowed", msgs, datedCacheSavingsUsage())
 	reconcile(t, s, "after ingest")
 
-	if err := st.ReparseSession(ctx, s, ingestVersion, reduce); err != nil {
-		t.Fatalf("reparse session %d: %v", s, err)
-	}
-	reconcile(t, s, "after reparse")
+	rebuildWith(t, st, s, delta)
+	reconcile(t, s, "after repeat rebuild")
 }
 
 // TestProjectsIndexReconcilesWithAnalytics is the cross-view reconciliation the

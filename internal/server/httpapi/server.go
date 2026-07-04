@@ -9,16 +9,16 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/jssblck/akari/internal/config"
-	"github.com/jssblck/akari/internal/server/reparse"
+	"github.com/jssblck/akari/internal/server/parse"
 	"github.com/jssblck/akari/internal/server/store"
 )
 
 // Server holds the dependencies shared by all handlers.
 type Server struct {
-	Store    *store.Store
-	Cfg      config.Server
-	hub      *sseHub
-	reparser *reparse.Service
+	Store  *store.Store
+	Cfg    config.Server
+	hub    *sseHub
+	worker *parse.Worker
 	// mcp is the Streamable-HTTP handler for the remote MCP server, built once and
 	// shared across requests; handleMCP wraps it per request with the bearer check.
 	mcp http.Handler
@@ -34,19 +34,26 @@ type Server struct {
 	ogSessionRender singleflight.Group
 }
 
-// New builds a Server. The reparse service is shared with the startup auto-run and
-// the CLI; here it backs the admin Reparse button, the status endpoint, and the UI
-// gating, and its progress is pushed to watching browsers over the SSE hub.
-func New(st *store.Store, cfg config.Server, reparser *reparse.Service) *Server {
-	s := &Server{Store: st, Cfg: cfg, hub: newSSEHub(), reparser: reparser}
+// New builds a Server. The parse worker is shared with the server main loop; here
+// it backs the admin Reparse button, the rebuild status endpoint, and the UI
+// gating. Its hooks fan out through the SSE hub: fleet-rebuild progress to the
+// status stream, and each committed rebuild to the browsers watching that session.
+func New(st *store.Store, cfg config.Server, worker *parse.Worker) *Server {
+	s := &Server{Store: st, Cfg: cfg, hub: newSSEHub(), worker: worker}
 	s.mcp = newMCPHandler(s)
-	// Fan reparse progress out to any browser watching the status stream. The hub
-	// carries the status JSON as the payload, so a watcher updates its progress bar
-	// directly rather than round-tripping to the status endpoint.
-	reparser.SetProgressHook(func(status reparse.Status) {
+	// Fan fleet-rebuild progress out to any browser watching the status stream. The
+	// hub carries the status JSON as the payload, so a watcher updates its progress
+	// bar directly rather than round-tripping to the status endpoint.
+	worker.SetStatusHook(func(status parse.Status) {
 		if b, err := json.Marshal(status); err == nil {
 			s.hub.publishReparse(string(b))
 		}
+	})
+	// Wake the browsers watching a session when its rebuild commits, so the live
+	// view refreshes when there is actually a new projection to fetch (the chunk
+	// handler only appends raw bytes; parsing is async).
+	worker.SetRebuiltHook(func(sessionID int64) {
+		s.hub.publish(sessionID)
 	})
 	return s
 }

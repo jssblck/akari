@@ -80,7 +80,6 @@ type Outcome struct {
 	Action        Action
 	UploadedBytes int64
 	StoredBytes   int64
-	MessageCount  int
 	// SessionID is the server's id for the synced session, learned at announce. It
 	// lets SyncFile address the session after the upload (the finalize refresh), and
 	// is carried out to the caller for the same reason.
@@ -509,7 +508,6 @@ func (s *syncSink) emitChunk(ctx context.Context, data []byte, origLen int64) (b
 	s.fs.prefixSize = s.size
 	s.out.UploadedBytes += int64(len(data))
 	s.out.StoredBytes = r.storedBytes
-	s.out.MessageCount = r.messageCount
 	return false, nil
 }
 
@@ -676,9 +674,8 @@ func (c *Client) finalize(ctx context.Context, sessionID int64) error {
 }
 
 type chunkResult struct {
-	storedBytes  int64
-	messageCount int
-	conflict     bool
+	storedBytes int64
+	conflict    bool
 }
 
 func (c *Client) chunk(ctx context.Context, sessionID, offset int64, data []byte) (chunkResult, error) {
@@ -700,13 +697,12 @@ func (c *Client) chunk(ctx context.Context, sessionID, offset int64, data []byte
 	switch resp.StatusCode {
 	case http.StatusOK:
 		var r struct {
-			StoredBytes  int64 `json:"stored_bytes"`
-			MessageCount int   `json:"message_count"`
+			StoredBytes int64 `json:"stored_bytes"`
 		}
 		if err := json.Unmarshal(payload, &r); err != nil {
 			return chunkResult{}, fmt.Errorf("decode chunk response: %w", err)
 		}
-		return chunkResult{storedBytes: r.StoredBytes, messageCount: r.MessageCount}, nil
+		return chunkResult{storedBytes: r.StoredBytes}, nil
 	case http.StatusConflict:
 		var r struct {
 			StoredBytes int64 `json:"stored_bytes"`

@@ -417,9 +417,8 @@ func (s *Store) fleetMixFrom(ctx context.Context, q querier, f AnalyticsFilter, 
 
 // signalTrendsFrom computes the per-bucket grade, outcome, hygiene, and context-reset
 // series from session_signals, plus the window-wide peak-context histogram. Every gated
-// join matches the distributions (current signals version, not stale; hygiene additionally
-// on the current prompt-facts version), so a bucket's rates speak only for the sessions a
-// current signal actually covers.
+// join matches the distributions (NOT s.signals_stale), so a bucket's rates speak only
+// for the sessions a current signal actually covers.
 func (s *Store) signalTrendsFrom(ctx context.Context, q querier, f AnalyticsFilter, g trendGrid, ctx0 ContextHealthStats) (SignalTrends, error) {
 	out := SignalTrends{
 		GradeShare:          make([]map[string]float64, g.n()),
@@ -440,12 +439,11 @@ func (s *Store) signalTrendsFrom(ctx context.Context, q querier, f AnalyticsFilt
 	// Grades and outcomes: one scan per bucket over the gated cohort. A missing grade
 	// folds into "" (unscored); a missing outcome into 'unknown'.
 	filter, args := f.clauseFor("s.started_at")
-	args = append(args, quality.Version)
 	rows, err := q.Query(ctx, fmt.Sprintf(
 		`SELECT %s AS b, coalesce(sig.grade, '') AS grade, coalesce(sig.outcome, 'unknown') AS outcome, count(*)
 		   FROM sessions s
 		   LEFT JOIN session_signals sig
-		     ON sig.session_id = s.id AND `+signalsCurrent(len(args))+`
+		     ON sig.session_id = s.id AND `+signalsCurrent()+`
 		  WHERE s.started_at IS NOT NULL%s
 		  GROUP BY 1, 2, 3`, g.sqlBucket("s.started_at"), filter), args...)
 	if err != nil {
@@ -511,12 +509,9 @@ func (s *Store) signalTrendsFrom(ctx context.Context, q querier, f AnalyticsFilt
 	out.CompletedCount = completed
 	out.AbandonedCount = abandoned
 
-	// Hygiene: per-bucket sums over the gated cohort, additionally on the prompt-facts
-	// version (the facts ride the messages row, so a superseded classifier reads as
-	// unmeasured). Rates divide by the bucket's prompt total (or session total for
-	// unstructured starts).
+	// Hygiene: per-bucket sums over the gated cohort. Rates divide by the bucket's
+	// prompt total (or session total for unstructured starts).
 	filter, args = f.clauseFor("s.started_at")
-	args = append(args, quality.Version, quality.PromptFactsVersion)
 	hrows, err := q.Query(ctx, fmt.Sprintf(
 		`SELECT %s AS b,
 		        coalesce(sum(sig.prompt_count), 0),
@@ -527,7 +522,7 @@ func (s *Store) signalTrendsFrom(ctx context.Context, q querier, f AnalyticsFilt
 		        count(*) FILTER (WHERE sig.unstructured_start)
 		   FROM sessions s
 		   LEFT JOIN session_signals sig
-		     ON sig.session_id = s.id AND `+signalsHygieneCurrent(len(args)-1, len(args))+`
+		     ON sig.session_id = s.id AND `+signalsCurrent()+`
 		  WHERE s.started_at IS NOT NULL%s
 		  GROUP BY 1`, g.sqlBucket("s.started_at"), filter), args...)
 	if err != nil {
@@ -560,12 +555,11 @@ func (s *Store) signalTrendsFrom(ctx context.Context, q querier, f AnalyticsFilt
 
 	// Context resets per bucket, over sessions carrying a measured peak.
 	filter, args = f.clauseFor("s.started_at")
-	args = append(args, quality.Version)
 	crows, err := q.Query(ctx, fmt.Sprintf(
 		`SELECT %s AS b, coalesce(sum(sig.context_reset_count), 0)
 		   FROM sessions s
 		   JOIN session_signals sig
-		     ON sig.session_id = s.id AND `+signalsCurrent(len(args))+`
+		     ON sig.session_id = s.id AND `+signalsCurrent()+`
 		  WHERE s.started_at IS NOT NULL AND sig.peak_context_tokens IS NOT NULL%s
 		  GROUP BY 1`, g.sqlBucket("s.started_at"), filter), args...)
 	if err != nil {
@@ -620,12 +614,11 @@ var contextHistogramEdges = func() []int64 {
 // context cohort.
 func (s *Store) contextHistogramFrom(ctx context.Context, q querier, f AnalyticsFilter) ([]ContextBucket, error) {
 	filter, args := f.clauseFor("s.started_at")
-	args = append(args, quality.Version)
 	rows, err := q.Query(ctx, fmt.Sprintf(
 		`SELECT sig.peak_context_tokens
 		   FROM sessions s
 		   JOIN session_signals sig
-		     ON sig.session_id = s.id AND `+signalsCurrent(len(args))+`
+		     ON sig.session_id = s.id AND `+signalsCurrent()+`
 		  WHERE s.started_at IS NOT NULL AND sig.peak_context_tokens IS NOT NULL%s`,
 		filter), args...)
 	if err != nil {
@@ -674,7 +667,6 @@ func (s *Store) economicsFrom(ctx context.Context, q querier, f AnalyticsFilter,
 	}
 
 	filter, args := f.clause() // occurred_at window
-	args = append(args, quality.Version)
 	rows, err := q.Query(ctx, fmt.Sprintf(
 		`SELECT %s AS b,
 		        coalesce(sum(ue.cost_usd) FILTER (WHERE sig.outcome = 'completed'), 0),
@@ -687,7 +679,7 @@ func (s *Store) economicsFrom(ctx context.Context, q querier, f AnalyticsFilter,
 		   FROM usage_events ue
 		   JOIN sessions s ON s.id = ue.session_id
 		   LEFT JOIN session_signals sig
-		     ON sig.session_id = s.id AND `+signalsCurrent(len(args))+`
+		     ON sig.session_id = s.id AND `+signalsCurrent()+`
 		  WHERE ue.occurred_at IS NOT NULL%s
 		  GROUP BY 1`, g.sqlBucket("ue.occurred_at"), filter), args...)
 	if err != nil {

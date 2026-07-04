@@ -33,8 +33,8 @@ func (r *reducer) reducePi(region []byte, base int64) error {
 				r.addUser(blockText(msg.Get("content")), ts)
 
 			case "assistant":
-				ord := r.st.NextOrdinal
-				r.st.NextOrdinal++
+				ord := r.nextOrdinal
+				r.nextOrdinal++
 				op := MessageOp{Ordinal: ord, Role: RoleAssistant, Model: msg.Get("model").String(), Timestamp: ts}
 				var textParts, thinkParts []string
 				callIndex := 0

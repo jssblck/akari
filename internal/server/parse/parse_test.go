@@ -51,27 +51,38 @@ func seedSession(t *testing.T, st *store.Store, source string) int64 {
 	return ann.SessionID
 }
 
-// uploadAndParse appends each piece as its own chunk and advances the parse after
-// each, returning the final message count.
+// uploadAndParse appends each piece as its own chunk and rebuilds the session
+// after each (the way an ingest wake drives the worker), returning the final
+// message count from the sessions rollup.
 func uploadAndParse(t *testing.T, st *store.Store, sessionID int64, pieces ...string) int {
 	t.Helper()
 	ctx := context.Background()
 	var offset int64
-	var msgCount int
 	for _, p := range pieces {
 		stored, err := st.AppendChunk(ctx, sessionID, offset, []byte(p))
 		if err != nil {
 			t.Fatalf("append at %d: %v", offset, err)
 		}
 		offset = stored
-		if msgCount, err = Advance(ctx, st, sessionID, "claude"); err != nil {
-			t.Fatalf("advance: %v", err)
+		if err := Rebuild(ctx, st, sessionID, "claude"); err != nil {
+			t.Fatalf("rebuild: %v", err)
 		}
 	}
-	return msgCount
+	return messageCount(t, st, sessionID)
 }
 
-func TestAdvanceSingleChunk(t *testing.T) {
+// messageCount reads the sessions.message_count rollup the rebuild folded.
+func messageCount(t *testing.T, st *store.Store, sessionID int64) int {
+	t.Helper()
+	var mc int
+	if err := st.Pool.QueryRow(context.Background(),
+		"SELECT message_count FROM sessions WHERE id=$1", sessionID).Scan(&mc); err != nil {
+		t.Fatalf("read message_count: %v", err)
+	}
+	return mc
+}
+
+func TestRebuildSingleChunk(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
 	ctx := context.Background()
@@ -83,23 +94,23 @@ func TestAdvanceSingleChunk(t *testing.T) {
 	}
 	assertClaudeProjection(t, st, sid)
 
-	// Advancing again with nothing new is a no-op.
-	if mc, err := Advance(ctx, st, sid, "claude"); err != nil || mc != 2 {
-		t.Fatalf("re-advance: mc=%d err=%v", mc, err)
+	// Rebuilding again with nothing new lands the identical projection: the
+	// whole-session parse is idempotent, which is what makes an epoch rollout or
+	// an operator-forced rebuild safe to run on an already-current session.
+	if err := Rebuild(ctx, st, sid, "claude"); err != nil {
+		t.Fatalf("re-rebuild: %v", err)
 	}
-	assertClaudeProjection(t, st, sid)
-
-	// A full reparse rebuilds the same projection.
-	if mc, err := Reparse(ctx, st, sid, "claude"); err != nil || mc != 2 {
-		t.Fatalf("reparse: mc=%d err=%v", mc, err)
+	if mc := messageCount(t, st, sid); mc != 2 {
+		t.Fatalf("re-rebuild message count = %d, want 2", mc)
 	}
 	assertClaudeProjection(t, st, sid)
 }
 
-// TestAdvanceChunkedMatchesSingle uploads the same session line by line, so the
-// tool result is back-patched in a later chunk than its call, and confirms the
-// projection is identical to the single-shot upload.
-func TestAdvanceChunkedMatchesSingle(t *testing.T) {
+// TestRebuildChunkedMatchesSingle uploads the same session line by line with a
+// rebuild after each chunk, so the tool result lands in a later rebuild than the
+// one that first saw its call, and confirms the final projection is identical to
+// the single-shot upload.
+func TestRebuildChunkedMatchesSingle(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
 	sid := seedSession(t, st, "chunked")
@@ -152,14 +163,13 @@ func assertClaudeProjection(t *testing.T, st *store.Store, sid int64) {
 		totalIn, totalOut int64
 		cost              float64
 		costIncomplete    bool
-		parserVer         int
 		startedAt, ended  *string
 	)
 	if err := st.Pool.QueryRow(ctx,
 		`SELECT message_count, user_message_count, total_input_tokens, total_output_tokens,
-		        total_cost_usd, cost_incomplete, parser_version, started_at::text, ended_at::text
+		        total_cost_usd, cost_incomplete, started_at::text, ended_at::text
 		   FROM sessions WHERE id=$1`, sid).
-		Scan(&mc, &umc, &totalIn, &totalOut, &cost, &costIncomplete, &parserVer, &startedAt, &ended); err != nil {
+		Scan(&mc, &umc, &totalIn, &totalOut, &cost, &costIncomplete, &startedAt, &ended); err != nil {
 		t.Fatal(err)
 	}
 	if mc != 2 || umc != 1 {
@@ -174,11 +184,21 @@ func assertClaudeProjection(t *testing.T, st *store.Store, sid int64) {
 	if costIncomplete {
 		t.Error("cost should be complete: sonnet is priced")
 	}
-	if parserVer != Version {
-		t.Errorf("parser_version = %d, want %d", parserVer, Version)
-	}
 	if startedAt == nil || ended == nil {
 		t.Error("started_at/ended_at should be set from message timestamps")
+	}
+
+	// The rebuild stamped its bookkeeping: the cursor covers every stored byte
+	// and the epoch is the binary's, so the session has left the due set.
+	var parsed, byteLen int64
+	var epoch int
+	if err := st.Pool.QueryRow(ctx,
+		"SELECT parsed_byte_len, byte_len, parser_epoch FROM session_raw WHERE session_id=$1", sid).
+		Scan(&parsed, &byteLen, &epoch); err != nil {
+		t.Fatal(err)
+	}
+	if parsed != byteLen || epoch != Epoch {
+		t.Errorf("bookkeeping: parsed=%d byte_len=%d epoch=%d, want a full-cover stamp at epoch %d", parsed, byteLen, epoch, Epoch)
 	}
 }
 
@@ -214,8 +234,8 @@ func TestCodexTurnFoldedInOneChunk(t *testing.T) {
 	if _, err := st.AppendChunk(ctx, sid, 0, []byte(chunk)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Advance(ctx, st, sid, "codex"); err != nil {
-		t.Fatalf("advance: %v", err)
+	if err := Rebuild(ctx, st, sid, "codex"); err != nil {
+		t.Fatalf("rebuild: %v", err)
 	}
 
 	var content, thinking string
@@ -289,8 +309,8 @@ func TestRedactedThinkingReachesMessagesColumn(t *testing.T) {
 // full ingest and parse path and confirms it is recorded as context, not a human
 // prompt: it counts toward message_count but not user_message_count, and the session
 // title reads the real opening prompt rather than the AGENTS.md block. This is the
-// end-to-end guard for the parse.Epoch 7 -> 8 re-roling, exercising the aggregate fold
-// (applyAggregates) that ApplyProjectionDelta alone does not run.
+// end-to-end guard for the parse.Epoch 7 -> 8 re-roling, exercising the rebuild's
+// rollup fold alongside the reducer.
 func TestCodexContextExcludedFromCounts(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -320,8 +340,8 @@ func TestCodexContextExcludedFromCounts(t *testing.T) {
 	if _, err := st.AppendChunk(ctx, sid, 0, []byte(chunk)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Advance(ctx, st, sid, "codex"); err != nil {
-		t.Fatalf("advance: %v", err)
+	if err := Rebuild(ctx, st, sid, "codex"); err != nil {
+		t.Fatalf("rebuild: %v", err)
 	}
 
 	// The context turn, the prompt, and the assistant reply are all messages; only the prompt is a
@@ -387,8 +407,8 @@ func TestCodexTrailingTurnFlushedWhole(t *testing.T) {
 	if _, err := st.AppendChunk(ctx, sid, 0, []byte(chunk)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Advance(ctx, st, sid, "codex"); err != nil {
-		t.Fatalf("advance: %v", err)
+	if err := Rebuild(ctx, st, sid, "codex"); err != nil {
+		t.Fatalf("rebuild: %v", err)
 	}
 
 	var content string
@@ -401,15 +421,68 @@ func TestCodexTrailingTurnFlushedWhole(t *testing.T) {
 	}
 }
 
-// TestClaudeDuplicateCallUIDDoesNotAbort reproduces the reparse failure that kept
+// TestClaudeDuplicateCallUIDDoesNotAbort reproduces the parse failure that kept
 // four production sessions stale: a resumed or compacted Claude transcript replays
 // a prior assistant turn verbatim, so two distinct tool_use rows carry the same
 // agent call id. Under the old unique index the second insert tripped it and rolled
 // the whole parse back. With the index non-unique (migration 0010) both rows keep
-// the id, and the back-patch stamps the same result onto each, so every replayed
-// copy of the turn renders with its result rather than one looking pending. The two
-// turns are delivered as separate chunks so they parse in separate regions (and so
-// separate transactions), the cross-region path the back-patch must cover.
+// the id, and the fold's result patching stamps the same result onto each, so every
+// replayed copy of the turn renders with its result rather than one looking pending.
+// TestClaudeParallelCallsInterleavedResultsFold pins the fold across a parallel
+// tool-call response: Claude Code logs each call's result between the response's
+// own tool_use lines, so a tool-result-only user line must not end the open
+// turn. One API response with two parallel calls lands as one assistant row
+// carrying both calls, however the results interleave; a different message id
+// still starts its own row. Needs no database: the reducer is pure.
+func TestClaudeParallelCallsInterleavedResultsFold(t *testing.T) {
+	t.Parallel()
+	raw := `{"type":"user","timestamp":"2024-01-01T10:00:00Z","message":{"content":"Trace the auth flow"}}` + "\n" +
+		`{"type":"assistant","timestamp":"2024-01-01T10:00:01Z","message":{"id":"msg_par","model":"claude-sonnet-4-20250514","content":[{"type":"thinking","thinking":"two reads at once"},{"type":"tool_use","id":"toolu_p1","name":"Grep","input":{"pattern":"verifyToken"}}],"usage":{"input_tokens":100,"output_tokens":10}}}` + "\n" +
+		`{"type":"user","timestamp":"2024-01-01T10:00:02Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_p1","content":"auth.go:42","is_error":false}]}}` + "\n" +
+		`{"type":"assistant","timestamp":"2024-01-01T10:00:02Z","message":{"id":"msg_par","model":"claude-sonnet-4-20250514","content":[{"type":"tool_use","id":"toolu_p2","name":"Read","input":{"file_path":"token.go"}}],"usage":{"input_tokens":100,"output_tokens":10}}}` + "\n" +
+		`{"type":"user","timestamp":"2024-01-01T10:00:03Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_p2","content":"package token","is_error":false}]}}` + "\n" +
+		`{"type":"assistant","timestamp":"2024-01-01T10:00:04Z","message":{"id":"msg_next","model":"claude-sonnet-4-20250514","content":[{"type":"text","text":"Both read."}],"usage":{"input_tokens":120,"output_tokens":8}}}` + "\n"
+
+	r, err := newSessionReducer("claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Feed([]byte(raw), 0); err != nil {
+		t.Fatal(err)
+	}
+	d := r.Finish()
+
+	if len(d.Messages) != 3 {
+		t.Fatalf("messages = %d, want 3 (user, the folded parallel turn, the next turn)", len(d.Messages))
+	}
+	turn := d.Messages[1]
+	if turn.Role != "assistant" || !turn.HasToolUse || !turn.HasThinking {
+		t.Fatalf("folded turn = %+v, want an assistant row carrying the tool use and the thinking", turn)
+	}
+	if d.Messages[2].Role != "assistant" || d.Messages[2].Content != "Both read." {
+		t.Fatalf("next turn = %+v, want the msg_next text on its own row", d.Messages[2])
+	}
+	if len(d.ToolCalls) != 2 {
+		t.Fatalf("tool calls = %d, want both parallel calls", len(d.ToolCalls))
+	}
+	for i, tc := range d.ToolCalls {
+		if tc.MessageOrdinal != turn.Ordinal || tc.CallIndex != i {
+			t.Errorf("call %d = ordinal %d index %d, want ordinal %d index %d (both on the folded turn)",
+				i, tc.MessageOrdinal, tc.CallIndex, turn.Ordinal, i)
+		}
+	}
+	if len(d.ToolResults) != 2 {
+		t.Fatalf("tool results = %d, want both interleaved results captured", len(d.ToolResults))
+	}
+	// Both usage lines of the folded response key on the shared message id and
+	// point at the folded turn, so the store's dedup keeps exactly one of them.
+	for _, u := range d.Usage {
+		if u.DedupKey == "msg_par" && (u.MessageOrdinal == nil || *u.MessageOrdinal != turn.Ordinal) {
+			t.Errorf("usage %+v should ride the folded turn's ordinal %d", u, turn.Ordinal)
+		}
+	}
+}
+
 func TestClaudeDuplicateCallUIDDoesNotAbort(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -423,8 +496,8 @@ func TestClaudeDuplicateCallUIDDoesNotAbort(t *testing.T) {
 	second := `{"type":"assistant","timestamp":"2024-01-01T10:00:02Z","message":{"id":"msg_b","model":"claude-sonnet-4-20250514","content":[{"type":"tool_use","id":"toolu_dup","name":"Read","input":{"file_path":"auth.go"}}]}}` + "\n"
 	result := `{"type":"user","timestamp":"2024-01-01T10:00:03Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_dup","content":"package auth","is_error":false}]}}` + "\n"
 
-	// Separate chunks: the first region commits before the second parses, so the
-	// duplicate insert meets an already-committed row carrying the same id.
+	// Separate chunks with a rebuild after each, so the final rebuild folds the
+	// duplicate ids and the result over the complete session.
 	uploadAndParse(t, st, sid, first, second, result)
 
 	assertDuplicateCallUID := func(t *testing.T, when string) {
@@ -459,23 +532,23 @@ func TestClaudeDuplicateCallUIDDoesNotAbort(t *testing.T) {
 		}
 	}
 
-	assertDuplicateCallUID(t, "after advance")
+	assertDuplicateCallUID(t, "after rebuild")
 
-	// Reparse is the production remediation for the four stalled sessions: it must run
-	// to completion and land the same shape rather than rolling back as it did before.
-	if _, err := Reparse(ctx, st, sid, "claude"); err != nil {
-		t.Fatalf("reparse: %v", err)
+	// A repeat rebuild (the epoch-rollout path) must run to completion and land
+	// the same shape rather than aborting on the shared id.
+	if err := Rebuild(ctx, st, sid, "claude"); err != nil {
+		t.Fatalf("repeat rebuild: %v", err)
 	}
-	assertDuplicateCallUID(t, "after reparse")
+	assertDuplicateCallUID(t, "after repeat rebuild")
 }
 
 // TestClaudeModelFallbackMergesAndCounts ingests a full fallback sequence (two assistant
 // chunks sharing a message id and requestId, one carrying the fallback block and both the
 // iterations, then the system model_refusal_fallback entry sharing the requestId) and asserts
 // the three parser ops merge to exactly one model_fallbacks row with fields from both sides,
-// that sessions.model_fallback_count is 1, and that a reparse does not inflate either (still 1
-// row, count still 1). It also drives the two read paths that surface the count and the
-// SessionModelFallbacks ordered read.
+// that sessions.model_fallback_count is 1, and that a repeat rebuild does not inflate either
+// (still 1 row, count still 1). It also drives the two read paths that surface the count and
+// the SessionModelFallbacks ordered read.
 func TestClaudeModelFallbackMergesAndCounts(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -492,8 +565,8 @@ func TestClaudeModelFallbackMergesAndCounts(t *testing.T) {
 	if _, err := st.AppendChunk(ctx, sid, 0, []byte(chunk)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Advance(ctx, st, sid, "claude"); err != nil {
-		t.Fatalf("advance: %v", err)
+	if err := Rebuild(ctx, st, sid, "claude"); err != nil {
+		t.Fatalf("rebuild: %v", err)
 	}
 
 	assertFallback := func(t *testing.T, when string) {
@@ -570,26 +643,26 @@ func TestClaudeModelFallbackMergesAndCounts(t *testing.T) {
 		}
 	}
 
-	assertFallback(t, "after advance")
+	assertFallback(t, "after rebuild")
 
-	// A reparse must land the same one merged row and count, not double it.
-	if _, err := Reparse(ctx, st, sid, "claude"); err != nil {
-		t.Fatalf("reparse: %v", err)
+	// A repeat rebuild must land the same one merged row and count, not double it.
+	if err := Rebuild(ctx, st, sid, "claude"); err != nil {
+		t.Fatalf("repeat rebuild: %v", err)
 	}
-	assertFallback(t, "after reparse")
+	assertFallback(t, "after repeat rebuild")
 }
 
 // TestClaudeModelFallbackTurnIdentityMatchesUsage pins the reconciliation between the two
-// projections a split fallback feeds: usage_events (via ON CONFLICT DO NOTHING, first line
-// wins) and model_fallbacks (via ON CONFLICT DO UPDATE). The merged fallback row must keep
-// the FIRST line's message_ordinal and occurred_at, the same turn identity usage_events
-// pins, so the fallback notice never lands on a different turn than the usage it describes.
-// The trap is a later line carrying a later timestamp: the first assistant chunk arrives at
-// 10:00:25, and a separate later append brings the system model_refusal_fallback entry at
-// 10:00:40. If the merge let a later non-null value overwrite, the fallback row would drift
-// to 10:00:40 while the usage row stayed at 10:00:25. The test also pins the other half of
-// the merge: the later system entry still fills trigger and category, the fill-toward-complete
-// columns the assistant line lacks.
+// folds a split fallback feeds: usage dedup (first line wins on the shared dedup_key) and
+// the fallback merge. The merged fallback row must keep the FIRST line's message_ordinal
+// and occurred_at, the same turn identity the usage fold pins, so the fallback notice never
+// lands on a different turn than the usage it describes. The trap is a later line carrying
+// a later timestamp: the first assistant chunk arrives at 10:00:25, and a separate later
+// append brings the system model_refusal_fallback entry at 10:00:40. If the merge let a
+// later non-null value overwrite, the fallback row would drift to 10:00:40 while the usage
+// row stayed at 10:00:25. The test also pins the other half of the merge: the later system
+// entry still fills trigger and category, the fill-toward-complete columns the assistant
+// line lacks.
 func TestClaudeModelFallbackTurnIdentityMatchesUsage(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -597,29 +670,29 @@ func TestClaudeModelFallbackTurnIdentityMatchesUsage(t *testing.T) {
 	sid := seedSession(t, st, "claude-fallback-turn-identity")
 
 	iters := `"iterations":[{"input_tokens":900,"output_tokens":6,"cache_read_input_tokens":3200,"cache_creation_input_tokens":1500,"type":"message","model":"claude-fable-5"},{"input_tokens":900,"output_tokens":260,"cache_read_input_tokens":5000,"cache_creation_input_tokens":0,"type":"fallback_message","model":"claude-opus-4-8"}]`
-	// First region: the two assistant chunks of one API message (shared id + requestId). The
-	// block chunk at 10:00:25 inserts the fallback row and pins the usage row's turn identity;
-	// the text chunk at 10:00:26 is the same message. This is the first (and only) assistant
+	// First chunk: the two assistant entries of one API message (shared id + requestId). The
+	// block entry at 10:00:25 owns the fallback and pins the usage row's turn identity; the
+	// text entry at 10:00:26 is the same message. This is the first (and only) assistant
 	// turn, so it takes the earliest message ordinal.
 	assistant := `{"type":"assistant","timestamp":"2024-01-01T10:00:25Z","requestId":"req_canon","message":{"id":"msg_canon","model":"claude-opus-4-8","content":[{"type":"fallback","from":{"model":"claude-fable-5"},"to":{"model":"claude-opus-4-8"}}],"usage":{"input_tokens":900,"output_tokens":260,"cache_read_input_tokens":5000,` + iters + `}}}` + "\n" +
 		`{"type":"assistant","timestamp":"2024-01-01T10:00:26Z","requestId":"req_canon","message":{"id":"msg_canon","model":"claude-opus-4-8","content":[{"type":"text","text":"honest working"}],"usage":{"input_tokens":900,"output_tokens":260,"cache_read_input_tokens":5000,` + iters + `}}}` + "\n"
 	if _, err := st.AppendChunk(ctx, sid, 0, []byte(assistant)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Advance(ctx, st, sid, "claude"); err != nil {
-		t.Fatalf("advance assistant: %v", err)
+	if err := Rebuild(ctx, st, sid, "claude"); err != nil {
+		t.Fatalf("rebuild after assistant chunk: %v", err)
 	}
 
-	// Second region: the system model_refusal_fallback entry, sharing the requestId but
-	// carrying a strictly LATER timestamp (10:00:40) and a NULL ordinal. The merge must not
-	// let either overwrite the pinned turn identity, even though it runs across region
-	// boundaries (a separate append + advance).
+	// Second chunk: the system model_refusal_fallback entry, sharing the requestId but
+	// carrying a strictly LATER timestamp (10:00:40) and a NULL ordinal. However far apart
+	// the lines landed, the rebuild folds them together and the merge must not let either
+	// overwrite the pinned turn identity.
 	systemLine := `{"type":"system","subtype":"model_refusal_fallback","trigger":"refusal","originalModel":"claude-fable-5","fallbackModel":"claude-opus-4-8","requestId":"req_canon","apiRefusalCategory":"reasoning_extraction","apiRefusalExplanation":null,"timestamp":"2024-01-01T10:00:40Z"}` + "\n"
 	if _, err := st.AppendChunk(ctx, sid, int64(len(assistant)), []byte(systemLine)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Advance(ctx, st, sid, "claude"); err != nil {
-		t.Fatalf("advance system: %v", err)
+	if err := Rebuild(ctx, st, sid, "claude"); err != nil {
+		t.Fatalf("rebuild after system chunk: %v", err)
 	}
 
 	assertTurnIdentity := func(t *testing.T, when string) {
@@ -646,7 +719,7 @@ func TestClaudeModelFallbackTurnIdentityMatchesUsage(t *testing.T) {
 		}
 
 		// The usage row for that same turn: found by the ordinal the assistant line took.
-		// Its identity is pinned by usage_events' ON CONFLICT DO NOTHING to the first line.
+		// Its identity is pinned to the first line by the usage fold's first-wins dedup.
 		var usageOrdinal int
 		var usageOccurred time.Time
 		if err := st.Pool.QueryRow(ctx,
@@ -671,23 +744,24 @@ func TestClaudeModelFallbackTurnIdentityMatchesUsage(t *testing.T) {
 		}
 	}
 
-	assertTurnIdentity(t, "after cross-region merge")
+	assertTurnIdentity(t, "after chunked rebuilds")
 
-	// A reparse rebuilds both projections from scratch; the turn identity must still line up.
-	if _, err := Reparse(ctx, st, sid, "claude"); err != nil {
-		t.Fatalf("reparse: %v", err)
+	// A repeat rebuild re-derives both projections from scratch; the turn
+	// identity must still line up.
+	if err := Rebuild(ctx, st, sid, "claude"); err != nil {
+		t.Fatalf("repeat rebuild: %v", err)
 	}
-	assertTurnIdentity(t, "after reparse")
+	assertTurnIdentity(t, "after repeat rebuild")
 }
 
 // TestClaudeModelFallbackSystemFirstTurnIdentityMatchesUsage is the system-first companion to
 // TestClaudeModelFallbackTurnIdentityMatchesUsage. When the model_refusal_fallback system
-// entry lands BEFORE the assistant entries, its NULL-ordinal row inserts first with its own
-// (earlier here) timestamp as a placeholder. The later assistant line owns the turn: it fills
-// message_ordinal, and the fallback row's occurred_at must adopt the assistant line's
-// timestamp so it matches the usage_events row pinned at that ordinal, not stay on the system
+// entry lands BEFORE the assistant entries, its NULL-ordinal observation opens the merge with
+// its own (earlier here) timestamp as a placeholder. The later assistant line owns the turn:
+// it fills message_ordinal, and the fallback row's occurred_at must adopt the assistant
+// line's timestamp so it matches the usage row pinned at that ordinal, not stay on the system
 // entry's placeholder. A first-non-null merge would freeze the system timestamp and drift the
-// two projections apart, so this pins the CASE that rebinds occurred_at to the ordinal owner.
+// two folds apart, so this pins the rule that rebinds occurred_at to the ordinal owner.
 func TestClaudeModelFallbackSystemFirstTurnIdentityMatchesUsage(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -695,26 +769,26 @@ func TestClaudeModelFallbackSystemFirstTurnIdentityMatchesUsage(t *testing.T) {
 	sid := seedSession(t, st, "claude-fallback-system-first-identity")
 
 	iters := `"iterations":[{"input_tokens":900,"output_tokens":6,"cache_read_input_tokens":3200,"cache_creation_input_tokens":1500,"type":"message","model":"claude-fable-5"},{"input_tokens":900,"output_tokens":260,"cache_read_input_tokens":5000,"cache_creation_input_tokens":0,"type":"fallback_message","model":"claude-opus-4-8"}]`
-	// First region: only the system entry, at 10:00:20. Its row inserts with a NULL ordinal and
-	// this timestamp as a placeholder, before any assistant line (or usage row) exists.
+	// First chunk: only the system entry, at 10:00:20. Its observation opens the merge with a
+	// NULL ordinal and this timestamp as a placeholder, before any assistant line exists.
 	systemLine := `{"type":"system","subtype":"model_refusal_fallback","trigger":"refusal","originalModel":"claude-fable-5","fallbackModel":"claude-opus-4-8","requestId":"req_sf_id","apiRefusalCategory":"reasoning_extraction","apiRefusalExplanation":null,"timestamp":"2024-01-01T10:00:20Z"}` + "\n"
 	if _, err := st.AppendChunk(ctx, sid, 0, []byte(systemLine)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Advance(ctx, st, sid, "claude"); err != nil {
-		t.Fatalf("advance system: %v", err)
+	if err := Rebuild(ctx, st, sid, "claude"); err != nil {
+		t.Fatalf("rebuild after system chunk: %v", err)
 	}
 
-	// Second region: the assistant entries sharing the requestId, at 10:00:25 (LATER than the
-	// system placeholder). This is the line usage_events pins to, so the fallback row must move
-	// its occurred_at here even though the placeholder was earlier.
+	// Second chunk: the assistant entries sharing the requestId, at 10:00:25 (LATER than the
+	// system placeholder). This is the line the usage fold pins to, so the fallback row must
+	// move its occurred_at here even though the placeholder was earlier.
 	assistant := `{"type":"assistant","timestamp":"2024-01-01T10:00:25Z","requestId":"req_sf_id","message":{"id":"msg_sf_id","model":"claude-opus-4-8","content":[{"type":"fallback","from":{"model":"claude-fable-5"},"to":{"model":"claude-opus-4-8"}}],"usage":{"input_tokens":900,"output_tokens":260,"cache_read_input_tokens":5000,` + iters + `}}}` + "\n" +
 		`{"type":"assistant","timestamp":"2024-01-01T10:00:26Z","requestId":"req_sf_id","message":{"id":"msg_sf_id","model":"claude-opus-4-8","content":[{"type":"text","text":"honest working"}],"usage":{"input_tokens":900,"output_tokens":260,"cache_read_input_tokens":5000,` + iters + `}}}` + "\n"
 	if _, err := st.AppendChunk(ctx, sid, int64(len(systemLine)), []byte(assistant)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Advance(ctx, st, sid, "claude"); err != nil {
-		t.Fatalf("advance assistant: %v", err)
+	if err := Rebuild(ctx, st, sid, "claude"); err != nil {
+		t.Fatalf("rebuild after assistant chunk: %v", err)
 	}
 
 	assertTurnIdentity := func(t *testing.T, when string) {
@@ -758,10 +832,10 @@ func TestClaudeModelFallbackSystemFirstTurnIdentityMatchesUsage(t *testing.T) {
 
 	assertTurnIdentity(t, "after system-first merge")
 
-	if _, err := Reparse(ctx, st, sid, "claude"); err != nil {
-		t.Fatalf("reparse: %v", err)
+	if err := Rebuild(ctx, st, sid, "claude"); err != nil {
+		t.Fatalf("repeat rebuild: %v", err)
 	}
-	assertTurnIdentity(t, "after reparse")
+	assertTurnIdentity(t, "after repeat rebuild")
 }
 
 // TestClaudeModelSwitchIsNotAFallback is the negative control at the store level: two
@@ -779,8 +853,8 @@ func TestClaudeModelSwitchIsNotAFallback(t *testing.T) {
 	if _, err := st.AppendChunk(ctx, sid, 0, []byte(chunk)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Advance(ctx, st, sid, "claude"); err != nil {
-		t.Fatalf("advance: %v", err)
+	if err := Rebuild(ctx, st, sid, "claude"); err != nil {
+		t.Fatalf("rebuild: %v", err)
 	}
 
 	var rows, count int
@@ -799,11 +873,11 @@ func TestClaudeModelSwitchIsNotAFallback(t *testing.T) {
 }
 
 // TestClaudeModelFallbackSystemFirstMerge pins the merge when the system entry lands before
-// the assistant entries (the reverse of TestClaudeModelFallbackMergesAndCounts). The system
-// row inserts first with only its refusal fields, the later assistant entries fill the
-// message ordinal and declined tokens into the same (session_id, dedup_key) row, and
-// model_fallback_count stays 1: the count folds once on the first insert of the dedup_key, so
-// a later merge into the same key must not re-count.
+// the assistant entries (the reverse of TestClaudeModelFallbackMergesAndCounts). A rebuild of
+// the system-only prefix records the row with only its refusal fields; once the assistant
+// entries arrive, the merge fills the message ordinal and declined tokens into the same
+// dedup_key's row, and model_fallback_count stays 1: one logical fallback, one row, one count,
+// however many lines carried it.
 func TestClaudeModelFallbackSystemFirstMerge(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -811,16 +885,16 @@ func TestClaudeModelFallbackSystemFirstMerge(t *testing.T) {
 	sid := seedSession(t, st, "claude-fallback-system-first")
 
 	iters := `"iterations":[{"input_tokens":900,"output_tokens":6,"cache_read_input_tokens":3200,"cache_creation_input_tokens":1500,"type":"message","model":"claude-fable-5"},{"input_tokens":900,"output_tokens":260,"cache_read_input_tokens":5000,"cache_creation_input_tokens":0,"type":"fallback_message","model":"claude-opus-4-8"}]`
-	// First chunk: only the system entry, so its row inserts before the assistant side exists.
+	// First chunk: only the system entry, so its rebuild sees no assistant side at all.
 	systemLine := `{"type":"system","subtype":"model_refusal_fallback","trigger":"refusal","originalModel":"claude-fable-5","fallbackModel":"claude-opus-4-8","requestId":"req_sf","apiRefusalCategory":"reasoning_extraction","apiRefusalExplanation":null,"timestamp":"2024-01-01T10:00:20Z"}` + "\n"
 	if _, err := st.AppendChunk(ctx, sid, 0, []byte(systemLine)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Advance(ctx, st, sid, "claude"); err != nil {
-		t.Fatalf("advance system: %v", err)
+	if err := Rebuild(ctx, st, sid, "claude"); err != nil {
+		t.Fatalf("rebuild after system chunk: %v", err)
 	}
 
-	// After the system-only advance the row exists with the refusal fields but no ordinal.
+	// After the system-only rebuild the row exists with the refusal fields but no ordinal.
 	var rows, count int
 	if err := st.Pool.QueryRow(ctx, "SELECT count(*) FROM model_fallbacks WHERE session_id=$1", sid).Scan(&rows); err != nil {
 		t.Fatal(err)
@@ -839,8 +913,8 @@ func TestClaudeModelFallbackSystemFirstMerge(t *testing.T) {
 	if _, err := st.AppendChunk(ctx, sid, int64(len(systemLine)), []byte(assistant)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Advance(ctx, st, sid, "claude"); err != nil {
-		t.Fatalf("advance assistant: %v", err)
+	if err := Rebuild(ctx, st, sid, "claude"); err != nil {
+		t.Fatalf("rebuild after assistant chunk: %v", err)
 	}
 
 	// Still one row, still count 1, now carrying both sides' fields.
@@ -881,7 +955,7 @@ func TestCostIncompleteForUnknownModel(t *testing.T) {
 	if _, err := st.AppendChunk(ctx, sid, 0, []byte(raw)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Advance(ctx, st, sid, "claude"); err != nil {
+	if err := Rebuild(ctx, st, sid, "claude"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -974,19 +1048,18 @@ func TestClaudeDuplicateUsageCountedOnce(t *testing.T) {
 		}
 	}
 
-	// The live incremental path folds the deduped set.
-	if _, err := Advance(ctx, st, sid, "claude"); err != nil {
-		t.Fatalf("advance: %v", err)
+	if err := Rebuild(ctx, st, sid, "claude"); err != nil {
+		t.Fatalf("rebuild: %v", err)
 	}
-	assertRollupsMatchLedger(t, "after advance")
+	assertRollupsMatchLedger(t, "after rebuild")
 
-	// Reparse is the remediation for already-ingested data: it zeroes the rollups
-	// and replays the stored raw through the same fixed fold, so it must land the
-	// same deduped totals rather than re-inflating them.
-	if _, err := Reparse(ctx, st, sid, "claude"); err != nil {
-		t.Fatalf("reparse: %v", err)
+	// A repeat rebuild clears the rows and replays the stored raw through the
+	// same fold, so it must land the same deduped totals rather than re-inflating
+	// them.
+	if err := Rebuild(ctx, st, sid, "claude"); err != nil {
+		t.Fatalf("repeat rebuild: %v", err)
 	}
-	assertRollupsMatchLedger(t, "after reparse")
+	assertRollupsMatchLedger(t, "after repeat rebuild")
 }
 
 // TestFallbackDeclinedProjectionGating pins toProjectionDelta's nullable mapping: an op that

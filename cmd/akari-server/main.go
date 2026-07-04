@@ -19,7 +19,6 @@ import (
 	"github.com/jssblck/akari/internal/config"
 	"github.com/jssblck/akari/internal/server/httpapi"
 	"github.com/jssblck/akari/internal/server/parse"
-	"github.com/jssblck/akari/internal/server/reparse"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/shutdown"
 	"github.com/jssblck/akari/internal/version"
@@ -100,24 +99,25 @@ func run() error {
 	}
 	log.Printf("migrations applied")
 
-	// Self-healing reparse. Parser behavior lives in the binary, so a parser change
-	// reaches already-ingested data only by replaying the stored raw bytes through
-	// the new reducer. The signal is parse.Epoch (a compiled-in constant) compared
-	// against the epoch the corpus was last reparsed under: when they differ, a fresh
-	// binary rebuilds the projection in the background, with no manual CLI step and no
-	// schema migration required (parser changes often ship without one). The service
-	// is shared by the startup auto-run here, the admin Reparse button, and the CLI,
-	// and an advisory lock keeps multiple instances from reparsing at once. Wait for
-	// any in-flight reparse to wind down on shutdown, before the pool closes; it is
-	// registered after the deferred st.Close so it runs first (LIFO).
-	reparser := reparse.New(rootCtx, st)
-	defer reparser.Wait()
-	if epoch, err := st.ReparsedEpoch(rootCtx); err != nil {
-		log.Printf("reparse: could not read epoch, skipping auto-reparse: %v", err)
-	} else if epoch != parse.Epoch {
-		log.Printf("reparse: parser epoch %d != stored %d, reparsing in the background", parse.Epoch, epoch)
-		reparser.Trigger(reparse.Options{})
-	}
+	// The parse worker owns every projection write: it rebuilds a session from its
+	// raw bytes whenever the session is due (bytes ahead of the last rebuild, or a
+	// parser epoch behind the binary's). Parser behavior lives in the binary, so a
+	// parser change reaches already-ingested data with no manual step and no schema
+	// migration: each session's row is stamped with the epoch it was last rebuilt
+	// under, and the worker's initial drain picks up everything a bumped parse.Epoch
+	// left behind. The store needs the binary's epoch too, to gate cross-session
+	// reads while another instance drains a fleet rebuild this process cannot see.
+	st.SetParserEpoch(parse.Epoch)
+	worker := parse.NewWorker(st, cfg.ParseWorkers, cfg.SignalsSettleInterval)
+	// httpapi.New installs the worker's SSE hooks, so it must run before the
+	// worker's first drain can fire them; Run starts further down, right before
+	// the server begins listening.
+	handler := httpapi.New(st, cfg, worker).Routes()
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		worker.Run(rootCtx)
+	}()
 
 	// Reclaim orphaned CAS blobs in the background. Deleting a session or
 	// re-parsing can leave blobs unreferenced; a periodic sweep keeps the store
@@ -146,43 +146,6 @@ func run() error {
 	} else {
 		close(ogDone)
 	}
-	// Materialize per-session signals for settled sessions on the same footing as the
-	// sweep. The ingest append path deliberately leaves signals uncomputed (see
-	// AdvanceProjection) so ingest stays linear and a live session is never graded with a
-	// time-dependent outcome; this loop fills the grade in once a session has been idle
-	// past the abandoned threshold. settleDone lets shutdown wait for an in-flight pass
-	// before the pool closes.
-	settleDone := make(chan struct{})
-	if cfg.SignalsSettleInterval > 0 {
-		go func() {
-			defer close(settleDone)
-			runSettleMaintenance(rootCtx, st, cfg.SignalsSettleInterval)
-		}()
-	} else {
-		close(settleDone)
-	}
-
-	// Backfill the per-session cache-savings rollup for any session the parse-time fold never
-	// reached: a session ingested before the column existed whose reparse fails keeps its
-	// usage_events but a zero rollup, which the epoch reparse cannot fix. The saving is a pure
-	// function of usage_events, so this prices it directly, independent of the parse. This
-	// startup pass is a self-limiting, idempotent one-shot (not a loop), run in the background so
-	// a large first pass does not delay accepting connections; backfillDone lets shutdown wait for
-	// it. It is the fast initial catch-up only: runSettleMaintenance re-runs the same drain each
-	// tick, which is what consumes candidates minted after this pass (a pricing rolling deploy
-	// keeps producing them), so a session is never left provisional once the settle loop is on.
-	backfillDone := make(chan struct{})
-	go func() {
-		defer close(backfillDone)
-		if n, err := st.BackfillCacheSavings(rootCtx); err != nil {
-			if !errors.Is(err, context.Canceled) {
-				log.Printf("cache-savings backfill: %v", err)
-			}
-		} else if n > 0 {
-			log.Printf("cache-savings backfill: priced %d session(s)", n)
-		}
-	}()
-
 	// Registered after st.Close so LIFO runs it first: cancel the background loops
 	// and wait for them to finish before the pool closes, on every return path
 	// (including an early ListenAndServe error). Receiving from an already-closed
@@ -191,13 +154,12 @@ func run() error {
 		stop()
 		<-sweepDone
 		<-ogDone
-		<-settleDone
-		<-backfillDone
+		<-workerDone
 	}()
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           httpapi.New(st, cfg, reparser).Routes(),
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		// These are absolute deadlines sized for the small, fast requests that make
 		// up almost all traffic. The two large-body routes (chunk uploads up to
@@ -223,8 +185,7 @@ func run() error {
 		}
 		<-sweepDone
 		<-ogDone
-		<-settleDone
-		<-backfillDone
+		<-workerDone
 		close(idleClosed)
 	}()
 
@@ -235,7 +196,9 @@ func run() error {
 		log.Printf("overview preview cache cleanup every %s", cfg.OGCleanupInterval)
 	}
 	if cfg.SignalsSettleInterval > 0 {
-		log.Printf("signals settle pass every %s", cfg.SignalsSettleInterval)
+		log.Printf("parse worker maintenance tick every %s (%d rebuild worker(s))", cfg.SignalsSettleInterval, cfg.ParseWorkers)
+	} else {
+		log.Printf("parse worker maintenance tick disabled (%d rebuild worker(s), wake-driven only)", cfg.ParseWorkers)
 	}
 	log.Printf("akari-server listening on %s", cfg.Listen)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

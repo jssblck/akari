@@ -8,14 +8,13 @@ import (
 	"github.com/jssblck/akari/internal/server/storetest"
 )
 
-// TestApplyDeltaDuplicateCallUIDBackPatchesEveryCopy exercises a call_uid collision
-// that lands inside one delta (one transaction), which the cross-region parse test
-// cannot reach: there the first occurrence is already committed when the duplicate
-// arrives, here both rows insert under the same ApplyProjectionDelta. With the
+// TestApplyDeltaDuplicateCallUIDBackPatchesEveryCopy exercises a call_uid collision:
+// a resumed or compacted transcript replays a prior turn verbatim, so the same
+// call_uid legitimately rides two rows in one whole-session delta. With the
 // (session_id, call_uid) index non-unique (migration 0010) both rows keep the id and
-// the back-patch UPDATE ... WHERE call_uid = $1 stamps the result onto each, so every
-// visible copy of a replayed turn carries its result. A third call carries no id at
-// all, which stays NULL and unpatched.
+// the fold's result patching stamps the result onto each still-unresolved copy, so
+// every visible copy of a replayed turn carries its result. A third call carries no
+// id at all, which stays NULL and unpatched.
 func TestApplyDeltaDuplicateCallUIDBackPatchesEveryCopy(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -49,11 +48,9 @@ func TestApplyDeltaDuplicateCallUIDBackPatchesEveryCopy(t *testing.T) {
 			{CallUID: "dup", Body: string(body), Bytes: int64(len(body)), MediaType: "text/plain", Status: "ok"},
 		},
 	}
-	// The whole delta applies in one transaction; the duplicate id no longer aborts
-	// on the index.
-	if err := st.ApplyProjectionDelta(ctx, sid, delta); err != nil {
-		t.Fatalf("apply delta: %v", err)
-	}
+	// The whole delta rebuilds in one transaction; the duplicate id no longer
+	// aborts on the index.
+	rebuildWith(t, st, sid, delta)
 
 	// All three calls persist; both "dup" rows keep the id, the unkeyed call is NULL.
 	var total, withUID, nulls int
@@ -126,15 +123,13 @@ func TestDuplicateCallUIDCountGroups(t *testing.T) {
 	}
 
 	unique := seedSession(t, st, u.ID, projectID, "sess-calluid-unique")
-	if err := st.ApplyProjectionDelta(ctx, unique, store.ProjectionDelta{
+	rebuildWith(t, st, unique, store.ProjectionDelta{
 		Messages: []store.MessageDelta{{Ordinal: 0, Role: "assistant", HasToolUse: true}},
 		ToolCalls: []store.ProjToolCall{
 			{MessageOrdinal: 0, CallIndex: 0, ToolName: "Read", CallUID: "a"},
 			{MessageOrdinal: 0, CallIndex: 1, ToolName: "Bash", CallUID: "b"},
 		},
-	}); err != nil {
-		t.Fatalf("apply unique delta: %v", err)
-	}
+	})
 	if dups, err := st.DuplicateCallUIDCount(ctx, unique); err != nil || dups != 0 {
 		t.Fatalf("DuplicateCallUIDCount(unique) = %d, err=%v; want 0", dups, err)
 	}
@@ -142,7 +137,7 @@ func TestDuplicateCallUIDCountGroups(t *testing.T) {
 	// Two ids each repeated, one distinct, plus an unkeyed call: the count is the two
 	// colliding ids, not the row total and not the distinct call.
 	multi := seedSession(t, st, u.ID, projectID, "sess-calluid-multi")
-	if err := st.ApplyProjectionDelta(ctx, multi, store.ProjectionDelta{
+	rebuildWith(t, st, multi, store.ProjectionDelta{
 		Messages: []store.MessageDelta{
 			{Ordinal: 0, Role: "assistant", HasToolUse: true},
 			{Ordinal: 1, Role: "assistant", HasToolUse: true},
@@ -155,18 +150,18 @@ func TestDuplicateCallUIDCountGroups(t *testing.T) {
 			{MessageOrdinal: 1, CallIndex: 1, ToolName: "Read", CallUID: "y"},
 			{MessageOrdinal: 1, CallIndex: 2, ToolName: "Bash", CallUID: ""},
 		},
-	}); err != nil {
-		t.Fatalf("apply multi delta: %v", err)
-	}
+	})
 	if dups, err := st.DuplicateCallUIDCount(ctx, multi); err != nil || dups != 2 {
 		t.Fatalf("DuplicateCallUIDCount(multi) = %d, err=%v; want 2", dups, err)
 	}
 }
 
-// TestBackPatchSkipsAlreadyResolvedCopies confirms the result_status IS NULL guard:
-// once a duplicated call's copies carry a result, a second tool_result for the same
-// id (a replay re-delivering it) does not overwrite them. A copy that is still
-// pending when the replay arrives is the only thing the second result resolves.
+// TestBackPatchSkipsAlreadyResolvedCopies confirms the first-result-wins guard
+// in the whole-session fold: the first result for a duplicated call id resolves
+// every copy of that call (a replayed call is the same call, so its copies share
+// the result), and a later result for the same id, the replay re-delivering what
+// already resolved, is dropped entirely. It must not overwrite the resolved rows
+// and must not write a stray blob nothing references.
 func TestBackPatchSkipsAlreadyResolvedCopies(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -182,57 +177,50 @@ func TestBackPatchSkipsAlreadyResolvedCopies(t *testing.T) {
 	}
 	sid := seedSession(t, st, u.ID, projectID, "sess-calluid-replay")
 
+	// A resumed or compacted transcript logs the same call id more than once and
+	// reports its result twice too: three copies of call "dup" and, in arrival
+	// order, its result twice. The bodies differ here only so the assertions can
+	// tell which one landed; in a real replay they are identical.
 	first := []byte("first result")
-	// Region 1: two copies of call "dup" and its result. Both resolve to "first".
-	if err := st.ApplyProjectionDelta(ctx, sid, store.ProjectionDelta{
+	second := []byte("second result, longer")
+	rebuildWith(t, st, sid, store.ProjectionDelta{
 		Messages: []store.MessageDelta{
 			{Ordinal: 0, Role: "assistant", HasToolUse: true},
 			{Ordinal: 1, Role: "assistant", HasToolUse: true},
+			{Ordinal: 2, Role: "assistant", HasToolUse: true},
 		},
 		ToolCalls: []store.ProjToolCall{
 			{MessageOrdinal: 0, CallIndex: 0, ToolName: "Read", CallUID: "dup"},
 			{MessageOrdinal: 1, CallIndex: 0, ToolName: "Read", CallUID: "dup"},
-		},
-		ToolResults: []store.ToolResultDelta{
-			{CallUID: "dup", Body: string(first), Bytes: int64(len(first)), MediaType: "text/plain", Status: "ok"},
-		},
-	}); err != nil {
-		t.Fatalf("apply region 1: %v", err)
-	}
-
-	// Region 2: the replay re-delivers the same id with a different body and a third,
-	// still-pending copy. The guard must skip the two resolved rows (keeping "first")
-	// and resolve only the new pending copy.
-	second := []byte("second result, longer")
-	if err := st.ApplyProjectionDelta(ctx, sid, store.ProjectionDelta{
-		Messages: []store.MessageDelta{{Ordinal: 2, Role: "assistant", HasToolUse: true}},
-		ToolCalls: []store.ProjToolCall{
 			{MessageOrdinal: 2, CallIndex: 0, ToolName: "Read", CallUID: "dup"},
 		},
 		ToolResults: []store.ToolResultDelta{
+			{CallUID: "dup", Body: string(first), Bytes: int64(len(first)), MediaType: "text/plain", Status: "ok"},
 			{CallUID: "dup", Body: string(second), Bytes: int64(len(second)), MediaType: "text/plain", Status: "ok"},
 		},
-	}); err != nil {
-		t.Fatalf("apply region 2: %v", err)
+	})
+
+	// All three copies carry the first result; the replayed result touched nothing.
+	var keptFirst, keptSecond int
+	if err := st.Pool.QueryRow(ctx,
+		`SELECT count(*) FILTER (WHERE result_bytes = $2),
+		        count(*) FILTER (WHERE result_bytes = $3)
+		   FROM tool_calls WHERE session_id = $1`,
+		sid, int64(len(first)), int64(len(second))).Scan(&keptFirst, &keptSecond); err != nil {
+		t.Fatal(err)
+	}
+	if keptFirst != 3 || keptSecond != 0 {
+		t.Fatalf("rows carrying first/second result = %d/%d, want 3/0 (the first result resolves every copy; the replay overwrites none)", keptFirst, keptSecond)
 	}
 
-	// The two original copies keep "first"; the new copy resolves to "second".
-	var keptFirst int
+	// The dropped replay stored no blob: with every copy already resolved there is
+	// nothing to reference its body, so writing it would orphan bytes in the CAS.
+	var strayBlobs int
 	if err := st.Pool.QueryRow(ctx,
-		`SELECT count(*) FROM tool_calls
-		   WHERE session_id=$1 AND result_bytes=$2`, sid, int64(len(first))).Scan(&keptFirst); err != nil {
+		`SELECT count(*) FROM blobs WHERE sha256 = $1`, store.HashBytes(second)).Scan(&strayBlobs); err != nil {
 		t.Fatal(err)
 	}
-	if keptFirst != 2 {
-		t.Fatalf("rows still carrying the first result = %d, want 2 (replay must not overwrite resolved rows)", keptFirst)
-	}
-	var newOrd int
-	if err := st.Pool.QueryRow(ctx,
-		`SELECT message_ordinal FROM tool_calls
-		   WHERE session_id=$1 AND result_bytes=$2`, sid, int64(len(second))).Scan(&newOrd); err != nil {
-		t.Fatal(err)
-	}
-	if newOrd != 2 {
-		t.Fatalf("the second result landed on ordinal %d, want 2 (the only pending copy)", newOrd)
+	if strayBlobs != 0 {
+		t.Fatalf("the dropped replay result left %d blob(s) in the CAS, want 0", strayBlobs)
 	}
 }

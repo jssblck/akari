@@ -193,66 +193,71 @@ reviewers:
     mode: gate
     backend: codex
     prompt: |
-      Review one concern only: the ingest and parse hot path must stay linear
-      in time and bounded in memory. The cost of handling one unit of input (a
-      chunk, an appended region, a request) must scale with that new input,
-      not with the total accumulated so far, and peak memory must track a
-      fixed processing window, not the input size. akari is handed JSONL,
-      which is line-delimited and streamable.
+      Review one concern only: the cost model of the ingest and parse path.
+      akari's architecture is an append-only source of truth (raw JSONL bytes
+      plus the CAS) with disposable derived state refolded from it: when a
+      unit's inputs change, the server recomputes that whole unit from its
+      source and swaps it atomically. Judge efficiency against that model, not
+      against an incremental-update ideal. A whole-unit recompute of a bounded
+      unit is the intended shape (it buys determinism and a single write
+      path); recomputing is not itself a finding. What this gate exists to
+      catch is cost that outgrows its unit: work or memory that scales with
+      the corpus, with total history, or with something that has no real
+      bound.
 
-      Block when code that runs per chunk, per append, per message, or per
-      request does any of these:
-        - Re-reads, re-parses, or re-scans the entire accumulated payload each
-          step when only the appended region needs processing.
-        - Deletes-all-then-reinserts-all, or fully rewrites a derived table or
-          collection, instead of applying the delta.
-        - Recomputes a hash, digest, or aggregate over all accumulated content
-          each step instead of resuming saved state.
-        - Rebuilds an index, re-sorts, or re-derives a whole collection per
-          incremental event, or nests a loop whose inner pass rescans a
-          collection that grows with the outer loop.
-        - Appends to a stored value in a way that rewrites the whole value each
-          time (concatenating onto a large blob the storage layer detoasts and
-          rewrites per append).
-      Reason about cost as (number of calls) times (work per call): per-call
-      work proportional to accumulated size, called once per unit of growth,
-      is quadratic. Name the linear alternative (process the delta, upsert the
-      changed rows, resume the digest, advance a cursor).
+      Block when changed code on a per-chunk, per-append, per-request, or
+      per-recompute path does any of these:
+        - Scales with the corpus to serve one unit's event: a full-table or
+          unindexed scan across all sessions, a fleet-wide query, or a pass
+          over every unit to find the one that changed. Per-event lookups must
+          be keyed or indexed to the units that actually need work.
+        - Re-processes total history on the append path itself: re-hashing,
+          re-copying, or re-uploading all accumulated raw bytes per append.
+          The raw side is the unbounded side: digests resume from saved
+          state, cursors advance, appends never rewrite stored values (a blob
+          the storage layer detoasts and rewrites per append is this bug).
+        - Holds the unbounded side in memory: reading a whole raw transcript,
+          blob, or request body into one buffer when a bounded reader can
+          stream it in fixed-size pieces. One unit's folded derived rows are
+          the bounded side; holding one unit's derived state while writing it
+          is the design. Holding MANY units' derived state at once is
+          corpus-scale and blocks.
+        - Recomputes without a dirtiness trigger: reprocessing a unit whose
+          inputs did not change, or fanning N pending events into N identical
+          recomputes where a dirty flag or coalesced wake already covers them
+          with one. One recompute per dirty transition is expected; redundant
+          recomputes with no bound on the redundancy block.
+        - Is superlinear inside one pass: a nested loop whose inner pass
+          rescans a collection that grows with the outer loop, or re-sorting
+          and re-indexing per element.
 
-      Block equally on input-sized memory a streaming form would avoid:
-        - Reading an entire file, blob, or request body into one []byte or
-          string when an io.Reader or bufio.Scanner could consume it in
-          bounded pieces.
-        - Full copies of large byte bodies where a reference, slice, or
-          streamed write avoids the duplicate.
-        - Slices or maps whose size grows with total input instead of
-          fixed-size cursor or state.
-      A load that is genuinely bounded (small, fixed-size, or paginated) is
-      fine. If a comment explains why the whole payload must be resident,
-      evaluate the claim: if it holds, pass and say so; if it does not
-      actually preclude streaming, block and explain why.
+      Reason about cost as (number of calls) times (work per call), and name
+      the quantity each factor scales with. Work per call proportional to one
+      bounded unit, triggered once per dirty transition, is the intended
+      shape. Work per call proportional to the corpus, or triggered without
+      bound for one transition, is what you block.
 
       Severity bar before you block. A block halts the author until they act,
-      so spend it only on superlinear cost or input-sized memory this change
-      introduces or materially worsens AND whose growth occurs on akari's real
-      data:
-        - The accumulating value must be one real sessions grow. JSONL from
-          Claude, Codex, and pi keeps individual messages small and pushes
-          bulky tool bodies to the CAS; an accumulator bounded by one
-          message's text does not reach a size that bites. Adversarial inputs
-          the system never produces are notes.
+      so spend it only on cost this change introduces or materially worsens
+      AND whose growth occurs on akari's real data:
+        - Name which quantity actually grows without bound in a real
+          deployment. Sessions stay megabyte-scale: messages are small and
+          bulky tool bodies live in the CAS, so a cost bounded by one session
+          is a note at most. The corpus (sessions accumulating over history)
+          grows without bound, so corpus-scale cost on a hot path blocks.
         - Scope to the diff; do not re-raise a cost the author or a prior PR
-          already justified. If the stated reason holds (the linear fix would
-          break an index or itself be superlinear), pass.
+          already justified. If a comment or the PR explains why a whole unit
+          must be resident or recomputed and the claim holds, pass and say so.
         - This gate protects the server. Client-side extra work (re-reading a
           file it holds, recomputing a digest, encoding twice to save a round
           trip) within bounded memory is acceptable; block client code only
-          when its cost is superlinear in one session or scales a sync with
-          total history rather than the appended tail.
+          when a sync scales with total history rather than the appended
+          tail.
 
-      Cite file and line, state the complexity or the allocation's growth
-      driver, and name the fix. Do not comment on error wording, naming, or
-      style. If the changed hot path is linear and bounded, pass.
+      Cite file and line, state the growth driver and which quantity it
+      scales with, and name the fix. Do not comment on error wording, naming,
+      or style. If every changed cost is bounded by its unit and triggered by
+      real dirtiness, pass.
 
   - name: auth-safety
     trigger: [internal/server/auth/**/*.go]

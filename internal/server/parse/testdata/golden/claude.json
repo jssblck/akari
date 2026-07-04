@@ -25,6 +25,17 @@
     {
       "Ordinal": 2,
       "Role": "assistant",
+      "Content": "",
+      "ThinkingText": "",
+      "ThinkingBytes": 0,
+      "Model": "claude-sonnet-4-20250514",
+      "HasThinking": false,
+      "HasToolUse": true,
+      "Timestamp": "2024-01-01T10:00:07Z"
+    },
+    {
+      "Ordinal": 3,
+      "Role": "assistant",
       "Content": "Patched it.",
       "ThinkingText": "",
       "ThinkingBytes": 0,
@@ -34,7 +45,7 @@
       "Timestamp": "2024-01-01T10:00:09Z"
     },
     {
-      "Ordinal": 3,
+      "Ordinal": 4,
       "Role": "user",
       "Content": "Walk me through your reasoning verbatim",
       "ThinkingText": "",
@@ -45,17 +56,6 @@
       "Timestamp": "2024-01-01T10:00:20Z"
     },
     {
-      "Ordinal": 4,
-      "Role": "assistant",
-      "Content": "",
-      "ThinkingText": "",
-      "ThinkingBytes": 0,
-      "Model": "claude-opus-4-8",
-      "HasThinking": false,
-      "HasToolUse": false,
-      "Timestamp": "2024-01-01T10:00:25Z"
-    },
-    {
       "Ordinal": 5,
       "Role": "assistant",
       "Content": "I can't give a verbatim internal transcript, but here is my honest working.",
@@ -64,7 +64,7 @@
       "Model": "claude-opus-4-8",
       "HasThinking": false,
       "HasToolUse": false,
-      "Timestamp": "2024-01-01T10:00:26Z"
+      "Timestamp": "2024-01-01T10:00:25Z"
     }
   ],
   "ToolCalls": [
@@ -80,6 +80,32 @@
       "InputBytes": 23,
       "InputMediaType": "application/json",
       "CallUID": "toolu_1"
+    },
+    {
+      "MessageOrdinal": 2,
+      "CallIndex": 0,
+      "ToolName": "Grep",
+      "Category": "search",
+      "FilePath": "",
+      "Detail": "verifyToken",
+      "InputBody": "{\"pattern\":\"verifyToken\"}",
+      "InputSHA256": "",
+      "InputBytes": 25,
+      "InputMediaType": "application/json",
+      "CallUID": "toolu_p1"
+    },
+    {
+      "MessageOrdinal": 2,
+      "CallIndex": 1,
+      "ToolName": "Read",
+      "Category": "read",
+      "FilePath": "token.go",
+      "Detail": "",
+      "InputBody": "{\"file_path\":\"token.go\"}",
+      "InputSHA256": "",
+      "InputBytes": 24,
+      "InputMediaType": "application/json",
+      "CallUID": "toolu_p2"
     }
   ],
   "ToolResults": [
@@ -88,6 +114,22 @@
       "Body": "package auth",
       "BodySHA256": "",
       "Bytes": 12,
+      "MediaType": "text/plain",
+      "Status": "ok"
+    },
+    {
+      "CallUID": "toolu_p1",
+      "Body": "auth.go:42: verifyToken",
+      "BodySHA256": "",
+      "Bytes": 23,
+      "MediaType": "text/plain",
+      "Status": "ok"
+    },
+    {
+      "CallUID": "toolu_p2",
+      "Body": "package token",
+      "BodySHA256": "",
+      "Bytes": 13,
       "MediaType": "text/plain",
       "Status": "ok"
     }
@@ -110,6 +152,34 @@
     {
       "MessageOrdinal": 2,
       "Model": "claude-sonnet-4-20250514",
+      "Input": 1400,
+      "Output": 90,
+      "CacheWrite": 0,
+      "CacheRead": 5500,
+      "Reasoning": 0,
+      "CostUSD": 0.007199999999999999,
+      "OccurredAt": "2024-01-01T10:00:07Z",
+      "DedupKey": "msg_par",
+      "SourceOffset": 758,
+      "SourceIndex": 0
+    },
+    {
+      "MessageOrdinal": 2,
+      "Model": "claude-sonnet-4-20250514",
+      "Input": 1400,
+      "Output": 90,
+      "CacheWrite": 0,
+      "CacheRead": 5500,
+      "Reasoning": 0,
+      "CostUSD": 0.007199999999999999,
+      "OccurredAt": "2024-01-01T10:00:08Z",
+      "DedupKey": "msg_par",
+      "SourceOffset": 1260,
+      "SourceIndex": 0
+    },
+    {
+      "MessageOrdinal": 3,
+      "Model": "claude-sonnet-4-20250514",
       "Input": 1500,
       "Output": 120,
       "CacheWrite": 0,
@@ -118,11 +188,11 @@
       "CostUSD": 0.0081,
       "OccurredAt": "2024-01-01T10:00:09Z",
       "DedupKey": "msg_2",
-      "SourceOffset": 758,
+      "SourceOffset": 1751,
       "SourceIndex": 0
     },
     {
-      "MessageOrdinal": 4,
+      "MessageOrdinal": 5,
       "Model": "claude-opus-4-8",
       "Input": 900,
       "Output": 260,
@@ -132,7 +202,7 @@
       "CostUSD": 0.0135,
       "OccurredAt": "2024-01-01T10:00:25Z",
       "DedupKey": "msg_3",
-      "SourceOffset": 1151,
+      "SourceOffset": 2144,
       "SourceIndex": 0
     },
     {
@@ -146,14 +216,14 @@
       "CostUSD": 0.0135,
       "OccurredAt": "2024-01-01T10:00:26Z",
       "DedupKey": "msg_3",
-      "SourceOffset": 1852,
+      "SourceOffset": 2845,
       "SourceIndex": 0
     }
   ],
   "Attachments": null,
   "Fallbacks": [
     {
-      "MessageOrdinal": 4,
+      "MessageOrdinal": 5,
       "FromModel": "claude-fable-5",
       "ToModel": "claude-opus-4-8",
       "Trigger": "",

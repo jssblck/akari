@@ -34,9 +34,7 @@ func seedToolSession(t *testing.T, st *store.Store, userID, projectID int64, sou
 			MediaType: "text/plain", Status: "ok",
 		}},
 	}
-	if err := st.ApplyProjectionDelta(ctx, ann.SessionID, delta); err != nil {
-		t.Fatalf("apply projection %s: %v", source, err)
-	}
+	rebuildWith(t, st, ann.SessionID, delta)
 	return ann.SessionID, store.HashBytes(body)
 }
 

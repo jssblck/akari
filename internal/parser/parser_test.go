@@ -386,12 +386,15 @@ func TestParseClaudeFallbackFromBlockAndIterations(t *testing.T) {
 			t.Errorf("op %d should carry the ordinal of the message it rode", i)
 		}
 	}
-	// The first entry produced ordinal 0, the second ordinal 1, and each op ties to its own.
-	if got := *s.Fallbacks[0].MessageOrdinal; got != 0 {
-		t.Errorf("op 0 ordinal = %d, want 0", got)
+	// The two entries share one message id, so they fold into one turn and both
+	// ops tie to that turn's ordinal.
+	for i, f := range s.Fallbacks {
+		if got := *f.MessageOrdinal; got != 0 {
+			t.Errorf("op %d ordinal = %d, want 0 (both entries fold into one turn)", i, got)
+		}
 	}
-	if got := *s.Fallbacks[1].MessageOrdinal; got != 1 {
-		t.Errorf("op 1 ordinal = %d, want 1", got)
+	if len(s.Messages) != 1 {
+		t.Errorf("messages = %d, want 1 (the split entries fold by message id)", len(s.Messages))
 	}
 }
 

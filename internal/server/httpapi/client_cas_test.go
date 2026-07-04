@@ -78,7 +78,7 @@ func casTarget(path string) upload.Target {
 // back byte for byte. It is the end-to-end equivalent of the parser round-trip.
 func TestClientCASRoundTrip(t *testing.T) {
 	t.Parallel()
-	srv, st := newTestServer(t)
+	srv, st, worker := newTestServerWithReparse(t)
 	c, ownerID := ingestClient(t, srv.URL, st)
 	ctx := context.Background()
 
@@ -96,6 +96,9 @@ func TestClientCASRoundTrip(t *testing.T) {
 	if out.Action != upload.ActionUploaded {
 		t.Fatalf("action = %s, want uploaded", out.Action)
 	}
+	// The chunk handler only appends raw bytes and wakes the worker; drain it so the
+	// upload actually parses into the tool_calls row this test inspects.
+	worker.Drain(ctx)
 
 	// The stored transcript is the TRANSFORMED one: smaller than the original and
 	// carrying no inline body.
@@ -223,7 +226,7 @@ func TestClientCASDedupOnResync(t *testing.T) {
 // tiny (a sentinel) and the body streams to the CAS as its own upload.
 func TestClientCASBigBody(t *testing.T) {
 	t.Parallel()
-	srv, st := newTestServer(t)
+	srv, st, worker := newTestServerWithReparse(t)
 	c, ownerID := ingestClient(t, srv.URL, st)
 	ctx := context.Background()
 
@@ -243,6 +246,9 @@ func TestClientCASBigBody(t *testing.T) {
 	if out.Action != upload.ActionUploaded {
 		t.Fatalf("action = %s, want uploaded", out.Action)
 	}
+	// The chunk handler only appends raw bytes and wakes the worker; drain it so the
+	// upload actually parses into the tool_calls row this test inspects.
+	worker.Drain(ctx)
 
 	sid := sessionID(t, st, ownerID)
 	stored := storedRaw(t, st, sid)
@@ -294,7 +300,7 @@ func TestClientCASBigBody(t *testing.T) {
 // server's cursor and lands the same final transcript and references.
 func TestClientCASResume(t *testing.T) {
 	t.Parallel()
-	srv, st := newTestServer(t)
+	srv, st, worker := newTestServerWithReparse(t)
 	c, ownerID := ingestClient(t, srv.URL, st)
 	ctx := context.Background()
 
@@ -319,6 +325,9 @@ func TestClientCASResume(t *testing.T) {
 	if out.Action != upload.ActionUploaded {
 		t.Fatalf("resume action = %s, want uploaded (not reset)", out.Action)
 	}
+	// The chunk handler only appends raw bytes and wakes the worker; drain it so the
+	// resumed upload actually parses into the tool_calls row this test inspects.
+	worker.Drain(ctx)
 
 	sid := sessionID(t, st, ownerID)
 	stored := storedRaw(t, st, sid)
@@ -344,7 +353,7 @@ func TestClientCASResume(t *testing.T) {
 // server itself never (de)compresses on either path.
 func TestBlobServeContentEncoding(t *testing.T) {
 	t.Parallel()
-	srv, st := newTestServer(t)
+	srv, st, worker := newTestServerWithReparse(t)
 	c, ownerID := ingestClient(t, srv.URL, st)
 	ctx := context.Background()
 
@@ -358,6 +367,9 @@ func TestBlobServeContentEncoding(t *testing.T) {
 	if _, err := c.SyncFile(ctx, casTarget(writeSession(t, content))); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
+	// The chunk handler only appends raw bytes and wakes the worker; drain it so the
+	// upload actually parses into the tool_calls row this test inspects.
+	worker.Drain(ctx)
 
 	sid := sessionID(t, st, ownerID)
 	var inputSHA, resultSHA string
@@ -434,7 +446,7 @@ func TestBlobServeContentEncoding(t *testing.T) {
 // lifted images once the browser holds them.
 func TestBlobETagConditional(t *testing.T) {
 	t.Parallel()
-	srv, st := newTestServer(t)
+	srv, st, worker := newTestServerWithReparse(t)
 	c, ownerID := ingestClient(t, srv.URL, st)
 	ctx := context.Background()
 
@@ -444,6 +456,9 @@ func TestBlobETagConditional(t *testing.T) {
 	if _, err := c.SyncFile(ctx, casTarget(writeSession(t, content))); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
+	// The chunk handler only appends raw bytes and wakes the worker; drain it so the
+	// upload actually parses into the tool_calls row this test inspects.
+	worker.Drain(ctx)
 
 	sid := sessionID(t, st, ownerID)
 	var inputSHA string

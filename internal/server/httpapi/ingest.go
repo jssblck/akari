@@ -3,12 +3,10 @@ package httpapi
 import (
 	"errors"
 	"io"
-	"log"
 	"net/http"
 	"strconv"
 	"strings"
 
-	"github.com/jssblck/akari/internal/server/parse"
 	"github.com/jssblck/akari/internal/server/store"
 )
 
@@ -102,6 +100,12 @@ func (s *Server) handleAnnounce(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "announce session")
 		return
 	}
+	// A fresh announce creates a session_raw row at parser_epoch 0, which is due
+	// (the rebuild stamps the epoch even over zero bytes). Chunks normally follow
+	// and their wakes cover it, but an announce that no chunk ever follows (a
+	// client that dies, a transcript with nothing to upload yet) must not depend
+	// on the maintenance tick, which can be disabled, to leave the due set.
+	s.worker.Wake()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"session_id":    res.SessionID,
 		"stored_bytes":  res.StoredBytes,
@@ -110,7 +114,7 @@ func (s *Server) handleAnnounce(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleChunk(w http.ResponseWriter, r *http.Request) {
-	sessionID, agent, ok := s.ownedSession(w, r)
+	sessionID, _, ok := s.ownedSession(w, r)
 	if !ok {
 		return
 	}
@@ -146,17 +150,14 @@ func (s *Server) handleChunk(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "append chunk")
 		return
 	}
-	// Parse the newly appended bytes into the projection. The raw bytes are
-	// already committed, so a parse failure (including a parser-version change
-	// awaiting a reparse) does not fail the upload: it is logged and the cursor is
-	// left for the next chunk or a reparse to advance.
-	msgCount, perr := parse.Advance(r.Context(), s.Store, sessionID, agent)
-	if perr != nil {
-		log.Printf("parse session %d (%s): %v", sessionID, agent, perr)
-	}
-	// Wake any browsers watching this session so they re-fetch the body.
-	s.hub.publish(sessionID)
-	writeJSON(w, http.StatusOK, map[string]any{"stored_bytes": stored, "message_count": msgCount})
+	// The raw bytes are committed; parsing is the worker's job. The append itself
+	// marked the session due (byte_len moved past the last rebuilt length), so the
+	// wake buys latency, not correctness, and client ingest health never depends
+	// on parser correctness. The SSE publish to watching browsers happens when the
+	// rebuild commits (the worker's rebuilt hook), when there is actually a new
+	// projection to fetch.
+	s.worker.Wake()
+	writeJSON(w, http.StatusOK, map[string]any{"stored_bytes": stored})
 }
 
 // handleFinalize grades a terminal session immediately, rather than leaving it for
@@ -168,8 +169,12 @@ func (s *Server) handleChunk(w http.ResponseWriter, r *http.Request) {
 //
 // It is idempotent and safe to call on any owned session: a session that is not
 // terminal simply grades under the ordinary rules (unknown until it settles), and a
-// re-call recomputes the same row. The grade is derived from the projection already
-// committed by the preceding chunks, so no request body is read.
+// re-call recomputes the same row. No request body is read. When the last chunk's
+// rebuild has not landed yet (finalize races the parse worker), the refresh skips
+// rather than grading a projection that does not cover the bytes (see
+// store.RefreshSessionSignals); the pending rebuild then grades the terminal session
+// itself, in the same transaction that parses it, so the grade still lands without a
+// settle tick and without the client staying alive.
 func (s *Server) handleFinalize(w http.ResponseWriter, r *http.Request) {
 	sessionID, _, ok := s.ownedSession(w, r)
 	if !ok {
@@ -195,6 +200,12 @@ func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "reset session")
 		return
 	}
+	// The reset put the session back at parser_epoch 0 (due). The client usually
+	// re-uploads immediately and those chunk wakes cover it, but a reset that no
+	// chunk follows (a file truncated to zero) must drain without relying on the
+	// maintenance tick, or the session would sit epoch-stale and hold the fleet
+	// gate up.
+	s.worker.Wake()
 	writeJSON(w, http.StatusOK, map[string]any{"stored_bytes": 0})
 }
 

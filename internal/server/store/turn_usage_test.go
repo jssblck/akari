@@ -63,9 +63,7 @@ func TestMessagesTurnUsageFolds(t *testing.T) {
 			{MessageOrdinal: nil, Model: "gpt-5", Input: 999, Output: 999, CostUSD: cost(9.99), SourceOffset: 5, SourceIndex: 0},
 		},
 	}
-	if err := st.ApplyProjectionDelta(ctx, sid, delta); err != nil {
-		t.Fatalf("apply delta: %v", err)
-	}
+	rebuildWith(t, st, sid, delta)
 
 	msgs, err := st.Messages(ctx, sid)
 	if err != nil {
@@ -122,14 +120,12 @@ func TestMessagesTurnUsageUnpricedTurn(t *testing.T) {
 	sid := seedForReads(t, st)
 
 	ord := 0
-	if err := st.ApplyProjectionDelta(ctx, sid, store.ProjectionDelta{
+	rebuildWith(t, st, sid, store.ProjectionDelta{
 		Messages: []store.MessageDelta{{Ordinal: 0, Role: "assistant", Content: "a", Model: "mystery"}},
 		Usage: []store.ProjUsage{
 			{MessageOrdinal: &ord, Model: "mystery", Input: 100, Output: 50, CostUSD: nil, SourceOffset: 1, SourceIndex: 0},
 		},
-	}); err != nil {
-		t.Fatalf("apply delta: %v", err)
-	}
+	})
 	msgs, err := st.Messages(ctx, sid)
 	if err != nil {
 		t.Fatalf("read messages: %v", err)
@@ -153,14 +149,12 @@ func TestMessagesTurnUsageNullOrdinalInvisible(t *testing.T) {
 	sid := seedForReads(t, st)
 
 	cost := func(f float64) *float64 { return &f }
-	if err := st.ApplyProjectionDelta(ctx, sid, store.ProjectionDelta{
+	rebuildWith(t, st, sid, store.ProjectionDelta{
 		Messages: []store.MessageDelta{{Ordinal: 0, Role: "assistant", Content: "a", Model: "gpt-5"}},
 		Usage: []store.ProjUsage{
 			{MessageOrdinal: nil, Model: "gpt-5", Input: 999, Output: 999, CostUSD: cost(9.99), SourceOffset: 1, SourceIndex: 0},
 		},
-	}); err != nil {
-		t.Fatalf("apply delta: %v", err)
-	}
+	})
 	msgs, err := st.Messages(ctx, sid)
 	if err != nil {
 		t.Fatalf("read messages: %v", err)
@@ -202,9 +196,7 @@ func TestMessagesTurnUsageDivergesFromContextFold(t *testing.T) {
 			{MessageOrdinal: nil, Model: "gpt-5", CacheRead: 1000, CostUSD: nil, SourceOffset: 3, SourceIndex: 0},
 		},
 	}
-	if err := st.ApplyProjectionDelta(ctx, sid, delta); err != nil {
-		t.Fatalf("apply delta: %v", err)
-	}
+	rebuildWith(t, st, sid, delta)
 
 	// What the transcript folds: the two same-ordinal rows collapse into one turn's Usage, the
 	// NULL-ordinal row is dropped, so there is one message with usage and no second turn to shed
@@ -267,7 +259,7 @@ func TestMessagesDuplicatePromptMatchesStoredCount(t *testing.T) {
 	repeated := "please run the guarded rerun and refresh the golden snapshots thoroughly"
 	other := "now add a reconciliation test that pins the invariant against the analytics panel"
 	terse := "yes go"
-	if err := st.ApplyProjectionDelta(ctx, sid, store.ProjectionDelta{
+	rebuildWith(t, st, sid, store.ProjectionDelta{
 		Messages: []store.MessageDelta{
 			{Ordinal: 0, Role: "user", Content: repeated}, // original
 			{Ordinal: 1, Role: "assistant", Content: "ok"},
@@ -280,14 +272,13 @@ func TestMessagesDuplicatePromptMatchesStoredCount(t *testing.T) {
 			{Ordinal: 8, Role: "user", Content: terse}, // short, ineligible
 			{Ordinal: 9, Role: "user", Content: terse}, // short repeat, still ineligible
 		},
-	}); err != nil {
-		t.Fatalf("apply delta: %v", err)
-	}
-	// The settle pass needs the user-turn rollup and a settled session to grade and store the count.
+		// Backdate Ended so the rebuild settles and grades in-line, giving the settled session_signals
+		// row the stored duplicate_prompt_count this test checks against the transcript's own flags.
+		Ended: time.Now().Add(-time.Hour),
+	})
 	if _, err := st.Pool.Exec(ctx, `UPDATE sessions SET user_message_count = 5 WHERE id = $1`, sid); err != nil {
 		t.Fatalf("set user message count: %v", err)
 	}
-	settleSession(t, st, ctx, sid)
 	if _, err := st.RefreshSettledSignals(ctx); err != nil {
 		t.Fatalf("refresh settled signals: %v", err)
 	}
@@ -329,13 +320,13 @@ func TestMessagesDuplicatePromptMatchesStoredCount(t *testing.T) {
 
 // TestMessageTurnUsageMatchesUsageEvents pins the projection-consistency invariant for the
 // materialized per-turn rollup: message_turn_usage must equal, row for row, a fresh GROUP BY over
-// the surviving usage_events it summarizes. The rollup is accumulated at insert (projection.go) and
-// read by the transcript in place of that GROUP BY, so if the two ever drifted the transcript would
-// show a turn load the ledger does not back. It seeds a mixed corpus (a multi-chunk turn, a
-// priced+unpriced mixed turn, an all-unpriced turn, and a NULL-ordinal row that belongs to no turn)
-// and asserts the stored rollup matches the aggregate the old read computed, including the
-// all-unpriced-is-nil cost rule and the cost_incomplete flag, and that the NULL-ordinal row folded
-// into no rollup row.
+// the surviving usage_events it summarizes. The rollup is folded in memory from the surviving usage
+// rows on every rebuild and read by the transcript in place of that GROUP BY, so if the two ever
+// drifted the transcript would show a turn load the ledger does not back. It seeds a mixed corpus (a
+// multi-chunk turn, a priced+unpriced mixed turn, an all-unpriced turn, and a NULL-ordinal row that
+// belongs to no turn) and asserts the stored rollup matches the aggregate the old read computed,
+// including the all-unpriced-is-nil cost rule and the cost_incomplete flag, and that the
+// NULL-ordinal row folded into no rollup row.
 func TestMessageTurnUsageMatchesUsageEvents(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -363,9 +354,7 @@ func TestMessageTurnUsageMatchesUsageEvents(t *testing.T) {
 			{MessageOrdinal: nil, Model: "gpt-5", Input: 999, Output: 999, CostUSD: cost(9.99), SourceOffset: 6, SourceIndex: 0},
 		},
 	}
-	if err := st.ApplyProjectionDelta(ctx, sid, delta); err != nil {
-		t.Fatalf("apply delta: %v", err)
-	}
+	rebuildWith(t, st, sid, delta)
 
 	// A row is (tokens..., costSum, costCount, costIncomplete): the exact shape both the stored rollup
 	// and a fresh aggregate over usage_events produce, so the two maps compare directly.
@@ -440,11 +429,9 @@ func TestMessageTurnUsageMatchesUsageEvents(t *testing.T) {
 	}
 }
 
-// TestMessagesPromptFacts pins that the Messages read surfaces the per-prompt hygiene facts and
-// gates them behind the current classifier version: a user prompt classified at
-// quality.PromptFactsVersion reads PromptFactsCurrent true with its facts, an assistant message
-// carries no facts, and a superseded-version row reads as not current (its facts render as
-// nothing).
+// TestMessagesPromptFacts pins that the Messages read surfaces the per-prompt hygiene facts,
+// gated on the facts being real: a user prompt reads PromptFactsCurrent true with its facts once a
+// rebuild has classified it, and an assistant message carries no facts.
 func TestMessagesPromptFacts(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -452,34 +439,24 @@ func TestMessagesPromptFacts(t *testing.T) {
 	sid := seedForReads(t, st)
 
 	ts := time.Date(2026, 6, 28, 9, 0, 0, 0, time.UTC)
-	// A terse user prompt (classified live at the current version), then an assistant reply.
-	if err := st.ApplyProjectionDelta(ctx, sid, store.ProjectionDelta{
+	// A terse user prompt (classified by the rebuild), then an assistant reply.
+	rebuildWith(t, st, sid, store.ProjectionDelta{
 		Messages: []store.MessageDelta{
 			{Ordinal: 0, Role: "user", Content: "fix it", Timestamp: ts},
 			{Ordinal: 1, Role: "assistant", Content: "On it.", Model: "gpt-5", Timestamp: ts},
 		},
-	}); err != nil {
-		t.Fatalf("apply delta: %v", err)
-	}
-	// Stamp a third message directly at a superseded facts version to prove the version gate: the
-	// row has a digest but an old version, so it must read as not current.
-	if _, err := st.Pool.Exec(ctx,
-		`INSERT INTO messages (session_id, ordinal, role, content, prompt_short, prompt_no_code, prompt_digest, prompt_facts_version)
-		 VALUES ($1, 2, 'user', 'stale prompt', true, false, 424242, $2)`,
-		sid, quality.PromptFactsVersion-1); err != nil {
-		t.Fatalf("insert stale-version message: %v", err)
-	}
+	})
 
 	msgs, err := st.Messages(ctx, sid)
 	if err != nil {
 		t.Fatalf("read messages: %v", err)
 	}
-	if len(msgs) != 3 {
-		t.Fatalf("read %d messages, want 3", len(msgs))
+	if len(msgs) != 2 {
+		t.Fatalf("read %d messages, want 2", len(msgs))
 	}
-	// The live-classified terse prompt reads its facts as current.
+	// The classified terse prompt reads its facts as current.
 	if !msgs[0].PromptFactsCurrent {
-		t.Error("the live-classified user prompt should read PromptFactsCurrent = true")
+		t.Error("a classified user prompt should read PromptFactsCurrent = true")
 	}
 	if !msgs[0].PromptShort {
 		t.Error("a two-word prompt should classify as short")
@@ -491,37 +468,24 @@ func TestMessagesPromptFacts(t *testing.T) {
 	if msgs[1].PromptFactsCurrent {
 		t.Error("an assistant message should not read PromptFactsCurrent = true")
 	}
-	// The superseded-version row reads as not current despite carrying a digest.
-	if msgs[2].PromptFactsCurrent {
-		t.Error("a message at a superseded facts version should read PromptFactsCurrent = false")
-	}
 }
 
-// TestMessagesAfterPromptFactsVersionGate pins that the bounded keyset reader applies the same
-// prompt-facts version gate the whole-transcript read does (TestMessagesPromptFacts): a message
-// row stamped at a superseded quality.PromptFactsVersion must read PromptFactsCurrent = false
-// through MessagesAfter, not just Messages, since both share messageReadColumns but the gate is
-// re-evaluated per query against the running version. A row at the current version, by contrast,
-// reads current.
-func TestMessagesAfterPromptFactsVersionGate(t *testing.T) {
+// TestMessagesAfterPromptFacts pins that the bounded keyset reader (MessagesAfter) surfaces the
+// same prompt-hygiene facts the whole-transcript read does (TestMessagesPromptFacts), since both
+// share messageReadColumns: a classified user prompt reads PromptFactsCurrent with its facts, and
+// an assistant message carries none.
+func TestMessagesAfterPromptFacts(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
 	ctx := context.Background()
 	sid := seedForReads(t, st)
 
-	if err := st.ApplyProjectionDelta(ctx, sid, store.ProjectionDelta{
-		Messages: []store.MessageDelta{{Ordinal: 0, Role: "user", Content: "fix it"}},
-	}); err != nil {
-		t.Fatalf("apply delta: %v", err)
-	}
-	// Stamp a second message directly at a superseded facts version, mirroring
-	// TestMessagesPromptFacts' stale row but read here through the bounded window instead.
-	if _, err := st.Pool.Exec(ctx,
-		`INSERT INTO messages (session_id, ordinal, role, content, prompt_short, prompt_no_code, prompt_digest, prompt_facts_version)
-		 VALUES ($1, 1, 'user', 'stale prompt', true, false, 424242, $2)`,
-		sid, quality.PromptFactsVersion-1); err != nil {
-		t.Fatalf("insert stale-version message: %v", err)
-	}
+	rebuildWith(t, st, sid, store.ProjectionDelta{
+		Messages: []store.MessageDelta{
+			{Ordinal: 0, Role: "user", Content: "fix it"},
+			{Ordinal: 1, Role: "assistant", Content: "On it.", Model: "gpt-5"},
+		},
+	})
 
 	msgs, err := st.MessagesAfter(ctx, sid, nil, 10)
 	if err != nil {
@@ -529,10 +493,10 @@ func TestMessagesAfterPromptFactsVersionGate(t *testing.T) {
 	}
 	byOrd := msgByOrdinal(msgs)
 	if !byOrd[0].PromptFactsCurrent {
-		t.Error("a message classified at the current facts version should read PromptFactsCurrent = true through MessagesAfter")
+		t.Error("a classified user prompt should read PromptFactsCurrent = true through MessagesAfter")
 	}
 	if byOrd[1].PromptFactsCurrent {
-		t.Error("a message at a superseded facts version should read PromptFactsCurrent = false through MessagesAfter, not the stale facts")
+		t.Error("an assistant message should not read PromptFactsCurrent = true through MessagesAfter")
 	}
 }
 
@@ -544,16 +508,14 @@ func TestToolCallsFileRelPath(t *testing.T) {
 	ctx := context.Background()
 	sid := seedForReads(t, st) // cwd is /home/grace/akari
 
-	if err := st.ApplyProjectionDelta(ctx, sid, store.ProjectionDelta{
+	rebuildWith(t, st, sid, store.ProjectionDelta{
 		Messages: []store.MessageDelta{{Ordinal: 0, Role: "assistant", HasToolUse: true}},
 		ToolCalls: []store.ProjToolCall{{
 			MessageOrdinal: 0, CallIndex: 0, ToolName: "Edit", Category: "edit",
 			FilePath:  "/home/grace/akari/internal/auth.go",
 			InputBody: `{"file_path":"internal/auth.go"}`, InputMediaType: "application/json", CallUID: "c1",
 		}},
-	}); err != nil {
-		t.Fatalf("apply delta: %v", err)
-	}
+	})
 
 	calls, err := st.ToolCalls(ctx, sid)
 	if err != nil {
@@ -582,16 +544,14 @@ func TestToolCallsInRangeFileRelPath(t *testing.T) {
 
 	// A session with a known cwd: the edit under it derives a relative path.
 	withCwd := seedForReads(t, st) // cwd is /home/grace/akari
-	if err := st.ApplyProjectionDelta(ctx, withCwd, store.ProjectionDelta{
+	rebuildWith(t, st, withCwd, store.ProjectionDelta{
 		Messages: []store.MessageDelta{{Ordinal: 0, Role: "assistant", HasToolUse: true}},
 		ToolCalls: []store.ProjToolCall{{
 			MessageOrdinal: 0, CallIndex: 0, ToolName: "Edit", Category: "edit",
 			FilePath:  "/home/grace/akari/internal/auth.go",
 			InputBody: `{"file_path":"internal/auth.go"}`, InputMediaType: "application/json", CallUID: "c1",
 		}},
-	}); err != nil {
-		t.Fatalf("apply delta (with cwd): %v", err)
-	}
+	})
 	calls, err := st.ToolCallsInRange(ctx, withCwd, 0, 0)
 	if err != nil {
 		t.Fatalf("tool calls in range (with cwd): %v", err)
@@ -617,15 +577,13 @@ func TestToolCallsInRangeFileRelPath(t *testing.T) {
 		t.Fatalf("announce without cwd: %v", err)
 	}
 	noCwd := ann.SessionID
-	if err := st.ApplyProjectionDelta(ctx, noCwd, store.ProjectionDelta{
+	rebuildWith(t, st, noCwd, store.ProjectionDelta{
 		Messages: []store.MessageDelta{{Ordinal: 0, Role: "assistant", HasToolUse: true}},
 		ToolCalls: []store.ProjToolCall{{
 			MessageOrdinal: 0, CallIndex: 0, ToolName: "Edit", Category: "edit",
 			FilePath: "/home/ada/somewhere/db.go", CallUID: "c2",
 		}},
-	}); err != nil {
-		t.Fatalf("apply delta (no cwd): %v", err)
-	}
+	})
 	noCwdCalls, err := st.ToolCallsInRange(ctx, noCwd, 0, 0)
 	if err != nil {
 		t.Fatalf("tool calls in range (no cwd): %v", err)
@@ -640,7 +598,7 @@ func TestToolCallsInRangeFileRelPath(t *testing.T) {
 
 // TestAnnounceRecomputesRelPathsOnCwdChange pins that a re-announce with a different cwd
 // recomputes the stored tool_calls.file_rel_path against the new anchor. file_rel_path is a
-// projection of cwd + file_path derived at insert, and announce updates cwd on conflict, so a
+// projection of cwd + file_path derived at rebuild time, and announce updates cwd on conflict, so a
 // re-announce from a different checkout must follow its input or old rel paths strand at the stale
 // anchor and split one repo file's churn across two keys. It announces cwd A, ingests two edits
 // (one under A, one outside it), re-announces the same session at cwd B (under which the first path
@@ -669,7 +627,7 @@ func TestAnnounceRecomputesRelPathsOnCwdChange(t *testing.T) {
 		t.Fatalf("announce cwd A: %v", err)
 	}
 	sid := annA.SessionID
-	if err := st.ApplyProjectionDelta(ctx, sid, store.ProjectionDelta{
+	rebuildWith(t, st, sid, store.ProjectionDelta{
 		Messages: []store.MessageDelta{{Ordinal: 0, Role: "assistant", HasToolUse: true}},
 		ToolCalls: []store.ProjToolCall{
 			{MessageOrdinal: 0, CallIndex: 0, ToolName: "Edit", Category: "edit",
@@ -677,9 +635,7 @@ func TestAnnounceRecomputesRelPathsOnCwdChange(t *testing.T) {
 			{MessageOrdinal: 0, CallIndex: 1, ToolName: "Edit", Category: "edit",
 				FilePath: "/home/grace/worktreeB/internal/db.go", CallUID: "c2"},
 		},
-	}); err != nil {
-		t.Fatalf("apply delta: %v", err)
-	}
+	})
 
 	// Sanity before the cwd change: the A-anchored path is relative, the B-anchored one is not.
 	relByFile := func() map[string]string {
@@ -702,13 +658,23 @@ func TestAnnounceRecomputesRelPathsOnCwdChange(t *testing.T) {
 	}
 
 	// Re-announce the same session at cwd B: now the db.go path is under the workspace and the
-	// auth.go path is not. The stored rel paths must flip to match the new anchor.
+	// auth.go path is not. The stored rel paths must flip to match the new anchor once the next
+	// rebuild re-derives them against the updated cwd.
 	if _, err := st.Announce(ctx, store.AnnounceParams{
 		UserID: u.ID, Agent: "claude", SourceSessionID: "sess-cwd",
 		ProjectID: pid, GitBranch: "main", Cwd: "/home/grace/worktreeB", Machine: "laptop",
 	}); err != nil {
 		t.Fatalf("re-announce cwd B: %v", err)
 	}
+	rebuildWith(t, st, sid, store.ProjectionDelta{
+		Messages: []store.MessageDelta{{Ordinal: 0, Role: "assistant", HasToolUse: true}},
+		ToolCalls: []store.ProjToolCall{
+			{MessageOrdinal: 0, CallIndex: 0, ToolName: "Edit", Category: "edit",
+				FilePath: "/home/grace/worktreeA/internal/auth.go", CallUID: "c1"},
+			{MessageOrdinal: 0, CallIndex: 1, ToolName: "Edit", Category: "edit",
+				FilePath: "/home/grace/worktreeB/internal/db.go", CallUID: "c2"},
+		},
+	})
 	after := relByFile()
 	if after["/home/grace/worktreeA/internal/auth.go"] != "" {
 		t.Errorf("after recompute: auth.go rel = %q, want empty (now outside cwd B)", after["/home/grace/worktreeA/internal/auth.go"])

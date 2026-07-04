@@ -81,9 +81,7 @@ func TestApplyDeltaSanitizesText(t *testing.T) {
 			CallUID:        "call-1",
 		}},
 	}
-	if err := st.ApplyProjectionDelta(ctx, sid, delta); err != nil {
-		t.Fatalf("apply delta with NUL and invalid UTF-8: %v", err)
-	}
+	rebuildWith(t, st, sid, delta)
 
 	msgs, err := st.Messages(ctx, sid)
 	if err != nil {

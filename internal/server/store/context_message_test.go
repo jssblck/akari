@@ -13,9 +13,9 @@ import (
 // session title: the title lateral filters on role='user', so it walks past the
 // context turn to the real opening prompt. The context body opens with the AGENTS.md
 // marker, so a regression that re-roled it back to 'user' (or dropped the role filter
-// on the lateral) would leak that framing text into the title here. The count rollups
-// are folded on the ingest path, not by ApplyProjectionDelta, so their exclusion is
-// covered end-to-end in the parse package's TestCodexContextExcludedFromCounts.
+// on the lateral) would leak that framing text into the title here. The user-count
+// rollup's own exclusion of the context role is covered end-to-end in the parse
+// package's TestCodexContextExcludedFromCounts.
 func TestContextMessageExcludedFromTitle(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -31,9 +31,7 @@ func TestContextMessageExcludedFromTitle(t *testing.T) {
 			{Ordinal: 2, Role: "assistant", Content: "On it.", Model: "gpt-5-codex"},
 		},
 	}
-	if err := st.ApplyProjectionDelta(ctx, sid, delta); err != nil {
-		t.Fatalf("apply delta: %v", err)
-	}
+	rebuildWith(t, st, sid, delta)
 
 	d, err := st.SessionDetailByID(ctx, sid)
 	if err != nil {

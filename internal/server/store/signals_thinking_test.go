@@ -31,10 +31,7 @@ func thinkingSession(t *testing.T, st *store.Store, uid, pid int64, source, mode
 		}
 		delta.Messages = append(delta.Messages, m)
 	}
-	if err := st.ApplyProjectionDelta(ctx, sid, delta); err != nil {
-		t.Fatalf("apply delta: %v", err)
-	}
-	setUserMessageCount(t, st, ctx, sid, 1)
+	rebuildWith(t, st, sid, delta)
 	settleSession(t, st, ctx, sid)
 	if err := st.RefreshSessionSignals(ctx, sid); err != nil {
 		t.Fatalf("refresh signals: %v", err)

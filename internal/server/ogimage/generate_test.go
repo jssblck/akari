@@ -112,11 +112,11 @@ func TestGenerateServesCanonicalOnLostRace(t *testing.T) {
 	}
 }
 
-// TestGenerateAbortsDuringReparse pins Generate's reparse gate directly: while a
-// reparse holds the advisory lock, AnalyticsSnapshot reports not-ok, so Generate
-// returns ErrReparseInProgress with no PNG and, crucially, writes nothing to the
-// cache. Caching a card built from a half-rebuilt projection is the failure this
-// guards against.
+// TestGenerateAbortsDuringReparse pins Generate's epoch gate directly: while a
+// session sits behind the running parser epoch, AnalyticsSnapshot reports not-ok,
+// so Generate returns ErrReparseInProgress with no PNG and, crucially, writes
+// nothing to the cache. Caching a card built from a half-rebuilt corpus is the
+// failure this guards against.
 func TestGenerateAbortsDuringReparse(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -126,13 +126,19 @@ func TestGenerateAbortsDuringReparse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	// Hold the reparse lock for the whole call, as a live reparse does for its run.
-	lock, ok, err := st.AcquireReparseLock(ctx)
-	if err != nil || !ok {
-		t.Fatalf("acquire reparse lock: ok=%v err=%v", ok, err)
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
 	}
-	defer lock.Release(ctx)
+	// A freshly announced session_raw row defaults to parser_epoch 0, so once the
+	// store runs at epoch 1 it stands in for a session a rebuild has not yet reached.
+	if _, err := st.Announce(ctx, store.AnnounceParams{
+		UserID: u.ID, Agent: "claude", SourceSessionID: "sess-1",
+		ProjectID: projectID, Cwd: "/home/grace/akari", Machine: "laptop",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	st.SetParserEpoch(1)
 
 	png, err := ogimage.Generate(ctx, st, u, time.Now())
 	if !errors.Is(err, ogimage.ErrReparseInProgress) {

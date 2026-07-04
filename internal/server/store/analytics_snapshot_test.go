@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -138,11 +139,12 @@ func TestPublicAndAuthedProjectAnalyticsReconcile(t *testing.T) {
 	}
 }
 
-// TestAnalyticsSnapshotSkipsDuringReparse guards the card render's reparse
-// coordination at the store layer: while the reparse advisory lock is held, the
-// snapshot reports not-ok (so Generate skips) rather than reading a projection that
-// may be mid-rebuild; once the lock clears, it returns the analytics.
-func TestAnalyticsSnapshotSkipsDuringReparse(t *testing.T) {
+// TestAnalyticsSnapshotSkipsDuringRebuild guards the card render's epoch coordination
+// at the store layer: while any session sits behind the store's running parser epoch,
+// the snapshot reports not-ok (so Generate skips) rather than reading a projection that
+// is a half-rebuilt mix of old and new parses; once every session is back at the
+// running epoch, it returns the analytics.
+func TestAnalyticsSnapshotSkipsDuringRebuild(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
 	ctx := context.Background()
@@ -160,23 +162,66 @@ func TestAnalyticsSnapshotSkipsDuringReparse(t *testing.T) {
 
 	filter := store.AnalyticsFilter{Since: time.Now().Add(-365 * 24 * time.Hour), UserIDs: []int64{u.ID}}
 
-	// Hold the reparse advisory lock: the snapshot must decline.
-	lock, ok, err := st.AcquireReparseLock(ctx)
-	if err != nil || !ok {
-		t.Fatalf("acquire reparse lock: ok=%v err=%v", ok, err)
+	// A session freshly seeded by direct SQL has no session_raw row, so it never trips
+	// the epoch check; announce one and mark it stale to stand in for a fleet rebuild
+	// still draining. The store is gated on testEpoch so rebuildWith's stub reducer
+	// (which always rebuilds at testEpoch) is what brings the corpus current below.
+	st.SetParserEpoch(testEpoch)
+	ann, err := st.Announce(ctx, store.AnnounceParams{
+		UserID: u.ID, Agent: "claude", SourceSessionID: "sess-1-raw", ProjectID: projectID, Machine: "box",
+	})
+	if err != nil {
+		t.Fatalf("announce: %v", err)
 	}
-	if _, ok, err := st.AnalyticsSnapshot(ctx, filter); err != nil || ok {
-		lock.Release(ctx)
-		t.Fatalf("snapshot during reparse: ok=%v err=%v, want ok=false", ok, err)
+	if _, err := st.MarkEpochStale(ctx, ""); err != nil {
+		t.Fatalf("mark epoch stale: %v", err)
 	}
-	lock.Release(ctx)
 
-	// With the lock clear, the snapshot returns the analytics.
+	// While the announced session sits behind the running epoch, the snapshot declines.
+	if _, ok, err := st.AnalyticsSnapshot(ctx, filter); err != nil || ok {
+		t.Fatalf("snapshot mid-rebuild: ok=%v err=%v, want ok=false", ok, err)
+	}
+
+	// Rebuild it up to the running epoch: the corpus is single-epoch again.
+	rebuildWith(t, st, ann.SessionID, store.ProjectionDelta{})
+
+	// With every session at the running epoch, the snapshot returns the analytics.
 	a, ok, err := st.AnalyticsSnapshot(ctx, filter)
 	if err != nil || !ok {
-		t.Fatalf("snapshot after reparse: ok=%v err=%v, want ok=true", ok, err)
+		t.Fatalf("snapshot after rebuild: ok=%v err=%v, want ok=true", ok, err)
 	}
 	if a.TotalIn != 100 {
 		t.Fatalf("snapshot TotalIn = %d, want 100", a.TotalIn)
+	}
+
+	// A session that FAILED its rebuild at the running epoch must not wedge the
+	// gate: its projection is permanently behind (the drain cannot advance it),
+	// so the snapshot serves rather than blanking the cards forever. An epoch
+	// bump (a different running epoch) gates again: the failed session gets a
+	// fresh attempt there.
+	if _, err := st.AppendChunk(ctx, ann.SessionID, 0, []byte("bad bytes\n")); err != nil {
+		t.Fatal(err)
+	}
+	rerr := errors.New("malformed transcript")
+	if err := st.RebuildSession(ctx, ann.SessionID, testEpoch, failingReducer{rerr}); !errors.Is(err, rerr) {
+		t.Fatalf("failing rebuild returned %v, want the reducer's error", err)
+	}
+	if _, err := st.Pool.Exec(ctx,
+		"UPDATE session_raw SET parser_epoch = $1 WHERE session_id = $2", testEpoch-1, ann.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := st.AnalyticsSnapshot(ctx, filter); err != nil || !ok {
+		t.Fatalf("snapshot with a failed-at-current-epoch session: ok=%v err=%v, want ok=true (gate must not wedge)", ok, err)
+	}
+
+	// New bytes un-pin the failure: the worker now has a concrete rebuild path at
+	// the running epoch (the appended tail might parse), so the session is due
+	// again and the gate must agree and decline rather than declaring the corpus
+	// current while that rebuild is pending.
+	if _, err := st.AppendChunk(ctx, ann.SessionID, int64(len("bad bytes\n")), []byte("more bytes\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := st.AnalyticsSnapshot(ctx, filter); err != nil || ok {
+		t.Fatalf("snapshot after appending to the failed session: ok=%v err=%v, want ok=false (a current-epoch rebuild is pending)", ok, err)
 	}
 }

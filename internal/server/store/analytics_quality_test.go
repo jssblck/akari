@@ -9,17 +9,17 @@ import (
 	"github.com/jssblck/akari/internal/server/store"
 )
 
-// insertScoredSignals writes a graded session_signals row at the given version carrying a
-// score and letter grade, then sets the session's signals_stale flag. It stands in for a
-// settled, graded session: stale=false is the state the settle pass leaves a current grade
-// (the gated reads count it), while stale=true or an older version stands in for a grade the
-// gate must exclude. It is the scored counterpart of settle_test.go's insertSignalsRow.
-func insertScoredSignals(t *testing.T, st *store.Store, ctx context.Context, sid int64, version, score int, grade string, stale bool) {
+// insertScoredSignals writes a graded session_signals row carrying a score and letter grade,
+// then sets the session's signals_stale flag. It stands in for a settled, graded session:
+// stale=false is the state the settle pass leaves a current grade (the gated reads count it),
+// while stale=true stands in for a grade whose projection has since moved, which the gate must
+// exclude. It is the scored counterpart of settle_test.go's insertSignalsRow.
+func insertScoredSignals(t *testing.T, st *store.Store, ctx context.Context, sid int64, score int, grade string, stale bool) {
 	t.Helper()
 	if _, err := st.Pool.Exec(ctx,
-		`INSERT INTO session_signals (session_id, signals_version, outcome, outcome_confidence, score, grade, refreshed_at)
-		 VALUES ($1, $2, 'completed', 'high', $3, $4, now())`,
-		sid, version, score, grade); err != nil {
+		`INSERT INTO session_signals (session_id, outcome, outcome_confidence, score, grade, refreshed_at)
+		 VALUES ($1, 'completed', 'high', $2, $3, now())`,
+		sid, score, grade); err != nil {
 		t.Fatalf("insert scored signals: %v", err)
 	}
 	if _, err := st.Pool.Exec(ctx, `UPDATE sessions SET signals_stale = $2 WHERE id = $1`, sid, stale); err != nil {
@@ -38,15 +38,15 @@ func TestSessionSignalsScoreGradeConsistency(t *testing.T) {
 
 	scoreOnly := seedSession(t, st, uid, pid, "score-only")
 	if _, err := st.Pool.Exec(ctx,
-		`INSERT INTO session_signals (session_id, signals_version, outcome, outcome_confidence, score, refreshed_at)
-		 VALUES ($1, $2, 'completed', 'high', 88, now())`, scoreOnly, quality.Version); err == nil {
+		`INSERT INTO session_signals (session_id, outcome, outcome_confidence, score, refreshed_at)
+		 VALUES ($1, 'completed', 'high', 88, now())`, scoreOnly); err == nil {
 		t.Fatal("a score without a grade should violate the coupling constraint, but the insert succeeded")
 	}
 
 	gradeOnly := seedSession(t, st, uid, pid, "grade-only")
 	if _, err := st.Pool.Exec(ctx,
-		`INSERT INTO session_signals (session_id, signals_version, outcome, outcome_confidence, grade, refreshed_at)
-		 VALUES ($1, $2, 'completed', 'high', 'B', now())`, gradeOnly, quality.Version); err == nil {
+		`INSERT INTO session_signals (session_id, outcome, outcome_confidence, grade, refreshed_at)
+		 VALUES ($1, 'completed', 'high', 'B', now())`, gradeOnly); err == nil {
 		t.Fatal("a grade without a score should violate the coupling constraint, but the insert succeeded")
 	}
 
@@ -54,30 +54,30 @@ func TestSessionSignalsScoreGradeConsistency(t *testing.T) {
 	// row's stored grade can never disagree with what its score would grade to.
 	mismatch := seedSession(t, st, uid, pid, "band-mismatch")
 	if _, err := st.Pool.Exec(ctx,
-		`INSERT INTO session_signals (session_id, signals_version, outcome, outcome_confidence, score, grade, refreshed_at)
-		 VALUES ($1, $2, 'completed', 'high', 95, 'F', now())`, mismatch, quality.Version); err == nil {
+		`INSERT INTO session_signals (session_id, outcome, outcome_confidence, score, grade, refreshed_at)
+		 VALUES ($1, 'completed', 'high', 95, 'F', now())`, mismatch); err == nil {
 		t.Fatal("a grade that does not match GradeFor(score) should violate the band constraint, but the insert succeeded")
 	}
 
 	// Both NULL (an unscored session) and a band-consistent pair (a scored one) are the allowed shapes.
 	unscored := seedSession(t, st, uid, pid, "unscored")
 	if _, err := st.Pool.Exec(ctx,
-		`INSERT INTO session_signals (session_id, signals_version, outcome, outcome_confidence, refreshed_at)
-		 VALUES ($1, $2, 'unknown', 'low', now())`, unscored, quality.Version); err != nil {
+		`INSERT INTO session_signals (session_id, outcome, outcome_confidence, refreshed_at)
+		 VALUES ($1, 'unknown', 'low', now())`, unscored); err != nil {
 		t.Fatalf("an unscored row (both NULL) should be allowed: %v", err)
 	}
 	scored := seedSession(t, st, uid, pid, "scored")
 	if _, err := st.Pool.Exec(ctx,
-		`INSERT INTO session_signals (session_id, signals_version, outcome, outcome_confidence, score, grade, refreshed_at)
-		 VALUES ($1, $2, 'completed', 'high', 82, 'B', now())`, scored, quality.Version); err != nil {
+		`INSERT INTO session_signals (session_id, outcome, outcome_confidence, score, grade, refreshed_at)
+		 VALUES ($1, 'completed', 'high', 82, 'B', now())`, scored); err != nil {
 		t.Fatalf("a band-consistent scored row (82 -> B) should be allowed: %v", err)
 	}
 }
 
 // TestAvgQualityScore pins the mean the project OG card rounds into its QUALITY letter: it
-// averages only the sessions carrying a gated (current-version, non-stale) grade, so a
-// stale-flagged grade and an older-version grade are both excluded, and it returns nil (not
-// zero) when no session in scope is scored, the "unmeasured" default the card dashes.
+// averages only the sessions carrying a gated (fresh) grade, so a stale-flagged grade is
+// excluded, and it returns nil (not zero) when no session in scope is scored, the
+// "unmeasured" default the card dashes.
 func TestAvgQualityScore(t *testing.T) {
 	t.Parallel()
 	st, ctx, uid, pid := signalsEnv(t)
@@ -93,12 +93,11 @@ func TestAvgQualityScore(t *testing.T) {
 	}
 
 	// Two gated grades (80 and 90) average to 85; the gate must fold in only these.
-	insertScoredSignals(t, st, ctx, seedSession(t, st, uid, pid, "graded-80"), quality.Version, 80, "B", false)
-	insertScoredSignals(t, st, ctx, seedSession(t, st, uid, pid, "graded-90"), quality.Version, 90, "A", false)
-	// A stale-flagged grade (its projection moved since it was graded) and an older-version
-	// grade (from before a scoring bump) are both excluded, so neither drags the mean.
-	insertScoredSignals(t, st, ctx, seedSession(t, st, uid, pid, "stale-0"), quality.Version, 0, "F", true)
-	insertScoredSignals(t, st, ctx, seedSession(t, st, uid, pid, "old-0"), quality.Version-1, 0, "F", false)
+	insertScoredSignals(t, st, ctx, seedSession(t, st, uid, pid, "graded-80"), 80, "B", false)
+	insertScoredSignals(t, st, ctx, seedSession(t, st, uid, pid, "graded-90"), 90, "A", false)
+	// A stale-flagged grade (its projection moved since it was graded) is excluded, so it
+	// cannot drag the mean.
+	insertScoredSignals(t, st, ctx, seedSession(t, st, uid, pid, "stale-0"), 0, "F", true)
 
 	avg, err = st.AvgQualityScore(ctx, store.AnalyticsFilter{ProjectID: pid})
 	if err != nil {
@@ -130,7 +129,7 @@ func TestAvgQualityScore(t *testing.T) {
 // depends on: the analytics totals and the quality average come back from one snapshot, and
 // that average equals the standalone read over the same filter (the two run the identical
 // query, now just off one MVCC snapshot instead of two pooled connections that could straddle
-// a reparse). ok is true when no reparse holds the lock.
+// a rebuild). ok is true when every session in scope is already on the current parser epoch.
 func TestProjectCardSnapshotReconcilesAnalyticsAndQuality(t *testing.T) {
 	t.Parallel()
 	st, ctx, uid, pid := signalsEnv(t)
@@ -140,8 +139,8 @@ func TestProjectCardSnapshotReconcilesAnalyticsAndQuality(t *testing.T) {
 	s2 := seedSessionWithStats(t, st, uid, pid, "claude", "s2", 1.0, 200, 40)
 	seedUsage(t, st, s1, "claude-opus-4-8", 1.0, 100, 20, 1, "u1")
 	seedUsage(t, st, s2, "claude-opus-4-8", 1.0, 200, 40, 1, "u2")
-	insertScoredSignals(t, st, ctx, s1, quality.Version, 70, "C", false)
-	insertScoredSignals(t, st, ctx, s2, quality.Version, 90, "A", false)
+	insertScoredSignals(t, st, ctx, s1, 70, "C", false)
+	insertScoredSignals(t, st, ctx, s2, 90, "A", false)
 
 	a, avg, ok, err := st.ProjectCardSnapshot(ctx, f)
 	if err != nil || !ok {

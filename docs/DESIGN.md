@@ -409,8 +409,10 @@ each tool body's reference from its sentinel rather than the CAS.
    line, so a chunk ends on the last `\n`. For Codex a message is a folded turn
    (reasoning, tool calls, and the assistant reply), so a chunk ends on a turn
    boundary: the client cuts right after a user line, which is where a turn
-   closes. This keeps a turn inside one chunk, and therefore inside one parse
-   region, which is what lets the projection write each message exactly once. The
+   closes. Turn alignment is a client nicety, not something the server depends
+   on: the parser always refolds the whole stored session, so a turn whose bytes
+   spanned two chunks parses correctly once the rest lands. Line alignment is
+   the invariant that matters, and the server enforces it. The
    client prefers ~1 MiB transformed chunks; because each tool body is lifted to
    the CAS, a transformed line (and so a chunk) stays small even for a turn whose
    original bytes are enormous. A single transformed line past a 128 MiB cap is
@@ -425,36 +427,40 @@ each tool body's reference from its sentinel rather than the CAS.
      the truth, so the client simply advances).
    - Rejects a chunk that is empty or does not end on a newline, so the line
      boundary the parser relies on is a server-enforced invariant, not just a
-     client convention. (Turn alignment is a client guarantee the server does not
-     re-check: a misaligned chunk would at worst render one turn as two messages,
-     never corrupt the store.)
+     client convention. (Turn alignment is not re-checked: a turn split across
+     chunks at worst renders partially for a moment and correctly once the rest
+     lands and the session rebuilds.)
    - Appends the chunk as a new raw row and advances the content hash by resuming
      its stored digest state over only the new (transformed) bytes. Both are one
      transaction: once it commits, the upload has succeeded regardless of what
      parsing does.
-   - In a second transaction, parses only the bytes past the parse cursor
-     (assigning ordinals after the last stored ordinal) and applies them to the
-     projection incrementally. Each tool body's sentinel is recorded as a CAS
-     reference (sha256, bytes, media type) with no blob write, since the client
-     already uploaded the body. Because every stored byte ends on a line boundary,
-     the parser only ever sees complete lines. Parsing is best effort: a parse
-     failure leaves the durable bytes in place and the cursor where it was, for
-     the next chunk or a reparse to advance, so client ingest health never
-     depends on parser correctness.
-   - Returns the new `stored_bytes` and the new message count.
+   - Wakes the parse worker. Parsing never runs on the request: the worker
+     rebuilds the session's whole projection from the stored bytes in the
+     background (see "Server-side parsing pipeline") and publishes the SSE
+     update when the rebuild commits. The append itself is what marks the
+     session due (its `byte_len` moves past the last rebuilt length), so a chunk
+     that lands mid-rebuild is picked up by the next one; the wake buys latency,
+     not correctness. Each tool body's sentinel is recorded as a CAS reference
+     (sha256, bytes, media type) with no blob write, since the client already
+     uploaded the body. Parsing stays best effort: a parse failure leaves the
+     durable bytes in place for a later rebuild to retry, so client ingest
+     health never depends on parser correctness.
+   - Returns the new `stored_bytes`.
 
 4. **Reset.** `POST /api/v1/ingest/session/{id}/reset` truncates the raw store
-   (its chunks, length, and hash), drops the derived rows, rewinds the parse
-   cursor, and re-parses from zero on the next chunk. The client calls this when
-   the announce divergence check fails.
+   (its chunks, length, and hash) and drops the derived rows; the next chunk
+   rebuilds the projection from zero. The client calls this when the announce
+   divergence check fails.
 
 5. **Finalize.** `POST /api/v1/ingest/session/{id}/finalize` grades a terminal
-   session now, rather than leaving it for the settle pass. `akari sync --finalize`
-   calls it once a session's whole transcript has landed: the session was announced
-   terminal, so its signals derive with the idle checks satisfied and the grade is
-   materialized from the projection the chunks already built. On an ephemeral host
-   this lands the grade before the host disappears, instead of after the 30-minute
-   window (and a settle loop that may be disabled). It carries no body and is
+   session now, rather than leaving it for the parse worker's settle tick.
+   `akari sync --finalize` calls it once a session's whole transcript has landed:
+   the session was announced terminal, so its signals derive with the idle checks
+   satisfied. The grade reads whatever projection is current; if the final chunks'
+   rebuild is still draining, that rebuild re-grades the session when it commits
+   (a rebuild always grades a terminal session), so finalize never needs to parse
+   inline and the ephemeral host never needs to wait: the raw bytes are already
+   durable and the server finishes on its own. It carries no body and is
    idempotent: a non-terminal session simply grades under the ordinary rules.
 
 Because the server stores raw bytes and `stored_bytes` is the cursor, there is
@@ -464,86 +470,142 @@ match mine."
 
 ### Server-side parsing pipeline
 
-The parser is a per-agent line reducer: given a small carry-over state (the next
-ordinal, and for Codex the sticky model) and a region of complete lines, it
-returns the next state and a projection delta (rows to add, results to
-back-patch, and the region's timestamp span). The carry-over
-is bounded to counters: no per-message accumulation and no open turn live in it.
-A Codex turn folds a run of items into one assistant message, but that fold never
-crosses a region, because the ingest protocol keeps a whole turn inside one chunk
-(and a chunk inside one region). So each `messages` row is written exactly once,
-with its complete text, never appended to in place. The one cross-region
-dependency that remains is a tool result: Claude delivers a `tool_result` in the
-following user entry, which can land in a later region, so a result is
-back-patched to its call by the call id (a per-session unique index makes that a
-constant-time, single-row update). The state and the parse cursor are stored on
-the `session_raw` row, so a chunk parses only its own bytes.
+Parsing is decoupled from ingest and has exactly one shape: rebuild the whole
+session. A background worker inside the server process owns every projection
+write; the ingest path never parses. There is no incremental parse, no
+serialized parser state, and no separate reparse mechanism. A session that
+gained bytes, a session whose last parse failed, and a corpus behind a new
+parser epoch are all the same case ("the projection is behind the raw bytes")
+handled by the same code: refold the stored bytes from zero and swap the result
+in atomically.
 
-The session rollups (`message_count`, `user_message_count`, the token totals, and
-`total_cost_usd`) are folded from the rows that actually persist, not from a count
-the reducer carries. The projection inserts messages and usage under their unique
-indexes with `ON CONFLICT DO NOTHING`, so a duplicate is dropped from the ledger,
-and only an insert that survives that guard contributes to the rollup. This
-matters because a Claude transcript streams one assistant message across several
-lines that share a `dedup_key`, so the ledger keeps one row while the raw region
-carries several. Folding the persisted set keeps the invariant that,
-for every agent, `sessions.total_*` equals the matching `sum` over `usage_events`
-and `message_count` equals the count of `messages` rows. `cost_incomplete` is
-derived the same way: a surviving usage row that carries tokens but no priced cost
-is what flags the session total as partial. The timestamp span is the one
-aggregate folded from the region directly, because widening `started_at` /
-`ended_at` by `LEAST` / `GREATEST` is idempotent under a replay.
+**Dirty tracking.** `session_raw` carries two bookkeeping columns beside the raw
+cursor: `parsed_byte_len`, the raw length the last successful rebuild covered,
+and `parser_epoch`, the `parse.Epoch` it ran at. A session is due when
+`parsed_byte_len <> byte_len` or when `parser_epoch` is behind the running
+binary's constant. The epoch comparison is monotonic on purpose: a session
+stamped ahead of the running epoch (a newer binary's work, seen by the older
+binary during a rolling deploy) is never due, even when byte-dirty, so an old
+worker cannot rebuild it back down to the older parser; the newer instance
+picks up its appends on its next wake or tick. An append makes a session due
+by construction (it grows
+`byte_len`), so there is no flag to race on: a chunk that lands while a rebuild
+is committing leaves the comparison unequal and the session is simply rebuilt
+again. A deploy with a bumped epoch makes the whole corpus due the same way,
+which is why "reparse everything" is not a separate mechanism.
 
-The batch parser used by tests and the bulk reparse is a thin wrapper over the
-same reducer fed the whole file at once, so incremental and full parsing cannot
-diverge. Reparse reaches already-ingested data after a parser upgrade: in one
-transaction per session (`store.ReparseSession`) it clears the derived rows, rewinds
-the cursor, and replays the stored raw through the reducer from scratch. Doing the
-clear and replay atomically matters: a reader never sees a session empty or half
-rebuilt (it reads the old projection until the new one commits), and any failure (a
-malformed-transcript parser error or an operational store error) rolls the rebuild
-back, leaving the prior projection in place rather than a cleared session. A session
-partially parsed by an older parser version refuses to advance incrementally (the
-stored `parse_state_version` no longer matches) until that reparse rewinds it, so a
-version change can never blend two parsers' output.
+**The reducer sees the whole session.** The per-agent parser is a reducer fed
+the session's complete stored bytes, streamed chunk by chunk within one parse
+call. Because a parse always starts at byte zero, the reducer's working state
+(the next ordinal, the sticky model, an open turn being folded) lives in
+ordinary memory for the duration of the call and is never serialized. That is
+what lets a fold cross line and chunk boundaries: Codex turns fold as before,
+and Claude's content-block lines (one API assistant message logged as separate
+thinking / text / tool_use JSONL lines sharing a `message.id`) fold into a
+single assistant turn, so a `messages` row is one semantic turn for every agent
+(issue #98). A tool result back-patches its call inside the same in-memory
+fold, matched by call id; when a resumed or compacted transcript replays a call
+id onto several rows, every copy receives the result.
 
-The reparse runs on its own after a parser upgrade. The trigger is `parse.Epoch`, a
-binary constant bumped whenever parser or reducer output changes (new rows, changed
-fields, a different fold, or a pricing change that re-prices stored usage). On
-startup the server compares `parse.Epoch` against `parse_meta.reparsed_epoch`; when
-they differ it reparses every session in the background and, on success, writes the
-new epoch back, so deploying a new binary is all it takes. The trigger is a binary
-constant and not a migration on purpose: parser behavior lives in the binary, and a
-parser change often ships with no schema migration at all (PR #18 added Codex image
-payloads to the projection without one), so a migration-versioned signal would miss
-exactly those changes. A golden-fixtures test (`internal/server/parse/epoch_test.go`)
-snapshots the projection for representative sessions and fails, naming `parse.Epoch`,
-if output drifts without a bump, so the bump cannot be forgotten.
+**The rebuild is one transaction.** `store.RebuildSession` locks the session
+row and its raw row (the same order the delete path takes), reads `byte_len` as
+the rebuild's high-water mark, folds the full projection in memory, deletes the
+old projection rows, and bulk-inserts the new set (`CopyFrom`). Everything
+derived is computed in that fold, over complete information and into empty
+tables: usage dedup (Claude's repeated usage blocks collapse in memory, not via
+ON CONFLICT arithmetic), per-event pricing at each event's `occurred_at`, the
+session rollups (summed from the exact row set being written, so the
+rollup/ledger invariant in docs/data-aggregation.md holds by construction), the
+per-turn usage rollup, prompt-hygiene facts and the duplicate-prompt flag
+(judged against the in-memory ordered prefix), relative tool paths against the
+session's current cwd, cache savings, and model-fallback merging. The session's
+blobs are pinned before the delete so a concurrent CAS sweep cannot reclaim a
+still-referenced body. When the session is settled or terminal, its signals
+recompute in the same transaction (see docs/signals.md); a rebuild of a
+still-live session instead drops the now-stale signals row and leaves grading
+for the settle tick. Readers never see a half-built session: the old projection
+serves until the commit, then the new one does. Peak memory is proportional to
+the transformed transcript, which the CAS lifting keeps small however large the
+original tool bodies were.
 
-One `reparse` service backs three entry points so they cannot diverge: the startup
-auto-run, the admin Reparse button on the account page (`POST /account/reparse`,
-admin-only), and the `akari-server reparse [--agent claude]` CLI (the manual escape
-hatch, which forces a run regardless of the epoch). A Postgres advisory lock keeps
-multiple server instances from reparsing at once, and an in-process guard makes a
-second trigger a no-op that returns the running status. Shutdown cancels an in-flight
-reparse the same way it winds down the blob sweep, before the pool closes; a partial
-or agent-filtered run never advances the epoch, so the next startup finishes the job.
-A per-session parser error is counted and the run still completes (re-running would
-fail identically, and the session kept its prior projection), so it does not block the
-epoch; an operational error aborts the run without advancing the epoch, so a transient
-store or CAS failure is retried on the next start rather than masked by a stamped epoch.
+**Failure model.** A reducer error on malformed bytes is deterministic
+(re-running fails identically), so the worker rolls the rebuild back and
+records the attempt on the failure markers: `session_raw.parse_error` plus the
+epoch and raw length the attempt covered. The last-successful-rebuild
+bookkeeping (`parsed_byte_len`, `parser_epoch`) is deliberately left alone, so
+the surviving projection keeps reading as the epoch that actually built it
+rather than masquerading as current, and the session's signals flip stale (the
+settle pass regrades them from the surviving projection under the current
+scoring). The due scan skips the session while the recorded failure covers its
+current bytes at the running epoch or ahead (an attempt stamped ahead belongs
+to a newer binary and is off-limits the same way a newer success is), so it
+neither hot-loops on the same bad bytes nor goes silent forever: new bytes or
+a bumped epoch retry it. Every staleness surface shares one indexed
+expression, the attempted epoch (the last successful rebuild's epoch, raised
+to the failure epoch while the failure still covers the current bytes): the
+due scan's epoch branch, the fleet progress count, and the OG-card snapshot
+check all test it against the running epoch, so "due" and "gated" can never
+drift apart, and a corpus full of pinned failures indexes AT its failure
+epochs, outside the behind-range the hot probes scan, so probe cost tracks
+the actual backlog rather than the accumulated failure history. New bytes
+break the pin and readmit the session to the scan and the gates in the same
+instant. An operational error (a store or CAS failure, a shutdown) records
+nothing about the parse, but the worker defers the session's next attempt with
+a doubling backoff (30s to a 1h ceiling): the session must not fall out of the
+due set (the failure may clear on its own), yet a persistent one (a CAS blob
+the client never uploaded) must not be re-attempted on every chunk wake, since
+each wake drains the whole due set. The deferral is indexed the same way the
+failure pin is: parked rows leave the ready-work indexes the due scan and the
+drain's opening count read (an elapsed retry comes back via one range scan on
+its ready time), so a parked backlog costs the hot paths nothing. New bytes, a
+reset, or an operator reparse clear the deferral for an immediate retry; the
+epoch gates ignore it (deferred is not done).
 
-Because a reparse rebuilds each session's projection atomically but works through the
-corpus one session at a time, a cross-session view can briefly mix already-rebuilt and
-not-yet-rebuilt sessions mid-reparse, so the server gates the parsed UI while one runs:
-pages that serve projected data return a "reparse in progress" view with a live
-progress bar (pushed over SSE, with `GET /api/v1/reparse/status` as a poll fallback)
-instead of that transitional mix, while raw-data, auth, and account endpoints stay
-available. The gate is best-effort (a request can still race a reparse that starts
-mid-render), which is acceptable now that each session is individually consistent: the
-worst a race serves is a mix of valid old and new sessions, never an empty or
-half-built one. A future improvement could build a shadow projection and swap it across
-the whole corpus atomically, removing the gate.
+**Scheduling.** The worker drains due sessions continuously, woken in-process
+by the chunk handler and backstopped by the periodic maintenance tick that also
+grades settled sessions (`AKARI_SIGNALS_SETTLE_INTERVAL`). Live-session latency
+is one wake plus one rebuild, so SSE viewers see a session grow within a moment
+of its chunks landing, and a burst of chunks coalesces into a few rebuilds
+instead of paying a parse per chunk. Distinct sessions rebuild on a small pool;
+two rebuilds of one session serialize on its row locks. Multiple server
+instances need no coordination. At one epoch, two rebuilds of a session are
+identical, so whichever commits last wins. Across a rolling deploy the
+monotonic due predicate keeps the binaries out of each other's way: the older
+binary skips sessions the newer one already stamped, the newer binary sees the
+older stamps as due, and the corpus converges on the newest epoch because the
+newest binary outlives the rest.
+
+**The epoch.** `parse.Epoch` is the single version constant for everything
+derived from raw bytes. Bump it in the same commit as any change to parser or
+reducer output, a rebuild-derived column, the signal set or scoring, prompt
+classification, or the pricing table. The next deploy sees the corpus due and
+rebuilds it in the background; nothing else needs versioning, because nothing
+derived can stay behind for longer than one rebuild. It is a binary constant
+and not a migration on purpose: parser behavior lives in the binary, and a
+parser change often ships with no schema change at all. The golden-fixtures
+test (`internal/server/parse/epoch_test.go`) snapshots the projection for
+representative sessions and fails, naming `parse.Epoch`, if output drifts
+without a bump, so the bump cannot be forgotten.
+
+**Fleet rebuilds and UI gating.** An epoch rollout rebuilds the corpus one
+session at a time, so a cross-session view could briefly mix old and new
+sessions. While a fleet rebuild is draining, the server gates the parsed pages
+behind a progress view (pushed over SSE, with `GET /api/v1/reparse/status` as
+the poll fallback); raw-data, auth, and account endpoints stay available. The
+admin Reparse button (`POST /account/reparse`) and the
+`akari-server reparse [--agent claude]` CLI remain as manual triggers, now
+implemented as "mark the scope due" against the same worker rather than a
+parallel service.
+
+**Migration from the incremental pipeline.** The raw store and the CAS carry
+over unchanged; everything derived is rebuilt. One migration drops the
+incremental bookkeeping (`session_raw.parse_state` and `parse_state_version`,
+`sessions.parser_version` and `cache_savings_backfilled`, the `parse_meta`
+table, and the `signals_version` / `prompt_facts_version` stamps on
+`session_signals` and `messages`) and adds `session_raw.parser_epoch DEFAULT
+0`. Every session then reads as due on first boot and the corpus rebuilds
+through the ordinary worker, which re-derives columns, re-grades signals, and
+re-prices usage in the same pass, so there is no one-off backfill step.
 
 Per-agent specifics the parser must handle:
 
@@ -551,7 +613,11 @@ Per-agent specifics the parser must handle:
   JSON; messages carry `uuid`/`parentUuid` (a DAG, with forks), `cwd`,
   `gitBranch`, `message.content`, and per-message token usage with
   `input_tokens`, `output_tokens`, `cache_read_input_tokens`,
-  `cache_creation_input_tokens`. Subagent runs live under `subagents/`.
+  `cache_creation_input_tokens`. Each content block of one API assistant
+  response (its thinking, its text, each `tool_use`) is logged as its own JSONL
+  line sharing the response's `message.id`; the reducer folds those lines into
+  one assistant turn, so a `messages` row is a turn, not a content block, and
+  the shared usage block prices once. Subagent runs live under `subagents/`.
 - **Codex** (`~/.codex/sessions/YYYY/MM/DD/rollout-*-<uuid>.jsonl` and archived
   flat files): events wrap payloads; `session_meta` carries `cwd` and
   `git.branch`; token totals arrive in `token_count` events as
@@ -663,7 +729,6 @@ CREATE TABLE sessions (
   total_cache_read_tokens  BIGINT NOT NULL DEFAULT 0,
   total_cost_usd       DOUBLE PRECISION NOT NULL DEFAULT 0,  -- partial sum
   cost_incomplete      BOOLEAN NOT NULL DEFAULT FALSE,        -- any unpriced model
-  parser_version    INT NOT NULL DEFAULT 0,
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),  -- row write time; moves on reparse
   -- Feed recency: the session's last event time, falling back to created_at for a
@@ -680,19 +745,32 @@ CREATE INDEX idx_sessions_parent  ON sessions(parent_session_id)
   WHERE parent_session_id IS NOT NULL;
 
 -- Raw bytes: lossless backup and re-parse source. Append-only. The parent row
--- holds the cursor, the prefix hash and its resumable digest state, and the parse
--- cursor + serialized parser state; the bytes themselves are appended as chunk
--- rows so growth is O(append), never a detoast-and-rewrite of the whole value.
+-- holds the cursor, the prefix hash and its resumable digest state, and the
+-- rebuild bookkeeping (a session is due for a rebuild when parsed_byte_len <>
+-- byte_len or parser_epoch is behind the binary's parse.Epoch); the bytes
+-- themselves are appended as chunk rows so growth is O(append), never a
+-- detoast-and-rewrite of the whole value.
 CREATE TABLE session_raw (
-  session_id          BIGINT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
-  byte_len            BIGINT NOT NULL DEFAULT 0,    -- == sessions cursor, line-aligned
-  content_sha256      CHAR(64) NOT NULL DEFAULT '...', -- sha256 of all bytes; the prefix hash
-  sha256_state        BYTEA,                        -- resumable digest, so hashing is O(append)
-  parsed_byte_len     BIGINT NOT NULL DEFAULT 0,    -- how far parsing has consumed
-  parse_state_version INT NOT NULL DEFAULT 0,       -- parser version that wrote parse_state
-  parse_state         JSONB NOT NULL DEFAULT '{}',  -- bounded per-agent resume cursor
-  parse_error         TEXT NOT NULL DEFAULT '',
+  session_id      BIGINT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+  byte_len        BIGINT NOT NULL DEFAULT 0,    -- == sessions cursor, line-aligned
+  content_sha256  CHAR(64) NOT NULL DEFAULT '...', -- sha256 of all bytes; the prefix hash
+  sha256_state    BYTEA,                        -- resumable digest, so hashing is O(append)
+  parsed_byte_len BIGINT NOT NULL DEFAULT 0,    -- raw length the last successful rebuild covered
+  parser_epoch    INT NOT NULL DEFAULT 0,       -- parse.Epoch that rebuild ran at
+  parse_error     TEXT NOT NULL DEFAULT '',     -- last deterministic parse failure, '' when clean
+  parse_error_epoch    INT NOT NULL DEFAULT 0,     -- epoch that failure was attempted at
+  parse_error_byte_len BIGINT NOT NULL DEFAULT 0,  -- raw length that failure covered
+  parse_retry_at           TIMESTAMPTZ,            -- operational-failure backoff: due scan skips until then
+  parse_retry_backoff_secs INT NOT NULL DEFAULT 0, -- doubles per consecutive failure, 30s..1h
   CHECK (parsed_byte_len <= byte_len)
+);
+-- The attempted epoch (parser_epoch, raised to parse_error_epoch while the
+-- failure covers the current bytes): one range over this expression answers
+-- every epoch-staleness probe, with pinned failures indexed out of the range.
+CREATE INDEX idx_session_raw_attempted_epoch ON session_raw (
+  (CASE WHEN parse_error <> '' AND parse_error_byte_len = byte_len
+        THEN GREATEST(parser_epoch, parse_error_epoch)
+        ELSE parser_epoch END)
 );
 
 -- One row per uploaded chunk. The client already trims each chunk to a newline,
@@ -718,8 +796,9 @@ CREATE TABLE messages (
   has_thinking   BOOLEAN NOT NULL DEFAULT FALSE,
   has_tool_use   BOOLEAN NOT NULL DEFAULT FALSE,
   content_length INT GENERATED ALWAYS AS (octet_length(content)) STORED,
-  -- A row is written once: a whole turn lands in one chunk, so content is never
-  -- appended in place and there is no "still accumulating" state to track.
+  -- A row is one semantic turn (Claude's split content-block lines fold by API
+  -- message id). Rows are only ever written by a whole-session rebuild, so there
+  -- is no "still accumulating" state to track.
   PRIMARY KEY (session_id, ordinal)
 );
 -- Trigram index for full-text search over message content
@@ -779,8 +858,8 @@ CREATE TABLE usage_events (
 );
 CREATE UNIQUE INDEX idx_usage_dedup ON usage_events(session_id, dedup_key)
   WHERE dedup_key <> '';
--- Source identity makes incremental inserts idempotent even for Codex, whose
--- usage carries no native dedup key; a replayed line is absorbed by ON CONFLICT.
+-- Dedup happens in the rebuild's in-memory fold; the unique indexes remain as
+-- integrity backstops so a fold bug fails loudly instead of double-counting.
 CREATE UNIQUE INDEX idx_usage_source ON usage_events(session_id, source_offset, source_index)
   WHERE source_offset IS NOT NULL;
 
@@ -1237,8 +1316,7 @@ internal/
     store/          # postgres queries, CAS (large objects), migration runner
     storetest/      # per-test database provisioning
     auth/           # password, tokens, cookies
-    parse/          # parse pipeline
-    reparse/        # fleet-wide reparse service
+    parse/          # rebuild worker, parse epoch, fleet rebuild status
   client/
     discover/       # session file enumeration
     resolve/        # cwd -> git remote, skip-and-warn
@@ -1273,8 +1351,8 @@ long as the final result is complete.
 1. **Server foundation**: schema + migrations, auth (first-admin bootstrap,
    invite-only registration, login, API tokens), ingest endpoints, raw storage,
    `docker-compose up` works end to end.
-2. **Parsing**: Claude, Codex, pi parsers; incremental parse on chunk; usage and
-   cost; `reparse` command.
+2. **Parsing**: Claude, Codex, pi parsers; the rebuild-on-dirty parse worker;
+   usage and cost; `reparse` command.
 3. **Client core**: discovery, git remote resolution with skip-and-warn,
    one-shot `sync`.
 4. **Client watch + daemon**: fsnotify, polling fallback, per-OS background

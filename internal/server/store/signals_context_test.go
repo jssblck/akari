@@ -31,10 +31,7 @@ func TestSignalsContextHealth(t *testing.T) {
 			{Model: "claude-sonnet-4", Input: 25000, SourceOffset: 400, SourceIndex: 0},
 		},
 	}
-	if err := st.ApplyProjectionDelta(ctx, sid, delta); err != nil {
-		t.Fatalf("apply delta: %v", err)
-	}
-	setUserMessageCount(t, st, ctx, sid, 1)
+	rebuildWith(t, st, sid, delta)
 	settleSession(t, st, ctx, sid)
 	if err := st.RefreshSessionSignals(ctx, sid); err != nil {
 		t.Fatalf("refresh signals: %v", err)
@@ -70,10 +67,7 @@ func TestSignalsContextHealthUnmeasured(t *testing.T) {
 			{Ordinal: 1, Role: "assistant", Content: "hello"},
 		},
 	}
-	if err := st.ApplyProjectionDelta(ctx, sid, delta); err != nil {
-		t.Fatalf("apply delta: %v", err)
-	}
-	setUserMessageCount(t, st, ctx, sid, 1)
+	rebuildWith(t, st, sid, delta)
 	settleSession(t, st, ctx, sid)
 	if err := st.RefreshSessionSignals(ctx, sid); err != nil {
 		t.Fatalf("refresh signals: %v", err)

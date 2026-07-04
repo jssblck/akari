@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jssblck/akari/internal/quality"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/storetest"
 )
@@ -13,23 +12,27 @@ import (
 // insertContextSignal writes a session_signals row with the context-health columns set, so
 // a cohort test can pin the aggregate without driving the whole gather path (signals_context_test
 // already covers that). peak and resets are pointers so a test can store NULL (a session
-// with no usage), which the aggregate must exclude from its measured cohort.
-func insertContextSignal(t *testing.T, st *store.Store, ctx context.Context, sid int64, version int, peak *int64, resets *int) {
+// with no usage), which the aggregate must exclude from its measured cohort. fresh controls
+// whether signals_stale is cleared afterward, standing in for a session whose grade the fleet
+// read gate should see (true) versus one whose projection moved since it was graded (false).
+func insertContextSignal(t *testing.T, st *store.Store, ctx context.Context, sid int64, fresh bool, peak *int64, resets *int) {
 	t.Helper()
 	if _, err := st.Pool.Exec(ctx,
 		`INSERT INTO session_signals
-		   (session_id, signals_version, outcome, outcome_confidence,
+		   (session_id, outcome, outcome_confidence,
 		    peak_context_tokens, context_reset_count)
-		 VALUES ($1, $2, 'completed', 'high', $3, $4)`,
-		sid, version, peak, resets); err != nil {
+		 VALUES ($1, 'completed', 'high', $2, $3)`,
+		sid, peak, resets); err != nil {
 		t.Fatalf("insert context signal for session %d: %v", sid, err)
 	}
-	markSignalsFresh(t, st, ctx, sid)
+	if fresh {
+		markSignalsFresh(t, st, ctx, sid)
+	}
 }
 
 // TestContextHealth pins the cohort aggregate: the peak percentiles read actual stored
-// peaks, the reset figures sum the per-session counts, and only current-version rows with a
-// measured (non-null) peak are in the cohort. It also honors the window and per-user scoping.
+// peaks, the reset figures sum the per-session counts, and only fresh rows with a measured
+// (non-null) peak are in the cohort. It also honors the window and per-user scoping.
 func TestContextHealth(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -45,20 +48,20 @@ func TestContextHealth(t *testing.T) {
 
 	ptr := func(v int64) *int64 { return &v }
 	rst := func(v int) *int { return &v }
-	seed := func(user int64, src string, started time.Time, version int, peak *int64, resets *int) {
+	seed := func(user int64, src string, started time.Time, fresh bool, peak *int64, resets *int) {
 		sid := seedSession(t, st, user, pid, src)
 		setSessionShape(t, st, ctx, sid, started, started.Add(10*time.Minute), 20, 5)
-		insertContextSignal(t, st, ctx, sid, version, peak, resets)
+		insertContextSignal(t, st, ctx, sid, fresh, peak, resets)
 	}
 
-	seed(ada, "c1", recent, quality.Version, ptr(100000), rst(0))          // in window, current
-	seed(ada, "c2", recent, quality.Version, ptr(200000), rst(2))          // in window, current
-	seed(grace, "c3", recent, quality.Version, ptr(300000), rst(1))        // in window, current, other user
-	seed(grace, "c4", old, quality.Version, ptr(400000), rst(3))           // out of window, current
-	seed(ada, "c5stale", recent, quality.Version+999, ptr(999999), rst(9)) // stale -> excluded
-	seed(ada, "c6null", recent, quality.Version, nil, nil)                 // no measured context -> excluded
+	seed(ada, "c1", recent, true, ptr(100000), rst(0))       // in window, fresh
+	seed(ada, "c2", recent, true, ptr(200000), rst(2))       // in window, fresh
+	seed(grace, "c3", recent, true, ptr(300000), rst(1))     // in window, fresh, other user
+	seed(grace, "c4", old, true, ptr(400000), rst(3))        // out of window, fresh
+	seed(ada, "c5stale", recent, false, ptr(999999), rst(9)) // graded but the projection moved since -> excluded
+	seed(ada, "c6null", recent, true, nil, nil)              // no measured context -> excluded
 
-	// Unscoped: the four current-version measured rows (c1..c4). percentile_disc returns a
+	// Unscoped: the four fresh measured rows (c1..c4). percentile_disc returns a
 	// real stored peak: for [100k,200k,300k,400k] the median is 200k and the p90 is 400k.
 	all, err := st.ContextHealth(ctx, store.AnalyticsFilter{})
 	if err != nil {
@@ -82,7 +85,7 @@ func TestContextHealth(t *testing.T) {
 		t.Errorf("windowed = %+v, want {Sessions 3, P50 200000, P90 300000, Max 300000, TotalResets 3, SessionsWithReset 2}", windowed)
 	}
 
-	// Ada only: her two measured current rows (c1, c2); the stale c5 and null-peak c6 stay out.
+	// Ada only: her two fresh measured rows (c1, c2); the stale c5 and null-peak c6 stay out.
 	adaOnly, err := st.ContextHealth(ctx, store.AnalyticsFilter{Username: "ada"})
 	if err != nil {
 		t.Fatalf("context health (ada): %v", err)

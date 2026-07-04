@@ -38,7 +38,7 @@ func (s *Server) handleAccountPage(w http.ResponseWriter, r *http.Request) {
 	// cleared, so a page reload does not keep showing them.
 	newToken := readFlash(w, r, "akari_new_token")
 	newInvite := readFlash(w, r, "akari_new_invite")
-	st := s.reparser.Status()
+	st := s.worker.FleetStatus(r.Context())
 	rp := web.ReparseView{InProgress: st.InProgress, Done: st.Done, Total: st.Total, Failed: st.Failed}
 	render(w, r, http.StatusOK, web.AccountPage(page, tokens, grants, invites, newToken, newInvite, rp))
 }

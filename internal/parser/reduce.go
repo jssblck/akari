@@ -2,7 +2,6 @@ package parser
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -11,50 +10,13 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// State is the carry-over a parser needs to resume from a byte cursor. It is
-// serialized to the session_raw row between chunks and is bounded in size: it
-// holds only counters, never any per-message accumulation or an open turn. A
-// Codex turn folds a run of reasoning/function_call items and the final text
-// into one assistant message, but that fold never crosses a region: the ingest
-// protocol cuts chunks on turn boundaries, so a whole turn always lands in one
-// region. That is what lets the open turn live in the reducer for the span of a
-// single Reduce call and never be serialized here.
-type State struct {
-	// NextOrdinal is the ordinal the next message will take.
-	NextOrdinal int `json:"next_ordinal"`
-	// Model is the sticky current model (Codex carries it across lines, and a
-	// later region's usage line may need the model named in an earlier region).
-	Model string `json:"model"`
-}
-
-// initialState is the state a fresh (or freshly reset) session starts from.
-func initialState() State {
-	return State{}
-}
-
-// DecodeState parses serialized parser state, defaulting unset fields to the
-// initial state. An empty or "{}" blob yields the initial state.
-func DecodeState(b []byte) (State, error) {
-	st := initialState()
-	if len(b) == 0 {
-		return st, nil
-	}
-	if err := json.Unmarshal(b, &st); err != nil {
-		return st, fmt.Errorf("decode parser state: %w", err)
-	}
-	return st, nil
-}
-
-// Encode serializes the state for storage.
-func (s State) Encode() ([]byte, error) { return json.Marshal(s) }
-
 // MessageOp is one message write in a Delta. Each ordinal is written exactly
-// once: a turn is folded whole within the region that contains it (the ingest
-// protocol keeps a turn inside one chunk), so Content and ThinkingText are the
-// complete text, not a fragment to append. ThinkingBytes is the turn's
-// reasoning-trace weight (see Message.ThinkingBytes): plaintext length where the
-// agent logs it, else the encrypted payload length, so a redacted turn still
-// records how much it thought.
+// once, carrying the turn's complete text: the reducer folds a whole session in
+// one pass, so a turn's fragments are joined before the op is emitted, never
+// appended in place. ThinkingBytes is the turn's reasoning-trace weight (see
+// Message.ThinkingBytes): plaintext length where the agent logs it, else the
+// encrypted payload length, so a redacted turn still records how much it
+// thought.
 type MessageOp struct {
 	Ordinal       int
 	Role          Role
@@ -144,13 +106,10 @@ type FallbackOp struct {
 	DedupKey string
 }
 
-// Delta is everything one Reduce call produces for one raw region: the rows to
-// write and the region's timestamp span. It carries operations, not a whole
-// session, so applying it is append-only work proportional to the region, never to
-// the session. It deliberately carries no message/token counters: the session
-// rollups are derived downstream from the rows that actually persist (the store
-// dedups messages and usage on insert), so a counter here would only risk drifting
-// from that surviving set.
+// Delta is everything one parse of a session produces: the rows to write and
+// the session's timestamp span. It deliberately carries no message/token
+// counters: the session rollups are derived downstream from the deduped set the
+// rebuild actually writes, so a counter here would only risk drifting from it.
 type Delta struct {
 	Messages    []MessageOp
 	ToolCalls   []ToolCall
@@ -168,45 +127,77 @@ type Delta struct {
 	GitBranch string
 }
 
-// Reduce advances the parse of one agent over a raw region that begins at
-// baseOffset. The region must contain only complete lines (the ingest protocol
-// guarantees every stored byte ends on a newline). It returns the new carry-over
-// state and the projection delta. Malformed individual lines are skipped, exactly
-// as the batch parser did; an error means the region could not be processed.
-func Reduce(agent Agent, st State, region []byte, baseOffset int64) (State, Delta, error) {
-	r := &reducer{st: st, lastUsageOffset: -1}
-	var err error
-	switch agent {
-	case AgentClaude:
-		err = r.reduceClaude(region, baseOffset)
-	case AgentCodex:
-		err = r.reduceCodex(region, baseOffset)
-	case AgentPi:
-		err = r.reducePi(region, baseOffset)
-	default:
-		return st, Delta{}, fmt.Errorf("unknown agent %q", agent)
-	}
-	if err != nil {
-		return st, Delta{}, err
-	}
-	return r.st, r.d, nil
+// Reducer folds one session's raw bytes into a Delta. A parse always covers the
+// whole session from byte zero: construct a Reducer, Feed the stored regions in
+// offset order (each must contain only complete lines; the ingest protocol
+// guarantees every stored byte ends on a newline), and Finish to flush the open
+// turn and take the Delta. Because the whole parse is one Reducer, an open turn
+// folds freely across region boundaries and no state is ever serialized.
+// Malformed individual lines are skipped; a Feed error means the region could
+// not be processed.
+type Reducer struct {
+	agent Agent
+	r     reducer
+	done  bool
 }
 
-// reducer accumulates a Delta for one Reduce call. open is the assistant turn
-// being folded across the lines of this region (Codex); claude and pi never use
-// it. It lives only for the span of one Reduce call: a turn never crosses a
-// region, so there is nothing to carry into the next one. openContent and
-// openThink collect that turn's fragments so they are joined once when the op is
-// emitted, rather than rebuilt with a growing concatenation on every line (which
-// would make one region O(region_text^2)). openCalls is the next call index
-// within the open turn.
+// NewReducer returns a Reducer for one session of the given agent.
+func NewReducer(agent Agent) (*Reducer, error) {
+	switch agent {
+	case AgentClaude, AgentCodex, AgentPi:
+		return &Reducer{agent: agent, r: reducer{lastUsageOffset: -1}}, nil
+	default:
+		return nil, fmt.Errorf("unknown agent %q", agent)
+	}
+}
+
+// Feed advances the parse over the next raw region, which begins at baseOffset.
+func (x *Reducer) Feed(region []byte, baseOffset int64) error {
+	if x.done {
+		return fmt.Errorf("reducer already finished")
+	}
+	switch x.agent {
+	case AgentClaude:
+		return x.r.reduceClaude(region, baseOffset)
+	case AgentCodex:
+		return x.r.reduceCodex(region, baseOffset)
+	default:
+		return x.r.reducePi(region, baseOffset)
+	}
+}
+
+// Finish emits any still-open turn (the final, in-progress turn of a live
+// session has no closing line) and returns the session's Delta.
+func (x *Reducer) Finish() Delta {
+	if !x.done {
+		x.r.closeTurn()
+		x.done = true
+	}
+	return x.r.d
+}
+
+// reducer accumulates the Delta for one session. open is the assistant turn
+// being folded across lines: Codex folds a run of reasoning/function_call items
+// into one turn, and Claude folds the content-block lines that share one API
+// message id. openContent and openThink collect that turn's fragments so they
+// are joined once when the op is emitted, rather than rebuilt with a growing
+// concatenation on every line (which would make one turn O(turn_text^2)).
+// openCalls is the next call index within the open turn.
 type reducer struct {
-	st          State
-	d           Delta
-	open        *MessageOp
-	openCalls   int
-	openContent []string
-	openThink   []string
+	// nextOrdinal is the ordinal the next message will take. model is the sticky
+	// current model (Codex carries it across lines).
+	nextOrdinal int
+	model       string
+
+	d         Delta
+	open      *MessageOp
+	openCalls int
+	// openClaudeID is the API message id of the open Claude turn, the fold key
+	// that groups Claude's split content-block lines (issue #98). Empty for other
+	// agents and for an id-less line, which never folds with a neighbor.
+	openClaudeID string
+	openContent  []string
+	openThink    []string
 	// openThinkBytes accumulates the open turn's reasoning-trace weight (plaintext
 	// where present, else the encrypted payload length), and openThinkSeen records
 	// that a reasoning block appeared at all, so a turn whose reasoning was redacted
@@ -239,10 +230,12 @@ func (r *reducer) observe(t time.Time) {
 }
 
 // addUser appends a user message and advances the ordinal, returning the ordinal it
-// took so a caller can attach images carried by the same line to it.
+// took so a caller can attach images carried by the same line to it. It closes any
+// open assistant turn first: a user message always ends the turn before it.
 func (r *reducer) addUser(content string, ts time.Time) int {
-	ord := r.st.NextOrdinal
-	r.st.NextOrdinal++
+	r.closeTurn()
+	ord := r.nextOrdinal
+	r.nextOrdinal++
 	r.d.Messages = append(r.d.Messages, MessageOp{
 		Ordinal: ord, Role: RoleUser, Content: content, Timestamp: ts,
 	})
@@ -255,8 +248,9 @@ func (r *reducer) addUser(content string, ts time.Time) int {
 // skip it. A context turn carries no images or usage, so unlike addUser its callers
 // have no attachment to hang on the returned ordinal.
 func (r *reducer) addContext(content string, ts time.Time) int {
-	ord := r.st.NextOrdinal
-	r.st.NextOrdinal++
+	r.closeTurn()
+	ord := r.nextOrdinal
+	r.nextOrdinal++
 	r.d.Messages = append(r.d.Messages, MessageOp{
 		Ordinal: ord, Role: RoleContext, Content: content, Timestamp: ts,
 	})
@@ -328,8 +322,8 @@ func (r *reducer) attachOrdinal(ts time.Time) int {
 	if r.open != nil {
 		return r.open.Ordinal
 	}
-	if r.st.NextOrdinal > 0 {
-		return r.st.NextOrdinal - 1
+	if r.nextOrdinal > 0 {
+		return r.nextOrdinal - 1
 	}
 	return r.ensureAssistant(ts)
 }
@@ -358,16 +352,16 @@ func (r *reducer) addUsage(u Usage, offset int64) {
 }
 
 // ensureAssistant returns the ordinal of the open assistant turn, opening one if
-// none is. The open turn lives only within this region; the protocol guarantees
-// the whole turn is here, so it is folded and emitted before the region ends.
+// none is. The open turn lives in memory until something closes it (a user line,
+// a new Claude message id, or Finish), so a fold crosses region boundaries freely.
 func (r *reducer) ensureAssistant(ts time.Time) int {
 	if r.open != nil {
 		return r.open.Ordinal
 	}
-	ord := r.st.NextOrdinal
-	r.st.NextOrdinal++
+	ord := r.nextOrdinal
+	r.nextOrdinal++
 	r.openCalls = 0
-	r.open = &MessageOp{Ordinal: ord, Role: RoleAssistant, Model: r.st.Model, Timestamp: ts}
+	r.open = &MessageOp{Ordinal: ord, Role: RoleAssistant, Model: r.model, Timestamp: ts}
 	return ord
 }
 
@@ -409,7 +403,8 @@ func (r *reducer) buildOpen() {
 	r.openThinkBytes, r.openThinkSeen = 0, false
 }
 
-// closeTurn finalizes and emits the open assistant turn (a user line ends it).
+// closeTurn finalizes and emits the open assistant turn (a user line, a new
+// Claude message id, or Finish ends it).
 func (r *reducer) closeTurn() {
 	if r.open == nil {
 		return
@@ -417,13 +412,7 @@ func (r *reducer) closeTurn() {
 	r.buildOpen()
 	r.d.Messages = append(r.d.Messages, *r.open)
 	r.open = nil
-}
-
-// flushRegion emits a still-open turn at the end of a region. Under the protocol
-// this only fires for the final, in-progress turn of a settled session (its
-// closing user line never arrives); it is emitted as a complete message.
-func (r *reducer) flushRegion() {
-	r.closeTurn()
+	r.openClaudeID = ""
 }
 
 // eachLine walks the complete JSONL lines in region, calling fn with the trimmed
@@ -455,14 +444,17 @@ func eachLine(region []byte, base int64, fn func(line []byte, offset int64) erro
 }
 
 // Parse parses a whole session in one shot, assembling a Session from the same
-// reducer the incremental path uses. Keeping the batch parser as a thin wrapper
-// over Reduce guarantees full and incremental parsing can never diverge.
+// reducer the server's rebuild uses. Keeping the batch parser as a thin wrapper
+// over Reducer guarantees the two can never diverge.
 func Parse(agent Agent, raw []byte) (Session, error) {
-	_, d, err := Reduce(agent, initialState(), raw, 0)
+	x, err := NewReducer(agent)
 	if err != nil {
 		return Session{}, err
 	}
-	return assemble(d), nil
+	if err := x.Feed(raw, 0); err != nil {
+		return Session{}, err
+	}
+	return assemble(x.Finish()), nil
 }
 
 // assemble folds a single-region Delta back into a Session for the test-facing

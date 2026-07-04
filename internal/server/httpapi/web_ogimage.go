@@ -168,7 +168,7 @@ func (s *Server) handlePublicSessionOGImage(w http.ResponseWriter, r *http.Reque
 	// Skip the render while a reparse rewrites the corpus (see the doc comment): serve the
 	// last good card if we hold one, else 404 until the reparse ends and a later fetch
 	// renders it.
-	if s.reparser.FleetStatus(r.Context()).InProgress {
+	if s.worker.FleetStatus(r.Context()).InProgress {
 		if haveCache {
 			s.writeOGImage(w, cached.PNG)
 			return

@@ -25,8 +25,10 @@ package quality
 // The band is an absolute cut on that token scale, not a per-model quartile. Quartiles
 // are 25%-each by construction, so a fleet distribution over them is tautological; an
 // absolute scale tracks the real spread and shifts when behavior shifts.
-// The edges are versioned constants (ThinkingScaleVersion) rather than recomputed at read
-// time, so a stored or displayed band is stable until an intentional rescale.
+// The edges are baked constants rather than recomputed at read time, so a stored or
+// displayed band is stable until an intentional rescale. A change to a bytes-per-token
+// factor moves stored scalars and so rides a parse.Epoch bump; an edge change is applied
+// at read time and needs no bump.
 
 // ThinkingBucket is the banded read of an observed-thinking volume.
 type ThinkingBucket string
@@ -41,14 +43,6 @@ const (
 	ThinkingHigh   ThinkingBucket = "high"
 	ThinkingXHigh  ThinkingBucket = "xhigh"
 )
-
-// ThinkingScaleVersion stamps the calibration factors and band edges below. Bump it on any
-// change to a bytes-per-token factor or a band edge, so a rescale is a deliberate, dated
-// event rather than a silent drift in what "high" means. It is separate from
-// quality.Version: the settle pass re-derives the stored per-session token scalars, so a
-// factor change (which moves the stored tokens) pairs with a quality.Version bump, while an
-// edge change (which only moves the read-time band) can ride this version alone.
-const ThinkingScaleVersion = 1
 
 // The band edges over per-turn estimated reasoning tokens. A turn (or a session's
 // hardest-decile-mean turn) sits in the band its token count reaches. The edges are a

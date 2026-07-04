@@ -32,15 +32,16 @@ Token and cost data is aggregated from exactly two places.
 2. **The rollups: `sessions.total_*`.** Per-session running totals
    (`total_input_tokens`, `total_output_tokens`, `total_cache_read_tokens`,
    `total_cache_write_tokens`, `total_cost_usd`, plus `message_count` and the
-   generated `total_tokens`). They are maintained incrementally at write time so a
+   generated `total_tokens`). They are written by each session's rebuild so a
    long list or index never has to scan the ledger.
 
 ## The load-bearing invariant
 
-The rollups are folded from exactly the usage rows that survive their `ON CONFLICT`
-dedup. `applyDelta` counts only the rows that actually insert (`RowsAffected() > 0`)
-and `applyAggregates` adds those to `sessions.total_*`; a reparse zeroes the rollups
-(`resetSessionAggregates`) and replays the identical fold. So, for every session:
+A session's projection is only ever written by a whole-session rebuild
+(`store.RebuildSession`), which computes the ledger and the rollups from one
+in-memory fold: usage events dedup in memory, and `sessions.total_*` is summed
+from the exact row set the rebuild writes, in the same transaction. So, for
+every session:
 
 > `sessions.total_<class> == sum(usage_events.<class>_tokens)` for each of the four
 > classes, `sessions.total_cost_usd == sum(usage_events.cost_usd)`, and
@@ -48,18 +49,17 @@ and `applyAggregates` adds those to `sessions.total_*`; a reparse zeroes the rol
 
 This holds by construction, but nothing in the schema enforces it, so it is exactly
 the kind of thing that rots. It is pinned directly by
-`TestSessionRollupMatchesLedger` (after the live ingest path and after a reparse,
+`TestSessionRollupMatchesLedger` (after live ingest and after an epoch rebuild,
 across multiple agents, models, cache tokens, duplicate usage, undated usage, and
 unpriced usage) and, for the specific Claude duplicate-usage case, by
 `TestClaudeDuplicateUsageCountedOnce` in the parse package.
 
 `sessions.model_fallback_count` follows the same construction against the
-`model_fallbacks` table: `applyDelta` counts only the rows its merge-upsert freshly
-inserts (the several transcript lines of one fallback share a dedup key, so later
-lines merge rather than re-count), and a reparse zeroes the counter and replays the
-fold. The invariant `sessions.model_fallback_count == count(model_fallbacks)` is
-pinned across ingest and reparse by `TestClaudeModelFallbackMergesAndCounts` in the
-parse package. The declined attempt's token counts live on the `model_fallbacks` row
+`model_fallbacks` table: the fold merges the several transcript lines of one
+fallback (they share a dedup key) into one row in memory and counts the merged
+set. The invariant `sessions.model_fallback_count == count(model_fallbacks)` is
+pinned across ingest and rebuild by `TestClaudeModelFallbackMergesAndCounts` in
+the parse package. The declined attempt's token counts live on the `model_fallbacks` row
 only; they are deliberately NOT folded into `sessions.total_*` or `usage_events`
 (whether a declined attempt is billed depends on where in the stream it declined, so
 the totals stay a record of served usage).
@@ -105,8 +105,7 @@ If you add a surface that shows a token or cost figure:
 2. If your view genuinely needs the other base (a cheap index that should not scan the
    ledger, say), add or extend a reconciliation test so the two bases are pinned equal,
    the way `TestProjectsIndexReconcilesWithAnalytics` pins the index against the panel.
-3. If you add a fifth token class or a new usage column, thread it through every fold
-   (`applyDelta`, `applyAggregates`, `resetSessionAggregates`) and every aggregate
-   query, and extend the invariant test. Dropping a class from one side is the
-   regression these tests and the `projection-consistency` bastion reviewer exist to
-   catch.
+3. If you add a fifth token class or a new usage column, thread it through the
+   rebuild fold (`store.RebuildSession`) and every aggregate query, and extend the
+   invariant test. Dropping a class from one side is the regression these tests
+   and the `projection-consistency` bastion reviewer exist to catch.

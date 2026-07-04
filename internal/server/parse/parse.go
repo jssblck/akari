@@ -1,8 +1,12 @@
 // Package parse is the server-side pipeline that turns a session's stored raw
-// bytes into the queryable projection. It runs the per-agent reducer over the
-// unparsed tail of a session, prices each usage event from the compiled-in
-// pricing table, and applies the result incrementally: each chunk does work
-// proportional to its own bytes, not to the whole session.
+// bytes into the queryable projection. Parsing has exactly one shape: rebuild
+// the whole session. The per-agent reducer is fed the session's complete bytes,
+// each usage event is priced from the compiled-in table, and the store swaps
+// the folded projection in atomically (see store.RebuildSession). There is no
+// incremental parse, no serialized parser state, and no separate reparse
+// mechanism: a session that gained bytes, a session whose last parse failed,
+// and a corpus behind a new parser epoch are all "the projection is behind the
+// raw bytes", handled by the same rebuild.
 package parse
 
 import (
@@ -13,178 +17,62 @@ import (
 	"github.com/jssblck/akari/internal/server/store"
 )
 
-// Version is the parser projection version. Bump it when parsing changes so a
-// reparse can be told which sessions are stale. A session parsed past byte 0 by a
-// different version cannot be resumed incrementally; reparse rewinds and replays
-// it from scratch.
-//
-// Version 2 changed how the session rollups are folded: they now count only the
-// usage and message rows that survive their ON CONFLICT dedup, where version 1
-// added every per-region occurrence and so inflated Claude sessions (which stream
-// one assistant message across several lines that share a usage block). A version-1
-// session keeps its inflated rollup until a reparse rewinds it, which is why the fix
-// ships with a version bump: an incremental advance over a still version-1 session
-// would fold a correct delta onto a wrong base. Run `akari-server reparse` to
-// correct the live data.
-//
-// Version 3 added Codex custom_tool_call bodies and binary image attachments (image
-// generation results and pasted images) to the projection, so a reparse backfills
-// those rows on already-ingested sessions.
-//
-// Version 4 added a per-tool-call detail: a bounded, human-scannable summary of the
-// input (a shell command, a search pattern, a fetched URL, or an agent's
-// description) the UI shows when a call has no file_path. It is derived from the
-// input's top-level JSON keys where the body is inline, and rides the CAS sentinel
-// where the client already lifted the body, so a reparse backfills it on
-// inline-bodied sessions while a client-stripped one keeps an empty detail.
-//
-// Version 5 pairs with the Epoch 4 -> 5 bump that materializes tool_calls.file_rel_path
-// (the store-side session-relative path, see epoch.go and store/projection.go). The
-// column is filled at insert and cannot backfill on its own, so a session already parsed
-// at version 4 must not resume incrementally: an incremental advance would insert new
-// tool_calls rows with file_rel_path filled while its pre-change rows keep NULL, and file
-// churn would carry two representations of one file (NULL and the relative path) until the
-// epoch reparse reached that session. Bumping Version forces a rewind-and-replay so every
-// row of a session fills the column in one pass, keeping a session's tool_calls internally
-// consistent rather than blended across the change.
-//
-// Version 6 pairs with the Epoch 5 -> 6 bump that materializes messages.duplicate_prompt
-// (the store-side per-user-turn repeat verdict, see epoch.go and store/projection.go). The
-// flag is filled at insert from the ordered prefix of earlier messages, so it cannot backfill
-// on its own AND an incremental resume would misjudge it: a session parsed at version 5 that
-// resumed incrementally would fill the flag only on newly appended rows (leaving its earlier
-// rows NULL), and a later duplicate would be judged against a prefix whose own flags were
-// never derived. Bumping Version forces a rewind-and-replay so every user turn re-derives its
-// flag against the full ordered prefix in one pass, keeping a session's transcript badges
-// internally consistent rather than blended across the change.
-//
-// Version 7 pairs with the Epoch 6 -> 7 bump that materializes the message_turn_usage rollup (the
-// per-turn usage fold the transcript reads, see migration 0032_message_turn_usage and the usage
-// insert loop in store/projection.go). The rollup is accumulated as usage rows insert, so it cannot
-// backfill on its own AND an incremental resume would leave it partial: a session parsed at version 6
-// that resumed incrementally would fold only newly appended usage rows into the rollup while its
-// earlier turns carried none, so the transcript would read a zero turn load for every pre-change
-// message. Bumping Version forces a rewind-and-replay so every surviving usage row re-folds into its
-// turn in one pass, keeping a session's per-turn loads consistent rather than blended across the change.
-//
-// Version 8 pairs with the Epoch 7 -> 8 bump that reclassifies a Codex session's injected framing (the
-// AGENTS.md project instructions and the environment_context block Codex prepends before the real
-// prompt) from the user role to the new "context" role (see internal/parser/codex.go isCodexContext).
-// This is a parser output change: a message row's role now differs, which cascades into every store
-// reader that keys on role='user' (the session title lateral, user_message_count, and the prompt-hygiene
-// aggregate all now read the real opening prompt instead of the framing). A session parsed at version 7
-// must not resume incrementally, since its already-written framing row keeps the user role while newly
-// appended turns would classify under the new rules, blending two representations in one transcript;
-// bumping Version forces a rewind-and-replay so the whole session re-roles in one pass. The golden
-// fixtures move with this change.
-//
-// Version 9 pairs with the Epoch 8 -> 9 bump that adds the model_fallbacks projection row (a Claude
-// Fable turn the safety classifier declined and re-served on a lower model, see migration
-// 0034_model_fallbacks and the fallback upsert in store/projection.go). This is a real parser output
-// change: the reducer emits a new op type from the transcript's explicit fallback markers, so the
-// golden fixtures move. A session parsed at version 8 must not resume incrementally, because the
-// per-session model_fallback_count is accumulated as the fallback rows insert: an incremental advance
-// would count only the fallbacks in newly appended regions and leave the session's pre-change fallbacks
-// undetected. Bumping Version forces a rewind-and-replay so every region re-detects its fallbacks and the
-// count re-accumulates from the full session in one pass.
-//
-// Version 10 pairs with the Epoch 9 -> 10 reprice that adds claude-sonnet-5 to the pricing table.
-// Per-row cost is stored on each usage_events row at parse time (see the pricing.Cost call in
-// reduceFunc), so a Sonnet 5 session parsed at version 9 holds NULL-cost rows. An incremental resume
-// would price only newly appended rows and leave the earlier ones unpriced, blending two pricings in
-// one session; bumping Version forces a rewind-and-replay so the whole session re-prices uniformly.
-// The reduce delta is otherwise unchanged and no golden fixture uses Sonnet 5, so the golden fixtures
-// do not move.
-//
-// Version 11 pairs with the Epoch 10 -> 11 reprice that gives claude-sonnet-5 its two-window
-// introductory rate ($2/$10 through 2026-08-31, $3/$15 after; see internal/pricing). pricing.Cost now
-// selects the window in effect at each row's OccurredAt, so a Sonnet 5 session logged inside the intro
-// window re-prices cheaper. A session parsed at version 10 holds rows priced at the flat $3/$15; an
-// incremental resume would price only newly appended rows at the windowed rate and leave the earlier
-// ones at the flat rate, blending two pricings in one session. Bumping Version forces a
-// rewind-and-replay so the whole session re-prices from the window at each row's OccurredAt. The reduce
-// delta is otherwise unchanged and no golden fixture uses Sonnet 5, so the golden fixtures do not move.
-//
-// Version 12 pairs with the Epoch 11 -> 12 reparse that records messages.thinking_bytes, the per-turn
-// reasoning-trace weight the observed-thinking signal sums (see parser.Message.ThinkingBytes and
-// migration 0041). The reducer now sets ThinkingBytes on every assistant turn (the reasoning plaintext
-// length where the agent logs it, else the encrypted signature/encrypted_content length) and marks
-// HasThinking whenever a reasoning block was present, decoupled from whether the text survived
-// redaction. That is a parser output change (a new message field, and HasThinking flips true on the
-// redacted turns current agents emit), so it pairs with the Epoch bump and moves the golden fixtures.
-// The column is not generated, so the reparse is what fills it: an incremental resume would leave
-// earlier turns at the DEFAULT 0 and blend measured and unmeasured turns in one session.
-const Version = 12
-
-// Advance parses any not-yet-parsed bytes of a session and applies them to the
-// projection, looping until the parse cursor catches up to the stored length. It
-// returns the session's message count. The raw bytes are never modified; a parser
-// error leaves the cursor where it was for the next chunk or a reparse to retry.
-func Advance(ctx context.Context, st *store.Store, sessionID int64, agent string) (int, error) {
-	reduce := reduceFunc(agent)
-	for {
-		_, caughtUp, err := st.AdvanceProjection(ctx, sessionID, Version, reduce)
-		if err != nil {
-			return 0, err
-		}
-		if caughtUp {
-			break
-		}
-	}
-	return st.MessageCount(ctx, sessionID)
-}
-
 // ParserError marks a failure that came from the parser reducer itself: malformed
 // transcript bytes the reducer cannot turn into a projection. It is distinct from an
 // operational error (a store query, a CAS read, a cancelled context), which travels
-// up un-wrapped. The reparse service uses this distinction: a parser error is
-// per-session and deterministic (re-running fails the same way), so it is counted and
-// the run still completes; an operational error is treated as transient and aborts
-// the run without stamping the epoch, so the next start retries rather than masking it.
+// up un-wrapped. The worker uses this distinction: a parser error is per-session and
+// deterministic (re-running fails the same way), so the store records the attempt on
+// session_raw's failure markers (parse_error plus the epoch and raw length it tried)
+// and the session retries only when its bytes or the epoch move; an operational
+// error records nothing, so the next drain retries it.
 type ParserError struct{ err error }
 
 func (e *ParserError) Error() string { return e.err.Error() }
 func (e *ParserError) Unwrap() error { return e.err }
 
-// Reparse rebuilds a session's projection from its stored raw bytes by clearing the
-// derived rows and replaying the whole session through the same reducer the live path
-// uses, atomically (see store.ReparseSession): on any failure the prior projection is
-// left intact rather than a cleared session. This is how a parser improvement reaches
-// already-ingested data without re-uploading anything.
-func Reparse(ctx context.Context, st *store.Store, sessionID int64, agent string) (int, error) {
-	if err := st.ReparseSession(ctx, sessionID, Version, reduceFunc(agent)); err != nil {
-		return 0, err
+// Rebuild rebuilds one session's whole projection from its stored raw bytes at
+// the running Epoch. It is the only projection write path: the parse worker
+// calls it for every due session, whether the session gained bytes, failed its
+// last parse, or sits behind a bumped epoch.
+func Rebuild(ctx context.Context, st *store.Store, sessionID int64, agent string) error {
+	r, err := newSessionReducer(agent)
+	if err != nil {
+		return &ParserError{err: err}
 	}
-	return st.MessageCount(ctx, sessionID)
+	return st.RebuildSession(ctx, sessionID, Epoch, r)
 }
 
-// reduceFunc adapts the per-agent reducer to the store's ReduceFunc: it decodes
-// the carry-over state, runs the reducer over the region, prices the usage, and
-// returns the re-encoded state plus the store-shaped delta.
-func reduceFunc(agent string) store.ReduceFunc {
-	return func(stateBytes, region []byte, baseOffset int64) ([]byte, store.ProjectionDelta, error) {
-		st, err := parser.DecodeState(stateBytes)
-		if err != nil {
-			return nil, store.ProjectionDelta{}, err
-		}
-		next, d, err := parser.Reduce(parser.Agent(agent), st, region, baseOffset)
-		if err != nil {
-			// A reducer failure is a deterministic parse error on these bytes; mark it so
-			// a reparse can tell it apart from an operational store/CAS error.
-			return nil, store.ProjectionDelta{}, &ParserError{err: err}
-		}
-		encoded, err := next.Encode()
-		if err != nil {
-			return nil, store.ProjectionDelta{}, err
-		}
-		return encoded, toProjectionDelta(d), nil
+// sessionReducer adapts the per-agent parser reducer to the store's
+// SessionReducer seam: Feed delegates to the reducer (marking its failures as
+// ParserError so the store and worker can classify them), and Finish prices the
+// completed delta into the store's shape.
+type sessionReducer struct {
+	r *parser.Reducer
+}
+
+func newSessionReducer(agent string) (*sessionReducer, error) {
+	r, err := parser.NewReducer(parser.Agent(agent))
+	if err != nil {
+		return nil, err
 	}
+	return &sessionReducer{r: r}, nil
+}
+
+func (s *sessionReducer) Feed(region []byte, baseOffset int64) error {
+	if err := s.r.Feed(region, baseOffset); err != nil {
+		return &ParserError{err: err}
+	}
+	return nil
+}
+
+func (s *sessionReducer) Finish() store.ProjectionDelta {
+	return toProjectionDelta(s.r.Finish())
 }
 
 // toProjectionDelta maps a parser delta to the store delta, pricing each usage
 // event from the compiled-in table. It does not accumulate session-level token or
-// cost increments: those are derived from the rows that actually persist (the store
-// dedups usage on insert), so the rollups count exactly the surviving ledger set.
+// cost counters: those are derived by the store's fold from the deduped set that
+// actually persists, so the rollups count exactly the surviving ledger set.
 func toProjectionDelta(p parser.Delta) store.ProjectionDelta {
 	d := store.ProjectionDelta{
 		Started: p.Started,
@@ -276,8 +164,8 @@ func toProjectionDelta(p parser.Delta) store.ProjectionDelta {
 		}
 		// Price the event here at the rate in effect when it occurred (OccurredAt
 		// selects the date-effective window); whether it counts toward the session
-		// total is decided at insert time, where a duplicate usage line is dropped and
-		// only the surviving row folds into the rollup (cost_incomplete included).
+		// total is decided by the store's dedup fold, where a duplicate usage line is
+		// dropped and only the surviving row folds into the rollup.
 		if cost, known := pricing.Cost(u.Model, u.OccurredAt, u.Input, u.Output, u.CacheWrite, u.CacheRead); known {
 			pu.CostUSD = &cost
 		}

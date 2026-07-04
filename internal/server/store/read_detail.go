@@ -8,18 +8,16 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-
-	"github.com/jssblck/akari/internal/pricing"
-	"github.com/jssblck/akari/internal/quality"
 )
 
-// scanDetailRow loads one session with its project into a SessionDetail by an arbitrary WHERE
-// clause, also reporting whether its cache-savings rollup is backfilled. It is the single-query
-// core that scanDetail wraps with the read-side backfill; every displayed field comes from this
-// one sessions-row read, so the token split and the saving are always one consistent snapshot.
-func (s *Store) scanDetailRow(ctx context.Context, where string, arg any) (SessionDetail, bool, error) {
+// scanDetail loads one session with its project into a SessionDetail by an arbitrary
+// WHERE clause. Every displayed field comes from this one sessions-row read, so the
+// token split and the cache saving are always one consistent snapshot. The rollups
+// (including total_cache_savings_usd) are re-folded whole by every rebuild, so there is
+// no read-side backfill or pricing-marker dance: a reprice ships as a parse.Epoch bump
+// and the epoch rebuild re-prices the corpus.
+func (s *Store) scanDetail(ctx context.Context, where string, arg any) (SessionDetail, error) {
 	var d SessionDetail
-	var cacheSavingsBackfilled bool
 	err := s.Pool.QueryRow(ctx,
 		`SELECT s.id, s.agent, s.machine, s.git_branch, u.username,
 		        s.message_count, s.user_message_count, s.model_fallback_count,
@@ -27,8 +25,8 @@ func (s *Store) scanDetailRow(ctx context.Context, where string, arg any) (Sessi
 		        s.total_cache_write_tokens, s.total_cache_read_tokens,
 		        s.total_cost_usd, s.cost_incomplete, s.visibility, s.public_id,
 		        s.started_at, s.ended_at, s.last_active_at,
-		        s.user_id, s.project_id, p.remote_key, p.display_name, p.kind, s.cwd, s.parent_session_id, s.parser_version,
-		        s.total_cache_savings_usd, s.cache_savings_incomplete, s.cache_savings_backfilled,
+		        s.user_id, s.project_id, p.remote_key, p.display_name, p.kind, s.cwd, s.parent_session_id,
+		        s.total_cache_savings_usd, s.cache_savings_incomplete,
 		        coalesce(title.content, '')
 		   FROM sessions s
 		   JOIN users u ON u.id = s.user_id
@@ -41,86 +39,16 @@ func (s *Store) scanDetailRow(ctx context.Context, where string, arg any) (Sessi
 		&d.TotalInput, &d.TotalOutput, &d.TotalCacheWrite, &d.TotalCacheRead,
 		&d.TotalCostUSD, &d.CostIncomplete, &d.Visibility, &d.PublicID,
 		&d.StartedAt, &d.EndedAt, &d.LastActiveAt,
-		&d.OwnerID, &d.ProjectID, &d.ProjectKey, &d.ProjectName, &d.ProjectKind, &d.Cwd, &d.ParentID, &d.ParserVersion,
-		&d.TotalCacheSavingsUSD, &d.CacheSavingsIncomplete, &cacheSavingsBackfilled,
+		&d.OwnerID, &d.ProjectID, &d.ProjectKey, &d.ProjectName, &d.ProjectKind, &d.Cwd, &d.ParentID,
+		&d.TotalCacheSavingsUSD, &d.CacheSavingsIncomplete,
 		&d.Title)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return SessionDetail{}, false, ErrNotFound
+		return SessionDetail{}, ErrNotFound
 	}
 	if err != nil {
-		return SessionDetail{}, false, err
+		return SessionDetail{}, err
 	}
 	d.Title = squashSpaces(d.Title)
-	return d, cacheSavingsBackfilled, nil
-}
-
-// scanDetail loads one session with its project, by an arbitrary WHERE clause.
-//
-// The Cache tile reads the total_cache_savings_usd rollup rather than rescanning usage_events per
-// refresh, but that rollup is authoritative only once cache_savings_backfilled is set. A session
-// that predates the column is seeded at 0 and left unbackfilled until it is priced, and the startup
-// BackfillCacheSavings runs asynchronously, so a detail read can arrive before it. Serving the
-// seeded value would put a wrong saving on the very session a reader opened. Two cheaper-looking
-// fixes are both wrong: recomputing the saving on every read makes a live session under SSE pay a
-// full usage_events scan per refresh, O(K^2) over its rows; and reading the token split from the
-// sessions rollup while recomputing only the saving from usage_events lets a concurrent append tear
-// the tile, pairing an old split with a newer saving. So this backfills the row once on demand,
-// under the same locked primitive the startup pass uses: backfillCacheSavingsForSession prices the
-// saving, persists it, and flips the flag (safe against the live parse fold), after which this read
-// and every later one serve the O(1) rollup from one consistent scanDetailRow snapshot.
-//
-// A stored rollup is authoritative only when the corpus has been priced at THIS binary's rate table,
-// which the singleton pricing marker records: cache_savings_priced_version == pricing.Version. When
-// the marker differs, a pricing rollout is in flight in one of two directions, and either way a
-// backfilled=true row may hold a saving at a different rate table than a live recompute would produce,
-// so the rollup is provisional. A newer binary is ahead (marker > pricing.Version): the stored value
-// was priced at the newer rates and this older binary must not present it as its own exact figure. Or
-// this newer binary's own reconcile has not run yet (marker < pricing.Version): existing rows are
-// still at the OLD rates while a live recompute here uses the new ones. In both cases the read serves
-// the stored value flagged partial rather than pay a per-read recompute: this is the session-body SSE
-// path, so an O(K) usage_events scan per refresh would be O(K^2) over a live session, the exact cost
-// the total_cache_savings_usd rollup exists to avoid. The marker check is one O(1) singleton read, and
-// the periodic reconcile re-prices the corpus to pricing.Version within a settle tick, so the partial
-// flag clears itself; until then it reads as provisional (the tile appends "partial") rather than
-// asserting a figure a recompute would contradict. In the steady state (marker current), that
-// on-demand backfill described above is the whole story.
-func (s *Store) scanDetail(ctx context.Context, where string, arg any) (SessionDetail, error) {
-	marker, err := s.cacheSavingsPricedVersion(ctx)
-	if err != nil {
-		return SessionDetail{}, err
-	}
-	d, backfilled, err := s.scanDetailRow(ctx, where, arg)
-	if err != nil {
-		return SessionDetail{}, err
-	}
-	if marker != pricing.Version {
-		// A pricing rollout is in flight (marker ahead or behind pricing.Version), so the stored rollup
-		// may be at a different rate table than a live recompute. Serve it flagged partial, from the same
-		// single row read as the token split so the two never tear, and do NOT recompute on this hot path.
-		d.CacheSavingsIncomplete = true
-		return d, nil
-	}
-	if backfilled {
-		return d, nil
-	}
-	if _, err := s.backfillCacheSavingsForSession(ctx, d.ID); err != nil {
-		return SessionDetail{}, fmt.Errorf("backfill cache savings for session %d on read: %w", d.ID, err)
-	}
-	// Re-read with the original predicate, not by id: the flag is now set (in the ordinary case), so
-	// this returns the O(1) rollup from one post-backfill snapshot rather than a mix of the pre-backfill
-	// scan and the new saving, and re-applying the same where clause rechecks any visibility gate (the
-	// public path filters on visibility = 'public'), so a session unpublished between the two reads is
-	// not rendered from the by-id re-read.
-	d, backfilled, err = s.scanDetailRow(ctx, where, arg)
-	if err != nil {
-		return SessionDetail{}, err
-	}
-	if !backfilled {
-		// The marker moved between the read above and the backfill (a concurrent reconcile winning the
-		// marker), so backfillCacheSavingsForSession bowed out. Serve the stored value flagged partial for
-		// the same reason as the marker-in-flight branch above rather than recompute on the SSE path.
-		d.CacheSavingsIncomplete = true
-	}
 	return d, nil
 }
 
@@ -153,12 +81,12 @@ func (s *Store) MessageCount(ctx context.Context, sessionID int64) (int, error) 
 // instead so peak memory does not scale with session size.
 //
 // Both the duplicate-prompt verdict and the per-turn usage are read from stored per-message rows
-// (duplicate_prompt on the messages row and the message_turn_usage rollup, both materialized at
-// insert, see projection.go), not folded from whole-session windows here. So the live body fragment
-// (handleSessionBody) re-fetching this on every SSE append reads bounded indexed rows and does no
-// growing whole-session usage aggregation or message-window scan for either.
+// (duplicate_prompt on the messages row and the message_turn_usage rollup, both materialized by
+// the rebuild's in-memory fold), not folded from whole-session windows here. So the live body
+// fragment (handleSessionBody) re-fetching this on every SSE append reads bounded indexed rows
+// and does no growing whole-session usage aggregation or message-window scan for either.
 func (s *Store) Messages(ctx context.Context, sessionID int64) ([]Message, error) {
-	return s.scanMessages(ctx, sessionID, messagesFullQuery, sessionID, quality.PromptFactsVersion)
+	return s.scanMessages(ctx, sessionID, messagesFullQuery, sessionID)
 }
 
 // MessagesAfter returns the next window of a session's transcript ordered by
@@ -179,12 +107,12 @@ func (s *Store) MessagesAfter(ctx context.Context, sessionID int64, after *int, 
 	}
 	if after == nil {
 		return s.scanMessages(ctx, sessionID,
-			messagesWindowQuery+` ORDER BY m.ordinal LIMIT $3`,
-			sessionID, quality.PromptFactsVersion, limit)
+			messagesWindowQuery+` ORDER BY m.ordinal LIMIT $2`,
+			sessionID, limit)
 	}
 	return s.scanMessages(ctx, sessionID,
-		messagesWindowQuery+` AND m.ordinal > $3 ORDER BY m.ordinal LIMIT $4`,
-		sessionID, quality.PromptFactsVersion, *after, limit)
+		messagesWindowQuery+` AND m.ordinal > $2 ORDER BY m.ordinal LIMIT $3`,
+		sessionID, *after, limit)
 }
 
 // scanMessages runs a transcript read and scans its rows into Messages. sessionID is carried only

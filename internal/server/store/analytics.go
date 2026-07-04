@@ -278,19 +278,17 @@ func (s *Store) analyticsFrom(ctx context.Context, q querier, f AnalyticsFilter)
 }
 
 // AnalyticsSnapshot reads Analytics as a single consistent snapshot that is
-// guaranteed not to straddle a reparse, for the OG card render. It runs the three
+// guaranteed not to straddle a fleet rebuild, for the OG card render. It runs the
 // grouped queries inside one REPEATABLE READ transaction, so they all read one MVCC
-// snapshot rather than three independently-timed reads. The first statement in that
-// transaction is the reparse-lock check, which both establishes the snapshot and
-// reads the lock state at that instant: if no reparse holds the lock at the snapshot
-// point, none is mid-flight, so every session in the snapshot is in a settled state
-// (fully reparsed or untouched) rather than a half-rebuilt mix, and a reparse that
-// starts later cannot alter the frozen snapshot. When a reparse does hold the lock
-// at that instant, it returns ok=false and no analytics, so the caller skips the
-// render rather than caching a mixed aggregate. Unlike taking the reparse advisory
-// lock itself, this holds no lock, so it never makes the fleet read as "reparsing".
+// snapshot rather than several independently-timed reads. The first statement in that
+// transaction is the epoch-staleness check (see epochGatedSnapshot), which both
+// establishes the snapshot and reads the corpus state at that instant: if every
+// session sits at the running parser epoch, the snapshot is a single-epoch corpus and
+// an epoch rollout that starts later cannot alter the frozen snapshot. When sessions
+// are still behind the epoch, it returns ok=false and no analytics, so the caller
+// skips the render rather than caching a mixed aggregate.
 func (s *Store) AnalyticsSnapshot(ctx context.Context, f AnalyticsFilter) (a Analytics, ok bool, err error) {
-	ok, err = s.reparseGatedSnapshot(ctx, func(tx pgx.Tx) error {
+	ok, err = s.epochGatedSnapshot(ctx, func(tx pgx.Tx) error {
 		a, err = s.analyticsFrom(ctx, tx, f)
 		return err
 	})
@@ -301,18 +299,18 @@ func (s *Store) AnalyticsSnapshot(ctx context.Context, f AnalyticsFilter) (a Ana
 }
 
 // ProjectCardSnapshot reads everything the project OG card renders from (the windowed
-// analytics and the mean quality score) as one reparse-gated snapshot, so the card's
+// analytics and the mean quality score) as one epoch-gated snapshot, so the card's
 // figures and its QUALITY grade describe the same instant. The two reads sat in separate
-// pooled queries before, which let a reparse or a signal refresh land in the gap: the card
-// could then cache pre-reparse token totals beside a partially rebuilt quality grade, a
+// pooled queries before, which let a rebuild or a signal refresh land in the gap: the card
+// could then cache pre-rebuild token totals beside a partially rebuilt quality grade, a
 // torn projection the page a visitor lands on never shows. Folding both into the one
-// repeatable-read snapshot AnalyticsSnapshot already uses (and its reparse-lock gate) means
+// repeatable-read snapshot AnalyticsSnapshot already uses (and its epoch gate) means
 // the average is read from the same MVCC snapshot as the totals, so the card reconciles with
 // the page's Insights grade distribution for the same project and window. ok is false when a
-// reparse holds the lock at the snapshot point, exactly as AnalyticsSnapshot, so the caller
+// fleet rebuild is draining at the snapshot point, exactly as AnalyticsSnapshot, so the caller
 // skips the render rather than caching a mixed card.
 func (s *Store) ProjectCardSnapshot(ctx context.Context, f AnalyticsFilter) (a Analytics, avgScore *float64, ok bool, err error) {
-	ok, err = s.reparseGatedSnapshot(ctx, func(tx pgx.Tx) error {
+	ok, err = s.epochGatedSnapshot(ctx, func(tx pgx.Tx) error {
 		if a, err = s.analyticsFrom(ctx, tx, f); err != nil {
 			return err
 		}
@@ -325,35 +323,45 @@ func (s *Store) ProjectCardSnapshot(ctx context.Context, f AnalyticsFilter) (a A
 	return a, avgScore, ok, nil
 }
 
-// reparseGatedSnapshot runs fn inside one REPEATABLE READ, read-only transaction whose first
-// statement is the reparse-lock check, so every read fn makes sees the one MVCC snapshot that
-// check established rather than several independently-timed reads. It is the shared spine of
-// the aggregate OG-card reads (AnalyticsSnapshot, ProjectCardSnapshot): fn is not run and ok is
-// false when a reparse holds the advisory lock at the snapshot point, since the corpus is then a
-// half-rebuilt mix; otherwise every session in the snapshot is settled and a reparse that starts
-// later cannot alter the frozen snapshot. Unlike taking the reparse lock itself, this holds no
-// lock, so it never makes the fleet read as "reparsing".
-func (s *Store) reparseGatedSnapshot(ctx context.Context, fn func(tx pgx.Tx) error) (ok bool, err error) {
+// epochGatedSnapshot runs fn inside one REPEATABLE READ, read-only transaction whose first
+// statement is the epoch-staleness check, so every read fn makes sees the one MVCC snapshot
+// that check established rather than several independently-timed reads. It is the shared
+// spine of the aggregate OG-card reads (AnalyticsSnapshot, ProjectCardSnapshot): fn is not
+// run and ok is false when any session's projection is behind the running parser epoch,
+// since the corpus is then a half-rebuilt mix of old and new parses; otherwise the frozen
+// snapshot is a single-epoch corpus and a rebuild that starts later cannot alter it. It
+// deliberately does NOT gate on byte-dirtiness (parsed_byte_len <> byte_len): a live
+// session's not-yet-rebuilt append is ordinary steady state, not a corpus-wide mix, and
+// gating on it would flap the cards on every active instance.
+//
+// The check is EpochStaleCount's predicate verbatim (attemptedEpoch behind the running
+// epoch), so the gate and the drain agree exactly: any session the worker still has a
+// rebuild path for gates the snapshot, and a session it can never advance (a failure
+// pinned to the current bytes at the running epoch or ahead) does not, since gating on
+// that would blank the cards forever rather than for the duration of a rebuild. New
+// bytes on a failed session un-pin it for both at once. In steady state (every row at
+// the running epoch) the range over idx_session_raw_attempted_epoch is empty and the
+// EXISTS is an index-only touch. An unset epoch (0, a store wired without
+// SetParserEpoch, as in tests) gates nothing.
+func (s *Store) epochGatedSnapshot(ctx context.Context, fn func(tx pgx.Tx) error) (ok bool, err error) {
 	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return false, fmt.Errorf("begin gated snapshot: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	var held bool
-	if err := tx.QueryRow(ctx,
-		`SELECT EXISTS (
-		   SELECT 1 FROM pg_locks
-		   WHERE locktype = 'advisory'
-		     AND classid = hashtext(current_database())::oid
-		     AND objid = $1::oid
-		     AND objsubid = 2
-		     AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
-		 )`, reparseLockKey).Scan(&held); err != nil {
-		return false, fmt.Errorf("check reparse lock in snapshot: %w", err)
-	}
-	if held {
-		return false, nil
+	if s.parserEpoch != 0 {
+		var stale bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS (
+			   SELECT 1 FROM session_raw
+			   WHERE `+attemptedEpoch("")+` < $1
+			 )`, s.parserEpoch).Scan(&stale); err != nil {
+			return false, fmt.Errorf("check epoch staleness in snapshot: %w", err)
+		}
+		if stale {
+			return false, nil
+		}
 	}
 
 	if err := fn(tx); err != nil {

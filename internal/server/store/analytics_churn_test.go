@@ -42,7 +42,7 @@ func TestFileChurn(t *testing.T) {
 	// Ada: three edits to a.go (one replayed across a later turn, which collapses), one to
 	// b.go (not churn), and one edit whose path did not parse (ignored).
 	s1 := seedSession(t, st, ada, pid, "ch1")
-	if err := st.ApplyProjectionDelta(ctx, s1, store.ProjectionDelta{
+	rebuildWith(t, st, s1, store.ProjectionDelta{
 		Messages: []store.MessageDelta{
 			{Ordinal: 0, Role: "user", Content: "edit"},
 			{Ordinal: 1, Role: "assistant", Content: "editing", HasToolUse: true},
@@ -61,15 +61,13 @@ func TestFileChurn(t *testing.T) {
 			{CallUID: "e1", Status: "ok"}, {CallUID: "e2", Status: "ok"}, {CallUID: "e3", Status: "ok"},
 			{CallUID: "e4", Status: "ok"}, {CallUID: "en", Status: "ok"},
 		},
-	}); err != nil {
-		t.Fatalf("apply s1: %v", err)
-	}
+	})
 	setSessionShape(t, st, ctx, s1, recent, recent.Add(10*time.Minute), 6, 2)
 
 	// Grace: one more edit to a.go (a second session touches it) and two to c.go. Started
 	// long ago, so a window drops it.
 	s2 := seedSession(t, st, grace, pid, "ch2")
-	if err := st.ApplyProjectionDelta(ctx, s2, store.ProjectionDelta{
+	rebuildWith(t, st, s2, store.ProjectionDelta{
 		Messages: []store.MessageDelta{
 			{Ordinal: 0, Role: "user", Content: "edit"},
 			{Ordinal: 1, Role: "assistant", Content: "editing", HasToolUse: true},
@@ -82,9 +80,7 @@ func TestFileChurn(t *testing.T) {
 		ToolResults: []store.ToolResultDelta{
 			{CallUID: "g1", Status: "ok"}, {CallUID: "g2", Status: "ok"}, {CallUID: "g3", Status: "ok"},
 		},
-	}); err != nil {
-		t.Fatalf("apply s2: %v", err)
-	}
+	})
 	setSessionShape(t, st, ctx, s2, old, old.Add(5*time.Minute), 2, 1)
 
 	// Unscoped: a.go (4 edits across 2 sessions) leads, then c.go (2, one session); b.go is
@@ -155,7 +151,7 @@ func TestFileChurnCollapsesWorktrees(t *testing.T) {
 	// Worktree A at C:\proj\akari edits internal\x.go twice.
 	sA := seedSession(t, st, ada, pid, "wtA")
 	setSessionCwd(t, st, ctx, sA, `C:\proj\akari`)
-	if err := st.ApplyProjectionDelta(ctx, sA, store.ProjectionDelta{
+	rebuildWith(t, st, sA, store.ProjectionDelta{
 		Messages: []store.MessageDelta{
 			{Ordinal: 0, Role: "user", Content: "edit"},
 			{Ordinal: 1, Role: "assistant", Content: "editing", HasToolUse: true},
@@ -165,16 +161,14 @@ func TestFileChurnCollapsesWorktrees(t *testing.T) {
 			{MessageOrdinal: 1, CallIndex: 1, ToolName: "Edit", Category: "edit", FilePath: `C:\proj\akari\internal\x.go`, InputBody: "a2", CallUID: "a2"},
 		},
 		ToolResults: []store.ToolResultDelta{{CallUID: "a1", Status: "ok"}, {CallUID: "a2", Status: "ok"}},
-	}); err != nil {
-		t.Fatalf("apply sA: %v", err)
-	}
+	})
 	setSessionShape(t, st, ctx, sA, recent, recent.Add(5*time.Minute), 2, 1)
 
 	// Worktree B at C:\worktrees\akari\foo (differing drive-letter case too) edits the same
 	// repo-relative file twice, from a different absolute path.
 	sB := seedSession(t, st, ada, pid, "wtB")
 	setSessionCwd(t, st, ctx, sB, `C:\worktrees\akari\foo`)
-	if err := st.ApplyProjectionDelta(ctx, sB, store.ProjectionDelta{
+	rebuildWith(t, st, sB, store.ProjectionDelta{
 		Messages: []store.MessageDelta{
 			{Ordinal: 0, Role: "user", Content: "edit"},
 			{Ordinal: 1, Role: "assistant", Content: "editing", HasToolUse: true},
@@ -184,9 +178,7 @@ func TestFileChurnCollapsesWorktrees(t *testing.T) {
 			{MessageOrdinal: 1, CallIndex: 1, ToolName: "Edit", Category: "edit", FilePath: `c:\worktrees\akari\foo\internal\x.go`, InputBody: "b2", CallUID: "b2"},
 		},
 		ToolResults: []store.ToolResultDelta{{CallUID: "b1", Status: "ok"}, {CallUID: "b2", Status: "ok"}},
-	}); err != nil {
-		t.Fatalf("apply sB: %v", err)
-	}
+	})
 	setSessionShape(t, st, ctx, sB, recent, recent.Add(5*time.Minute), 2, 1)
 
 	fc, err := st.FileChurn(ctx, store.AnalyticsFilter{})
@@ -228,7 +220,7 @@ func TestFileChurnKeepsProjectsDistinct(t *testing.T) {
 
 	edit := func(sid int64, cwd, path, prefix string) {
 		setSessionCwd(t, st, ctx, sid, cwd)
-		if err := st.ApplyProjectionDelta(ctx, sid, store.ProjectionDelta{
+		rebuildWith(t, st, sid, store.ProjectionDelta{
 			Messages: []store.MessageDelta{
 				{Ordinal: 0, Role: "user", Content: "edit"},
 				{Ordinal: 1, Role: "assistant", Content: "editing", HasToolUse: true},
@@ -238,9 +230,7 @@ func TestFileChurnKeepsProjectsDistinct(t *testing.T) {
 				{MessageOrdinal: 1, CallIndex: 1, ToolName: "Edit", Category: "edit", FilePath: path, InputBody: prefix + "2", CallUID: prefix + "2"},
 			},
 			ToolResults: []store.ToolResultDelta{{CallUID: prefix + "1", Status: "ok"}, {CallUID: prefix + "2", Status: "ok"}},
-		}); err != nil {
-			t.Fatalf("apply %s: %v", prefix, err)
-		}
+		})
 		setSessionShape(t, st, ctx, sid, recent, recent.Add(5*time.Minute), 2, 1)
 	}
 
@@ -297,16 +287,14 @@ func TestFileChurnClips(t *testing.T) {
 		}
 	}
 	sid := seedSession(t, st, u, pid, "clip")
-	if err := st.ApplyProjectionDelta(ctx, sid, store.ProjectionDelta{
+	rebuildWith(t, st, sid, store.ProjectionDelta{
 		Messages: []store.MessageDelta{
 			{Ordinal: 0, Role: "user", Content: "edit"},
 			{Ordinal: 1, Role: "assistant", Content: "editing", HasToolUse: true},
 		},
 		ToolCalls:   calls,
 		ToolResults: results,
-	}); err != nil {
-		t.Fatalf("apply clip session: %v", err)
-	}
+	})
 
 	fc, err := st.FileChurn(ctx, store.AnalyticsFilter{})
 	if err != nil {

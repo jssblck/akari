@@ -68,25 +68,32 @@ func TestGenerateProjectStoresRenderedCard(t *testing.T) {
 	}
 }
 
-// TestGenerateProjectAbortsDuringReparse pins GenerateProject's reparse gate: while a
-// reparse holds the advisory lock, AnalyticsSnapshot reports not-ok, so GenerateProject
-// returns ErrReparseInProgress with no PNG and writes nothing. Caching a card built from
-// a half-rebuilt projection is the failure this guards against.
+// TestGenerateProjectAbortsDuringReparse pins GenerateProject's epoch gate: while a
+// session sits behind the running parser epoch, AnalyticsSnapshot reports not-ok, so
+// GenerateProject returns ErrReparseInProgress with no PNG and writes nothing. Caching
+// a card built from a half-rebuilt corpus is the failure this guards against.
 func TestGenerateProjectAbortsDuringReparse(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
 	ctx := context.Background()
 
+	u, err := st.Register(ctx, "grace", "hash", "")
+	if err != nil {
+		t.Fatal(err)
+	}
 	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	lock, ok, err := st.AcquireReparseLock(ctx)
-	if err != nil || !ok {
-		t.Fatalf("acquire reparse lock: ok=%v err=%v", ok, err)
+	// A freshly announced session_raw row defaults to parser_epoch 0, so once the
+	// store runs at epoch 1 it stands in for a session a rebuild has not yet reached.
+	if _, err := st.Announce(ctx, store.AnnounceParams{
+		UserID: u.ID, Agent: "claude", SourceSessionID: "sess-1",
+		ProjectID: projectID, Cwd: "/home/grace/akari", Machine: "laptop",
+	}); err != nil {
+		t.Fatal(err)
 	}
-	defer lock.Release(ctx)
+	st.SetParserEpoch(1)
 
 	pngBytes, err := ogimage.GenerateProject(ctx, st, projectID, "github.com/jssblck/akari", time.Now())
 	if !errors.Is(err, ogimage.ErrReparseInProgress) {
