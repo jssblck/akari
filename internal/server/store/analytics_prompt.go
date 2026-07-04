@@ -63,9 +63,9 @@ func (s *Store) PromptHygiene(ctx context.Context, f AnalyticsFilter) (PromptHyg
 func (s *Store) promptHygieneFrom(ctx context.Context, q querier, f AnalyticsFilter) (PromptHygiene, error) {
 	filter, args := f.clauseFor("s.started_at")
 	args = append(args, quality.Version)
-	versionArg := fmt.Sprint(len(args))
+	versionArg := len(args)
 	args = append(args, quality.PromptFactsVersion)
-	factsVersionArg := fmt.Sprint(len(args))
+	factsVersionArg := len(args)
 	var h PromptHygiene
 	err := q.QueryRow(ctx,
 		`SELECT coalesce(sum(sig.prompt_count), 0),
@@ -76,8 +76,7 @@ func (s *Store) promptHygieneFrom(ctx context.Context, q querier, f AnalyticsFil
 		        coalesce(sum(CASE WHEN sig.unstructured_start THEN 1 ELSE 0 END), 0)
 		   FROM sessions s
 		   JOIN session_signals sig
-		     ON sig.session_id = s.id AND sig.signals_version = $`+versionArg+`
-		        AND sig.prompt_facts_version = $`+factsVersionArg+` AND NOT s.signals_stale
+		     ON sig.session_id = s.id AND `+signalsHygieneCurrent(versionArg, factsVersionArg)+`
 		  WHERE TRUE`+filter,
 		args...).Scan(&h.Prompts, &h.Short, &h.Duplicate, &h.NoCodeContext, &h.Sessions, &h.UnstructuredStarts)
 	if err != nil {

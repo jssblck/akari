@@ -329,26 +329,26 @@ func (f SessionFilter) conds(sinceCol string) (conds []string, args []any) {
 	//     with the missing-row cases.
 	if g := f.Grade; g != "" {
 		args = append(args, quality.Version)
-		ver := "$" + itoa(len(args))
+		gate := signalsCurrent(len(args))
 		if g == "unscored" {
-			conds = append(conds, "NOT EXISTS (SELECT 1 FROM session_signals sig WHERE sig.session_id = s.id"+
-				" AND sig.signals_version = "+ver+" AND NOT s.signals_stale AND sig.grade IS NOT NULL)")
+			conds = append(conds, "NOT EXISTS (SELECT 1 FROM session_signals sig WHERE sig.session_id = s.id AND "+
+				gate+" AND sig.grade IS NOT NULL)")
 		} else {
 			args = append(args, g)
-			conds = append(conds, "EXISTS (SELECT 1 FROM session_signals sig WHERE sig.session_id = s.id"+
-				" AND sig.signals_version = "+ver+" AND NOT s.signals_stale AND sig.grade = $"+itoa(len(args))+")")
+			conds = append(conds, "EXISTS (SELECT 1 FROM session_signals sig WHERE sig.session_id = s.id AND "+
+				gate+" AND sig.grade = $"+itoa(len(args))+")")
 		}
 	}
 	if o := f.Outcome; o != "" {
 		args = append(args, quality.Version)
-		ver := "$" + itoa(len(args))
+		gate := signalsCurrent(len(args))
 		args = append(args, o)
 		if o == "unknown" {
-			conds = append(conds, "NOT EXISTS (SELECT 1 FROM session_signals sig WHERE sig.session_id = s.id"+
-				" AND sig.signals_version = "+ver+" AND NOT s.signals_stale AND sig.outcome <> $"+itoa(len(args))+")")
+			conds = append(conds, "NOT EXISTS (SELECT 1 FROM session_signals sig WHERE sig.session_id = s.id AND "+
+				gate+" AND sig.outcome <> $"+itoa(len(args))+")")
 		} else {
-			conds = append(conds, "EXISTS (SELECT 1 FROM session_signals sig WHERE sig.session_id = s.id"+
-				" AND sig.signals_version = "+ver+" AND NOT s.signals_stale AND sig.outcome = $"+itoa(len(args))+")")
+			conds = append(conds, "EXISTS (SELECT 1 FROM session_signals sig WHERE sig.session_id = s.id AND "+
+				gate+" AND sig.outcome = $"+itoa(len(args))+")")
 		}
 	}
 	return conds, args

@@ -776,10 +776,10 @@ func (s *Store) galleryFrom(ctx context.Context, q querier, f AnalyticsFilter) (
 		        count(*) OVER () AS total
 		   FROM sessions s
 		   LEFT JOIN session_signals sig
-		     ON sig.session_id = s.id AND sig.signals_version = $%d AND NOT s.signals_stale
+		     ON sig.session_id = s.id AND `+signalsCurrent(versionArg)+`
 		  WHERE s.started_at IS NOT NULL AND s.ended_at IS NOT NULL AND s.ended_at >= s.started_at%s
 		  ORDER BY s.started_at DESC
-		  LIMIT %s`, archetypeCaseExpr, versionArg, filter, limitArg), args...)
+		  LIMIT %s`, archetypeCaseExpr, filter, limitArg), args...)
 	if err != nil {
 		return Gallery{}, fmt.Errorf("session gallery: %w", err)
 	}
@@ -814,7 +814,7 @@ func (s *Store) galleryFrom(ctx context.Context, q querier, f AnalyticsFilter) (
 		          coalesce(sig.outcome, 'unknown') AS outcome
 		     FROM sessions s
 		     LEFT JOIN session_signals sig
-		       ON sig.session_id = s.id AND sig.signals_version = $%d AND NOT s.signals_stale
+		       ON sig.session_id = s.id AND `+signalsCurrent(len(sargs))+`
 		    WHERE s.started_at IS NOT NULL AND s.ended_at IS NOT NULL AND s.ended_at >= s.started_at%s
 		 )
 		 SELECT coalesce(percentile_cont(0.5) WITHIN GROUP (ORDER BY dur), 0),
@@ -823,7 +823,7 @@ func (s *Store) galleryFrom(ctx context.Context, q querier, f AnalyticsFilter) (
 		        max(ARRAY[cost, dur]),
 		        max(ARRAY[dur, cost]),
 		        coalesce(bool_or(cost_incomplete), false)
-		   FROM cohort`, len(sargs), sfilter), sargs...).
+		   FROM cohort`, sfilter), sargs...).
 		Scan(&medDur, &medCost, &medComp, &priciest, &longest, &out.CostIncomplete); err != nil {
 		return Gallery{}, fmt.Errorf("session gallery summary: %w", err)
 	}

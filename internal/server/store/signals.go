@@ -17,6 +17,27 @@ import (
 // verdict (see quality.Classify); a historical import, long past this window, settles.
 const abandonedIdleMinutes = 30
 
+// signalsCurrent is the predicate that admits only a usable signals row: one written at the
+// running signals_version (bound to $verArg) whose session is not flagged signals_stale. It is
+// the single definition of "a current, gradeable signal" that every fleet read shares, so a
+// scoring-version bump or a change to the staleness rule lands here once instead of in the dozen
+// hand-copied clauses it used to (see docs/signals.md). It carries no join key: a caller pairs it
+// with its own sig.session_id = s.id in a JOIN ON or an EXISTS, or drops it straight into a CASE.
+// The version placeholder is passed as an index, not baked in, because each query numbers its
+// arguments independently.
+func signalsCurrent(verArg int) string {
+	return "sig.signals_version = $" + itoa(verArg) + " AND NOT s.signals_stale"
+}
+
+// signalsHygieneCurrent extends signalsCurrent with the prompt_facts_version gate the prompt-
+// hygiene reads add. Their counts come from the messages.prompt_* facts, stamped with a classifier
+// version (quality.PromptFactsVersion) that moves independently of the scoring version, so a row
+// current for scoring but classified under a superseded ClassifyPrompt must still drop out until
+// the reparse re-derives it.
+func signalsHygieneCurrent(verArg, factsArg int) string {
+	return signalsCurrent(verArg) + " AND sig.prompt_facts_version = $" + itoa(factsArg)
+}
+
 // SessionSignals is a session's stored behavioral signals: its outcome, its quality
 // score and grade (nil when unscored), and the tool-health counts the score is built
 // from. It is the read shape of the session_signals row, derived from the session's
@@ -960,7 +981,7 @@ func (s *Store) SessionSignalsByID(ctx context.Context, sessionID int64) (Sessio
 		        sig.assistant_turns, sig.thinking_turns, sig.thinking_tail_tokens, sig.thinking_peak_tokens
 		   FROM session_signals sig
 		   JOIN sessions s ON s.id = sig.session_id
-		  WHERE sig.session_id = $1 AND sig.signals_version = $2 AND NOT s.signals_stale`, sessionID, quality.Version).Scan(
+		  WHERE sig.session_id = $1 AND `+signalsCurrent(2), sessionID, quality.Version).Scan(
 		&sig.SessionID, &sig.Version, &sig.Outcome, &sig.OutcomeConfidence, &sig.Score, &sig.Grade,
 		&sig.ToolCalls, &sig.ToolFailures, &sig.ToolRetries, &sig.EditChurn, &sig.LongestFailureStreak,
 		&sig.PromptCount, &sig.ShortPromptCount, &sig.DuplicatePromptCount, &sig.NoCodeContextCount, &sig.UnstructuredStart,

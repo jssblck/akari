@@ -91,7 +91,7 @@ func (s *Store) sessionCardFrom(ctx context.Context, q querier, sessionID int64,
 		        s.total_input_tokens + s.total_output_tokens
 		          + s.total_cache_read_tokens + s.total_cache_write_tokens,
 		        s.started_at, s.ended_at,
-		        CASE WHEN sig.signals_version = $2 AND NOT s.signals_stale
+		        CASE WHEN `+signalsCurrent(2)+`
 		                  AND sig.grade IS NOT NULL
 		             THEN sig.grade END
 		   FROM sessions s
