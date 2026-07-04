@@ -226,8 +226,8 @@ client is stateless across runs:
    As it goes, it lifts large tool bodies out of the transcript into
    content-addressed storage: it checks whether the server already holds each body
    by hash, uploads the ones it does not, and leaves a small reference in the
-   stream. The server parses each chunk as it lands, so the projection fills in
-   incrementally and a live session appears to grow in the UI.
+   stream. The server re-parses the session moments after chunks land, so a live
+   session appears to grow in the UI as it runs.
 
 Two consequences worth knowing:
 
