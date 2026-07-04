@@ -115,6 +115,45 @@ func TestWorkerTriggerRedrains(t *testing.T) {
 	}
 }
 
+// TestWorkerDrainGrowsTotalForMidDrainArrivals pins the progress arithmetic
+// when live traffic lands during a fleet rebuild: a session announced mid-drain
+// starts at parser_epoch 0, so it joins the epoch-stale backlog after the drain
+// counted its starting total. The denominator must grow to cover it rather than
+// Done running past Total (the 6-of-1 progress bar this once produced).
+func TestWorkerDrainGrowsTotalForMidDrainArrivals(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	sidA := seedSession(t, st, "mid-drain-a")
+	var uid, pid int64
+	if err := st.Pool.QueryRow(ctx, "SELECT user_id, project_id FROM sessions WHERE id = $1", sidA).Scan(&uid, &pid); err != nil {
+		t.Fatal(err)
+	}
+
+	// The rebuilt hook runs synchronously inside the drain, so announcing here
+	// lands a new due session between the drain's pages, exactly the live-ingest
+	// interleaving the arithmetic has to absorb.
+	w := NewWorker(st, 1, 0)
+	announced := false
+	w.SetRebuiltHook(func(int64) {
+		if announced {
+			return
+		}
+		announced = true
+		if _, err := st.Announce(ctx, store.AnnounceParams{
+			UserID: uid, Agent: "claude", SourceSessionID: "mid-drain-b", ProjectID: pid,
+		}); err != nil {
+			t.Errorf("mid-drain announce: %v", err)
+		}
+	})
+
+	status := w.Drain(ctx)
+	if status.Total != 2 || status.Done != 2 || status.Failed != 0 || status.InProgress {
+		t.Fatalf("drain status = %+v, want the mid-drain arrival absorbed as a completed 2/2", status)
+	}
+}
+
 // TestWorkerFleetStatusSeesForeignBacklog pins the cross-instance gate and its
 // cache asymmetry: a worker that has run no drain itself (its local status is
 // idle) still reports a fleet rebuild in progress when the shared corpus holds

@@ -6,10 +6,13 @@ import (
 )
 
 // DueSession is one session the parse worker should rebuild: its projection is
-// behind its raw bytes or behind the running parser epoch.
+// behind its raw bytes or behind the running parser epoch. EpochStale says the
+// epoch is what made it due (possibly alongside new bytes), which is the subset
+// a fleet rebuild's progress counts.
 type DueSession struct {
-	ID    int64
-	Agent string
+	ID         int64
+	Agent      string
+	EpochStale bool
 }
 
 // DueSessions returns up to limit sessions due for a rebuild, strictly after
@@ -27,7 +30,7 @@ type DueSession struct {
 // that fails operationally.
 func (s *Store) DueSessions(ctx context.Context, epoch int, afterID int64, limit int) ([]DueSession, error) {
 	rows, err := s.Pool.Query(ctx,
-		`SELECT sr.session_id, s.agent
+		`SELECT sr.session_id, s.agent, sr.parser_epoch <> $1 AS epoch_stale
 		   FROM session_raw sr
 		   JOIN sessions s ON s.id = sr.session_id
 		  WHERE sr.session_id > $2
@@ -42,7 +45,7 @@ func (s *Store) DueSessions(ctx context.Context, epoch int, afterID int64, limit
 	var out []DueSession
 	for rows.Next() {
 		var d DueSession
-		if err := rows.Scan(&d.ID, &d.Agent); err != nil {
+		if err := rows.Scan(&d.ID, &d.Agent, &d.EpochStale); err != nil {
 			return nil, fmt.Errorf("scan due session: %w", err)
 		}
 		out = append(out, d)

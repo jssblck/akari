@@ -32,9 +32,10 @@ type Status struct {
 	// InProgress is true while epoch-stale sessions are draining. The parsed UI
 	// gates on it.
 	InProgress bool `json:"in_progress"`
-	// Done is the number of epoch-stale sessions rebuilt so far this drain
-	// (successes plus deterministic parser failures), Total the number the drain
-	// started with, Failed the failed subset. Done/Total drive the progress bar.
+	// Done and Total track the epoch-stale backlog: Total is the backlog size
+	// (grown when sessions announced mid-drain join it), Done is how much of it
+	// has drained, and Failed counts deterministic parser failures along the
+	// way. Done/Total drive the progress bar.
 	Done   int `json:"done"`
 	Total  int `json:"total"`
 	Failed int `json:"failed"`
@@ -174,7 +175,7 @@ func (w *Worker) drain(ctx context.Context) {
 	// (rebuild rolled back, still due) is not retried in a hot loop; the next
 	// wake or tick retries it fresh.
 	attempted := map[int64]bool{}
-	var done, failed int
+	var done, failed, staleDone int
 	var afterID int64
 	for ctx.Err() == nil {
 		page, err := w.st.DueSessions(ctx, Epoch, afterID, duePageSize)
@@ -195,30 +196,39 @@ func (w *Worker) drain(ctx context.Context) {
 				todo = append(todo, d)
 			}
 		}
-		d, f := w.rebuildBatch(ctx, todo)
+		d, f, sd := w.rebuildBatch(ctx, todo)
 		done += d
 		failed += f
+		staleDone += sd
 		if fleet {
-			w.advanceFleet(done, failed)
+			// Progress counts only the epoch-stale subset: a fleet drain also picks
+			// up byte-dirty live sessions, and counting those would run Done past
+			// the backlog total. Sessions announced mid-drain start at parser_epoch
+			// 0 and join the backlog instead; the count re-read lets Total grow to
+			// cover them. A count error skips the update; the next page retries.
+			if remaining, err := w.st.EpochStaleCount(ctx, Epoch); err == nil {
+				w.advanceFleet(staleDone, remaining, failed)
+			}
 		}
 	}
 	if fleet {
 		w.finishFleet()
 		if ctx.Err() == nil {
-			log.Printf("parse worker: fleet rebuild done (%d ok, %d failed of %d)", done-failed, failed, staleTotal)
+			log.Printf("parse worker: fleet rebuild done (%d session(s) rebuilt, %d failed)", done, failed)
 		} else {
-			log.Printf("parse worker: fleet rebuild interrupted after %d/%d session(s); it resumes on next start", done, staleTotal)
+			log.Printf("parse worker: fleet rebuild interrupted after %d rebuild(s); it resumes on next start", done)
 		}
 	}
 }
 
 // rebuildBatch rebuilds one page of due sessions across the worker pool,
-// returning how many completed and how many of those were deterministic parser
-// failures. Distinct sessions rebuild in parallel; the pool bounds concurrent
+// returning how many completed, how many of those were deterministic parser
+// failures, and how many were epoch-stale (the fleet progress numerator).
+// Distinct sessions rebuild in parallel; the pool bounds concurrent
 // transactions.
-func (w *Worker) rebuildBatch(ctx context.Context, batch []store.DueSession) (done, failed int) {
+func (w *Worker) rebuildBatch(ctx context.Context, batch []store.DueSession) (done, failed, staleDone int) {
 	if len(batch) == 0 {
-		return 0, 0
+		return 0, 0, 0
 	}
 	sem := make(chan struct{}, w.concurrency)
 	var mu sync.Mutex
@@ -238,6 +248,9 @@ func (w *Worker) rebuildBatch(ctx context.Context, batch []store.DueSession) (do
 			switch {
 			case err == nil:
 				done++
+				if t.EpochStale {
+					staleDone++
+				}
 				if w.onRebuilt != nil {
 					w.onRebuilt(t.ID)
 				}
@@ -250,6 +263,9 @@ func (w *Worker) rebuildBatch(ctx context.Context, batch []store.DueSession) (do
 				// until its bytes or the epoch move. The prior projection survives.
 				done++
 				failed++
+				if t.EpochStale {
+					staleDone++
+				}
 				log.Printf("parse worker: session %d (%s): %v", t.ID, t.Agent, err)
 			default:
 				// Operational error: the rebuild rolled back and the session stays due.
@@ -260,7 +276,7 @@ func (w *Worker) rebuildBatch(ctx context.Context, batch []store.DueSession) (do
 		}(t)
 	}
 	wg.Wait()
-	return done, failed
+	return done, failed, staleDone
 }
 
 func isParserError(err error) bool {
@@ -355,8 +371,15 @@ func (w *Worker) beginFleet(total int) {
 	w.emit()
 }
 
-func (w *Worker) advanceFleet(done, failed int) {
+// advanceFleet publishes fleet progress: done epoch-stale rebuilds completed,
+// remaining still in the backlog. Total grows when done+remaining outruns it
+// (sessions announced mid-drain join the backlog), so Done never overtakes it
+// and both stay monotone for a watching progress stream.
+func (w *Worker) advanceFleet(done, remaining, failed int) {
 	w.mu.Lock()
+	if done+remaining > w.status.Total {
+		w.status.Total = done + remaining
+	}
 	w.status.Done = done
 	w.status.Failed = failed
 	w.mu.Unlock()
