@@ -126,6 +126,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "overview"), http.StatusInternalServerError, "Could not load analytics."))
 		return
 	}
+	setDashboardCache(w)
 	render(w, r, http.StatusOK, web.OverviewPage(s.pageForNav(r, "Overview", "overview"), analytics, rng, users, selected))
 }
 
@@ -136,19 +137,52 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 // window rides the URL via ?range=.
 func (s *Server) handleInsights(w http.ResponseWriter, r *http.Request) {
 	rng := web.ParseRange(r.URL.Query().Get("range"))
-	// The Bucket names the trend grid's unit (day for short windows, week for long), which
-	// switches on the trend computation inside Insights: the fleet page draws time series,
-	// so it always asks for a grid, unlike the project quality band which leaves it unset.
-	ins, err := s.Store.Insights(r.Context(), store.AnalyticsFilter{
-		Since:  web.RangeSince(rng, time.Now()),
-		Bucket: web.TrendBucket(rng),
+	// The snapshot is memoized per range for a short TTL (insights_cache.go): the
+	// pipeline behind it is a dozen aggregate queries over the whole window, so a
+	// map lookup here is the difference between an instant load and several seconds.
+	// The Bucket names the trend grid's unit (day for short windows, week for long),
+	// which switches on the trend computation inside Insights: the fleet page draws
+	// time series, so it always asks for a grid, unlike the project quality band.
+	ins, err := s.insights.load(r.Context(), rng, time.Now(), func(ctx context.Context) (store.Insights, error) {
+		return s.Store.Insights(ctx, store.AnalyticsFilter{
+			Since:  web.RangeSince(rng, time.Now()),
+			Bucket: web.TrendBucket(rng),
+		})
 	})
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "insights"), http.StatusInternalServerError, "Could not load insights."))
 		return
 	}
+	setDashboardCache(w)
 	ranges := web.RangeOptions("/insights", nil, rng)
 	render(w, r, http.StatusOK, web.InsightsPage(s.pageForNav(r, "Insights", "insights"), ins, rng, ranges))
+}
+
+// dashboardCacheMaxAge lets a browser reuse a dashboard page for a few seconds, so
+// back/forward navigation and the range selector's hx-select refetch do not re-run
+// the query pipeline. It is private (these pages carry the viewer's own sidebar and
+// windowed figures) and short enough that a reader who pauses sees fresh numbers.
+// The server-side insights cache absorbs the cross-viewer and post-expiry load
+// behind it. The sessions feed is deliberately excluded: it is already a single
+// indexed query and changes on every ingest, so a stale feed would mislead.
+const dashboardCacheMaxAge = 30
+
+func setDashboardCache(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "private, max-age="+strconv.Itoa(dashboardCacheMaxAge))
+}
+
+// handleNotFound is the catch-all for a GET whose path no route claims: a typed or
+// stale URL, or a guessed pretty project path (projects are keyed by numeric id, so
+// /projects/github.com/owner/repo lands here). It renders the styled error page in
+// the viewer's shell rather than net/http's bare "404 page not found" text, with a
+// way back into the app. It gates nothing: an error page shows no parsed data, and a
+// logged-out visitor should get the public 404 rather than a login bounce.
+func (s *Server) handleNotFound(w http.ResponseWriter, r *http.Request) {
+	if p, ok := s.resolve(r); ok && p.Scope == scopeFull {
+		render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(s.withPrincipal(r, p), "Not found"), http.StatusNotFound, "That page does not exist."))
+		return
+	}
+	render(w, r, http.StatusNotFound, web.PublicErrorPage(http.StatusNotFound, "That page does not exist."))
 }
 
 // handleProjectsIndex is the projects table at /projects (moved off the root when
@@ -173,6 +207,7 @@ func (s *Server) handleProjectsIndex(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "projects"), http.StatusInternalServerError, "Could not load analytics."))
 		return
 	}
+	setDashboardCache(w)
 	render(w, r, http.StatusOK, web.ProjectsPage(s.pageForNav(r, "Projects", "projects"), remotes, spark))
 }
 

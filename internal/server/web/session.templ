@@ -291,6 +291,13 @@ templ statQuality(s store.SessionSignals, t ThinkingReadout) {
 					<dd>{ fmt.Sprintf("%d", s.LongestFailureStreak) }</dd>
 				}
 			</dl>
+			if !s.Scored() {
+				// The dash is deferral, not a broken read: a grade is assigned off the hot
+				// path once the session settles (idle long enough or declared terminal), so a
+				// still-running or just-finished session shows no grade until then. Naming that
+				// here keeps the empty tile from reading as missing data.
+				<div class="tt-note muted small">Not graded yet. A session is graded once it settles.</div>
+			}
 			if s.HasHygieneSignal() {
 				<div class="tt-sub">Input</div>
 				<dl class="tt-grid">

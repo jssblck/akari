@@ -1953,7 +1953,9 @@
     const svg = A.svgRoot(w, h);
     const S = D.subagents;
     const xScale = A.scaleLinear([0, D.nBuckets - 1], [pL, w - pR]);
-    const maxV = Math.max(...S.delegateShare, ...S.costShare) * 1.15;
+    // Floor at 1% so a window with no delegation draws a flat baseline rather than a
+    // degenerate domain with NaN axis ticks.
+    const maxV = Math.max(1, Math.max(...S.delegateShare, ...S.costShare, 0) * 1.15);
     const yScale = A.scaleLinear([0, maxV], [h - pB, pT]);
 
     A.axisTicksY(svg, [0, Math.round(maxV / 2), Math.round(maxV)], pL, w - pR, yScale, (v) => v + '%');
@@ -2026,8 +2028,11 @@
     const svg = A.svgRoot(w, h);
     const S = D.subagents;
     const xScale = A.scaleLinear([0, D.nBuckets - 1], [pL, w - pR]);
-    const totals = S.fanoutRows.map((r) => S.fanoutOrder.reduce((s, k) => s + r[k], 0));
-    const maxV = Math.max(...totals) * 1.1;
+    const totals = S.fanoutRows.map((r) => S.fanoutOrder.reduce((s, k) => s + (r[k] || 0), 0));
+    // Floor the domain at 1 so a window with no fan-out (every bucket zero, or no rows at
+    // all) draws a flat baseline instead of a degenerate [0,0]/[0,-Infinity] domain that
+    // renders NaN axis ticks. Matches the guard the other stacked charts use.
+    const maxV = Math.max(1, Math.max(...totals, 0) * 1.1);
     const yScale = A.scaleLinear([0, maxV], [h - pB, pT]);
 
     A.axisTicksY(svg, [0, Math.round(maxV / 2), Math.round(maxV)], pL, w - pR, yScale, (v) => v);
