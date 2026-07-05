@@ -83,6 +83,10 @@ templ sessionsToolbar(facets store.GlobalFacetValues, sel store.SessionFilter) {
 				}
 			}
 		}
+		@tbSelect("Subagents", "subagents") {
+			<option value="" selected?={ !sel.IncludeSubagents }>Hidden</option>
+			<option value="1" selected?={ sel.IncludeSubagents }>Shown</option>
+		}
 		<span class="spacer"></span>
 		@tbSelect("Sort", "sort") {
 			for _, o := range SessionSortOptions() {
@@ -218,6 +222,12 @@ templ feedRow(fr FeedRow) {
 					<span class="srow-branch mono">{ fr.Row.GitBranch }</span>
 				}
 				@kindTag(fr.Row.ProjectKind)
+				if fr.Row.Grade != nil {
+					<span class={ "tag grade " + RowGradeClass(fr.Row.Grade) } title="quality grade">{ *fr.Row.Grade }</span>
+				}
+				if note := RowOutcomeNote(fr.Row.Outcome); note != "" {
+					<span class="tag outcome" title="session outcome">{ note }</span>
+				}
 				if fr.Row.Visibility == "public" {
 					<span class="tag public">public</span>
 				}
@@ -227,8 +237,9 @@ templ feedRow(fr FeedRow) {
 			</div>
 			if fr.Row.Search.Has() {
 				@snippetLine(fr.Row.Search)
-			} else if fr.Row.Title != "" {
-				<div class="srow-sub" title={ fr.Row.Title }>{ fr.Row.Title }</div>
+			} else if StripPromptPreamble(fr.Row.Title) != "" {
+				{{ title := StripPromptPreamble(fr.Row.Title) }}
+				<div class="srow-sub" title={ title }>{ title }</div>
 			}
 		</div>
 		<span class="srow-msgs mono small" title="messages">{ fmt.Sprintf("%d", fr.Row.MessageCount) }</span>

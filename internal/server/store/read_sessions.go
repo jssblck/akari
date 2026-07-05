@@ -252,10 +252,12 @@ func globalSessionSelect(matchLateral, matchCol, matchCutCol string) string {
 	       s.total_cost_usd, s.cost_incomplete, s.visibility, s.public_id,
 	       s.started_at, s.ended_at, s.last_active_at,
 	       p.id, p.remote_key, p.display_name, p.kind,
+	       sig.grade, sig.outcome,
 	       coalesce(title.content, ''), ` + matchCol + `, ` + matchCutCol + `
 	  FROM sessions s
 	  JOIN users u ON u.id = s.user_id
 	  JOIN projects p ON p.id = s.project_id
+	  LEFT JOIN session_signals sig ON sig.session_id = s.id AND ` + signalsCurrent() + `
 	  ` + titleLateralSQL + matchLateral
 }
 
@@ -269,15 +271,23 @@ func globalSessionSelect(matchLateral, matchCol, matchCutCol string) string {
 func scanSessionRow(rows pgx.Rows, matchActive bool) (r SessionRow, raw string, frontCut bool, err error) {
 	var match *string
 	var cut bool
+	// outcome is nullable in the row: a session with no current signals row (unsettled,
+	// or its signals gone stale under a newer epoch) LEFT JOINs to NULL. Scan through a
+	// pointer and fold a missing outcome to the empty string the row field documents.
+	var outcome *string
 	dest := []any{&r.ID, &r.Agent, &r.Machine, &r.GitBranch, &r.Username,
 		&r.MessageCount, &r.UserMessageCount, &r.ModelFallbackCount,
 		&r.TotalInput, &r.TotalOutput, &r.TotalCacheWrite, &r.TotalCacheRead,
 		&r.TotalCostUSD, &r.CostIncomplete, &r.Visibility, &r.PublicID,
 		&r.StartedAt, &r.EndedAt, &r.LastActiveAt,
 		&r.ProjectID, &r.ProjectKey, &r.ProjectName, &r.ProjectKind,
+		&r.Grade, &outcome,
 		&r.Title, &match, &cut}
 	if err := rows.Scan(dest...); err != nil {
 		return r, "", false, fmt.Errorf("scan global session row: %w", err)
+	}
+	if outcome != nil {
+		r.Outcome = *outcome
 	}
 	r.Title = squashSpaces(r.Title)
 	if matchActive && match != nil {
@@ -313,6 +323,15 @@ func (s *Store) ListAllSessions(ctx context.Context, f SessionFilter) (rows []Se
 	// started before the window but bumped inside it by a late reparse stays out of both,
 	// where an updated_at bound would have pulled it into the feed but not the panel.
 	conds, args := f.conds("s.started_at")
+
+	if !f.IncludeSubagents {
+		// Hide subagent sessions from the browse feed by default. This lives here, not in
+		// the shared conds(), so CountAllSessions, the facet probes, the MCP SessionFeed,
+		// and the Insights drill-through invariants keep counting every session; only this
+		// list narrows to top-level work. relationship_type is NOT NULL (default ''), so a
+		// plain inequality is null-safe and needs no placeholder.
+		conds = append(conds, "s.relationship_type <> 'subagent'")
+	}
 
 	// The match lateral reuses the escaped ILIKE pattern conds() already appended as
 	// the last arg (so the row it snippets is the row the EXISTS filter matched), and

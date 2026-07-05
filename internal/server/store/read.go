@@ -213,6 +213,16 @@ type SessionFilter struct {
 	// global feed without carrying anything to read. Setting it restores the old
 	// behavior of listing every session regardless of message count.
 	IncludeEmpty bool
+	// IncludeSubagents keeps subagent sessions (relationship_type = 'subagent') in the
+	// global feed. The default excludes them: a fleet's spawned reviewers, fan-out
+	// workers, and spec-extraction batches vastly outnumber the top-level runs a reader
+	// is looking for, and each already rolls up under its parent's detail page. Setting
+	// it shows the whole tree. Continuations (a resumed session) stay visible either way:
+	// they are real work a reader started, not machinery a parent spun up. It is applied
+	// in ListAllSessions, not the shared conds(), so it narrows only the browse feed and
+	// leaves the count, facet, MCP-feed, and Insights drill-through queries counting every
+	// session (see ListAllSessions).
+	IncludeSubagents bool
 	// Since bounds the list to sessions last active at or after this instant,
 	// matching the analytics window so a project page's session list and its usage
 	// panel cover the same range. The zero time means no lower bound.
@@ -442,6 +452,14 @@ type SessionRow struct {
 	ProjectKey  string
 	ProjectName string
 	ProjectKind string
+	// Grade is the session's letter grade (A..F) from its current, non-stale signals
+	// row, nil when the session is unscored or has not settled yet. Outcome is that
+	// row's outcome (completed / abandoned / errored / unknown), empty when no current
+	// row exists. Both come from a LEFT JOIN in globalSessionSelect gated by
+	// signalsCurrent(), so a feed row's grade and outcome match the drill filters and
+	// the Insights panels rather than reading a stale verdict.
+	Grade   *string
+	Outcome string
 	// Search is the content-match snippet for this row, populated only when the
 	// list was run with a Query filter: a window of the first matching message's
 	// content centered on the match, so the feed can show what the session said
@@ -546,8 +564,17 @@ const titleCap = 240
 // this one fragment so a session titles the same on the detail page, the project
 // table, the global feed, and its OG card, and so the title rule changes in one
 // place. It assumes the outer query aliases the sessions row `s`.
+//
+// Claude Code prepends a fixed <local-command-caveat>...</local-command-caveat>
+// block (a couple hundred characters telling the model to ignore locally generated
+// messages) ahead of the user's actual words when a session ran a local command. The
+// block alone overruns titleCap, so a naive left() would title the whole session with
+// the caveat and never reach the prompt. Strip that one known wrapper on the full
+// content first, then cap: the visible title becomes the human's words, not the
+// harness boilerplate. The strip is anchored and non-greedy so it removes exactly the
+// leading caveat and nothing past its close; a message without one is unchanged.
 var titleLateralSQL = `LEFT JOIN LATERAL (
-	         SELECT left(m.content, ` + itoa(titleCap) + `) AS content
+	         SELECT left(regexp_replace(m.content, '^\s*<local-command-caveat>.*?</local-command-caveat>\s*', ''), ` + itoa(titleCap) + `) AS content
 	           FROM messages m
 	          WHERE m.session_id = s.id AND m.role = 'user'
 	          ORDER BY m.ordinal LIMIT 1

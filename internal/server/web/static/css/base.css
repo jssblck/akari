@@ -342,6 +342,14 @@ td.num, th.num, table.grid td.num, table.grid th.num { text-align: right; font-f
 .tag.orphaned { color: var(--err); border-color: rgba(239, 154, 169, 0.4); }
 /* Data-quality caution: the session repeats a tool-call id across rows. */
 .tag.warn { color: var(--warn); border-color: rgba(240, 197, 146, 0.4); cursor: help; }
+/* Feed-row quality chips: the grade reads in the report-card banding the Quality tile
+   uses (A/B sage, C peach, D/F rose), and the outcome flags a session that did not
+   complete. The grade chip is mono and tight so the single letter reads as a mark. */
+.tag.grade { font-family: var(--mono); letter-spacing: 0; cursor: help; }
+.tag.grade.q-good { color: var(--ok); border-color: rgba(159, 214, 166, 0.4); }
+.tag.grade.q-watch { color: var(--warn); border-color: rgba(240, 197, 146, 0.4); }
+.tag.grade.q-poor { color: var(--err); border-color: rgba(239, 154, 169, 0.4); }
+.tag.outcome { color: var(--err); border-color: rgba(239, 154, 169, 0.4); cursor: help; }
 
 /* ---- Buttons ---- */
 button, .btn {

@@ -158,6 +158,11 @@ func sessionsQuery(f store.SessionFilter) string {
 	if f.IncludeEmpty {
 		q.Set("empty", "1")
 	}
+	// Subagents are hidden by default, so the flag rides the URL only when the reader
+	// has opted to include them, so a facet click or "Show more" holds that choice.
+	if f.IncludeSubagents {
+		q.Set("subagents", "1")
+	}
 	// The span constraint rides the URL only when set (the busiest-user drill), so the
 	// linked feed round-trips the same spanned cohort the concurrency panel counted.
 	if f.RequireSpan {

@@ -280,6 +280,9 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	// Empty sessions (message_count = 0) are hidden by default; empty=1 shows them.
 	filter.IncludeEmpty = q.Get("empty") == "1"
+	// Subagent sessions are hidden by default so the feed reads as top-level work;
+	// subagents=1 folds them back in (they stay reachable from each parent's page).
+	filter.IncludeSubagents = q.Get("subagents") == "1"
 	// spanned=1 narrows to sessions with a measured span, the concurrency panel's cohort;
 	// it arrives only on the busiest-user drill so that feed matches what the panel swept.
 	filter.RequireSpan = q.Get("spanned") == "1"
