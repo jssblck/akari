@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"fmt"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // The session detail's audit header reads: which models served the session, what the
@@ -10,12 +12,60 @@ import (
 // ended. All are read-time presentation reads over existing projection rows; none is
 // rebuild-derived, so none moves parse.Epoch.
 
+// SessionAudit is everything the audit header judges together, read from one MVCC
+// snapshot: the session row, its current signals, its direct subagents with their
+// verdicts, the whole-work-item rollup, and the serving models. The header shows the
+// session's own cost, the subagents' costs, and the rollup of both side by side; a
+// rebuild committing between separate reads could update sessions.total_cost_usd under
+// the page and make those figures disagree, so they are pinned the same way the feed
+// pins its rows (analyticsSnapshot's reasoning at single-session scale).
+type SessionAudit struct {
+	Detail    SessionDetail
+	Signals   SessionSignals
+	Subagents []SubagentRow
+	Tree      TreeRollup
+	Models    []string
+}
+
+// SessionAuditByID loads a session's audit bundle from one repeatable-read snapshot.
+// A missing session returns ErrNotFound.
+func (s *Store) SessionAuditByID(ctx context.Context, sessionID int64) (SessionAudit, error) {
+	var a SessionAudit
+	err := s.snapshotTx(ctx, func(tx pgx.Tx) error {
+		var err error
+		if a.Detail, err = s.scanDetail(ctx, tx, "s.id = $1", sessionID); err != nil {
+			return err
+		}
+		if a.Signals, err = s.sessionSignals(ctx, tx, sessionID); err != nil {
+			return err
+		}
+		if a.Subagents, err = s.subagents(ctx, tx, sessionID); err != nil {
+			return err
+		}
+		roll, err := s.treeRollups(ctx, tx, []int64{sessionID})
+		if err != nil {
+			return err
+		}
+		a.Tree = roll[sessionID]
+		a.Models, err = s.sessionModels(ctx, tx, sessionID)
+		return err
+	})
+	if err != nil {
+		return SessionAudit{}, err
+	}
+	return a, nil
+}
+
 // SessionModels returns the distinct models that served a session, heaviest first by
 // total token volume, capped so a pathological session cannot grow the header line. The
 // header shows the working set, not an exhaustive ledger; the per-model split lives on
 // the Insights instruments.
 func (s *Store) SessionModels(ctx context.Context, sessionID int64) ([]string, error) {
-	rows, err := s.Pool.Query(ctx,
+	return s.sessionModels(ctx, s.Pool, sessionID)
+}
+
+func (s *Store) sessionModels(ctx context.Context, q querier, sessionID int64) ([]string, error) {
+	rows, err := q.Query(ctx,
 		`SELECT model FROM usage_events
 		  WHERE session_id = $1 AND model <> ''
 		  GROUP BY model
@@ -74,7 +124,11 @@ func (r SubagentRow) Failed() bool { return r.Outcome == "errored" }
 // from the same signalsCurrent-gated LEFT JOIN the feed row uses, so a child's outcome
 // here matches its own session page.
 func (s *Store) Subagents(ctx context.Context, parentID int64) ([]SubagentRow, error) {
-	rows, err := s.Pool.Query(ctx, `
+	return s.subagents(ctx, s.Pool, parentID)
+}
+
+func (s *Store) subagents(ctx context.Context, q querier, parentID int64) ([]SubagentRow, error) {
+	rows, err := q.Query(ctx, `
 		SELECT s.id, s.agent, s.machine, s.git_branch, u.username,
 		       s.message_count, s.user_message_count, s.model_fallback_count,
 		       s.total_input_tokens, s.total_output_tokens,

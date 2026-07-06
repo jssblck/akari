@@ -149,8 +149,9 @@ func TestFlowRibbonTicks(t *testing.T) {
 		5: {{ToolName: "Edit", Category: "edit"}, {ToolName: "Bash", Category: "bash", ResultStatus: "error"}},
 	}
 
-	html := renderComponent(t, FlowRibbon(msgs, tools))
+	html := renderComponent(t, flowRibbon(SessionView{Outline: msgs, Tools: tools}, false))
 	for _, want := range []string{
+		`id="session-flow"`,
 		`class="flow"`,
 		`flow-tick ft-edit" href="#msg-1"`,
 		`flow-tick ft-run" href="#msg-3"`,
@@ -163,9 +164,14 @@ func TestFlowRibbonTicks(t *testing.T) {
 		}
 	}
 
-	short := renderComponent(t, FlowRibbon(msgs[:6], tools))
+	// A short session renders the stable wrapper (the live append's out-of-band
+	// target) but no ticks.
+	short := renderComponent(t, flowRibbon(SessionView{Outline: msgs[:6], Tools: tools}, false))
 	if strings.Contains(short, "flow-tick") {
-		t.Error("a short session should render no ribbon")
+		t.Error("a short session should render no ribbon ticks")
+	}
+	if !strings.Contains(short, `id="session-flow"`) {
+		t.Error("the ribbon wrapper must always render so the append swap has a target")
 	}
 }
 
@@ -210,6 +216,8 @@ func TestTranscriptAppendFragment(t *testing.T) {
 		`id="msg-0"`,
 		`id="session-instruments" hx-swap-oob="outerHTML"`,
 		`id="session-subagents" hx-swap-oob="outerHTML"`,
+		`id="session-flow" hx-swap-oob="outerHTML"`,
+		`id="session-outline" class="outline" aria-label="Session outline" hx-swap-oob="outerHTML"`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("append fragment missing %q", want)
@@ -217,6 +225,18 @@ func TestTranscriptAppendFragment(t *testing.T) {
 	}
 	if strings.Contains(html, `<div class="transcript">`) {
 		t.Error("an append fragment must not open its own transcript container")
+	}
+
+	// A quiet tick (no rows) keeps the instrument refreshes but not the
+	// whole-session shape.
+	quiet := v
+	quiet.Page = store.TranscriptPage{}
+	qhtml := renderComponent(t, TranscriptAppend(quiet))
+	if !strings.Contains(qhtml, `id="session-instruments"`) {
+		t.Error("a quiet append should still refresh the instruments")
+	}
+	if strings.Contains(qhtml, `id="session-flow"`) || strings.Contains(qhtml, `id="session-outline"`) {
+		t.Error("a quiet append should not ship the ribbon or outline")
 	}
 }
 

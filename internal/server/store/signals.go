@@ -793,8 +793,14 @@ var settledSignalBatch = 500
 // reassignment) that leave the grade valid, so keying reads on it would strand those grades
 // unread while the settle tick, which keys on the flag, never revisits them.
 func (s *Store) SessionSignalsByID(ctx context.Context, sessionID int64) (SessionSignals, error) {
+	return s.sessionSignals(ctx, s.Pool, sessionID)
+}
+
+// sessionSignals is SessionSignalsByID over an arbitrary querier, so the audit bundle
+// can read the signals row in the same snapshot as the costs it is judged beside.
+func (s *Store) sessionSignals(ctx context.Context, q querier, sessionID int64) (SessionSignals, error) {
 	var sig SessionSignals
-	err := s.Pool.QueryRow(ctx,
+	err := q.QueryRow(ctx,
 		`SELECT sig.session_id, sig.outcome, sig.outcome_confidence, sig.score, sig.grade,
 		        sig.tool_calls, sig.tool_failures, sig.tool_retries, sig.edit_churn, sig.longest_failure_streak,
 		        sig.prompt_count, sig.short_prompt_count, sig.duplicate_prompt_count, sig.no_code_context_count, sig.unstructured_start,

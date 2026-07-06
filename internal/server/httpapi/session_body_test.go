@@ -112,19 +112,31 @@ func TestSessionTranscriptFragments(t *testing.T) {
 	if h := resp.Header.Get("HX-Retarget"); h != "" {
 		t.Fatalf("valid append should not retarget, got HX-Retarget=%q", h)
 	}
-	for _, want := range []string{`id="msg-128"`, `id="msg-129"`, `id="session-instruments"`, `id="session-subagents"`, `hx-swap-oob="outerHTML"`} {
+	for _, want := range []string{
+		`id="msg-128"`, `id="msg-129"`,
+		`id="session-instruments"`, `id="session-subagents"`,
+		`id="session-flow"`, `id="session-outline"`,
+		`hx-swap-oob="outerHTML"`,
+	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("?after fragment missing %q", want)
 		}
+	}
+	// The ribbon and outline out-of-band refreshes cover the whole session, so the
+	// fragment names turns the transcript window itself does not carry.
+	if !strings.Contains(body, `id="ol-0"`) {
+		t.Fatal("?after fragment should refresh the outline across the whole session")
 	}
 	if strings.Contains(body, `id="msg-127"`) {
 		t.Fatal("?after fragment re-sent the row the client already holds")
 	}
 
 	// A quiet tick (the cursor already at the live edge) appends nothing but still
-	// carries the out-of-band refreshes, and must not fall back to a re-render: the
-	// SSE wake fires on raw bytes, which can precede the rebuild that grows the
-	// projection.
+	// carries the out-of-band instrument refreshes, and must not fall back to a
+	// re-render: the SSE wake fires on raw bytes, which can precede the rebuild that
+	// grows the projection. The whole-session shape (ribbon, outline) stays home: no
+	// turns changed, so shipping it would make every quiet tick cost the session's
+	// full outline.
 	resp, body = get(fmt.Sprintf("/sessions/%d/body?after=129", sid))
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("quiet ?after = %d, want 200", resp.StatusCode)
@@ -140,6 +152,11 @@ func TestSessionTranscriptFragments(t *testing.T) {
 			t.Fatalf("quiet tick missing out-of-band refresh %q", want)
 		}
 	}
+	for _, skip := range []string{`id="session-flow"`, `id="session-outline"`} {
+		if strings.Contains(body, skip) {
+			t.Fatalf("quiet tick should not ship the whole-session shape, found %q", skip)
+		}
+	}
 
 	// A cursor naming an ordinal the projection does not have means the open tab's
 	// DOM no longer matches (an epoch rebuild reshaped the transcript). The response
@@ -151,7 +168,13 @@ func TestSessionTranscriptFragments(t *testing.T) {
 	if rt, rs := resp.Header.Get("HX-Retarget"), resp.Header.Get("HX-Reswap"); rt != "#session-body" || rs != "innerHTML" {
 		t.Fatalf("stale cursor headers = (%q, %q), want (#session-body, innerHTML)", rt, rs)
 	}
-	for _, want := range []string{`id="transcript-earlier"`, `id="msg-129"`} {
+	for _, want := range []string{
+		`id="transcript-earlier"`, `id="msg-129"`,
+		// A reshaped projection renumbers ordinals, so the resync must also refresh
+		// the shape surfaces outside #session-body out-of-band.
+		`id="session-flow" hx-swap-oob="outerHTML"`,
+		`id="session-outline" class="outline" aria-label="Session outline" hx-swap-oob="outerHTML"`,
+	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("stale-cursor re-render missing %q", want)
 		}

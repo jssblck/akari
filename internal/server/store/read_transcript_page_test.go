@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -41,6 +42,64 @@ func ordinals(msgs []store.Message) []int {
 		out[i] = m.Ordinal
 	}
 	return out
+}
+
+// TestTranscriptWindowCarriesToolsAndAttachments pins that a window's tool calls and
+// attachments ride on the page itself, read in the same snapshot as its rows and cut to
+// exactly the window's ordinal range: a chip outside the window costs nothing and can
+// never pair with rows from a different projection.
+func TestTranscriptWindowCarriesToolsAndAttachments(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	const total = 240
+	sid := seedTurns(t, st, "grace", total)
+
+	// One tool call before the window, one inside; one attachment on each side too.
+	// The tail window of 240 alternating rows starts at ordinal 140. The attachments FK
+	// into the CAS, so each needs a blob row (the hash is the 64-char zero-padded
+	// ordinal, unique per test database).
+	for _, ord := range []int{10, 141} {
+		if _, err := st.Pool.Exec(ctx,
+			`INSERT INTO tool_calls (session_id, message_ordinal, call_index, tool_name, category)
+			 VALUES ($1, $2, 0, 'Bash', 'bash')`, sid, ord); err != nil {
+			t.Fatalf("tool call at %d: %v", ord, err)
+		}
+		sha := fmt.Sprintf("%064d", ord)
+		if _, err := st.Pool.Exec(ctx,
+			`INSERT INTO blobs (sha256, lo_oid, byte_len, media_type)
+			 VALUES ($1, lo_create(0), 4, 'image/png')`, sha); err != nil {
+			t.Fatalf("blob for %d: %v", ord, err)
+		}
+		if _, err := st.Pool.Exec(ctx,
+			`INSERT INTO attachments (session_id, message_ordinal, sha256, media_type, byte_len)
+			 VALUES ($1, $2, $3, 'image/png', 4)`, sid, ord, sha); err != nil {
+			t.Fatalf("attachment at %d: %v", ord, err)
+		}
+	}
+
+	page, err := st.TranscriptTail(ctx, sid, nil)
+	if err != nil {
+		t.Fatalf("tail: %v", err)
+	}
+	if len(page.Tools) != 1 || page.Tools[0].MessageOrdinal != 141 {
+		t.Fatalf("window tools = %+v, want just the ordinal-141 call", page.Tools)
+	}
+	if len(page.Attachments) != 1 || page.Attachments[0].MessageOrdinal != 141 {
+		t.Fatalf("window attachments = %+v, want just the ordinal-141 image", page.Attachments)
+	}
+
+	// The append read carries them the same way.
+	after, err := st.TranscriptAfter(ctx, sid, 140)
+	if err != nil {
+		t.Fatalf("after: %v", err)
+	}
+	if len(after.Tools) != 1 || after.Tools[0].MessageOrdinal != 141 {
+		t.Fatalf("append tools = %+v, want just the ordinal-141 call", after.Tools)
+	}
+	if len(after.Attachments) != 1 || after.Attachments[0].MessageOrdinal != 141 {
+		t.Fatalf("append attachments = %+v, want just the ordinal-141 image", after.Attachments)
+	}
 }
 
 // TestTranscriptTailWindowsByTurn pins the tail window's shape: it covers exactly the

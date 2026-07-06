@@ -12,18 +12,20 @@ import (
 func floatPtr(f float64) *float64 { return &f }
 
 // viewFor assembles the SessionView a render test hands SessionPage: the fixture's
-// messages serve as both the outline read and the (whole-session) transcript window, the
-// shape a short real session loads with, so assertions against the rendered page cover
-// both surfaces.
+// messages serve as both the outline read and the (whole-session) transcript window, and
+// the tool map feeds both the whole-session surfaces (outline, ribbon) and the window's
+// rows, the shape a short real session loads with, so assertions against the rendered
+// page cover both surfaces.
 func viewFor(d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, subs []store.SubagentRow, hs HeaderStats, dupIDs int) SessionView {
 	return SessionView{
-		Detail:    d,
-		Outline:   msgs,
-		Page:      store.TranscriptPage{Msgs: msgs},
-		Tools:     tools,
-		Subagents: subs,
-		Header:    hs,
-		DupIDs:    dupIDs,
+		Detail:      d,
+		Outline:     msgs,
+		Page:        store.TranscriptPage{Msgs: msgs},
+		Tools:       tools,
+		WindowTools: tools,
+		Subagents:   subs,
+		Header:      hs,
+		DupIDs:      dupIDs,
 	}
 }
 

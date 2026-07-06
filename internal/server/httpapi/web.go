@@ -512,66 +512,54 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 // the window the page renders.
 //
 // The transcript is the session's tail (store.TranscriptTail), not the whole session:
-// an unbounded render is what froze the tab on long sessions (P-2). The outline and
-// ribbon still cover every turn through the bounded-column outline read, and the tool
-// map is loaded whole because both consume it; only the attachments are cut to the
-// window, since only rendered rows show them.
+// an unbounded render is what froze the tab on long sessions (P-2). The window carries
+// its own tools and attachments from the same snapshot as its rows; the whole-session
+// tool map loaded here serves only the outline and the ribbon, which cover every turn.
 func (s *Server) sessionView(r *http.Request, id int64) (web.SessionView, error) {
 	v := web.SessionView{}
-	d, err := s.Store.SessionDetailByID(r.Context(), id)
+	if err := s.fillSessionAudit(r.Context(), id, &v); err != nil {
+		return v, err
+	}
+	page, err := s.Store.TranscriptTail(r.Context(), id, nil)
 	if err != nil {
 		return v, err
 	}
-	v.Detail = d
-	if v.Outline, err = s.Store.OutlineMessages(r.Context(), id); err != nil {
-		return v, err
-	}
-	if v.Page, err = s.Store.TranscriptTail(r.Context(), id, nil); err != nil {
-		return v, err
-	}
-	tools, err := s.Store.ToolCalls(r.Context(), id)
-	if err != nil {
-		return v, err
-	}
-	v.Tools = web.ToolsByOrdinal(tools)
-	if err := s.fillWindowAttachments(r.Context(), id, &v); err != nil {
-		return v, err
-	}
-	return v, s.fillSessionAudit(r.Context(), &v)
-}
-
-// fillWindowAttachments loads the attachments for exactly the rendered window's ordinal
-// range. A window is contiguous, so the range read returns precisely the rendered rows'
-// attachments; an empty window needs none.
-func (s *Server) fillWindowAttachments(ctx context.Context, id int64, v *web.SessionView) error {
-	if len(v.Page.Msgs) == 0 {
-		return nil
-	}
-	atts, err := s.Store.AttachmentsInRange(ctx, id,
-		v.Page.Msgs[0].Ordinal, v.Page.Msgs[len(v.Page.Msgs)-1].Ordinal)
-	if err != nil {
-		return err
-	}
-	v.Attachments = web.AttachmentsByOrdinal(atts)
-	return nil
+	v.SetPage(page)
+	return v, s.fillSessionShape(r.Context(), id, &v)
 }
 
 // fillSessionAudit loads the audit-header inputs shared by the full view and the live
-// append's out-of-band refresh: subagents with verdicts, the work-item rollup, the
-// serving models, and the header stats (cache, signals, fallbacks, thinking).
-func (s *Server) fillSessionAudit(ctx context.Context, v *web.SessionView) error {
-	var err error
-	if v.Subagents, err = s.Store.Subagents(ctx, v.Detail.ID); err != nil {
+// append's out-of-band refresh: the session row, its signals, subagents with verdicts,
+// the work-item rollup, and the serving models, all from one store snapshot (the header
+// judges these costs side by side, so they must not straddle a rebuild), plus the
+// header stats derived from them.
+func (s *Server) fillSessionAudit(ctx context.Context, id int64, v *web.SessionView) error {
+	a, err := s.Store.SessionAuditByID(ctx, id)
+	if err != nil {
 		return err
 	}
-	if v.Tree, err = s.Store.TreeRollupFor(ctx, v.Detail.ID); err != nil {
-		return err
-	}
-	if v.Models, err = s.Store.SessionModels(ctx, v.Detail.ID); err != nil {
-		return err
-	}
-	v.Header, err = s.sessionHeaderStats(ctx, v.Detail)
+	v.Detail = a.Detail
+	v.Subagents = a.Subagents
+	v.Tree = a.Tree
+	v.Models = a.Models
+	v.Header, err = s.sessionHeaderStats(ctx, a.Detail, a.Signals)
 	return err
+}
+
+// fillSessionShape loads the whole-session-coverage reads behind the outline rail and
+// the flow ribbon: one bounded-column row per turn and the tool metadata map. The live
+// append refreshes both out-of-band, so it shares this load with the full page.
+func (s *Server) fillSessionShape(ctx context.Context, id int64, v *web.SessionView) error {
+	var err error
+	if v.Outline, err = s.Store.OutlineMessages(ctx, id); err != nil {
+		return err
+	}
+	tools, err := s.Store.ToolCalls(ctx, id)
+	if err != nil {
+		return err
+	}
+	v.Tools = web.ToolsByOrdinal(tools)
+	return nil
 }
 
 // sessionHeaderStats builds the derived stat-tile inputs the session instrument header
@@ -583,8 +571,10 @@ func (s *Server) fillSessionAudit(ctx context.Context, v *web.SessionView) error
 // classes plus the parse-time cache-savings fold), so it costs nothing here. That is the
 // point of the rollup: the live body re-renders on every SSE update, and reading the tile
 // from the row the caller already holds keeps a long session's K refreshes linear rather
-// than rescanning its K usage rows each time. Only the stored signals still need a read.
-func (s *Server) sessionHeaderStats(ctx context.Context, d store.SessionDetail) (web.HeaderStats, error) {
+// than rescanning its K usage rows each time. The signals row comes in from the caller
+// too (the audit bundle reads it in the same snapshot as the costs it is judged beside);
+// only a counted fallback still needs a read.
+func (s *Server) sessionHeaderStats(ctx context.Context, d store.SessionDetail, sig store.SessionSignals) (web.HeaderStats, error) {
 	cache := store.CacheStats{
 		Input:             d.TotalInput,
 		Output:            d.TotalOutput,
@@ -592,10 +582,6 @@ func (s *Server) sessionHeaderStats(ctx context.Context, d store.SessionDetail) 
 		CacheWrite:        d.TotalCacheWrite,
 		SavingsUSD:        d.TotalCacheSavingsUSD,
 		SavingsIncomplete: d.CacheSavingsIncomplete,
-	}
-	sig, err := s.Store.SessionSignalsByID(ctx, d.ID)
-	if err != nil {
-		return web.HeaderStats{}, err
 	}
 	// Only a session whose rollup counted a fallback pays for the fallbacks read; the
 	// common no-fallback session skips it, so the header tile and transcript notices cost
@@ -605,6 +591,7 @@ func (s *Server) sessionHeaderStats(ctx context.Context, d store.SessionDetail) 
 		// Cap the read so a pathological session cannot grow the tooltip slice or the
 		// transcript-notice map without bound; the O(1) ModelFallbackCount stays the true
 		// total, and the tooltip renders "plus N more" from it when it overflows the cap.
+		var err error
 		fallbacks, err = s.Store.SessionModelFallbacks(ctx, d.ID, store.ModelFallbackListCap)
 		if err != nil {
 			return web.HeaderStats{}, err
@@ -667,7 +654,8 @@ func (s *Server) handleSessionPage(w http.ResponseWriter, r *http.Request) {
 //     response retargets to #session-body and re-renders the windowed body whole, so
 //     the client can never assemble a transcript with a hidden gap.
 //   - ?before=N: the window of turns preceding ordinal N, for "Show earlier".
-//   - bare: the whole windowed body (SessionMain), the full-refresh fallback.
+//   - bare: the whole windowed body plus the out-of-band ribbon and outline
+//     (SessionResync), the full-refresh fallback.
 func (s *Server) handleSessionBody(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
@@ -694,32 +682,39 @@ func (s *Server) handleSessionBody(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Could not load session.", http.StatusInternalServerError)
 		return
 	}
-	render(w, r, http.StatusOK, web.SessionMain(v))
+	// The full-refresh fallback arrives via htmx (app.js swaps it into #session-body),
+	// so the resync's out-of-band ribbon and outline land too: a transcript rendering
+	// its first rows populates the shape surfaces in the same swap.
+	render(w, r, http.StatusOK, web.SessionResync(v))
 }
 
 // loadFragmentView builds the SessionView a windowed transcript fragment renders: the
-// detail, the given page, the page's tools and attachments (range reads, so a fragment
-// costs its own rows and not the session), and the header stats (whose fallbacks map
-// the rows' notices read). The audit inputs are filled only when the fragment carries
-// the out-of-band instruments refresh (the append path); the earlier path skips them.
+// detail, the given page (which carries its own snapshot-pinned tools and attachments),
+// and the header stats (whose fallbacks map the rows' notices read). The audit and
+// whole-session-shape inputs are filled only when the fragment carries the out-of-band
+// refreshes (the append path); the earlier path skips them.
 func (s *Server) loadFragmentView(ctx context.Context, d store.SessionDetail, page store.TranscriptPage, audit bool) (web.SessionView, error) {
-	v := web.SessionView{Detail: d, Page: page}
-	if len(page.Msgs) > 0 {
-		lo, hi := page.Msgs[0].Ordinal, page.Msgs[len(page.Msgs)-1].Ordinal
-		tools, err := s.Store.ToolCallsInRange(ctx, d.ID, lo, hi)
-		if err != nil {
-			return v, err
-		}
-		v.Tools = web.ToolsByOrdinal(tools)
-		if err := s.fillWindowAttachments(ctx, d.ID, &v); err != nil {
-			return v, err
-		}
-	}
+	v := web.SessionView{Detail: d}
+	v.SetPage(page)
 	if audit {
-		return v, s.fillSessionAudit(ctx, &v)
+		// The bundle re-reads the detail in the same snapshot as the audit rows, so the
+		// out-of-band instruments render one consistent picture; the caller's earlier
+		// detail read only steered the dispatch.
+		if err := s.fillSessionAudit(ctx, d.ID, &v); err != nil {
+			return v, err
+		}
+		// The whole-session shape (outline, ribbon) rides the fragment only when rows
+		// landed; a quiet tick changed no turns and skips both the load and the swap.
+		if len(page.Msgs) == 0 {
+			return v, nil
+		}
+		return v, s.fillSessionShape(ctx, d.ID, &v)
 	}
-	var err error
-	v.Header, err = s.sessionHeaderStats(ctx, d)
+	sig, err := s.Store.SessionSignalsByID(ctx, d.ID)
+	if err != nil {
+		return v, err
+	}
+	v.Header, err = s.sessionHeaderStats(ctx, d, sig)
 	return v, err
 }
 
@@ -756,7 +751,7 @@ func (s *Server) serveSessionAppend(w http.ResponseWriter, r *http.Request, id i
 		}
 		w.Header().Set("HX-Retarget", "#session-body")
 		w.Header().Set("HX-Reswap", "innerHTML")
-		render(w, r, http.StatusOK, web.SessionMain(v))
+		render(w, r, http.StatusOK, web.SessionResync(v))
 		return
 	}
 	v, err := s.loadFragmentView(r.Context(), d, page, true)

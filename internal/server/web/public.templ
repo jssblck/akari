@@ -27,7 +27,7 @@ templ PublicSessionPage(d store.SessionDetail, msgs []store.Message, tools map[i
 			<div id="session-body">
 				<div class="session-grid">
 					<aside class="outline-rail" aria-label="Outline">
-						@Outline(msgs, tools, PublicBlobBase(*d.PublicID))
+						@Outline(msgs, tools, PublicBlobBase(*d.PublicID), false)
 					</aside>
 					<div class="session-main">
 						@sessionStats(d, hs)

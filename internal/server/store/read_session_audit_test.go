@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/jssblck/akari/internal/server/store"
@@ -179,6 +180,68 @@ func TestTreeRollupFor(t *testing.T) {
 	}
 	if leaf.SubagentCount != 0 {
 		t.Fatalf("a leaf session should roll up no subagents, got %+v", leaf)
+	}
+}
+
+// TestSessionAuditByID pins the one-snapshot audit bundle: the detail, signals,
+// subagents, work-item rollup, and models the header judges side by side all arrive
+// from a single read and agree with the individual reads on quiet data. (The snapshot
+// property itself is the repeatable-read transaction; this pins the wiring.)
+func TestSessionAuditByID(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	uid := seedUser(t, st, "grace")
+	pid, err := st.UpsertProject(ctx, "github.com/ada/engine", "github.com", "ada", "engine", "engine", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, err := st.Announce(ctx, store.AnnounceParams{UserID: uid, Agent: "claude", SourceSessionID: "audit-root", ProjectID: pid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := st.Announce(ctx, store.AnnounceParams{UserID: uid, Agent: "claude", SourceSessionID: "audit-root/subagents/a", ProjectID: pid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, cost := range map[int64]float64{parent.SessionID: 2.00, child.SessionID: 0.50} {
+		if _, err := st.Pool.Exec(ctx, `UPDATE sessions SET total_cost_usd = $2 WHERE id = $1`, id, cost); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := st.Pool.Exec(ctx,
+		`INSERT INTO session_signals (session_id, outcome, outcome_confidence, score, grade)
+		 VALUES ($1, 'completed', 'high', 95, 'A')`, parent.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE sessions SET signals_stale = false WHERE id = $1`, parent.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	seedUsage(t, st, parent.SessionID, "claude-fable-5", 1.0, 1000, 100, 0, "audit-u1")
+
+	a, err := st.SessionAuditByID(ctx, parent.SessionID)
+	if err != nil {
+		t.Fatalf("audit bundle: %v", err)
+	}
+	if a.Detail.ID != parent.SessionID || a.Detail.TotalCostUSD != 2.00 {
+		t.Fatalf("bundle detail = id %d cost %v", a.Detail.ID, a.Detail.TotalCostUSD)
+	}
+	if a.Signals.Outcome != "completed" || a.Signals.Grade == nil || *a.Signals.Grade != "A" {
+		t.Fatalf("bundle signals = %+v", a.Signals)
+	}
+	if len(a.Subagents) != 1 || a.Subagents[0].ID != child.SessionID {
+		t.Fatalf("bundle subagents = %+v", a.Subagents)
+	}
+	if a.Tree.SubagentCount != 1 || a.Tree.CostUSD != 2.50 {
+		t.Fatalf("bundle rollup = %+v, want 1 subagent at $2.50", a.Tree)
+	}
+	if len(a.Models) != 1 || a.Models[0] != "claude-fable-5" {
+		t.Fatalf("bundle models = %v", a.Models)
+	}
+
+	if _, err := st.SessionAuditByID(ctx, 99999999); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("missing session = %v, want ErrNotFound", err)
 	}
 }
 

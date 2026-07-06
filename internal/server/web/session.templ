@@ -41,10 +41,10 @@ templ SessionPage(p Page, v SessionView, live, owner bool) {
 			</div>
 			<div class="session-grid">
 				<aside class="outline-rail" aria-label="Outline">
-					@Outline(v.Outline, v.Tools, SessionBlobBase(v.Detail.ID))
+					@Outline(v.Outline, v.Tools, SessionBlobBase(v.Detail.ID), false)
 				</aside>
 				<div class="session-maincol">
-					@FlowRibbon(v.Outline, v.Tools)
+					@flowRibbon(v, false)
 					if live {
 						<div id="session-body" class="session-main" data-sse={ SSEPath(v.Detail.ID) } data-body={ BodyPath(v.Detail.ID) }>
 							@SessionMain(v)
@@ -107,18 +107,36 @@ templ TranscriptEarlier(v SessionView) {
 	if v.Page.HasEarlier && len(v.Page.Msgs) > 0 {
 		@earlierBar(v.Detail.ID, v.Page.Msgs[0].Ordinal, v.Page.EarlierCount)
 	}
-	@TranscriptRows(v.Page.Seed, v.Page.Msgs, v.Detail.Agent, v.Tools, v.Attachments, FallbacksByOrdinal(v.Header.Fallbacks), SessionBlobBase(v.Detail.ID))
+	@TranscriptRows(v.Page.Seed, v.Page.Msgs, v.Detail.Agent, v.WindowTools, v.WindowAttachments, FallbacksByOrdinal(v.Header.Fallbacks), SessionBlobBase(v.Detail.ID))
 }
 
 // TranscriptAppend is the fragment behind GET /sessions/{id}/body?after=N, fetched on an
 // SSE wake: just the turns past the last ordinal the client rendered, appended to the
-// transcript with hx-swap beforeend, plus out-of-band swaps for the instruments and the
-// subagents block so the verdict, stat tiles, and fan-out stay current without the
-// full-body re-render that used to freeze long sessions and reset the reader's scroll.
+// transcript with hx-swap beforeend, plus out-of-band swaps for the instruments, the
+// subagents block, the flow ribbon, and the outline rail, so every projection of the
+// transcript stays current without the full-body re-render that used to freeze long
+// sessions and reset the reader's scroll. The ribbon and outline refreshes ride only
+// when rows actually landed: a quiet tick (raw bytes ahead of the rebuild) changes no
+// turns, so it must not ship the whole-session shape for nothing.
 templ TranscriptAppend(v SessionView) {
-	@TranscriptRows(v.Page.Seed, v.Page.Msgs, v.Detail.Agent, v.Tools, v.Attachments, FallbacksByOrdinal(v.Header.Fallbacks), SessionBlobBase(v.Detail.ID))
+	@TranscriptRows(v.Page.Seed, v.Page.Msgs, v.Detail.Agent, v.WindowTools, v.WindowAttachments, FallbacksByOrdinal(v.Header.Fallbacks), SessionBlobBase(v.Detail.ID))
 	@sessionInstruments(v, true)
 	@subagentsSection(v, true)
+	if len(v.Page.Msgs) > 0 {
+		@flowRibbon(v, true)
+		@Outline(v.Outline, v.Tools, SessionBlobBase(v.Detail.ID), true)
+	}
+}
+
+// SessionResync is the whole-window re-render behind the append path's two fallback
+// cases (a client too far behind for one fragment, or a cursor an epoch rebuild
+// orphaned). The body re-renders via the retarget headers, and the ribbon and outline
+// ride as out-of-band swaps: a reshaped projection renumbers ordinals, so the shape
+// surfaces outside #session-body would otherwise keep anchors into the old numbering.
+templ SessionResync(v SessionView) {
+	@SessionMain(v)
+	@flowRibbon(v, true)
+	@Outline(v.Outline, v.Tools, SessionBlobBase(v.Detail.ID), true)
 }
 
 // sessionInstruments is the audit read above the transcript: the verdict header
@@ -259,25 +277,35 @@ templ subagentsTable(subs []store.SubagentRow) {
 	</div>
 }
 
-// FlowRibbon is the session's shape at a glance: one tick per turn, in transcript order,
+// flowRibbon is the session's shape at a glance: one tick per turn, in transcript order,
 // colored by what the turn did (edit, run, failure), so a reviewer sees a long failure
 // streak or an edit churn loop before reading a word. It renders from the same bounded
 // outline read the rail uses, so it covers the whole session even while the transcript
 // below renders only a window; a tick's anchor rides the same fetch-then-scroll path an
-// outline entry does. Short sessions skip it: their shape is visible by scrolling.
-templ FlowRibbon(msgs []store.Message, tools map[int][]store.ToolCallView) {
-	if FlowRibbonVisible(msgs) {
-		<div class="flow" aria-label="Session flow: one tick per turn, colored by activity">
-			for _, m := range msgs {
-				<a
-					class={ "flow-tick " + FlowTickClass(m, tools[m.Ordinal]) }
-					href={ templ.SafeURL(fmt.Sprintf("#msg-%d", m.Ordinal)) }
-					title={ FlowTickTitle(m, tools[m.Ordinal]) }
-					data-ord={ fmt.Sprintf("%d", m.Ordinal) }
-				></a>
-			}
-		</div>
-	}
+// outline entry does. Short sessions skip the ticks: their shape is visible by
+// scrolling. The wrapper div always renders (like the subagents block) so the live
+// append's out-of-band swap has a stable target and the ribbon grows with the session
+// instead of freezing at the turns the first page load knew about.
+templ flowRibbon(v SessionView, oob bool) {
+	<div
+		id="session-flow"
+		if oob {
+			hx-swap-oob="outerHTML"
+		}
+	>
+		if FlowRibbonVisible(v.Outline) {
+			<div class="flow" aria-label="Session flow: one tick per turn, colored by activity">
+				for _, m := range v.Outline {
+					<a
+						class={ "flow-tick " + FlowTickClass(m, v.Tools[m.Ordinal]) }
+						href={ templ.SafeURL(fmt.Sprintf("#msg-%d", m.Ordinal)) }
+						title={ FlowTickTitle(m, v.Tools[m.Ordinal]) }
+						data-ord={ fmt.Sprintf("%d", m.Ordinal) }
+					></a>
+				}
+			</div>
+		}
+	</div>
 }
 
 // Outline is the left pane of the session view: one entry per turn, with its
@@ -285,9 +313,18 @@ templ FlowRibbon(msgs []store.Message, tools map[int][]store.ToolCallView) {
 // and tool metadata the page already holds, so no second session-sized structure
 // is built. A turn links to its message; a step with a stored body opens that
 // body in the inspector pane (carrying the blob URLs so the inspector needs no
-// extra round trip to know what to fetch).
-templ Outline(msgs []store.Message, tools map[int][]store.ToolCallView, blobBase string) {
-	<div class="outline" aria-label="Session outline">
+// extra round trip to know what to fetch). The live append swaps it out-of-band
+// (the scrollable rail around it stays put, so the reader's position survives),
+// keeping its per-turn entries in step with the rows the append just added.
+templ Outline(msgs []store.Message, tools map[int][]store.ToolCallView, blobBase string, oob bool) {
+	<div
+		id="session-outline"
+		class="outline"
+		aria-label="Session outline"
+		if oob {
+			hx-swap-oob="outerHTML"
+		}
+	>
 		<div class="label outline-head">Outline</div>
 		for _, m := range msgs {
 			{{ steps := tools[m.Ordinal] }}
@@ -607,7 +644,7 @@ templ transcriptWindow(v SessionView) {
 			if v.Page.HasEarlier {
 				@earlierBar(v.Detail.ID, v.Page.Msgs[0].Ordinal, v.Page.EarlierCount)
 			}
-			@TranscriptRows(v.Page.Seed, v.Page.Msgs, v.Detail.Agent, v.Tools, v.Attachments, FallbacksByOrdinal(v.Header.Fallbacks), SessionBlobBase(v.Detail.ID))
+			@TranscriptRows(v.Page.Seed, v.Page.Msgs, v.Detail.Agent, v.WindowTools, v.WindowAttachments, FallbacksByOrdinal(v.Header.Fallbacks), SessionBlobBase(v.Detail.ID))
 		</div>
 	}
 }

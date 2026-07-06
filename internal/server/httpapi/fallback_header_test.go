@@ -48,7 +48,11 @@ func TestSessionHeaderStatsLoadsFallbacks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("detail: %v", err)
 	}
-	hs, err := srv.sessionHeaderStats(ctx, d)
+	sig, err := st.SessionSignalsByID(ctx, d.ID)
+	if err != nil {
+		t.Fatalf("signals: %v", err)
+	}
+	hs, err := srv.sessionHeaderStats(ctx, d, sig)
 	if err != nil {
 		t.Fatalf("sessionHeaderStats: %v", err)
 	}
@@ -68,7 +72,11 @@ func TestSessionHeaderStatsLoadsFallbacks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bare detail: %v", err)
 	}
-	bhs, err := srv.sessionHeaderStats(ctx, bd)
+	bsig, err := st.SessionSignalsByID(ctx, bd.ID)
+	if err != nil {
+		t.Fatalf("bare signals: %v", err)
+	}
+	bhs, err := srv.sessionHeaderStats(ctx, bd, bsig)
 	if err != nil {
 		t.Fatalf("bare sessionHeaderStats: %v", err)
 	}

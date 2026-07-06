@@ -41,6 +41,13 @@ type TranscriptPage struct {
 	// Seed is up to transcriptSeedLookback rows immediately before Msgs, in ordinal
 	// order, for walker priming only; the caller must not render them.
 	Seed []Message
+	// Tools and Attachments are the tool calls and attachments hanging on Msgs, read in
+	// the same transaction as the rows themselves. A rebuild committing between separate
+	// reads could otherwise pair one projection's messages with another's tool chips or
+	// images at the same ordinals, and an appended fragment would leave that mix in the
+	// DOM; carrying them on the page pins all three to one snapshot.
+	Tools       []ToolCallView
+	Attachments []AttachmentView
 	// HasEarlier reports whether any rows precede the window, so the renderer knows to
 	// draw the "Show earlier" bar. EarlierCount is how many (for the bar's label).
 	HasEarlier   bool
@@ -52,10 +59,11 @@ type TranscriptPage struct {
 	More bool
 }
 
-// transcriptTx runs fn inside a repeatable-read, read-only transaction, so the several
-// reads behind one transcript page (boundary lookup, window, seed, count) describe one
-// MVCC snapshot even if the parse worker commits a rebuild mid-request.
-func (s *Store) transcriptTx(ctx context.Context, fn func(tx pgx.Tx) error) error {
+// snapshotTx runs fn inside a repeatable-read, read-only transaction, so the several
+// reads behind one page (a transcript window with its tools and attachments, or the
+// audit header's cost-bearing rows) describe one MVCC snapshot even if the parse
+// worker commits a rebuild mid-request.
+func (s *Store) snapshotTx(ctx context.Context, fn func(tx pgx.Tx) error) error {
 	return pgx.BeginTxFunc(ctx, s.Pool,
 		pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, fn)
 }
@@ -68,7 +76,7 @@ func (s *Store) transcriptTx(ctx context.Context, fn func(tx pgx.Tx) error) erro
 // turns than the window simply starts at its beginning.
 func (s *Store) TranscriptTail(ctx context.Context, sessionID int64, before *int) (TranscriptPage, error) {
 	var page TranscriptPage
-	err := s.transcriptTx(ctx, func(tx pgx.Tx) error {
+	err := s.snapshotTx(ctx, func(tx pgx.Tx) error {
 		// The window's start: the TranscriptTailTurns-th user message counting back from
 		// the window's end. Walks the (session_id, ordinal) primary key backward; no row
 		// means the session has fewer turns than the window, so start at the beginning.
@@ -97,6 +105,9 @@ func (s *Store) TranscriptTail(ctx context.Context, sessionID int64, before *int
 			// nothing before it either: the window predicate already reached ordinal >= 0.
 			return nil
 		}
+		if err := s.fillWindowExtras(ctx, tx, sessionID, &page); err != nil {
+			return err
+		}
 		return s.fillWindowLead(ctx, tx, sessionID, msgs[0].Ordinal, &page)
 	})
 	if err != nil {
@@ -112,7 +123,7 @@ func (s *Store) TranscriptTail(ctx context.Context, sessionID int64, before *int
 // rather than append a fragment with a gap after it.
 func (s *Store) TranscriptAfter(ctx context.Context, sessionID int64, after int) (TranscriptPage, error) {
 	var page TranscriptPage
-	err := s.transcriptTx(ctx, func(tx pgx.Tx) error {
+	err := s.snapshotTx(ctx, func(tx pgx.Tx) error {
 		msgs, err := s.scanMessages(ctx, tx, sessionID,
 			messagesFullSelect+` AND m.ordinal > $2 ORDER BY m.ordinal LIMIT $3`,
 			sessionID, after, transcriptPageMessageCap+1)
@@ -124,6 +135,9 @@ func (s *Store) TranscriptAfter(ctx context.Context, sessionID int64, after int)
 			msgs = msgs[:transcriptPageMessageCap]
 		}
 		page.Msgs = msgs
+		if err := s.fillWindowExtras(ctx, tx, sessionID, &page); err != nil {
+			return err
+		}
 		// The seed here includes the row AT `after` (the last one the client already
 		// holds): `<=` rather than `<`, since the boundary instruments compare the first
 		// appended row against exactly that row. It is read even when nothing follows
@@ -144,6 +158,27 @@ func (s *Store) TranscriptAfter(ctx context.Context, sessionID int64, after int)
 		return TranscriptPage{}, err
 	}
 	return page, nil
+}
+
+// fillWindowExtras loads the tool calls and attachments hanging on the page's window,
+// inside the same transaction as the window itself (see TranscriptPage.Tools). An empty
+// window carries neither.
+func (s *Store) fillWindowExtras(ctx context.Context, tx pgx.Tx, sessionID int64, page *TranscriptPage) error {
+	if len(page.Msgs) == 0 {
+		return nil
+	}
+	lo, hi := page.Msgs[0].Ordinal, page.Msgs[len(page.Msgs)-1].Ordinal
+	tools, err := s.scanToolCalls(ctx, tx, toolCallsInRangeQuery, sessionID, lo, hi)
+	if err != nil {
+		return fmt.Errorf("read window tool calls for session %d: %w", sessionID, err)
+	}
+	page.Tools = tools
+	atts, err := s.scanAttachments(ctx, tx, attachmentsInRangeQuery, sessionID, lo, hi)
+	if err != nil {
+		return fmt.Errorf("read window attachments for session %d: %w", sessionID, err)
+	}
+	page.Attachments = atts
+	return nil
 }
 
 // fillWindowLead loads what precedes a window that starts at firstOrdinal: the walker

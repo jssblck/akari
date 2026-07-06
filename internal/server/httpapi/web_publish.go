@@ -323,7 +323,12 @@ func (s *Server) handlePublicSession(w http.ResponseWriter, r *http.Request) {
 			publicSubs = append(publicSubs, sub)
 		}
 	}
-	hs, err := s.sessionHeaderStats(r.Context(), d)
+	sig, err := s.Store.SessionSignalsByID(r.Context(), d.ID)
+	if err != nil {
+		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load session."))
+		return
+	}
+	hs, err := s.sessionHeaderStats(r.Context(), d, sig)
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load session."))
 		return

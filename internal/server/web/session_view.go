@@ -19,11 +19,18 @@ type SessionView struct {
 	Outline []store.Message
 	// Page is the transcript window the body renders: the tail of the session on first
 	// load, a windowed continuation on a "Show earlier" or live-append fetch.
-	Page        store.TranscriptPage
-	Tools       map[int][]store.ToolCallView
-	Attachments map[int][]store.AttachmentView
-	Subagents   []store.SubagentRow
-	Header      HeaderStats
+	Page store.TranscriptPage
+	// Tools is the whole session's tool metadata, for the outline rail and the flow
+	// ribbon (which cover every turn regardless of the window below).
+	Tools map[int][]store.ToolCallView
+	// WindowTools and WindowAttachments are Page's own tool calls and attachments,
+	// grouped by ordinal. Transcript rows render from these, never from Tools: they were
+	// read in the same transaction as the rows, so a rebuild committing mid-request
+	// cannot pair one projection's messages with another's chips or images.
+	WindowTools       map[int][]store.ToolCallView
+	WindowAttachments map[int][]store.AttachmentView
+	Subagents         []store.SubagentRow
+	Header            HeaderStats
 	// Tree is the whole-work-item rollup (own cost plus every descendant subagent), the
 	// same fold the feed's fan-out chip reads, so the audit header names what the whole
 	// run cost and not just the root turn.
@@ -31,6 +38,14 @@ type SessionView struct {
 	// Models is the session's serving models, heaviest first, for the audit header line.
 	Models []string
 	DupIDs int
+}
+
+// SetPage installs a transcript window on the view and groups the page's
+// snapshot-pinned tools and attachments for the row renderer.
+func (v *SessionView) SetPage(page store.TranscriptPage) {
+	v.Page = page
+	v.WindowTools = ToolsByOrdinal(page.Tools)
+	v.WindowAttachments = AttachmentsByOrdinal(page.Attachments)
 }
 
 // SubagentFailures counts the direct children that ended in an error, for the collapsed

@@ -16,9 +16,9 @@ import (
 // (including total_cache_savings_usd) are re-folded whole by every rebuild, so there is
 // no read-side backfill or pricing-marker dance: a reprice ships as a parse.Epoch bump
 // and the epoch rebuild re-prices the corpus.
-func (s *Store) scanDetail(ctx context.Context, where string, arg any) (SessionDetail, error) {
+func (s *Store) scanDetail(ctx context.Context, q querier, where string, arg any) (SessionDetail, error) {
 	var d SessionDetail
-	err := s.Pool.QueryRow(ctx,
+	err := q.QueryRow(ctx,
 		`SELECT s.id, s.agent, s.machine, s.git_branch, u.username,
 		        s.message_count, s.user_message_count, s.model_fallback_count,
 		        s.total_input_tokens, s.total_output_tokens,
@@ -54,12 +54,12 @@ func (s *Store) scanDetail(ctx context.Context, where string, arg any) (SessionD
 
 // SessionDetailByID loads a session by numeric id.
 func (s *Store) SessionDetailByID(ctx context.Context, id int64) (SessionDetail, error) {
-	return s.scanDetail(ctx, "s.id = $1", id)
+	return s.scanDetail(ctx, s.Pool, "s.id = $1", id)
 }
 
 // SessionDetailByPublicID loads a published session by its public id.
 func (s *Store) SessionDetailByPublicID(ctx context.Context, publicID string) (SessionDetail, error) {
-	return s.scanDetail(ctx, "s.public_id = $1 AND s.visibility = 'public'", publicID)
+	return s.scanDetail(ctx, s.Pool, "s.public_id = $1 AND s.visibility = 'public'", publicID)
 }
 
 // MessageCount returns a session's current message count from its rollup.
@@ -163,27 +163,31 @@ func (s *Store) scanMessages(ctx context.Context, q querier, sessionID int64, qu
 // ToolCalls returns all of a session's tool calls as metadata, for the web
 // renderer. Bounded readers pass a message-ordinal range to ToolCallsInRange.
 func (s *Store) ToolCalls(ctx context.Context, sessionID int64) ([]ToolCallView, error) {
-	return s.scanToolCalls(ctx,
+	return s.scanToolCalls(ctx, s.Pool,
 		`SELECT message_ordinal, call_index, tool_name, coalesce(category,''), coalesce(file_path,''), coalesce(file_rel_path,''), coalesce(detail,''),
 		        coalesce(input_sha256,''), coalesce(input_bytes,0), coalesce(input_media_type,''),
 		        coalesce(result_sha256,''), coalesce(result_bytes,0), coalesce(result_media_type,''), coalesce(result_status,'')
 		   FROM tool_calls WHERE session_id = $1 ORDER BY message_ordinal, call_index`, sessionID)
 }
 
+// toolCallsInRangeQuery reads the tool calls hanging on messages in an inclusive
+// ordinal window, shared by the pool-backed range read and the transcript page's
+// in-transaction read (which must see the same snapshot as the window's messages).
+const toolCallsInRangeQuery = `SELECT message_ordinal, call_index, tool_name, coalesce(category,''), coalesce(file_path,''), coalesce(file_rel_path,''), coalesce(detail,''),
+	        coalesce(input_sha256,''), coalesce(input_bytes,0), coalesce(input_media_type,''),
+	        coalesce(result_sha256,''), coalesce(result_bytes,0), coalesce(result_media_type,''), coalesce(result_status,'')
+	   FROM tool_calls WHERE session_id = $1 AND message_ordinal BETWEEN $2 AND $3
+	   ORDER BY message_ordinal, call_index`
+
 // ToolCallsInRange returns the tool calls hanging on messages in the inclusive
 // ordinal window [minOrdinal, maxOrdinal], so a bounded transcript read fetches
 // only the calls for the messages it returned rather than the whole session.
 func (s *Store) ToolCallsInRange(ctx context.Context, sessionID int64, minOrdinal, maxOrdinal int) ([]ToolCallView, error) {
-	return s.scanToolCalls(ctx,
-		`SELECT message_ordinal, call_index, tool_name, coalesce(category,''), coalesce(file_path,''), coalesce(file_rel_path,''), coalesce(detail,''),
-		        coalesce(input_sha256,''), coalesce(input_bytes,0), coalesce(input_media_type,''),
-		        coalesce(result_sha256,''), coalesce(result_bytes,0), coalesce(result_media_type,''), coalesce(result_status,'')
-		   FROM tool_calls WHERE session_id = $1 AND message_ordinal BETWEEN $2 AND $3
-		   ORDER BY message_ordinal, call_index`, sessionID, minOrdinal, maxOrdinal)
+	return s.scanToolCalls(ctx, s.Pool, toolCallsInRangeQuery, sessionID, minOrdinal, maxOrdinal)
 }
 
-func (s *Store) scanToolCalls(ctx context.Context, query string, args ...any) ([]ToolCallView, error) {
-	rows, err := s.Pool.Query(ctx, query, args...)
+func (s *Store) scanToolCalls(ctx context.Context, q querier, query string, args ...any) ([]ToolCallView, error) {
+	rows, err := q.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -272,23 +276,26 @@ type AttachmentView struct {
 // hang on, for the web renderer. Bounded readers pass an ordinal range to
 // AttachmentsInRange.
 func (s *Store) Attachments(ctx context.Context, sessionID int64) ([]AttachmentView, error) {
-	return s.scanAttachments(ctx,
+	return s.scanAttachments(ctx, s.Pool,
 		`SELECT coalesce(message_ordinal, 0), sha256, coalesce(media_type,''), coalesce(byte_len,0), coalesce(filename,'')
 		   FROM attachments WHERE session_id = $1 ORDER BY message_ordinal, id`, sessionID)
 }
+
+// attachmentsInRangeQuery reads the attachments hanging on messages in an inclusive
+// ordinal window, shared like toolCallsInRangeQuery.
+const attachmentsInRangeQuery = `SELECT coalesce(message_ordinal, 0), sha256, coalesce(media_type,''), coalesce(byte_len,0), coalesce(filename,'')
+	   FROM attachments WHERE session_id = $1 AND message_ordinal BETWEEN $2 AND $3
+	   ORDER BY message_ordinal, id`
 
 // AttachmentsInRange returns the attachments hanging on messages in the inclusive
 // ordinal window [minOrdinal, maxOrdinal], so a bounded transcript read fetches
 // only the attachments for the messages it returned.
 func (s *Store) AttachmentsInRange(ctx context.Context, sessionID int64, minOrdinal, maxOrdinal int) ([]AttachmentView, error) {
-	return s.scanAttachments(ctx,
-		`SELECT coalesce(message_ordinal, 0), sha256, coalesce(media_type,''), coalesce(byte_len,0), coalesce(filename,'')
-		   FROM attachments WHERE session_id = $1 AND message_ordinal BETWEEN $2 AND $3
-		   ORDER BY message_ordinal, id`, sessionID, minOrdinal, maxOrdinal)
+	return s.scanAttachments(ctx, s.Pool, attachmentsInRangeQuery, sessionID, minOrdinal, maxOrdinal)
 }
 
-func (s *Store) scanAttachments(ctx context.Context, query string, args ...any) ([]AttachmentView, error) {
-	rows, err := s.Pool.Query(ctx, query, args...)
+func (s *Store) scanAttachments(ctx context.Context, q querier, query string, args ...any) ([]AttachmentView, error) {
+	rows, err := q.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query attachments: %w", err)
 	}
