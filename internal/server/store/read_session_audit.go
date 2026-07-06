@@ -33,27 +33,37 @@ func (s *Store) SessionAuditByID(ctx context.Context, sessionID int64) (SessionA
 	var a SessionAudit
 	err := s.snapshotTx(ctx, func(tx pgx.Tx) error {
 		var err error
-		if a.Detail, err = s.scanDetail(ctx, tx, "s.id = $1", sessionID); err != nil {
-			return err
-		}
-		if a.Signals, err = s.sessionSignals(ctx, tx, sessionID); err != nil {
-			return err
-		}
-		if a.Subagents, err = s.subagents(ctx, tx, sessionID); err != nil {
-			return err
-		}
-		roll, err := s.treeRollups(ctx, tx, []int64{sessionID})
-		if err != nil {
-			return err
-		}
-		a.Tree = roll[sessionID]
-		a.Models, err = s.sessionModels(ctx, tx, sessionID)
+		a, err = s.sessionAudit(ctx, tx, sessionID)
 		return err
 	})
 	if err != nil {
 		return SessionAudit{}, err
 	}
 	return a, nil
+}
+
+// sessionAudit is SessionAuditByID inside a caller-owned transaction, so the session
+// snapshot reads can pin the audit rows to the same MVCC snapshot as the transcript
+// window and shape beside them.
+func (s *Store) sessionAudit(ctx context.Context, tx pgx.Tx, sessionID int64) (SessionAudit, error) {
+	var a SessionAudit
+	var err error
+	if a.Detail, err = s.scanDetail(ctx, tx, "s.id = $1", sessionID); err != nil {
+		return a, err
+	}
+	if a.Signals, err = s.sessionSignals(ctx, tx, sessionID); err != nil {
+		return a, err
+	}
+	if a.Subagents, err = s.subagents(ctx, tx, sessionID); err != nil {
+		return a, err
+	}
+	roll, err := s.treeRollups(ctx, tx, []int64{sessionID})
+	if err != nil {
+		return a, err
+	}
+	a.Tree = roll[sessionID]
+	a.Models, err = s.sessionModels(ctx, tx, sessionID)
+	return a, err
 }
 
 // SessionModels returns the distinct models that served a session, heaviest first by

@@ -511,55 +511,35 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 // context/cost stamps and repeat badges need no second session-sized structure beside
 // the window the page renders.
 //
-// The transcript is the session's tail (store.TranscriptTail), not the whole session:
-// an unbounded render is what froze the tab on long sessions (P-2). The window carries
-// its own tools and attachments from the same snapshot as its rows; the whole-session
-// tool map loaded here serves only the outline and the ribbon, which cover every turn.
+// The transcript is the session's tail, not the whole session: an unbounded render is
+// what froze the tab on long sessions (P-2). Everything comes from one store snapshot
+// (store.SessionSnapshotByID), so the window, the shape surfaces, and the audit rows
+// can never mix projections across a mid-request rebuild.
 func (s *Server) sessionView(r *http.Request, id int64) (web.SessionView, error) {
-	v := web.SessionView{}
-	if err := s.fillSessionAudit(r.Context(), id, &v); err != nil {
-		return v, err
-	}
-	page, err := s.Store.TranscriptTail(r.Context(), id, nil)
+	snap, err := s.Store.SessionSnapshotByID(r.Context(), id)
 	if err != nil {
-		return v, err
+		return web.SessionView{}, err
 	}
-	v.SetPage(page)
-	return v, s.fillSessionShape(r.Context(), id, &v)
+	return s.sessionViewFrom(r.Context(), snap)
 }
 
-// fillSessionAudit loads the audit-header inputs shared by the full view and the live
-// append's out-of-band refresh: the session row, its signals, subagents with verdicts,
-// the work-item rollup, and the serving models, all from one store snapshot (the header
-// judges these costs side by side, so they must not straddle a rebuild), plus the
-// header stats derived from them.
-func (s *Server) fillSessionAudit(ctx context.Context, id int64, v *web.SessionView) error {
-	a, err := s.Store.SessionAuditByID(ctx, id)
-	if err != nil {
-		return err
+// sessionViewFrom builds the web view from one store snapshot plus the derived header
+// stats. The fallbacks list inside those stats is the only read outside the snapshot;
+// it is gated by the snapshot's own rollup count and feeds notices only, so a straddle
+// there cannot misprice or misattribute anything.
+func (s *Server) sessionViewFrom(ctx context.Context, snap store.SessionSnapshot) (web.SessionView, error) {
+	v := web.SessionView{
+		Detail:    snap.Audit.Detail,
+		Subagents: snap.Audit.Subagents,
+		Tree:      snap.Audit.Tree,
+		Models:    snap.Audit.Models,
+		Outline:   snap.Outline,
+		Tools:     web.ToolsByOrdinal(snap.Tools),
 	}
-	v.Detail = a.Detail
-	v.Subagents = a.Subagents
-	v.Tree = a.Tree
-	v.Models = a.Models
-	v.Header, err = s.sessionHeaderStats(ctx, a.Detail, a.Signals)
-	return err
-}
-
-// fillSessionShape loads the whole-session-coverage reads behind the outline rail and
-// the flow ribbon: one bounded-column row per turn and the tool metadata map. The live
-// append refreshes both out-of-band, so it shares this load with the full page.
-func (s *Server) fillSessionShape(ctx context.Context, id int64, v *web.SessionView) error {
+	v.SetPage(snap.Page)
 	var err error
-	if v.Outline, err = s.Store.OutlineMessages(ctx, id); err != nil {
-		return err
-	}
-	tools, err := s.Store.ToolCalls(ctx, id)
-	if err != nil {
-		return err
-	}
-	v.Tools = web.ToolsByOrdinal(tools)
-	return nil
+	v.Header, err = s.sessionHeaderStats(ctx, snap.Audit.Detail, snap.Audit.Signals)
+	return v, err
 }
 
 // sessionHeaderStats builds the derived stat-tile inputs the session instrument header
@@ -688,36 +668,6 @@ func (s *Server) handleSessionBody(w http.ResponseWriter, r *http.Request) {
 	render(w, r, http.StatusOK, web.SessionResync(v))
 }
 
-// loadFragmentView builds the SessionView a windowed transcript fragment renders: the
-// detail, the given page (which carries its own snapshot-pinned tools and attachments),
-// and the header stats (whose fallbacks map the rows' notices read). The audit and
-// whole-session-shape inputs are filled only when the fragment carries the out-of-band
-// refreshes (the append path); the earlier path skips them.
-func (s *Server) loadFragmentView(ctx context.Context, d store.SessionDetail, page store.TranscriptPage, audit bool) (web.SessionView, error) {
-	v := web.SessionView{Detail: d}
-	v.SetPage(page)
-	if audit {
-		// The bundle re-reads the detail in the same snapshot as the audit rows, so the
-		// out-of-band instruments render one consistent picture; the caller's earlier
-		// detail read only steered the dispatch.
-		if err := s.fillSessionAudit(ctx, d.ID, &v); err != nil {
-			return v, err
-		}
-		// The whole-session shape (outline, ribbon) rides the fragment only when rows
-		// landed; a quiet tick changed no turns and skips both the load and the swap.
-		if len(page.Msgs) == 0 {
-			return v, nil
-		}
-		return v, s.fillSessionShape(ctx, d.ID, &v)
-	}
-	sig, err := s.Store.SessionSignalsByID(ctx, d.ID)
-	if err != nil {
-		return v, err
-	}
-	v.Header, err = s.sessionHeaderStats(ctx, d, sig)
-	return v, err
-}
-
 // serveSessionAppend answers ?after=N: the incremental SSE path.
 func (s *Server) serveSessionAppend(w http.ResponseWriter, r *http.Request, id int64, arg string) {
 	after, err := strconv.Atoi(arg)
@@ -725,25 +675,22 @@ func (s *Server) serveSessionAppend(w http.ResponseWriter, r *http.Request, id i
 		http.Error(w, "bad after cursor", http.StatusBadRequest)
 		return
 	}
-	d, err := s.Store.SessionDetailByID(r.Context(), id)
-	if err != nil {
-		s.fragmentError(w, err)
-		return
-	}
-	page, err := s.Store.TranscriptAfter(r.Context(), id, after)
+	snap, err := s.Store.SessionAppendByID(r.Context(), id, after)
 	if err != nil {
 		s.fragmentError(w, err)
 		return
 	}
 	// An append can only extend a transcript the client already holds a true prefix
-	// of. Two cases break that: the read hit its cap (page.More: too many new rows for
-	// one fragment) and a cursor naming an ordinal the projection no longer has (an
-	// epoch rebuild reshaped the transcript under the open tab, so the DOM no longer
-	// matches). The seed proves the cursor: it reads backward from `after` inclusive,
-	// so its last row carries exactly `after` whenever that row exists. Both cases
-	// re-render the windowed body whole; htmx honors the retarget headers.
-	cursorValid := len(page.Seed) > 0 && page.Seed[len(page.Seed)-1].Ordinal == after
-	if page.More || (!cursorValid && d.MessageCount > 0) {
+	// of. Two cases break that: the read hit its cap (More: too many new rows for one
+	// fragment) and a cursor naming an ordinal the projection no longer has (an epoch
+	// rebuild reshaped or emptied the transcript under the open tab, so the DOM no
+	// longer matches). The seed proves the cursor: it reads backward from `after`
+	// inclusive, so its last row carries exactly `after` whenever that row exists. A
+	// client only sends ?after= for rows it actually rendered, so any invalid cursor,
+	// including one over a projection now empty, re-renders the windowed body whole;
+	// htmx honors the retarget headers.
+	cursorValid := len(snap.Page.Seed) > 0 && snap.Page.Seed[len(snap.Page.Seed)-1].Ordinal == after
+	if snap.Page.More || !cursorValid {
 		v, err := s.sessionView(r, id)
 		if err != nil {
 			s.fragmentError(w, err)
@@ -754,7 +701,7 @@ func (s *Server) serveSessionAppend(w http.ResponseWriter, r *http.Request, id i
 		render(w, r, http.StatusOK, web.SessionResync(v))
 		return
 	}
-	v, err := s.loadFragmentView(r.Context(), d, page, true)
+	v, err := s.sessionViewFrom(r.Context(), snap)
 	if err != nil {
 		s.fragmentError(w, err)
 		return
@@ -762,7 +709,10 @@ func (s *Server) serveSessionAppend(w http.ResponseWriter, r *http.Request, id i
 	render(w, r, http.StatusOK, web.TranscriptAppend(v))
 }
 
-// serveSessionEarlier answers ?before=N: the "Show earlier" path.
+// serveSessionEarlier answers ?before=N: the "Show earlier" path. The fragment renders
+// only settled rows (with the tools and attachments its page carries from the window's
+// own snapshot) and no out-of-band refreshes, so it needs just the detail and the
+// header stats whose fallbacks map feeds the rows' notices.
 func (s *Server) serveSessionEarlier(w http.ResponseWriter, r *http.Request, id int64, arg string) {
 	before, err := strconv.Atoi(arg)
 	if err != nil {
@@ -779,8 +729,14 @@ func (s *Server) serveSessionEarlier(w http.ResponseWriter, r *http.Request, id 
 		s.fragmentError(w, err)
 		return
 	}
-	v, err := s.loadFragmentView(r.Context(), d, page, false)
+	v := web.SessionView{Detail: d}
+	v.SetPage(page)
+	sig, err := s.Store.SessionSignalsByID(r.Context(), id)
 	if err != nil {
+		s.fragmentError(w, err)
+		return
+	}
+	if v.Header, err = s.sessionHeaderStats(r.Context(), d, sig); err != nil {
 		s.fragmentError(w, err)
 		return
 	}

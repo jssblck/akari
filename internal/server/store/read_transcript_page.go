@@ -77,43 +77,53 @@ func (s *Store) snapshotTx(ctx context.Context, fn func(tx pgx.Tx) error) error 
 func (s *Store) TranscriptTail(ctx context.Context, sessionID int64, before *int) (TranscriptPage, error) {
 	var page TranscriptPage
 	err := s.snapshotTx(ctx, func(tx pgx.Tx) error {
-		// The window's start: the TranscriptTailTurns-th user message counting back from
-		// the window's end. Walks the (session_id, ordinal) primary key backward; no row
-		// means the session has fewer turns than the window, so start at the beginning.
-		start := 0
-		err := tx.QueryRow(ctx,
-			`SELECT m.ordinal FROM messages m
-			  WHERE m.session_id = $1 AND m.role = 'user' AND ($2::int IS NULL OR m.ordinal < $2)
-			  ORDER BY m.ordinal DESC OFFSET $3 LIMIT 1`,
-			sessionID, before, TranscriptTailTurns-1).Scan(&start)
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("find tail window start for session %d: %w", sessionID, err)
-		}
-		// Read the window newest-first so the cap keeps the rows nearest the window's end
-		// (the reader pages backward from the live edge), then restore ordinal order.
-		msgs, err := s.scanMessages(ctx, tx, sessionID,
-			messagesFullSelect+` AND ($2::int IS NULL OR m.ordinal < $2) AND m.ordinal >= $3
-			 ORDER BY m.ordinal DESC LIMIT $4`,
-			sessionID, before, start, transcriptPageMessageCap)
-		if err != nil {
-			return err
-		}
-		slices.Reverse(msgs)
-		page.Msgs = msgs
-		if len(msgs) == 0 {
-			// An empty window (an empty transcript, or a cursor at the very start) has
-			// nothing before it either: the window predicate already reached ordinal >= 0.
-			return nil
-		}
-		if err := s.fillWindowExtras(ctx, tx, sessionID, &page); err != nil {
-			return err
-		}
-		return s.fillWindowLead(ctx, tx, sessionID, msgs[0].Ordinal, &page)
+		var err error
+		page, err = s.transcriptTail(ctx, tx, sessionID, before)
+		return err
 	})
 	if err != nil {
 		return TranscriptPage{}, err
 	}
 	return page, nil
+}
+
+// transcriptTail is TranscriptTail inside a caller-owned transaction, so the session
+// snapshot reads can pin the window to the same MVCC snapshot as the audit and shape
+// rows beside it.
+func (s *Store) transcriptTail(ctx context.Context, tx pgx.Tx, sessionID int64, before *int) (TranscriptPage, error) {
+	var page TranscriptPage
+	// The window's start: the TranscriptTailTurns-th user message counting back from
+	// the window's end. Walks the (session_id, ordinal) primary key backward; no row
+	// means the session has fewer turns than the window, so start at the beginning.
+	start := 0
+	err := tx.QueryRow(ctx,
+		`SELECT m.ordinal FROM messages m
+		  WHERE m.session_id = $1 AND m.role = 'user' AND ($2::int IS NULL OR m.ordinal < $2)
+		  ORDER BY m.ordinal DESC OFFSET $3 LIMIT 1`,
+		sessionID, before, TranscriptTailTurns-1).Scan(&start)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return page, fmt.Errorf("find tail window start for session %d: %w", sessionID, err)
+	}
+	// Read the window newest-first so the cap keeps the rows nearest the window's end
+	// (the reader pages backward from the live edge), then restore ordinal order.
+	msgs, err := s.scanMessages(ctx, tx, sessionID,
+		messagesFullSelect+` AND ($2::int IS NULL OR m.ordinal < $2) AND m.ordinal >= $3
+		 ORDER BY m.ordinal DESC LIMIT $4`,
+		sessionID, before, start, transcriptPageMessageCap)
+	if err != nil {
+		return page, err
+	}
+	slices.Reverse(msgs)
+	page.Msgs = msgs
+	if len(msgs) == 0 {
+		// An empty window (an empty transcript, or a cursor at the very start) has
+		// nothing before it either: the window predicate already reached ordinal >= 0.
+		return page, nil
+	}
+	if err := s.fillWindowExtras(ctx, tx, sessionID, &page); err != nil {
+		return page, err
+	}
+	return page, s.fillWindowLead(ctx, tx, sessionID, msgs[0].Ordinal, &page)
 }
 
 // TranscriptAfter reads the rows strictly after `after`, for the live SSE append: the
@@ -124,39 +134,48 @@ func (s *Store) TranscriptTail(ctx context.Context, sessionID int64, before *int
 func (s *Store) TranscriptAfter(ctx context.Context, sessionID int64, after int) (TranscriptPage, error) {
 	var page TranscriptPage
 	err := s.snapshotTx(ctx, func(tx pgx.Tx) error {
-		msgs, err := s.scanMessages(ctx, tx, sessionID,
-			messagesFullSelect+` AND m.ordinal > $2 ORDER BY m.ordinal LIMIT $3`,
-			sessionID, after, transcriptPageMessageCap+1)
-		if err != nil {
-			return err
-		}
-		if len(msgs) > transcriptPageMessageCap {
-			page.More = true
-			msgs = msgs[:transcriptPageMessageCap]
-		}
-		page.Msgs = msgs
-		if err := s.fillWindowExtras(ctx, tx, sessionID, &page); err != nil {
-			return err
-		}
-		// The seed here includes the row AT `after` (the last one the client already
-		// holds): `<=` rather than `<`, since the boundary instruments compare the first
-		// appended row against exactly that row. It is read even when nothing follows
-		// the cursor: a seed ending exactly at `after` is how the caller tells a quiet
-		// tick (nothing new yet) from a cursor the projection no longer has (an epoch
-		// rebuild reshaped the transcript), which must force a resync instead.
-		seed, err := s.scanMessages(ctx, tx, sessionID,
-			messagesFullSelect+` AND m.ordinal <= $2 ORDER BY m.ordinal DESC LIMIT $3`,
-			sessionID, after, transcriptSeedLookback)
-		if err != nil {
-			return err
-		}
-		slices.Reverse(seed)
-		page.Seed = seed
-		return nil
+		var err error
+		page, err = s.transcriptAfter(ctx, tx, sessionID, after)
+		return err
 	})
 	if err != nil {
 		return TranscriptPage{}, err
 	}
+	return page, nil
+}
+
+// transcriptAfter is TranscriptAfter inside a caller-owned transaction (see
+// transcriptTail).
+func (s *Store) transcriptAfter(ctx context.Context, tx pgx.Tx, sessionID int64, after int) (TranscriptPage, error) {
+	var page TranscriptPage
+	msgs, err := s.scanMessages(ctx, tx, sessionID,
+		messagesFullSelect+` AND m.ordinal > $2 ORDER BY m.ordinal LIMIT $3`,
+		sessionID, after, transcriptPageMessageCap+1)
+	if err != nil {
+		return page, err
+	}
+	if len(msgs) > transcriptPageMessageCap {
+		page.More = true
+		msgs = msgs[:transcriptPageMessageCap]
+	}
+	page.Msgs = msgs
+	if err := s.fillWindowExtras(ctx, tx, sessionID, &page); err != nil {
+		return page, err
+	}
+	// The seed here includes the row AT `after` (the last one the client already
+	// holds): `<=` rather than `<`, since the boundary instruments compare the first
+	// appended row against exactly that row. It is read even when nothing follows
+	// the cursor: a seed ending exactly at `after` is how the caller tells a quiet
+	// tick (nothing new yet) from a cursor the projection no longer has (an epoch
+	// rebuild reshaped the transcript), which must force a resync instead.
+	seed, err := s.scanMessages(ctx, tx, sessionID,
+		messagesFullSelect+` AND m.ordinal <= $2 ORDER BY m.ordinal DESC LIMIT $3`,
+		sessionID, after, transcriptSeedLookback)
+	if err != nil {
+		return page, err
+	}
+	slices.Reverse(seed)
+	page.Seed = seed
 	return page, nil
 }
 

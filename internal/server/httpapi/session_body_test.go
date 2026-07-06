@@ -181,6 +181,53 @@ func TestSessionTranscriptFragments(t *testing.T) {
 	}
 }
 
+// TestSessionAppendEmptiedProjectionRetargets pins the resync on a projection a rebuild
+// emptied: a browser still holding old rows sends its cursor, no such ordinal exists any
+// longer, and the response must re-render the (now empty) windowed body rather than
+// return an empty append that leaves the stale rows standing.
+func TestSessionAppendEmptiedProjectionRetargets(t *testing.T) {
+	t.Parallel()
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+	c := newClient(t)
+
+	owner, err := st.Register(ctx, "grace", mustHash(t, "hopper-1906"), "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	projectID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	sid := seedTurnedSession(t, st, owner.ID, projectID, "sess-emptied", 20)
+	// A rebuild that produces no rows (e.g. the raw was superseded) replaces the
+	// projection with nothing.
+	rebuildWith(t, st, sid, store.ProjectionDelta{})
+
+	if _, err := c.PostForm(srv.URL+"/login", url.Values{
+		"username": {"grace"}, "password": {"hopper-1906"},
+	}); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	resp, err := c.Get(srv.URL + fmt.Sprintf("/sessions/%d/body?after=5", sid))
+	if err != nil {
+		t.Fatalf("get ?after over emptied projection: %v", err)
+	}
+	body := readBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("?after = %d, want 200", resp.StatusCode)
+	}
+	if rt, rs := resp.Header.Get("HX-Retarget"), resp.Header.Get("HX-Reswap"); rt != "#session-body" || rs != "innerHTML" {
+		t.Fatalf("emptied projection headers = (%q, %q), want (#session-body, innerHTML)", rt, rs)
+	}
+	if strings.Contains(body, `id="msg-`) {
+		t.Fatal("emptied projection re-render should hold no rows")
+	}
+	if !strings.Contains(body, "No messages parsed yet.") {
+		t.Fatal("emptied projection re-render should show the empty state")
+	}
+}
+
 // TestSessionAppendCapRetargets pins the other resync trigger: when more rows landed
 // than one append fragment may carry, the handler re-renders the windowed body whole
 // instead of streaming an unbounded fragment.

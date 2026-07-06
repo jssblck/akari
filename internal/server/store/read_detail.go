@@ -160,14 +160,17 @@ func (s *Store) scanMessages(ctx context.Context, q querier, sessionID int64, qu
 	return out, nil
 }
 
+// toolCallsQuery reads all of a session's tool calls, shared by the pool-backed read
+// and the session snapshot's in-transaction read.
+const toolCallsQuery = `SELECT message_ordinal, call_index, tool_name, coalesce(category,''), coalesce(file_path,''), coalesce(file_rel_path,''), coalesce(detail,''),
+	        coalesce(input_sha256,''), coalesce(input_bytes,0), coalesce(input_media_type,''),
+	        coalesce(result_sha256,''), coalesce(result_bytes,0), coalesce(result_media_type,''), coalesce(result_status,'')
+	   FROM tool_calls WHERE session_id = $1 ORDER BY message_ordinal, call_index`
+
 // ToolCalls returns all of a session's tool calls as metadata, for the web
 // renderer. Bounded readers pass a message-ordinal range to ToolCallsInRange.
 func (s *Store) ToolCalls(ctx context.Context, sessionID int64) ([]ToolCallView, error) {
-	return s.scanToolCalls(ctx, s.Pool,
-		`SELECT message_ordinal, call_index, tool_name, coalesce(category,''), coalesce(file_path,''), coalesce(file_rel_path,''), coalesce(detail,''),
-		        coalesce(input_sha256,''), coalesce(input_bytes,0), coalesce(input_media_type,''),
-		        coalesce(result_sha256,''), coalesce(result_bytes,0), coalesce(result_media_type,''), coalesce(result_status,'')
-		   FROM tool_calls WHERE session_id = $1 ORDER BY message_ordinal, call_index`, sessionID)
+	return s.scanToolCalls(ctx, s.Pool, toolCallsQuery, sessionID)
 }
 
 // toolCallsInRangeQuery reads the tool calls hanging on messages in an inclusive

@@ -245,6 +245,89 @@ func TestSessionAuditByID(t *testing.T) {
 	}
 }
 
+// TestSessionSnapshotByID pins the one-transaction session view: the audit bundle, the
+// tail window, and the whole-session shape (outline rows plus tool metadata) all arrive
+// together, so the page can never render one projection's window beside another's
+// outline. TestSessionAppendByID beside it pins the append variant's shape gating.
+func TestSessionSnapshotByID(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	sid := seedTurns(t, st, "grace", 30)
+	if _, err := st.Pool.Exec(ctx,
+		`INSERT INTO tool_calls (session_id, message_ordinal, call_index, tool_name, category)
+		 VALUES ($1, 3, 0, 'Edit', 'edit')`, sid); err != nil {
+		t.Fatal(err)
+	}
+
+	snap, err := st.SessionSnapshotByID(ctx, sid)
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	if snap.Audit.Detail.ID != sid {
+		t.Fatalf("snapshot detail = %d, want %d", snap.Audit.Detail.ID, sid)
+	}
+	if len(snap.Page.Msgs) != 30 {
+		t.Fatalf("snapshot window = %d rows, want all 30", len(snap.Page.Msgs))
+	}
+	if len(snap.Outline) != 30 {
+		t.Fatalf("snapshot outline = %d rows, want 30", len(snap.Outline))
+	}
+	if len(snap.Tools) != 1 || snap.Tools[0].MessageOrdinal != 3 {
+		t.Fatalf("snapshot tools = %+v, want the ordinal-3 call", snap.Tools)
+	}
+
+	if _, err := st.SessionSnapshotByID(ctx, 99999999); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("missing session = %v, want ErrNotFound", err)
+	}
+}
+
+// TestSessionAppendByID pins the append snapshot: rows past the cursor with the shape
+// riding along, a quiet tick with the shape skipped (nil, so the fragment ships no
+// swap), and an empty seed for a cursor over an emptied projection (the handler's
+// resync signal).
+func TestSessionAppendByID(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	const total = 30
+	sid := seedTurns(t, st, "grace", total)
+
+	snap, err := st.SessionAppendByID(ctx, sid, 27)
+	if err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if len(snap.Page.Msgs) != 2 || snap.Page.Msgs[0].Ordinal != 28 {
+		t.Fatalf("append rows = %v, want [28 29]", ordinals(snap.Page.Msgs))
+	}
+	if len(snap.Outline) != total {
+		t.Fatalf("append shape outline = %d rows, want %d", len(snap.Outline), total)
+	}
+
+	quiet, err := st.SessionAppendByID(ctx, sid, total-1)
+	if err != nil {
+		t.Fatalf("quiet append: %v", err)
+	}
+	if len(quiet.Page.Msgs) != 0 || quiet.Outline != nil || quiet.Tools != nil {
+		t.Fatalf("quiet tick should carry no rows and no shape, got %d rows, outline %d",
+			len(quiet.Page.Msgs), len(quiet.Outline))
+	}
+
+	// A cursor over an emptied projection (a rebuild removed every message) yields an
+	// empty seed, the handler's signal to resync rather than leave stale DOM rows.
+	if _, err := st.Pool.Exec(ctx, `DELETE FROM messages WHERE session_id = $1`, sid); err != nil {
+		t.Fatal(err)
+	}
+	gone, err := st.SessionAppendByID(ctx, sid, 5)
+	if err != nil {
+		t.Fatalf("append over emptied projection: %v", err)
+	}
+	if len(gone.Page.Msgs) != 0 || len(gone.Page.Seed) != 0 {
+		t.Fatalf("emptied projection should return no rows and no seed, got msgs=%v seed=%v",
+			ordinals(gone.Page.Msgs), ordinals(gone.Page.Seed))
+	}
+}
+
 // TestSessionModels pins the audit header's model line: distinct models heaviest first
 // by total token volume, empty-model rows dropped, and the whole read capped.
 func TestSessionModels(t *testing.T) {
