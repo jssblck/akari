@@ -740,8 +740,8 @@
     const avgActive = D.activeHours.active.reduce((a, b) => a + b, 0) / D.activeHours.active.length;
     const figs = [
       { v: avgActive.toFixed(1) + 'h', k: 'avg active h/day' },
-      { v: D.concurrency.peakConcurrent, k: 'peak concurrent' },
-      { v: D.concurrency.avgConcurrent.toFixed(1), k: 'avg concurrent' },
+      { v: D.concurrency.peakConcurrent, k: 'peak concurrent sessions' },
+      { v: D.concurrency.avgConcurrent.toFixed(1), k: 'avg concurrent sessions' },
     ];
     figs.forEach((f) => {
       const d = document.createElement('div');

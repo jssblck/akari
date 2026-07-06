@@ -32,12 +32,32 @@ templ InsightsPage(p Page, ins store.Insights, rng string, ranges []RangeOption)
 				if ins.Trends == nil || !ins.Trends.HasData() {
 					<div class="empty">No sessions in this window yet.</div>
 				} else {
+					@insightsSummaryStrip(ins)
 					@insightsInstruments()
 					@insightsDataElement(ins)
 				}
 			</div>
 			<div class="chart-tooltip" id="tooltip" role="status"></div>
 		</section>
+	}
+}
+
+// insightsSummaryStrip is the plain-language lead at the top of the instruments: two or
+// three sentences synthesizing the window's quality, spend, and tool reliability, so a reader
+// gets the shape of the window before scanning a chart. The sentences are computed in
+// InsightsSummary and joined into one flowing lead paragraph here; the strip renders nothing
+// when nothing was measurable, so it never leaves an empty rule above the charts.
+templ insightsSummaryStrip(ins store.Insights) {
+	{{ lines := InsightsSummary(ins) }}
+	if len(lines) > 0 {
+		<p class="insights-summary">
+			for i, s := range lines {
+				if i > 0 {
+					{ " " }
+				}
+				{ s }
+			}
+		</p>
 	}
 }
 

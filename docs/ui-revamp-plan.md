@@ -34,11 +34,15 @@ verified against the live dev server:
   the root turn's own cost. The rollup is a read-time recursive walk of the
   subagent edges (continuations stay their own work item), attached to the feed
   page in one batch query, so no rebuild-derived column and no epoch bump.
+- E-2 and E-3: Insights opens with a plain-language summary strip (the
+  session-weighted GPA with its coverage, spend with the abandoned share pulled
+  out, the tool failure rate over the window's calls), each sentence dropped when
+  its figure is unmeasured. The concurrency tiles name their unit ("peak
+  concurrent sessions"); the other number tiles already carried theirs.
 
 Remaining: B-4 (repositories vs local folders), P-2 (transcript windowing +
-incremental SSE), P-3 (keyset pagination), D (session detail auditor view), E-2
-(units on tiles), E-3 (Insights summary strip). Each is independent and can land
-as its own PR per the sequencing table below.
+incremental SSE), P-3 (keyset pagination), D (session detail auditor view). Each
+is independent and can land as its own PR per the sequencing table below.
 
 ## The lens
 

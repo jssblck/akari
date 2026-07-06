@@ -178,6 +178,18 @@
   font-size: 0.875rem;
 }
 
+/* Summary strip: the plain-language lead over the instruments. It reads a step up from the
+   header's sub-copy (larger, in --text, roomier leading) so it lands as the page's headline
+   read, and its figures sit on tabular numerics so the numbers line up as the eye scans. */
+.insights-summary {
+  margin: 20px 0 4px;
+  max-width: 640px;
+  color: var(--text);
+  font-size: 1rem;
+  line-height: 1.6;
+  font-variant-numeric: tabular-nums;
+}
+
 /* range control */
 
 .range-control {
