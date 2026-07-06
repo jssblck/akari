@@ -75,7 +75,7 @@ func TestBuildSessionFeed(t *testing.T) {
 		{SessionSummary: store.SessionSummary{ID: 3, Agent: "claude", TotalInput: 0, LastActiveAt: &yesterday}, ProjectID: 2, ProjectKey: "site", ProjectName: "site", ProjectKind: "remote"},
 	}
 
-	groups := buildSessionFeed(now, time.UTC, rows, true, "")
+	groups := buildSessionFeed(now, time.UTC, rows, true, "", FeedMaxTokens(rows))
 	if len(groups) != 2 {
 		t.Fatalf("want 2 day groups, got %d", len(groups))
 	}
@@ -101,9 +101,41 @@ func TestBuildSessionFeed(t *testing.T) {
 	}
 
 	// Ungrouped (any non-recent sort) yields a single, unlabeled group in order.
-	flat := buildSessionFeed(now, time.UTC, rows, false, "")
+	flat := buildSessionFeed(now, time.UTC, rows, false, "", FeedMaxTokens(rows))
 	if len(flat) != 1 || flat[0].Label != "" || len(flat[0].Rows) != 3 {
 		t.Errorf("ungrouped feed should be one unlabeled group of all rows, got %d groups", len(flat))
+	}
+}
+
+// TestFeedTokenDenominatorCarries pins the fix for token bars rescaling across a keyset
+// "Show more": buildSessionFeed scales every row against the maxTok it is handed, not the
+// page's own maximum, so an appended page of small sessions renders thin bars against the
+// denominator the first page established rather than pegging them full and reading larger
+// than the bigger sessions already on screen.
+func TestFeedTokenDenominatorCarries(t *testing.T) {
+	now := time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC)
+	at := now.Add(-1 * time.Hour)
+	// An appended page whose own largest session is 250 tokens, small next to the bigger
+	// sessions the reader already loaded (a first-page denominator of 1000).
+	small := []store.SessionRow{
+		{SessionSummary: store.SessionSummary{ID: 10, Agent: "claude", TotalInput: 250, LastActiveAt: &at}, ProjectID: 1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote"},
+	}
+	// Against the carried denominator (1000) the 250-token row is sqrt(0.25) = 50%.
+	if pct := buildSessionFeed(now, time.UTC, small, true, "", 1000)[0].Rows[0].TokenPct; pct != 50 {
+		t.Errorf("a row scaled against the carried denominator should read 50, got %d", pct)
+	}
+	// Sanity: recomputed per page (the old behavior) the same row pegs full against its own
+	// 250 max, which is exactly the cross-page miscalibration the carried denominator fixes.
+	if pct := buildSessionFeed(now, time.UTC, small, true, "", FeedMaxTokens(small))[0].Rows[0].TokenPct; pct != 100 {
+		t.Errorf("against its own page max the row pegs full, got %d", pct)
+	}
+	// A session larger than the carried denominator clamps to a full bar rather than
+	// overflowing it, reading as "the biggest so far".
+	big := []store.SessionRow{
+		{SessionSummary: store.SessionSummary{ID: 11, Agent: "claude", TotalInput: 5000, LastActiveAt: &at}, ProjectID: 1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote"},
+	}
+	if pct := buildSessionFeed(now, time.UTC, big, true, "", 1000)[0].Rows[0].TokenPct; pct != 100 {
+		t.Errorf("a row above the carried denominator should clamp to 100, got %d", pct)
 	}
 }
 
@@ -122,7 +154,7 @@ func TestBuildSessionFeedContinuesDay(t *testing.T) {
 
 	// A continuation of the same day: the first (only) group repeats today, so its heading
 	// is suppressed.
-	cont := buildSessionFeed(now, time.UTC, rows, true, todayKey)
+	cont := buildSessionFeed(now, time.UTC, rows, true, todayKey, FeedMaxTokens(rows))
 	if len(cont) != 1 || cont[0].Label != "" {
 		t.Errorf("a same-day continuation should drop the leading heading, got %d groups with label %q", len(cont), labelOf(cont))
 	}
@@ -132,13 +164,13 @@ func TestBuildSessionFeedContinuesDay(t *testing.T) {
 	}
 
 	// A fresh first page (no prevKey) keeps the heading.
-	first := buildSessionFeed(now, time.UTC, rows, true, "")
+	first := buildSessionFeed(now, time.UTC, rows, true, "", FeedMaxTokens(rows))
 	if first[0].Label != "Today" {
 		t.Errorf("a first page should keep its Today heading, got %q", first[0].Label)
 	}
 
 	// A prevKey naming a different day opens a new heading, not a continuation.
-	other := buildSessionFeed(now, time.UTC, rows, true, "2020-01-01")
+	other := buildSessionFeed(now, time.UTC, rows, true, "2020-01-01", FeedMaxTokens(rows))
 	if other[0].Label != "Today" {
 		t.Errorf("a prevKey from another day should still head the group, got %q", other[0].Label)
 	}

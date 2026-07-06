@@ -24,9 +24,10 @@ type FeedRow struct {
 	// the same day group, so the template can mute the repeated label and let a run
 	// of same-project sessions read as one burst rather than a stuttering column.
 	FadeProject bool
-	// TokenPct is the row's total token volume as a percent of the feed's largest
-	// session, backing a magnitude bar so the big runs stand out without the reader
-	// parsing seven-digit figures. It is 0 for a zero-token session.
+	// TokenPct is the row's total token volume as a percent of the feed's token
+	// denominator (the largest session on the first loaded page, held stable across
+	// keyset pages), backing a magnitude bar so the big runs stand out without the
+	// reader parsing seven-digit figures. It is 0 for a zero-token session.
 	TokenPct int
 }
 
@@ -42,11 +43,31 @@ type SessionDayGroup struct {
 // most-recent order) the rows, already sorted newest first, are split under day
 // headings ("Today", "Yesterday", a weekday, then a date); otherwise they form a
 // single unlabeled group in the order the query returned. Within a group a row
-// whose project repeats the previous row's is flagged to mute its label. Token
-// bars scale against the largest session across the whole feed, so magnitudes are
-// comparable between groups.
-func BuildSessionFeed(ctx context.Context, rows []store.SessionRow, grouped bool, prevKey string) []SessionDayGroup {
-	return buildSessionFeed(time.Now(), Loc(ctx), rows, grouped, prevKey)
+// whose project repeats the previous row's is flagged to mute its label. maxTok is
+// the token-bar denominator every row scales against: the first page establishes it
+// (FeedMaxTokens) and the keyset "Show more" carries it forward, so a bar's width
+// means the same magnitude on page three as on page one rather than re-normalizing
+// to each appended page's own maximum.
+func BuildSessionFeed(ctx context.Context, rows []store.SessionRow, grouped bool, prevKey string, maxTok int64) []SessionDayGroup {
+	return buildSessionFeed(time.Now(), Loc(ctx), rows, grouped, prevKey, maxTok)
+}
+
+// FeedMaxTokens is the token-bar denominator for a page of feed rows: the largest
+// session's total token volume across the page. The first page computes it and the
+// keyset "Show more" carries it forward (SessionFooter.MaxTok) so every appended page
+// scales its bars against the same reference the reader already sees. Recomputing it
+// per page would make a bar's width incomparable across a "Show more" boundary: a page
+// of small sessions would render them full-width against their own small maximum. A
+// later page holding a session larger than this denominator clamps to a full bar
+// (tokenPct caps at 100), which reads as "the biggest so far" rather than misleading.
+func FeedMaxTokens(rows []store.SessionRow) int64 {
+	var maxTok int64
+	for _, r := range rows {
+		if t := RowTokens(r.SessionSummary); t > maxTok {
+			maxTok = t
+		}
+	}
+	return maxTok
 }
 
 // FeedDayKey is the day-bucket key of a timestamp in the viewer's zone, the same key
@@ -65,15 +86,9 @@ func FeedDayKey(ctx context.Context, t *time.Time) string {
 // the row immediately before this slice (the last row of the previous keyset page), or ""
 // on the first page: when the first group's day matches it, that group's heading is dropped
 // so an appended page continues the previous day rather than re-printing its heading.
-func buildSessionFeed(now time.Time, loc *time.Location, rows []store.SessionRow, grouped bool, prevKey string) []SessionDayGroup {
+func buildSessionFeed(now time.Time, loc *time.Location, rows []store.SessionRow, grouped bool, prevKey string, maxTok int64) []SessionDayGroup {
 	if len(rows) == 0 {
 		return nil
-	}
-	var maxTok int64
-	for _, r := range rows {
-		if t := RowTokens(r.SessionSummary); t > maxTok {
-			maxTok = t
-		}
 	}
 
 	var groups []SessionDayGroup
@@ -333,6 +348,11 @@ type SessionFooter struct {
 	// The button appends the next page onto the feed rather than re-rendering it, so depth
 	// is unbounded; there is no cap.
 	MoreHref string
+	// MaxTok is the feed's token-bar denominator, the largest session's token volume on
+	// the first loaded page. It rides the "Show more" cursor so each appended page scales
+	// its bars against the same reference the first page set, keeping a bar's width
+	// comparable across pages rather than re-normalizing to each page's own maximum.
+	MaxTok int64
 	// HasEmpty reports whether the current scope holds at least one empty (zero-message)
 	// session, so the toggle appears only when it would change the feed; IncludeEmpty
 	// reports whether those empties are being shown. Together they drive the terse
@@ -348,18 +368,21 @@ type SessionFooter struct {
 // the first page, the cumulative count on a keyset append), so Shown reports the whole loaded
 // feed. lastDayKey is the day-bucket key of the page's last row, carried into the "Show more"
 // cursor so the next appended page can continue the same day without reprinting its heading;
-// it is empty for a flat (non-grouped) order, where day headings do not apply. The "Show more"
-// link appears only when more rows match, and the empty toggle only when the scope holds an
-// empty session (or already shows them, so the reader can hide them again).
-func BuildSessionFooter(f store.SessionFilter, rows []store.SessionRow, priorCount int, hasMore, hasEmpty bool, lastDayKey string) SessionFooter {
+// it is empty for a flat (non-grouped) order, where day headings do not apply. maxTok is the
+// feed's token-bar denominator (FeedMaxTokens of the first page), carried into the "Show more"
+// cursor so appended pages scale their bars against the same reference. The "Show more" link
+// appears only when more rows match, and the empty toggle only when the scope holds an empty
+// session (or already shows them, so the reader can hide them again).
+func BuildSessionFooter(f store.SessionFilter, rows []store.SessionRow, priorCount int, hasMore, hasEmpty bool, lastDayKey string, maxTok int64) SessionFooter {
 	ft := SessionFooter{
 		Shown:        priorCount + len(rows),
 		HasMore:      hasMore,
 		HasEmpty:     hasEmpty,
 		IncludeEmpty: f.IncludeEmpty,
+		MaxTok:       maxTok,
 	}
 	if hasMore && len(rows) > 0 {
-		ft.MoreHref = ShowMorePath(f, rows[len(rows)-1].ID, lastDayKey, ft.Shown)
+		ft.MoreHref = ShowMorePath(f, rows[len(rows)-1].ID, lastDayKey, ft.Shown, maxTok)
 	}
 	// The empty toggle is relevant only when hiding actually withholds something (or
 	// when already showing empties, so the reader can hide them again). Either way a

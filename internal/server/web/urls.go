@@ -355,10 +355,12 @@ func EmptyToggleHref(f store.SessionFilter) templ.SafeURL {
 // resumes strictly after it rather than re-reading the page under a doubled limit. afterDay
 // is the last row's day-bucket key, carried only for the day-grouped default order so the
 // appended page suppresses a repeated heading; count is the running total already shown, so
-// the appended footer reports the cumulative "Showing N" without counting the corpus. The
-// cursor rides only this link, never the facet or sort URLs, so any filter change resets to
-// the first page.
-func ShowMorePath(f store.SessionFilter, afterID int64, afterDay string, count int) string {
+// the appended footer reports the cumulative "Showing N" without counting the corpus; maxTok
+// is the feed's token-bar denominator (the first page's largest session), carried so the
+// appended page scales its bars against the same reference rather than its own page maximum.
+// The cursor rides only this link, never the facet or sort URLs, so any filter change resets
+// to the first page.
+func ShowMorePath(f store.SessionFilter, afterID int64, afterDay string, count int, maxTok int64) string {
 	base := SessionsPath(f)
 	sep := "?"
 	if strings.Contains(base, "?") {
@@ -371,6 +373,9 @@ func ShowMorePath(f store.SessionFilter, afterID int64, afterDay string, count i
 	}
 	if count > 0 {
 		q.Set("count", fmt.Sprintf("%d", count))
+	}
+	if maxTok > 0 {
+		q.Set("maxtok", fmt.Sprintf("%d", maxTok))
 	}
 	return base + sep + q.Encode()
 }

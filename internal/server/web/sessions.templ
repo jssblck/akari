@@ -202,7 +202,7 @@ templ GlobalSessionList(rows []store.SessionRow, sel store.SessionFilter, footer
 		if len(rows) == 0 {
 			<div class="empty">No sessions match these filters.</div>
 		} else {
-			@feedGroups(BuildSessionFeed(ctx, rows, FeedIsGrouped(sel), ""), footer.HasMore)
+			@feedGroups(BuildSessionFeed(ctx, rows, FeedIsGrouped(sel), "", footer.MaxTok), footer.HasMore)
 		}
 		@feedMore(footer)
 	</div>
@@ -241,7 +241,7 @@ templ feedGroups(groups []SessionDayGroup, hasMore bool) {
 // reprints "Today". It builds the groups here, off the render ctx, so the row grouping and the
 // day-continuation use the same viewer zone the first page did.
 templ FeedAppend(rows []store.SessionRow, sel store.SessionFilter, footer SessionFooter, prevKey string) {
-	@feedGroups(BuildSessionFeed(ctx, rows, FeedIsGrouped(sel), prevKey), footer.HasMore)
+	@feedGroups(BuildSessionFeed(ctx, rows, FeedIsGrouped(sel), prevKey, footer.MaxTok), footer.HasMore)
 	@feedMore(footer)
 }
 

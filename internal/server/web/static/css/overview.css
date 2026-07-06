@@ -81,7 +81,7 @@
    feed uses for its hover-tooltip badges. */
 .att-reason {
   justify-self: start; white-space: nowrap;
-  border: 1px solid var(--border); border-radius: 999px;
+  border: 1px solid var(--border); border-radius: var(--r-sm);
   padding: 1px 8px; font-size: 0.6875rem; line-height: 1.5;
   background: var(--surface-2); color: var(--muted);
 }

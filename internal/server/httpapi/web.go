@@ -328,15 +328,23 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	// after_day is the day-bucket key of the cursor row, carried only in the day-grouped
 	// default order so the appended page can suppress a heading that repeats the day the
 	// prior page ended on. count is the running total already shown, so the appended footer
-	// reports the cumulative "Showing N" without counting the corpus. Both are honored only
-	// on an actual continuation (a cursor is set), so a stray param on a first-page URL
-	// cannot inflate the count or fake a continuation.
+	// reports the cumulative "Showing N" without counting the corpus. carriedMax is the
+	// feed's token-bar denominator the first page established, so an appended page scales its
+	// bars against the same reference rather than re-normalizing to its own page maximum. All
+	// three are honored only on an actual continuation (a cursor is set), so a stray param on
+	// a first-page URL cannot inflate the count or skew the bars.
 	afterDay := strings.TrimSpace(q.Get("after_day"))
 	priorCount := 0
+	var carriedMax int64
 	if filter.After > 0 {
 		if v := strings.TrimSpace(q.Get("count")); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				priorCount = n
+			}
+		}
+		if v := strings.TrimSpace(q.Get("maxtok")); v != "" {
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+				carriedMax = n
 			}
 		}
 	}
@@ -372,7 +380,15 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	if web.FeedIsGrouped(filter) && len(rows) > 0 {
 		lastDayKey = web.FeedDayKey(r.Context(), rows[len(rows)-1].LastActiveAt)
 	}
-	footer := web.BuildSessionFooter(filter, rows, priorCount, hasMore, hasEmpty, lastDayKey)
+	// The token-bar denominator is the first page's largest session, carried forward on each
+	// "Show more" (carriedMax) so a bar's width means the same magnitude across pages. When no
+	// cursor carries one (the first page, or a hand-edited link), fall back to this page's own
+	// maximum so bars still render.
+	maxTok := carriedMax
+	if maxTok <= 0 {
+		maxTok = web.FeedMaxTokens(rows)
+	}
+	footer := web.BuildSessionFooter(filter, rows, priorCount, hasMore, hasEmpty, lastDayKey, maxTok)
 	if r.Header.Get("HX-Request") == "true" {
 		// "Show more" appends the next keyset page in place (FeedAppend replaces #feed-more
 		// with the new rows plus a fresh tail). A bare htmx request with no cursor (not

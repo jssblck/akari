@@ -2222,6 +2222,7 @@ func TestSessionsPagingParamsRobust(t *testing.T) {
 	for _, q := range []string{
 		"?after=99999", "?after=abc", "?after=-5",
 		"?after=1&count=abc", "?after=1&count=-9", "?after=1&after_day=garbage",
+		"?after=1&maxtok=abc", "?after=1&maxtok=-5", // a bad token denominator falls back to the page max
 		"?limit=99999", // the retired paging param is ignored now, not an error
 	} {
 		resp := mustGet(t, c, srv.URL+"/sessions"+q)

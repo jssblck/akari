@@ -445,7 +445,7 @@ func TestGlobalSessionListFooter(t *testing.T) {
 	// appears carrying the last row's id as the cursor and the running count, and the
 	// empty toggle (hasEmpty true) reads "empty hidden · show".
 	sel := store.SessionFilter{Sort: "updated", Desc: true}
-	footer := BuildSessionFooter(sel, rows, 99, true, true, "")
+	footer := BuildSessionFooter(sel, rows, 99, true, true, "", 4096)
 	html := renderComponent(t, GlobalSessionList(rows, sel, footer))
 
 	for _, want := range []string{
@@ -453,6 +453,9 @@ func TestGlobalSessionListFooter(t *testing.T) {
 		`id="feed-more"`,
 		`hx-target="#feed-more"`, `hx-swap="outerHTML"`, `hx-push-url="false"`,
 		`after=1`, `count=100`,
+		// The token-bar denominator rides the cursor so an appended page scales its bars
+		// against the same reference the first page set, not its own page maximum.
+		`maxtok=4096`,
 		`>Show more</a>`,
 		// Empty toggle: hidden, a "show" verb, no count.
 		`empty hidden`, `>show</a>`,
@@ -472,7 +475,7 @@ func TestGlobalSessionListFooter(t *testing.T) {
 
 	// hasMore false: the running total IS the exact total, so the footer reads "N
 	// sessions" and offers no "Show more".
-	exact := BuildSessionFooter(sel, rows, 6, false, false, "")
+	exact := BuildSessionFooter(sel, rows, 6, false, false, "", 0)
 	exactHTML := renderComponent(t, GlobalSessionList(rows, sel, exact))
 	if !strings.Contains(exactHTML, "7 sessions") {
 		t.Errorf("an exhausted page should read the exact 'N sessions', got:\n%s", exactHTML)
