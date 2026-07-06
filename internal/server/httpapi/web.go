@@ -151,7 +151,8 @@ func (s *Server) handleInsights(w http.ResponseWriter, r *http.Request) {
 	// The Bucket names the trend grid's unit (day for short windows, week for long),
 	// which switches on the trend computation inside Insights: the fleet page draws
 	// time series, so it always asks for a grid, unlike the project quality band.
-	ins, err := s.insights.load(r.Context(), rng, time.Now(), func(ctx context.Context) (store.Insights, error) {
+	start := time.Now()
+	ins, err := s.insights.load(r.Context(), rng, start, func(ctx context.Context) (store.Insights, error) {
 		return s.Store.Insights(ctx, store.AnalyticsFilter{
 			Since:  web.RangeSince(rng, time.Now()),
 			Bucket: web.TrendBucket(rng),
@@ -161,6 +162,10 @@ func (s *Server) handleInsights(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "insights"), http.StatusInternalServerError, "Could not load insights."))
 		return
 	}
+	// Expose the server-side load time so a cold miss (the full parallel pipeline) versus a
+	// warm cache hit (a map lookup) reads straight off the Server-Timing entry in devtools,
+	// which is how the revamp's perf target stays visible to a future regression.
+	w.Header().Set("Server-Timing", fmt.Sprintf("insights;dur=%.1f", float64(time.Since(start).Microseconds())/1000))
 	setDashboardCache(w)
 	ranges := web.RangeOptions("/insights", nil, rng)
 	render(w, r, http.StatusOK, web.InsightsPage(s.pageForNav(r, "Insights", "insights"), ins, rng, ranges))
