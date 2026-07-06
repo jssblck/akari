@@ -130,6 +130,87 @@ func TestListAllSessionsKeyset(t *testing.T) {
 	}
 }
 
+// TestListAllSessionsKeysetStableUnderActivity pins the fix for a drifting keyset cursor. The
+// "Show more" boundary is the sort value the page rendered (SessionFilter.AfterVal), so new
+// activity on the cursor row between pages (which bumps its last_active_at) cannot move the
+// boundary and re-show or skip rows. The bare id cursor resolves the boundary live from the
+// cursor row, so it drifts when that row moves; this shows the carried value holds where the
+// live lookup does not.
+func TestListAllSessionsKeysetStableUnderActivity(t *testing.T) {
+	t.Parallel()
+	st, ctx, uid, pid := signalsEnv(t)
+	base := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+
+	s1 := seedSession(t, st, uid, pid, "a1")
+	setActive(t, st, ctx, s1, base.Add(1*time.Minute))
+	s2 := seedSession(t, st, uid, pid, "a2")
+	setActive(t, st, ctx, s2, base.Add(2*time.Minute))
+	s3 := seedSession(t, st, uid, pid, "a3")
+	setActive(t, st, ctx, s3, base.Add(3*time.Minute))
+	s4 := seedSession(t, st, uid, pid, "a4")
+	setActive(t, st, ctx, s4, base.Add(4*time.Minute))
+	s5 := seedSession(t, st, uid, pid, "a5")
+	setActive(t, st, ctx, s5, base.Add(5*time.Minute))
+
+	// Page 1 of the recency feed: newest first, s5, s4, s3. Its last row (s3) is the cursor.
+	page1, hasMore, err := st.ListAllSessions(ctx, store.SessionFilter{ProjectID: pid, IncludeEmpty: true, Sort: "updated", Desc: true, Limit: 3})
+	if err != nil {
+		t.Fatalf("page 1: %v", err)
+	}
+	assertSameOrder(t, rowIDs(page1), []int64{s5, s4, s3}, "updated", 3)
+	if !hasMore {
+		t.Fatal("page 1 should report more rows")
+	}
+	cursor := page1[len(page1)-1] // s3
+	if cursor.LastActiveAt == nil {
+		t.Fatal("cursor row has no last_active_at")
+	}
+	// The value the web footer carries: the cursor row's activity instant as page 1 saw it,
+	// formatted exactly as web.keysetCursorValue does for the default order.
+	cursorVal := cursor.LastActiveAt.UTC().Format(time.RFC3339Nano)
+
+	// Between page loads, the cursor row gets new activity and jumps to the top of the order.
+	setActive(t, st, ctx, s3, base.Add(10*time.Minute))
+
+	// Page 2 carrying the observed value resumes at the boundary the reader actually saw, so it
+	// returns exactly the rows below it (s2, s1) and overlaps page 1 nowhere.
+	stable, _, err := st.ListAllSessions(ctx, store.SessionFilter{
+		ProjectID: pid, IncludeEmpty: true, Sort: "updated", Desc: true, Limit: 3,
+		After: cursor.ID, AfterVal: cursorVal,
+	})
+	if err != nil {
+		t.Fatalf("stable page 2: %v", err)
+	}
+	assertSameOrder(t, rowIDs(stable), []int64{s2, s1}, "updated-stable", 3)
+
+	// The bare id cursor resolves the boundary live from the now-bumped cursor row, so it drifts
+	// and re-includes rows page 1 already showed. This is the behavior AfterVal exists to prevent.
+	drifted, _, err := st.ListAllSessions(ctx, store.SessionFilter{
+		ProjectID: pid, IncludeEmpty: true, Sort: "updated", Desc: true, Limit: 3,
+		After: cursor.ID,
+	})
+	if err != nil {
+		t.Fatalf("drifted page 2: %v", err)
+	}
+	var reshown bool
+	for _, id := range rowIDs(drifted) {
+		if id == s4 || id == s5 {
+			reshown = true
+		}
+	}
+	if !reshown {
+		t.Errorf("expected the id-only cursor to drift and re-show a page-1 row, got %v", rowIDs(drifted))
+	}
+}
+
+func rowIDs(rows []store.SessionRow) []int64 {
+	out := make([]int64, len(rows))
+	for i, r := range rows {
+		out[i] = r.ID
+	}
+	return out
+}
+
 func assertSameOrder(t *testing.T, got, want []int64, sort string, pageSize int) {
 	t.Helper()
 	if len(got) != len(want) {

@@ -124,14 +124,12 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	}
 	selected := web.SelectedUserIDs(r.URL.Query()["user"], users)
 	filter := store.AnalyticsFilter{Since: web.RangeSince(rng, time.Now()), UserIDs: selected}
-	analytics, err := s.Store.Analytics(r.Context(), filter)
+	// Read the usage analytics and the audit verdict from one snapshot: the Spend tile shows
+	// the analytics total with the audit's failed-run spend pulled out beneath it, so the two
+	// must come from one MVCC view or the subfigure could disagree with the total it annotates.
+	analytics, audit, err := s.Store.OverviewData(r.Context(), filter)
 	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "overview"), http.StatusInternalServerError, "Could not load analytics."))
-		return
-	}
-	audit, err := s.Store.OverviewAudit(r.Context(), filter)
-	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "overview"), http.StatusInternalServerError, "Could not load audit."))
+		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "overview"), http.StatusInternalServerError, "Could not load overview."))
 		return
 	}
 	setDashboardCache(w)
@@ -337,6 +335,14 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	priorCount := 0
 	var carriedMax int64
 	if filter.After > 0 {
+		// av is the cursor row's sort value as the page rendered it, so the resume boundary
+		// stays fixed at what the reader saw even if that row's own column later moves (see
+		// store.SessionFilter.AfterVal). Validate it against the active sort's type so a
+		// hand-tampered value is dropped (falling back to the id-only cursor) rather than
+		// failing the SQL cast; a valid value only ever comes from our own ShowMorePath.
+		if v := strings.TrimSpace(q.Get("av")); v != "" && web.ValidKeysetValue(filter.Sort, v) {
+			filter.AfterVal = v
+		}
 		if v := strings.TrimSpace(q.Get("count")); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				priorCount = n

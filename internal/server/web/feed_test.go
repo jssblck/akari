@@ -2,11 +2,59 @@ package web
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/jssblck/akari/internal/server/store"
 )
+
+// TestKeysetCursorValue pins the "Show more" cursor value the footer carries for each feed
+// order, and that ShowMorePath and the handler's validation agree on its form: a value produced
+// for an order validates for that order, garbage does not, and the value rides the URL as ?av.
+func TestKeysetCursorValue(t *testing.T) {
+	at := time.Date(2026, 5, 1, 8, 30, 0, 0, time.UTC)
+	var row store.SessionRow
+	row.LastActiveAt = &at
+	// total_tokens is input+output+cache_read+cache_write (migration 0014): 100+200+300+400.
+	row.TotalInput, row.TotalOutput, row.TotalCacheRead, row.TotalCacheWrite = 100, 200, 300, 400
+	row.MessageCount = 12
+	row.TotalCostUSD = 3.5
+
+	cases := []struct{ sort, want string }{
+		{"", at.Format(time.RFC3339Nano)}, // default order -> last_active_at
+		{"updated", at.Format(time.RFC3339Nano)},
+		{"tokens", "1000"},
+		{"messages", "12"},
+		{"cost", "3.5"},
+		{"project", ""}, // a non-keyset order carries no cursor value
+	}
+	for _, c := range cases {
+		f := store.SessionFilter{Sort: c.sort}
+		got := keysetCursorValue(f, row)
+		if got != c.want {
+			t.Errorf("keysetCursorValue(sort=%q) = %q, want %q", c.sort, got, c.want)
+		}
+		if c.want == "" {
+			continue
+		}
+		if !ValidKeysetValue(c.sort, c.want) {
+			t.Errorf("ValidKeysetValue(%q, %q) = false, want true (own value must validate)", c.sort, c.want)
+		}
+		if ValidKeysetValue(c.sort, "not-a-cursor-value") {
+			t.Errorf("ValidKeysetValue(%q, garbage) = true, want false", c.sort)
+		}
+	}
+
+	// The value rides the "Show more" URL as ?av, and is omitted when empty (a non-keyset order).
+	withVal := ShowMorePath(store.SessionFilter{}, 42, "2026-05-01T08:30:00Z", "", 0, 0)
+	if !strings.Contains(withVal, "after=42") || !strings.Contains(withVal, "av=") {
+		t.Errorf("ShowMorePath should carry after and av, got %q", withVal)
+	}
+	if noVal := ShowMorePath(store.SessionFilter{}, 42, "", "", 0, 0); strings.Contains(noVal, "av=") {
+		t.Errorf("ShowMorePath should omit av when empty, got %q", noVal)
+	}
+}
 
 // dayBucket labels a session's last activity relative to a fixed clock and shares
 // a key across same-day rows so the feed groups them together. The calendar date is

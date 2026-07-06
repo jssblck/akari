@@ -52,7 +52,7 @@ templ verdictStrip(a store.Analytics, au store.AuditSummary) {
 			<div class="label">Spend</div>
 			<div class="vvalue">{ FmtCost(a.TotalCost, a.CostIncomplete) }</div>
 			<div class="vsub muted small">
-				if au.WastedUSD > 0 {
+				if au.WastedUSD > 0 || au.WastedIncomplete {
 					<span class="waste">{ FmtCost(au.WastedUSD, au.WastedIncomplete) }</span>
 					{ " on failed runs" }
 				} else {

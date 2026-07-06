@@ -260,13 +260,20 @@ type SessionFilter struct {
 	Offset int
 	// After is a keyset cursor: the id of the last row the reader has already seen, so
 	// "Show more" fetches the page strictly after it in the current sort order rather
-	// than re-reading rows 1..N with a doubled limit. Zero means the first page. The
-	// query resolves the cursor row's sort value with a scalar subquery, so the URL
-	// carries only the id and never a value that could round-trip imprecisely. It applies
+	// than re-reading rows 1..N with a doubled limit. Zero means the first page. It applies
 	// only to the four keyset-sortable feed orders (updated, tokens, messages, cost, in
 	// sessionKeysetColumns); an After set under any other sort is ignored, since those
 	// orders are not offered a "Show more" cursor. See ListAllSessions.
 	After int64
+	// AfterVal is the cursor row's sort value as the page observed it (the last visible row's
+	// last_active_at, total_tokens, message_count, or total_cost_usd, formatted for its column
+	// type). It is carried so the resume boundary stays fixed at what the reader already saw:
+	// the sort columns are mutable projection fields (activity bumps last_active_at, a rebuild
+	// moves the cost/token/message counts), so resolving the boundary live from the cursor row
+	// on the next request would let it drift and duplicate or skip rows. Empty falls back to a
+	// live scalar-subquery lookup of the cursor row's value, which is what a legacy cursor URL
+	// (id only) still gets. It is meaningful only alongside a keyset-sortable After.
+	AfterVal string
 }
 
 // conds builds the WHERE additions for the filter's narrowing fields, shared by
@@ -478,36 +485,59 @@ func (f SessionFilter) orderClause() string {
 	return fmt.Sprintf(" ORDER BY %s %s, s.id %s", expr, dir, dir)
 }
 
-// keysetCond returns the WHERE predicate that resumes the feed strictly after the After
-// cursor in the current sort order, and whether a cursor applies. It applies only when
-// After is set and the sort has a keyset column (sessionKeysetColumns); otherwise it
-// returns ("", false) and the caller pages from the top. placeholder is the bind slot the
-// caller will fill with the cursor id (the same slot is read three times: twice to look up
-// the cursor row's sort value, once for the id tiebreak).
+// keysetColType names the Postgres type of each keyset sort column, so a cursor value carried
+// as text (SessionFilter.AfterVal) casts back to the exact value the column holds. The keys are
+// the columns in sessionKeysetColumns: last_active_at is a timestamptz, the two counts are
+// integers, and total_cost_usd is a double precision (not a numeric), so a shortest-round-trip
+// float text casts back to the identical float64 and the equality tiebreak stays exact.
+var keysetColType = map[string]string{
+	"last_active_at": "timestamptz",
+	"total_tokens":   "bigint",
+	"message_count":  "integer",
+	"total_cost_usd": "double precision",
+}
+
+// keysetCond returns the WHERE predicate that resumes the feed strictly after the After cursor
+// in the current sort order, the args it binds, and whether a cursor applies. It applies only
+// when After is set and the sort has a keyset column (sessionKeysetColumns); otherwise it
+// returns ok=false and the caller pages from the top. firstArg is the number of the first bind
+// slot it may claim: the cursor id, and (when the cursor carries an observed value) that value.
 //
-// The predicate mirrors orderClause's "(col, id)" ordering exactly: under the descending
-// feed a later row has a smaller (col, id), so it keeps rows where col is below the cursor's
-// or, on a tie, id is below it; an ascending sort flips both comparisons. The cursor row's
-// sort value comes from a scalar subquery on its id rather than a value on the URL, so the
-// cursor stays a bare id and no timestamp or float round-trips through the query string. A
-// cursor id that names no row makes the subquery NULL, so the predicate matches nothing and
-// "Show more" ends cleanly rather than resuming from a wrong place.
-func (f SessionFilter) keysetCond(placeholder string) (string, bool) {
+// The predicate mirrors orderClause's "(col, id)" ordering exactly: under the descending feed a
+// later row has a smaller (col, id), so it keeps rows where col is below the cursor's or, on a
+// tie, id is below it; an ascending sort flips both comparisons. The boundary value comes from
+// AfterVal, the value the rendered page actually saw, cast back to the column's type, so a later
+// change to the cursor row's own column (activity bumping last_active_at, a rebuild moving a
+// count) cannot move the boundary and duplicate or skip rows the reader has or has not seen. A
+// legacy cursor that carries no value falls back to a scalar subquery on the cursor id: exact
+// while the row is unchanged, and a cursor id that names no row makes the subquery NULL so the
+// predicate matches nothing and "Show more" ends cleanly rather than resuming from a wrong place.
+func (f SessionFilter) keysetCond(firstArg int) (cond string, cargs []any, ok bool) {
 	if f.After <= 0 {
-		return "", false
+		return "", nil, false
 	}
 	key, desc := f.resolvedSort()
-	col, ok := sessionKeysetColumns[key]
-	if !ok {
-		return "", false
+	col, has := sessionKeysetColumns[key]
+	if !has {
+		return "", nil, false
 	}
 	op := "<"
 	if !desc {
 		op = ">"
 	}
-	sub := "(SELECT " + col + " FROM sessions WHERE id = " + placeholder + ")"
-	return fmt.Sprintf("(s.%s %s %s OR (s.%s = %s AND s.id %s %s))",
-		col, op, sub, col, sub, op, placeholder), true
+	idPH := "$" + itoa(firstArg)
+	cargs = append(cargs, f.After)
+	// The value expression appears twice below but binds one slot, so the cursor value (or the
+	// subquery on the cursor id) is evaluated against the same boundary in both the col
+	// comparison and the tie's equality.
+	valExpr := "(SELECT " + col + " FROM sessions WHERE id = " + idPH + ")"
+	if f.AfterVal != "" {
+		cargs = append(cargs, f.AfterVal)
+		valExpr = "$" + itoa(firstArg+1) + "::" + keysetColType[col]
+	}
+	cond = fmt.Sprintf("(s.%s %s %s OR (s.%s = %s AND s.id %s %s))",
+		col, op, valExpr, col, valExpr, op, idPH)
+	return cond, cargs, true
 }
 
 // SessionRow is one row of the global (cross-project) session list: a session

@@ -136,21 +136,58 @@ func (s *Store) OverviewAudit(ctx context.Context, f AnalyticsFilter) (AuditSumm
 		pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly},
 		func(tx pgx.Tx) error {
 			var err error
-			out, err = s.overviewVerdict(ctx, tx, f)
-			if err != nil {
-				return err
-			}
-			out.WastedUSD, out.WastedIncomplete, err = s.wastedSpend(ctx, tx, f)
-			if err != nil {
-				return err
-			}
-			out.Attention, err = s.attentionRows(ctx, tx, f)
+			out, err = s.overviewAuditFrom(ctx, tx, f)
 			return err
 		})
 	if err != nil {
 		return AuditSummary{}, fmt.Errorf("overview audit snapshot: %w", err)
 	}
 	return out, nil
+}
+
+// overviewAuditFrom assembles the audit summary from one querier: the verdict counts, the
+// wasted-spend figure, and the attention shortlist. Taking a querier lets the standalone
+// OverviewAudit and the combined OverviewData share it, so the three reads always run against
+// one caller's snapshot rather than three independently-timed ones.
+func (s *Store) overviewAuditFrom(ctx context.Context, q querier, f AnalyticsFilter) (AuditSummary, error) {
+	out, err := s.overviewVerdict(ctx, q, f)
+	if err != nil {
+		return AuditSummary{}, err
+	}
+	if out.WastedUSD, out.WastedIncomplete, err = s.wastedSpend(ctx, q, f); err != nil {
+		return AuditSummary{}, err
+	}
+	if out.Attention, err = s.attentionRows(ctx, q, f); err != nil {
+		return AuditSummary{}, err
+	}
+	return out, nil
+}
+
+// OverviewData reads the Overview's usage analytics and audit verdict as one repeatable-read
+// snapshot, so the Spend tile's total (Analytics.TotalCost) and the "on failed runs" figure the
+// tile pulls out of it (AuditSummary.WastedUSD, a subset of that total by construction) are
+// computed against one MVCC snapshot. Read in two separate transactions, an ingest or rebuild
+// that commits a failed usage_event between the calls could make WastedUSD name spend the
+// TotalCost it annotates has not counted, so the subfigure would exceed the aggregate it sits
+// under. Both reads are read-only and take no locks, so this never blocks ingest, matching the
+// standalone Analytics and OverviewAudit snapshots it replaces on the Overview path.
+func (s *Store) OverviewData(ctx context.Context, f AnalyticsFilter) (Analytics, AuditSummary, error) {
+	var a Analytics
+	var au AuditSummary
+	err := pgx.BeginTxFunc(ctx, s.Pool,
+		pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly},
+		func(tx pgx.Tx) error {
+			var err error
+			if a, err = s.analyticsFrom(ctx, tx, f); err != nil {
+				return err
+			}
+			au, err = s.overviewAuditFrom(ctx, tx, f)
+			return err
+		})
+	if err != nil {
+		return Analytics{}, AuditSummary{}, fmt.Errorf("overview snapshot: %w", err)
+	}
+	return a, au, nil
 }
 
 // overviewVerdict is the one-scan aggregate behind the verdict strip's counts: the work-item

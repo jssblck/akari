@@ -143,3 +143,22 @@ func TestAuditDashRenders(t *testing.T) {
 		t.Error("empty audit scope should not render the attention shortlist")
 	}
 }
+
+// TestAuditWasteIncompleteRenders pins that a failed-run spend which is a $0 lower bound (its
+// usage token-bearing but unpriced, so wastedSpend returns 0 with the incomplete flag set) still
+// renders as waste rather than "none wasted": the marker means "some failed spend we could not
+// price", not "no failed spend", so dropping it would misreport the leak as zero.
+func TestAuditWasteIncompleteRenders(t *testing.T) {
+	p := Page{Title: "Overview", LoggedIn: true, Active: "overview", Username: "Grace Hopper"}
+	au := store.AuditSummary{
+		WorkItems: 3, Settled: 3, Completed: 2, Wasted: 1, Graded: 2, GradePoints: 6,
+		WastedUSD: 0, WastedIncomplete: true,
+	}
+	html := renderComponent(t, OverviewPage(p, analyticsWithData(), au, DefaultRange, nil, nil))
+	if !strings.Contains(html, "on failed runs") {
+		t.Error("a $0-but-incomplete failed spend should render as waste, not be dropped")
+	}
+	if strings.Contains(html, "none wasted") {
+		t.Error(`"none wasted" must not show when failed spend is an unpriced lower bound`)
+	}
+}

@@ -374,8 +374,8 @@ func (s *Store) ListAllSessions(ctx context.Context, f SessionFilter) (rows []Se
 	// re-scanning rows 1..N under a doubled limit. The cursor id binds to the next arg
 	// slot, so append it only when the predicate actually applies (a keyset-sortable order
 	// with a cursor set).
-	if cond, ok := f.keysetCond("$" + itoa(len(args)+1)); ok {
-		args = append(args, f.After)
+	if cond, kargs, ok := f.keysetCond(len(args) + 1); ok {
+		args = append(args, kargs...)
 		conds = append(conds, cond)
 	}
 
@@ -397,38 +397,58 @@ func (s *Store) ListAllSessions(ctx context.Context, f SessionFilter) (rows []Se
 		q += " OFFSET $" + itoa(len(args))
 	}
 
-	qrows, err := s.Pool.Query(ctx, q, args...)
+	// Read the page and its fan-out rollups in one read-only repeatable-read snapshot. The row
+	// summaries carry each session's own cost, and attachTreeRollups reads the whole-work-item
+	// cost (root plus subagent subtree) in a second query; a rebuild landing between the two
+	// pool reads would let the row cost and the fan-out chip describe different snapshots of the
+	// same subtree. One transaction pins both to a single MVCC view. Read-only, so it takes no
+	// locks and never blocks ingest; the keyset cursor's live value lookup (when a legacy cursor
+	// carries no observed value) also resolves against this same snapshot.
+	err = pgx.BeginTxFunc(ctx, s.Pool,
+		pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly},
+		func(tx pgx.Tx) error {
+			qrows, qerr := tx.Query(ctx, q, args...)
+			if qerr != nil {
+				return fmt.Errorf("query global sessions: %w", qerr)
+			}
+			var page []SessionRow
+			for qrows.Next() {
+				r, raw, frontCut, serr := scanSessionRow(qrows, searching)
+				if serr != nil {
+					qrows.Close()
+					return serr
+				}
+				if searching {
+					r.Search = buildSnippet(raw, f.Query, frontCut)
+				}
+				page = append(page, r)
+			}
+			if ierr := qrows.Err(); ierr != nil {
+				qrows.Close()
+				return fmt.Errorf("iterate global sessions: %w", ierr)
+			}
+			// Free the connection for the rollup query on this same transaction: pgx allows one
+			// active query per connection at a time, so the page must be fully drained first.
+			qrows.Close()
+			// A full extra row past the page is the "more match" signal: drop it and flag
+			// hasMore so the footer can offer the next page without counting the corpus.
+			if len(page) > limit {
+				page = page[:limit]
+				hasMore = true
+			}
+			// Fold each row's subagent subtree into a whole-work-item rollup so the feed can
+			// show the fan-out a root turn hides. One batch query over the trimmed page, after
+			// the hasMore probe row is dropped, so the extra row never costs a walk.
+			if terr := s.attachTreeRollups(ctx, tx, page); terr != nil {
+				return terr
+			}
+			rows = page
+			return nil
+		})
 	if err != nil {
-		return nil, false, fmt.Errorf("query global sessions: %w", err)
-	}
-	defer qrows.Close()
-	var out []SessionRow
-	for qrows.Next() {
-		r, raw, frontCut, err := scanSessionRow(qrows, searching)
-		if err != nil {
-			return nil, false, err
-		}
-		if searching {
-			r.Search = buildSnippet(raw, f.Query, frontCut)
-		}
-		out = append(out, r)
-	}
-	if err := qrows.Err(); err != nil {
-		return nil, false, fmt.Errorf("iterate global sessions: %w", err)
-	}
-	// A full extra row past the page is the "more match" signal: drop it and flag
-	// hasMore so the footer can offer the next page without counting the corpus.
-	if len(out) > limit {
-		out = out[:limit]
-		hasMore = true
-	}
-	// Fold each row's subagent subtree into a whole-work-item rollup so the feed can
-	// show the fan-out a root turn hides. One batch query over the trimmed page, after
-	// the hasMore probe row is dropped, so the extra row never costs a walk.
-	if err := s.attachTreeRollups(ctx, out); err != nil {
 		return nil, false, err
 	}
-	return out, hasMore, nil
+	return rows, hasMore, nil
 }
 
 // CountAllSessions counts the sessions ListAllSessions would return for the same
@@ -496,6 +516,13 @@ func (s *Store) HasEmptySessions(ctx context.Context, f SessionFilter) (bool, er
 	// the same windowed scope the list draws from.
 	conds, args := cf.conds("s.started_at")
 	conds = append(conds, "s.message_count = 0")
+	// Mirror ListAllSessions' default subagent hiding (it lives outside conds() there, so it
+	// must be added here too): the toggle drives that same list, so an empty row it could never
+	// reveal must not make the toggle appear. Without this, a hidden empty subagent would offer
+	// an empty=1 toggle that still shows nothing.
+	if !f.IncludeSubagents {
+		conds = append(conds, "s.relationship_type <> 'subagent'")
+	}
 	q := `SELECT EXISTS (SELECT 1
 	        FROM sessions s
 	        JOIN users u ON u.id = s.user_id

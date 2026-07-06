@@ -58,11 +58,11 @@ SELECT t.root,
 // just its own cost with a zero count), so the caller can look up every id it asked
 // for. Ids that name no session are absent from the map. It is a no-op on an empty
 // slice, so a caller need not guard the empty page.
-func (s *Store) treeRollups(ctx context.Context, ids []int64) (map[int64]TreeRollup, error) {
+func (s *Store) treeRollups(ctx context.Context, q querier, ids []int64) (map[int64]TreeRollup, error) {
 	if len(ids) == 0 {
 		return map[int64]TreeRollup{}, nil
 	}
-	rows, err := s.Pool.Query(ctx, treeRollupSQL, ids)
+	rows, err := q.Query(ctx, treeRollupSQL, ids)
 	if err != nil {
 		return nil, fmt.Errorf("query tree rollups: %w", err)
 	}
@@ -83,10 +83,12 @@ func (s *Store) treeRollups(ctx context.Context, ids []int64) (map[int64]TreeRol
 }
 
 // attachTreeRollups fills each row's Tree field with its subagent-subtree rollup,
-// computed for the whole page in one query. It mutates the rows in place. A row whose
-// id has no rollup (it named no live session) keeps the zero-value rollup, which reads
-// as a session that fanned out nothing. It is a no-op on an empty page.
-func (s *Store) attachTreeRollups(ctx context.Context, rows []SessionRow) error {
+// computed for the whole page in one query on the given querier. It mutates the rows in
+// place. A row whose id has no rollup (it named no live session) keeps the zero-value
+// rollup, which reads as a session that fanned out nothing. It is a no-op on an empty
+// page. The caller passes the same transaction the row summaries were read on, so a row's
+// own cost and its fan-out rollup describe one snapshot even if a rebuild lands mid-read.
+func (s *Store) attachTreeRollups(ctx context.Context, q querier, rows []SessionRow) error {
 	if len(rows) == 0 {
 		return nil
 	}
@@ -94,7 +96,7 @@ func (s *Store) attachTreeRollups(ctx context.Context, rows []SessionRow) error 
 	for i := range rows {
 		ids[i] = rows[i].ID
 	}
-	roll, err := s.treeRollups(ctx, ids)
+	roll, err := s.treeRollups(ctx, q, ids)
 	if err != nil {
 		return err
 	}

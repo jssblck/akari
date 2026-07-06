@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strconv"
 	"time"
 
 	"github.com/jssblck/akari/internal/server/store"
@@ -382,7 +383,8 @@ func BuildSessionFooter(f store.SessionFilter, rows []store.SessionRow, priorCou
 		MaxTok:       maxTok,
 	}
 	if hasMore && len(rows) > 0 {
-		ft.MoreHref = ShowMorePath(f, rows[len(rows)-1].ID, lastDayKey, ft.Shown, maxTok)
+		last := rows[len(rows)-1]
+		ft.MoreHref = ShowMorePath(f, last.ID, keysetCursorValue(f, last), lastDayKey, ft.Shown, maxTok)
 	}
 	// The empty toggle is relevant only when hiding actually withholds something (or
 	// when already showing empties, so the reader can hide them again). Either way a
@@ -391,6 +393,57 @@ func BuildSessionFooter(f store.SessionFilter, rows []store.SessionRow, priorCou
 		ft.EmptyHref = string(EmptyToggleHref(f))
 	}
 	return ft
+}
+
+// keysetCursorValue formats the sort value of the feed's last visible row for the current
+// order, so "Show more" can carry the boundary the page actually saw. The next page then
+// resumes from that fixed value even if the cursor row's own column later moves (activity bumps
+// last_active_at, a rebuild moves a count or cost), which would otherwise duplicate or skip rows
+// (see store.SessionFilter.AfterVal and keysetCond). It returns "" for an order with no keyset
+// cursor, where the value is unused. Each format is the exact, round-trippable text of the
+// column's type: RFC3339 for the timestamp, plain integers for the counts, and the shortest
+// float text for the cost (a double precision column, so the text casts back to the same
+// float64). total_tokens sums the same four token classes migration 0014's generated column
+// does, so the Go sum equals the value the query sorted by.
+func keysetCursorValue(f store.SessionFilter, row store.SessionRow) string {
+	switch effSort(f) {
+	case store.DefaultSort: // "updated" -> last_active_at
+		if row.LastActiveAt == nil {
+			return ""
+		}
+		return row.LastActiveAt.UTC().Format(time.RFC3339Nano)
+	case "tokens":
+		return strconv.FormatInt(row.TotalInput+row.TotalOutput+row.TotalCacheRead+row.TotalCacheWrite, 10)
+	case "messages":
+		return strconv.Itoa(row.MessageCount)
+	case "cost":
+		return strconv.FormatFloat(row.TotalCostUSD, 'g', -1, 64)
+	default:
+		return ""
+	}
+}
+
+// ValidKeysetValue reports whether val is a well-formed cursor value for the given feed sort
+// key, so the handler can drop a tampered ?av (which would otherwise fail the SQL cast and 500)
+// and fall back to the id-only cursor. It mirrors keysetCursorValue's per-column formats; an
+// empty key reads as the default order, and a non-keyset order accepts no value.
+func ValidKeysetValue(sortKey, val string) bool {
+	if sortKey == "" {
+		sortKey = store.DefaultSort
+	}
+	switch sortKey {
+	case store.DefaultSort:
+		_, err := time.Parse(time.RFC3339Nano, val)
+		return err == nil
+	case "tokens", "messages":
+		_, err := strconv.ParseInt(val, 10, 64)
+		return err == nil
+	case "cost":
+		_, err := strconv.ParseFloat(val, 64)
+		return err == nil
+	default:
+		return false
+	}
 }
 
 // HasEmptyToggle reports whether the footer shows the empty-hidden toggle.

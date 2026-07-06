@@ -351,16 +351,18 @@ func EmptyToggleHref(f store.SessionFilter) templ.SafeURL {
 }
 
 // ShowMorePath is the plain-string path the "Show more" button fetches: the current
-// feed's filter plus a keyset cursor (afterID, the last visible row's id) so the store
-// resumes strictly after it rather than re-reading the page under a doubled limit. afterDay
-// is the last row's day-bucket key, carried only for the day-grouped default order so the
-// appended page suppresses a repeated heading; count is the running total already shown, so
-// the appended footer reports the cumulative "Showing N" without counting the corpus; maxTok
-// is the feed's token-bar denominator (the first page's largest session), carried so the
-// appended page scales its bars against the same reference rather than its own page maximum.
-// The cursor rides only this link, never the facet or sort URLs, so any filter change resets
-// to the first page.
-func ShowMorePath(f store.SessionFilter, afterID int64, afterDay string, count int, maxTok int64) string {
+// feed's filter plus a keyset cursor (afterID, the last visible row's id, and afterVal, that
+// row's sort value as the page saw it) so the store resumes strictly after it rather than
+// re-reading the page under a doubled limit. afterVal fixes the resume boundary to what the
+// reader already saw, so a later change to the cursor row's own column cannot drift the page
+// and duplicate or skip rows; it is empty for an order with no keyset cursor. afterDay is the
+// last row's day-bucket key, carried only for the day-grouped default order so the appended
+// page suppresses a repeated heading; count is the running total already shown, so the appended
+// footer reports the cumulative "Showing N" without counting the corpus; maxTok is the feed's
+// token-bar denominator (the first page's largest session), carried so the appended page scales
+// its bars against the same reference rather than its own page maximum. The cursor rides only
+// this link, never the facet or sort URLs, so any filter change resets to the first page.
+func ShowMorePath(f store.SessionFilter, afterID int64, afterVal, afterDay string, count int, maxTok int64) string {
 	base := SessionsPath(f)
 	sep := "?"
 	if strings.Contains(base, "?") {
@@ -368,6 +370,9 @@ func ShowMorePath(f store.SessionFilter, afterID int64, afterDay string, count i
 	}
 	q := url.Values{}
 	q.Set("after", fmt.Sprintf("%d", afterID))
+	if afterVal != "" {
+		q.Set("av", afterVal)
+	}
 	if afterDay != "" {
 		q.Set("after_day", afterDay)
 	}

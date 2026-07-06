@@ -243,6 +243,38 @@ func TestOverviewAuditWastedSpendTracksOccurredAt(t *testing.T) {
 	}
 }
 
+// TestOverviewDataWastedSubsetOfSpend pins that the combined Overview read returns the Spend
+// total and the failed-run spend from one snapshot with the subset relation intact: WastedUSD
+// (the "on failed runs" subfigure) never exceeds TotalCost (the tile's total), because both sum
+// the same window's usage_events and WastedUSD only adds the failed and top-level predicates.
+func TestOverviewDataWastedSubsetOfSpend(t *testing.T) {
+	t.Parallel()
+	st, ctx, uid, pid := signalsEnv(t)
+	g := func(s string) *string { return &s }
+
+	comp := seedSession(t, st, uid, pid, "od-completed")
+	insertGradeOutcomeSignal(t, st, ctx, comp, g("A"), "completed")
+	seedUsage(t, st, comp, "claude-opus-4-8", 6.00, 1000, 500, 1, "od-comp")
+
+	errd := seedSession(t, st, uid, pid, "od-errored")
+	insertGradeOutcomeSignal(t, st, ctx, errd, g("F"), "errored")
+	seedUsage(t, st, errd, "claude-opus-4-8", 2.00, 400, 200, 1, "od-err")
+
+	a, au, err := st.OverviewData(ctx, store.AnalyticsFilter{ProjectID: pid})
+	if err != nil {
+		t.Fatalf("overview data: %v", err)
+	}
+	if au.WastedUSD > a.TotalCost+1e-9 {
+		t.Errorf("WastedUSD %v exceeds TotalCost %v; the subfigure must be a subset of the total", au.WastedUSD, a.TotalCost)
+	}
+	if math.Abs(au.WastedUSD-2.00) > 1e-9 {
+		t.Errorf("WastedUSD = %v, want 2.00 (the errored run's priced usage)", au.WastedUSD)
+	}
+	if math.Abs(a.TotalCost-8.00) > 1e-9 {
+		t.Errorf("TotalCost = %v, want 8.00 (both runs' priced usage)", a.TotalCost)
+	}
+}
+
 // TestOverviewAuditUnmeasured pins the unmeasured sentinels: a scope whose work has not
 // settled or been graded reports -1 from CompletionRate and GPA (which the view dashes)
 // rather than a 0 that would read as total failure, and its shortlist is empty rather than

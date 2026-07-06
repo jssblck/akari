@@ -49,7 +49,7 @@ func InsightsSummary(ins store.Insights) []string {
 			// a summary should call out. Below the threshold the spend line stands alone.
 			if pct := int(math.Round(e.AbandonedSharePct)); pct >= 1 {
 				s += fmt.Sprintf(", with %d%% (%s) sunk into abandoned sessions",
-					pct, FmtCost(e.TotalAbandoned, e.CostIncomplete))
+					pct, FmtCost(e.TotalAbandoned, e.AbandonedIncomplete))
 			}
 			out = append(out, s+".")
 		}
