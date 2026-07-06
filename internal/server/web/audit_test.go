@@ -70,9 +70,9 @@ func TestCompletionTone(t *testing.T) {
 		completed, settled int
 		want               string
 	}{
-		{0, 0, ""},     // nothing settled: unmeasured, no verdict colour
-		{9, 10, "ok"},  // 90%
-		{8, 10, "ok"},  // 80% is the ok floor
+		{0, 0, ""},    // nothing settled: unmeasured, no verdict colour
+		{9, 10, "ok"}, // 90%
+		{8, 10, "ok"}, // 80% is the ok floor
 		{6, 10, "warn"},
 		{5, 10, "warn"}, // 50% is the warn floor
 		{4, 10, "err"},
@@ -91,7 +91,7 @@ func TestGPATone(t *testing.T) {
 		graded int
 		want   string
 	}{
-		{0, 0, ""}, // no graded session: unmeasured
+		{0, 0, ""},       // no graded session: unmeasured
 		{35, 10, "ok"},   // 3.5
 		{30, 10, "ok"},   // 3.0 is the ok floor
 		{25, 10, "warn"}, // 2.5
@@ -126,8 +126,8 @@ func TestAuditDashRenders(t *testing.T) {
 	for _, want := range []string{
 		"Needs attention",
 		">Work<", ">Completed<", ">Quality<", ">Spend<",
-		"errored",                 // the reason chip
-		`href="/sessions/42"`,     // the flagged row links to its transcript
+		"errored",             // the reason chip
+		`href="/sessions/42"`, // the flagged row links to its transcript
 		"rebuild the insights page",
 		"1 flagged",
 	} {

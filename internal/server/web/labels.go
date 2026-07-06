@@ -136,12 +136,15 @@ func SubagentsCollapsed(subs []store.SessionSummary) bool {
 	return len(subs) > SubagentCollapseThreshold
 }
 
-// SubagentsSummaryLabel is the collapsed subagents summary: the child count and their
-// summed cost, joined the same way the feed's fan-out chip reads ("34 subagents · $6.12"),
-// so a reader sees the same two facts whether they meet the fan-out on the parent's feed
-// row or at the head of its collapsed table. The cost carries the "+" lower-bound marker
-// when any child could not be fully priced. The count is singular at one, though the
-// collapse only ever engages well above that.
+// SubagentsSummaryLabel is the collapsed subagents summary: the direct child count and
+// their summed cost ("34 subagents · $6.12"). It describes the subagents table it heads,
+// which lists a session's direct children (Store.Subagents), so both figures are over those
+// direct rows, not the feed fan-out chip's whole-subtree rollup (TreeRollup, which also
+// folds in a subagent's own subagents). For a flat fan-out the two read the same; for a
+// nested one they legitimately differ, because this summary answers "what is in the table
+// below" while the feed chip answers "what did the whole work item cost". The cost carries
+// the "+" lower-bound marker when any direct child could not be fully priced. The count is
+// singular at one, though the collapse only ever engages well above that.
 func SubagentsSummaryLabel(subs []store.SessionSummary) string {
 	var cost float64
 	var incomplete bool

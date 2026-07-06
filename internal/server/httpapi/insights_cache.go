@@ -28,6 +28,14 @@ import (
 // cross-epoch-stale snapshot; the epoch rides the key as a second guard.
 const insightsTTL = 60 * time.Second
 
+// insightsComputeTimeout is the hard ceiling on one shared compute. The compute is
+// detached from any single caller's context (so one reader navigating away does not
+// abort the query the other waiters are blocked on), which means it needs its own
+// bound or a hung database read would park every waiter until the process restarts.
+// It sits well above the several seconds a cold load takes, so it never cuts off a
+// legitimate first render, only a read that has genuinely stalled.
+const insightsComputeTimeout = 45 * time.Second
+
 // insightsCompute is the miss path: it runs the real store query for a range. It
 // is injected so the cache stays free of the handler's filter construction and is
 // unit-testable without a database.
@@ -60,10 +68,14 @@ func cacheKey(rangeKey string) string {
 }
 
 // load returns the cached snapshot for rangeKey when it is still fresh, otherwise
-// computes it once (coalescing concurrent callers) and caches it. The compute runs
-// under a cancel-detached context so one caller navigating away mid-flight does not
-// abort the shared query the other waiters are blocked on; the store's own read
-// path bounds it. now is passed in so tests drive the clock.
+// computes it once (coalescing concurrent callers) and caches it. The shared compute
+// runs detached from any single caller's context so one reader navigating away
+// mid-flight does not abort the query the other waiters are blocked on, but it is
+// bounded by insightsComputeTimeout so a stalled read cannot park waiters forever.
+// Waiters block through DoChan and select on their OWN context, so a client that
+// disconnects returns immediately (with ctx.Err()) rather than staying parked until
+// the detached compute finishes: the compute keeps running to warm the cache for the
+// readers that remain. now is passed in so tests drive the clock.
 func (c *insightsCache) load(ctx context.Context, rangeKey string, now time.Time, compute insightsCompute) (store.Insights, error) {
 	key := cacheKey(rangeKey)
 
@@ -74,7 +86,7 @@ func (c *insightsCache) load(ctx context.Context, rangeKey string, now time.Time
 	}
 	c.mu.Unlock()
 
-	v, err, _ := c.sf.Do(key, func() (any, error) {
+	ch := c.sf.DoChan(key, func() (any, error) {
 		// Re-check under the flight: a caller that queued behind the leader while it
 		// computed should read the value the leader just stored, not recompute.
 		c.mu.Lock()
@@ -84,7 +96,11 @@ func (c *insightsCache) load(ctx context.Context, rangeKey string, now time.Time
 		}
 		c.mu.Unlock()
 
-		ins, err := compute(context.WithoutCancel(ctx))
+		// Detach from the triggering caller's cancellation (keep its values), then cap the
+		// read so a hung database call cannot hold the flight open indefinitely.
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), insightsComputeTimeout)
+		defer cancel()
+		ins, err := compute(cctx)
 		if err != nil {
 			return store.Insights{}, err
 		}
@@ -93,8 +109,16 @@ func (c *insightsCache) load(ctx context.Context, rangeKey string, now time.Time
 		c.mu.Unlock()
 		return ins, nil
 	})
-	if err != nil {
-		return store.Insights{}, err
+
+	select {
+	case <-ctx.Done():
+		// This caller gave up (disconnect or its own deadline); the flight keeps running for
+		// the remaining waiters and warms the cache, so only this request returns early.
+		return store.Insights{}, ctx.Err()
+	case res := <-ch:
+		if res.Err != nil {
+			return store.Insights{}, res.Err
+		}
+		return res.Val.(store.Insights), nil
 	}
-	return v.(store.Insights), nil
 }

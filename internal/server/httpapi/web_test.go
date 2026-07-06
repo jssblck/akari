@@ -457,11 +457,11 @@ func TestStandaloneOrphanedIndex(t *testing.T) {
 	}
 	body := readBody(t, resp)
 	for _, want := range []string{
-		"github.com/grace-hopper/akari",   // the repository, under Repositories
+		"github.com/grace-hopper/akari", // the repository, under Repositories
 		"<h2>Repositories</h2>", "<h2>Local folders</h2>",
-		"standalone", "orphaned",          // each folder's state tag
-		"scratch", "/home/grace/scratch",  // the standalone folder by name and path
-		"deleted", "/home/grace/deleted",  // the orphaned folder by name and path
+		"standalone", "orphaned", // each folder's state tag
+		"scratch", "/home/grace/scratch", // the standalone folder by name and path
+		"deleted", "/home/grace/deleted", // the orphaned folder by name and path
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("projects index missing %q, got:\n%s", want, body)

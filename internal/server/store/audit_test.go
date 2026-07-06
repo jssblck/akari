@@ -137,6 +137,57 @@ func TestOverviewAudit(t *testing.T) {
 	}
 }
 
+// linkSubagent makes child a subagent of parent (parent_session_id plus the relationship
+// tag), so the child's own spend belongs to the parent's whole-work-item rollup on the feed
+// but must never fold into the audit's direct verdict or attention costs.
+func linkSubagent(t *testing.T, st *store.Store, ctx context.Context, parent, child int64) {
+	t.Helper()
+	if _, err := st.Pool.Exec(ctx,
+		`UPDATE sessions SET parent_session_id = $1, relationship_type = 'subagent' WHERE id = $2`,
+		parent, child); err != nil {
+		t.Fatalf("link subagent %d under %d: %v", child, parent, err)
+	}
+}
+
+// TestOverviewAuditCostsAreDirect pins the audit's direct-cost basis: WastedUSD and an
+// attention row's CostUSD count a failed top-level run's OWN cost, never the cost of the
+// subagent subtree it fanned out. The feed's fan-out chip carries the whole-work-item figure
+// (root plus subtree, see TreeRollup); the Overview deliberately keeps the direct cost, so a
+// $2 errored root that spawned a $50 subagent reads as $2 of waste here, not $52.
+func TestOverviewAuditCostsAreDirect(t *testing.T) {
+	t.Parallel()
+	st, ctx, uid, pid := signalsEnv(t)
+	g := func(s string) *string { return &s }
+
+	root := seedSession(t, st, uid, pid, "errored-root")
+	insertGradeOutcomeSignal(t, st, ctx, root, g("F"), "errored")
+	setSessionCost(t, st, ctx, root, 2.00)
+
+	// An expensive subagent under that failed root. Its spend is part of the work item's
+	// whole-tree cost, but the audit excludes subagents and counts only the root's own cost.
+	sub := seedSession(t, st, uid, pid, "expensive-subagent")
+	setSessionCost(t, st, ctx, sub, 50.00)
+	linkSubagent(t, st, ctx, root, sub)
+
+	au, err := st.OverviewAudit(ctx, store.AnalyticsFilter{ProjectID: pid})
+	if err != nil {
+		t.Fatalf("overview audit: %v", err)
+	}
+	if math.Abs(au.WastedUSD-2.00) > 1e-9 {
+		t.Errorf("WastedUSD = %v, want 2.00 (the root's own cost, not the $50 subagent subtree)", au.WastedUSD)
+	}
+	if len(au.Attention) != 1 {
+		t.Fatalf("Attention has %d rows, want 1 (the errored root; the subagent is excluded): %+v", len(au.Attention), au.Attention)
+	}
+	got := au.Attention[0]
+	if got.ID != root {
+		t.Errorf("Attention[0].ID = %d, want the errored root %d", got.ID, root)
+	}
+	if math.Abs(got.CostUSD-2.00) > 1e-9 {
+		t.Errorf("Attention[0].CostUSD = %v, want 2.00 (direct root cost, not the whole-tree $52)", got.CostUSD)
+	}
+}
+
 // TestOverviewAuditUnmeasured pins the unmeasured sentinels: a scope whose work has not
 // settled or been graded reports -1 from CompletionRate and GPA (which the view dashes)
 // rather than a 0 that would read as total failure, and its shortlist is empty rather than

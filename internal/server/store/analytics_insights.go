@@ -45,8 +45,26 @@ func (i Insights) HasData() bool { return i.Quality.Sessions > 0 }
 // insightsPanelLimit bounds how many panels read concurrently, so one Insights call
 // never drains the pool out from under other requests. The control connection holds one
 // slot for the whole call, so peak usage is this many plus one; kept a few below a
-// default pool's ceiling to leave headroom for concurrent traffic.
+// default pool's ceiling to leave headroom for concurrent traffic. Insights further caps
+// the worker count at the connections actually spare beyond the control one, so a pool
+// smaller than this constant cannot deadlock (see panelWorkers).
 const insightsPanelLimit = 6
+
+// panelWorkers is how many panels Insights may read concurrently given the pool's connection
+// ceiling. Each concurrent panel acquires its own connection while the control transaction
+// holds one open until Wait, so the safe worker count is the connections spare beyond that
+// control one, capped at insightsPanelLimit. It returns 0 when nothing is spare (a pool sized
+// at or near one connection, as some constrained deployments configure): the caller must then
+// run the panels sequentially on the control transaction, because a concurrent panel would
+// block forever in Acquire waiting on the very connection this call is holding. That zero is
+// the guard against a self-inflicted deadlock, not a performance knob.
+func panelWorkers(maxConns int) int {
+	spare := maxConns - 1
+	if spare < 1 {
+		return 0
+	}
+	return min(insightsPanelLimit, spare)
+}
 
 // snapshotIDRe validates a pg_export_snapshot token before it is interpolated into SET
 // TRANSACTION SNAPSHOT (which takes no bind parameters). The token is server-generated,
@@ -127,13 +145,82 @@ func (s *Store) Insights(ctx context.Context, f AnalyticsFilter) (Insights, erro
 		return Insights{}, fmt.Errorf("insights snapshot: unexpected snapshot id %q", snapshotID)
 	}
 
+	// The panels, each writing a distinct out field. They run either concurrently (each on its
+	// own pooled connection importing the control snapshot) or, when the pool cannot spare a
+	// connection beyond the one the control transaction holds, sequentially on the control
+	// transaction itself. Distinct panels write distinct out fields and both dispatch paths
+	// synchronize before out is read, so the writes are race-free either way.
+	panels := []func(context.Context, querier) error{
+		func(ctx context.Context, q querier) (err error) {
+			out.Quality, err = s.qualityDistributionFrom(ctx, q, f)
+			return
+		},
+		func(ctx context.Context, q querier) (err error) {
+			out.Archetypes, err = s.archetypeDistributionFrom(ctx, q, f)
+			return
+		},
+		func(ctx context.Context, q querier) (err error) {
+			out.Concurrency, err = s.concurrencyStatsFrom(ctx, q, f)
+			return
+		},
+		func(ctx context.Context, q querier) (err error) {
+			out.Velocity, err = s.velocityStatsFrom(ctx, q, f)
+			return
+		},
+		func(ctx context.Context, q querier) (err error) {
+			out.Tools, err = s.toolStatsFrom(ctx, q, f)
+			return
+		},
+		func(ctx context.Context, q querier) (err error) {
+			out.Hygiene, err = s.promptHygieneFrom(ctx, q, f)
+			return
+		},
+		func(ctx context.Context, q querier) (err error) {
+			out.Churn, err = s.fileChurnFrom(ctx, q, f)
+			return
+		},
+		// Context and, when charted, the trend grid share one panel: the trend reuses the context
+		// stats for its peak-context histogram markers, so it must run after Context, and keeping
+		// the pair on one connection avoids threading the intermediate result across goroutines.
+		func(ctx context.Context, q querier) (err error) {
+			if out.Context, err = s.contextHealthFrom(ctx, q, f); err != nil {
+				return err
+			}
+			if f.Bucket != "" {
+				out.Trends, err = s.trendsFrom(ctx, q, f, out.Context)
+			}
+			return err
+		},
+	}
+	// The per-author leaderboard is skipped when the caller will not render it (OmitUsers, set
+	// by the public project overview, whose quality band carries no People panel), so the read
+	// does not group every session by user and build an aggregate proportional to the scope's
+	// user count only to discard it. It sits outside every other panel's totals, so leaving
+	// Users zero changes nothing else.
+	if !f.OmitUsers {
+		panels = append(panels, func(ctx context.Context, q querier) (err error) {
+			out.Users, err = s.userQualityFrom(ctx, q, f)
+			return
+		})
+	}
+
+	// With no connection spare beyond the one the control transaction holds, run the panels in
+	// order on the control transaction itself, which already sees the fixed snapshot and needs
+	// no further connection. This is what keeps a tiny pool from deadlocking; see panelWorkers.
+	workers := panelWorkers(int(s.Pool.Config().MaxConns))
+	if workers == 0 {
+		for _, p := range panels {
+			if err := p(ctx, ctrlTx); err != nil {
+				return Insights{}, fmt.Errorf("insights snapshot: %w", err)
+			}
+		}
+		return out, nil
+	}
+
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(insightsPanelLimit)
-	// panel runs one panel's read on its own pooled connection under a transaction that
-	// imports the control snapshot, so every panel sees the identical MVCC state. Distinct
-	// panels write distinct out fields, and errgroup.Wait synchronizes before out is read, so
-	// the concurrent writes are race-free.
-	panel := func(fn func(context.Context, querier) error) {
+	g.SetLimit(workers)
+	for _, p := range panels {
+		p := p
 		g.Go(func() error {
 			c, err := s.Pool.Acquire(gctx)
 			if err != nil {
@@ -150,38 +237,9 @@ func (s *Store) Insights(ctx context.Context, f AnalyticsFilter) (Insights, erro
 			if _, err := tx.Exec(gctx, "SET TRANSACTION SNAPSHOT '"+snapshotID+"'"); err != nil {
 				return fmt.Errorf("import snapshot: %w", err)
 			}
-			return fn(gctx, tx)
+			return p(gctx, tx)
 		})
 	}
-
-	panel(func(ctx context.Context, q querier) (err error) { out.Quality, err = s.qualityDistributionFrom(ctx, q, f); return })
-	panel(func(ctx context.Context, q querier) (err error) { out.Archetypes, err = s.archetypeDistributionFrom(ctx, q, f); return })
-	panel(func(ctx context.Context, q querier) (err error) { out.Concurrency, err = s.concurrencyStatsFrom(ctx, q, f); return })
-	panel(func(ctx context.Context, q querier) (err error) { out.Velocity, err = s.velocityStatsFrom(ctx, q, f); return })
-	panel(func(ctx context.Context, q querier) (err error) { out.Tools, err = s.toolStatsFrom(ctx, q, f); return })
-	panel(func(ctx context.Context, q querier) (err error) { out.Hygiene, err = s.promptHygieneFrom(ctx, q, f); return })
-	panel(func(ctx context.Context, q querier) (err error) { out.Churn, err = s.fileChurnFrom(ctx, q, f); return })
-	// Context and, when charted, the trend grid share one panel: the trend reuses the context
-	// stats for its peak-context histogram markers, so it must run after Context, and keeping
-	// the pair on one connection avoids threading the intermediate result across goroutines.
-	panel(func(ctx context.Context, q querier) (err error) {
-		if out.Context, err = s.contextHealthFrom(ctx, q, f); err != nil {
-			return err
-		}
-		if f.Bucket != "" {
-			out.Trends, err = s.trendsFrom(ctx, q, f, out.Context)
-		}
-		return err
-	})
-	// The per-author leaderboard is skipped when the caller will not render it (OmitUsers, set
-	// by the public project overview, whose quality band carries no People panel), so the read
-	// does not group every session by user and build an aggregate proportional to the scope's
-	// user count only to discard it. It sits outside every other panel's totals, so leaving
-	// Users zero changes nothing else.
-	if !f.OmitUsers {
-		panel(func(ctx context.Context, q querier) (err error) { out.Users, err = s.userQualityFrom(ctx, q, f); return })
-	}
-
 	if err := g.Wait(); err != nil {
 		// The panel queries name their own failures; wrap so the /insights 500 path reads as an
 		// insights-snapshot failure rather than a raw database error.

@@ -38,12 +38,16 @@ type AuditSummary struct {
 	// coverage the average speaks for rather than a bare number.
 	Graded      int
 	GradePoints float64
-	// WastedUSD is the direct cost of the errored and abandoned work items, the money the
-	// fleet spent on runs that did not ship. It counts each failed top-level session's own
-	// rolled-up cost; the fan-out subtree it may have spawned is not yet folded in (that is
-	// the tree-cost rollup, a later addition), so this reads as a lower bound on true waste.
-	// WastedIncomplete flags that some of those sessions carried unpriced usage, so even the
-	// direct figure is itself a lower bound.
+	// WastedUSD is the direct cost of the errored and abandoned work items: each failed
+	// top-level session's own rolled-up cost, summed. It is deliberately the root run's own
+	// cost, not the whole-work-item cost the feed's fan-out chip shows (root plus its subagent
+	// subtree, see TreeRollup). Two reasons the verdict keeps the direct figure: it stays a
+	// single bounded scan of the session rows rather than a recursive per-corpus subtree walk
+	// on the hot Overview path, and the money reconciles with the fleet-wide spend tile, which
+	// already counts every subagent session once under its own row. So this is a lower bound on
+	// the true cost of failure, and TestOverviewAuditCostsAreDirect pins that a failed root's
+	// subagent spend is not folded in here. WastedIncomplete flags that some of those sessions
+	// carried unpriced usage, so even the direct figure is itself a lower bound.
 	WastedUSD        float64
 	WastedIncomplete bool
 	// Attention is the ranked shortlist of sessions worth a look, worst first: errored, then
@@ -81,19 +85,19 @@ func (a AuditSummary) GPA() float64 {
 // "costly"); the view maps it to a human phrase, the same store-keeps-the-key split
 // LabeledCount uses so the two layers stay decoupled.
 type AttentionRow struct {
-	ID           int64
-	Agent        string
-	ProjectKey   string
-	ProjectName  string
-	ProjectKind  string
-	Title        string
-	Grade        *string
-	Outcome      string
-	CostUSD      float64
+	ID             int64
+	Agent          string
+	ProjectKey     string
+	ProjectName    string
+	ProjectKind    string
+	Title          string
+	Grade          *string
+	Outcome        string
+	CostUSD        float64
 	CostIncomplete bool
-	MessageCount int
-	StartedAt    *time.Time
-	Reason       string
+	MessageCount   int
+	StartedAt      *time.Time
+	Reason         string
 }
 
 // attentionLimit caps the audit shortlist. It is a triage queue a team lead skims top to
@@ -181,9 +185,17 @@ func (s *Store) overviewVerdict(ctx context.Context, q querier, f AnalyticsFilte
 //
 // The cost threshold is relative to this scope's own median spend, so "expensive" means
 // several times a typical run in this window and these users, not an absolute dollar line
-// that would flag every session on a busy instance and none on a quiet one. It reuses the
-// shared title lateral and signals gate so a shortlisted row reads the same title and grade
-// the Sessions feed would show it under.
+// that would flag every session on a busy instance and none on a quiet one. The CostUSD it
+// returns and the costly tier both read the session's own direct cost (s.total_cost_usd),
+// the same direct-cost basis as the verdict's WastedUSD, not the feed's whole-work-item
+// rollup; see AuditSummary.WastedUSD for why the audit keeps the direct figure.
+//
+// Ranking runs on the session and signal columns alone, and only the surviving
+// attentionLimit rows join projects and the shared title lateral. So the first-message
+// lookup and its regexp run for the handful of rows the strip shows, not for every session
+// in the window: the per-request work is bounded by the shortlist, not by the corpus. The
+// shortlisted rows still read the same title and grade the Sessions feed would show them
+// under, since the join reuses the same title lateral and signals gate.
 func (s *Store) attentionRows(ctx context.Context, q querier, f AnalyticsFilter) ([]AttentionRow, error) {
 	filter, args := f.clauseFor("s.started_at")
 	multArg := len(args) + 1
@@ -192,13 +204,10 @@ func (s *Store) attentionRows(ctx context.Context, q querier, f AnalyticsFilter)
 	args = append(args, costlyMultiple, costlyMinCohort, attentionLimit)
 	rows, err := q.Query(ctx, `
 		WITH scoped AS (
-		  SELECT s.id, s.agent, s.total_cost_usd, s.cost_incomplete, s.message_count,
-		         s.started_at, p.remote_key, p.display_name, p.kind,
-		         sig.grade, sig.outcome, coalesce(title.content, '') AS title
+		  SELECT s.id, s.agent, s.project_id, s.total_cost_usd, s.cost_incomplete,
+		         s.message_count, s.started_at, sig.grade, sig.outcome
 		    FROM sessions s
-		    JOIN projects p ON p.id = s.project_id
 		    LEFT JOIN session_signals sig ON sig.session_id = s.id AND `+signalsCurrent()+`
-		    `+titleLateralSQL+`
 		   WHERE s.relationship_type <> 'subagent'`+filter+`
 		),
 		thr AS (
@@ -211,30 +220,38 @@ func (s *Store) attentionRows(ctx context.Context, q querier, f AnalyticsFilter)
 		         (thr.n_priced >= $`+itoa(cohortArg)+` AND thr.med > 0
 		            AND sc.total_cost_usd >= $`+itoa(multArg)+` * thr.med) AS is_costly
 		    FROM scoped sc CROSS JOIN thr
+		),
+		top AS (
+		  SELECT id, agent, project_id, total_cost_usd, cost_incomplete, message_count,
+		         started_at, grade, outcome,
+		         CASE
+		           WHEN outcome = 'errored'   THEN 5
+		           WHEN outcome = 'abandoned' THEN 4
+		           WHEN grade = 'F'           THEN 3
+		           WHEN grade = 'D'           THEN 2
+		           WHEN is_costly             THEN 1
+		           ELSE 0
+		         END AS tier,
+		         CASE
+		           WHEN outcome = 'errored'   THEN 'errored'
+		           WHEN outcome = 'abandoned' THEN 'abandoned'
+		           WHEN grade = 'F'           THEN 'grade-f'
+		           WHEN grade = 'D'           THEN 'grade-d'
+		           WHEN is_costly             THEN 'costly'
+		           ELSE ''
+		         END AS reason
+		    FROM ranked
+		   WHERE outcome IN ('errored', 'abandoned') OR grade IN ('D', 'F') OR is_costly
+		   ORDER BY tier DESC, total_cost_usd DESC, started_at DESC NULLS LAST
+		   LIMIT $`+itoa(limitArg)+`
 		)
-		SELECT id, agent, remote_key, display_name, kind, title, grade, outcome,
-		       total_cost_usd, cost_incomplete, message_count, started_at,
-		       CASE
-		         WHEN outcome = 'errored'   THEN 'errored'
-		         WHEN outcome = 'abandoned' THEN 'abandoned'
-		         WHEN grade = 'F'           THEN 'grade-f'
-		         WHEN grade = 'D'           THEN 'grade-d'
-		         WHEN is_costly             THEN 'costly'
-		         ELSE ''
-		       END AS reason
-		  FROM ranked
-		 WHERE outcome IN ('errored', 'abandoned') OR grade IN ('D', 'F') OR is_costly
-		 ORDER BY
-		   CASE
-		     WHEN outcome = 'errored'   THEN 5
-		     WHEN outcome = 'abandoned' THEN 4
-		     WHEN grade = 'F'           THEN 3
-		     WHEN grade = 'D'           THEN 2
-		     WHEN is_costly             THEN 1
-		     ELSE 0
-		   END DESC,
-		   total_cost_usd DESC, started_at DESC NULLS LAST
-		 LIMIT $`+itoa(limitArg), args...)
+		SELECT s.id, s.agent, p.remote_key, p.display_name, p.kind, coalesce(title.content, ''),
+		       s.grade, s.outcome, s.total_cost_usd, s.cost_incomplete, s.message_count,
+		       s.started_at, s.reason
+		  FROM top s
+		  JOIN projects p ON p.id = s.project_id
+		  `+titleLateralSQL+`
+		 ORDER BY s.tier DESC, s.total_cost_usd DESC, s.started_at DESC NULLS LAST`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query attention rows: %w", err)
 	}
