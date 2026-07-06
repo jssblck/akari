@@ -11,6 +11,25 @@ import (
 // floatPtr returns a pointer to a float, for the nullable per-turn cost in TurnUsage fixtures.
 func floatPtr(f float64) *float64 { return &f }
 
+// viewFor assembles the SessionView a render test hands SessionPage: the fixture's
+// messages serve as both the outline read and the (whole-session) transcript window,
+// the tool map feeds both the whole-session surfaces (outline, ribbon) and the window's
+// rows, and the header's fallbacks double as the window's, the shape a short real
+// session loads with (the snapshot reads fill both from one transaction), so assertions
+// against the rendered page cover both surfaces.
+func viewFor(d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, subs []store.SubagentRow, hs HeaderStats, dupIDs int) SessionView {
+	return SessionView{
+		Detail:      d,
+		Outline:     msgs,
+		Page:        store.TranscriptPage{Msgs: msgs, Fallbacks: hs.Fallbacks},
+		Tools:       tools,
+		WindowTools: tools,
+		Subagents:   subs,
+		Header:      hs,
+		DupIDs:      dupIDs,
+	}
+}
+
 // fixtureDetail is a codex shell_command's Detail: a realistic invocation longer
 // than DetailLabel's 80-rune cap, so the fixture exercises truncation rather than
 // a string that happens to fit.
@@ -66,24 +85,24 @@ func sessionFixture() (store.SessionDetail, []store.Message, map[int][]store.Too
 func TestSessionPageRendersSubagents(t *testing.T) {
 	p := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "jessoteric"}
 	d, msgs, tools := sessionFixture()
-	subs := []store.SessionSummary{
-		{ID: 4242, Agent: "claude", Username: "grace", Machine: "grace", GitBranch: "main", MessageCount: 11, TotalCostUSD: 0.42},
-		{ID: 4243, Agent: "claude", Username: "grace", Machine: "grace", GitBranch: "main", MessageCount: 7, TotalCostUSD: 0.19},
+	subs := []store.SubagentRow{
+		{SessionSummary: store.SessionSummary{ID: 4242, Agent: "claude", Username: "grace", Machine: "grace", GitBranch: "main", MessageCount: 11, TotalCostUSD: 0.42}},
+		{SessionSummary: store.SessionSummary{ID: 4243, Agent: "claude", Username: "grace", Machine: "grace", GitBranch: "main", MessageCount: 7, TotalCostUSD: 0.19}},
 	}
 
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, subs, HeaderStats{}, 0, false, true))
+	html := renderComponent(t, SessionPage(p, viewFor(d, msgs, tools, subs, HeaderStats{}, 0), false, true))
 	for _, want := range []string{
 		`<h2>Subagents</h2>`,
 		`class="subagents"`,
-		`#4242`, // each child links to its own session
-		`#4243`,
+		`/sessions/4242`, // each child links to its own session
+		`/sessions/4243`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("session page with subagents missing %q", want)
 		}
 	}
 
-	bare := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, HeaderStats{}, 0, false, true))
+	bare := renderComponent(t, SessionPage(p, viewFor(d, msgs, tools, nil, HeaderStats{}, 0), false, true))
 	if strings.Contains(bare, "<h2>Subagents</h2>") {
 		t.Error("session page without subagents should omit the Subagents heading")
 	}
@@ -99,7 +118,7 @@ func TestSessionPageRendersSubagents(t *testing.T) {
 func TestToolCallDetailRendersOnChipAndOutline(t *testing.T) {
 	p := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "jessoteric"}
 	d, msgs, tools := sessionFixture()
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, HeaderStats{}, 0, false, true))
+	html := renderComponent(t, SessionPage(p, viewFor(d, msgs, tools, nil, HeaderStats{}, 0), false, true))
 
 	label := DetailLabel(fixtureDetail)
 	if label == fixtureDetail {
@@ -122,7 +141,7 @@ func TestToolCallDetailRendersOnChipAndOutline(t *testing.T) {
 	bareTools := map[int][]store.ToolCallView{
 		1: {{MessageOrdinal: 1, ToolName: "Read", FilePath: "internal/server/web/session.templ"}},
 	}
-	bare := renderComponent(t, SessionPage(p, d, msgs, bareTools, nil, nil, HeaderStats{}, 0, false, true))
+	bare := renderComponent(t, SessionPage(p, viewFor(d, msgs, bareTools, nil, HeaderStats{}, 0), false, true))
 	for _, unwant := range []string{`class="tdetail`, `class="ol-detail`, `data-detail`} {
 		if strings.Contains(bare, unwant) {
 			t.Errorf("a tool call with no Detail should render no %q", unwant)
@@ -146,7 +165,7 @@ func TestTranscriptRendersContextTurn(t *testing.T) {
 		{Ordinal: 1, Role: "user", Content: "Add rate limiting", Timestamp: ts(1)},
 		{Ordinal: 2, Role: "assistant", Content: "On it.", Model: "gpt-5", Timestamp: ts(6)},
 	}
-	html := renderComponent(t, SessionPage(p, d, msgs, nil, nil, nil, HeaderStats{}, 0, false, true))
+	html := renderComponent(t, SessionPage(p, viewFor(d, msgs, nil, nil, HeaderStats{}, 0), false, true))
 
 	for _, want := range []string{
 		// The context turn renders as a collapsed <details>, not an open .msg-user block.
@@ -205,7 +224,7 @@ func TestContextLabelAndRoleClass(t *testing.T) {
 func TestSessionPageCompactHeaderAndModal(t *testing.T) {
 	p := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "jessoteric"}
 	d, msgs, tools := sessionFixture()
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, HeaderStats{}, 0, false, true))
+	html := renderComponent(t, SessionPage(p, viewFor(d, msgs, tools, nil, HeaderStats{}, 0), false, true))
 
 	for _, want := range []string{
 		`class="session-page"`,    // full-width wrapper drives main:has(> .session-page)
@@ -240,7 +259,7 @@ func TestSessionPageCompactHeaderAndModal(t *testing.T) {
 func TestSessionStatsFoldTokensAndDropLive(t *testing.T) {
 	p := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "jessoteric"}
 	d, msgs, tools := sessionFixture()
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, HeaderStats{}, 0, true, true))
+	html := renderComponent(t, SessionPage(p, viewFor(d, msgs, tools, nil, HeaderStats{}, 0), true, true))
 
 	// The tile must show the aggregate of all four token classes, and the tooltip
 	// must carry each class value plus the cost, run through the same formatters
@@ -282,7 +301,7 @@ func TestSessionStatsTokensContext(t *testing.T) {
 		Outcome: "completed", OutcomeConfidence: "high",
 		PeakContextTokens: &peak, ContextResetCount: &resets,
 	}}
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, hs, 0, false, true))
+	html := renderComponent(t, SessionPage(p, viewFor(d, msgs, tools, nil, hs, 0), false, true))
 
 	for _, want := range []string{
 		`class="tt-sub">Context</div>`,           // the context group under its own ruled label
@@ -296,7 +315,7 @@ func TestSessionStatsTokensContext(t *testing.T) {
 	}
 
 	// A session with no measured context draws no Context group at all.
-	bare := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, HeaderStats{}, 0, false, true))
+	bare := renderComponent(t, SessionPage(p, viewFor(d, msgs, tools, nil, HeaderStats{}, 0), false, true))
 	if strings.Contains(bare, `class="tt-sub">Context</div>`) {
 		t.Error("an unmeasured session should draw no Context group in the Tokens tile")
 	}
@@ -318,7 +337,7 @@ func TestSessionStatsQualityTileScored(t *testing.T) {
 		ToolCalls: 12, ToolFailures: 2, ToolRetries: 1, EditChurn: 3, LongestFailureStreak: 1,
 		ShortPromptCount: 4, NoCodeContextCount: 2, UnstructuredStart: true,
 	}}
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, hs, 0, false, true))
+	html := renderComponent(t, SessionPage(p, viewFor(d, msgs, tools, nil, hs, 0), false, true))
 
 	for _, want := range []string{
 		`class="stat quality-stat q-good"`,    // a B bands as "good"
@@ -348,7 +367,7 @@ func TestSessionStatsQualityTileUnscored(t *testing.T) {
 	p := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "jessoteric"}
 	d, msgs, tools := sessionFixture()
 	hs := HeaderStats{Signals: store.SessionSignals{Outcome: "unknown", OutcomeConfidence: "low"}}
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, hs, 0, false, true))
+	html := renderComponent(t, SessionPage(p, viewFor(d, msgs, tools, nil, hs, 0), false, true))
 
 	for _, want := range []string{
 		`class="stat quality-stat q-none"`,
@@ -398,7 +417,7 @@ func TestTranscriptInstruments(t *testing.T) {
 		}},
 	}
 
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, HeaderStats{}, 0, false, true))
+	html := renderComponent(t, SessionPage(p, viewFor(d, msgs, tools, nil, HeaderStats{}, 0), false, true))
 
 	for _, want := range []string{
 		// (a) the answered turn's latency stamp, prompt-to-reply
@@ -454,7 +473,7 @@ func TestSessionQualityScoreArithmetic(t *testing.T) {
 		Score: &score, Grade: &grade,
 		ToolCalls: 10, ToolFailures: 3, // 30 errored + 9 failures = 39, score 61
 	}}
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, hs, 0, false, true))
+	html := renderComponent(t, SessionPage(p, viewFor(d, msgs, tools, nil, hs, 0), false, true))
 	for _, want := range []string{
 		`class="tt-sub">Score arithmetic</div>`,
 		`>errored ending</dt>`, `<dd class="mono">-30</dd>`,
@@ -470,13 +489,13 @@ func TestSessionQualityScoreArithmetic(t *testing.T) {
 	clean := HeaderStats{Signals: store.SessionSignals{
 		Outcome: "completed", OutcomeConfidence: "high", Score: &cs, Grade: &cg,
 	}}
-	cleanHTML := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, clean, 0, false, true))
+	cleanHTML := renderComponent(t, SessionPage(p, viewFor(d, msgs, tools, nil, clean, 0), false, true))
 	if !strings.Contains(cleanHTML, `>No penalties</dt>`) {
 		t.Error("a clean scored run should show a No penalties row in the score arithmetic")
 	}
 
 	unscored := HeaderStats{Signals: store.SessionSignals{Outcome: "unknown", OutcomeConfidence: "low"}}
-	unscoredHTML := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, unscored, 0, false, true))
+	unscoredHTML := renderComponent(t, SessionPage(p, viewFor(d, msgs, tools, nil, unscored, 0), false, true))
 	if strings.Contains(unscoredHTML, `Score arithmetic`) {
 		t.Error("an unscored session should draw no score-arithmetic group")
 	}
@@ -490,7 +509,7 @@ func TestSessionPagePublicShowsUnpublish(t *testing.T) {
 	pub := "k3y"
 	d.Visibility = "public"
 	d.PublicID = &pub
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, HeaderStats{}, 0, false, true))
+	html := renderComponent(t, SessionPage(p, viewFor(d, msgs, tools, nil, HeaderStats{}, 0), false, true))
 
 	for _, want := range []string{`>Unpublish</button>`, `class="share-link`, PublicPath(pub)} {
 		if !strings.Contains(html, want) {
@@ -508,7 +527,7 @@ func TestSessionPageActionsGating(t *testing.T) {
 	d, msgs, tools := sessionFixture()
 
 	admin := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "ada", IsAdmin: true}
-	adminHTML := renderComponent(t, SessionPage(admin, d, msgs, tools, nil, nil, HeaderStats{}, 0, false, false))
+	adminHTML := renderComponent(t, SessionPage(admin, viewFor(d, msgs, tools, nil, HeaderStats{}, 0), false, false))
 	if !strings.Contains(adminHTML, `>Delete</button>`) {
 		t.Error("admin should be able to delete a session they do not own")
 	}
@@ -517,7 +536,7 @@ func TestSessionPageActionsGating(t *testing.T) {
 	}
 
 	viewer := Page{Title: "session", LoggedIn: true, Active: "sessions", Username: "anna"}
-	viewerHTML := renderComponent(t, SessionPage(viewer, d, msgs, tools, nil, nil, HeaderStats{}, 0, false, false))
+	viewerHTML := renderComponent(t, SessionPage(viewer, viewFor(d, msgs, tools, nil, HeaderStats{}, 0), false, false))
 	if strings.Contains(viewerHTML, `class="session-actions"`) {
 		t.Error("a plain viewer should see no actions cluster")
 	}

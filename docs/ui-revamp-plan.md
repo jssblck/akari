@@ -59,12 +59,31 @@ verified against the live dev server:
   child count and their summed cost ("37 subagents · $11.44"), opening on demand,
   so the fan-out no longer buries the transcript on exactly the sessions a lead
   most wants to read. A short list still reads inline. Presentation only.
+- P-2 (items 1, 2, 4): the transcript is windowed. The initial render is the
+  session's last 50 user turns (bounded by a hard message cap) behind a "Show
+  earlier" bar that fetches the previous window in place, scroll-pinned; the SSE
+  wake now appends only the turns past the last rendered ordinal
+  (`?after={ordinal}`, read from the DOM so the server stays stateless) with
+  out-of-band swaps refreshing the instruments and subagents, so a live session
+  neither re-renders its whole body nor resets the reader's scroll. A client too
+  far behind for one append (or whose cursor an epoch rebuild orphaned) gets a
+  retargeted whole-window re-render, so the DOM can never carry a hidden gap.
+  Outline and ribbon anchors above the window fetch-then-scroll through the same
+  earlier-window path. The windowed reads share the whole-session read's
+  full-fold columns and prime the per-turn instruments with a short unrendered
+  seed, so a windowed transcript renders identically to the full one.
+- D: the session detail leads with the auditor's answer. A verdict strip
+  (outcome and grade with the score arithmetic promoted to a visible line, cost
+  with the whole-work-item rollup, wasted spend when the run or its children
+  burned money, duration with the serving models) sits above the stat band; the
+  subagents read carries each child's verdict, so the table names each task's
+  outcome and the collapsed fold reads "37 subagents · $11.44 · 2 failed"; a
+  flow ribbon above the transcript draws one tick per turn colored by activity
+  (edit, run, failure) so a failure streak or churn loop is visible before
+  reading a word. The MCP subagents list and feed rows carry the same verdict
+  fields. All read-time presentation: no rebuild-derived column, no epoch bump.
 
-Remaining: P-2's transcript windowing and incremental SSE (items 1, 2, 4 of that
-workstream: cap the initial render at the last N turns behind a "Show earlier"
-bar, and make live updates append only the new turns instead of re-rendering the
-whole body), and D (session detail auditor view). Both are independent and can
-land as their own PRs per the sequencing table below.
+All workstreams in this plan have landed.
 
 ## The lens
 
@@ -229,9 +248,9 @@ at it so future regressions are visible in devtools).
    line: "34 subagents, $6.12, 2 failed", expandable). It currently pushes the
    transcript below the fold on exactly the sessions a lead most wants to
    audit. (Shipped: the fold engages past eight children with a "N subagents ·
-   $cost" summary, closed by default. The "M failed" clause waits on the
-   outcome-aware subagents read that item 4 / workstream D introduces; the
-   current subagents table carries no outcome column to reconcile it against.)
+   $cost" summary, closed by default. The "M failed" clause shipped with
+   workstream D's outcome-aware subagents read, which also gave the table its
+   verdict column to reconcile against.)
 4. The outline rail renders one entry per turn regardless; it stays, but its
    anchors must work with the windowed transcript (fetch-then-scroll for
    turns not yet in the DOM).

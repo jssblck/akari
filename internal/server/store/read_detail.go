@@ -16,9 +16,9 @@ import (
 // (including total_cache_savings_usd) are re-folded whole by every rebuild, so there is
 // no read-side backfill or pricing-marker dance: a reprice ships as a parse.Epoch bump
 // and the epoch rebuild re-prices the corpus.
-func (s *Store) scanDetail(ctx context.Context, where string, arg any) (SessionDetail, error) {
+func (s *Store) scanDetail(ctx context.Context, q querier, where string, arg any) (SessionDetail, error) {
 	var d SessionDetail
-	err := s.Pool.QueryRow(ctx,
+	err := q.QueryRow(ctx,
 		`SELECT s.id, s.agent, s.machine, s.git_branch, u.username,
 		        s.message_count, s.user_message_count, s.model_fallback_count,
 		        s.total_input_tokens, s.total_output_tokens,
@@ -54,12 +54,12 @@ func (s *Store) scanDetail(ctx context.Context, where string, arg any) (SessionD
 
 // SessionDetailByID loads a session by numeric id.
 func (s *Store) SessionDetailByID(ctx context.Context, id int64) (SessionDetail, error) {
-	return s.scanDetail(ctx, "s.id = $1", id)
+	return s.scanDetail(ctx, s.Pool, "s.id = $1", id)
 }
 
 // SessionDetailByPublicID loads a published session by its public id.
 func (s *Store) SessionDetailByPublicID(ctx context.Context, publicID string) (SessionDetail, error) {
-	return s.scanDetail(ctx, "s.public_id = $1 AND s.visibility = 'public'", publicID)
+	return s.scanDetail(ctx, s.Pool, "s.public_id = $1 AND s.visibility = 'public'", publicID)
 }
 
 // MessageCount returns a session's current message count from its rollup.
@@ -86,7 +86,7 @@ func (s *Store) MessageCount(ctx context.Context, sessionID int64) (int, error) 
 // fragment (handleSessionBody) re-fetching this on every SSE append reads bounded indexed rows
 // and does no growing whole-session usage aggregation or message-window scan for either.
 func (s *Store) Messages(ctx context.Context, sessionID int64) ([]Message, error) {
-	return s.scanMessages(ctx, sessionID, messagesFullQuery, sessionID)
+	return s.scanMessages(ctx, s.Pool, sessionID, messagesFullQuery, sessionID)
 }
 
 // MessagesAfter returns the next window of a session's transcript ordered by
@@ -106,20 +106,22 @@ func (s *Store) MessagesAfter(ctx context.Context, sessionID int64, after *int, 
 		limit = 2000
 	}
 	if after == nil {
-		return s.scanMessages(ctx, sessionID,
+		return s.scanMessages(ctx, s.Pool, sessionID,
 			messagesWindowQuery+` ORDER BY m.ordinal LIMIT $2`,
 			sessionID, limit)
 	}
-	return s.scanMessages(ctx, sessionID,
+	return s.scanMessages(ctx, s.Pool, sessionID,
 		messagesWindowQuery+` AND m.ordinal > $2 ORDER BY m.ordinal LIMIT $3`,
 		sessionID, *after, limit)
 }
 
-// scanMessages runs a transcript read and scans its rows into Messages. sessionID is carried only
-// to give the error path context: a cursor, network, or cancellation failure mid-read then names
-// the session and the operation rather than surfacing a bare driver error to the handler.
-func (s *Store) scanMessages(ctx context.Context, sessionID int64, query string, args ...any) ([]Message, error) {
-	rows, err := s.Pool.Query(ctx, query, args...)
+// scanMessages runs a transcript read and scans its rows into Messages. The querier is the pool
+// for a standalone read or a transaction when several windowed reads must see one snapshot
+// (read_transcript_page.go). sessionID is carried only to give the error path context: a cursor,
+// network, or cancellation failure mid-read then names the session and the operation rather than
+// surfacing a bare driver error to the handler.
+func (s *Store) scanMessages(ctx context.Context, q querier, sessionID int64, query string, args ...any) ([]Message, error) {
+	rows, err := q.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query messages for session %d: %w", sessionID, err)
 	}
@@ -158,30 +160,37 @@ func (s *Store) scanMessages(ctx context.Context, sessionID int64, query string,
 	return out, nil
 }
 
+// toolCallsQuery reads all of a session's tool calls, shared by the pool-backed read
+// and the session snapshot's in-transaction read.
+const toolCallsQuery = `SELECT message_ordinal, call_index, tool_name, coalesce(category,''), coalesce(file_path,''), coalesce(file_rel_path,''), coalesce(detail,''),
+	        coalesce(input_sha256,''), coalesce(input_bytes,0), coalesce(input_media_type,''),
+	        coalesce(result_sha256,''), coalesce(result_bytes,0), coalesce(result_media_type,''), coalesce(result_status,'')
+	   FROM tool_calls WHERE session_id = $1 ORDER BY message_ordinal, call_index`
+
 // ToolCalls returns all of a session's tool calls as metadata, for the web
 // renderer. Bounded readers pass a message-ordinal range to ToolCallsInRange.
 func (s *Store) ToolCalls(ctx context.Context, sessionID int64) ([]ToolCallView, error) {
-	return s.scanToolCalls(ctx,
-		`SELECT message_ordinal, call_index, tool_name, coalesce(category,''), coalesce(file_path,''), coalesce(file_rel_path,''), coalesce(detail,''),
-		        coalesce(input_sha256,''), coalesce(input_bytes,0), coalesce(input_media_type,''),
-		        coalesce(result_sha256,''), coalesce(result_bytes,0), coalesce(result_media_type,''), coalesce(result_status,'')
-		   FROM tool_calls WHERE session_id = $1 ORDER BY message_ordinal, call_index`, sessionID)
+	return s.scanToolCalls(ctx, s.Pool, toolCallsQuery, sessionID)
 }
+
+// toolCallsInRangeQuery reads the tool calls hanging on messages in an inclusive
+// ordinal window, shared by the pool-backed range read and the transcript page's
+// in-transaction read (which must see the same snapshot as the window's messages).
+const toolCallsInRangeQuery = `SELECT message_ordinal, call_index, tool_name, coalesce(category,''), coalesce(file_path,''), coalesce(file_rel_path,''), coalesce(detail,''),
+	        coalesce(input_sha256,''), coalesce(input_bytes,0), coalesce(input_media_type,''),
+	        coalesce(result_sha256,''), coalesce(result_bytes,0), coalesce(result_media_type,''), coalesce(result_status,'')
+	   FROM tool_calls WHERE session_id = $1 AND message_ordinal BETWEEN $2 AND $3
+	   ORDER BY message_ordinal, call_index`
 
 // ToolCallsInRange returns the tool calls hanging on messages in the inclusive
 // ordinal window [minOrdinal, maxOrdinal], so a bounded transcript read fetches
 // only the calls for the messages it returned rather than the whole session.
 func (s *Store) ToolCallsInRange(ctx context.Context, sessionID int64, minOrdinal, maxOrdinal int) ([]ToolCallView, error) {
-	return s.scanToolCalls(ctx,
-		`SELECT message_ordinal, call_index, tool_name, coalesce(category,''), coalesce(file_path,''), coalesce(file_rel_path,''), coalesce(detail,''),
-		        coalesce(input_sha256,''), coalesce(input_bytes,0), coalesce(input_media_type,''),
-		        coalesce(result_sha256,''), coalesce(result_bytes,0), coalesce(result_media_type,''), coalesce(result_status,'')
-		   FROM tool_calls WHERE session_id = $1 AND message_ordinal BETWEEN $2 AND $3
-		   ORDER BY message_ordinal, call_index`, sessionID, minOrdinal, maxOrdinal)
+	return s.scanToolCalls(ctx, s.Pool, toolCallsInRangeQuery, sessionID, minOrdinal, maxOrdinal)
 }
 
-func (s *Store) scanToolCalls(ctx context.Context, query string, args ...any) ([]ToolCallView, error) {
-	rows, err := s.Pool.Query(ctx, query, args...)
+func (s *Store) scanToolCalls(ctx context.Context, q querier, query string, args ...any) ([]ToolCallView, error) {
+	rows, err := q.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -242,8 +251,12 @@ type TurnUsage struct {
 // session repeats a tool_use id), which the view surfaces as a chip so a genuinely
 // malformed id reuse is visible rather than silent.
 func (s *Store) DuplicateCallUIDCount(ctx context.Context, sessionID int64) (int, error) {
+	return s.duplicateCallUIDCount(ctx, s.Pool, sessionID)
+}
+
+func (s *Store) duplicateCallUIDCount(ctx context.Context, q querier, sessionID int64) (int, error) {
 	var n int
-	err := s.Pool.QueryRow(ctx,
+	err := q.QueryRow(ctx,
 		`SELECT count(*) FROM (
 		   SELECT 1 FROM tool_calls
 		    WHERE session_id = $1 AND call_uid IS NOT NULL
@@ -270,23 +283,26 @@ type AttachmentView struct {
 // hang on, for the web renderer. Bounded readers pass an ordinal range to
 // AttachmentsInRange.
 func (s *Store) Attachments(ctx context.Context, sessionID int64) ([]AttachmentView, error) {
-	return s.scanAttachments(ctx,
+	return s.scanAttachments(ctx, s.Pool,
 		`SELECT coalesce(message_ordinal, 0), sha256, coalesce(media_type,''), coalesce(byte_len,0), coalesce(filename,'')
 		   FROM attachments WHERE session_id = $1 ORDER BY message_ordinal, id`, sessionID)
 }
+
+// attachmentsInRangeQuery reads the attachments hanging on messages in an inclusive
+// ordinal window, shared like toolCallsInRangeQuery.
+const attachmentsInRangeQuery = `SELECT coalesce(message_ordinal, 0), sha256, coalesce(media_type,''), coalesce(byte_len,0), coalesce(filename,'')
+	   FROM attachments WHERE session_id = $1 AND message_ordinal BETWEEN $2 AND $3
+	   ORDER BY message_ordinal, id`
 
 // AttachmentsInRange returns the attachments hanging on messages in the inclusive
 // ordinal window [minOrdinal, maxOrdinal], so a bounded transcript read fetches
 // only the attachments for the messages it returned.
 func (s *Store) AttachmentsInRange(ctx context.Context, sessionID int64, minOrdinal, maxOrdinal int) ([]AttachmentView, error) {
-	return s.scanAttachments(ctx,
-		`SELECT coalesce(message_ordinal, 0), sha256, coalesce(media_type,''), coalesce(byte_len,0), coalesce(filename,'')
-		   FROM attachments WHERE session_id = $1 AND message_ordinal BETWEEN $2 AND $3
-		   ORDER BY message_ordinal, id`, sessionID, minOrdinal, maxOrdinal)
+	return s.scanAttachments(ctx, s.Pool, attachmentsInRangeQuery, sessionID, minOrdinal, maxOrdinal)
 }
 
-func (s *Store) scanAttachments(ctx context.Context, query string, args ...any) ([]AttachmentView, error) {
-	rows, err := s.Pool.Query(ctx, query, args...)
+func (s *Store) scanAttachments(ctx context.Context, q querier, query string, args ...any) ([]AttachmentView, error) {
+	rows, err := q.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query attachments: %w", err)
 	}
@@ -327,16 +343,23 @@ type ModelFallback struct {
 	DedupKey           string
 }
 
+// modelFallbackColumns is the shared select list behind every model_fallbacks read.
+const modelFallbackColumns = `message_ordinal, from_model, to_model, trigger,
+	        COALESCE(refusal_category, ''), COALESCE(refusal_explanation, ''),
+	        declined_input_tokens, declined_output_tokens, declined_cache_write_tokens,
+	        declined_cache_read_tokens, occurred_at, dedup_key`
+
 // SessionModelFallbacks returns a session's recorded model fallbacks in a stable order
 // (by when they occurred, then by dedup_key so rows with no timestamp still order
 // deterministically), capped at limit rows so the read stays bounded on a pathological
 // session. It reads the merged model_fallbacks rows the projection built. A limit of zero
 // or less means no cap; callers on hot paths pass ModelFallbackListCap.
 func (s *Store) SessionModelFallbacks(ctx context.Context, sessionID int64, limit int) ([]ModelFallback, error) {
-	query := `SELECT message_ordinal, from_model, to_model, trigger,
-	        COALESCE(refusal_category, ''), COALESCE(refusal_explanation, ''),
-	        declined_input_tokens, declined_output_tokens, declined_cache_write_tokens,
-	        declined_cache_read_tokens, occurred_at, dedup_key
+	return s.sessionModelFallbacks(ctx, s.Pool, sessionID, limit)
+}
+
+func (s *Store) sessionModelFallbacks(ctx context.Context, q querier, sessionID int64, limit int) ([]ModelFallback, error) {
+	query := `SELECT ` + modelFallbackColumns + `
 	   FROM model_fallbacks WHERE session_id = $1
 	  ORDER BY occurred_at, dedup_key`
 	args := []any{sessionID}
@@ -344,7 +367,11 @@ func (s *Store) SessionModelFallbacks(ctx context.Context, sessionID int64, limi
 		query += ` LIMIT $2`
 		args = append(args, limit)
 	}
-	rows, err := s.Pool.Query(ctx, query, args...)
+	return s.scanModelFallbacks(ctx, q, sessionID, query, args...)
+}
+
+func (s *Store) scanModelFallbacks(ctx context.Context, q querier, sessionID int64, query string, args ...any) ([]ModelFallback, error) {
+	rows, err := q.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query model fallbacks for session %d: %w", sessionID, err)
 	}
@@ -434,22 +461,4 @@ func (s *Store) SessionRawTo(ctx context.Context, w io.Writer, sessionID, limit 
 		return written, truncated, total, txErr
 	}
 	return written, truncated, total, nil
-}
-
-// Subagents returns sessions whose parent is the given session.
-func (s *Store) Subagents(ctx context.Context, parentID int64) ([]SessionSummary, error) {
-	rows, err := s.Pool.Query(ctx, sessionSelect+" WHERE s.parent_session_id = $1 ORDER BY s.id", parentID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []SessionSummary
-	for rows.Next() {
-		sm, err := scanSession(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, sm)
-	}
-	return out, rows.Err()
 }

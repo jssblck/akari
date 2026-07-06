@@ -502,47 +502,57 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 	render(w, r, http.StatusOK, web.ProjectPage(s.pageForNav(r, proj.RemoteKey, "projects"), proj, page.Sessions, page.Remainder, wf, filter, analytics, insights, rng))
 }
 
-// sessionView loads everything the session page (and its live body fragment)
-// needs: detail, transcript, tool metadata and attachments grouped by message, and
-// subagents. Each message carries its own per-turn usage (Message.Usage) and duplicate-prompt
-// verdict (Message.DuplicatePrompt), folded in the Messages read itself, so the transcript's
-// context/cost stamps and repeat badges need no second session-sized structure beside the message
-// slice the page already renders.
-func (s *Server) sessionView(r *http.Request, id int64) (store.SessionDetail, []store.Message, map[int][]store.ToolCallView, map[int][]store.AttachmentView, []store.SessionSummary, error) {
-	d, err := s.Store.SessionDetailByID(r.Context(), id)
+// sessionView loads everything the session page (and its live body fragment) renders:
+// detail, the bounded outline rows, the windowed transcript tail, tool metadata and
+// attachments grouped by message, subagents with their verdicts, the whole-work-item
+// rollup, the serving models, and the header stats. Each transcript message carries its
+// own per-turn usage (Message.Usage) and duplicate-prompt verdict
+// (Message.DuplicatePrompt), folded in the windowed read itself, so the transcript's
+// context/cost stamps and repeat badges need no second session-sized structure beside
+// the window the page renders.
+//
+// The transcript is the session's tail, not the whole session: an unbounded render is
+// what froze the tab on long sessions (P-2). Everything comes from one store snapshot
+// (store.SessionSnapshotByID), so the window, the shape surfaces, and the audit rows
+// can never mix projections across a mid-request rebuild.
+func (s *Server) sessionView(r *http.Request, id int64) (web.SessionView, error) {
+	snap, err := s.Store.SessionSnapshotByID(r.Context(), id)
 	if err != nil {
-		return d, nil, nil, nil, nil, err
+		return web.SessionView{}, err
 	}
-	msgs, err := s.Store.Messages(r.Context(), id)
-	if err != nil {
-		return d, nil, nil, nil, nil, err
+	return sessionViewFrom(snap), nil
+}
+
+// sessionViewFrom builds the web view from one store snapshot. Pure assembly: every
+// row it maps was read in the snapshot's transaction, so nothing here can straddle a
+// rebuild.
+func sessionViewFrom(snap store.SessionSnapshot) web.SessionView {
+	v := web.SessionView{
+		Detail:    snap.Audit.Detail,
+		Subagents: snap.Audit.Subagents,
+		Tree:      snap.Audit.Tree,
+		Models:    snap.Audit.Models,
+		Outline:   snap.Outline,
+		Tools:     web.ToolsByOrdinal(snap.Tools),
+		DupIDs:    snap.DupIDs,
+		Header:    sessionHeaderStats(snap.Audit.Detail, snap.Audit.Signals, snap.Audit.Fallbacks),
 	}
-	tools, err := s.Store.ToolCalls(r.Context(), id)
-	if err != nil {
-		return d, nil, nil, nil, nil, err
-	}
-	atts, err := s.Store.Attachments(r.Context(), id)
-	if err != nil {
-		return d, nil, nil, nil, nil, err
-	}
-	subs, err := s.Store.Subagents(r.Context(), id)
-	if err != nil {
-		return d, nil, nil, nil, nil, err
-	}
-	return d, msgs, web.ToolsByOrdinal(tools), web.AttachmentsByOrdinal(atts), subs, nil
+	v.SetPage(snap.Page)
+	return v
 }
 
 // sessionHeaderStats builds the derived stat-tile inputs the session instrument header
-// renders: the session's all-usage cache effectiveness and its stored quality signals.
-// Both session-page handlers and the live body fragment share it, so the header reads the
-// same way on first load and on every SSE refresh.
+// renders: the session's all-usage cache effectiveness, its stored quality signals, and
+// the header tile's capped fallback list. Pure derivation over rows the caller already
+// holds: the session page passes them from one store snapshot (SessionAudit), so the
+// tiles can never mix projections, and the public page passes its own pool reads.
 //
-// The Cache tile comes straight off the already-loaded SessionDetail rollups (the token
-// classes plus the parse-time cache-savings fold), so it costs nothing here. That is the
-// point of the rollup: the live body re-renders on every SSE update, and reading the tile
-// from the row the caller already holds keeps a long session's K refreshes linear rather
-// than rescanning its K usage rows each time. Only the stored signals still need a read.
-func (s *Server) sessionHeaderStats(ctx context.Context, d store.SessionDetail) (web.HeaderStats, error) {
+// The Cache tile comes straight off the SessionDetail rollups (the token classes plus
+// the parse-time cache-savings fold). That is the point of the rollup: the live body
+// re-renders on every SSE update, and reading the tile from the row the caller already
+// holds keeps a long session's K refreshes linear rather than rescanning its K usage
+// rows each time.
+func sessionHeaderStats(d store.SessionDetail, sig store.SessionSignals, fallbacks []store.ModelFallback) web.HeaderStats {
 	cache := store.CacheStats{
 		Input:             d.TotalInput,
 		Output:            d.TotalOutput,
@@ -550,23 +560,6 @@ func (s *Server) sessionHeaderStats(ctx context.Context, d store.SessionDetail) 
 		CacheWrite:        d.TotalCacheWrite,
 		SavingsUSD:        d.TotalCacheSavingsUSD,
 		SavingsIncomplete: d.CacheSavingsIncomplete,
-	}
-	sig, err := s.Store.SessionSignalsByID(ctx, d.ID)
-	if err != nil {
-		return web.HeaderStats{}, err
-	}
-	// Only a session whose rollup counted a fallback pays for the fallbacks read; the
-	// common no-fallback session skips it, so the header tile and transcript notices cost
-	// nothing on the overwhelming majority of pages. The rollup is the O(1) gate.
-	var fallbacks []store.ModelFallback
-	if d.ModelFallbackCount > 0 {
-		// Cap the read so a pathological session cannot grow the tooltip slice or the
-		// transcript-notice map without bound; the O(1) ModelFallbackCount stays the true
-		// total, and the tooltip renders "plus N more" from it when it overflows the cap.
-		fallbacks, err = s.Store.SessionModelFallbacks(ctx, d.ID, store.ModelFallbackListCap)
-		if err != nil {
-			return web.HeaderStats{}, err
-		}
 	}
 	// The observed-thinking band is an absolute cut on the token scale, carried whole by the
 	// stored signals row, so the readout reads straight from the row with no extra query: the
@@ -584,7 +577,7 @@ func (s *Server) sessionHeaderStats(ctx context.Context, d store.SessionDetail) 
 			Coverage:   sig.ThinkingCoverage(),
 		}
 	}
-	return web.HeaderStats{Cache: cache, Signals: sig, Fallbacks: fallbacks, Thinking: thinking}, nil
+	return web.HeaderStats{Cache: cache, Signals: sig, Fallbacks: fallbacks, Thinking: thinking}
 }
 
 func (s *Server) handleSessionPage(w http.ResponseWriter, r *http.Request) {
@@ -593,7 +586,7 @@ func (s *Server) handleSessionPage(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(r, "Not found"), http.StatusNotFound, "Session not found."))
 		return
 	}
-	d, msgs, tools, atts, subs, err := s.sessionView(r, id)
+	v, err := s.sessionView(r, id)
 	if errors.Is(err, store.ErrNotFound) {
 		render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(r, "Not found"), http.StatusNotFound, "Session not found."))
 		return
@@ -602,33 +595,40 @@ func (s *Server) handleSessionPage(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load session."))
 		return
 	}
-	// A bounded scalar (the GROUP BY runs in the database), so flagging a repeated
-	// tool-call id costs one count query, not an in-process scan of every tool call.
-	dupIDs, err := s.Store.DuplicateCallUIDCount(r.Context(), id)
-	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load session."))
-		return
-	}
-	hs, err := s.sessionHeaderStats(r.Context(), d)
-	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load session."))
-		return
-	}
-	title := web.SessionPageTitle(d)
+	title := web.SessionPageTitle(v.Detail)
 	p, _ := principalFrom(r.Context())
-	owner := p.UserID == d.OwnerID
-	render(w, r, http.StatusOK, web.SessionPage(s.pageForNav(r, title, "sessions"), d, msgs, tools, atts, subs, hs, dupIDs, true, owner))
+	owner := p.UserID == v.Detail.OwnerID
+	render(w, r, http.StatusOK, web.SessionPage(s.pageForNav(r, title, "sessions"), v, true, owner))
 }
 
-// handleSessionBody serves just the live-updating body fragment, re-fetched by
-// the page over SSE when new bytes are parsed.
+// handleSessionBody serves the live body's fragments. Three shapes, chosen by query
+// param, all stateless (the client names its own position, per the P-2 render map):
+//
+//   - ?after=N: the turns past the last ordinal the client rendered, for the SSE
+//     append, plus out-of-band swaps for the instruments and subagents. When the
+//     client is too far behind for one append (the window read hit its cap, or its
+//     ordinal has run past the projection after an epoch rebuild reshaped it), the
+//     response retargets to #session-body and re-renders the windowed body whole, so
+//     the client can never assemble a transcript with a hidden gap.
+//   - ?before=N: the window of turns preceding ordinal N, for "Show earlier".
+//   - bare: the whole windowed body plus the out-of-band ribbon and outline
+//     (SessionResync), the full-refresh fallback.
 func (s *Server) handleSessionBody(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
-	d, msgs, tools, atts, subs, err := s.sessionView(r, id)
+	q := r.URL.Query()
+	if a := q.Get("after"); a != "" {
+		s.serveSessionAppend(w, r, id, a)
+		return
+	}
+	if b := q.Get("before"); b != "" {
+		s.serveSessionEarlier(w, r, id, b)
+		return
+	}
+	v, err := s.sessionView(r, id)
 	if errors.Is(err, store.ErrNotFound) {
 		http.NotFound(w, r)
 		return
@@ -639,16 +639,76 @@ func (s *Server) handleSessionBody(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Could not load session.", http.StatusInternalServerError)
 		return
 	}
-	// The live fragment re-renders the stat header on every SSE update. The Cache tile now
-	// comes off the same SessionDetail the body already loaded, so it tracks the session's
-	// growing usage in step with the Tokens tile beside it without a second read; only the
-	// stored quality signals are fetched here.
-	hs, err := s.sessionHeaderStats(r.Context(), d)
+	// The full-refresh fallback arrives via htmx (app.js swaps it into #session-body),
+	// so the resync's out-of-band ribbon and outline land too: a transcript rendering
+	// its first rows populates the shape surfaces in the same swap.
+	render(w, r, http.StatusOK, web.SessionResync(v))
+}
+
+// serveSessionAppend answers ?after=N: the incremental SSE path.
+func (s *Server) serveSessionAppend(w http.ResponseWriter, r *http.Request, id int64, arg string) {
+	after, err := strconv.Atoi(arg)
 	if err != nil {
-		http.Error(w, "Could not load session.", http.StatusInternalServerError)
+		http.Error(w, "bad after cursor", http.StatusBadRequest)
 		return
 	}
-	render(w, r, http.StatusOK, web.SessionMain(d, msgs, tools, atts, subs, hs))
+	snap, err := s.Store.SessionAppendByID(r.Context(), id, after)
+	if err != nil {
+		s.fragmentError(w, err)
+		return
+	}
+	// An append can only extend a transcript the client already holds a true prefix
+	// of. Two cases break that: the read hit its cap (More: too many new rows for one
+	// fragment) and a cursor naming an ordinal the projection no longer has (an epoch
+	// rebuild reshaped or emptied the transcript under the open tab, so the DOM no
+	// longer matches). The seed proves the cursor: it reads backward from `after`
+	// inclusive, so its last row carries exactly `after` whenever that row exists. A
+	// client only sends ?after= for rows it actually rendered, so any invalid cursor,
+	// including one over a projection now empty, re-renders the windowed body whole;
+	// htmx honors the retarget headers.
+	cursorValid := len(snap.Page.Seed) > 0 && snap.Page.Seed[len(snap.Page.Seed)-1].Ordinal == after
+	if snap.Page.More || !cursorValid {
+		v, err := s.sessionView(r, id)
+		if err != nil {
+			s.fragmentError(w, err)
+			return
+		}
+		w.Header().Set("HX-Retarget", "#session-body")
+		w.Header().Set("HX-Reswap", "innerHTML")
+		render(w, r, http.StatusOK, web.SessionResync(v))
+		return
+	}
+	render(w, r, http.StatusOK, web.TranscriptAppend(sessionViewFrom(snap)))
+}
+
+// serveSessionEarlier answers ?before=N: the "Show earlier" path. The fragment renders
+// only settled rows, whose page carries its own tools, attachments, and fallback
+// notices from one store snapshot; there are no out-of-band refreshes, so the detail
+// and the page are all it needs.
+func (s *Server) serveSessionEarlier(w http.ResponseWriter, r *http.Request, id int64, arg string) {
+	before, err := strconv.Atoi(arg)
+	if err != nil {
+		http.Error(w, "bad before cursor", http.StatusBadRequest)
+		return
+	}
+	d, page, err := s.Store.SessionEarlierByID(r.Context(), id, before)
+	if err != nil {
+		s.fragmentError(w, err)
+		return
+	}
+	v := web.SessionView{Detail: d}
+	v.SetPage(page)
+	render(w, r, http.StatusOK, web.TranscriptEarlier(v))
+}
+
+// fragmentError maps a fragment load failure to its status: a vanished session is 404,
+// anything else a 500 (never "not found" for a database hiccup).
+func (s *Server) fragmentError(w http.ResponseWriter, err error) {
+	if errors.Is(err, store.ErrNotFound) {
+		http.Error(w, "Session not found.", http.StatusNotFound)
+		return
+	}
+	http.Error(w, "Could not load session.", http.StatusInternalServerError)
 }
 
 // handleSessionEvents is the SSE endpoint that signals a watching browser to
