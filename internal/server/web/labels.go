@@ -74,6 +74,23 @@ func ProjectFacetLabel(pf store.ProjectFacet) string {
 	return pf.Key
 }
 
+// SplitProjectFacets partitions the project filter options into git-remote repositories and
+// local folders, preserving the store's busiest-first order within each group. The session
+// toolbar renders the two as separate option groups so a reader scanning for a repository is
+// not wading through a machine's scratch folders: a repository is the audit unit, a local
+// folder the looser catch-all beneath it. The store already orders remotes ahead of locals
+// (GlobalFacets), so this only routes each option to its bucket.
+func SplitProjectFacets(projects []store.ProjectFacet) (repos, folders []store.ProjectFacet) {
+	for _, pf := range projects {
+		if IsLocalKind(pf.Kind) {
+			folders = append(folders, pf)
+		} else {
+			repos = append(repos, pf)
+		}
+	}
+	return repos, folders
+}
+
 // LocalPath recovers the working-directory path from a local project's synthetic
 // key ("local:machine:path"), for display beside the folder name. It returns ""
 // for a remote project.

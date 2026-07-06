@@ -206,12 +206,16 @@ func (s *Server) handleProjectsIndex(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "projects"), http.StatusInternalServerError, "Could not load projects."))
 		return
 	}
-	// The index lists git-remote projects only. Local (standalone/orphaned)
-	// folders reach the reader through the Sessions filter rail, so they are kept
-	// off this surface rather than crowding it with a second table.
-	var remotes []store.ProjectSummary
+	// The index splits git-remote repositories from local (standalone/orphaned)
+	// folders into two sections: a repository is the audit unit a reader scans for
+	// first, a local folder the looser catch-all beneath it. The store returns both
+	// kinds in one activity-ordered list; partition it here so the template renders
+	// each section in that order.
+	var remotes, locals []store.ProjectSummary
 	for _, pr := range projects {
-		if !web.IsLocalKind(pr.Kind) {
+		if web.IsLocalKind(pr.Kind) {
+			locals = append(locals, pr)
+		} else {
 			remotes = append(remotes, pr)
 		}
 	}
@@ -221,7 +225,7 @@ func (s *Server) handleProjectsIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setDashboardCache(w)
-	render(w, r, http.StatusOK, web.ProjectsPage(s.pageForNav(r, "Projects", "projects"), remotes, spark))
+	render(w, r, http.StatusOK, web.ProjectsPage(s.pageForNav(r, "Projects", "projects"), remotes, locals, spark))
 }
 
 // handleSessions is the global, faceted session list across every project. An

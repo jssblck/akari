@@ -219,23 +219,31 @@ func TestOverviewPageByUserBreakdownGatedOnMultipleUsers(t *testing.T) {
 	}
 }
 
-// The projects index is now just the table: no usage panel (the Overview owns
-// fleet usage), no page heading (the sidebar marks the section), and no
-// local-folder list. The token columns collapse to one "Tokens" total whose
-// figure is the sum across all four classes, and the row carries a hover card
-// breaking that total back out.
-func TestProjectsPageIsBareTable(t *testing.T) {
+// The projects index heads a Repositories table: no usage panel (the Overview owns
+// fleet usage) and no page heading (the sidebar marks the section), but a section
+// heading per kind. With no local folders in scope the Local folders section stays
+// absent. The token columns collapse to one "Tokens" total whose figure is the sum
+// across all four classes, and the row carries a hover card breaking that total out.
+func TestProjectsPageRepositoriesSection(t *testing.T) {
 	p := Page{Title: "Projects", LoggedIn: true, Active: "projects", Username: "Ada Lovelace"}
 	projects := []store.ProjectSummary{{
 		ID: 1, RemoteKey: "hopper/akari", Kind: "remote", SessionCount: 3,
 		TotalInput: 100, TotalOutput: 50, TotalCacheRead: 30, TotalCacheWrite: 20,
 	}}
-	html := renderComponent(t, ProjectsPage(p, projects, nil))
+	html := renderComponent(t, ProjectsPage(p, projects, nil, nil))
 
 	for _, gone := range []string{`data-chart`, `data-heatmap`, `<h2>Usage</h2>`, `<h1>Projects</h1>`} {
 		if strings.Contains(html, gone) {
-			t.Errorf("projects index should be a bare table; found stripped markup %q", gone)
+			t.Errorf("projects index should carry no usage panel or page heading; found %q", gone)
 		}
+	}
+	// The Repositories section heads the table; with no locals the Local folders
+	// section does not render.
+	if !strings.Contains(html, `<h2>Repositories</h2>`) {
+		t.Error("projects index should head the repositories table with a Repositories section")
+	}
+	if strings.Contains(html, `Local folders`) {
+		t.Error("with no local folders in scope, the Local folders section should not render")
 	}
 	// The merged column shows the grand total (100+50+30+20 = 200) with thousands
 	// separators, plus all four classes in the hover card. Each class is asserted
@@ -252,6 +260,82 @@ func TestProjectsPageIsBareTable(t *testing.T) {
 	}
 	if strings.Contains(html, `<th class="num">Input</th>`) {
 		t.Error("projects index should fold Input/Output/Cost into one Tokens column, not list Input")
+	}
+}
+
+// With local folders in scope the index renders a second section below Repositories: a
+// Local folders table whose rows lead with the folder name and its state chip, carry the
+// filesystem path recovered from the synthetic key, and link to the same project page.
+func TestProjectsPageLocalFoldersSection(t *testing.T) {
+	p := Page{Title: "Projects", LoggedIn: true, Active: "projects", Username: "Ada Lovelace"}
+	remotes := []store.ProjectSummary{{ID: 1, RemoteKey: "hopper/akari", Kind: "remote", SessionCount: 3}}
+	locals := []store.ProjectSummary{{
+		ID: 5, RemoteKey: "local:laptop:/home/grace/scratch", Host: "laptop",
+		DisplayName: "scratch", Kind: "standalone", SessionCount: 2,
+	}}
+	html := renderComponent(t, ProjectsPage(p, remotes, locals, nil))
+
+	for _, want := range []string{
+		`<h2>Repositories</h2>`,
+		`<h2>Local folders</h2>`,
+		`>scratch</a>`,                    // the folder name links, not the synthetic key
+		`class="tag standalone"`,          // the state chip rides the folder row
+		`/home/grace/scratch`,             // the path recovered from the local: key
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("local folders section missing %q", want)
+		}
+	}
+	// The synthetic key never shows as a row label.
+	if strings.Contains(html, `>local:laptop:/home/grace/scratch</a>`) {
+		t.Error("a local folder should link by folder name, not its synthetic local: key")
+	}
+}
+
+// SplitProjectFacets routes git-remote projects into the repos bucket and standalone or
+// orphaned folders into the folders bucket, holding the input order within each.
+func TestSplitProjectFacets(t *testing.T) {
+	in := []store.ProjectFacet{
+		{ID: 1, Key: "hopper/akari", Kind: "remote"},
+		{ID: 2, Name: "scratch", Kind: "standalone"},
+		{ID: 3, Key: "lovelace/engine", Kind: "remote"},
+		{ID: 4, Name: "gone", Kind: "orphaned"},
+	}
+	repos, folders := SplitProjectFacets(in)
+	if len(repos) != 2 || repos[0].ID != 1 || repos[1].ID != 3 {
+		t.Errorf("repos = %+v, want the two remotes in order (1, 3)", repos)
+	}
+	if len(folders) != 2 || folders[0].ID != 2 || folders[1].ID != 4 {
+		t.Errorf("folders = %+v, want the standalone then orphaned (2, 4)", folders)
+	}
+}
+
+// The sessions toolbar groups the project filter into a Repositories option group and a
+// Local folders option group, so a reader scanning for a repository is not wading through a
+// machine's scratch folders. A scope with only repositories renders no Local folders group.
+func TestSessionsToolbarProjectOptgroups(t *testing.T) {
+	p := Page{Title: "Sessions", LoggedIn: true, Active: "sessions", Username: "grace"}
+	facets := store.GlobalFacetValues{Projects: []store.ProjectFacet{
+		{ID: 1, Key: "hopper/akari", Kind: "remote"},
+		{ID: 2, Name: "scratch", Kind: "standalone"},
+	}}
+	html := renderComponent(t, SessionsPage(p, nil, facets, store.SessionFilter{}, SessionFooter{}))
+	for _, want := range []string{
+		`<optgroup label="Repositories">`,
+		`<optgroup label="Local folders">`,
+		`>hopper/akari</option>`,
+		`>scratch</option>`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("project facet missing %q", want)
+		}
+	}
+
+	// A fleet with no local folders renders only the Repositories group.
+	reposOnly := store.GlobalFacetValues{Projects: []store.ProjectFacet{{ID: 1, Key: "hopper/akari", Kind: "remote"}}}
+	bare := renderComponent(t, SessionsPage(p, nil, reposOnly, store.SessionFilter{}, SessionFooter{}))
+	if strings.Contains(bare, `<optgroup label="Local folders">`) {
+		t.Error("with no local folders, the project facet should render no Local folders group")
 	}
 }
 

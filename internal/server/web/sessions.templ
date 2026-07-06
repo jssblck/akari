@@ -63,8 +63,20 @@ templ sessionsToolbar(facets store.GlobalFacetValues, sel store.SessionFilter) {
 		}
 		@tbSelect("Project", "project") {
 			<option value="" selected?={ sel.ProjectID == 0 }>All projects</option>
-			for _, pf := range facets.Projects {
-				<option value={ fmt.Sprintf("%d", pf.ID) } selected?={ sel.ProjectID == pf.ID }>{ ProjectFacetLabel(pf) }</option>
+			{{ repos, folders := SplitProjectFacets(facets.Projects) }}
+			if len(repos) > 0 {
+				<optgroup label="Repositories">
+					for _, pf := range repos {
+						<option value={ fmt.Sprintf("%d", pf.ID) } selected?={ sel.ProjectID == pf.ID }>{ ProjectFacetLabel(pf) }</option>
+					}
+				</optgroup>
+			}
+			if len(folders) > 0 {
+				<optgroup label="Local folders">
+					for _, pf := range folders {
+						<option value={ fmt.Sprintf("%d", pf.ID) } selected?={ sel.ProjectID == pf.ID }>{ ProjectFacetLabel(pf) }</option>
+					}
+				</optgroup>
 			}
 		}
 		if len(facets.Machines) > 1 {

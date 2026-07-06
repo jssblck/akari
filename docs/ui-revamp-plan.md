@@ -39,10 +39,17 @@ verified against the live dev server:
   out, the tool failure rate over the window's calls), each sentence dropped when
   its figure is unmeasured. The concurrency tiles name their unit ("peak
   concurrent sessions"); the other number tiles already carried theirs.
+- B-4: repositories and local folders are split apart. The sessions project
+  filter groups its options under "Repositories" and "Local folders" headings, so
+  a reader is not wading through a machine's scratch folders to find a repo. The
+  Projects index, which used to hide local folders behind a footnote, now heads a
+  Repositories table and a Local folders table (each folder by name, state chip,
+  and recovered path). Presentation only: the store already tags every project's
+  kind and orders remotes first.
 
-Remaining: B-4 (repositories vs local folders), P-2 (transcript windowing +
-incremental SSE), P-3 (keyset pagination), D (session detail auditor view). Each
-is independent and can land as its own PR per the sequencing table below.
+Remaining: P-2 (transcript windowing + incremental SSE), P-3 (keyset
+pagination), D (session detail auditor view). Each is independent and can land as
+its own PR per the sequencing table below.
 
 ## The lens
 
