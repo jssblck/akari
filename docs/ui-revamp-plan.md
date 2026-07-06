@@ -1,9 +1,38 @@
 # UI revamp plan: usable, approachable, performant
 
-Status: proposed. Written 2026-07-04 from a full walkthrough of the live app at
-akari.jessica.black plus a code audit of `internal/server/web/` and
+Status: in progress. Written 2026-07-04 from a full walkthrough of the live app
+at akari.jessica.black plus a code audit of `internal/server/web/` and
 `internal/server/httpapi/`. This plan is the working brief for the implementing
 agents; each workstream is scoped so it can be picked up independently.
+
+## Shipped so far
+
+Landed on this branch, each as its own commit, tests green under eph and each
+verified against the live dev server:
+
+- P-1 (cache) and P-4: the fleet Insights snapshot is memoized per range for a
+  short TTL, and `/overview`, `/projects`, `/insights` carry a short private
+  `Cache-Control`. C1 (the `NaN` fan-out axis), C2 (the unstyled 404), and C3
+  (the bare `-` quality on live sessions) are fixed.
+- P-1 (parallelize): `Store.Insights` fans its panels out concurrently over one
+  exported MVCC snapshot (`pg_export_snapshot`), so the cold pipeline runs in the
+  slowest panel's time rather than the sum, and the handler emits a
+  `Server-Timing` header.
+- B-1 and B-3: the sessions feed defaults to top-level work (subagents hidden
+  behind a toolbar toggle), rows carry a grade chip and an outcome word, and row
+  titles strip harness preambles (slash-command envelopes, AGENTS.md dumps, the
+  Claude Code local-command caveat).
+- C: the Overview is now an audit dashboard. A four-tile verdict (work,
+  completion rate, quality GPA, spend with wasted spend pulled out) sits over a
+  ranked needs-attention shortlist of the sessions worth opening, both scoped to
+  the window and swapping together.
+- E-1: every Insights instrument leads with a plain-language caption; the
+  schema-level detail moves into a demoted "How it's measured" disclosure (A5).
+
+Remaining: B-2 (tree cost rollups), B-4 (repositories vs local folders), P-2
+(transcript windowing + incremental SSE), P-3 (keyset pagination), D (session
+detail auditor view), E-2 (units on tiles), E-3 (Insights summary strip). Each
+is independent and can land as its own PR per the sequencing table below.
 
 ## The lens
 
