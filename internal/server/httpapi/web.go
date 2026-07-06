@@ -502,34 +502,76 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 	render(w, r, http.StatusOK, web.ProjectPage(s.pageForNav(r, proj.RemoteKey, "projects"), proj, page.Sessions, page.Remainder, wf, filter, analytics, insights, rng))
 }
 
-// sessionView loads everything the session page (and its live body fragment)
-// needs: detail, transcript, tool metadata and attachments grouped by message, and
-// subagents. Each message carries its own per-turn usage (Message.Usage) and duplicate-prompt
-// verdict (Message.DuplicatePrompt), folded in the Messages read itself, so the transcript's
-// context/cost stamps and repeat badges need no second session-sized structure beside the message
-// slice the page already renders.
-func (s *Server) sessionView(r *http.Request, id int64) (store.SessionDetail, []store.Message, map[int][]store.ToolCallView, map[int][]store.AttachmentView, []store.SessionSummary, error) {
+// sessionView loads everything the session page (and its live body fragment) renders:
+// detail, the bounded outline rows, the windowed transcript tail, tool metadata and
+// attachments grouped by message, subagents with their verdicts, the whole-work-item
+// rollup, the serving models, and the header stats. Each transcript message carries its
+// own per-turn usage (Message.Usage) and duplicate-prompt verdict
+// (Message.DuplicatePrompt), folded in the windowed read itself, so the transcript's
+// context/cost stamps and repeat badges need no second session-sized structure beside
+// the window the page renders.
+//
+// The transcript is the session's tail (store.TranscriptTail), not the whole session:
+// an unbounded render is what froze the tab on long sessions (P-2). The outline and
+// ribbon still cover every turn through the bounded-column outline read, and the tool
+// map is loaded whole because both consume it; only the attachments are cut to the
+// window, since only rendered rows show them.
+func (s *Server) sessionView(r *http.Request, id int64) (web.SessionView, error) {
+	v := web.SessionView{}
 	d, err := s.Store.SessionDetailByID(r.Context(), id)
 	if err != nil {
-		return d, nil, nil, nil, nil, err
+		return v, err
 	}
-	msgs, err := s.Store.Messages(r.Context(), id)
-	if err != nil {
-		return d, nil, nil, nil, nil, err
+	v.Detail = d
+	if v.Outline, err = s.Store.OutlineMessages(r.Context(), id); err != nil {
+		return v, err
+	}
+	if v.Page, err = s.Store.TranscriptTail(r.Context(), id, nil); err != nil {
+		return v, err
 	}
 	tools, err := s.Store.ToolCalls(r.Context(), id)
 	if err != nil {
-		return d, nil, nil, nil, nil, err
+		return v, err
 	}
-	atts, err := s.Store.Attachments(r.Context(), id)
+	v.Tools = web.ToolsByOrdinal(tools)
+	if err := s.fillWindowAttachments(r.Context(), id, &v); err != nil {
+		return v, err
+	}
+	return v, s.fillSessionAudit(r.Context(), &v)
+}
+
+// fillWindowAttachments loads the attachments for exactly the rendered window's ordinal
+// range. A window is contiguous, so the range read returns precisely the rendered rows'
+// attachments; an empty window needs none.
+func (s *Server) fillWindowAttachments(ctx context.Context, id int64, v *web.SessionView) error {
+	if len(v.Page.Msgs) == 0 {
+		return nil
+	}
+	atts, err := s.Store.AttachmentsInRange(ctx, id,
+		v.Page.Msgs[0].Ordinal, v.Page.Msgs[len(v.Page.Msgs)-1].Ordinal)
 	if err != nil {
-		return d, nil, nil, nil, nil, err
+		return err
 	}
-	subs, err := s.Store.Subagents(r.Context(), id)
-	if err != nil {
-		return d, nil, nil, nil, nil, err
+	v.Attachments = web.AttachmentsByOrdinal(atts)
+	return nil
+}
+
+// fillSessionAudit loads the audit-header inputs shared by the full view and the live
+// append's out-of-band refresh: subagents with verdicts, the work-item rollup, the
+// serving models, and the header stats (cache, signals, fallbacks, thinking).
+func (s *Server) fillSessionAudit(ctx context.Context, v *web.SessionView) error {
+	var err error
+	if v.Subagents, err = s.Store.Subagents(ctx, v.Detail.ID); err != nil {
+		return err
 	}
-	return d, msgs, web.ToolsByOrdinal(tools), web.AttachmentsByOrdinal(atts), subs, nil
+	if v.Tree, err = s.Store.TreeRollupFor(ctx, v.Detail.ID); err != nil {
+		return err
+	}
+	if v.Models, err = s.Store.SessionModels(ctx, v.Detail.ID); err != nil {
+		return err
+	}
+	v.Header, err = s.sessionHeaderStats(ctx, v.Detail)
+	return err
 }
 
 // sessionHeaderStats builds the derived stat-tile inputs the session instrument header
@@ -593,7 +635,7 @@ func (s *Server) handleSessionPage(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(r, "Not found"), http.StatusNotFound, "Session not found."))
 		return
 	}
-	d, msgs, tools, atts, subs, err := s.sessionView(r, id)
+	v, err := s.sessionView(r, id)
 	if errors.Is(err, store.ErrNotFound) {
 		render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(r, "Not found"), http.StatusNotFound, "Session not found."))
 		return
@@ -604,31 +646,44 @@ func (s *Server) handleSessionPage(w http.ResponseWriter, r *http.Request) {
 	}
 	// A bounded scalar (the GROUP BY runs in the database), so flagging a repeated
 	// tool-call id costs one count query, not an in-process scan of every tool call.
-	dupIDs, err := s.Store.DuplicateCallUIDCount(r.Context(), id)
+	v.DupIDs, err = s.Store.DuplicateCallUIDCount(r.Context(), id)
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load session."))
 		return
 	}
-	hs, err := s.sessionHeaderStats(r.Context(), d)
-	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load session."))
-		return
-	}
-	title := web.SessionPageTitle(d)
+	title := web.SessionPageTitle(v.Detail)
 	p, _ := principalFrom(r.Context())
-	owner := p.UserID == d.OwnerID
-	render(w, r, http.StatusOK, web.SessionPage(s.pageForNav(r, title, "sessions"), d, msgs, tools, atts, subs, hs, dupIDs, true, owner))
+	owner := p.UserID == v.Detail.OwnerID
+	render(w, r, http.StatusOK, web.SessionPage(s.pageForNav(r, title, "sessions"), v, true, owner))
 }
 
-// handleSessionBody serves just the live-updating body fragment, re-fetched by
-// the page over SSE when new bytes are parsed.
+// handleSessionBody serves the live body's fragments. Three shapes, chosen by query
+// param, all stateless (the client names its own position, per the P-2 render map):
+//
+//   - ?after=N: the turns past the last ordinal the client rendered, for the SSE
+//     append, plus out-of-band swaps for the instruments and subagents. When the
+//     client is too far behind for one append (the window read hit its cap, or its
+//     ordinal has run past the projection after an epoch rebuild reshaped it), the
+//     response retargets to #session-body and re-renders the windowed body whole, so
+//     the client can never assemble a transcript with a hidden gap.
+//   - ?before=N: the window of turns preceding ordinal N, for "Show earlier".
+//   - bare: the whole windowed body (SessionMain), the full-refresh fallback.
 func (s *Server) handleSessionBody(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
-	d, msgs, tools, atts, subs, err := s.sessionView(r, id)
+	q := r.URL.Query()
+	if a := q.Get("after"); a != "" {
+		s.serveSessionAppend(w, r, id, a)
+		return
+	}
+	if b := q.Get("before"); b != "" {
+		s.serveSessionEarlier(w, r, id, b)
+		return
+	}
+	v, err := s.sessionView(r, id)
 	if errors.Is(err, store.ErrNotFound) {
 		http.NotFound(w, r)
 		return
@@ -639,16 +694,112 @@ func (s *Server) handleSessionBody(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Could not load session.", http.StatusInternalServerError)
 		return
 	}
-	// The live fragment re-renders the stat header on every SSE update. The Cache tile now
-	// comes off the same SessionDetail the body already loaded, so it tracks the session's
-	// growing usage in step with the Tokens tile beside it without a second read; only the
-	// stored quality signals are fetched here.
-	hs, err := s.sessionHeaderStats(r.Context(), d)
+	render(w, r, http.StatusOK, web.SessionMain(v))
+}
+
+// loadFragmentView builds the SessionView a windowed transcript fragment renders: the
+// detail, the given page, the page's tools and attachments (range reads, so a fragment
+// costs its own rows and not the session), and the header stats (whose fallbacks map
+// the rows' notices read). The audit inputs are filled only when the fragment carries
+// the out-of-band instruments refresh (the append path); the earlier path skips them.
+func (s *Server) loadFragmentView(ctx context.Context, d store.SessionDetail, page store.TranscriptPage, audit bool) (web.SessionView, error) {
+	v := web.SessionView{Detail: d, Page: page}
+	if len(page.Msgs) > 0 {
+		lo, hi := page.Msgs[0].Ordinal, page.Msgs[len(page.Msgs)-1].Ordinal
+		tools, err := s.Store.ToolCallsInRange(ctx, d.ID, lo, hi)
+		if err != nil {
+			return v, err
+		}
+		v.Tools = web.ToolsByOrdinal(tools)
+		if err := s.fillWindowAttachments(ctx, d.ID, &v); err != nil {
+			return v, err
+		}
+	}
+	if audit {
+		return v, s.fillSessionAudit(ctx, &v)
+	}
+	var err error
+	v.Header, err = s.sessionHeaderStats(ctx, d)
+	return v, err
+}
+
+// serveSessionAppend answers ?after=N: the incremental SSE path.
+func (s *Server) serveSessionAppend(w http.ResponseWriter, r *http.Request, id int64, arg string) {
+	after, err := strconv.Atoi(arg)
 	if err != nil {
-		http.Error(w, "Could not load session.", http.StatusInternalServerError)
+		http.Error(w, "bad after cursor", http.StatusBadRequest)
 		return
 	}
-	render(w, r, http.StatusOK, web.SessionMain(d, msgs, tools, atts, subs, hs))
+	d, err := s.Store.SessionDetailByID(r.Context(), id)
+	if err != nil {
+		s.fragmentError(w, err)
+		return
+	}
+	page, err := s.Store.TranscriptAfter(r.Context(), id, after)
+	if err != nil {
+		s.fragmentError(w, err)
+		return
+	}
+	// An append can only extend a transcript the client already holds a true prefix
+	// of. Two cases break that: the read hit its cap (page.More: too many new rows for
+	// one fragment) and a cursor naming an ordinal the projection no longer has (an
+	// epoch rebuild reshaped the transcript under the open tab, so the DOM no longer
+	// matches). The seed proves the cursor: it reads backward from `after` inclusive,
+	// so its last row carries exactly `after` whenever that row exists. Both cases
+	// re-render the windowed body whole; htmx honors the retarget headers.
+	cursorValid := len(page.Seed) > 0 && page.Seed[len(page.Seed)-1].Ordinal == after
+	if page.More || (!cursorValid && d.MessageCount > 0) {
+		v, err := s.sessionView(r, id)
+		if err != nil {
+			s.fragmentError(w, err)
+			return
+		}
+		w.Header().Set("HX-Retarget", "#session-body")
+		w.Header().Set("HX-Reswap", "innerHTML")
+		render(w, r, http.StatusOK, web.SessionMain(v))
+		return
+	}
+	v, err := s.loadFragmentView(r.Context(), d, page, true)
+	if err != nil {
+		s.fragmentError(w, err)
+		return
+	}
+	render(w, r, http.StatusOK, web.TranscriptAppend(v))
+}
+
+// serveSessionEarlier answers ?before=N: the "Show earlier" path.
+func (s *Server) serveSessionEarlier(w http.ResponseWriter, r *http.Request, id int64, arg string) {
+	before, err := strconv.Atoi(arg)
+	if err != nil {
+		http.Error(w, "bad before cursor", http.StatusBadRequest)
+		return
+	}
+	d, err := s.Store.SessionDetailByID(r.Context(), id)
+	if err != nil {
+		s.fragmentError(w, err)
+		return
+	}
+	page, err := s.Store.TranscriptTail(r.Context(), id, &before)
+	if err != nil {
+		s.fragmentError(w, err)
+		return
+	}
+	v, err := s.loadFragmentView(r.Context(), d, page, false)
+	if err != nil {
+		s.fragmentError(w, err)
+		return
+	}
+	render(w, r, http.StatusOK, web.TranscriptEarlier(v))
+}
+
+// fragmentError maps a fragment load failure to its status: a vanished session is 404,
+// anything else a 500 (never "not found" for a database hiccup).
+func (s *Server) fragmentError(w http.ResponseWriter, err error) {
+	if errors.Is(err, store.ErrNotFound) {
+		http.Error(w, "Session not found.", http.StatusNotFound)
+		return
+	}
+	http.Error(w, "Could not load session.", http.StatusInternalServerError)
 }
 
 // handleSessionEvents is the SSE endpoint that signals a watching browser to

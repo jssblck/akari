@@ -132,20 +132,22 @@ const SubagentCollapseThreshold = 8
 // SubagentsCollapsed reports whether a session's subagents table should render collapsed
 // behind its summary (more than SubagentCollapseThreshold children), so the template and a
 // test read the same rule rather than each spelling out the comparison.
-func SubagentsCollapsed(subs []store.SessionSummary) bool {
+func SubagentsCollapsed(subs []store.SubagentRow) bool {
 	return len(subs) > SubagentCollapseThreshold
 }
 
-// SubagentsSummaryLabel is the collapsed subagents summary: the direct child count and
-// their summed cost ("34 subagents · $6.12"). It describes the subagents table it heads,
-// which lists a session's direct children (Store.Subagents), so both figures are over those
-// direct rows, not the feed fan-out chip's whole-subtree rollup (TreeRollup, which also
-// folds in a subagent's own subagents). For a flat fan-out the two read the same; for a
-// nested one they legitimately differ, because this summary answers "what is in the table
-// below" while the feed chip answers "what did the whole work item cost". The cost carries
-// the "+" lower-bound marker when any direct child could not be fully priced. The count is
+// SubagentsSummaryLabel is the collapsed subagents summary: the direct child count,
+// their summed cost, and how many of them failed ("34 subagents · $6.12 · 2 failed").
+// It describes the subagents table it heads, which lists a session's direct children
+// (Store.Subagents), so all three figures are over those direct rows, not the feed
+// fan-out chip's whole-subtree rollup (TreeRollup, which also folds in a subagent's own
+// subagents). For a flat fan-out the two read the same; for a nested one they
+// legitimately differ, because this summary answers "what is in the table below" while
+// the feed chip answers "what did the whole work item cost". The cost carries the "+"
+// lower-bound marker when any direct child could not be fully priced. The failed clause
+// appears only when a child errored, so a clean fan-out stays two figures. The count is
 // singular at one, though the collapse only ever engages well above that.
-func SubagentsSummaryLabel(subs []store.SessionSummary) string {
+func SubagentsSummaryLabel(subs []store.SubagentRow) string {
 	var cost float64
 	var incomplete bool
 	for _, s := range subs {
@@ -156,7 +158,11 @@ func SubagentsSummaryLabel(subs []store.SessionSummary) string {
 	if len(subs) == 1 {
 		unit = "subagent"
 	}
-	return fmt.Sprintf("%d %s · %s", len(subs), unit, FmtCost(cost, incomplete))
+	label := fmt.Sprintf("%d %s · %s", len(subs), unit, FmtCost(cost, incomplete))
+	if failed := SubagentFailures(subs); failed > 0 {
+		label += fmt.Sprintf(" · %d failed", failed)
+	}
+	return label
 }
 
 // AttachmentsByOrdinal groups attachments by the message ordinal they belong to,

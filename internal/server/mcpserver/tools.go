@@ -174,7 +174,15 @@ func registerTools(s *mcp.Server, st *store.Store) {
 			return nil, sessionDetailDTO{}, err
 		}
 		for _, sub := range subs {
-			out.Subagents = append(out.Subagents, sessionSummaryToDTO(sub))
+			dto := sessionSummaryToDTO(sub.SessionSummary)
+			// The subagents read carries each child's verdict; surface it so an agent
+			// auditing a fan-out sees which children failed without opening each one.
+			// Both stay empty/absent while the child is unsettled or unscored.
+			dto.Outcome = sub.Outcome
+			if sub.Grade != nil {
+				dto.Grade = *sub.Grade
+			}
+			out.Subagents = append(out.Subagents, dto)
 		}
 
 		// The fallback list is a separate, capped read that rides only the first view

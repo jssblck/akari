@@ -317,7 +317,7 @@ func (s *Server) handlePublicSession(w http.ResponseWriter, r *http.Request) {
 	}
 	// Only public subagents may appear on a public page; a public parent does not
 	// make its children public.
-	var publicSubs []store.SessionSummary
+	var publicSubs []store.SubagentRow
 	for _, sub := range subs {
 		if sub.Visibility == "public" && sub.PublicID != nil {
 			publicSubs = append(publicSubs, sub)

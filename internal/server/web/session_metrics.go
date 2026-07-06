@@ -98,6 +98,19 @@ type TranscriptWalker struct {
 	havePrev    bool
 }
 
+// SeededWalker returns a walker primed with the unrendered rows that precede a
+// transcript window, so the window's first rendered turns still carry their latency and
+// shed stamps. The seed is the store's fixed short lookback (transcriptSeedLookback);
+// a boundary turn whose prompt sits deeper than the lookback simply shows no latency,
+// which the P-2 plan accepts. A whole-transcript render passes nil.
+func SeededWalker(seed []store.Message) *TranscriptWalker {
+	w := &TranscriptWalker{}
+	for _, m := range seed {
+		w.Next(m)
+	}
+	return w
+}
+
 // Next advances the walker over one message and returns that message's latency and shed marks.
 // Messages must be passed in transcript (ordinal) order, once each; the walker's carried state
 // depends on the order.

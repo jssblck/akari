@@ -80,6 +80,19 @@
   }
 
   // ---------------- Live session updates ----------------
+  // lastTranscriptOrdinal reads the highest data-ordinal in the rendered transcript,
+  // so the live refresh can ask the server for only the turns past it. Rows are in
+  // ordinal order and appends land at the end, so the last row is the highest. Null
+  // when no transcript is rendered yet (an empty session), in which case the refresh
+  // falls back to swapping the whole body, which renders the transcript container.
+  function lastTranscriptOrdinal() {
+    var t = document.querySelector("#session-body .transcript");
+    if (!t) return null;
+    var rows = t.querySelectorAll("[data-ordinal]");
+    if (!rows.length) return null;
+    return rows[rows.length - 1].getAttribute("data-ordinal");
+  }
+
   function initLive() {
     var el = document.getElementById("session-body");
     if (!el) return;
@@ -106,11 +119,79 @@
         flashChangedStats(before);
         if (pending) { pending = false; refresh(); }
       };
-      var p = window.htmx.ajax("GET", body, { target: "#session-body", swap: "innerHTML" });
+      // Incremental by default: ask only for the turns past the last rendered one and
+      // append them in place, with the server OOB-swapping the instruments and
+      // subagents. The full-body innerHTML swap remains for a not-yet-rendered
+      // transcript, and the server retargets to it when the client is too far behind
+      // for one append (see handleSessionBody), so the transcript can never show a
+      // gap. Appending instead of re-rendering is both the freeze fix and the
+      // scroll-position fix for live sessions.
+      var after = lastTranscriptOrdinal();
+      var p;
+      if (after == null) {
+        p = window.htmx.ajax("GET", body, { target: "#session-body", swap: "innerHTML" });
+      } else {
+        p = window.htmx.ajax("GET", body + "?after=" + encodeURIComponent(after), {
+          target: "#session-body .transcript",
+          swap: "beforeend",
+        });
+      }
       if (p && typeof p.then === "function") { p.then(done, done); } else { setTimeout(done, 60); }
     }
     es.addEventListener("update", refresh);
   }
+
+  // ---------------- Windowed transcript: earlier pages and deep anchors ----------------
+  // "Show earlier" swaps the top-of-transcript bar for the previous window's rows, so
+  // content is inserted ABOVE the reader's viewport. Without help the browser keeps the
+  // scroll offset and everything visibly jumps down. Pin the first already-rendered row
+  // across the swap: record its viewport position before, restore it after.
+  var earlierAnchor = null;
+  document.addEventListener("htmx:beforeSwap", function (e) {
+    var t = e.detail && e.detail.target;
+    if (!t || t.id !== "transcript-earlier") { return; }
+    var row = t.nextElementSibling;
+    earlierAnchor = row ? { el: row, top: row.getBoundingClientRect().top } : null;
+  });
+  document.addEventListener("htmx:afterSwap", function (e) {
+    var t = (e.detail && e.detail.target) || e.target;
+    if (!t || t.id !== "transcript-earlier" || !earlierAnchor) return;
+    var a = earlierAnchor;
+    earlierAnchor = null;
+    if (!a.el.isConnected) return;
+    window.scrollBy(0, a.el.getBoundingClientRect().top - a.top);
+  });
+
+  // The outline rail and the flow ribbon list every turn, but the transcript renders a
+  // window, so an anchor can point at a turn not yet in the DOM. Those turns are always
+  // ABOVE the window (appends keep the tail complete), so clicking one fetches earlier
+  // windows through the same "Show earlier" bar until the target renders, then scrolls
+  // to it. The loop is bounded: each fetch either extends the window upward or removes
+  // the bar (transcript start reached), so it terminates even for a bad anchor.
+  function fetchEarlierUntil(msgID, done) {
+    var bar = document.getElementById("transcript-earlier");
+    if (document.getElementById(msgID) || !bar || !window.htmx) { done(); return; }
+    var p = window.htmx.ajax("GET", bar.getAttribute("hx-get"), {
+      target: "#transcript-earlier",
+      swap: "outerHTML",
+    });
+    var next = function () { fetchEarlierUntil(msgID, done); };
+    if (p && typeof p.then === "function") { p.then(next, done); } else { setTimeout(next, 120); }
+  }
+  document.addEventListener("click", function (ev) {
+    if (ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey) return;
+    var a = ev.target.closest ? ev.target.closest('a[href^="#msg-"]') : null;
+    if (!a) return;
+    var msgID = a.getAttribute("href").slice(1);
+    if (document.getElementById(msgID)) return; // in the DOM: native anchor scroll works
+    ev.preventDefault();
+    fetchEarlierUntil(msgID, function () {
+      var el = document.getElementById(msgID);
+      if (!el) return;
+      el.scrollIntoView({ block: "start" });
+      if (history.replaceState) history.replaceState(null, "", "#" + msgID);
+    });
+  });
 
   // ---------------- Reparse progress ----------------
   // While the server rebuilds the parsed projection, parsed views are gated and
