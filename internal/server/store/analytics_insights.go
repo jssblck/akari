@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -50,14 +51,14 @@ func (i Insights) HasData() bool { return i.Quality.Sessions > 0 }
 // smaller than this constant cannot deadlock (see panelWorkers).
 const insightsPanelLimit = 6
 
-// panelWorkers is how many panels Insights may read concurrently given the pool's connection
-// ceiling. Each concurrent panel acquires its own connection while the control transaction
-// holds one open until Wait, so the safe worker count is the connections spare beyond that
-// control one, capped at insightsPanelLimit. It returns 0 when nothing is spare (a pool sized
-// at or near one connection, as some constrained deployments configure): the caller must then
-// run the panels sequentially on the control transaction, because a concurrent panel would
-// block forever in Acquire waiting on the very connection this call is holding. That zero is
-// the guard against a self-inflicted deadlock, not a performance knob.
+// panelWorkers is the most spare connections one Insights call will borrow to read panels
+// concurrently, given the pool's connection ceiling. The control transaction holds one
+// connection open until Wait, so the room beyond it is MaxConns-1, capped at insightsPanelLimit
+// to leave headroom for other traffic. It returns 0 when nothing is spare (a pool sized at or
+// near one connection, as some constrained deployments configure), which routes every panel
+// onto the control transaction. This is an upper bound, not a reservation: Insights borrows
+// only connections the pool has idle at dispatch time, so it never blocks for one and cannot
+// deadlock the pool against itself or other concurrent callers.
 func panelWorkers(maxConns int) int {
 	spare := maxConns - 1
 	if spare < 1 {
@@ -204,29 +205,56 @@ func (s *Store) Insights(ctx context.Context, f AnalyticsFilter) (Insights, erro
 		})
 	}
 
-	// With no connection spare beyond the one the control transaction holds, run the panels in
-	// order on the control transaction itself, which already sees the fixed snapshot and needs
-	// no further connection. This is what keeps a tiny pool from deadlocking; see panelWorkers.
-	workers := panelWorkers(int(s.Pool.Config().MaxConns))
-	if workers == 0 {
-		for _, p := range panels {
-			if err := p(ctx, ctrlTx); err != nil {
-				return Insights{}, fmt.Errorf("insights snapshot: %w", err)
-			}
+	// Dispatch the panels without ever letting this call hold a connection while blocking to
+	// acquire another. That hold-and-wait is the deadlock: N concurrent Insights calls (the
+	// project and public-project pages reach this without the HTTP cache) would each pin a
+	// control connection, exhaust the pool, then all block acquiring a panel connection that can
+	// never free. So the call borrows only the connections the pool has idle right now
+	// (AcquireAllIdle never blocks), capped by panelWorkers to leave headroom, and runs the rest
+	// of the panels on the control transaction it already holds. Under contention it borrows
+	// nothing and the read is fully sequential on the control connection, which is deadlock-free
+	// because the call then waits on no further connection: it finishes and releases, so any
+	// caller blocked acquiring a control connection makes progress.
+	var panelConns []*pgxpool.Conn
+	if workers := panelWorkers(int(s.Pool.Config().MaxConns)); workers > 0 {
+		idle := s.Pool.AcquireAllIdle(ctx)
+		keep := min(len(idle), workers)
+		panelConns = idle[:keep]
+		for _, c := range idle[keep:] {
+			c.Release()
 		}
-		return out, nil
+	}
+	defer func() {
+		for _, c := range panelConns {
+			c.Release()
+		}
+	}()
+
+	// Each executor runs its assigned panels sequentially on one connection: the control
+	// transaction, or a borrowed connection under an imported snapshot. Executors run
+	// concurrently, so no connection is ever used by two goroutines at once. Round-robin keeps
+	// the per-executor panel counts even; with no borrowed connections, every panel lands on the
+	// control executor and the read is sequential.
+	executors := len(panelConns) + 1
+	buckets := make([][]func(context.Context, querier) error, executors)
+	for i, p := range panels {
+		buckets[i%executors] = append(buckets[i%executors], p)
 	}
 
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(workers)
-	for _, p := range panels {
-		p := p
-		g.Go(func() error {
-			c, err := s.Pool.Acquire(gctx)
-			if err != nil {
-				return fmt.Errorf("acquire panel conn: %w", err)
+	// Executor 0 runs on the control transaction directly (it already holds the snapshot).
+	g.Go(func() error {
+		for _, p := range buckets[0] {
+			if err := p(gctx, ctrlTx); err != nil {
+				return err
 			}
-			defer c.Release()
+		}
+		return nil
+	})
+	// The remaining executors each run on a borrowed connection under the imported snapshot.
+	for i, c := range panelConns {
+		i, c := i, c
+		g.Go(func() error {
 			tx, err := c.BeginTx(gctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 			if err != nil {
 				return fmt.Errorf("begin panel tx: %w", err)
@@ -237,7 +265,12 @@ func (s *Store) Insights(ctx context.Context, f AnalyticsFilter) (Insights, erro
 			if _, err := tx.Exec(gctx, "SET TRANSACTION SNAPSHOT '"+snapshotID+"'"); err != nil {
 				return fmt.Errorf("import snapshot: %w", err)
 			}
-			return p(gctx, tx)
+			for _, p := range buckets[i+1] {
+				if err := p(gctx, tx); err != nil {
+					return err
+				}
+			}
+			return nil
 		})
 	}
 	if err := g.Wait(); err != nil {
