@@ -365,6 +365,16 @@ func (s *Store) ListAllSessions(ctx context.Context, f SessionFilter) (rows []Se
 		matchCutCol = "coalesce(match.front_cut, false)"
 	}
 
+	// Keyset pagination: "Show more" resumes strictly after the last row the reader saw
+	// (f.After), so a deep page reads the next slice off the (col, id) index instead of
+	// re-scanning rows 1..N under a doubled limit. The cursor id binds to the next arg
+	// slot, so append it only when the predicate actually applies (a keyset-sortable order
+	// with a cursor set).
+	if cond, ok := f.keysetCond("$" + itoa(len(args)+1)); ok {
+		args = append(args, f.After)
+		conds = append(conds, cond)
+	}
+
 	q := globalSessionSelect(matchLateral, matchCol, matchCutCol)
 	if len(conds) > 0 {
 		q += " WHERE " + strings.Join(conds, " AND ")

@@ -2207,20 +2207,26 @@ func TestSessionsSearchAndPaging(t *testing.T) {
 	}
 }
 
-// TestSessionsLimitClamp asserts the limit param is clamped to the store's window
-// and that an over-cap request does not error.
-func TestSessionsLimitClamp(t *testing.T) {
+// TestSessionsPagingParamsRobust asserts the feed's keyset paging params are parsed
+// defensively: a hostile or malformed cursor, running count, or day key all render a 200
+// (falling back to the first page) rather than erroring. A tampered ?after that names no
+// row resolves its cursor value to NULL in the store, so the predicate matches nothing and
+// the page is empty rather than a 500; the old ?limit param is ignored now, not clamped.
+func TestSessionsPagingParamsRobust(t *testing.T) {
 	t.Parallel()
 	srv, _ := newTestServer(t)
 	c := newClient(t)
 	if _, err := c.PostForm(srv.URL+"/register", url.Values{"username": {"grace"}, "password": {"hopper-1906"}}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	// A wildly over-cap limit and a garbage limit both render a 200, not a 500.
-	for _, q := range []string{"?limit=99999", "?limit=abc", "?limit=-5"} {
+	for _, q := range []string{
+		"?after=99999", "?after=abc", "?after=-5",
+		"?after=1&count=abc", "?after=1&count=-9", "?after=1&after_day=garbage",
+		"?limit=99999", // the retired paging param is ignored now, not an error
+	} {
 		resp := mustGet(t, c, srv.URL+"/sessions"+q)
 		if resp.StatusCode != http.StatusOK {
-			t.Errorf("/sessions%s = %d, want 200 (limit should clamp, not error)", q, resp.StatusCode)
+			t.Errorf("/sessions%s = %d, want 200 (paging params should degrade, not error)", q, resp.StatusCode)
 		}
 		resp.Body.Close()
 	}

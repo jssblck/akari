@@ -168,12 +168,6 @@ func sessionsQuery(f store.SessionFilter) string {
 	if f.RequireSpan {
 		q.Set("spanned", "1")
 	}
-	// The paging limit rides the URL only when it has grown past the default page, so
-	// a "Show more" swap and a reload land on the same expanded feed while the first
-	// page stays a bare path.
-	if f.Limit > 0 && f.Limit != DefaultSessionLimit {
-		q.Set("limit", fmt.Sprintf("%d", f.Limit))
-	}
 	// The default order (most recent first) is the bare URL; any other column or
 	// direction is encoded so the sort link round-trips and survives a reload.
 	if !isDefaultOrder(f) {
@@ -190,27 +184,10 @@ func sessionsQuery(f store.SessionFilter) string {
 	return ""
 }
 
-// DefaultSessionLimit is the global feed's first-page size, matching the store's
-// default cap. "Show more" doubles the limit from here (100 -> 200 -> 400 -> 500).
+// DefaultSessionLimit is the global feed's page size, the fixed slice each request reads.
+// "Show more" no longer grows this: it passes a keyset cursor and appends the next page of
+// the same size (see ShowMorePath), so depth is unbounded and the page cost stays flat.
 const DefaultSessionLimit = 100
-
-// MaxSessionLimit is the largest page the feed will request; past it the footer
-// drops the "Show more" button and asks the reader to narrow by filter or search.
-const MaxSessionLimit = 500
-
-// NextSessionLimit doubles the current page size for the "Show more" control,
-// clamped to MaxSessionLimit, so the feed grows 100 -> 200 -> 400 -> 500 rather
-// than jumping straight to the cap.
-func NextSessionLimit(cur int) int {
-	if cur <= 0 {
-		cur = DefaultSessionLimit
-	}
-	n := cur * 2
-	if n > MaxSessionLimit {
-		return MaxSessionLimit
-	}
-	return n
-}
 
 // effSort resolves a filter's effective sort column, treating the empty string
 // as the default so the templates can read one canonical key.
@@ -356,40 +333,46 @@ func RangeChipLabel(key string) string {
 
 // SearchClearHref is the toggle link for the active search chip: it drops the query
 // while holding every other facet, sort, and the empty toggle, so removing a search
-// leaves the rest of the narrowing in place.
+// leaves the rest of the narrowing in place. It returns the feed to its first page
+// implicitly: the base path carries no keyset cursor (only "Show more" appends one), so
+// a cleared-search link always reopens at the top.
 func SearchClearHref(f store.SessionFilter) templ.SafeURL {
 	f.Query = ""
-	// Clearing the search returns the feed to its first page: the expanded limit was
-	// scoped to the search results and would otherwise persist into a broader list.
-	f.Limit = 0
 	return SessionsHref(f)
 }
 
-// EmptyToggleHref flips the include-empty state for the footer's toggle, holding
-// every other facet, search, and sort. It resets the page to the default size for
-// the same reason "Show more" carries the limit: the visible count changes, so the
-// paging restarts rather than keeping a limit sized for the other visibility.
+// EmptyToggleHref flips the include-empty state for the footer's toggle, holding every
+// other facet, search, and sort. Like every filter link it carries no keyset cursor, so
+// flipping the empty state reopens the feed at the first page rather than resuming mid-walk
+// under the other visibility, which the changed row set would make meaningless.
 func EmptyToggleHref(f store.SessionFilter) templ.SafeURL {
 	f.IncludeEmpty = !f.IncludeEmpty
-	f.Limit = 0
 	return SessionsHref(f)
 }
 
-// ShowMorePath is the plain-string path the "Show more" button fetches: the same
-// filter with the page size doubled, used as the htmx GET target so the swap
-// re-renders the whole list (day grouping and footer included) at the larger page.
-func ShowMorePath(f store.SessionFilter) string {
-	f.Limit = NextSessionLimit(effLimit(f))
-	return SessionsPath(f)
-}
-
-// effLimit resolves a filter's effective page size, treating a zero (unset) limit
-// as the default so the "Show more" math starts from the right base.
-func effLimit(f store.SessionFilter) int {
-	if f.Limit <= 0 {
-		return DefaultSessionLimit
+// ShowMorePath is the plain-string path the "Show more" button fetches: the current
+// feed's filter plus a keyset cursor (afterID, the last visible row's id) so the store
+// resumes strictly after it rather than re-reading the page under a doubled limit. afterDay
+// is the last row's day-bucket key, carried only for the day-grouped default order so the
+// appended page suppresses a repeated heading; count is the running total already shown, so
+// the appended footer reports the cumulative "Showing N" without counting the corpus. The
+// cursor rides only this link, never the facet or sort URLs, so any filter change resets to
+// the first page.
+func ShowMorePath(f store.SessionFilter, afterID int64, afterDay string, count int) string {
+	base := SessionsPath(f)
+	sep := "?"
+	if strings.Contains(base, "?") {
+		sep = "&"
 	}
-	return f.Limit
+	q := url.Values{}
+	q.Set("after", fmt.Sprintf("%d", afterID))
+	if afterDay != "" {
+		q.Set("after_day", afterDay)
+	}
+	if count > 0 {
+		q.Set("count", fmt.Sprintf("%d", count))
+	}
+	return base + sep + q.Encode()
 }
 
 // PublicPath is the plain-string public URL, shown to the owner as the shareable

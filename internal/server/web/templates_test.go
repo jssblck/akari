@@ -440,16 +440,19 @@ func TestGlobalSessionListFooter(t *testing.T) {
 		SessionSummary: store.SessionSummary{ID: 1, Agent: "claude", MessageCount: 1, LastActiveAt: &ts},
 		ProjectID:      1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote",
 	}}
-	// hasMore true: the page is not the whole set, so the count reads "Showing N", a
-	// "Show more" control appears, and the empty toggle (hasEmpty true) reads "empty
-	// hidden · show".
-	sel := store.SessionFilter{Sort: "updated", Desc: true, Limit: 100}
-	footer := BuildSessionFooter(sel, 100, true, true)
+	// hasMore true: the loaded feed is one page of a larger set, so the count reads the
+	// running total "Showing N" (priorCount + this page), a keyset "Show more" control
+	// appears carrying the last row's id as the cursor and the running count, and the
+	// empty toggle (hasEmpty true) reads "empty hidden · show".
+	sel := store.SessionFilter{Sort: "updated", Desc: true}
+	footer := BuildSessionFooter(sel, rows, 99, true, true, "")
 	html := renderComponent(t, GlobalSessionList(rows, sel, footer))
 
 	for _, want := range []string{
 		`Showing 100`,
-		`hx-target="#session-list"`, `hx-select="#session-list"`, `hx-swap="outerHTML"`,
+		`id="feed-more"`,
+		`hx-target="#feed-more"`, `hx-swap="outerHTML"`, `hx-push-url="false"`,
+		`after=1`, `count=100`,
 		`>Show more</a>`,
 		// Empty toggle: hidden, a "show" verb, no count.
 		`empty hidden`, `>show</a>`,
@@ -458,29 +461,24 @@ func TestGlobalSessionListFooter(t *testing.T) {
 			t.Errorf("footer missing %q, got:\n%s", want, html)
 		}
 	}
-	if strings.Contains(html, " of ") {
-		t.Errorf("the more-matching footer should not read 'N of M', got:\n%s", html)
+	// The keyset control appends its next page in place; it must not re-fetch and
+	// re-select the whole list the way the old limit-doubling control did, and it never
+	// reads "N of M".
+	for _, unwanted := range []string{`hx-select`, `#session-list`, " of "} {
+		if strings.Contains(html, unwanted) {
+			t.Errorf("the keyset footer should not contain %q, got:\n%s", unwanted, html)
+		}
 	}
 
-	// hasMore false: the shown count IS the exact total, so the footer reads "N
+	// hasMore false: the running total IS the exact total, so the footer reads "N
 	// sessions" and offers no "Show more".
-	exact := BuildSessionFooter(store.SessionFilter{Sort: "updated", Desc: true}, 7, false, false)
-	exactHTML := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Sort: "updated", Desc: true}, exact))
+	exact := BuildSessionFooter(sel, rows, 6, false, false, "")
+	exactHTML := renderComponent(t, GlobalSessionList(rows, sel, exact))
 	if !strings.Contains(exactHTML, "7 sessions") {
 		t.Errorf("an exhausted page should read the exact 'N sessions', got:\n%s", exactHTML)
 	}
 	if strings.Contains(exactHTML, ">Show more</a>") {
 		t.Errorf("an exhausted page should carry no Show more, got:\n%s", exactHTML)
-	}
-
-	// At the cap with more matching, the button is replaced by the cap note.
-	capped := BuildSessionFooter(store.SessionFilter{Limit: 500}, 500, true, false)
-	capHTML := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Limit: 500}, capped))
-	if strings.Contains(capHTML, ">Show more</a>") {
-		t.Error("at the cap there should be no Show more button")
-	}
-	if !strings.Contains(capHTML, "at cap") {
-		t.Error("at the cap the footer should name the cap")
 	}
 }
 

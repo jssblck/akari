@@ -258,6 +258,15 @@ type SessionFilter struct {
 	Desc   bool
 	Limit  int
 	Offset int
+	// After is a keyset cursor: the id of the last row the reader has already seen, so
+	// "Show more" fetches the page strictly after it in the current sort order rather
+	// than re-reading rows 1..N with a doubled limit. Zero means the first page. The
+	// query resolves the cursor row's sort value with a scalar subquery, so the URL
+	// carries only the id and never a value that could round-trip imprecisely. It applies
+	// only to the four keyset-sortable feed orders (updated, tokens, messages, cost, in
+	// sessionKeysetColumns); an After set under any other sort is ignored, since those
+	// orders are not offered a "Show more" cursor. See ListAllSessions.
+	After int64
 }
 
 // conds builds the WHERE additions for the filter's narrowing fields, shared by
@@ -398,12 +407,38 @@ var sessionSortColumns = map[string]string{
 	"updated": "s.last_active_at",
 }
 
+// sessionKeysetColumns names the bare session column behind each keyset-paginable feed
+// order, for the "Show more" cursor. It is the subset of sessionSortColumns whose sort
+// expression is a single NOT NULL column on the sessions row, so a keyset predicate can
+// compare (column, id) against the cursor row's (column, id) and walk the same (col, id)
+// btree the order already uses. The other sort keys (project, agent, branch, user) rank a
+// joined or text expression and are not offered a cursor, so they are absent here and an
+// After under them is ignored. The four listed are exactly the feed's sort dropdown
+// (SessionSortOptions), which is all a reader ever paginates.
+var sessionKeysetColumns = map[string]string{
+	"updated":  "last_active_at",
+	"tokens":   "total_tokens",
+	"messages": "message_count",
+	"cost":     "total_cost_usd",
+}
+
 // IsSortKey reports whether key names a sortable column of the global session
 // list, so the handler can reject an unknown or tampered sort param before it
 // reaches the query builder.
 func IsSortKey(key string) bool {
 	_, ok := sessionSortColumns[key]
 	return ok
+}
+
+// resolvedSort returns the effective sort key and direction the query builder uses: the
+// filter's Sort and Desc when Sort is a known key, else the default (updated, descending).
+// orderClause and the keyset predicate both read it, so the order they emit and the cursor
+// comparison they build can never disagree on which column or direction the page walks.
+func (f SessionFilter) resolvedSort() (key string, desc bool) {
+	if _, ok := sessionSortColumns[f.Sort]; ok {
+		return f.Sort, f.Desc
+	}
+	return DefaultSort, true
 }
 
 // orderClause builds the ORDER BY for the global session list from the filter's
@@ -431,16 +466,45 @@ func IsSortKey(key string) bool {
 // "DESC NULLS LAST" clause forces a full sort instead of an index scan. Omitting
 // it lets the (col, id) and feed indexes satisfy the order directly.
 func (f SessionFilter) orderClause() string {
-	expr, ok := sessionSortColumns[f.Sort]
-	desc := f.Desc
-	if !ok {
-		expr, desc = sessionSortColumns[DefaultSort], true
-	}
+	key, desc := f.resolvedSort()
+	expr := sessionSortColumns[key]
 	dir := "ASC"
 	if desc {
 		dir = "DESC"
 	}
 	return fmt.Sprintf(" ORDER BY %s %s, s.id %s", expr, dir, dir)
+}
+
+// keysetCond returns the WHERE predicate that resumes the feed strictly after the After
+// cursor in the current sort order, and whether a cursor applies. It applies only when
+// After is set and the sort has a keyset column (sessionKeysetColumns); otherwise it
+// returns ("", false) and the caller pages from the top. placeholder is the bind slot the
+// caller will fill with the cursor id (the same slot is read three times: twice to look up
+// the cursor row's sort value, once for the id tiebreak).
+//
+// The predicate mirrors orderClause's "(col, id)" ordering exactly: under the descending
+// feed a later row has a smaller (col, id), so it keeps rows where col is below the cursor's
+// or, on a tie, id is below it; an ascending sort flips both comparisons. The cursor row's
+// sort value comes from a scalar subquery on its id rather than a value on the URL, so the
+// cursor stays a bare id and no timestamp or float round-trips through the query string. A
+// cursor id that names no row makes the subquery NULL, so the predicate matches nothing and
+// "Show more" ends cleanly rather than resuming from a wrong place.
+func (f SessionFilter) keysetCond(placeholder string) (string, bool) {
+	if f.After <= 0 {
+		return "", false
+	}
+	key, desc := f.resolvedSort()
+	col, ok := sessionKeysetColumns[key]
+	if !ok {
+		return "", false
+	}
+	op := "<"
+	if !desc {
+		op = ">"
+	}
+	sub := "(SELECT " + col + " FROM sessions WHERE id = " + placeholder + ")"
+	return fmt.Sprintf("(s.%s %s %s OR (s.%s = %s AND s.id %s %s))",
+		col, op, sub, col, sub, op, placeholder), true
 }
 
 // SessionRow is one row of the global (cross-project) session list: a session

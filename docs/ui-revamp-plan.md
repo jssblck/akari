@@ -46,10 +46,18 @@ verified against the live dev server:
   Repositories table and a Local folders table (each folder by name, state chip,
   and recovered path). Presentation only: the store already tags every project's
   kind and orders remotes first.
+- P-3: the feed's "Show more" is keyset pagination. It carries the last row's id
+  as a cursor (and, in the day-grouped order, that row's day key) and appends the
+  next fixed-size page onto the feed in place, replacing only its own tail rather
+  than re-fetching rows 1..N under a doubled limit. The 500-row cap is gone: depth
+  is unbounded because each page is a bounded index walk off the existing
+  `(col, id)` btrees. The running count accumulates ("Showing N") and the boundary
+  day's heading does not reprint on the appended page. Read-time only: no
+  rebuild-derived column, no epoch bump.
 
-Remaining: P-2 (transcript windowing + incremental SSE), P-3 (keyset
-pagination), D (session detail auditor view). Each is independent and can land as
-its own PR per the sequencing table below.
+Remaining: P-2 (transcript windowing + incremental SSE), D (session detail
+auditor view). Each is independent and can land as its own PR per the sequencing
+table below.
 
 ## The lens
 
@@ -118,7 +126,8 @@ Performance:
   DOM plus full-body re-render on every SSE wake signal. A live session
   re-renders everything each time the parser settles new bytes.
 - P3. "Show more" on the feed re-fetches rows 1..N to show N+100, and tops out
-  at 500 with a "narrow your filter" message.
+  at 500 with a "narrow your filter" message. (Fixed by P-3: keyset cursor,
+  append-in-place, no cap.)
 - P4. No `Cache-Control`/ETag on any HTML route; back-navigation re-runs the
   full pipeline.
 
@@ -217,13 +226,21 @@ at it so future regressions are visible in devtools).
    anchors must work with the windowed transcript (fetch-then-scroll for
    turns not yet in the DOM).
 
-### P-3 Feed pagination
+### P-3 Feed pagination (shipped)
 
-Replace limit-doubling with keyset pagination: "Show more" passes the last
-row's `(last_active_at, id)` cursor and appends the next 100 rows
-(`hx-swap="beforeend"` on the list body). Remove the 500 cap; the cursor makes
-depth cheap. The existing `(last_active_at DESC, id DESC)` indexes are exactly
-right for this.
+Replaced limit-doubling with keyset pagination: "Show more" passes the last
+row's id as a cursor and appends the next fixed-size page in place. The tail
+carrying the count and the button is a `#feed-more` element that is the last
+child of the feed; the button swaps that element with the next page's rows plus
+a fresh tail (`hx-target="#feed-more"`, `hx-swap="outerHTML"`), so the settled
+rows above never re-render. The 500 cap is gone; the cursor makes depth cheap.
+The store resolves the cursor row's sort value with a scalar subquery, so the URL
+carries only the id, and the predicate mirrors the order's `(col, id)` tiebreak
+so the existing per-column btrees serve the walk. The four sort orders
+(recent, tokens, messages, cost) are keyset-paginable; the joined-column orders
+(project, user) are not offered a cursor. The day-grouped order also carries the
+cursor row's day key so an appended page does not reprint the heading of a day it
+continues.
 
 ### P-4 HTTP hygiene
 

@@ -45,14 +45,27 @@ type SessionDayGroup struct {
 // whose project repeats the previous row's is flagged to mute its label. Token
 // bars scale against the largest session across the whole feed, so magnitudes are
 // comparable between groups.
-func BuildSessionFeed(ctx context.Context, rows []store.SessionRow, grouped bool) []SessionDayGroup {
-	return buildSessionFeed(time.Now(), Loc(ctx), rows, grouped)
+func BuildSessionFeed(ctx context.Context, rows []store.SessionRow, grouped bool, prevKey string) []SessionDayGroup {
+	return buildSessionFeed(time.Now(), Loc(ctx), rows, grouped, prevKey)
+}
+
+// FeedDayKey is the day-bucket key of a timestamp in the viewer's zone, the same key
+// buildSessionFeed groups on. The keyset "Show more" carries the last rendered row's key so
+// the appended page can suppress a repeated day heading when it continues the same day (a
+// page boundary must not print "Today" twice). It is empty for a missing timestamp, matching
+// the undated bucket.
+func FeedDayKey(ctx context.Context, t *time.Time) string {
+	key, _ := dayBucket(time.Now(), Loc(ctx), t)
+	return key
 }
 
 // buildSessionFeed is BuildSessionFeed's clock- and zone-injected core, so the day
 // headings are testable without mocking the wall clock, and a session buckets under
-// the viewer's local calendar date rather than UTC's.
-func buildSessionFeed(now time.Time, loc *time.Location, rows []store.SessionRow, grouped bool) []SessionDayGroup {
+// the viewer's local calendar date rather than UTC's. prevKey is the day-bucket key of
+// the row immediately before this slice (the last row of the previous keyset page), or ""
+// on the first page: when the first group's day matches it, that group's heading is dropped
+// so an appended page continues the previous day rather than re-printing its heading.
+func buildSessionFeed(now time.Time, loc *time.Location, rows []store.SessionRow, grouped bool, prevKey string) []SessionDayGroup {
 	if len(rows) == 0 {
 		return nil
 	}
@@ -73,6 +86,12 @@ func buildSessionFeed(now time.Time, loc *time.Location, rows []store.SessionRow
 		if grouped {
 			key, label := dayBucket(now, loc, r.LastActiveAt)
 			if !started || key != curKey {
+				// Drop the heading on the very first group when it continues the day the
+				// previous keyset page ended on, so an appended "Show more" page does not
+				// reprint a heading ("Today") the DOM already shows above it.
+				if !started && key == prevKey {
+					label = ""
+				}
 				groups = append(groups, SessionDayGroup{Label: label})
 				curKey = key
 				prevProj = ""
@@ -300,20 +319,20 @@ func SplitSnippet(s store.SearchSnippet) SnippetParts {
 // the page rather than the corpus: the old "N of M" carried a count(*) over the whole
 // matching history, which the incremental-efficiency gate flagged.
 type SessionFooter struct {
-	// Shown is how many rows the feed currently renders. When HasMore is false it is
-	// also the exact total, since the whole matching set fit in the page; when HasMore
-	// is true more rows match beyond it and the count reads "Showing N".
+	// Shown is how many rows the feed renders cumulatively: on the first page it is
+	// len(rows), and on each keyset "Show more" it is the prior total plus the appended
+	// page, so the count grows as the reader loads deeper. When HasMore is false it is the
+	// exact total (the whole set is loaded); when HasMore is true it reads "Showing N".
 	Shown int
-	// HasMore reports that at least one more row matches past the page (from
-	// ListAllSessions' limit+1 probe), so the footer offers the next page and the count
-	// reads "Showing N" rather than the exact "N sessions".
+	// HasMore reports that at least one more row matches past the loaded pages (from
+	// ListAllSessions' limit+1 probe), so the footer offers "Show more" and the count reads
+	// "Showing N" rather than the exact "N sessions".
 	HasMore bool
-	// MoreHref is the "Show more" target (a doubled-limit path), set only when more
-	// rows match than are shown and the page is below the cap.
+	// MoreHref is the "Show more" target: a keyset path carrying the last row's id as the
+	// cursor (and, in the day-grouped order, its day key), set only when more rows match.
+	// The button appends the next page onto the feed rather than re-rendering it, so depth
+	// is unbounded; there is no cap.
 	MoreHref string
-	// AtCap reports the feed is showing the maximum page (500) yet more match, so the
-	// footer names the cap and drops the button, asking the reader to narrow instead.
-	AtCap bool
 	// HasEmpty reports whether the current scope holds at least one empty (zero-message)
 	// session, so the toggle appears only when it would change the feed; IncludeEmpty
 	// reports whether those empties are being shown. Together they drive the terse
@@ -323,26 +342,24 @@ type SessionFooter struct {
 	EmptyHref    string
 }
 
-// BuildSessionFooter assembles the footer state from the loaded rows, the filter, and
-// two bounded probes: hasMore (does a further page exist) and hasEmpty (does any empty
-// session sit in scope). shown is len(rows); the "Show more" button appears only when
-// more rows match and the page is below the cap, and the empty toggle appears only
-// when the scope actually holds an empty session (or already shows them, so the reader
-// can hide them again).
-func BuildSessionFooter(f store.SessionFilter, shown int, hasMore, hasEmpty bool) SessionFooter {
+// BuildSessionFooter assembles the footer state from the loaded page and two bounded probes:
+// hasMore (does a further page exist, from the limit+1 read) and hasEmpty (does any empty
+// session sit in scope). priorCount is the running total already shown before this page (0 on
+// the first page, the cumulative count on a keyset append), so Shown reports the whole loaded
+// feed. lastDayKey is the day-bucket key of the page's last row, carried into the "Show more"
+// cursor so the next appended page can continue the same day without reprinting its heading;
+// it is empty for a flat (non-grouped) order, where day headings do not apply. The "Show more"
+// link appears only when more rows match, and the empty toggle only when the scope holds an
+// empty session (or already shows them, so the reader can hide them again).
+func BuildSessionFooter(f store.SessionFilter, rows []store.SessionRow, priorCount int, hasMore, hasEmpty bool, lastDayKey string) SessionFooter {
 	ft := SessionFooter{
-		Shown:        shown,
+		Shown:        priorCount + len(rows),
 		HasMore:      hasMore,
 		HasEmpty:     hasEmpty,
 		IncludeEmpty: f.IncludeEmpty,
 	}
-	limit := effLimit(f)
-	switch {
-	case hasMore && limit >= MaxSessionLimit:
-		// At the cap with more matching: name the cap, no button, narrow instead.
-		ft.AtCap = true
-	case hasMore:
-		ft.MoreHref = ShowMorePath(f)
+	if hasMore && len(rows) > 0 {
+		ft.MoreHref = ShowMorePath(f, rows[len(rows)-1].ID, lastDayKey, ft.Shown)
 	}
 	// The empty toggle is relevant only when hiding actually withholds something (or
 	// when already showing empties, so the reader can hide them again). Either way a

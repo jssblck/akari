@@ -75,7 +75,7 @@ func TestBuildSessionFeed(t *testing.T) {
 		{SessionSummary: store.SessionSummary{ID: 3, Agent: "claude", TotalInput: 0, LastActiveAt: &yesterday}, ProjectID: 2, ProjectKey: "site", ProjectName: "site", ProjectKind: "remote"},
 	}
 
-	groups := buildSessionFeed(now, time.UTC, rows, true)
+	groups := buildSessionFeed(now, time.UTC, rows, true, "")
 	if len(groups) != 2 {
 		t.Fatalf("want 2 day groups, got %d", len(groups))
 	}
@@ -101,10 +101,55 @@ func TestBuildSessionFeed(t *testing.T) {
 	}
 
 	// Ungrouped (any non-recent sort) yields a single, unlabeled group in order.
-	flat := buildSessionFeed(now, time.UTC, rows, false)
+	flat := buildSessionFeed(now, time.UTC, rows, false, "")
 	if len(flat) != 1 || flat[0].Label != "" || len(flat[0].Rows) != 3 {
 		t.Errorf("ungrouped feed should be one unlabeled group of all rows, got %d groups", len(flat))
 	}
+}
+
+// TestBuildSessionFeedContinuesDay pins the keyset "Show more" continuation: when a
+// prevKey names the day the previous page ended on, the first group of the appended page
+// repeats that day and so drops its heading, rather than reprinting "Today" above rows the
+// DOM already shows under it. A first page (empty prevKey) always keeps its heading, and a
+// prevKey naming a different day still opens a fresh heading.
+func TestBuildSessionFeedContinuesDay(t *testing.T) {
+	now := time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC)
+	today := now.Add(-1 * time.Hour)
+	rows := []store.SessionRow{
+		{SessionSummary: store.SessionSummary{ID: 5, Agent: "claude", LastActiveAt: &today}, ProjectID: 1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote"},
+	}
+	todayKey, _ := dayBucket(now, time.UTC, &today)
+
+	// A continuation of the same day: the first (only) group repeats today, so its heading
+	// is suppressed.
+	cont := buildSessionFeed(now, time.UTC, rows, true, todayKey)
+	if len(cont) != 1 || cont[0].Label != "" {
+		t.Errorf("a same-day continuation should drop the leading heading, got %d groups with label %q", len(cont), labelOf(cont))
+	}
+	// The rows still render; only the heading is dropped.
+	if len(cont[0].Rows) != 1 {
+		t.Errorf("the continuation should still carry its row, got %d", len(cont[0].Rows))
+	}
+
+	// A fresh first page (no prevKey) keeps the heading.
+	first := buildSessionFeed(now, time.UTC, rows, true, "")
+	if first[0].Label != "Today" {
+		t.Errorf("a first page should keep its Today heading, got %q", first[0].Label)
+	}
+
+	// A prevKey naming a different day opens a new heading, not a continuation.
+	other := buildSessionFeed(now, time.UTC, rows, true, "2020-01-01")
+	if other[0].Label != "Today" {
+		t.Errorf("a prevKey from another day should still head the group, got %q", other[0].Label)
+	}
+}
+
+// labelOf reads the first group's label for a diagnostic, tolerating an empty feed.
+func labelOf(groups []SessionDayGroup) string {
+	if len(groups) == 0 {
+		return "<none>"
+	}
+	return groups[0].Label
 }
 
 // TestOutcomeFilterOptions pins the outcome toolbar select's option set: the canonical

@@ -303,17 +303,10 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	// spanned=1 narrows to sessions with a measured span, the concurrency panel's cohort;
 	// it arrives only on the busiest-user drill so that feed matches what the panel swept.
 	filter.RequireSpan = q.Get("spanned") == "1"
-	// The paging limit rides the URL, doubled by "Show more" and clamped to the
-	// store's window. An absent or malformed value is the default page.
+	// The feed reads one fixed-size page (DefaultSessionLimit). "Show more" no longer grows
+	// this: it passes a keyset cursor (after) and appends the next page of the same size, so
+	// depth is unbounded and every page's read cost stays flat.
 	filter.Limit = web.DefaultSessionLimit
-	if v := strings.TrimSpace(q.Get("limit")); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			if n > web.MaxSessionLimit {
-				n = web.MaxSessionLimit
-			}
-			filter.Limit = n
-		}
-	}
 	// Click-to-sort: an unknown sort key falls back to the default order rather
 	// than erroring, so a stale or tampered link still renders the feed. The
 	// direction defaults to descending; the header links always carry an explicit
@@ -323,6 +316,35 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		filter.Sort = v
 	}
 	filter.Desc = q.Get("dir") != "asc"
+	// Keyset cursor: "Show more" carries the last row the reader saw as ?after=<id>, so the
+	// store resumes strictly after it in the current order rather than re-reading the page
+	// under a bigger limit. A malformed or non-positive value is no cursor (the first page).
+	// The store applies it only to the keyset-sortable orders and ignores it otherwise.
+	if v := strings.TrimSpace(q.Get("after")); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			filter.After = n
+		}
+	}
+	// after_day is the day-bucket key of the cursor row, carried only in the day-grouped
+	// default order so the appended page can suppress a heading that repeats the day the
+	// prior page ended on. count is the running total already shown, so the appended footer
+	// reports the cumulative "Showing N" without counting the corpus. Both are honored only
+	// on an actual continuation (a cursor is set), so a stray param on a first-page URL
+	// cannot inflate the count or fake a continuation.
+	afterDay := strings.TrimSpace(q.Get("after_day"))
+	priorCount := 0
+	if filter.After > 0 {
+		if v := strings.TrimSpace(q.Get("count")); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				priorCount = n
+			}
+		}
+	}
+	// The day-continuation and the next cursor's day key are resolved against the viewer's
+	// zone, so attach it now rather than at render time (render's own withLocation is
+	// idempotent): the handler-side FeedDayKey below must bucket a row the same way the
+	// template does, or a page boundary could drop or double a day heading.
+	r = withLocation(r)
 	// The list fetches limit+1 rows and reports hasMore, so the footer learns whether a
 	// next page exists without a count(*) over the whole matching history: the render
 	// cost stays linear in the page, not the corpus.
@@ -343,9 +365,23 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "sessions"), http.StatusInternalServerError, "Could not load sessions."))
 		return
 	}
-	footer := web.BuildSessionFooter(filter, len(rows), hasMore, hasEmpty)
+	// lastDayKey is this page's last row's day bucket, carried into the next "Show more"
+	// cursor so the following page continues the same day without reprinting its heading.
+	// It applies only to the day-grouped default order; the flat sorts carry no day key.
+	lastDayKey := ""
+	if web.FeedIsGrouped(filter) && len(rows) > 0 {
+		lastDayKey = web.FeedDayKey(r.Context(), rows[len(rows)-1].LastActiveAt)
+	}
+	footer := web.BuildSessionFooter(filter, rows, priorCount, hasMore, hasEmpty, lastDayKey)
 	if r.Header.Get("HX-Request") == "true" {
-		render(w, r, http.StatusOK, web.GlobalSessionList(rows, filter, footer))
+		// "Show more" appends the next keyset page in place (FeedAppend replaces #feed-more
+		// with the new rows plus a fresh tail). A bare htmx request with no cursor (not
+		// something the UI issues) still degrades to the full list body.
+		if filter.After > 0 {
+			render(w, r, http.StatusOK, web.FeedAppend(rows, filter, footer, afterDay))
+		} else {
+			render(w, r, http.StatusOK, web.GlobalSessionList(rows, filter, footer))
+		}
 		return
 	}
 	facets, err := s.Store.GlobalFacets(r.Context())
