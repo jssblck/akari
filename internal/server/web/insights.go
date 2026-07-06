@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jssblck/akari/internal/quality"
 	"github.com/jssblck/akari/internal/server/store"
 )
 
@@ -336,13 +337,16 @@ func titleCase(s string) string {
 	return strings.ToUpper(s[:1]) + s[1:]
 }
 
+// gradeBarColor maps quality.GradeBand's tier onto the chart palette; the tiering
+// rule itself lives with the scoring model so the bar colours cannot drift from the
+// session tile's q-good/q-watch/q-poor classes.
 func gradeBarColor(grade string) string {
-	switch grade {
-	case "A", "B":
+	switch quality.GradeBand(grade) {
+	case "good":
 		return barSage
-	case "C":
+	case "watch":
 		return barPeach
-	case "D", "F":
+	case "poor":
 		return barRose
 	default: // unscored
 		return barMuted

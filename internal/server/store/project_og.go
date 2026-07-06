@@ -9,57 +9,18 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// OGImage is a cached Open Graph preview card: the rendered PNG bytes and when they
-// were generated. The generated_at stamp drives the TTL (a request past the cache
-// window re-renders) and the cleanup sweep (an expired card is pruned). It is the
-// read shape for the project and session card tables; the per-user overview card
-// predates it and keeps its own OverviewOGImage type.
-type OGImage struct {
-	PNG         []byte
-	GeneratedAt time.Time
-}
-
 // PutProjectOGImage stores the rendered preview card for a project's published
-// overview, stamped with the instant the card's analytics were taken (generatedAt),
-// not the write time. It upserts on the one-per-project key with the same guard
-// PutOverviewOGImage uses: the DO UPDATE fires only when EXCLUDED.generated_at >= the
-// stored generated_at, so a render that read an older analytics snapshot but finishes
-// last cannot clobber a newer card and make stale content look fresh for a whole TTL.
-// Ties win harmlessly, since the render is deterministic for a given analytics window.
-//
-// It reports whether this card became the cached one: true when the row was inserted
-// or the guarded update fired, false when a newer card was already present. The caller
-// uses that to avoid serving bytes it rendered but did not store (see
-// ogimage.GenerateProject), so the served image never diverges from the cache.
+// overview. The guarded-upsert semantics live on putOGImage, shared by all three card
+// caches.
 func (s *Store) PutProjectOGImage(ctx context.Context, projectID int64, png []byte, generatedAt time.Time) (bool, error) {
-	tag, err := s.Pool.Exec(ctx,
-		`INSERT INTO project_og_images (project_id, png, generated_at)
-		      VALUES ($1, $2, $3)
-		 ON CONFLICT (project_id)
-		 DO UPDATE SET png = EXCLUDED.png, generated_at = EXCLUDED.generated_at
-		       WHERE EXCLUDED.generated_at >= project_og_images.generated_at`,
-		projectID, png, generatedAt)
-	if err != nil {
-		return false, err
-	}
-	return tag.RowsAffected() > 0, nil
+	return s.putOGImage(ctx, projectOGTable, projectID, png, generatedAt)
 }
 
 // ProjectOGImage loads the cached preview card for a project, addressed by id, or
-// ErrNotFound when none is cached yet. It is a plain by-id read with no visibility
-// join: the public serve path reads through PublicProjectCard, which folds in the
-// overview_public gate atomically. This by-id form backs the render path's own
-// reconciliation (GenerateProject reloads the canonical card after a skipped guarded
-// write) and the tests, where the visibility gate is not the property under test.
+// ErrNotFound when none is cached yet. See ogImage for why this read carries no
+// visibility join (the public serve path reads through PublicProjectCard).
 func (s *Store) ProjectOGImage(ctx context.Context, projectID int64) (OGImage, error) {
-	var img OGImage
-	err := s.Pool.QueryRow(ctx,
-		`SELECT png, generated_at FROM project_og_images WHERE project_id = $1`,
-		projectID).Scan(&img.PNG, &img.GeneratedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return OGImage{}, ErrNotFound
-	}
-	return img, err
+	return s.ogImage(ctx, projectOGTable, projectID)
 }
 
 // PublicProjectCard resolves a project id to its identity and reads that project's
@@ -98,14 +59,7 @@ func (s *Store) PublicProjectCard(ctx context.Context, id int64) (ProjectSummary
 }
 
 // DeleteExpiredProjectOGImages removes cached project cards stamped before the cutoff,
-// the housekeeping the cleanup loop runs beside DeleteExpiredOGImages. A card for a
-// shared overview re-renders on demand, so pruning a stale one only discards bytes
-// nobody is serving. It returns how many rows it removed.
+// the housekeeping the cleanup loop runs beside DeleteExpiredOGImages.
 func (s *Store) DeleteExpiredProjectOGImages(ctx context.Context, olderThan time.Time) (int64, error) {
-	tag, err := s.Pool.Exec(ctx,
-		`DELETE FROM project_og_images WHERE generated_at < $1`, olderThan)
-	if err != nil {
-		return 0, err
-	}
-	return tag.RowsAffected(), nil
+	return s.deleteExpiredOGImages(ctx, projectOGTable, olderThan)
 }

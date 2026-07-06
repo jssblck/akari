@@ -99,11 +99,12 @@ type ContextBucket struct {
 	Count int
 }
 
-// ContextMarker annotates the histogram with an order statistic (p50/p90/max) at a token
-// position, label pre-formatted for the axis.
+// ContextMarker annotates the histogram with an order statistic at a token position.
+// Kind names the statistic ("p50", "p90", "max"); the axis label is formatted at render
+// time in web, so the store carries no presentation strings.
 type ContextMarker struct {
 	Tokens int64
-	Label  string
+	Kind   string
 }
 
 // Economics is the per-bucket money read: spend split by outcome class (completed, abandoned,
@@ -137,10 +138,6 @@ type Economics struct {
 	// this is "partial", not a lower bound, matching CacheStats.SavingsIncomplete.
 	CacheSavingsIncomplete bool
 }
-
-// gradeOrderTrend fixes the stacked-band order for the per-bucket grade shares, unscored
-// last so it reads as the residue above the graded bands (matching the distribution order).
-var gradeOrderTrend = []string{"A", "B", "C", "D", "F", ""}
 
 // trendGrid is the shared bucket spine every trend series projects onto: the ordered bucket
 // starts plus an index from a truncated instant back to its position, so a GROUP BY
@@ -487,7 +484,6 @@ func (s *Store) signalTrendsFrom(ctx context.Context, q querier, f AnalyticsFilt
 	if err := rows.Err(); err != nil {
 		return SignalTrends{}, fmt.Errorf("iterate grade/outcome trend: %w", err)
 	}
-	gpaPoints := map[string]float64{"A": 4, "B": 3, "C": 2, "D": 1, "F": 0}
 	for i := range gradeCounts {
 		total := out.OutcomeTotal[i]
 		if total == 0 {
@@ -495,12 +491,12 @@ func (s *Store) signalTrendsFrom(ctx context.Context, q querier, f AnalyticsFilt
 		}
 		var graded int
 		var points float64
-		for _, gk := range gradeOrderTrend {
+		for _, gk := range quality.GradeOrder {
 			c := gradeCounts[i][gk]
 			out.GradeShare[i][gk] = float64(c) / float64(total) * 100
 			if gk != "" {
 				graded += c
-				points += gpaPoints[gk] * float64(c)
+				points += quality.GPAPoints(gk) * float64(c)
 			}
 		}
 		if graded > 0 {
@@ -596,9 +592,9 @@ func (s *Store) signalTrendsFrom(ctx context.Context, q querier, f AnalyticsFilt
 	out.ContextHistogram = hist
 	if ctx0.HasData() {
 		out.ContextMarkers = []ContextMarker{
-			{Tokens: ctx0.PeakTokensP50, Label: "p50 " + fmtTokensShort(ctx0.PeakTokensP50)},
-			{Tokens: ctx0.PeakTokensP90, Label: "p90 " + fmtTokensShort(ctx0.PeakTokensP90)},
-			{Tokens: ctx0.PeakTokensMax, Label: "max " + fmtTokensShort(ctx0.PeakTokensMax)},
+			{Tokens: ctx0.PeakTokensP50, Kind: "p50"},
+			{Tokens: ctx0.PeakTokensP90, Kind: "p90"},
+			{Tokens: ctx0.PeakTokensMax, Kind: "max"},
 		}
 	}
 	return out, nil
@@ -807,17 +803,4 @@ func (s *Store) cacheSavingsTrend(ctx context.Context, q querier, f AnalyticsFil
 		return fmt.Errorf("iterate cache savings trend: %w", err)
 	}
 	return nil
-}
-
-// fmtTokensShort renders a token count as a compact k/M figure for the context markers,
-// matching the histogram's axis (101.9k, 1.2M).
-func fmtTokensShort(n int64) string {
-	switch {
-	case n >= 1_000_000:
-		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
-	case n >= 1000:
-		return fmt.Sprintf("%.1fk", float64(n)/1000)
-	default:
-		return fmt.Sprintf("%d", n)
-	}
 }

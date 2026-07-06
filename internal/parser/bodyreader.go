@@ -308,8 +308,10 @@ func (r *jsonStringReader) flushSurrogate() {
 
 // appendRune4 appends the UTF-8 encoding of r, covering the full range including
 // astral-plane code points (four-byte sequences) that combined surrogate pairs
-// produce. The three-byte helper in jsonspan.go only needs the BMP for keys; this
-// one is used for arbitrary string content.
+// produce. It is deliberately not utf8.AppendRune: callers pass lone surrogates
+// (an unpaired \uD800 in lenient JSON), which this encodes as their raw three-byte
+// form, WTF-8 style, where the stdlib would substitute U+FFFD and lose the byte
+// sequence gjson-compatible passthrough preserves.
 func appendRune4(out []byte, r rune) []byte {
 	switch {
 	case r < 0x80:

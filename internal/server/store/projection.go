@@ -460,6 +460,23 @@ func writeToolCalls(ctx context.Context, tx pgx.Tx, sessionID int64, calls []Pro
 			byUID[uid] = append(byUID[uid], i)
 		}
 	}
+	// Blob work is only collected while the loops run and then resolved in one
+	// batched check-and-lock (resolveBlobsTx), so a tool-heavy session costs one
+	// round trip for all its bodies rather than one per body. writeSeen dedups
+	// inline bodies by hash, so a body repeated within the session stores once.
+	var (
+		blobRefs   []blobRef
+		blobWrites []blobWrite
+		writeSeen  = map[string]bool{}
+	)
+	collectWrite := func(body, media, errCtx string) string {
+		sum := HashString(body)
+		if !writeSeen[sum] {
+			writeSeen[sum] = true
+			blobWrites = append(blobWrites, blobWrite{sha: sum, body: body, media: media, errCtx: errCtx})
+		}
+		return sum
+	}
 	for _, tr := range results {
 		if tr.CallUID == "" {
 			continue
@@ -479,16 +496,15 @@ func writeToolCalls(ctx context.Context, tx pgx.Tx, sessionID int64, calls []Pro
 		var sha any
 		switch {
 		case tr.BodySHA256 != "":
-			if err := pinBlobRefTx(ctx, tx, tr.BodySHA256); err != nil {
-				return fmt.Errorf("reference tool result blob %s for session %d call %q: %w", tr.BodySHA256, sessionID, tr.CallUID, err)
-			}
+			blobRefs = append(blobRefs, blobRef{
+				sha:        tr.BodySHA256,
+				localWrite: writeSeen[tr.BodySHA256],
+				errCtx:     fmt.Sprintf("reference tool result blob %s for session %d call %q", tr.BodySHA256, sessionID, tr.CallUID),
+			})
 			sha = tr.BodySHA256
 		case len(tr.Body) > 0:
-			s, err := writeBlobTx(ctx, tx, tr.Body, tr.MediaType)
-			if err != nil {
-				return fmt.Errorf("write tool result blob for session %d call %q: %w", sessionID, tr.CallUID, err)
-			}
-			sha = s
+			sha = collectWrite(tr.Body, tr.MediaType,
+				fmt.Sprintf("write tool result blob for session %d call %q", sessionID, tr.CallUID))
 		}
 		media := sanitizeText(tr.MediaType)
 		if media == "" {
@@ -506,17 +522,18 @@ func writeToolCalls(ctx context.Context, tx pgx.Tx, sessionID int64, calls []Pro
 		case t.InputSHA256 != "":
 			// The client lifted the input to the CAS and left a sentinel; the blob is
 			// already present (and pinned against the sweep), so record the reference
-			// without re-storing the body. Re-lock it FOR KEY SHARE so a sweep racing
-			// this insert cannot delete the blob between here and the FK check.
-			if err := pinBlobRefTx(ctx, tx, t.InputSHA256); err != nil {
-				return fmt.Errorf("reference tool input blob %s for session %d call %d/%d: %w", t.InputSHA256, sessionID, t.MessageOrdinal, t.CallIndex, err)
-			}
+			// without re-storing the body. The batched resolve re-locks it FOR KEY
+			// SHARE so a sweep racing this insert cannot delete the blob between the
+			// check and the FK validation.
+			blobRefs = append(blobRefs, blobRef{
+				sha:        t.InputSHA256,
+				localWrite: writeSeen[t.InputSHA256],
+				errCtx:     fmt.Sprintf("reference tool input blob %s for session %d call %d/%d", t.InputSHA256, sessionID, t.MessageOrdinal, t.CallIndex),
+			})
 			inputSHA, inputMedia = t.InputSHA256, sanitizeText(t.InputMediaType)
 		case len(t.InputBody) > 0:
-			sha, err := writeBlobTx(ctx, tx, t.InputBody, t.InputMediaType)
-			if err != nil {
-				return fmt.Errorf("write tool input blob for session %d call %d/%d: %w", sessionID, t.MessageOrdinal, t.CallIndex, err)
-			}
+			sha := collectWrite(t.InputBody, t.InputMediaType,
+				fmt.Sprintf("write tool input blob for session %d call %d/%d", sessionID, t.MessageOrdinal, t.CallIndex))
 			inputSHA, inputMedia = sha, sanitizeText(t.InputMediaType)
 		}
 		// Store the session-relative form of the path beside the absolute one.
@@ -543,6 +560,9 @@ func writeToolCalls(ctx context.Context, tx pgx.Tx, sessionID int64, calls []Pro
 			nullString(sanitizeText(t.Detail)),
 			resSHA, resBytes, resMedia, resStatus,
 		})
+	}
+	if err := resolveBlobsTx(ctx, tx, blobRefs, blobWrites); err != nil {
+		return err
 	}
 	if _, err := tx.CopyFrom(ctx, pgx.Identifier{"tool_calls"},
 		[]string{"session_id", "message_ordinal", "call_index", "tool_name", "category",
@@ -707,25 +727,37 @@ func writeUsage(ctx context.Context, tx pgx.Tx, sessionID int64, usage []ProjUsa
 // writeAttachments stores each attachment's body (or pins its client-lifted
 // reference) and bulk-inserts the rows. The reducer dedups attachments by
 // content key across the whole session, so the rows are unique by construction.
+// Like writeToolCalls, blob work is collected during the loop and resolved in one
+// batched check-and-lock, not probed per attachment.
 func writeAttachments(ctx context.Context, tx pgx.Tx, sessionID int64, atts []AttachmentDelta) error {
 	if len(atts) == 0 {
 		return nil
 	}
+	var (
+		blobRefs   []blobRef
+		blobWrites []blobWrite
+		writeSeen  = map[string]bool{}
+	)
 	rows := make([][]any, 0, len(atts))
 	for _, a := range atts {
 		var sha string
 		switch {
 		case a.SHA256 != "":
-			if err := pinBlobRefTx(ctx, tx, a.SHA256); err != nil {
-				return fmt.Errorf("reference attachment blob %s for session %d ordinal %d: %w", a.SHA256, sessionID, a.MessageOrdinal, err)
-			}
+			blobRefs = append(blobRefs, blobRef{
+				sha:        a.SHA256,
+				localWrite: writeSeen[a.SHA256],
+				errCtx:     fmt.Sprintf("reference attachment blob %s for session %d ordinal %d", a.SHA256, sessionID, a.MessageOrdinal),
+			})
 			sha = a.SHA256
 		case len(a.Body) > 0:
-			s, err := writeBlobTx(ctx, tx, a.Body, a.MediaType)
-			if err != nil {
-				return fmt.Errorf("write attachment blob for session %d ordinal %d: %w", sessionID, a.MessageOrdinal, err)
+			sha = HashString(a.Body)
+			if !writeSeen[sha] {
+				writeSeen[sha] = true
+				blobWrites = append(blobWrites, blobWrite{
+					sha: sha, body: a.Body, media: a.MediaType,
+					errCtx: fmt.Sprintf("write attachment blob for session %d ordinal %d", sessionID, a.MessageOrdinal),
+				})
 			}
-			sha = s
 		default:
 			continue // an attachment with no body is nothing to store
 		}
@@ -739,6 +771,9 @@ func writeAttachments(ctx context.Context, tx pgx.Tx, sessionID int64, atts []At
 	}
 	if len(rows) == 0 {
 		return nil
+	}
+	if err := resolveBlobsTx(ctx, tx, blobRefs, blobWrites); err != nil {
+		return err
 	}
 	if _, err := tx.CopyFrom(ctx, pgx.Identifier{"attachments"},
 		[]string{"session_id", "message_ordinal", "sha256", "filename", "media_type", "byte_len"},

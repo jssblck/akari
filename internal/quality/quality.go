@@ -318,3 +318,44 @@ func GradeFor(score int) string {
 		return "F"
 	}
 }
+
+// GradeOrder is the canonical display order for grade distributions: best to worst,
+// with the empty string (unscored) last. Charts and facet counts iterate this so every
+// distribution reads the same way; it lives beside GradeFor so the letter set and its
+// ordering change together.
+var GradeOrder = []string{"A", "B", "C", "D", "F", ""}
+
+// GradeBand buckets a letter grade into the coarse tier the UI colours by: A and B
+// "good", C "watch", D and F "poor", anything else (unscored) "none". The tiering is a
+// scoring-model judgment, so it lives here rather than in each renderer; callers map
+// the band to their own CSS class or colour.
+func GradeBand(grade string) string {
+	switch grade {
+	case "A", "B":
+		return "good"
+	case "C":
+		return "watch"
+	case "D", "F":
+		return "poor"
+	default:
+		return "none"
+	}
+}
+
+// GPAPoints is the numeric weight of each letter on the standard 4.0 scale, used to
+// average grades into a GPA trend. Defined beside GradeFor so a change to the letter
+// set cannot silently leave a grade with no weight.
+func GPAPoints(grade string) float64 {
+	switch grade {
+	case "A":
+		return 4
+	case "B":
+		return 3
+	case "C":
+		return 2
+	case "D":
+		return 1
+	default:
+		return 0
+	}
+}

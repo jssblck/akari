@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jssblck/akari/internal/parser"
 	"github.com/jssblck/akari/internal/server/store"
 )
 
@@ -16,7 +17,18 @@ import (
 // parses one chunk in one region, so this also bounds worst-case parse memory.
 const maxChunk = 128 << 20
 
-var validAgents = map[string]bool{"claude": true, "codex": true, "pi": true}
+// validAgents and validAgentsMsg derive from parser.Agents, the one owner of which
+// agent formats exist, so the announce validator cannot drift from what the parser
+// can actually rebuild.
+var validAgents, validAgentsMsg = func() (map[string]bool, string) {
+	m := make(map[string]bool, len(parser.Agents))
+	names := make([]string, len(parser.Agents))
+	for i, a := range parser.Agents {
+		m[string(a)] = true
+		names[i] = string(a)
+	}
+	return m, "agent must be one of: " + strings.Join(names, ", ")
+}()
 
 var validKinds = map[string]bool{"remote": true, "standalone": true, "orphaned": true}
 
@@ -50,7 +62,7 @@ func (s *Server) handleAnnounce(w http.ResponseWriter, r *http.Request) {
 		req.Kind = "remote" // back-compat: older clients announce only remotes
 	}
 	if !validAgents[req.Agent] {
-		writeError(w, http.StatusBadRequest, "agent must be claude, codex, or pi")
+		writeError(w, http.StatusBadRequest, validAgentsMsg)
 		return
 	}
 	if req.SourceSessionID == "" {

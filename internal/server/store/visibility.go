@@ -175,7 +175,7 @@ func (s *Store) PublicOverviewUser(ctx context.Context, username string) (User, 
 // is true the account is public; card.PNG is nil when no card is cached yet (the
 // LEFT JOIN yields NULLs), which the caller renders on demand. Only the fields the
 // card path needs are loaded; the password hash is left zero.
-func (s *Store) PublicOverviewCard(ctx context.Context, username string) (User, OverviewOGImage, bool, error) {
+func (s *Store) PublicOverviewCard(ctx context.Context, username string) (User, OGImage, bool, error) {
 	var u User
 	var png []byte
 	var generatedAt *time.Time
@@ -186,14 +186,14 @@ func (s *Store) PublicOverviewCard(ctx context.Context, username string) (User, 
 		  WHERE u.username = $1 AND u.overview_public = TRUE`,
 		username).Scan(&u.ID, &u.Username, &u.OverviewPublic, &png, &generatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return User{}, OverviewOGImage{}, false, nil
+		return User{}, OGImage{}, false, nil
 	}
 	if err != nil {
-		return User{}, OverviewOGImage{}, false, fmt.Errorf("read public overview card for %q: %w", username, err)
+		return User{}, OGImage{}, false, fmt.Errorf("read public overview card for %q: %w", username, err)
 	}
-	var card OverviewOGImage
+	var card OGImage
 	if png != nil && generatedAt != nil {
-		card = OverviewOGImage{PNG: png, GeneratedAt: *generatedAt}
+		card = OGImage{PNG: png, GeneratedAt: *generatedAt}
 	}
 	return u, card, true, nil
 }

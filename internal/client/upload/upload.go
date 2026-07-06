@@ -741,8 +741,8 @@ func (c *Client) checkBlobs(ctx context.Context, shas []string) (map[string]bool
 // is rejected and a present-but-unreferenced body survives until the transcript lands;
 // it stores the bytes opaquely and never decompresses them.
 func (c *Client) putBody(ctx context.Context, enc *casenc.Encoder, sha, contentType string, ref bodyRef) error {
-	url := fmt.Sprintf("%s/api/v1/ingest/blob/%s?media_type=%s&content_type=%s",
-		c.baseURL, sha, urlQueryEscape(ref.media), urlQueryEscape(contentType))
+	endpoint := fmt.Sprintf("%s/api/v1/ingest/blob/%s?media_type=%s&content_type=%s",
+		c.baseURL, sha, url.QueryEscape(ref.media), url.QueryEscape(contentType))
 
 	var bodyReader io.Reader
 	if ref.haveContent {
@@ -750,7 +750,7 @@ func (c *Client) putBody(ctx context.Context, enc *casenc.Encoder, sha, contentT
 	} else {
 		bodyReader = enc.StreamAs(ctx, ref.canonicalReader(ctx), contentType)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, bodyReader)
 	if err != nil {
 		return err
 	}
@@ -786,9 +786,6 @@ type httpStatusError struct {
 func (e *httpStatusError) Error() string {
 	return fmt.Sprintf("%s: server returned %d: %s", e.op, e.code, e.body)
 }
-
-// urlQueryEscape escapes a value for use in a query string.
-func urlQueryEscape(s string) string { return url.QueryEscape(s) }
 
 // doJSON performs a JSON request, optionally decoding a JSON response into out.
 func (c *Client) doJSON(ctx context.Context, method, path string, body, out any) error {

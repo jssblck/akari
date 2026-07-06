@@ -172,47 +172,17 @@ func (s *Store) sessionActivityBuckets(ctx context.Context, q querier, sessionID
 	return out, nil
 }
 
-// PutSessionOGImage stores the rendered preview card for a published session, stamped
-// with the instant the card's data was read (generatedAt), not the write time. It
-// upserts on the one-per-session key with the same guard PutOverviewOGImage uses: the
-// DO UPDATE fires only when EXCLUDED.generated_at >= the stored generated_at, so a
-// render that read older rollups but finishes last cannot clobber a newer card and
-// make stale content look fresh for a whole TTL. Ties win harmlessly, since the render
-// is deterministic for a given session snapshot.
-//
-// It reports whether this card became the cached one: true when the row was inserted
-// or the guarded update fired, false when a newer card was already present. The caller
-// uses that to avoid serving bytes it rendered but did not store (see
-// ogimage.GenerateSession), so the served image never diverges from the cache.
+// PutSessionOGImage stores the rendered preview card for a published session. The
+// guarded-upsert semantics live on putOGImage, shared by all three card caches.
 func (s *Store) PutSessionOGImage(ctx context.Context, sessionID int64, png []byte, generatedAt time.Time) (bool, error) {
-	tag, err := s.Pool.Exec(ctx,
-		`INSERT INTO session_og_images (session_id, png, generated_at)
-		      VALUES ($1, $2, $3)
-		 ON CONFLICT (session_id)
-		 DO UPDATE SET png = EXCLUDED.png, generated_at = EXCLUDED.generated_at
-		       WHERE EXCLUDED.generated_at >= session_og_images.generated_at`,
-		sessionID, png, generatedAt)
-	if err != nil {
-		return false, err
-	}
-	return tag.RowsAffected() > 0, nil
+	return s.putOGImage(ctx, sessionOGTable, sessionID, png, generatedAt)
 }
 
 // SessionOGImage loads the cached preview card for a session, addressed by id, or
-// ErrNotFound when none is cached yet. It is a plain by-id read with no visibility
-// join: the public serve path reads through PublicSessionCard, which folds in the
-// visibility gate atomically. This by-id form backs the render path's own
-// reconciliation (GenerateSession reloads the canonical card after a skipped guarded
-// write) and the tests, where the visibility gate is not the property under test.
+// ErrNotFound when none is cached yet. See ogImage for why this read carries no
+// visibility join (the public serve path reads through PublicSessionCard).
 func (s *Store) SessionOGImage(ctx context.Context, sessionID int64) (OGImage, error) {
-	var img OGImage
-	err := s.Pool.QueryRow(ctx,
-		`SELECT png, generated_at FROM session_og_images WHERE session_id = $1`,
-		sessionID).Scan(&img.PNG, &img.GeneratedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return OGImage{}, ErrNotFound
-	}
-	return img, err
+	return s.ogImage(ctx, sessionOGTable, sessionID)
 }
 
 // PublicSessionCard resolves a session's public id to its numeric id and reads that
@@ -249,14 +219,7 @@ func (s *Store) PublicSessionCard(ctx context.Context, publicID string) (int64, 
 }
 
 // DeleteExpiredSessionOGImages removes cached session cards stamped before the cutoff,
-// the housekeeping the cleanup loop runs beside DeleteExpiredOGImages. A card for a
-// shared session re-renders on demand, so pruning a stale one only discards bytes
-// nobody is serving. It returns how many rows it removed.
+// the housekeeping the cleanup loop runs beside DeleteExpiredOGImages.
 func (s *Store) DeleteExpiredSessionOGImages(ctx context.Context, olderThan time.Time) (int64, error) {
-	tag, err := s.Pool.Exec(ctx,
-		`DELETE FROM session_og_images WHERE generated_at < $1`, olderThan)
-	if err != nil {
-		return 0, err
-	}
-	return tag.RowsAffected(), nil
+	return s.deleteExpiredOGImages(ctx, sessionOGTable, olderThan)
 }

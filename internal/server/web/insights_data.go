@@ -86,7 +86,7 @@ func InsightsData(ins store.Insights) (string, error) {
 		payload["contextMarkers"] = markers
 	}
 	if ins.Context.HasData() {
-		payload["contextSummary"] = map[string]any{"p50Label": fmtTokensShort(ins.Context.PeakTokensP50)}
+		payload["contextSummary"] = map[string]any{"p50Label": FmtTokensCompact(ins.Context.PeakTokensP50)}
 	}
 
 	out, err := json.Marshal(payload)
@@ -366,7 +366,7 @@ func histogramData(bins []store.ContextBucket) []map[string]any {
 func contextMarkers(markers []store.ContextMarker) []map[string]any {
 	out := make([]map[string]any, 0, len(markers))
 	for _, m := range markers {
-		out = append(out, map[string]any{"v": m.Tokens, "label": m.Label})
+		out = append(out, map[string]any{"v": m.Tokens, "label": m.Kind + " " + FmtTokensCompact(m.Tokens)})
 	}
 	return out
 }
@@ -561,17 +561,6 @@ func punchcardPeak(r store.RhythmGrid) (string, bool) {
 		return "", false
 	}
 	return fmt.Sprintf("peak %s %02d:00", punchcardDOW[bestD], bestH), true
-}
-
-func fmtTokensShort(nTok int64) string {
-	switch {
-	case nTok >= 1_000_000:
-		return fmt.Sprintf("%.1fM", float64(nTok)/1_000_000)
-	case nTok >= 1000:
-		return fmt.Sprintf("%.1fk", float64(nTok)/1000)
-	default:
-		return fmt.Sprintf("%d", nTok)
-	}
 }
 
 func fmtCostShort(usd float64) string {
