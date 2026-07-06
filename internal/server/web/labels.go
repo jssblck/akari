@@ -121,6 +121,41 @@ func DuplicateIDsLabel(n int) string {
 	return fmt.Sprintf("%d duplicate ids", n)
 }
 
+// SubagentCollapseThreshold is the subagent count past which the session detail
+// collapses the subagents table behind a summary line. Below it the short list reads
+// fine inline; above it the table pushes the transcript below the fold on exactly the
+// fan-out-heavy sessions a lead most wants to audit, so it folds away by default and the
+// summary carries the count and spend at a glance. The value is a comfortable ceiling: a
+// handful of subagents is context, a few dozen is a wall.
+const SubagentCollapseThreshold = 8
+
+// SubagentsCollapsed reports whether a session's subagents table should render collapsed
+// behind its summary (more than SubagentCollapseThreshold children), so the template and a
+// test read the same rule rather than each spelling out the comparison.
+func SubagentsCollapsed(subs []store.SessionSummary) bool {
+	return len(subs) > SubagentCollapseThreshold
+}
+
+// SubagentsSummaryLabel is the collapsed subagents summary: the child count and their
+// summed cost, joined the same way the feed's fan-out chip reads ("34 subagents · $6.12"),
+// so a reader sees the same two facts whether they meet the fan-out on the parent's feed
+// row or at the head of its collapsed table. The cost carries the "+" lower-bound marker
+// when any child could not be fully priced. The count is singular at one, though the
+// collapse only ever engages well above that.
+func SubagentsSummaryLabel(subs []store.SessionSummary) string {
+	var cost float64
+	var incomplete bool
+	for _, s := range subs {
+		cost += s.TotalCostUSD
+		incomplete = incomplete || s.CostIncomplete
+	}
+	unit := "subagents"
+	if len(subs) == 1 {
+		unit = "subagent"
+	}
+	return fmt.Sprintf("%d %s · %s", len(subs), unit, FmtCost(cost, incomplete))
+}
+
 // AttachmentsByOrdinal groups attachments by the message ordinal they belong to,
 // so the session view can render a message's images beneath it.
 func AttachmentsByOrdinal(atts []store.AttachmentView) map[int][]store.AttachmentView {

@@ -54,10 +54,17 @@ verified against the live dev server:
   `(col, id)` btrees. The running count accumulates ("Showing N") and the boundary
   day's heading does not reprint on the appended page. Read-time only: no
   rebuild-derived column, no epoch bump.
+- P-2 (subagents fold, item 3 of the workstream): a session that fanned out past
+  eight subagents now folds its subagents table behind a summary that names the
+  child count and their summed cost ("37 subagents · $11.44"), opening on demand,
+  so the fan-out no longer buries the transcript on exactly the sessions a lead
+  most wants to read. A short list still reads inline. Presentation only.
 
-Remaining: P-2 (transcript windowing + incremental SSE), D (session detail
-auditor view). Each is independent and can land as its own PR per the sequencing
-table below.
+Remaining: P-2's transcript windowing and incremental SSE (items 1, 2, 4 of that
+workstream: cap the initial render at the last N turns behind a "Show earlier"
+bar, and make live updates append only the new turns instead of re-rendering the
+whole body), and D (session detail auditor view). Both are independent and can
+land as their own PRs per the sequencing table below.
 
 ## The lens
 
@@ -221,7 +228,10 @@ at it so future regressions are visible in devtools).
 3. Collapse the subagents table by default when it exceeds 8 rows (summary
    line: "34 subagents, $6.12, 2 failed", expandable). It currently pushes the
    transcript below the fold on exactly the sessions a lead most wants to
-   audit.
+   audit. (Shipped: the fold engages past eight children with a "N subagents ·
+   $cost" summary, closed by default. The "M failed" clause waits on the
+   outcome-aware subagents read that item 4 / workstream D introduces; the
+   current subagents table carries no outcome column to reconcile it against.)
 4. The outline rail renders one entry per turn regardless; it stays, but its
    anchors must work with the windowed transcript (fetch-then-scroll for
    turns not yet in the DOM).

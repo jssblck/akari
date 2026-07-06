@@ -89,14 +89,33 @@ templ sessionActions(d store.SessionDetail, owner bool) {
 // persist across updates and are not re-rendered per refresh.
 templ SessionMain(d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, subagents []store.SessionSummary, hs HeaderStats) {
 	@sessionStats(d, hs)
-	if len(subagents) > 0 {
-		<h2>Subagents</h2>
-		<div class="subagents">
-			@SessionList(subagents)
-		</div>
-	}
+	@subagentsBlock(subagents)
 	<h2>Transcript</h2>
 	@Transcript(msgs, d.Agent, tools, attachments, FallbacksByOrdinal(hs.Fallbacks), SessionBlobBase(d.ID))
+}
+
+// subagentsBlock renders a parent session's direct subagents. A short list reads inline
+// under the heading; a fan-out-heavy one (past SubagentCollapseThreshold) folds away by
+// default behind a summary naming the child count and their summed cost, and opens on
+// demand, so the subagents do not push the transcript below the fold on exactly the
+// sessions a lead most wants to read. It renders nothing when the session spawned none.
+templ subagentsBlock(subagents []store.SessionSummary) {
+	if len(subagents) > 0 {
+		<h2>Subagents</h2>
+		if SubagentsCollapsed(subagents) {
+			<details class="subagents subagents-fold">
+				<summary class="subagents-summary">
+					<span class="subagents-summary-label">{ SubagentsSummaryLabel(subagents) }</span>
+					<span class="subagents-summary-hint muted small" aria-hidden="true"></span>
+				</summary>
+				@SessionList(subagents)
+			</details>
+		} else {
+			<div class="subagents">
+				@SessionList(subagents)
+			</div>
+		}
+	}
 }
 
 // Outline is the left pane of the session view: one entry per turn, with its
