@@ -408,6 +408,12 @@ func (s *Store) ListAllSessions(ctx context.Context, f SessionFilter) (rows []Se
 		out = out[:limit]
 		hasMore = true
 	}
+	// Fold each row's subagent subtree into a whole-work-item rollup so the feed can
+	// show the fan-out a root turn hides. One batch query over the trimmed page, after
+	// the hasMore probe row is dropped, so the extra row never costs a walk.
+	if err := s.attachTreeRollups(ctx, out); err != nil {
+		return nil, false, err
+	}
 	return out, hasMore, nil
 }
 

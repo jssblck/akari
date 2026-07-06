@@ -228,6 +228,34 @@ func barStyle(pct int) string {
 	return fmt.Sprintf("width:%d%%", pct)
 }
 
+// FanoutLabel is the fan-out chip's text: the subtree's subagent count and its
+// whole-work-item cost, joined so a reader sees at a glance both how wide a prompt
+// fanned out and what the whole thing cost. The count is singular at one ("1
+// subagent"), and the cost carries the "+" lower-bound marker when any session in the
+// subtree could not be fully priced. It is only ever rendered when the count is
+// positive, so it never reads "0 subagents".
+func FanoutLabel(tr store.TreeRollup) string {
+	unit := "subagents"
+	if tr.SubagentCount == 1 {
+		unit = "subagent"
+	}
+	return fmt.Sprintf("%d %s · %s", tr.SubagentCount, unit, FmtCost(tr.CostUSD, tr.CostIncomplete))
+}
+
+// FanoutTitle is the fan-out chip's hover text, spelling out that the chip's cost is
+// the whole work item's, not the root turn's. The row's own token cell shows the root
+// session's own cost; a prompt that delegated to subagents spent far more than that
+// root turn, and this line names that gap so the two cost figures do not read as a
+// contradiction.
+func FanoutTitle(tr store.TreeRollup) string {
+	unit := "subagents"
+	if tr.SubagentCount == 1 {
+		unit = "subagent"
+	}
+	return fmt.Sprintf("Whole work item: %s across %d %s fanned out (the row's own cost is the root turn's alone)",
+		FmtCost(tr.CostUSD, tr.CostIncomplete), tr.SubagentCount, unit)
+}
+
 // FeedTime is the clock time a feed row shows, in the viewer's timezone. The day
 // already rides the group heading, so the row needs only the time of day; the exact
 // stamp is the cell's title on hover.

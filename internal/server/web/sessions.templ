@@ -234,6 +234,9 @@ templ feedRow(fr FeedRow) {
 				if fr.Row.ModelFallbackCount > 0 {
 					<span class="tag warn" title={ FallbackBadgeTitle(fr.Row.ModelFallbackCount) }>{ FallbackBadgeLabel(fr.Row.ModelFallbackCount) }</span>
 				}
+				if fr.Row.Tree.SubagentCount > 0 {
+					<span class="tag fanout" title={ FanoutTitle(fr.Row.Tree) }>{ FanoutLabel(fr.Row.Tree) }</span>
+				}
 			</div>
 			if fr.Row.Search.Has() {
 				@snippetLine(fr.Row.Search)

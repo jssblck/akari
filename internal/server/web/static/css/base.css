@@ -350,6 +350,10 @@ td.num, th.num, table.grid td.num, table.grid th.num { text-align: right; font-f
 .tag.grade.q-watch { color: var(--warn); border-color: rgba(240, 197, 146, 0.4); }
 .tag.grade.q-poor { color: var(--err); border-color: rgba(239, 154, 169, 0.4); }
 .tag.outcome { color: var(--err); border-color: rgba(239, 154, 169, 0.4); cursor: help; }
+/* Fan-out chip: a root session's whole-work-item rollup (how many subagents it spun
+   out and the total cost including all of them). It reads as structure, not a verdict,
+   so it takes the neutral subtext color and a mono figure rather than a status hue. */
+.tag.fanout { color: var(--subtext); font-family: var(--mono); letter-spacing: 0; cursor: help; }
 
 /* ---- Buttons ---- */
 button, .btn {

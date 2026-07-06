@@ -465,6 +465,13 @@ type SessionRow struct {
 	// content centered on the match, so the feed can show what the session said
 	// around the search term. It is the zero value on an unfiltered list.
 	Search SearchSnippet
+	// Tree is the whole-work-item rollup for this row: its own cost plus every
+	// subagent it fanned out, and the count of those subagents. It is filled only by
+	// the feed path (ListAllSessions attaches it after the page is scanned), so a row
+	// read outside the feed carries the zero-value rollup (no fan-out). The feed shows
+	// the fan-out only when SubagentCount > 0, since a session that spawned nothing has
+	// no work-item cost beyond the cost the row already shows.
+	Tree TreeRollup
 }
 
 // SearchSnippet is a window of a matching message's content around the first

@@ -158,6 +158,39 @@ func TestGradeFilterOptions(t *testing.T) {
 	}
 }
 
+// TestFanoutLabel pins the fan-out chip's text: the subagent count with a singular unit
+// at one, joined to the whole-work-item cost, and the "+" lower-bound marker riding an
+// incomplete subtree cost.
+func TestFanoutLabel(t *testing.T) {
+	cases := []struct {
+		name string
+		tr   store.TreeRollup
+		want string
+	}{
+		{"plural", store.TreeRollup{SubagentCount: 62, CostUSD: 4.12}, "62 subagents · $4.12"},
+		{"singular", store.TreeRollup{SubagentCount: 1, CostUSD: 0.30}, "1 subagent · $0.30"},
+		{"incomplete cost carries the plus marker", store.TreeRollup{SubagentCount: 3, CostUSD: 2.00, CostIncomplete: true}, "3 subagents · $2.00+"},
+	}
+	for _, c := range cases {
+		if got := FanoutLabel(c.tr); got != c.want {
+			t.Errorf("%s: FanoutLabel = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// TestFanoutTitle checks the hover text names the cost as the whole work item's and uses
+// the same singular/plural unit as the chip, so the two never disagree on grammar.
+func TestFanoutTitle(t *testing.T) {
+	if got := FanoutTitle(store.TreeRollup{SubagentCount: 1, CostUSD: 0.30}); got !=
+		"Whole work item: $0.30 across 1 subagent fanned out (the row's own cost is the root turn's alone)" {
+		t.Errorf("FanoutTitle singular = %q", got)
+	}
+	if got := FanoutTitle(store.TreeRollup{SubagentCount: 4, CostUSD: 9.00, CostIncomplete: true}); got !=
+		"Whole work item: $9.00+ across 4 subagents fanned out (the row's own cost is the root turn's alone)" {
+		t.Errorf("FanoutTitle plural incomplete = %q", got)
+	}
+}
+
 // FeedTime renders the clock time of day in the viewer's zone, with a placeholder
 // for a missing stamp.
 func TestFeedTime(t *testing.T) {

@@ -28,11 +28,17 @@ verified against the live dev server:
   the window and swapping together.
 - E-1: every Insights instrument leads with a plain-language caption; the
   schema-level detail moves into a demoted "How it's measured" disclosure (A5).
+- B-2: a root feed row now carries a fan-out chip naming its whole-work-item
+  rollup, the subagent count and the total cost folded over its subtree, so a
+  prompt that delegated to dozens of subagents no longer hides that spend behind
+  the root turn's own cost. The rollup is a read-time recursive walk of the
+  subagent edges (continuations stay their own work item), attached to the feed
+  page in one batch query, so no rebuild-derived column and no epoch bump.
 
-Remaining: B-2 (tree cost rollups), B-4 (repositories vs local folders), P-2
-(transcript windowing + incremental SSE), P-3 (keyset pagination), D (session
-detail auditor view), E-2 (units on tiles), E-3 (Insights summary strip). Each
-is independent and can land as its own PR per the sequencing table below.
+Remaining: B-4 (repositories vs local folders), P-2 (transcript windowing +
+incremental SSE), P-3 (keyset pagination), D (session detail auditor view), E-2
+(units on tiles), E-3 (Insights summary strip). Each is independent and can land
+as its own PR per the sequencing table below.
 
 ## The lens
 
