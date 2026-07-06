@@ -46,7 +46,7 @@ func analyticsWithData() store.Analytics {
 // would otherwise repeat the scope already named in the page head.
 func TestOverviewPageRendersHeatmap(t *testing.T) {
 	p := Page{Title: "Overview", LoggedIn: true, Active: "overview", Username: "Grace Hopper"}
-	html := renderComponent(t, OverviewPage(p, analyticsWithData(), DefaultRange, nil, nil))
+	html := renderComponent(t, OverviewPage(p, analyticsWithData(), store.AuditSummary{}, DefaultRange, nil, nil))
 
 	for _, want := range []string{`data-heatmap`, `data-heatmap-target="chart-global"`, `>Tokens</button>`, `>Dollars</button>`} {
 		if !strings.Contains(html, want) {
@@ -61,14 +61,16 @@ func TestOverviewPageRendersHeatmap(t *testing.T) {
 	}
 }
 
-// The overview's usage panel is the htmx swap target for the range selector, so
-// it must carry the stable id and the selector must offer every window, mark the
-// active one, and refetch into that same target.
+// The overview's range selector refetches the overview and swaps the whole
+// audit-plus-usage wrapper (#overview-usage), so the verdict and the grid move to the
+// new window together. The wrapper must carry the stable id, the usage panel keeps its
+// own id="usage" inside it, and the selector must offer every window, mark the active
+// one, and refetch into that wrapper target.
 func TestOverviewPageRangeSelector(t *testing.T) {
 	p := Page{Title: "Overview", LoggedIn: true, Active: "overview", Username: "Grace Hopper"}
-	html := renderComponent(t, OverviewPage(p, analyticsWithData(), "90d", nil, nil))
+	html := renderComponent(t, OverviewPage(p, analyticsWithData(), store.AuditSummary{}, "90d", nil, nil))
 
-	for _, want := range []string{`id="usage"`, `aria-label="Date range"`, `hx-get="/overview?range=7d"`, `hx-get="/overview?range=all"`, `hx-target="#usage"`, `hx-select="#usage"`} {
+	for _, want := range []string{`id="overview-usage"`, `id="usage"`, `aria-label="Date range"`, `hx-get="/overview?range=7d"`, `hx-get="/overview?range=all"`, `hx-target="#overview-usage"`, `hx-select="#overview-usage"`} {
 		if !strings.Contains(html, want) {
 			t.Errorf("range selector missing %q", want)
 		}
@@ -92,7 +94,7 @@ func TestOverviewPageRangeSelector(t *testing.T) {
 func TestOverviewPageUserFilter(t *testing.T) {
 	p := Page{Title: "Overview", LoggedIn: true, Active: "overview", Username: "Grace Hopper"}
 	users := []store.User{{ID: 2, Username: "ada"}, {ID: 5, Username: "grace"}}
-	html := renderComponent(t, OverviewPage(p, analyticsWithData(), "7d", users, []int64{5}))
+	html := renderComponent(t, OverviewPage(p, analyticsWithData(), store.AuditSummary{}, "7d", users, []int64{5}))
 
 	for _, want := range []string{
 		`class="userfilter"`,
@@ -126,7 +128,7 @@ func TestOverviewPageUserFilter(t *testing.T) {
 func TestOverviewPageUserFilterUnscoped(t *testing.T) {
 	p := Page{Title: "Overview", LoggedIn: true, Active: "overview", Username: "Grace Hopper"}
 	users := []store.User{{ID: 2, Username: "ada"}}
-	html := renderComponent(t, OverviewPage(p, analyticsWithData(), DefaultRange, users, nil))
+	html := renderComponent(t, OverviewPage(p, analyticsWithData(), store.AuditSummary{}, DefaultRange, users, nil))
 
 	if !strings.Contains(html, `class="userfilter-all">All Users</span>`) {
 		t.Error("unscoped collapsed control should read All Users")
@@ -144,7 +146,7 @@ func TestOverviewPageUserFilterUnscoped(t *testing.T) {
 // Output into their own tiles.
 func TestOverviewPageTokensStat(t *testing.T) {
 	p := Page{Title: "Overview", LoggedIn: true, Active: "overview", Username: "Grace Hopper"}
-	html := renderComponent(t, OverviewPage(p, analyticsWithData(), DefaultRange, nil, nil))
+	html := renderComponent(t, OverviewPage(p, analyticsWithData(), store.AuditSummary{}, DefaultRange, nil, nil))
 
 	for _, want := range []string{`>Tokens</div>`, `tokens-stat`, `tokens-value`, `class="stat-tip"`, `<dt>In</dt>`, `<dt>Out</dt>`, `<dt>Cache read</dt>`, `<dt>Cache write</dt>`, `<dt>Reasoning</dt>`} {
 		if !strings.Contains(html, want) {
@@ -170,7 +172,7 @@ func TestOverviewPageHidesZeroReasoning(t *testing.T) {
 	p := Page{Title: "Overview", LoggedIn: true, Active: "overview", Username: "Grace Hopper"}
 	a := analyticsWithData()
 	a.TotalReasoning = 0
-	html := renderComponent(t, OverviewPage(p, a, DefaultRange, nil, nil))
+	html := renderComponent(t, OverviewPage(p, a, store.AuditSummary{}, DefaultRange, nil, nil))
 
 	if strings.Contains(html, `<dt>Reasoning</dt>`) {
 		t.Error("tokens tooltip should omit the reasoning line when there are no reasoning tokens")
@@ -181,7 +183,7 @@ func TestOverviewPageHidesZeroReasoning(t *testing.T) {
 // the panel is the page.
 func TestOverviewPageDropsRecentActivity(t *testing.T) {
 	p := Page{Title: "Overview", LoggedIn: true, Active: "overview", Username: "Grace Hopper"}
-	html := renderComponent(t, OverviewPage(p, analyticsWithData(), DefaultRange, nil, nil))
+	html := renderComponent(t, OverviewPage(p, analyticsWithData(), store.AuditSummary{}, DefaultRange, nil, nil))
 
 	if strings.Contains(html, "Recent activity") {
 		t.Error("overview should no longer render the recent-activity feed")
@@ -199,7 +201,7 @@ func TestOverviewPageByUserBreakdownGatedOnMultipleUsers(t *testing.T) {
 
 	one := analyticsWithData()
 	one.Users = []store.Breakdown{{Label: "grace", CostUSD: 12.5, Input: 100, Sessions: 3}}
-	html := renderComponent(t, OverviewPage(p, one, DefaultRange, nil, nil))
+	html := renderComponent(t, OverviewPage(p, one, store.AuditSummary{}, DefaultRange, nil, nil))
 	if strings.Contains(html, "By user") {
 		t.Error("a single-user breakdown should not render the By user list")
 	}
@@ -209,7 +211,7 @@ func TestOverviewPageByUserBreakdownGatedOnMultipleUsers(t *testing.T) {
 		{Label: "grace", CostUSD: 9.0, Input: 80, Sessions: 2},
 		{Label: "ada", CostUSD: 3.5, Input: 20, Sessions: 1},
 	}
-	html = renderComponent(t, OverviewPage(p, two, DefaultRange, nil, nil))
+	html = renderComponent(t, OverviewPage(p, two, store.AuditSummary{}, DefaultRange, nil, nil))
 	for _, want := range []string{"By user", ">grace<", ">ada<"} {
 		if !strings.Contains(html, want) {
 			t.Errorf("a multi-user breakdown should render %q", want)

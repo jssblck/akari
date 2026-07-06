@@ -1,0 +1,112 @@
+package web
+
+import (
+	"fmt"
+
+	"github.com/jssblck/akari/internal/server/store"
+)
+
+// auditDash is the Overview's lead, the audit read a team lead scans before the usage
+// panel: a four-tile verdict (how much work, how much shipped, how good, what it cost)
+// over a ranked shortlist of the sessions most worth opening. It draws only when the
+// scope holds at least one work item, so an empty fleet or an over-narrow filter falls
+// through to the usage panel's own empty state rather than a strip of dashes.
+templ auditDash(a store.Analytics, au store.AuditSummary) {
+	if au.WorkItems > 0 {
+		<section class="audit">
+			@verdictStrip(a, au)
+			@attentionList(au.Attention)
+		</section>
+	}
+}
+
+// verdictStrip is the four-tile fleet verdict. Work and Spend read plain: a count and a
+// dollar figure. Completed and Quality carry a banded tone so the figure reads its own
+// judgement (green/peach/rose) without the reader doing the math. Spend leads with the
+// window's total (the same figure the usage panel totals) and trails the money the
+// failed runs burned, the one number a team lead most wants pulled out of the aggregate.
+templ verdictStrip(a store.Analytics, au store.AuditSummary) {
+	<div class="verdict">
+		<div class="vtile">
+			<div class="label">Work</div>
+			<div class="vvalue">{ fmt.Sprintf("%d", au.WorkItems) }</div>
+			<div class="vsub muted small">{ fmt.Sprintf("%d of %d settled", au.Settled, au.WorkItems) }</div>
+		</div>
+		<div class="vtile">
+			<div class="label">Completed</div>
+			<div class={ VerdictValueClass(CompletionTone(au)) }>{ FmtCompletionRate(au.CompletionRate()) }</div>
+			<div class="vsub muted small">{ fmt.Sprintf("%d of %d settled", au.Completed, au.Settled) }</div>
+		</div>
+		<div class="vtile">
+			<div class="label">Quality</div>
+			<div class={ VerdictValueClass(GPATone(au)) }>{ FmtGPA(au.GPA()) }</div>
+			<div class="vsub muted small">
+				if au.Graded > 0 {
+					{ fmt.Sprintf("GPA over %d graded", au.Graded) }
+				} else {
+					{ "no graded sessions yet" }
+				}
+			</div>
+		</div>
+		<div class="vtile">
+			<div class="label">Spend</div>
+			<div class="vvalue">{ FmtCost(a.TotalCost, a.CostIncomplete) }</div>
+			<div class="vsub muted small">
+				if au.WastedUSD > 0 {
+					<span class="waste">{ FmtCost(au.WastedUSD, au.WastedIncomplete) }</span>
+					{ " on failed runs" }
+				} else {
+					{ "none wasted" }
+				}
+			</div>
+		</div>
+	</div>
+}
+
+// attentionList is the triage queue under the verdict: the sessions the ranking pulled
+// out as worth a look, worst first. An empty list is the good case (nothing in scope
+// warrants review), so it reads as a calm all-clear rather than a bare gap.
+templ attentionList(rows []store.AttentionRow) {
+	<div class="attention">
+		<div class="attention-head">
+			<span class="label">Needs attention</span>
+			if len(rows) > 0 {
+				<span class="attention-count muted small">{ fmt.Sprintf("%d flagged", len(rows)) }</span>
+			}
+		</div>
+		if len(rows) == 0 {
+			<div class="attention-clear muted small">Nothing flagged in this window. No errors, abandonments, or failing grades.</div>
+		} else {
+			<div class="attention-rows">
+				for _, r := range rows {
+					@attentionRow(r)
+				}
+			</div>
+		}
+	</div>
+}
+
+// attentionRow is one shortlisted session: the reason it was flagged leads the row (so
+// the eye scans the why down the left edge), then the project and agent it ran under,
+// its grade, the run's first-prompt title, and its cost. The whole row links to the
+// session so a flagged run is one click from its transcript.
+templ attentionRow(r store.AttentionRow) {
+	<a class="att-row" href={ SessionHref(r.ID) }>
+		<span class={ "att-reason " + AttentionReasonTone(r) } title={ AttentionReasonTitle(r) }>{ AttentionReasonLabel(r) }</span>
+		<div class="att-main">
+			<div class="att-line">
+				<span class="att-proj">{ AttentionProjectLabel(r) }</span>
+				@kindTag(r.ProjectKind)
+				<span class="att-agent mono small">{ r.Agent }</span>
+				if r.Grade != nil {
+					<span class={ "tag grade " + RowGradeClass(r.Grade) } title="quality grade">{ *r.Grade }</span>
+				}
+			</div>
+			if t := StripPromptPreamble(r.Title); t != "" {
+				<div class="att-sub" title={ t }>{ t }</div>
+			}
+		</div>
+		<span class="att-cost mono small" title="session cost">{ FmtCost(r.CostUSD, r.CostIncomplete) }</span>
+		<span class="att-time mono small" title={ FmtTimeLong(ctx, r.StartedAt) }>{ FeedTime(ctx, r.StartedAt) }</span>
+	</a>
+}

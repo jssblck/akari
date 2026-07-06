@@ -109,10 +109,12 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	render(w, r, http.StatusOK, web.LandingPage(og, viewer))
 }
 
-// handleOverview is the app's home surface at /overview: fleet-wide usage bounded
-// to the selected trailing window. The range selector refetches this same handler
-// and swaps the usage panel (hx-select="#usage"), so a plain load and an htmx swap
-// render from one path; the window also rides the URL via ?range=.
+// handleOverview is the app's home surface at /overview: the audit verdict and its
+// needs-attention shortlist over fleet-wide usage, bounded to the selected trailing
+// window and users. The range selector and the per-user filter refetch this same
+// handler and swap the audit-plus-usage wrapper (hx-select="#overview-usage"), so a
+// plain load and an htmx swap render from one path; the window and selection ride the
+// URL via ?range= and ?user=.
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	rng := web.ParseRange(r.URL.Query().Get("range"))
 	users, err := s.Store.ListUsers(r.Context())
@@ -121,13 +123,19 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	selected := web.SelectedUserIDs(r.URL.Query()["user"], users)
-	analytics, err := s.Store.Analytics(r.Context(), store.AnalyticsFilter{Since: web.RangeSince(rng, time.Now()), UserIDs: selected})
+	filter := store.AnalyticsFilter{Since: web.RangeSince(rng, time.Now()), UserIDs: selected}
+	analytics, err := s.Store.Analytics(r.Context(), filter)
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "overview"), http.StatusInternalServerError, "Could not load analytics."))
 		return
 	}
+	audit, err := s.Store.OverviewAudit(r.Context(), filter)
+	if err != nil {
+		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageForNav(r, "Error", "overview"), http.StatusInternalServerError, "Could not load audit."))
+		return
+	}
 	setDashboardCache(w)
-	render(w, r, http.StatusOK, web.OverviewPage(s.pageForNav(r, "Overview", "overview"), analytics, rng, users, selected))
+	render(w, r, http.StatusOK, web.OverviewPage(s.pageForNav(r, "Overview", "overview"), analytics, audit, rng, users, selected))
 }
 
 // handleInsights is the cross-cutting analytics surface at /insights: the quality and

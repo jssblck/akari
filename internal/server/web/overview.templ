@@ -6,14 +6,16 @@ import (
 	"github.com/jssblck/akari/internal/server/store"
 )
 
-// OverviewPage is the app's home surface at /overview: the fleet-wide usage panel
-// (totals, the activity grid, and model and agent breakdowns), bounded to the
-// selected trailing window and the selected users. rng is the active range key and
-// selected the chosen user ids, both already applied to a by the store; users is
-// the full account list the per-user filter offers, and the panel's controls mark
-// the active range and selection. The page carries no heading: the sidebar
-// already marks this section as Overview, so the usage panel is the whole surface.
-templ OverviewPage(p Page, a store.Analytics, rng string, users []store.User, selected []int64) {
+// OverviewPage is the app's home surface at /overview: the audit verdict and its
+// needs-attention shortlist up top (the team-lead read: how the fleet is doing and what
+// to look at), then the fleet-wide usage panel (totals, the activity grid, and model and
+// agent breakdowns), bounded to the selected trailing window and the selected users. rng
+// is the active range key and selected the chosen user ids, both already applied to a and
+// au by the store; users is the full account list the per-user filter offers, and the
+// panel's controls mark the active range and selection. The page carries no heading: the
+// sidebar already marks this section as Overview, so the verdict and panel are the whole
+// surface.
+templ OverviewPage(p Page, a store.Analytics, au store.AuditSummary, rng string, users []store.User, selected []int64) {
 	@layout(p) {
 		if p.OverviewPublic {
 			// A second entry point to the publicity control, so a published overview is
@@ -27,7 +29,15 @@ templ OverviewPage(p Page, a store.Analytics, rng string, users []store.User, se
 				<a class="muted small" href="/account#publicity">Manage</a>
 			</div>
 		}
-		@analyticsPanel(a, "chart-global", RangeOptions("/overview", userValues(selected), rng), rng, users, selected, "#usage", true)
+		// The audit verdict and the usage panel swap as one unit: a range or per-user
+		// change refetches the overview and replaces this whole wrapper (the controls
+		// live inside the panel and target #overview-usage), so the verdict, the
+		// shortlist, and the grid all move to the new window together rather than the
+		// strip freezing on the first-load range while the grid below it updates.
+		<div id="overview-usage">
+			@auditDash(a, au)
+			@analyticsPanel(a, "chart-global", RangeOptions("/overview", userValues(selected), rng), rng, users, selected, "#overview-usage", true)
+		</div>
 	}
 }
 
