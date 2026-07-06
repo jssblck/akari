@@ -117,7 +117,7 @@ func TestSessionStatsFallbackTile(t *testing.T) {
 		DeclinedCacheRead:  int64Ptr(5000),
 		OccurredAt:         &when,
 	}}}
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, hs, 0, false, true))
+	html := renderComponent(t, SessionPage(p, d, msgs, FullTranscript(msgs), tools, nil, nil, hs, 0, false, true))
 
 	for _, want := range []string{
 		`class="stat fallback-stat"`,
@@ -137,7 +137,7 @@ func TestSessionStatsFallbackTile(t *testing.T) {
 
 	// A session with no fallback draws no tile at all: absence is the signal.
 	d.ModelFallbackCount = 0
-	bare := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, HeaderStats{}, 0, false, true))
+	bare := renderComponent(t, SessionPage(p, d, msgs, FullTranscript(msgs), tools, nil, nil, HeaderStats{}, 0, false, true))
 	if strings.Contains(bare, `class="stat fallback-stat"`) {
 		t.Error("a session with no fallback should draw no Fallbacks tile")
 	}
@@ -150,7 +150,7 @@ func TestFallbackTileDefensiveDefaults(t *testing.T) {
 	d, msgs, tools := sessionFixture()
 	d.ModelFallbackCount = 1
 	hs := HeaderStats{Fallbacks: []store.ModelFallback{{DedupKey: "x"}}}
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, hs, 0, false, true))
+	html := renderComponent(t, SessionPage(p, d, msgs, FullTranscript(msgs), tools, nil, nil, hs, 0, false, true))
 
 	if !strings.Contains(html, `<dd>unknown → unknown</dd>`) {
 		t.Error("an unnamed model pair should read unknown, not blank")
@@ -181,7 +181,7 @@ func TestFallbackTilePartialDeclinedOmitted(t *testing.T) {
 		DeclinedOutput:     int64Ptr(200),
 		DeclinedCacheWrite: int64Ptr(300),
 	}}}
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, hs, 0, false, true))
+	html := renderComponent(t, SessionPage(p, d, msgs, FullTranscript(msgs), tools, nil, nil, hs, 0, false, true))
 	if strings.Contains(html, `>Declined input</dt>`) {
 		t.Error("a partly measured declined spend should omit the declined-token rows entirely")
 	}
@@ -201,7 +201,7 @@ func TestFallbackTileCapsListAndCountsOverflow(t *testing.T) {
 	for i := 0; i < 8; i++ {
 		many = append(many, store.ModelFallback{FromModel: "claude-fable-5", ToModel: "claude-opus-4-8", DedupKey: string(rune('a' + i))})
 	}
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, HeaderStats{Fallbacks: many}, 0, false, true))
+	html := renderComponent(t, SessionPage(p, d, msgs, FullTranscript(msgs), tools, nil, nil, HeaderStats{Fallbacks: many}, 0, false, true))
 	if got := strings.Count(html, `>Models</dt>`); got != 5 {
 		t.Errorf("tooltip rendered %d fallback rows, want 5", got)
 	}
@@ -212,7 +212,7 @@ func TestFallbackTileCapsListAndCountsOverflow(t *testing.T) {
 	// A session with three fallbacks shows all three and no overflow note.
 	d.ModelFallbackCount = 3
 	few := many[:3]
-	small := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, HeaderStats{Fallbacks: few}, 0, false, true))
+	small := renderComponent(t, SessionPage(p, d, msgs, FullTranscript(msgs), tools, nil, nil, HeaderStats{Fallbacks: few}, 0, false, true))
 	if got := strings.Count(small, `>Models</dt>`); got != 3 {
 		t.Errorf("tooltip rendered %d fallback rows, want 3", got)
 	}
@@ -242,7 +242,7 @@ func TestTranscriptFallbackNotice(t *testing.T) {
 			DedupKey:  "orphan",
 		},
 	}}
-	html := renderComponent(t, SessionPage(p, d, msgs, tools, nil, nil, hs, 0, false, true))
+	html := renderComponent(t, SessionPage(p, d, msgs, FullTranscript(msgs), tools, nil, nil, hs, 0, false, true))
 
 	if !strings.Contains(html, `class="msg-fallback"`) {
 		t.Error("the transcript should mark the fallback turn with an inline notice")

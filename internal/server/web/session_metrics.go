@@ -98,6 +98,18 @@ type TranscriptWalker struct {
 	havePrev    bool
 }
 
+// Seed primes the walker with the unrendered messages preceding a rendered window (in ordinal
+// order), so a transcript that starts mid-session still marks its first row correctly: a
+// usage-bearing seed arms shed detection against the boundary, and a user-role seed with a
+// timestamp anchors the first assistant row's reply latency. The store's TranscriptSeed supplies
+// at most two rows (the last preceding message, and the last usage-bearing one behind it); an
+// empty seed (the window starts at the transcript head) is a no-op.
+func (w *TranscriptWalker) Seed(msgs []store.Message) {
+	for _, m := range msgs {
+		w.Next(m)
+	}
+}
+
 // Next advances the walker over one message and returns that message's latency and shed marks.
 // Messages must be passed in transcript (ordinal) order, once each; the walker's carried state
 // depends on the order.

@@ -109,6 +109,17 @@ body.modal-open { overflow: hidden; }
 
 /* ---- Transcript ---- */
 .transcript { display: flex; flex-direction: column; gap: var(--sp-md); }
+
+/* "Show earlier" bar: sits above the earliest rendered turn of a windowed transcript and
+   fetches the window before it. It reads like the shed divider (a quiet full-width hairline
+   with centered content) so the transcript's top edge signals continuation, not a heading.
+   While htmx has the fetch in flight the button reads disabled so a double click cannot
+   queue a second prepend. */
+.show-earlier { display: flex; align-items: center; justify-content: center; gap: var(--sp-sm); margin: var(--sp-xs) 0; }
+.show-earlier::before, .show-earlier::after { content: ""; flex: 1; border-top: 1px solid var(--border); }
+.show-earlier .muted { white-space: nowrap; }
+.show-earlier button { flex: none; }
+.show-earlier.htmx-request button { opacity: 0.5; pointer-events: none; }
 .msg { border: 1px solid var(--border); border-radius: var(--r-md); padding: var(--sp-md) var(--sp-lg); scroll-margin-top: 96px; }
 .msg-user { background: var(--msg-user); }
 .msg-assistant { background: var(--msg-assistant); }

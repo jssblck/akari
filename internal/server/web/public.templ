@@ -30,7 +30,7 @@ templ PublicSessionPage(d store.SessionDetail, msgs []store.Message, tools map[i
 						@Outline(msgs, tools, PublicBlobBase(*d.PublicID))
 					</aside>
 					<div class="session-main">
-						@sessionStats(d, hs)
+						@sessionStats(d, hs, false)
 						if len(publicSubs) > 0 {
 							<h2>Subagents</h2>
 							<div class="subagents">
@@ -51,7 +51,9 @@ templ PublicSessionPage(d store.SessionDetail, msgs []store.Message, tools map[i
 							</div>
 						}
 						<h2>Transcript</h2>
-						@Transcript(msgs, d.Agent, tools, attachments, FallbacksByOrdinal(hs.Fallbacks), PublicBlobBase(*d.PublicID))
+						// The public view has no fragment endpoint to page through, so it deliberately
+						// renders the whole transcript rather than a window.
+						@Transcript(FullTranscript(msgs), d.Agent, tools, attachments, FallbacksByOrdinal(hs.Fallbacks), PublicBlobBase(*d.PublicID), "")
 					</div>
 				</div>
 			</div>

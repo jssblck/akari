@@ -617,15 +617,40 @@ func (s *Server) handleSessionPage(w http.ResponseWriter, r *http.Request) {
 	title := web.SessionPageTitle(d)
 	p, _ := principalFrom(r.Context())
 	owner := p.UserID == d.OwnerID
-	render(w, r, http.StatusOK, web.SessionPage(s.pageForNav(r, title, "sessions"), d, msgs, tools, atts, subs, hs, dupIDs, true, owner))
+	// The outline lists every turn while the transcript renders only the most recent
+	// window, so a long session's first paint stays bounded. Both draw from the one
+	// message slice already loaded; the window is a re-slice, not a second read.
+	win := web.WindowTail(msgs, web.TranscriptWindowSize)
+	render(w, r, http.StatusOK, web.SessionPage(s.pageForNav(r, title, "sessions"), d, msgs, win, tools, atts, subs, hs, dupIDs, true, owner))
 }
 
-// handleSessionBody serves just the live-updating body fragment, re-fetched by
-// the page over SSE when new bytes are parsed.
+// handleSessionBody serves the session body fragments in three modes, keyed by
+// message ordinal so the client stays the cursor holder and the server stateless:
+//
+//   - ?after=N (the live append): only the turns past the last ordinal the client
+//     has rendered, plus out-of-band swaps of the stat band and subagents. The SSE
+//     wake stays a bare signal; the client reads its own last data-ordinal to build
+//     this request, appends the rows with hx-swap beforeend, and so never re-renders
+//     the settled transcript or loses its scroll position.
+//   - ?before=N (the "Show earlier" bar), optionally with &until=M (the outline's
+//     fetch-then-scroll): the window of turns before N (down to M when given), plus
+//     a fresh bar when more remain. The fragment replaces the bar by outerHTML,
+//     which prepends the rows above the ones on screen.
+//   - no params: the whole windowed body (SessionMain), the client's fallback when
+//     the transcript region is empty and there is nothing to key an append on.
 func (s *Server) handleSessionBody(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		http.NotFound(w, r)
+		return
+	}
+	q := r.URL.Query()
+	if q.Has("after") {
+		s.serveSessionAppend(w, r, id, q.Get("after"))
+		return
+	}
+	if q.Has("before") {
+		s.serveSessionEarlier(w, r, id, q.Get("before"), q.Get("until"))
 		return
 	}
 	d, msgs, tools, atts, subs, err := s.sessionView(r, id)
@@ -639,16 +664,134 @@ func (s *Server) handleSessionBody(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Could not load session.", http.StatusInternalServerError)
 		return
 	}
-	// The live fragment re-renders the stat header on every SSE update. The Cache tile now
-	// comes off the same SessionDetail the body already loaded, so it tracks the session's
-	// growing usage in step with the Tokens tile beside it without a second read; only the
-	// stored quality signals are fetched here.
+	// The full fragment re-renders the stat header. The Cache tile comes off the same
+	// SessionDetail the body already loaded, so it tracks the session's growing usage in
+	// step with the Tokens tile beside it without a second read; only the stored quality
+	// signals are fetched here.
 	hs, err := s.sessionHeaderStats(r.Context(), d)
 	if err != nil {
 		http.Error(w, "Could not load session.", http.StatusInternalServerError)
 		return
 	}
-	render(w, r, http.StatusOK, web.SessionMain(d, msgs, tools, atts, subs, hs))
+	render(w, r, http.StatusOK, web.SessionMain(d, web.WindowTail(msgs, web.TranscriptWindowSize), tools, atts, subs, hs))
+}
+
+// serveSessionAppend renders the ?after= fragment: the full-fold turns strictly past
+// the given ordinal, their tool calls and attachments, and the out-of-band stat band
+// and subagents swaps. Every read here is bounded by the append window except the
+// stat band's, which was already bounded on the full-body path.
+func (s *Server) serveSessionAppend(w http.ResponseWriter, r *http.Request, id int64, afterRaw string) {
+	after, err := strconv.Atoi(afterRaw)
+	if err != nil {
+		http.Error(w, "Bad after ordinal.", http.StatusBadRequest)
+		return
+	}
+	ctx := r.Context()
+	d, err := s.Store.SessionDetailByID(ctx, id)
+	if errors.Is(err, store.ErrNotFound) {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		http.Error(w, "Could not load session.", http.StatusInternalServerError)
+		return
+	}
+	msgs, seed, err := s.Store.MessagesAfterFull(ctx, id, after)
+	if err != nil {
+		http.Error(w, "Could not load session.", http.StatusInternalServerError)
+		return
+	}
+	tools, atts, err := s.rangeViews(ctx, id, msgs)
+	if err != nil {
+		http.Error(w, "Could not load session.", http.StatusInternalServerError)
+		return
+	}
+	subs, err := s.Store.Subagents(ctx, id)
+	if err != nil {
+		http.Error(w, "Could not load session.", http.StatusInternalServerError)
+		return
+	}
+	hs, err := s.sessionHeaderStats(ctx, d)
+	if err != nil {
+		http.Error(w, "Could not load session.", http.StatusInternalServerError)
+		return
+	}
+	render(w, r, http.StatusOK, web.SessionAppend(d, msgs, seed, tools, atts, subs, hs))
+}
+
+// serveSessionEarlier renders the ?before= fragment: the window of full-fold turns
+// before the given ordinal (one TranscriptWindowSize page, or the whole gap down to
+// &until= for the outline's fetch-then-scroll), a fresh "Show earlier" bar when
+// turns remain above it, and the window's tool calls and attachments.
+func (s *Server) serveSessionEarlier(w http.ResponseWriter, r *http.Request, id int64, beforeRaw, untilRaw string) {
+	before, err := strconv.Atoi(beforeRaw)
+	if err != nil {
+		http.Error(w, "Bad before ordinal.", http.StatusBadRequest)
+		return
+	}
+	ctx := r.Context()
+	d, err := s.Store.SessionDetailByID(ctx, id)
+	if errors.Is(err, store.ErrNotFound) {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		http.Error(w, "Could not load session.", http.StatusInternalServerError)
+		return
+	}
+	var msgs, seed []store.Message
+	if untilRaw != "" {
+		until, uerr := strconv.Atoi(untilRaw)
+		if uerr != nil {
+			http.Error(w, "Bad until ordinal.", http.StatusBadRequest)
+			return
+		}
+		msgs, seed, err = s.Store.MessagesRange(ctx, id, until, before)
+	} else {
+		msgs, seed, err = s.Store.MessagesTail(ctx, id, &before, web.TranscriptWindowSize)
+	}
+	if err != nil {
+		http.Error(w, "Could not load session.", http.StatusInternalServerError)
+		return
+	}
+	earlier := 0
+	if len(msgs) > 0 {
+		earlier, err = s.Store.MessageCountBefore(ctx, id, msgs[0].Ordinal)
+		if err != nil {
+			http.Error(w, "Could not load session.", http.StatusInternalServerError)
+			return
+		}
+	}
+	tools, atts, err := s.rangeViews(ctx, id, msgs)
+	if err != nil {
+		http.Error(w, "Could not load session.", http.StatusInternalServerError)
+		return
+	}
+	hs, err := s.sessionHeaderStats(ctx, d)
+	if err != nil {
+		http.Error(w, "Could not load session.", http.StatusInternalServerError)
+		return
+	}
+	render(w, r, http.StatusOK, web.SessionEarlier(d, msgs, seed, earlier, tools, atts, hs))
+}
+
+// rangeViews loads the tool calls and attachments hanging on exactly the message
+// window msgs spans, grouped by ordinal, so a fragment read stays bounded by its
+// window. An empty window loads nothing.
+func (s *Server) rangeViews(ctx context.Context, id int64, msgs []store.Message) (map[int][]store.ToolCallView, map[int][]store.AttachmentView, error) {
+	if len(msgs) == 0 {
+		return nil, nil, nil
+	}
+	lo, hi := msgs[0].Ordinal, msgs[len(msgs)-1].Ordinal
+	tools, err := s.Store.ToolCallsInRange(ctx, id, lo, hi)
+	if err != nil {
+		return nil, nil, err
+	}
+	atts, err := s.Store.AttachmentsInRange(ctx, id, lo, hi)
+	if err != nil {
+		return nil, nil, err
+	}
+	return web.ToolsByOrdinal(tools), web.AttachmentsByOrdinal(atts), nil
 }
 
 // handleSessionEvents is the SSE endpoint that signals a watching browser to

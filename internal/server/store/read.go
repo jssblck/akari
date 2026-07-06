@@ -721,10 +721,11 @@ const messageReadColumns = `m.ordinal, m.role, m.content, m.thinking_text, m.mod
 	(m.prompt_digest IS NOT NULL AND m.content_length > 0),
 	coalesce(m.duplicate_prompt, false)`
 
-// messagesFullQuery is the whole-transcript read behind Messages. It LEFT JOINs the materialized
-// per-turn usage rollup (message_turn_usage) so each returned row carries its own turn load without
-// re-aggregating the session's usage_events on every render, and the render path holds no second
-// session-sized structure beside the message slice it already renders:
+// The full-fold transcript read (messagesFullSelect below, and messagesFullQuery, the whole-session
+// form behind Messages) LEFT JOINs the materialized per-turn usage rollup (message_turn_usage) so
+// each returned row carries its own turn load without re-aggregating the session's usage_events on
+// every render, and the render path holds no second session-sized structure beside the message
+// slice it already renders:
 //
 //   - message_turn_usage holds one row per (session, message_ordinal) with the per-turn sums each
 //     message carries on Message.Usage: input, output, cache read, cache write, reasoning, and the
@@ -752,7 +753,13 @@ const messageReadColumns = `m.ordinal, m.role, m.content, m.thinking_text, m.mod
 // usage and the duplicate flag are now stored per row, so the live body refresh (handleSessionBody
 // re-fetching this on every SSE append) reads bounded indexed rows and does no growing whole-session
 // usage scan or message window. $1 is the session id.
-const messagesFullQuery = `
+// messagesFullSelect is the select-plus-join fragment behind every full-fold transcript read:
+// the whole read (Messages) and the windowed reads the web transcript pages with (MessagesTail,
+// MessagesRange, MessagesAfterFull). Each appends its own ordinal predicate, ORDER BY, and LIMIT;
+// $1 is always the session id, so a window is an index-range scan of the (session_id, ordinal)
+// primary key. The bounded MessagesAfter (the MCP window) deliberately does NOT build on this
+// fragment: it skips the usage join entirely because its caller renders no per-turn usage.
+const messagesFullSelect = `
 	SELECT ` + messageReadColumns + `,
 	       mtu.message_ordinal IS NOT NULL,
 	       coalesce(mtu.input_tokens,0), coalesce(mtu.output_tokens,0), coalesce(mtu.cache_read_tokens,0), coalesce(mtu.cache_write_tokens,0),
@@ -761,7 +768,9 @@ const messagesFullQuery = `
 	       mtu.cost_sum, coalesce(mtu.cost_count,0), coalesce(mtu.cost_incomplete, false)
 	  FROM messages m
 	  LEFT JOIN message_turn_usage mtu ON mtu.session_id = m.session_id AND mtu.message_ordinal = m.ordinal
-	 WHERE m.session_id = $1
+	 WHERE m.session_id = $1`
+
+const messagesFullQuery = messagesFullSelect + `
 	 ORDER BY m.ordinal`
 
 // messagesWindowQuery is the bounded transcript read behind MessagesAfter. It selects the message

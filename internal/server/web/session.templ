@@ -6,7 +6,7 @@ import (
 	"github.com/jssblck/akari/internal/server/store"
 )
 
-templ SessionPage(p Page, d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, subagents []store.SessionSummary, hs HeaderStats, dupIDs int, live, owner bool) {
+templ SessionPage(p Page, d store.SessionDetail, msgs []store.Message, win TranscriptWindow, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, subagents []store.SessionSummary, hs HeaderStats, dupIDs int, live, owner bool) {
 	@layout(p) {
 		<div class="session-page">
 			<div class="session-head">
@@ -43,13 +43,15 @@ templ SessionPage(p Page, d store.SessionDetail, msgs []store.Message, tools map
 				<aside class="outline-rail" aria-label="Outline">
 					@Outline(msgs, tools, SessionBlobBase(d.ID))
 				</aside>
+				// data-body rides both branches: the live refresh and the outline's
+				// fetch-then-scroll (which works on any windowed transcript) read it.
 				if live {
 					<div id="session-body" class="session-main" data-sse={ SSEPath(d.ID) } data-body={ BodyPath(d.ID) }>
-						@SessionMain(d, msgs, tools, attachments, subagents, hs)
+						@SessionMain(d, win, tools, attachments, subagents, hs)
 					</div>
 				} else {
-					<div id="session-body" class="session-main">
-						@SessionMain(d, msgs, tools, attachments, subagents, hs)
+					<div id="session-body" class="session-main" data-body={ BodyPath(d.ID) }>
+						@SessionMain(d, win, tools, attachments, subagents, hs)
 					</div>
 				}
 			</div>
@@ -83,15 +85,67 @@ templ sessionActions(d store.SessionDetail, owner bool) {
 	</div>
 }
 
-// SessionMain is the live region of the session view: the stat header, any
-// subagents, and the transcript. Only this fragment is re-fetched and swapped on
-// a live SSE update, so the outline and inspector (its siblings in the grid)
-// persist across updates and are not re-rendered per refresh.
-templ SessionMain(d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, subagents []store.SessionSummary, hs HeaderStats) {
-	@sessionStats(d, hs)
-	@subagentsBlock(subagents)
+// SessionMain is the body of the session view: the stat header, any subagents,
+// and the windowed transcript. It renders whole only on the page load and on the
+// no-param body fragment (the live path's fallback for a transcript that was
+// empty); a live update appends new rows and swaps the stat band and subagents
+// out of band instead (SessionAppend), so the settled transcript rows, the
+// outline, and the inspector are never re-rendered per refresh.
+//
+// #session-subagents is a stable wrapper (present even when the session spawned
+// nothing) so the live append's out-of-band swap always has a target.
+templ SessionMain(d store.SessionDetail, win TranscriptWindow, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, subagents []store.SessionSummary, hs HeaderStats) {
+	@sessionStats(d, hs, false)
+	<div id="session-subagents">
+		@subagentsBlock(subagents)
+	</div>
 	<h2>Transcript</h2>
-	@Transcript(msgs, d.Agent, tools, attachments, FallbacksByOrdinal(hs.Fallbacks), SessionBlobBase(d.ID))
+	@Transcript(win, d.Agent, tools, attachments, FallbacksByOrdinal(hs.Fallbacks), SessionBlobBase(d.ID), BodyPath(d.ID))
+}
+
+// SessionEarlier is the fragment a "Show earlier" click (or the outline's
+// fetch-then-scroll) swaps in for the bar it replaces: a fresh bar when messages
+// still remain above the new window, then the window's rows. The outerHTML swap
+// of the old bar therefore prepends the rows inside .transcript, above every row
+// already on screen.
+templ SessionEarlier(d store.SessionDetail, msgs []store.Message, seed []store.Message, earlierCount int, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, hs HeaderStats) {
+	if len(msgs) > 0 {
+		if earlierCount > 0 {
+			@showEarlierBar(BodyPath(d.ID), msgs[0].Ordinal, earlierCount)
+		}
+		@TranscriptRows(msgs, seed, d.Agent, tools, attachments, FallbacksByOrdinal(hs.Fallbacks), SessionBlobBase(d.ID))
+	}
+}
+
+// SessionAppend is the live-update fragment: only the rows past the client's
+// last rendered ordinal, appended into .transcript with hx-swap beforeend, plus
+// out-of-band swaps of the stat band and the subagents block. The settled rows
+// above keep their DOM (and the reader keeps their scroll position); only the
+// stat tiles and subagents re-render, and both are bounded.
+templ SessionAppend(d store.SessionDetail, msgs []store.Message, seed []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, subagents []store.SessionSummary, hs HeaderStats) {
+	@TranscriptRows(msgs, seed, d.Agent, tools, attachments, FallbacksByOrdinal(hs.Fallbacks), SessionBlobBase(d.ID))
+	@sessionStats(d, hs, true)
+	<div id="session-subagents" hx-swap-oob="true">
+		@subagentsBlock(subagents)
+	</div>
+}
+
+// showEarlierBar sits at the top of a windowed transcript and fetches the window
+// above the earliest rendered message. The response (SessionEarlier) replaces the
+// bar itself by outerHTML with a fresh bar plus the older rows, so each click
+// prepends one more window and the bar disappears when the head is reached. Its
+// id is stable so the outline's fetch-then-scroll can target the same swap.
+templ showEarlierBar(bodyPath string, firstOrdinal, earlierCount int) {
+	<div class="show-earlier" id="transcript-earlier">
+		<button
+			type="button"
+			class="secondary small"
+			hx-get={ EarlierPath(bodyPath, firstOrdinal) }
+			hx-target="#transcript-earlier"
+			hx-swap="outerHTML"
+		>Show earlier</button>
+		<span class="muted small">{ EarlierCountLabel(earlierCount) }</span>
+	</div>
 }
 
 // subagentsBlock renders a parent session's direct subagents. A short list reads inline
@@ -205,9 +259,17 @@ templ inspectorModal() {
 // transcript column and flash (needle-settle) when a live update changes a value. The
 // Cache tile reads the session's own all-usage cache stats (dated or not), so its hit
 // rate matches the token figures in the Tokens tile beside it; the Quality tile reads
-// the session's stored signals.
-templ sessionStats(d store.SessionDetail, hs HeaderStats) {
-	<div class="stats sticky" id="session-stats">
+// the session's stored signals. With oob set (the live-append fragment), the band
+// carries hx-swap-oob so htmx replaces the on-page #session-stats out of band while
+// the fragment's rows append into the transcript.
+templ sessionStats(d store.SessionDetail, hs HeaderStats, oob bool) {
+	<div
+		class="stats sticky"
+		id="session-stats"
+		if oob {
+			hx-swap-oob="true"
+		}
+	>
 		@stat("Messages", fmt.Sprintf("%d", d.MessageCount), "messages")
 		@stat("User msgs", fmt.Sprintf("%d", d.UserMessageCount), "user")
 		@tokenStat(d, hs.Signals)
@@ -432,10 +494,14 @@ templ stat(label, value, key string) {
 	</div>
 }
 
-// Transcript renders the session's messages as an instrumented trace. The two carried per-message
-// instruments (reply latency and context sheds) are derived while walking the message slice with a
-// TranscriptWalker holding only bounded state (see session_metrics.go), so the render path holds no
-// session-sized structure beyond the message slice the page already renders; the duplicate-prompt
+// Transcript renders a session's messages as an instrumented trace. It renders the window the
+// caller hands it, not necessarily the whole session: the session page passes the most recent
+// TranscriptWindowSize messages topped by a "Show earlier" bar (so a long transcript cannot freeze
+// the tab), while the public page passes everything. The two carried per-message instruments
+// (reply latency and context sheds) are derived while walking the message slice with a
+// TranscriptWalker holding only bounded state (see session_metrics.go), seeded at the window
+// boundary, so the render path holds no session-sized structure beyond the message slice the page
+// already renders; the duplicate-prompt
 // verdict rides on each message (m.DuplicatePrompt), and each turn's usage rides on m.Usage, both
 // folded in the message read. The meta line carries a right-aligned cluster of stamps (latency,
 // then a context+cost stamp group that hosts a per-turn token breakdown card); a shed divider
@@ -443,13 +509,29 @@ templ stat(label, value, key string) {
 // sit after a user message's role tag. An assistant turn that carried a reasoning block wears a thinking-band chip
 // above its content (MessageThinkingBand), reading the turn's own deliberation on the same absolute scale as the
 // header readout, so a reader sees which turns the model worked hardest on without opening the (often redacted) trace.
-templ Transcript(msgs []store.Message, agent string, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, fallbacks map[int]store.ModelFallback, blobBase string) {
-	if len(msgs) == 0 {
+templ Transcript(win TranscriptWindow, agent string, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, fallbacks map[int]store.ModelFallback, blobBase string, bodyPath string) {
+	if len(win.Msgs) == 0 {
 		<div class="empty">No messages parsed yet.</div>
 	} else {
-		{{ walker := &TranscriptWalker{} }}
 		<div class="transcript">
-			for _, m := range msgs {
+			if win.EarlierCount > 0 {
+				@showEarlierBar(bodyPath, win.Msgs[0].Ordinal, win.EarlierCount)
+			}
+			@TranscriptRows(win.Msgs, win.Seed, agent, tools, attachments, fallbacks, blobBase)
+		</div>
+	}
+}
+
+// TranscriptRows renders one window of transcript rows, with no wrapper: the full
+// transcript wraps it in .transcript, the "Show earlier" fragment prepends it there,
+// and the live-append fragment appends it there. The walker is seeded with the one
+// message before the window (unrendered) so the first row's latency stamp and shed
+// divider read the same whether the row arrived in the initial window, a prepend, or
+// an append.
+templ TranscriptRows(msgs []store.Message, seed []store.Message, agent string, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, fallbacks map[int]store.ModelFallback, blobBase string) {
+	{{ walker := &TranscriptWalker{} }}
+	{{ walker.Seed(seed) }}
+	for _, m := range msgs {
 				{{ metrics := walker.Next(m) }}
 				if metrics.Shed != nil {
 					@shedDivider(*metrics.Shed)
@@ -531,8 +613,6 @@ templ Transcript(msgs []store.Message, agent string, tools map[int][]store.ToolC
 				</div>
 				}
 			}
-		</div>
-	}
 }
 
 // contextTurn renders an injected-context message (agent framing: project

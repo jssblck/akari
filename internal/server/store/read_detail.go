@@ -115,6 +115,135 @@ func (s *Store) MessagesAfter(ctx context.Context, sessionID int64, after *int, 
 		sessionID, *after, limit)
 }
 
+// MessagesTail returns the last limit full-fold messages before the given ordinal (before == nil
+// means the end of the transcript), in ascending ordinal order, plus the window's seed (see
+// TranscriptSeed; empty when the window reaches the transcript head). The web transcript renders
+// windows of this read: the tail is the initial view, and each "Show earlier" click passes the
+// first rendered ordinal as before.
+//
+// Unlike MessagesAfter (the MCP window), every row carries the full per-turn usage fold and
+// duplicate-prompt flag, because the web transcript renders both. limit is clamped to [1, 2000].
+func (s *Store) MessagesTail(ctx context.Context, sessionID int64, before *int, limit int) (window, seed []Message, err error) {
+	if limit <= 0 || limit > 2000 {
+		limit = 2000
+	}
+	var rows []Message
+	if before == nil {
+		rows, err = s.scanMessages(ctx, sessionID,
+			messagesFullSelect+` ORDER BY m.ordinal DESC LIMIT $2`,
+			sessionID, limit)
+	} else {
+		rows, err = s.scanMessages(ctx, sessionID,
+			messagesFullSelect+` AND m.ordinal < $2 ORDER BY m.ordinal DESC LIMIT $3`,
+			sessionID, *before, limit)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	// Rows arrive newest-first; reverse into transcript order.
+	for i, j := 0, len(rows)-1; i < j; i, j = i+1, j-1 {
+		rows[i], rows[j] = rows[j], rows[i]
+	}
+	// The seed hangs off the window's first ordinal; an empty window (before at or
+	// below the transcript head) seeds off the boundary the caller asked about.
+	start := 0
+	switch {
+	case len(rows) > 0:
+		start = rows[0].Ordinal
+	case before != nil:
+		start = *before
+	default:
+		return rows, nil, nil // an empty session has nothing to seed
+	}
+	seed, err = s.TranscriptSeed(ctx, sessionID, start)
+	if err != nil {
+		return nil, nil, err
+	}
+	return rows, seed, nil
+}
+
+// MessagesRange returns the full-fold messages with ordinal in the half-open window [from, to),
+// in ascending order, plus the window's seed (see TranscriptSeed). It serves the outline's
+// fetch-then-scroll: a click on a turn not yet in the DOM fetches the whole gap between that
+// turn and the earliest rendered row in one request.
+func (s *Store) MessagesRange(ctx context.Context, sessionID int64, from, to int) (window, seed []Message, err error) {
+	window, err = s.scanMessages(ctx, sessionID,
+		messagesFullSelect+` AND m.ordinal >= $2 AND m.ordinal < $3 ORDER BY m.ordinal`,
+		sessionID, from, to)
+	if err != nil {
+		return nil, nil, err
+	}
+	seed, err = s.TranscriptSeed(ctx, sessionID, from)
+	if err != nil {
+		return nil, nil, err
+	}
+	return window, seed, nil
+}
+
+// MessagesAfterFull returns the full-fold messages with ordinal strictly greater than after, in
+// ascending order, plus the window's seed (see TranscriptSeed; the last message at or below
+// after, and the usage-bearing one behind it when they differ). It serves the live append: the
+// client asks for everything past the last ordinal it has rendered, and the seed keeps the first
+// appended row's latency and shed marks continuous with the rows already on screen.
+//
+// This is the full-fold sibling of MessagesAfter, which deliberately omits the usage fold and
+// duplicate-prompt flag for its MCP caller; the web transcript renders both, so it reads here.
+func (s *Store) MessagesAfterFull(ctx context.Context, sessionID int64, after int) (window, seed []Message, err error) {
+	window, err = s.scanMessages(ctx, sessionID,
+		messagesFullSelect+` AND m.ordinal > $2 ORDER BY m.ordinal`,
+		sessionID, after)
+	if err != nil {
+		return nil, nil, err
+	}
+	seed, err = s.TranscriptSeed(ctx, sessionID, after+1)
+	if err != nil {
+		return nil, nil, err
+	}
+	return window, seed, nil
+}
+
+// TranscriptSeed returns the messages that prime a transcript walker for a window starting at
+// the given ordinal, in ascending order and never more than two rows: the last message before
+// the window (it anchors the first row's reply latency), preceded by the last usage-bearing
+// message before the window when the two differ (it arms context-shed detection against the
+// boundary). One row is not enough on its own: transcripts alternate user and assistant turns,
+// so the message just before a window usually carries no usage, and a shed landing exactly on a
+// window seam would silently lose its divider. Empty when the window starts at the transcript
+// head. Both reads are single-row index scans.
+func (s *Store) TranscriptSeed(ctx context.Context, sessionID int64, ordinal int) ([]Message, error) {
+	prev, err := s.scanMessages(ctx, sessionID,
+		messagesFullSelect+` AND m.ordinal < $2 ORDER BY m.ordinal DESC LIMIT 1`,
+		sessionID, ordinal)
+	if err != nil {
+		return nil, err
+	}
+	if len(prev) == 0 || prev[0].Usage != nil {
+		return prev, nil
+	}
+	prevUsage, err := s.scanMessages(ctx, sessionID,
+		messagesFullSelect+` AND m.ordinal < $2 AND mtu.message_ordinal IS NOT NULL
+		 ORDER BY m.ordinal DESC LIMIT 1`,
+		sessionID, prev[0].Ordinal)
+	if err != nil {
+		return nil, err
+	}
+	return append(prevUsage, prev[0]), nil
+}
+
+// MessageCountBefore returns how many of a session's messages precede the given ordinal, so the
+// "Show earlier" bar can name what remains above the rendered window. It is an index-range count
+// on the (session_id, ordinal) primary key.
+func (s *Store) MessageCountBefore(ctx context.Context, sessionID int64, ordinal int) (int, error) {
+	var n int
+	err := s.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM messages WHERE session_id = $1 AND ordinal < $2`,
+		sessionID, ordinal).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count messages before ordinal %d for session %d: %w", ordinal, sessionID, err)
+	}
+	return n, nil
+}
+
 // scanMessages runs a transcript read and scans its rows into Messages. sessionID is carried only
 // to give the error path context: a cursor, network, or cancellation failure mid-read then names
 // the session and the operation rather than surfacing a bare driver error to the handler.

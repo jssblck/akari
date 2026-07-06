@@ -80,6 +80,13 @@
   }
 
   // ---------------- Live session updates ----------------
+  // The last transcript row's ordinal: the client-held cursor the incremental
+  // refresh keys on. Rows (messages and context turns) carry data-ordinal; the
+  // dividers between them do not, so the last match is always a real row.
+  function lastOrdinal() {
+    var rows = document.querySelectorAll("#session-body .transcript [data-ordinal]");
+    return rows.length ? rows[rows.length - 1].getAttribute("data-ordinal") : null;
+  }
   function initLive() {
     var el = document.getElementById("session-body");
     if (!el) return;
@@ -106,11 +113,55 @@
         flashChangedStats(before);
         if (pending) { pending = false; refresh(); }
       };
-      var p = window.htmx.ajax("GET", body, { target: "#session-body", swap: "innerHTML" });
+      // Incremental by default: ask only for the turns past the last rendered row and
+      // append them, with the stat band and subagents arriving as out-of-band swaps.
+      // The settled rows keep their DOM, so a live update can neither freeze the tab
+      // re-rendering a long transcript nor reset the reader's scroll position. Only a
+      // page with no rendered rows yet (nothing to key on) falls back to swapping the
+      // whole body, which also replaces the "No messages parsed yet." empty state.
+      var ord = lastOrdinal();
+      var p = ord !== null
+        ? window.htmx.ajax("GET", body + "?after=" + encodeURIComponent(ord), { target: "#session-body .transcript", swap: "beforeend" })
+        : window.htmx.ajax("GET", body, { target: "#session-body", swap: "innerHTML" });
       if (p && typeof p.then === "function") { p.then(done, done); } else { setTimeout(done, 60); }
     }
     es.addEventListener("update", refresh);
   }
+
+  // ---------------- Outline fetch-then-scroll ----------------
+  // The outline lists every turn while the transcript renders a window, so a click
+  // can target a turn with no DOM yet. Fetch the whole gap between it and the
+  // earliest rendered row (the ?before&until fragment replaces the "Show earlier"
+  // bar, prepending the rows), then scroll to the turn. In-DOM targets keep the
+  // browser's native anchor behavior; this handler only fills gaps.
+  document.addEventListener("click", function (ev) {
+    if (ev.defaultPrevented || !ev.target.closest) return;
+    var a = ev.target.closest('.outline a[href^="#msg-"]');
+    if (!a || !window.htmx) return;
+    var anchor = a.getAttribute("href").slice(1);
+    if (document.getElementById(anchor)) return;
+    var ord = parseInt(anchor.slice(4), 10);
+    var bodyEl = document.getElementById("session-body");
+    var body = bodyEl && bodyEl.getAttribute("data-body");
+    var bar = document.getElementById("transcript-earlier");
+    var first = document.querySelector("#session-body .transcript [data-ordinal]");
+    if (!body || !bar || !first || isNaN(ord)) return;
+    var before = parseInt(first.getAttribute("data-ordinal"), 10);
+    if (isNaN(before) || ord >= before) return; // not above the window: nothing to fetch
+    ev.preventDefault();
+    var p = window.htmx.ajax("GET", body + "?before=" + before + "&until=" + ord, { target: "#transcript-earlier", swap: "outerHTML" });
+    var scroll = function () {
+      var t = document.getElementById(anchor);
+      if (!t) return;
+      // Instant, overriding the stylesheet's smooth behavior: a fetched turn is by
+      // definition far above the viewport, and animating across a whole prepended
+      // window reads as a multi-second crawl rather than a jump.
+      t.scrollIntoView({ behavior: "instant", block: "start" });
+      if (history.replaceState) history.replaceState(null, "", "#" + anchor);
+      animateBars();
+    };
+    if (p && typeof p.then === "function") { p.then(scroll, function () {}); } else { setTimeout(scroll, 60); }
+  });
 
   // ---------------- Reparse progress ----------------
   // While the server rebuilds the parsed projection, parsed views are gated and
@@ -644,6 +695,30 @@
     if (e.key !== "Escape") return;
     var open = document.querySelector(".userfilter[open]");
     if (open) { open.open = false; userFilterOpen = false; }
+  });
+
+  // Prepending earlier turns must not teleport the reader. The browser's native
+  // scroll anchoring usually cannot hold across htmx's remove-and-insert swap of
+  // the "Show earlier" bar (the anchor node itself is what gets replaced), so the
+  // page would keep its absolute offset while thousands of pixels land above it.
+  // Compensate by hand: measure the document height before the swap and shift the
+  // scroll offset by the growth after it, so the turn the reader was looking at
+  // stays put and the new rows extend above.
+  var prependScroll = null;
+  document.addEventListener("htmx:beforeSwap", function (e) {
+    var t = e.detail && e.detail.target;
+    if (t && t.id === "transcript-earlier") {
+      prependScroll = { y: window.scrollY, h: document.documentElement.scrollHeight };
+    }
+  });
+  document.addEventListener("htmx:afterSwap", function (e) {
+    var t = (e.detail && e.detail.target) || e.target;
+    if (!prependScroll || !t || t.id !== "transcript-earlier") return;
+    var grown = document.documentElement.scrollHeight - prependScroll.h;
+    // Instant, overriding the stylesheet's smooth behavior: a correction that
+    // animated would itself read as a lurch.
+    if (grown > 0) window.scrollTo({ top: prependScroll.y + grown, behavior: "instant" });
+    prependScroll = null;
   });
 
   // The project header is sticky, so a filter or range change can fire while the

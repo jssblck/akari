@@ -218,13 +218,23 @@ at it so future regressions are visible in devtools).
 1. Cap the initial render at the last 50 turns (a turn: one user message plus
    the assistant run that follows). Render a "Show earlier" bar at the top
    that htmx-fetches the previous 50 into the same list, keyed by message
-   sequence, reusing the existing fragment pattern.
+   sequence, reusing the existing fragment pattern. (Shipped: the window is
+   the last `web.TranscriptWindowSize` = 100 messages, the message-ordinal
+   equivalent of 50 turns; each "Show earlier" click prepends another window
+   by replacing the bar via outerHTML, with a hand-rolled scroll compensation
+   because native scroll anchoring cannot hold across the swap that removes
+   the anchor node itself.)
 2. Make SSE updates incremental. The wake signal should carry (or the client
    should request) only messages after the last-seen sequence:
    `GET /sessions/{id}/body?after={seq}` returns just the new turns, appended
    with `hx-swap="beforeend"`, plus an out-of-band swap for the stat band.
    Today's full-body re-render is both the freeze and a scroll-position reset
-   on live sessions.
+   on live sessions. (Shipped: the client reads its last rendered
+   data-ordinal and appends; the stat band and the subagents block ride the
+   fragment as hx-swap-oob swaps; a page whose transcript region is empty
+   falls back to the whole-body swap. The walker is seeded with up to two
+   unrendered boundary rows, the store's TranscriptSeed shape, so latency
+   stamps and shed dividers survive every window seam.)
 3. Collapse the subagents table by default when it exceeds 8 rows (summary
    line: "34 subagents, $6.12, 2 failed", expandable). It currently pushes the
    transcript below the fold on exactly the sessions a lead most wants to
@@ -234,7 +244,10 @@ at it so future regressions are visible in devtools).
    current subagents table carries no outcome column to reconcile it against.)
 4. The outline rail renders one entry per turn regardless; it stays, but its
    anchors must work with the windowed transcript (fetch-then-scroll for
-   turns not yet in the DOM).
+   turns not yet in the DOM). (Shipped: a click on an outline anchor whose
+   turn is not in the DOM fetches the whole gap down to that turn in one
+   `?before=&until=` request, prepends it, then scrolls; in-DOM anchors keep
+   native behavior.)
 
 #### Implementation map for items 1, 2, 4 (from the render-path survey)
 
