@@ -119,7 +119,7 @@ body.modal-open { overflow: hidden; }
 .show-earlier::before, .show-earlier::after { content: ""; flex: 1; border-top: 1px solid var(--border); }
 .show-earlier .muted { white-space: nowrap; }
 .show-earlier button { flex: none; }
-.show-earlier.htmx-request button { opacity: 0.5; pointer-events: none; }
+.show-earlier button.htmx-request, .show-earlier.htmx-request button { opacity: 0.5; pointer-events: none; }
 .msg { border: 1px solid var(--border); border-radius: var(--r-md); padding: var(--sp-md) var(--sp-lg); scroll-margin-top: 96px; }
 .msg-user { background: var(--msg-user); }
 .msg-assistant { background: var(--msg-assistant); }
