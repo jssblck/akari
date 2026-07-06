@@ -254,9 +254,11 @@ func TestSessionSnapshotByID(t *testing.T) {
 	st := storetest.NewStore(t)
 	ctx := context.Background()
 	sid := seedTurns(t, st, "grace", 30)
+	// Two rows sharing a call_uid: a replayed turn, so the snapshot's duplicate-id
+	// count (read with the same tool rows the page renders) reports one repeated id.
 	if _, err := st.Pool.Exec(ctx,
-		`INSERT INTO tool_calls (session_id, message_ordinal, call_index, tool_name, category)
-		 VALUES ($1, 3, 0, 'Edit', 'edit')`, sid); err != nil {
+		`INSERT INTO tool_calls (session_id, message_ordinal, call_index, tool_name, category, call_uid)
+		 VALUES ($1, 3, 0, 'Edit', 'edit', 'toolu_dup'), ($1, 5, 0, 'Edit', 'edit', 'toolu_dup')`, sid); err != nil {
 		t.Fatal(err)
 	}
 
@@ -273,8 +275,11 @@ func TestSessionSnapshotByID(t *testing.T) {
 	if len(snap.Outline) != 30 {
 		t.Fatalf("snapshot outline = %d rows, want 30", len(snap.Outline))
 	}
-	if len(snap.Tools) != 1 || snap.Tools[0].MessageOrdinal != 3 {
-		t.Fatalf("snapshot tools = %+v, want the ordinal-3 call", snap.Tools)
+	if len(snap.Tools) != 2 || snap.Tools[0].MessageOrdinal != 3 {
+		t.Fatalf("snapshot tools = %+v, want the ordinal-3 and ordinal-5 calls", snap.Tools)
+	}
+	if snap.DupIDs != 1 {
+		t.Fatalf("snapshot DupIDs = %d, want 1 repeated call id", snap.DupIDs)
 	}
 
 	if _, err := st.SessionSnapshotByID(ctx, 99999999); !errors.Is(err, store.ErrNotFound) {

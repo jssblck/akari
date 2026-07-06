@@ -41,13 +41,15 @@ type TranscriptPage struct {
 	// Seed is up to transcriptSeedLookback rows immediately before Msgs, in ordinal
 	// order, for walker priming only; the caller must not render them.
 	Seed []Message
-	// Tools and Attachments are the tool calls and attachments hanging on Msgs, read in
-	// the same transaction as the rows themselves. A rebuild committing between separate
-	// reads could otherwise pair one projection's messages with another's tool chips or
-	// images at the same ordinals, and an appended fragment would leave that mix in the
-	// DOM; carrying them on the page pins all three to one snapshot.
+	// Tools, Attachments, and Fallbacks are the tool calls, attachments, and model
+	// fallback notices hanging on Msgs, read in the same transaction as the rows
+	// themselves. A rebuild committing between separate reads could otherwise pair one
+	// projection's messages with another's chips, images, or notices at the same
+	// ordinals, and an appended fragment would leave that mix in the DOM; carrying them
+	// on the page pins all four to one snapshot.
 	Tools       []ToolCallView
 	Attachments []AttachmentView
+	Fallbacks   []ModelFallback
 	// HasEarlier reports whether any rows precede the window, so the renderer knows to
 	// draw the "Show earlier" bar. EarlierCount is how many (for the bar's label).
 	HasEarlier   bool
@@ -197,6 +199,17 @@ func (s *Store) fillWindowExtras(ctx context.Context, tx pgx.Tx, sessionID int64
 		return fmt.Errorf("read window attachments for session %d: %w", sessionID, err)
 	}
 	page.Attachments = atts
+	// Window-ranged rather than the capped whole-session list the header tile shows:
+	// bounded by the window either way, and a notice can never be cut by a cap that
+	// tripped on fallbacks outside the window.
+	fallbacks, err := s.scanModelFallbacks(ctx, tx, sessionID,
+		`SELECT `+modelFallbackColumns+`
+		   FROM model_fallbacks WHERE session_id = $1 AND message_ordinal BETWEEN $2 AND $3
+		  ORDER BY occurred_at, dedup_key`, sessionID, lo, hi)
+	if err != nil {
+		return err
+	}
+	page.Fallbacks = fallbacks
 	return nil
 }
 

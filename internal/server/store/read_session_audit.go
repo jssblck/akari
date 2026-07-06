@@ -25,6 +25,10 @@ type SessionAudit struct {
 	Subagents []SubagentRow
 	Tree      TreeRollup
 	Models    []string
+	// Fallbacks is the header tile's capped fallback list (ModelFallbackListCap rows),
+	// loaded only when Detail's rollup counted one, from the same snapshot as the
+	// count, so the tile's list and its "plus N more" remainder always reconcile.
+	Fallbacks []ModelFallback
 }
 
 // SessionAuditByID loads a session's audit bundle from one repeatable-read snapshot.
@@ -62,8 +66,17 @@ func (s *Store) sessionAudit(ctx context.Context, tx pgx.Tx, sessionID int64) (S
 		return a, err
 	}
 	a.Tree = roll[sessionID]
-	a.Models, err = s.sessionModels(ctx, tx, sessionID)
-	return a, err
+	if a.Models, err = s.sessionModels(ctx, tx, sessionID); err != nil {
+		return a, err
+	}
+	// Only a session whose rollup counted a fallback pays for the list read; the
+	// common no-fallback session skips it.
+	if a.Detail.ModelFallbackCount > 0 {
+		if a.Fallbacks, err = s.sessionModelFallbacks(ctx, tx, sessionID, ModelFallbackListCap); err != nil {
+			return a, err
+		}
+	}
+	return a, nil
 }
 
 // SessionModels returns the distinct models that served a session, heaviest first by

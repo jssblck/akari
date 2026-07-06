@@ -520,14 +520,13 @@ func (s *Server) sessionView(r *http.Request, id int64) (web.SessionView, error)
 	if err != nil {
 		return web.SessionView{}, err
 	}
-	return s.sessionViewFrom(r.Context(), snap)
+	return sessionViewFrom(snap), nil
 }
 
-// sessionViewFrom builds the web view from one store snapshot plus the derived header
-// stats. The fallbacks list inside those stats is the only read outside the snapshot;
-// it is gated by the snapshot's own rollup count and feeds notices only, so a straddle
-// there cannot misprice or misattribute anything.
-func (s *Server) sessionViewFrom(ctx context.Context, snap store.SessionSnapshot) (web.SessionView, error) {
+// sessionViewFrom builds the web view from one store snapshot. Pure assembly: every
+// row it maps was read in the snapshot's transaction, so nothing here can straddle a
+// rebuild.
+func sessionViewFrom(snap store.SessionSnapshot) web.SessionView {
 	v := web.SessionView{
 		Detail:    snap.Audit.Detail,
 		Subagents: snap.Audit.Subagents,
@@ -535,26 +534,25 @@ func (s *Server) sessionViewFrom(ctx context.Context, snap store.SessionSnapshot
 		Models:    snap.Audit.Models,
 		Outline:   snap.Outline,
 		Tools:     web.ToolsByOrdinal(snap.Tools),
+		DupIDs:    snap.DupIDs,
+		Header:    sessionHeaderStats(snap.Audit.Detail, snap.Audit.Signals, snap.Audit.Fallbacks),
 	}
 	v.SetPage(snap.Page)
-	var err error
-	v.Header, err = s.sessionHeaderStats(ctx, snap.Audit.Detail, snap.Audit.Signals)
-	return v, err
+	return v
 }
 
 // sessionHeaderStats builds the derived stat-tile inputs the session instrument header
-// renders: the session's all-usage cache effectiveness and its stored quality signals.
-// Both session-page handlers and the live body fragment share it, so the header reads the
-// same way on first load and on every SSE refresh.
+// renders: the session's all-usage cache effectiveness, its stored quality signals, and
+// the header tile's capped fallback list. Pure derivation over rows the caller already
+// holds: the session page passes them from one store snapshot (SessionAudit), so the
+// tiles can never mix projections, and the public page passes its own pool reads.
 //
-// The Cache tile comes straight off the already-loaded SessionDetail rollups (the token
-// classes plus the parse-time cache-savings fold), so it costs nothing here. That is the
-// point of the rollup: the live body re-renders on every SSE update, and reading the tile
-// from the row the caller already holds keeps a long session's K refreshes linear rather
-// than rescanning its K usage rows each time. The signals row comes in from the caller
-// too (the audit bundle reads it in the same snapshot as the costs it is judged beside);
-// only a counted fallback still needs a read.
-func (s *Server) sessionHeaderStats(ctx context.Context, d store.SessionDetail, sig store.SessionSignals) (web.HeaderStats, error) {
+// The Cache tile comes straight off the SessionDetail rollups (the token classes plus
+// the parse-time cache-savings fold). That is the point of the rollup: the live body
+// re-renders on every SSE update, and reading the tile from the row the caller already
+// holds keeps a long session's K refreshes linear rather than rescanning its K usage
+// rows each time.
+func sessionHeaderStats(d store.SessionDetail, sig store.SessionSignals, fallbacks []store.ModelFallback) web.HeaderStats {
 	cache := store.CacheStats{
 		Input:             d.TotalInput,
 		Output:            d.TotalOutput,
@@ -562,20 +560,6 @@ func (s *Server) sessionHeaderStats(ctx context.Context, d store.SessionDetail, 
 		CacheWrite:        d.TotalCacheWrite,
 		SavingsUSD:        d.TotalCacheSavingsUSD,
 		SavingsIncomplete: d.CacheSavingsIncomplete,
-	}
-	// Only a session whose rollup counted a fallback pays for the fallbacks read; the
-	// common no-fallback session skips it, so the header tile and transcript notices cost
-	// nothing on the overwhelming majority of pages. The rollup is the O(1) gate.
-	var fallbacks []store.ModelFallback
-	if d.ModelFallbackCount > 0 {
-		// Cap the read so a pathological session cannot grow the tooltip slice or the
-		// transcript-notice map without bound; the O(1) ModelFallbackCount stays the true
-		// total, and the tooltip renders "plus N more" from it when it overflows the cap.
-		var err error
-		fallbacks, err = s.Store.SessionModelFallbacks(ctx, d.ID, store.ModelFallbackListCap)
-		if err != nil {
-			return web.HeaderStats{}, err
-		}
 	}
 	// The observed-thinking band is an absolute cut on the token scale, carried whole by the
 	// stored signals row, so the readout reads straight from the row with no extra query: the
@@ -593,7 +577,7 @@ func (s *Server) sessionHeaderStats(ctx context.Context, d store.SessionDetail, 
 			Coverage:   sig.ThinkingCoverage(),
 		}
 	}
-	return web.HeaderStats{Cache: cache, Signals: sig, Fallbacks: fallbacks, Thinking: thinking}, nil
+	return web.HeaderStats{Cache: cache, Signals: sig, Fallbacks: fallbacks, Thinking: thinking}
 }
 
 func (s *Server) handleSessionPage(w http.ResponseWriter, r *http.Request) {
@@ -607,13 +591,6 @@ func (s *Server) handleSessionPage(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(r, "Not found"), http.StatusNotFound, "Session not found."))
 		return
 	}
-	if err != nil {
-		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load session."))
-		return
-	}
-	// A bounded scalar (the GROUP BY runs in the database), so flagging a repeated
-	// tool-call id costs one count query, not an in-process scan of every tool call.
-	v.DupIDs, err = s.Store.DuplicateCallUIDCount(r.Context(), id)
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.ErrorPage(s.pageFor(r, "Error"), http.StatusInternalServerError, "Could not load session."))
 		return
@@ -701,45 +678,26 @@ func (s *Server) serveSessionAppend(w http.ResponseWriter, r *http.Request, id i
 		render(w, r, http.StatusOK, web.SessionResync(v))
 		return
 	}
-	v, err := s.sessionViewFrom(r.Context(), snap)
-	if err != nil {
-		s.fragmentError(w, err)
-		return
-	}
-	render(w, r, http.StatusOK, web.TranscriptAppend(v))
+	render(w, r, http.StatusOK, web.TranscriptAppend(sessionViewFrom(snap)))
 }
 
 // serveSessionEarlier answers ?before=N: the "Show earlier" path. The fragment renders
-// only settled rows (with the tools and attachments its page carries from the window's
-// own snapshot) and no out-of-band refreshes, so it needs just the detail and the
-// header stats whose fallbacks map feeds the rows' notices.
+// only settled rows, whose page carries its own tools, attachments, and fallback
+// notices from one store snapshot; there are no out-of-band refreshes, so the detail
+// and the page are all it needs.
 func (s *Server) serveSessionEarlier(w http.ResponseWriter, r *http.Request, id int64, arg string) {
 	before, err := strconv.Atoi(arg)
 	if err != nil {
 		http.Error(w, "bad before cursor", http.StatusBadRequest)
 		return
 	}
-	d, err := s.Store.SessionDetailByID(r.Context(), id)
-	if err != nil {
-		s.fragmentError(w, err)
-		return
-	}
-	page, err := s.Store.TranscriptTail(r.Context(), id, &before)
+	d, page, err := s.Store.SessionEarlierByID(r.Context(), id, before)
 	if err != nil {
 		s.fragmentError(w, err)
 		return
 	}
 	v := web.SessionView{Detail: d}
 	v.SetPage(page)
-	sig, err := s.Store.SessionSignalsByID(r.Context(), id)
-	if err != nil {
-		s.fragmentError(w, err)
-		return
-	}
-	if v.Header, err = s.sessionHeaderStats(r.Context(), d, sig); err != nil {
-		s.fragmentError(w, err)
-		return
-	}
 	render(w, r, http.StatusOK, web.TranscriptEarlier(v))
 }
 

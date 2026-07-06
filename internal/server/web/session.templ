@@ -107,7 +107,7 @@ templ TranscriptEarlier(v SessionView) {
 	if v.Page.HasEarlier && len(v.Page.Msgs) > 0 {
 		@earlierBar(v.Detail.ID, v.Page.Msgs[0].Ordinal, v.Page.EarlierCount)
 	}
-	@TranscriptRows(v.Page.Seed, v.Page.Msgs, v.Detail.Agent, v.WindowTools, v.WindowAttachments, FallbacksByOrdinal(v.Header.Fallbacks), SessionBlobBase(v.Detail.ID))
+	@TranscriptRows(v.Page.Seed, v.Page.Msgs, v.Detail.Agent, v.WindowTools, v.WindowAttachments, FallbacksByOrdinal(v.Page.Fallbacks), SessionBlobBase(v.Detail.ID))
 }
 
 // TranscriptAppend is the fragment behind GET /sessions/{id}/body?after=N, fetched on an
@@ -119,7 +119,7 @@ templ TranscriptEarlier(v SessionView) {
 // when rows actually landed: a quiet tick (raw bytes ahead of the rebuild) changes no
 // turns, so it must not ship the whole-session shape for nothing.
 templ TranscriptAppend(v SessionView) {
-	@TranscriptRows(v.Page.Seed, v.Page.Msgs, v.Detail.Agent, v.WindowTools, v.WindowAttachments, FallbacksByOrdinal(v.Header.Fallbacks), SessionBlobBase(v.Detail.ID))
+	@TranscriptRows(v.Page.Seed, v.Page.Msgs, v.Detail.Agent, v.WindowTools, v.WindowAttachments, FallbacksByOrdinal(v.Page.Fallbacks), SessionBlobBase(v.Detail.ID))
 	@sessionInstruments(v, true)
 	@subagentsSection(v, true)
 	if len(v.Page.Msgs) > 0 {
@@ -644,7 +644,7 @@ templ transcriptWindow(v SessionView) {
 			if v.Page.HasEarlier {
 				@earlierBar(v.Detail.ID, v.Page.Msgs[0].Ordinal, v.Page.EarlierCount)
 			}
-			@TranscriptRows(v.Page.Seed, v.Page.Msgs, v.Detail.Agent, v.WindowTools, v.WindowAttachments, FallbacksByOrdinal(v.Header.Fallbacks), SessionBlobBase(v.Detail.ID))
+			@TranscriptRows(v.Page.Seed, v.Page.Msgs, v.Detail.Agent, v.WindowTools, v.WindowAttachments, FallbacksByOrdinal(v.Page.Fallbacks), SessionBlobBase(v.Detail.ID))
 		</div>
 	}
 }

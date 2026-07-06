@@ -26,6 +26,10 @@ type SessionSnapshot struct {
 	Page    TranscriptPage
 	Outline []Message
 	Tools   []ToolCallView
+	// DupIDs counts tool-call ids appearing on more than one row (a replayed
+	// transcript), read with the shape: it summarizes the same tool_calls rows the
+	// page renders, so it must not straddle a rebuild against them.
+	DupIDs int
 }
 
 // SessionSnapshotByID loads the full session view: the audit bundle, the transcript's
@@ -90,5 +94,27 @@ func (s *Store) fillShape(ctx context.Context, tx pgx.Tx, sessionID int64, snap 
 		return err
 	}
 	snap.Tools = tools
-	return nil
+	snap.DupIDs, err = s.duplicateCallUIDCount(ctx, tx, sessionID)
+	return err
+}
+
+// SessionEarlierByID loads the "Show earlier" fragment's inputs from one snapshot: the
+// session row and the window strictly before `before`. The window's rows carry their
+// own tools, attachments, and fallback notices, and the fragment refreshes nothing
+// out-of-band, so nothing else is read.
+func (s *Store) SessionEarlierByID(ctx context.Context, sessionID int64, before int) (SessionDetail, TranscriptPage, error) {
+	var d SessionDetail
+	var page TranscriptPage
+	err := s.snapshotTx(ctx, func(tx pgx.Tx) error {
+		var err error
+		if d, err = s.scanDetail(ctx, tx, "s.id = $1", sessionID); err != nil {
+			return err
+		}
+		page, err = s.transcriptTail(ctx, tx, sessionID, &before)
+		return err
+	})
+	if err != nil {
+		return SessionDetail{}, TranscriptPage{}, err
+	}
+	return d, page, nil
 }

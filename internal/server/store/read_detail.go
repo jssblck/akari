@@ -251,8 +251,12 @@ type TurnUsage struct {
 // session repeats a tool_use id), which the view surfaces as a chip so a genuinely
 // malformed id reuse is visible rather than silent.
 func (s *Store) DuplicateCallUIDCount(ctx context.Context, sessionID int64) (int, error) {
+	return s.duplicateCallUIDCount(ctx, s.Pool, sessionID)
+}
+
+func (s *Store) duplicateCallUIDCount(ctx context.Context, q querier, sessionID int64) (int, error) {
 	var n int
-	err := s.Pool.QueryRow(ctx,
+	err := q.QueryRow(ctx,
 		`SELECT count(*) FROM (
 		   SELECT 1 FROM tool_calls
 		    WHERE session_id = $1 AND call_uid IS NOT NULL
@@ -339,16 +343,23 @@ type ModelFallback struct {
 	DedupKey           string
 }
 
+// modelFallbackColumns is the shared select list behind every model_fallbacks read.
+const modelFallbackColumns = `message_ordinal, from_model, to_model, trigger,
+	        COALESCE(refusal_category, ''), COALESCE(refusal_explanation, ''),
+	        declined_input_tokens, declined_output_tokens, declined_cache_write_tokens,
+	        declined_cache_read_tokens, occurred_at, dedup_key`
+
 // SessionModelFallbacks returns a session's recorded model fallbacks in a stable order
 // (by when they occurred, then by dedup_key so rows with no timestamp still order
 // deterministically), capped at limit rows so the read stays bounded on a pathological
 // session. It reads the merged model_fallbacks rows the projection built. A limit of zero
 // or less means no cap; callers on hot paths pass ModelFallbackListCap.
 func (s *Store) SessionModelFallbacks(ctx context.Context, sessionID int64, limit int) ([]ModelFallback, error) {
-	query := `SELECT message_ordinal, from_model, to_model, trigger,
-	        COALESCE(refusal_category, ''), COALESCE(refusal_explanation, ''),
-	        declined_input_tokens, declined_output_tokens, declined_cache_write_tokens,
-	        declined_cache_read_tokens, occurred_at, dedup_key
+	return s.sessionModelFallbacks(ctx, s.Pool, sessionID, limit)
+}
+
+func (s *Store) sessionModelFallbacks(ctx context.Context, q querier, sessionID int64, limit int) ([]ModelFallback, error) {
+	query := `SELECT ` + modelFallbackColumns + `
 	   FROM model_fallbacks WHERE session_id = $1
 	  ORDER BY occurred_at, dedup_key`
 	args := []any{sessionID}
@@ -356,7 +367,11 @@ func (s *Store) SessionModelFallbacks(ctx context.Context, sessionID int64, limi
 		query += ` LIMIT $2`
 		args = append(args, limit)
 	}
-	rows, err := s.Pool.Query(ctx, query, args...)
+	return s.scanModelFallbacks(ctx, q, sessionID, query, args...)
+}
+
+func (s *Store) scanModelFallbacks(ctx context.Context, q querier, sessionID int64, query string, args ...any) ([]ModelFallback, error) {
+	rows, err := q.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query model fallbacks for session %d: %w", sessionID, err)
 	}

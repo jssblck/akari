@@ -55,10 +55,10 @@ func TestTranscriptWindowCarriesToolsAndAttachments(t *testing.T) {
 	const total = 240
 	sid := seedTurns(t, st, "grace", total)
 
-	// One tool call before the window, one inside; one attachment on each side too.
-	// The tail window of 240 alternating rows starts at ordinal 140. The attachments FK
-	// into the CAS, so each needs a blob row (the hash is the 64-char zero-padded
-	// ordinal, unique per test database).
+	// One tool call before the window, one inside; one attachment and one fallback on
+	// each side too. The tail window of 240 alternating rows starts at ordinal 140. The
+	// attachments FK into the CAS, so each needs a blob row (the hash is the 64-char
+	// zero-padded ordinal, unique per test database).
 	for _, ord := range []int{10, 141} {
 		if _, err := st.Pool.Exec(ctx,
 			`INSERT INTO tool_calls (session_id, message_ordinal, call_index, tool_name, category)
@@ -76,6 +76,12 @@ func TestTranscriptWindowCarriesToolsAndAttachments(t *testing.T) {
 			 VALUES ($1, $2, $3, 'image/png', 4)`, sid, ord, sha); err != nil {
 			t.Fatalf("attachment at %d: %v", ord, err)
 		}
+		if _, err := st.Pool.Exec(ctx,
+			`INSERT INTO model_fallbacks (session_id, message_ordinal, from_model, to_model, trigger, occurred_at, dedup_key)
+			 VALUES ($1, $2, 'claude-fable-5', 'claude-opus-4-8', 'refusal', now(), $3)`,
+			sid, ord, fmt.Sprintf("fb-%d", ord)); err != nil {
+			t.Fatalf("fallback at %d: %v", ord, err)
+		}
 	}
 
 	page, err := st.TranscriptTail(ctx, sid, nil)
@@ -87,6 +93,9 @@ func TestTranscriptWindowCarriesToolsAndAttachments(t *testing.T) {
 	}
 	if len(page.Attachments) != 1 || page.Attachments[0].MessageOrdinal != 141 {
 		t.Fatalf("window attachments = %+v, want just the ordinal-141 image", page.Attachments)
+	}
+	if len(page.Fallbacks) != 1 || page.Fallbacks[0].MessageOrdinal == nil || *page.Fallbacks[0].MessageOrdinal != 141 {
+		t.Fatalf("window fallbacks = %+v, want just the ordinal-141 notice", page.Fallbacks)
 	}
 
 	// The append read carries them the same way.
