@@ -32,12 +32,32 @@ templ InsightsPage(p Page, ins store.Insights, rng string, ranges []RangeOption)
 				if ins.Trends == nil || !ins.Trends.HasData() {
 					<div class="empty">No sessions in this window yet.</div>
 				} else {
+					@insightsSummaryStrip(ins)
 					@insightsInstruments()
 					@insightsDataElement(ins)
 				}
 			</div>
 			<div class="chart-tooltip" id="tooltip" role="status"></div>
 		</section>
+	}
+}
+
+// insightsSummaryStrip is the plain-language lead at the top of the instruments: two or
+// three sentences synthesizing the window's quality, spend, and tool reliability, so a reader
+// gets the shape of the window before scanning a chart. The sentences are computed in
+// InsightsSummary and joined into one flowing lead paragraph here; the strip renders nothing
+// when nothing was measurable, so it never leaves an empty rule above the charts.
+templ insightsSummaryStrip(ins store.Insights) {
+	{{ lines := InsightsSummary(ins) }}
+	if len(lines) > 0 {
+		<p class="insights-summary">
+			for i, s := range lines {
+				if i > 0 {
+					{ " " }
+				}
+				{ s }
+			}
+		</p>
 	}
 }
 
@@ -63,6 +83,22 @@ templ insightsRangeControl(ranges []RangeOption) {
 	</div>
 }
 
+// instrumentCaption is one instrument's caption in two registers. The lead is the sentence a
+// reader sees first: plain language, answering "what does this tell me" without a single
+// column name. The demoted "How it's measured" disclosure carries the schema-level detail
+// (the tables, the exact predicate, the caveats) for whoever wants it. Splitting the two is
+// the approachability fix: the page reads as instruments a team lead can use, not as a tour
+// of the schema, while the precise method stays one click away rather than deleted.
+templ instrumentCaption(lead string) {
+	<p class="panel-caption">{ lead }</p>
+	<details class="panel-how">
+		<summary>How it's measured</summary>
+		<div class="panel-how-body">
+			{ children... }
+		</div>
+	</details>
+}
+
 // insightsInstruments is the seven-section instrument panel: static scaffolding (headings,
 // tab strips, chart mount points) that insights.js populates from AK_DATA. It carries no Go
 // data of its own; every id here is a mount target the chart engine looks up by name, so the
@@ -77,7 +113,9 @@ templ insightsInstruments() {
 			<div class="figures-row" id="fleetmix-figures"></div>
 			<div id="chart-fleetmix-full"></div>
 			<ul class="legend" id="fleetmix-legend" style="margin-top:10px;"></ul>
-			<p class="panel-caption"><code>usage_events.model</code> token share per bucket; a migration shows up here as one band growing while another shrinks, without reading release notes.</p>
+			@instrumentCaption("Which models did the work, and how the mix shifted across the window.") {
+				<code>usage_events.model</code> token share per bucket; a migration shows up here as one band growing while another shrinks, without reading release notes.
+			}
 		</div>
 	</section>
 	<!-- 2. Session gallery -->
@@ -90,7 +128,9 @@ templ insightsInstruments() {
 			<div id="chart-gallery-full"></div>
 			<div class="muted small" id="gallery-sample" style="margin-top:6px;"></div>
 			<ul class="legend" id="gallery-legend" style="margin-top:10px;"></ul>
-			<p class="panel-caption">Every fully spanned session is one dot, placed by how long it ran and what it cost, coloured by archetype; outliers stop hiding inside averages.</p>
+			@instrumentCaption("Every session as one dot, so the long or expensive outliers stop hiding inside the averages.") {
+				Every fully spanned session is one dot, placed by how long it ran and what it cost, coloured by archetype.
+			}
 		</div>
 	</section>
 	<!-- 3. Velocity -->
@@ -117,20 +157,28 @@ templ insightsInstruments() {
 			<div class="tabpanel instrument-solo" id="vpanel-activehours" role="tabpanel" aria-labelledby="vtab-activehours" tabindex="0" hidden>
 				<div class="figures-row" id="activehours-figures"></div>
 				<div id="chart-activehours-full"></div>
-				<p class="panel-caption">Bars are hands-on agent time per bucket (gap time over the idle threshold removed); the dotted line is wall-clock session span, the same integral behind the concurrency figures. The gap between them is idle sessions sitting open.</p>
+				@instrumentCaption("Hands-on agent time against wall-clock time; the gap between them is sessions left sitting open.") {
+					Bars are hands-on agent time per bucket (gap time over the idle threshold removed); the dotted line is wall-clock session span, the same integral behind the concurrency figures.
+				}
 			</div>
 			<div class="tabpanel instrument-solo" id="vpanel-response" role="tabpanel" aria-labelledby="vtab-response" tabindex="0" hidden>
 				<div id="chart-response-full"></div>
-				<p class="panel-caption"><code>messages.timestamp</code> deltas between a prompt and the agent's first reply: p50 line, p50 to p90 band, and a p99 line for the long tail.</p>
+				@instrumentCaption("How quickly the agent answers a prompt, and how long the slow tail runs.") {
+					<code>messages.timestamp</code> deltas between a prompt and the agent's first reply: p50 line, p50 to p90 band, and a p99 line for the long tail.
+				}
 			</div>
 			<div class="tabpanel instrument-solo" id="vpanel-throughput" role="tabpanel" aria-labelledby="vtab-throughput" tabindex="0" hidden>
 				<div class="figures-row" id="throughput-figures"></div>
 				<div id="chart-throughput-full"></div>
-				<p class="panel-caption">Cadence per active minute: messages and tool calls over hands-on time. Output tokens per second would need a generation duration the projection does not record, so this reads the two densities we can derive honestly.</p>
+				@instrumentCaption("How much the agent gets through per active minute: messages and tool calls.") {
+					Cadence per active minute over hands-on time. Output tokens per second would need a generation duration the projection does not record, so this reads the two densities we can derive honestly.
+				}
 			</div>
 			<div class="tabpanel instrument-solo" id="vpanel-rhythm" role="tabpanel" aria-labelledby="vtab-rhythm" tabindex="0" hidden>
 				<div class="overflow-x"><div id="chart-punchcard" style="min-width:480px;"></div></div>
-				<p class="panel-caption">When the fleet works: cell brightness is message and tool volume by hour of week. Joins <code>tool_calls</code> and <code>messages</code> to <code>messages.timestamp</code>.</p>
+				@instrumentCaption("When in the week the fleet is busiest.") {
+					Cell brightness is message and tool volume by hour of week, joining <code>tool_calls</code> and <code>messages</code> to <code>messages.timestamp</code>.
+				}
 			</div>
 		</div>
 	</section>
@@ -158,16 +206,22 @@ templ insightsInstruments() {
 			<div class="tabpanel instrument-solo" id="tpanel-reliability" role="tabpanel" aria-labelledby="ttab-reliability" tabindex="0" hidden>
 				<div class="overflow-x"><div id="chart-reliability" style="min-width:480px;"></div></div>
 				<ul class="legend" id="reliability-legend" style="margin-top:10px;"></ul>
-				<p class="panel-caption">Every tool in one frame: volume says how much you lean on it, height says how often it bites. <code>tool_calls</code> grouped by <code>tool_name</code>; error = <code>result_status='error'</code>.</p>
+				@instrumentCaption("Which tools the fleet leans on most, and which ones fail most.") {
+					Every tool in one frame: volume says how much you lean on it, height says how often it bites. <code>tool_calls</code> grouped by <code>tool_name</code>; error = <code>result_status='error'</code>.
+				}
 			</div>
 			<div class="tabpanel instrument-solo" id="tpanel-mix" role="tabpanel" aria-labelledby="ttab-mix" tabindex="0" hidden>
 				<div id="chart-toolmix-full"></div>
 				<ul class="legend" id="toolmix-legend" style="margin-top:10px;"></ul>
-				<p class="panel-caption">Share of each bucket's tool calls by category. Same <code>tool_calls</code> rows as the reliability map, grouped by category and drawn over time instead of collapsed to one snapshot.</p>
+				@instrumentCaption("How the balance of tool categories shifted over time.") {
+					Share of each bucket's tool calls by category. Same <code>tool_calls</code> rows as the reliability map, grouped by category and drawn over time instead of collapsed to one snapshot.
+				}
 			</div>
 			<div class="tabpanel instrument-solo" id="tpanel-failures" role="tabpanel" aria-labelledby="ttab-failures" tabindex="0" hidden>
 				<div id="chart-failures-full"></div>
-				<p class="panel-caption">Same <code>tool_calls</code> base as the scatter, drawn over time so a regression shows up the bucket it lands, not after it burns you. The fleet rate plus the window's worst offenders.</p>
+				@instrumentCaption("The tool failure rate over time, so a regression shows up the week it lands.") {
+					Same <code>tool_calls</code> base as the scatter, drawn over time instead of collapsed to a snapshot. The fleet rate plus the window's worst offenders.
+				}
 			</div>
 			<div class="tabpanel instrument-solo" id="tpanel-churn" role="tabpanel" aria-labelledby="ttab-churn" tabindex="0" hidden>
 				<div class="figures-row" id="churn-figures"></div>
@@ -176,7 +230,9 @@ templ insightsInstruments() {
 				<div class="treemap" id="treemap"></div>
 				<div class="muted small" id="churn-clip" style="margin-top:6px;"></div>
 				<ul class="legend" id="churn-legend" style="margin-top:10px;"></ul>
-				<p class="panel-caption">The headline is the trend; the treemap answers which files. Drill from project to folder to file, <kbd>Escape</kbd> or a breadcrumb crumb goes back up.</p>
+				@instrumentCaption("Which files the fleet edited most, and how that trended.") {
+					The headline is the trend; the treemap answers which files. Drill from project to folder to file, <kbd>Escape</kbd> or a breadcrumb crumb goes back up.
+				}
 			</div>
 		</div>
 	</section>
@@ -203,19 +259,28 @@ templ insightsInstruments() {
 			</div>
 			<div class="tabpanel instrument-solo" id="hpanel-grades" role="tabpanel" aria-labelledby="htab-grades" tabindex="0" hidden>
 				<div id="chart-grades"></div>
-				<p class="panel-caption"><code>session_signals.grade</code> re-read per bucket. The settle pass already stamps every session; this is the same column drawn over time instead of one rolled-up number.</p>
+				@instrumentCaption("How session quality graded over time.") {
+					<code>session_signals.grade</code> re-read per bucket. The settle pass already stamps every session; this is the same column drawn over time instead of one rolled-up number.
+				}
 			</div>
 			<div class="tabpanel instrument-solo" id="hpanel-outcomes" role="tabpanel" aria-labelledby="htab-outcomes" tabindex="0" hidden>
 				<div id="chart-outcomes"></div>
-				<p class="panel-caption"><code>session_signals.outcome</code> per bucket: completed against abandoned, with raw session counts underneath.</p>
+				@instrumentCaption("How sessions ended over time: completed against abandoned.") {
+					<code>session_signals.outcome</code> per bucket, with raw session counts underneath.
+				}
 			</div>
 			<div class="tabpanel instrument-solo" id="hpanel-hygiene" role="tabpanel" aria-labelledby="htab-hygiene" tabindex="0" hidden>
 				<div id="chart-hygiene"></div>
 				<ul class="legend" id="hygiene-legend" style="margin-top:10px;"></ul>
-				<p class="panel-caption"><code>messages.prompt_facts</code> classified per prompt, rolled up per bucket as a share of the bucket's prompts touched by each flag.</p>
+				@instrumentCaption("How well-formed the prompts were over time: short, code-free, or repeated.") {
+					<code>messages.prompt_facts</code> classified per prompt, rolled up per bucket as a share of the bucket's prompts touched by each flag.
+				}
 			</div>
 			<div class="tabpanel instrument-solo" id="hpanel-context" role="tabpanel" aria-labelledby="htab-context" tabindex="0" hidden>
 				<div id="chart-context"></div>
+				@instrumentCaption("How close sessions ran to the model's context limit.") {
+					Peak context tokens per session, banded on the absolute token scale, so a fleet crowding its context window reads before sessions start dropping work.
+				}
 			</div>
 		</div>
 	</section>
@@ -240,12 +305,16 @@ templ insightsInstruments() {
 				<div class="figures-row" id="costquality-figures"></div>
 				<div id="chart-costquality-full"></div>
 				<ul class="legend" id="costquality-legend" style="margin-top:10px;"></ul>
-				<p class="panel-caption"><code>usage_events</code> cost joined to <code>session_signals.outcome</code>; puts a price on the abandon rate.</p>
+				@instrumentCaption("How much spend went to work that completed against work that was abandoned.") {
+					<code>usage_events</code> cost joined to <code>session_signals.outcome</code>; puts a price on the abandon rate.
+				}
 			</div>
 			<div class="tabpanel instrument-solo" id="epanel-cache" role="tabpanel" aria-labelledby="etab-cache" tabindex="0" hidden>
 				<div class="figures-row" id="cache-figures"></div>
 				<div id="chart-cache-full"></div>
-				<p class="panel-caption">What caching saved, priced per day and model then given a time axis; the same figure the token tiles reconcile with.</p>
+				@instrumentCaption("What prompt caching saved over time.") {
+					What caching saved, priced per day and model then given a time axis; the same figure the token tiles reconcile with.
+				}
 			</div>
 		</div>
 	</section>
@@ -260,7 +329,9 @@ templ insightsInstruments() {
 			<ul class="legend" id="subagents-legend" style="margin-top:10px;"></ul>
 			<div id="chart-fanout-full" style="margin-top:20px;"></div>
 			<ul class="legend" id="fanout-legend" style="margin-top:10px;"></ul>
-			<p class="panel-caption"><code>parent_session_id</code> and <code>relationship_type</code> ride every session row and appear in no other aggregate; this makes delegation visible: how often, how wide, and what share of spend rides on it. The stack below shows how wide the fan-out runs, not just how often delegation happens.</p>
+			@instrumentCaption("How much work runs through delegation: how often the fleet spawns subagents, how wide the fan-out runs, and what share of spend rides on it.") {
+				<code>parent_session_id</code> and <code>relationship_type</code> ride every session row and appear in no other aggregate. The stack below shows how wide the fan-out runs, not just how often delegation happens.
+			}
 		</div>
 	</section>
 }

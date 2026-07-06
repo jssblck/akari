@@ -252,10 +252,12 @@ func globalSessionSelect(matchLateral, matchCol, matchCutCol string) string {
 	       s.total_cost_usd, s.cost_incomplete, s.visibility, s.public_id,
 	       s.started_at, s.ended_at, s.last_active_at,
 	       p.id, p.remote_key, p.display_name, p.kind,
+	       sig.grade, sig.outcome,
 	       coalesce(title.content, ''), ` + matchCol + `, ` + matchCutCol + `
 	  FROM sessions s
 	  JOIN users u ON u.id = s.user_id
 	  JOIN projects p ON p.id = s.project_id
+	  LEFT JOIN session_signals sig ON sig.session_id = s.id AND ` + signalsCurrent() + `
 	  ` + titleLateralSQL + matchLateral
 }
 
@@ -269,15 +271,23 @@ func globalSessionSelect(matchLateral, matchCol, matchCutCol string) string {
 func scanSessionRow(rows pgx.Rows, matchActive bool) (r SessionRow, raw string, frontCut bool, err error) {
 	var match *string
 	var cut bool
+	// outcome is nullable in the row: a session with no current signals row (unsettled,
+	// or its signals gone stale under a newer epoch) LEFT JOINs to NULL. Scan through a
+	// pointer and fold a missing outcome to the empty string the row field documents.
+	var outcome *string
 	dest := []any{&r.ID, &r.Agent, &r.Machine, &r.GitBranch, &r.Username,
 		&r.MessageCount, &r.UserMessageCount, &r.ModelFallbackCount,
 		&r.TotalInput, &r.TotalOutput, &r.TotalCacheWrite, &r.TotalCacheRead,
 		&r.TotalCostUSD, &r.CostIncomplete, &r.Visibility, &r.PublicID,
 		&r.StartedAt, &r.EndedAt, &r.LastActiveAt,
 		&r.ProjectID, &r.ProjectKey, &r.ProjectName, &r.ProjectKind,
+		&r.Grade, &outcome,
 		&r.Title, &match, &cut}
 	if err := rows.Scan(dest...); err != nil {
 		return r, "", false, fmt.Errorf("scan global session row: %w", err)
+	}
+	if outcome != nil {
+		r.Outcome = *outcome
 	}
 	r.Title = squashSpaces(r.Title)
 	if matchActive && match != nil {
@@ -314,6 +324,19 @@ func (s *Store) ListAllSessions(ctx context.Context, f SessionFilter) (rows []Se
 	// where an updated_at bound would have pulled it into the feed but not the panel.
 	conds, args := f.conds("s.started_at")
 
+	if !f.IncludeSubagents {
+		// Hide subagent sessions from the browse feed by default. This lives here, not in
+		// the shared conds(), so CountAllSessions, the facet probes, the MCP SessionFeed,
+		// and the Insights drill-through invariants keep counting every session; only this
+		// list narrows to top-level work. relationship_type is NOT NULL (default ''), so a
+		// plain inequality is null-safe and needs no placeholder. The top-level partial
+		// indexes match this exact predicate so the page still walks an index rather than
+		// scanning subagent rows: 0046's global sort orders for the unfaceted feed, and
+		// 0047's per-facet twins for the default recency order under a project, user, agent,
+		// or machine filter.
+		conds = append(conds, "s.relationship_type <> 'subagent'")
+	}
+
 	// The match lateral reuses the escaped ILIKE pattern conds() already appended as
 	// the last arg (so the row it snippets is the row the EXISTS filter matched), and
 	// additionally binds the raw query for strpos, which wants the literal substring,
@@ -346,6 +369,16 @@ func (s *Store) ListAllSessions(ctx context.Context, f SessionFilter) (rows []Se
 		matchCutCol = "coalesce(match.front_cut, false)"
 	}
 
+	// Keyset pagination: "Show more" resumes strictly after the last row the reader saw
+	// (f.After), so a deep page reads the next slice off the (col, id) index instead of
+	// re-scanning rows 1..N under a doubled limit. The cursor id binds to the next arg
+	// slot, so append it only when the predicate actually applies (a keyset-sortable order
+	// with a cursor set).
+	if cond, kargs, ok := f.keysetCond(len(args) + 1); ok {
+		args = append(args, kargs...)
+		conds = append(conds, cond)
+	}
+
 	q := globalSessionSelect(matchLateral, matchCol, matchCutCol)
 	if len(conds) > 0 {
 		q += " WHERE " + strings.Join(conds, " AND ")
@@ -364,32 +397,58 @@ func (s *Store) ListAllSessions(ctx context.Context, f SessionFilter) (rows []Se
 		q += " OFFSET $" + itoa(len(args))
 	}
 
-	qrows, err := s.Pool.Query(ctx, q, args...)
+	// Read the page and its fan-out rollups in one read-only repeatable-read snapshot. The row
+	// summaries carry each session's own cost, and attachTreeRollups reads the whole-work-item
+	// cost (root plus subagent subtree) in a second query; a rebuild landing between the two
+	// pool reads would let the row cost and the fan-out chip describe different snapshots of the
+	// same subtree. One transaction pins both to a single MVCC view. Read-only, so it takes no
+	// locks and never blocks ingest; the keyset cursor's live value lookup (when a legacy cursor
+	// carries no observed value) also resolves against this same snapshot.
+	err = pgx.BeginTxFunc(ctx, s.Pool,
+		pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly},
+		func(tx pgx.Tx) error {
+			qrows, qerr := tx.Query(ctx, q, args...)
+			if qerr != nil {
+				return fmt.Errorf("query global sessions: %w", qerr)
+			}
+			var page []SessionRow
+			for qrows.Next() {
+				r, raw, frontCut, serr := scanSessionRow(qrows, searching)
+				if serr != nil {
+					qrows.Close()
+					return serr
+				}
+				if searching {
+					r.Search = buildSnippet(raw, f.Query, frontCut)
+				}
+				page = append(page, r)
+			}
+			if ierr := qrows.Err(); ierr != nil {
+				qrows.Close()
+				return fmt.Errorf("iterate global sessions: %w", ierr)
+			}
+			// Free the connection for the rollup query on this same transaction: pgx allows one
+			// active query per connection at a time, so the page must be fully drained first.
+			qrows.Close()
+			// A full extra row past the page is the "more match" signal: drop it and flag
+			// hasMore so the footer can offer the next page without counting the corpus.
+			if len(page) > limit {
+				page = page[:limit]
+				hasMore = true
+			}
+			// Fold each row's subagent subtree into a whole-work-item rollup so the feed can
+			// show the fan-out a root turn hides. One batch query over the trimmed page, after
+			// the hasMore probe row is dropped, so the extra row never costs a walk.
+			if terr := s.attachTreeRollups(ctx, tx, page); terr != nil {
+				return terr
+			}
+			rows = page
+			return nil
+		})
 	if err != nil {
-		return nil, false, fmt.Errorf("query global sessions: %w", err)
+		return nil, false, err
 	}
-	defer qrows.Close()
-	var out []SessionRow
-	for qrows.Next() {
-		r, raw, frontCut, err := scanSessionRow(qrows, searching)
-		if err != nil {
-			return nil, false, err
-		}
-		if searching {
-			r.Search = buildSnippet(raw, f.Query, frontCut)
-		}
-		out = append(out, r)
-	}
-	if err := qrows.Err(); err != nil {
-		return nil, false, fmt.Errorf("iterate global sessions: %w", err)
-	}
-	// A full extra row past the page is the "more match" signal: drop it and flag
-	// hasMore so the footer can offer the next page without counting the corpus.
-	if len(out) > limit {
-		out = out[:limit]
-		hasMore = true
-	}
-	return out, hasMore, nil
+	return rows, hasMore, nil
 }
 
 // CountAllSessions counts the sessions ListAllSessions would return for the same
@@ -457,6 +516,13 @@ func (s *Store) HasEmptySessions(ctx context.Context, f SessionFilter) (bool, er
 	// the same windowed scope the list draws from.
 	conds, args := cf.conds("s.started_at")
 	conds = append(conds, "s.message_count = 0")
+	// Mirror ListAllSessions' default subagent hiding (it lives outside conds() there, so it
+	// must be added here too): the toggle drives that same list, so an empty row it could never
+	// reveal must not make the toggle appear. Without this, a hidden empty subagent would offer
+	// an empty=1 toggle that still shows nothing.
+	if !f.IncludeSubagents {
+		conds = append(conds, "s.relationship_type <> 'subagent'")
+	}
 	q := `SELECT EXISTS (SELECT 1
 	        FROM sessions s
 	        JOIN users u ON u.id = s.user_id

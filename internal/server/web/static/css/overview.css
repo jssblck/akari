@@ -15,6 +15,102 @@
 .public-overview-head h1 { display: flex; align-items: baseline; gap: var(--sp-sm); margin: 0; }
 .public-overview-head .sep { color: var(--border); }
 
+/* ---- Audit dash (overview lead) ---- */
+/* The verdict strip and the needs-attention shortlist sit above the usage panel as the
+   team-lead read: the fleet's headline figures, then the handful of sessions worth
+   opening. Both live inside #overview-usage so a range or per-user change swaps them
+   with the grid below. */
+.audit { margin-bottom: var(--sp-xl); }
+
+/* Four joined tiles, the same seam-and-radius treatment the usage panel's stats strip
+   wears, so the two blocks read as one instrument stack. Each tile stacks a label, a
+   large figure, and a muted context line. */
+.verdict {
+  display: grid; grid-template-columns: repeat(4, 1fr);
+  border: 1px solid var(--border); border-radius: var(--r-md);
+  background: var(--surface); overflow: hidden; margin-bottom: var(--sp-md);
+}
+.vtile { padding: var(--sp-md) var(--sp-lg); min-width: 0; }
+.vtile + .vtile { border-left: 1px solid var(--border); }
+.vtile .label { display: block; margin-bottom: 4px; }
+.vvalue {
+  font-family: var(--mono); font-size: 1.5rem; line-height: 1.1;
+  font-variant-numeric: tabular-nums; color: var(--text);
+}
+/* The banded figures (completion, quality) carry their own verdict colour; the plain
+   ones (work count, spend) stay in the default ink. */
+.vvalue.tone-ok { color: var(--ok); }
+.vvalue.tone-warn { color: var(--warn); }
+.vvalue.tone-err { color: var(--err); }
+.vsub { margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* The wasted-spend figure reads in the error colour inside its context line, the one
+   number the Spend tile pulls out of the aggregate as a loss. */
+.vsub .waste { color: var(--err); }
+
+/* The shortlist: a bordered card matching the feed's surface. */
+.attention {
+  border: 1px solid var(--border); border-radius: var(--r-md);
+  background: var(--surface); overflow: hidden;
+}
+.attention-head {
+  display: flex; align-items: baseline; gap: var(--sp-sm);
+  padding: var(--sp-sm) var(--sp-md); border-bottom: 1px solid var(--border);
+}
+.attention-count { margin-left: auto; }
+.attention-clear { padding: var(--sp-md); }
+.attention-rows { display: flex; flex-direction: column; }
+
+/* One flagged session. The reason leads the row so the why scans down the left edge;
+   the main column takes the slack and ellipsizes; cost and time hold stable right
+   columns. The whole row is the link to the session. */
+.att-row {
+  display: grid; grid-template-columns: 116px minmax(0, 1fr) 64px 46px;
+  align-items: center; gap: var(--sp-md);
+  padding: var(--sp-sm) var(--sp-md);
+  border-bottom: 1px solid var(--border);
+  text-decoration: none; color: inherit;
+  transition: background var(--dur-fast) var(--ease-state);
+}
+.att-row:last-child { border-bottom: 0; }
+.att-row:hover { background: var(--surface-2); }
+.att-row:hover .att-proj { color: var(--lilac); }
+
+/* The reason chip: a bordered tag in the status palette, error tone for a hard failure
+   (errored, abandoned) and warn tone for a softer flag (a low grade or an expensive
+   run). It carries no help cursor (the whole row is a link), unlike the .tag.warn the
+   feed uses for its hover-tooltip badges. */
+.att-reason {
+  justify-self: start; white-space: nowrap;
+  border: 1px solid var(--border); border-radius: var(--r-sm);
+  padding: 1px 8px; font-size: 0.6875rem; line-height: 1.5;
+  background: var(--surface-2); color: var(--muted);
+}
+.att-reason.err { color: var(--err); border-color: rgba(239, 154, 169, 0.4); }
+.att-reason.warn { color: var(--warn); border-color: rgba(240, 197, 146, 0.4); }
+
+.att-main { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.att-line { min-width: 0; display: flex; align-items: center; gap: var(--sp-sm); }
+.att-proj {
+  flex: none; color: var(--text); font-size: 0.875rem;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 32ch;
+}
+.att-agent { flex: none; color: var(--muted); }
+.att-line .tag { flex: none; font-size: 0.625rem; padding: 1px 5px; }
+.att-sub {
+  min-width: 0; color: var(--muted); font-size: 0.75rem; line-height: 1.3;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.att-cost { text-align: right; color: var(--subtext); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.att-time { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+@media (max-width: 860px) {
+  .verdict { grid-template-columns: 1fr 1fr; }
+  .vtile:nth-child(3), .vtile:nth-child(4) { border-top: 1px solid var(--border); }
+  .vtile:nth-child(3) { border-left: 0; }
+  .att-row { grid-template-columns: 100px minmax(0, 1fr) 56px; }
+  .att-time { display: none; }
+}
+
 /* ---- Analytics ---- */
 .analytics { margin-top: var(--sp-md); }
 /* The panel's lead (totals strip + activity grid) holds a centered reading column

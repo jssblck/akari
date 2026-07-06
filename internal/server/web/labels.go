@@ -74,6 +74,23 @@ func ProjectFacetLabel(pf store.ProjectFacet) string {
 	return pf.Key
 }
 
+// SplitProjectFacets partitions the project filter options into git-remote repositories and
+// local folders, preserving the store's busiest-first order within each group. The session
+// toolbar renders the two as separate option groups so a reader scanning for a repository is
+// not wading through a machine's scratch folders: a repository is the audit unit, a local
+// folder the looser catch-all beneath it. The store already orders remotes ahead of locals
+// (GlobalFacets), so this only routes each option to its bucket.
+func SplitProjectFacets(projects []store.ProjectFacet) (repos, folders []store.ProjectFacet) {
+	for _, pf := range projects {
+		if IsLocalKind(pf.Kind) {
+			folders = append(folders, pf)
+		} else {
+			repos = append(repos, pf)
+		}
+	}
+	return repos, folders
+}
+
 // LocalPath recovers the working-directory path from a local project's synthetic
 // key ("local:machine:path"), for display beside the folder name. It returns ""
 // for a remote project.
@@ -102,6 +119,44 @@ func DuplicateIDsLabel(n int) string {
 		return "1 duplicate id"
 	}
 	return fmt.Sprintf("%d duplicate ids", n)
+}
+
+// SubagentCollapseThreshold is the subagent count past which the session detail
+// collapses the subagents table behind a summary line. Below it the short list reads
+// fine inline; above it the table pushes the transcript below the fold on exactly the
+// fan-out-heavy sessions a lead most wants to audit, so it folds away by default and the
+// summary carries the count and spend at a glance. The value is a comfortable ceiling: a
+// handful of subagents is context, a few dozen is a wall.
+const SubagentCollapseThreshold = 8
+
+// SubagentsCollapsed reports whether a session's subagents table should render collapsed
+// behind its summary (more than SubagentCollapseThreshold children), so the template and a
+// test read the same rule rather than each spelling out the comparison.
+func SubagentsCollapsed(subs []store.SessionSummary) bool {
+	return len(subs) > SubagentCollapseThreshold
+}
+
+// SubagentsSummaryLabel is the collapsed subagents summary: the direct child count and
+// their summed cost ("34 subagents · $6.12"). It describes the subagents table it heads,
+// which lists a session's direct children (Store.Subagents), so both figures are over those
+// direct rows, not the feed fan-out chip's whole-subtree rollup (TreeRollup, which also
+// folds in a subagent's own subagents). For a flat fan-out the two read the same; for a
+// nested one they legitimately differ, because this summary answers "what is in the table
+// below" while the feed chip answers "what did the whole work item cost". The cost carries
+// the "+" lower-bound marker when any direct child could not be fully priced. The count is
+// singular at one, though the collapse only ever engages well above that.
+func SubagentsSummaryLabel(subs []store.SessionSummary) string {
+	var cost float64
+	var incomplete bool
+	for _, s := range subs {
+		cost += s.TotalCostUSD
+		incomplete = incomplete || s.CostIncomplete
+	}
+	unit := "subagents"
+	if len(subs) == 1 {
+		unit = "subagent"
+	}
+	return fmt.Sprintf("%d %s · %s", len(subs), unit, FmtCost(cost, incomplete))
 }
 
 // AttachmentsByOrdinal groups attachments by the message ordinal they belong to,

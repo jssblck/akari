@@ -253,6 +253,22 @@ a.attachment.file { width: fit-content; text-decoration: none; }
 /* ---- Subagents ---- */
 .subagents { margin: var(--sp-sm) 0 var(--sp-lg); padding-left: var(--sp-md); border-left: 1px solid var(--border); }
 
+/* A fan-out-heavy session folds its subagents behind a summary (SubagentCollapseThreshold).
+   The <details> reuses .subagents for the ruled indent; its summary reads as a quiet
+   disclosure row carrying the count-and-cost label, and the table pays its DOM cost only
+   once opened, so a session that spawned dozens of subagents no longer buries its
+   transcript. The native marker is replaced by a textual show/hide the ::after toggles off
+   the open state, so the affordance names the action rather than showing a bare triangle. */
+.subagents-fold > summary {
+  cursor: pointer; list-style: none; display: flex; align-items: baseline; gap: var(--sp-sm);
+  padding: var(--sp-xs) 0; color: var(--text);
+}
+.subagents-fold > summary::-webkit-details-marker { display: none; }
+.subagents-summary-label { font-variant-numeric: tabular-nums; }
+.subagents-fold:not([open]) > summary .subagents-summary-hint::after { content: "show"; }
+.subagents-fold[open] > summary .subagents-summary-hint::after { content: "hide"; }
+.subagents-fold > summary:hover .subagents-summary-hint { color: var(--lilac); }
+
 /* ---- Responsive ---- */
 @media (max-width: 1100px) {
   .session-grid { grid-template-columns: 200px minmax(0, 1fr); }

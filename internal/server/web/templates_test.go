@@ -46,7 +46,7 @@ func analyticsWithData() store.Analytics {
 // would otherwise repeat the scope already named in the page head.
 func TestOverviewPageRendersHeatmap(t *testing.T) {
 	p := Page{Title: "Overview", LoggedIn: true, Active: "overview", Username: "Grace Hopper"}
-	html := renderComponent(t, OverviewPage(p, analyticsWithData(), DefaultRange, nil, nil))
+	html := renderComponent(t, OverviewPage(p, analyticsWithData(), store.AuditSummary{}, DefaultRange, nil, nil))
 
 	for _, want := range []string{`data-heatmap`, `data-heatmap-target="chart-global"`, `>Tokens</button>`, `>Dollars</button>`} {
 		if !strings.Contains(html, want) {
@@ -61,14 +61,16 @@ func TestOverviewPageRendersHeatmap(t *testing.T) {
 	}
 }
 
-// The overview's usage panel is the htmx swap target for the range selector, so
-// it must carry the stable id and the selector must offer every window, mark the
-// active one, and refetch into that same target.
+// The overview's range selector refetches the overview and swaps the whole
+// audit-plus-usage wrapper (#overview-usage), so the verdict and the grid move to the
+// new window together. The wrapper must carry the stable id, the usage panel keeps its
+// own id="usage" inside it, and the selector must offer every window, mark the active
+// one, and refetch into that wrapper target.
 func TestOverviewPageRangeSelector(t *testing.T) {
 	p := Page{Title: "Overview", LoggedIn: true, Active: "overview", Username: "Grace Hopper"}
-	html := renderComponent(t, OverviewPage(p, analyticsWithData(), "90d", nil, nil))
+	html := renderComponent(t, OverviewPage(p, analyticsWithData(), store.AuditSummary{}, "90d", nil, nil))
 
-	for _, want := range []string{`id="usage"`, `aria-label="Date range"`, `hx-get="/overview?range=7d"`, `hx-get="/overview?range=all"`, `hx-target="#usage"`, `hx-select="#usage"`} {
+	for _, want := range []string{`id="overview-usage"`, `id="usage"`, `aria-label="Date range"`, `hx-get="/overview?range=7d"`, `hx-get="/overview?range=all"`, `hx-target="#overview-usage"`, `hx-select="#overview-usage"`} {
 		if !strings.Contains(html, want) {
 			t.Errorf("range selector missing %q", want)
 		}
@@ -92,7 +94,7 @@ func TestOverviewPageRangeSelector(t *testing.T) {
 func TestOverviewPageUserFilter(t *testing.T) {
 	p := Page{Title: "Overview", LoggedIn: true, Active: "overview", Username: "Grace Hopper"}
 	users := []store.User{{ID: 2, Username: "ada"}, {ID: 5, Username: "grace"}}
-	html := renderComponent(t, OverviewPage(p, analyticsWithData(), "7d", users, []int64{5}))
+	html := renderComponent(t, OverviewPage(p, analyticsWithData(), store.AuditSummary{}, "7d", users, []int64{5}))
 
 	for _, want := range []string{
 		`class="userfilter"`,
@@ -126,7 +128,7 @@ func TestOverviewPageUserFilter(t *testing.T) {
 func TestOverviewPageUserFilterUnscoped(t *testing.T) {
 	p := Page{Title: "Overview", LoggedIn: true, Active: "overview", Username: "Grace Hopper"}
 	users := []store.User{{ID: 2, Username: "ada"}}
-	html := renderComponent(t, OverviewPage(p, analyticsWithData(), DefaultRange, users, nil))
+	html := renderComponent(t, OverviewPage(p, analyticsWithData(), store.AuditSummary{}, DefaultRange, users, nil))
 
 	if !strings.Contains(html, `class="userfilter-all">All Users</span>`) {
 		t.Error("unscoped collapsed control should read All Users")
@@ -144,7 +146,7 @@ func TestOverviewPageUserFilterUnscoped(t *testing.T) {
 // Output into their own tiles.
 func TestOverviewPageTokensStat(t *testing.T) {
 	p := Page{Title: "Overview", LoggedIn: true, Active: "overview", Username: "Grace Hopper"}
-	html := renderComponent(t, OverviewPage(p, analyticsWithData(), DefaultRange, nil, nil))
+	html := renderComponent(t, OverviewPage(p, analyticsWithData(), store.AuditSummary{}, DefaultRange, nil, nil))
 
 	for _, want := range []string{`>Tokens</div>`, `tokens-stat`, `tokens-value`, `class="stat-tip"`, `<dt>In</dt>`, `<dt>Out</dt>`, `<dt>Cache read</dt>`, `<dt>Cache write</dt>`, `<dt>Reasoning</dt>`} {
 		if !strings.Contains(html, want) {
@@ -170,7 +172,7 @@ func TestOverviewPageHidesZeroReasoning(t *testing.T) {
 	p := Page{Title: "Overview", LoggedIn: true, Active: "overview", Username: "Grace Hopper"}
 	a := analyticsWithData()
 	a.TotalReasoning = 0
-	html := renderComponent(t, OverviewPage(p, a, DefaultRange, nil, nil))
+	html := renderComponent(t, OverviewPage(p, a, store.AuditSummary{}, DefaultRange, nil, nil))
 
 	if strings.Contains(html, `<dt>Reasoning</dt>`) {
 		t.Error("tokens tooltip should omit the reasoning line when there are no reasoning tokens")
@@ -181,7 +183,7 @@ func TestOverviewPageHidesZeroReasoning(t *testing.T) {
 // the panel is the page.
 func TestOverviewPageDropsRecentActivity(t *testing.T) {
 	p := Page{Title: "Overview", LoggedIn: true, Active: "overview", Username: "Grace Hopper"}
-	html := renderComponent(t, OverviewPage(p, analyticsWithData(), DefaultRange, nil, nil))
+	html := renderComponent(t, OverviewPage(p, analyticsWithData(), store.AuditSummary{}, DefaultRange, nil, nil))
 
 	if strings.Contains(html, "Recent activity") {
 		t.Error("overview should no longer render the recent-activity feed")
@@ -199,7 +201,7 @@ func TestOverviewPageByUserBreakdownGatedOnMultipleUsers(t *testing.T) {
 
 	one := analyticsWithData()
 	one.Users = []store.Breakdown{{Label: "grace", CostUSD: 12.5, Input: 100, Sessions: 3}}
-	html := renderComponent(t, OverviewPage(p, one, DefaultRange, nil, nil))
+	html := renderComponent(t, OverviewPage(p, one, store.AuditSummary{}, DefaultRange, nil, nil))
 	if strings.Contains(html, "By user") {
 		t.Error("a single-user breakdown should not render the By user list")
 	}
@@ -209,7 +211,7 @@ func TestOverviewPageByUserBreakdownGatedOnMultipleUsers(t *testing.T) {
 		{Label: "grace", CostUSD: 9.0, Input: 80, Sessions: 2},
 		{Label: "ada", CostUSD: 3.5, Input: 20, Sessions: 1},
 	}
-	html = renderComponent(t, OverviewPage(p, two, DefaultRange, nil, nil))
+	html = renderComponent(t, OverviewPage(p, two, store.AuditSummary{}, DefaultRange, nil, nil))
 	for _, want := range []string{"By user", ">grace<", ">ada<"} {
 		if !strings.Contains(html, want) {
 			t.Errorf("a multi-user breakdown should render %q", want)
@@ -217,23 +219,31 @@ func TestOverviewPageByUserBreakdownGatedOnMultipleUsers(t *testing.T) {
 	}
 }
 
-// The projects index is now just the table: no usage panel (the Overview owns
-// fleet usage), no page heading (the sidebar marks the section), and no
-// local-folder list. The token columns collapse to one "Tokens" total whose
-// figure is the sum across all four classes, and the row carries a hover card
-// breaking that total back out.
-func TestProjectsPageIsBareTable(t *testing.T) {
+// The projects index heads a Repositories table: no usage panel (the Overview owns
+// fleet usage) and no page heading (the sidebar marks the section), but a section
+// heading per kind. With no local folders in scope the Local folders section stays
+// absent. The token columns collapse to one "Tokens" total whose figure is the sum
+// across all four classes, and the row carries a hover card breaking that total out.
+func TestProjectsPageRepositoriesSection(t *testing.T) {
 	p := Page{Title: "Projects", LoggedIn: true, Active: "projects", Username: "Ada Lovelace"}
 	projects := []store.ProjectSummary{{
 		ID: 1, RemoteKey: "hopper/akari", Kind: "remote", SessionCount: 3,
 		TotalInput: 100, TotalOutput: 50, TotalCacheRead: 30, TotalCacheWrite: 20,
 	}}
-	html := renderComponent(t, ProjectsPage(p, projects, nil))
+	html := renderComponent(t, ProjectsPage(p, projects, nil, nil))
 
 	for _, gone := range []string{`data-chart`, `data-heatmap`, `<h2>Usage</h2>`, `<h1>Projects</h1>`} {
 		if strings.Contains(html, gone) {
-			t.Errorf("projects index should be a bare table; found stripped markup %q", gone)
+			t.Errorf("projects index should carry no usage panel or page heading; found %q", gone)
 		}
+	}
+	// The Repositories section heads the table; with no locals the Local folders
+	// section does not render.
+	if !strings.Contains(html, `<h2>Repositories</h2>`) {
+		t.Error("projects index should head the repositories table with a Repositories section")
+	}
+	if strings.Contains(html, `Local folders`) {
+		t.Error("with no local folders in scope, the Local folders section should not render")
 	}
 	// The merged column shows the grand total (100+50+30+20 = 200) with thousands
 	// separators, plus all four classes in the hover card. Each class is asserted
@@ -250,6 +260,82 @@ func TestProjectsPageIsBareTable(t *testing.T) {
 	}
 	if strings.Contains(html, `<th class="num">Input</th>`) {
 		t.Error("projects index should fold Input/Output/Cost into one Tokens column, not list Input")
+	}
+}
+
+// With local folders in scope the index renders a second section below Repositories: a
+// Local folders table whose rows lead with the folder name and its state chip, carry the
+// filesystem path recovered from the synthetic key, and link to the same project page.
+func TestProjectsPageLocalFoldersSection(t *testing.T) {
+	p := Page{Title: "Projects", LoggedIn: true, Active: "projects", Username: "Ada Lovelace"}
+	remotes := []store.ProjectSummary{{ID: 1, RemoteKey: "hopper/akari", Kind: "remote", SessionCount: 3}}
+	locals := []store.ProjectSummary{{
+		ID: 5, RemoteKey: "local:laptop:/home/grace/scratch", Host: "laptop",
+		DisplayName: "scratch", Kind: "standalone", SessionCount: 2,
+	}}
+	html := renderComponent(t, ProjectsPage(p, remotes, locals, nil))
+
+	for _, want := range []string{
+		`<h2>Repositories</h2>`,
+		`<h2>Local folders</h2>`,
+		`>scratch</a>`,           // the folder name links, not the synthetic key
+		`class="tag standalone"`, // the state chip rides the folder row
+		`/home/grace/scratch`,    // the path recovered from the local: key
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("local folders section missing %q", want)
+		}
+	}
+	// The synthetic key never shows as a row label.
+	if strings.Contains(html, `>local:laptop:/home/grace/scratch</a>`) {
+		t.Error("a local folder should link by folder name, not its synthetic local: key")
+	}
+}
+
+// SplitProjectFacets routes git-remote projects into the repos bucket and standalone or
+// orphaned folders into the folders bucket, holding the input order within each.
+func TestSplitProjectFacets(t *testing.T) {
+	in := []store.ProjectFacet{
+		{ID: 1, Key: "hopper/akari", Kind: "remote"},
+		{ID: 2, Name: "scratch", Kind: "standalone"},
+		{ID: 3, Key: "lovelace/engine", Kind: "remote"},
+		{ID: 4, Name: "gone", Kind: "orphaned"},
+	}
+	repos, folders := SplitProjectFacets(in)
+	if len(repos) != 2 || repos[0].ID != 1 || repos[1].ID != 3 {
+		t.Errorf("repos = %+v, want the two remotes in order (1, 3)", repos)
+	}
+	if len(folders) != 2 || folders[0].ID != 2 || folders[1].ID != 4 {
+		t.Errorf("folders = %+v, want the standalone then orphaned (2, 4)", folders)
+	}
+}
+
+// The sessions toolbar groups the project filter into a Repositories option group and a
+// Local folders option group, so a reader scanning for a repository is not wading through a
+// machine's scratch folders. A scope with only repositories renders no Local folders group.
+func TestSessionsToolbarProjectOptgroups(t *testing.T) {
+	p := Page{Title: "Sessions", LoggedIn: true, Active: "sessions", Username: "grace"}
+	facets := store.GlobalFacetValues{Projects: []store.ProjectFacet{
+		{ID: 1, Key: "hopper/akari", Kind: "remote"},
+		{ID: 2, Name: "scratch", Kind: "standalone"},
+	}}
+	html := renderComponent(t, SessionsPage(p, nil, facets, store.SessionFilter{}, SessionFooter{}))
+	for _, want := range []string{
+		`<optgroup label="Repositories">`,
+		`<optgroup label="Local folders">`,
+		`>hopper/akari</option>`,
+		`>scratch</option>`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("project facet missing %q", want)
+		}
+	}
+
+	// A fleet with no local folders renders only the Repositories group.
+	reposOnly := store.GlobalFacetValues{Projects: []store.ProjectFacet{{ID: 1, Key: "hopper/akari", Kind: "remote"}}}
+	bare := renderComponent(t, SessionsPage(p, nil, reposOnly, store.SessionFilter{}, SessionFooter{}))
+	if strings.Contains(bare, `<optgroup label="Local folders">`) {
+		t.Error("with no local folders, the project facet should render no Local folders group")
 	}
 }
 
@@ -354,16 +440,22 @@ func TestGlobalSessionListFooter(t *testing.T) {
 		SessionSummary: store.SessionSummary{ID: 1, Agent: "claude", MessageCount: 1, LastActiveAt: &ts},
 		ProjectID:      1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote",
 	}}
-	// hasMore true: the page is not the whole set, so the count reads "Showing N", a
-	// "Show more" control appears, and the empty toggle (hasEmpty true) reads "empty
-	// hidden · show".
-	sel := store.SessionFilter{Sort: "updated", Desc: true, Limit: 100}
-	footer := BuildSessionFooter(sel, 100, true, true)
+	// hasMore true: the loaded feed is one page of a larger set, so the count reads the
+	// running total "Showing N" (priorCount + this page), a keyset "Show more" control
+	// appears carrying the last row's id as the cursor and the running count, and the
+	// empty toggle (hasEmpty true) reads "empty hidden · show".
+	sel := store.SessionFilter{Sort: "updated", Desc: true}
+	footer := BuildSessionFooter(sel, rows, 99, true, true, "", 4096)
 	html := renderComponent(t, GlobalSessionList(rows, sel, footer))
 
 	for _, want := range []string{
 		`Showing 100`,
-		`hx-target="#session-list"`, `hx-select="#session-list"`, `hx-swap="outerHTML"`,
+		`id="feed-more"`,
+		`hx-target="#feed-more"`, `hx-swap="outerHTML"`, `hx-push-url="false"`,
+		`after=1`, `count=100`,
+		// The token-bar denominator rides the cursor so an appended page scales its bars
+		// against the same reference the first page set, not its own page maximum.
+		`maxtok=4096`,
 		`>Show more</a>`,
 		// Empty toggle: hidden, a "show" verb, no count.
 		`empty hidden`, `>show</a>`,
@@ -372,29 +464,24 @@ func TestGlobalSessionListFooter(t *testing.T) {
 			t.Errorf("footer missing %q, got:\n%s", want, html)
 		}
 	}
-	if strings.Contains(html, " of ") {
-		t.Errorf("the more-matching footer should not read 'N of M', got:\n%s", html)
+	// The keyset control appends its next page in place; it must not re-fetch and
+	// re-select the whole list the way the old limit-doubling control did, and it never
+	// reads "N of M".
+	for _, unwanted := range []string{`hx-select`, `#session-list`, " of "} {
+		if strings.Contains(html, unwanted) {
+			t.Errorf("the keyset footer should not contain %q, got:\n%s", unwanted, html)
+		}
 	}
 
-	// hasMore false: the shown count IS the exact total, so the footer reads "N
+	// hasMore false: the running total IS the exact total, so the footer reads "N
 	// sessions" and offers no "Show more".
-	exact := BuildSessionFooter(store.SessionFilter{Sort: "updated", Desc: true}, 7, false, false)
-	exactHTML := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Sort: "updated", Desc: true}, exact))
+	exact := BuildSessionFooter(sel, rows, 6, false, false, "", 0)
+	exactHTML := renderComponent(t, GlobalSessionList(rows, sel, exact))
 	if !strings.Contains(exactHTML, "7 sessions") {
 		t.Errorf("an exhausted page should read the exact 'N sessions', got:\n%s", exactHTML)
 	}
 	if strings.Contains(exactHTML, ">Show more</a>") {
 		t.Errorf("an exhausted page should carry no Show more, got:\n%s", exactHTML)
-	}
-
-	// At the cap with more matching, the button is replaced by the cap note.
-	capped := BuildSessionFooter(store.SessionFilter{Limit: 500}, 500, true, false)
-	capHTML := renderComponent(t, GlobalSessionList(rows, store.SessionFilter{Limit: 500}, capped))
-	if strings.Contains(capHTML, ">Show more</a>") {
-		t.Error("at the cap there should be no Show more button")
-	}
-	if !strings.Contains(capHTML, "at cap") {
-		t.Error("at the cap the footer should name the cap")
 	}
 }
 

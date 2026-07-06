@@ -438,3 +438,67 @@ func TestInsightsChurnTreeCap(t *testing.T) {
 		t.Error("churn clipped = 0 with more hot files than the tree cap; the headline would exceed the treemap silently")
 	}
 }
+
+// TestEconomicsAbandonedIncompleteScoped pins that the abandoned-spend incompleteness marker is
+// the abandoned subset's own, not the whole window's. A completed session with unpriced usage
+// makes the window incomplete, but when every abandoned session is fully priced the abandoned
+// subfigure is exact, so the Insights summary must not stamp it with a spurious "+".
+func TestEconomicsAbandonedIncompleteScoped(t *testing.T) {
+	t.Parallel()
+	st, ctx, uid, pid := signalsEnv(t)
+	g := func(s string) *string { return &s }
+	since := time.Now().Add(-30 * 24 * time.Hour)
+
+	// A completed session with token-bearing but unpriced usage: it makes the window incomplete.
+	comp := seedSession(t, st, uid, pid, "econ-completed")
+	insertGradeOutcomeSignal(t, st, ctx, comp, g("A"), "completed")
+	seedUsageUnpriced(t, st, comp, "mystery-model", 1000, 500, "econ-comp-unpriced")
+
+	// An abandoned session whose usage is fully priced: the abandoned subset is NOT incomplete.
+	aband := seedSession(t, st, uid, pid, "econ-abandoned")
+	insertGradeOutcomeSignal(t, st, ctx, aband, nil, "abandoned")
+	seedUsage(t, st, aband, "claude-opus-4-8", 4.00, 900, 450, 1, "econ-aband-priced")
+
+	ins, err := st.Insights(ctx, store.AnalyticsFilter{ProjectID: pid, Since: since, Bucket: "day"})
+	if err != nil {
+		t.Fatalf("insights: %v", err)
+	}
+	if ins.Trends == nil {
+		t.Fatal("trends are nil; a day-bucketed window should carry a grid")
+	}
+	e := ins.Trends.Economics
+	if !e.CostIncomplete {
+		t.Error("window CostIncomplete should be true: the completed session had unpriced usage")
+	}
+	if e.AbandonedIncomplete {
+		t.Error("AbandonedIncomplete should be false: the abandoned session's usage is fully priced")
+	}
+	if e.TotalAbandoned < 3.99 || e.TotalAbandoned > 4.01 {
+		t.Errorf("abandoned spend = %v, want ~4.0", e.TotalAbandoned)
+	}
+}
+
+// TestEconomicsAbandonedIncompleteWhenAbandonedUnpriced is the other side: when an abandoned
+// session carries token-bearing unpriced usage, the abandoned subfigure is itself a lower bound,
+// so AbandonedIncomplete is true and the summary's abandoned dollars read as approximate.
+func TestEconomicsAbandonedIncompleteWhenAbandonedUnpriced(t *testing.T) {
+	t.Parallel()
+	st, ctx, uid, pid := signalsEnv(t)
+	since := time.Now().Add(-30 * 24 * time.Hour)
+
+	aband := seedSession(t, st, uid, pid, "econ-abandoned-mixed")
+	insertGradeOutcomeSignal(t, st, ctx, aband, nil, "abandoned")
+	seedUsage(t, st, aband, "claude-opus-4-8", 2.00, 400, 200, 1, "econ-aband-priced")
+	seedUsageUnpriced(t, st, aband, "mystery-model", 500, 250, "econ-aband-unpriced")
+
+	ins, err := st.Insights(ctx, store.AnalyticsFilter{ProjectID: pid, Since: since, Bucket: "day"})
+	if err != nil {
+		t.Fatalf("insights: %v", err)
+	}
+	if ins.Trends == nil {
+		t.Fatal("trends are nil; a day-bucketed window should carry a grid")
+	}
+	if !ins.Trends.Economics.AbandonedIncomplete {
+		t.Error("AbandonedIncomplete should be true: the abandoned session carried token-bearing unpriced usage")
+	}
+}

@@ -2,11 +2,59 @@ package web
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/jssblck/akari/internal/server/store"
 )
+
+// TestKeysetCursorValue pins the "Show more" cursor value the footer carries for each feed
+// order, and that ShowMorePath and the handler's validation agree on its form: a value produced
+// for an order validates for that order, garbage does not, and the value rides the URL as ?av.
+func TestKeysetCursorValue(t *testing.T) {
+	at := time.Date(2026, 5, 1, 8, 30, 0, 0, time.UTC)
+	var row store.SessionRow
+	row.LastActiveAt = &at
+	// total_tokens is input+output+cache_read+cache_write (migration 0014): 100+200+300+400.
+	row.TotalInput, row.TotalOutput, row.TotalCacheRead, row.TotalCacheWrite = 100, 200, 300, 400
+	row.MessageCount = 12
+	row.TotalCostUSD = 3.5
+
+	cases := []struct{ sort, want string }{
+		{"", at.Format(time.RFC3339Nano)}, // default order -> last_active_at
+		{"updated", at.Format(time.RFC3339Nano)},
+		{"tokens", "1000"},
+		{"messages", "12"},
+		{"cost", "3.5"},
+		{"project", ""}, // a non-keyset order carries no cursor value
+	}
+	for _, c := range cases {
+		f := store.SessionFilter{Sort: c.sort}
+		got := keysetCursorValue(f, row)
+		if got != c.want {
+			t.Errorf("keysetCursorValue(sort=%q) = %q, want %q", c.sort, got, c.want)
+		}
+		if c.want == "" {
+			continue
+		}
+		if !ValidKeysetValue(c.sort, c.want) {
+			t.Errorf("ValidKeysetValue(%q, %q) = false, want true (own value must validate)", c.sort, c.want)
+		}
+		if ValidKeysetValue(c.sort, "not-a-cursor-value") {
+			t.Errorf("ValidKeysetValue(%q, garbage) = true, want false", c.sort)
+		}
+	}
+
+	// The value rides the "Show more" URL as ?av, and is omitted when empty (a non-keyset order).
+	withVal := ShowMorePath(store.SessionFilter{}, 42, "2026-05-01T08:30:00Z", "", 0, 0)
+	if !strings.Contains(withVal, "after=42") || !strings.Contains(withVal, "av=") {
+		t.Errorf("ShowMorePath should carry after and av, got %q", withVal)
+	}
+	if noVal := ShowMorePath(store.SessionFilter{}, 42, "", "", 0, 0); strings.Contains(noVal, "av=") {
+		t.Errorf("ShowMorePath should omit av when empty, got %q", noVal)
+	}
+}
 
 // dayBucket labels a session's last activity relative to a fixed clock and shares
 // a key across same-day rows so the feed groups them together. The calendar date is
@@ -75,7 +123,7 @@ func TestBuildSessionFeed(t *testing.T) {
 		{SessionSummary: store.SessionSummary{ID: 3, Agent: "claude", TotalInput: 0, LastActiveAt: &yesterday}, ProjectID: 2, ProjectKey: "site", ProjectName: "site", ProjectKind: "remote"},
 	}
 
-	groups := buildSessionFeed(now, time.UTC, rows, true)
+	groups := buildSessionFeed(now, time.UTC, rows, true, "", FeedMaxTokens(rows))
 	if len(groups) != 2 {
 		t.Fatalf("want 2 day groups, got %d", len(groups))
 	}
@@ -101,10 +149,87 @@ func TestBuildSessionFeed(t *testing.T) {
 	}
 
 	// Ungrouped (any non-recent sort) yields a single, unlabeled group in order.
-	flat := buildSessionFeed(now, time.UTC, rows, false)
+	flat := buildSessionFeed(now, time.UTC, rows, false, "", FeedMaxTokens(rows))
 	if len(flat) != 1 || flat[0].Label != "" || len(flat[0].Rows) != 3 {
 		t.Errorf("ungrouped feed should be one unlabeled group of all rows, got %d groups", len(flat))
 	}
+}
+
+// TestFeedTokenDenominatorCarries pins the fix for token bars rescaling across a keyset
+// "Show more": buildSessionFeed scales every row against the maxTok it is handed, not the
+// page's own maximum, so an appended page of small sessions renders thin bars against the
+// denominator the first page established rather than pegging them full and reading larger
+// than the bigger sessions already on screen.
+func TestFeedTokenDenominatorCarries(t *testing.T) {
+	now := time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC)
+	at := now.Add(-1 * time.Hour)
+	// An appended page whose own largest session is 250 tokens, small next to the bigger
+	// sessions the reader already loaded (a first-page denominator of 1000).
+	small := []store.SessionRow{
+		{SessionSummary: store.SessionSummary{ID: 10, Agent: "claude", TotalInput: 250, LastActiveAt: &at}, ProjectID: 1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote"},
+	}
+	// Against the carried denominator (1000) the 250-token row is sqrt(0.25) = 50%.
+	if pct := buildSessionFeed(now, time.UTC, small, true, "", 1000)[0].Rows[0].TokenPct; pct != 50 {
+		t.Errorf("a row scaled against the carried denominator should read 50, got %d", pct)
+	}
+	// Sanity: recomputed per page (the old behavior) the same row pegs full against its own
+	// 250 max, which is exactly the cross-page miscalibration the carried denominator fixes.
+	if pct := buildSessionFeed(now, time.UTC, small, true, "", FeedMaxTokens(small))[0].Rows[0].TokenPct; pct != 100 {
+		t.Errorf("against its own page max the row pegs full, got %d", pct)
+	}
+	// A session larger than the carried denominator clamps to a full bar rather than
+	// overflowing it, reading as "the biggest so far".
+	big := []store.SessionRow{
+		{SessionSummary: store.SessionSummary{ID: 11, Agent: "claude", TotalInput: 5000, LastActiveAt: &at}, ProjectID: 1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote"},
+	}
+	if pct := buildSessionFeed(now, time.UTC, big, true, "", 1000)[0].Rows[0].TokenPct; pct != 100 {
+		t.Errorf("a row above the carried denominator should clamp to 100, got %d", pct)
+	}
+}
+
+// TestBuildSessionFeedContinuesDay pins the keyset "Show more" continuation: when a
+// prevKey names the day the previous page ended on, the first group of the appended page
+// repeats that day and so drops its heading, rather than reprinting "Today" above rows the
+// DOM already shows under it. A first page (empty prevKey) always keeps its heading, and a
+// prevKey naming a different day still opens a fresh heading.
+func TestBuildSessionFeedContinuesDay(t *testing.T) {
+	now := time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC)
+	today := now.Add(-1 * time.Hour)
+	rows := []store.SessionRow{
+		{SessionSummary: store.SessionSummary{ID: 5, Agent: "claude", LastActiveAt: &today}, ProjectID: 1, ProjectKey: "akari", ProjectName: "akari", ProjectKind: "remote"},
+	}
+	todayKey, _ := dayBucket(now, time.UTC, &today)
+
+	// A continuation of the same day: the first (only) group repeats today, so its heading
+	// is suppressed.
+	cont := buildSessionFeed(now, time.UTC, rows, true, todayKey, FeedMaxTokens(rows))
+	if len(cont) != 1 || cont[0].Label != "" {
+		t.Errorf("a same-day continuation should drop the leading heading, got %d groups with label %q", len(cont), labelOf(cont))
+	}
+	// The rows still render; only the heading is dropped.
+	if len(cont[0].Rows) != 1 {
+		t.Errorf("the continuation should still carry its row, got %d", len(cont[0].Rows))
+	}
+
+	// A fresh first page (no prevKey) keeps the heading.
+	first := buildSessionFeed(now, time.UTC, rows, true, "", FeedMaxTokens(rows))
+	if first[0].Label != "Today" {
+		t.Errorf("a first page should keep its Today heading, got %q", first[0].Label)
+	}
+
+	// A prevKey naming a different day opens a new heading, not a continuation.
+	other := buildSessionFeed(now, time.UTC, rows, true, "2020-01-01", FeedMaxTokens(rows))
+	if other[0].Label != "Today" {
+		t.Errorf("a prevKey from another day should still head the group, got %q", other[0].Label)
+	}
+}
+
+// labelOf reads the first group's label for a diagnostic, tolerating an empty feed.
+func labelOf(groups []SessionDayGroup) string {
+	if len(groups) == 0 {
+		return "<none>"
+	}
+	return groups[0].Label
 }
 
 // TestOutcomeFilterOptions pins the outcome toolbar select's option set: the canonical
@@ -155,6 +280,39 @@ func TestGradeFilterOptions(t *testing.T) {
 		if opts[i].Label != want {
 			t.Errorf("option[%d].Label = %q, want %q", i, opts[i].Label, want)
 		}
+	}
+}
+
+// TestFanoutLabel pins the fan-out chip's text: the subagent count with a singular unit
+// at one, joined to the whole-work-item cost, and the "+" lower-bound marker riding an
+// incomplete subtree cost.
+func TestFanoutLabel(t *testing.T) {
+	cases := []struct {
+		name string
+		tr   store.TreeRollup
+		want string
+	}{
+		{"plural", store.TreeRollup{SubagentCount: 62, CostUSD: 4.12}, "62 subagents · $4.12"},
+		{"singular", store.TreeRollup{SubagentCount: 1, CostUSD: 0.30}, "1 subagent · $0.30"},
+		{"incomplete cost carries the plus marker", store.TreeRollup{SubagentCount: 3, CostUSD: 2.00, CostIncomplete: true}, "3 subagents · $2.00+"},
+	}
+	for _, c := range cases {
+		if got := FanoutLabel(c.tr); got != c.want {
+			t.Errorf("%s: FanoutLabel = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// TestFanoutTitle checks the hover text names the cost as the whole work item's and uses
+// the same singular/plural unit as the chip, so the two never disagree on grammar.
+func TestFanoutTitle(t *testing.T) {
+	if got := FanoutTitle(store.TreeRollup{SubagentCount: 1, CostUSD: 0.30}); got !=
+		"Whole work item: $0.30 across 1 subagent fanned out (the row's own cost is the root turn's alone)" {
+		t.Errorf("FanoutTitle singular = %q", got)
+	}
+	if got := FanoutTitle(store.TreeRollup{SubagentCount: 4, CostUSD: 9.00, CostIncomplete: true}); got !=
+		"Whole work item: $9.00+ across 4 subagents fanned out (the row's own cost is the root turn's alone)" {
+		t.Errorf("FanoutTitle plural incomplete = %q", got)
 	}
 }
 

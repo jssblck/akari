@@ -126,6 +126,12 @@ type Economics struct {
 	// CostIncomplete is true when the window folded in a token-bearing usage event with no
 	// price, so every spend figure here is a lower bound, the same flag Analytics carries.
 	CostIncomplete bool
+	// AbandonedIncomplete is CostIncomplete narrowed to the abandoned subset: true when an
+	// abandoned session's usage carried token volume with no price, so TotalAbandoned alone is a
+	// lower bound. It is separate from CostIncomplete because a window can be incomplete on its
+	// completed spend while its abandoned spend is fully priced (or the reverse), so the
+	// abandoned subfigure must carry its own marker rather than the whole window's.
+	AbandonedIncomplete bool
 	// CacheSavingsIncomplete is true when cached read or write volume rode a model the pricing
 	// table cannot price, so the savings total omits it. The omitted term can be either sign, so
 	// this is "partial", not a lower bound, matching CacheStats.SavingsIncomplete.
@@ -675,7 +681,8 @@ func (s *Store) economicsFrom(ctx context.Context, q querier, f AnalyticsFilter,
 		        coalesce(sum(ue.cache_read_tokens), 0),
 		        coalesce(sum(ue.input_tokens), 0),
 		        coalesce(sum(ue.cache_write_tokens), 0),
-		        coalesce(`+costIncompleteExpr+`, false)
+		        coalesce(`+costIncompleteExpr+`, false),
+		        coalesce(`+costIncompleteExpr+` FILTER (WHERE sig.outcome = 'abandoned'), false)
 		   FROM usage_events ue
 		   JOIN sessions s ON s.id = ue.session_id
 		   LEFT JOIN session_signals sig
@@ -689,14 +696,16 @@ func (s *Store) economicsFrom(ctx context.Context, q querier, f AnalyticsFilter,
 		var b time.Time
 		var comp, aband, total float64
 		var cacheRead, input, cacheWrite int64
-		var incomplete bool
-		if err := rows.Scan(&b, &comp, &aband, &total, &cacheRead, &input, &cacheWrite, &incomplete); err != nil {
+		var incomplete, abandIncomplete bool
+		if err := rows.Scan(&b, &comp, &aband, &total, &cacheRead, &input, &cacheWrite, &incomplete, &abandIncomplete); err != nil {
 			rows.Close()
 			return Economics{}, fmt.Errorf("scan cost of quality trend: %w", err)
 		}
 		// A window is incomplete if any bucket carried a token-bearing unpriced event, even one
-		// the grid drops, so the flag folds before the index guard.
+		// the grid drops, so the flag folds before the index guard. The abandoned-subset flag
+		// folds the same way, so the abandoned subfigure carries its own lower-bound marker.
 		out.CostIncomplete = out.CostIncomplete || incomplete
+		out.AbandonedIncomplete = out.AbandonedIncomplete || abandIncomplete
 		i := g.index(b)
 		if i < 0 {
 			continue

@@ -425,6 +425,81 @@ func TestUserQualityAvgScoreNilWhenUnscored(t *testing.T) {
 	}
 }
 
+// TestInsightsPanelsShareCohort guards the parallel snapshot: Insights runs its panels
+// concurrently on separate connections that each import one exported MVCC snapshot, so the
+// overlapping denominators (the quality total, the archetype split, the concurrency count,
+// and the per-user session sum) must all describe the identical scoped cohort. If a panel
+// ever read on its own snapshot instead of the shared one, these totals could drift apart;
+// this pins them equal over a hand-seeded corpus, and exercises the bucket path so the
+// context-plus-trends panel and the control-transaction window resolution run too.
+func TestInsightsPanelsShareCohort(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	ada := seedUser(t, st, "ada")
+	grace := seedUser(t, st, "grace")
+	pid, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recent := time.Now().Add(-24 * time.Hour)
+
+	// Six sessions, all in-window with a span and a fresh signals row, so every panel counts
+	// each one: the shared-cohort totals should all read six.
+	shape := []struct {
+		user  int64
+		src   string
+		out   string
+		grade string
+	}{
+		{ada, "c1", "completed", "A"},
+		{ada, "c2", "completed", "B"},
+		{ada, "c3", "errored", "C"},
+		{ada, "c4", "abandoned", "D"},
+		{grace, "c5", "completed", "A"},
+		{grace, "c6", "unknown", ""},
+	}
+	for i, s := range shape {
+		sid := seedSession(t, st, s.user, pid, s.src)
+		start := recent.Add(time.Duration(i) * time.Minute)
+		setSessionShape(t, st, ctx, sid, start, start.Add(10*time.Minute), 20, 2)
+		insertSignal(t, st, ctx, sid, s.out, s.grade)
+	}
+
+	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: time.Now().Add(-90 * 24 * time.Hour), Bucket: "day"})
+	if err != nil {
+		t.Fatalf("insights: %v", err)
+	}
+
+	const want = 6
+	if ins.Quality.Sessions != want {
+		t.Errorf("Quality.Sessions = %d, want %d", ins.Quality.Sessions, want)
+	}
+	if ins.Concurrency.Sessions != want {
+		t.Errorf("Concurrency.Sessions = %d, want %d (same cohort as the quality total)", ins.Concurrency.Sessions, want)
+	}
+	archTotal := 0
+	for _, a := range ins.Archetypes {
+		archTotal += a.Count
+	}
+	if archTotal != want {
+		t.Errorf("archetype total = %d, want %d (every scoped session bands once)", archTotal, want)
+	}
+	userTotal := 0
+	for _, u := range ins.Users.Users {
+		userTotal += u.Sessions
+	}
+	if userTotal != want {
+		t.Errorf("per-user session sum = %d, want %d (the leaderboard covers the same cohort)", userTotal, want)
+	}
+	if ins.Trends == nil {
+		t.Error("Trends is nil, want a populated grid for the bucketed call")
+	}
+	if !ins.HasData() {
+		t.Error("HasData() = false over a six-session corpus")
+	}
+}
+
 // TestArchetypeDistribution confirms each session bands into the archetype its facts
 // imply, matching quality.ClassifyArchetype, and that the result folds into the fixed
 // lightest-to-heaviest order.

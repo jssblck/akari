@@ -250,6 +250,45 @@ func TestHasEmptySessions(t *testing.T) {
 	}
 }
 
+// TestHasEmptySessionsExcludesSubagent pins the empty-toggle probe to ListAllSessions' default
+// subagent hiding: an empty session that is a hidden subagent must not make the probe report an
+// empty in scope, because the toggle it drives would still not reveal that row. Including
+// subagents (the subagents=1 feed) brings it back into scope, so the probe finds it then.
+func TestHasEmptySessionsExcludesSubagent(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	u, err := st.Register(ctx, "ada", "hash", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	proj, err := st.UpsertProject(ctx, "github.com/x/sub", "github.com", "x", "sub", "sub", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	// The only empty session in scope is a subagent.
+	sub := seedEmptySess(t, st, u.ID, proj, "he-subagent")
+	markSubagent(t, st, ctx, sub)
+
+	// Default scope hides subagents, so the toggle would reveal nothing: the probe reports false.
+	has, err := st.HasEmptySessions(ctx, store.SessionFilter{})
+	if err != nil {
+		t.Fatalf("probe default: %v", err)
+	}
+	if has {
+		t.Error("an empty subagent must not make the default-scope probe report an empty")
+	}
+
+	// The subagents=1 feed shows subagents, so the same empty is now revealable: probe true.
+	has, err = st.HasEmptySessions(ctx, store.SessionFilter{IncludeSubagents: true})
+	if err != nil {
+		t.Fatalf("probe with subagents: %v", err)
+	}
+	if !has {
+		t.Error("with subagents included, the empty subagent should report true")
+	}
+}
+
 // TestListAllSessionsTitle asserts every row carries its first user message as the
 // title, whitespace-squashed, with no user message leaving the title empty.
 func TestListAllSessionsTitle(t *testing.T) {
