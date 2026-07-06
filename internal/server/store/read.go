@@ -213,6 +213,16 @@ type SessionFilter struct {
 	// global feed without carrying anything to read. Setting it restores the old
 	// behavior of listing every session regardless of message count.
 	IncludeEmpty bool
+	// IncludeSubagents keeps subagent sessions (relationship_type = 'subagent') in the
+	// global feed. The default excludes them: a fleet's spawned reviewers, fan-out
+	// workers, and spec-extraction batches vastly outnumber the top-level runs a reader
+	// is looking for, and each already rolls up under its parent's detail page. Setting
+	// it shows the whole tree. Continuations (a resumed session) stay visible either way:
+	// they are real work a reader started, not machinery a parent spun up. It is applied
+	// in ListAllSessions, not the shared conds(), so it narrows only the browse feed and
+	// leaves the count, facet, MCP-feed, and Insights drill-through queries counting every
+	// session (see ListAllSessions).
+	IncludeSubagents bool
 	// Since bounds the list to sessions last active at or after this instant,
 	// matching the analytics window so a project page's session list and its usage
 	// panel cover the same range. The zero time means no lower bound.
@@ -248,6 +258,22 @@ type SessionFilter struct {
 	Desc   bool
 	Limit  int
 	Offset int
+	// After is a keyset cursor: the id of the last row the reader has already seen, so
+	// "Show more" fetches the page strictly after it in the current sort order rather
+	// than re-reading rows 1..N with a doubled limit. Zero means the first page. It applies
+	// only to the four keyset-sortable feed orders (updated, tokens, messages, cost, in
+	// sessionKeysetColumns); an After set under any other sort is ignored, since those
+	// orders are not offered a "Show more" cursor. See ListAllSessions.
+	After int64
+	// AfterVal is the cursor row's sort value as the page observed it (the last visible row's
+	// last_active_at, total_tokens, message_count, or total_cost_usd, formatted for its column
+	// type). It is carried so the resume boundary stays fixed at what the reader already saw:
+	// the sort columns are mutable projection fields (activity bumps last_active_at, a rebuild
+	// moves the cost/token/message counts), so resolving the boundary live from the cursor row
+	// on the next request would let it drift and duplicate or skip rows. Empty falls back to a
+	// live scalar-subquery lookup of the cursor row's value, which is what a legacy cursor URL
+	// (id only) still gets. It is meaningful only alongside a keyset-sortable After.
+	AfterVal string
 }
 
 // conds builds the WHERE additions for the filter's narrowing fields, shared by
@@ -384,8 +410,26 @@ var sessionSortColumns = map[string]string{
 	// reparse restamps updated_at but leaves last_active_at fixed, so an old
 	// session stays where its activity puts it. The query-string key stays
 	// "updated" so bookmarked feed URLs keep working; only the column it maps to
-	// changed. Index-walked by idx_sessions_feed_active (migration 0033).
+	// changed. Index-walked by idx_sessions_feed_active (migration 0033), with
+	// top-level-only twins for the subagent-hiding default feed: the global order
+	// (0046) and one per facet (0047), so a project, user, agent, or machine feed
+	// walks only its own top-level rows rather than the facet's subagent history.
 	"updated": "s.last_active_at",
+}
+
+// sessionKeysetColumns names the bare session column behind each keyset-paginable feed
+// order, for the "Show more" cursor. It is the subset of sessionSortColumns whose sort
+// expression is a single NOT NULL column on the sessions row, so a keyset predicate can
+// compare (column, id) against the cursor row's (column, id) and walk the same (col, id)
+// btree the order already uses. The other sort keys (project, agent, branch, user) rank a
+// joined or text expression and are not offered a cursor, so they are absent here and an
+// After under them is ignored. The four listed are exactly the feed's sort dropdown
+// (SessionSortOptions), which is all a reader ever paginates.
+var sessionKeysetColumns = map[string]string{
+	"updated":  "last_active_at",
+	"tokens":   "total_tokens",
+	"messages": "message_count",
+	"cost":     "total_cost_usd",
 }
 
 // IsSortKey reports whether key names a sortable column of the global session
@@ -394,6 +438,17 @@ var sessionSortColumns = map[string]string{
 func IsSortKey(key string) bool {
 	_, ok := sessionSortColumns[key]
 	return ok
+}
+
+// resolvedSort returns the effective sort key and direction the query builder uses: the
+// filter's Sort and Desc when Sort is a known key, else the default (updated, descending).
+// orderClause and the keyset predicate both read it, so the order they emit and the cursor
+// comparison they build can never disagree on which column or direction the page walks.
+func (f SessionFilter) resolvedSort() (key string, desc bool) {
+	if _, ok := sessionSortColumns[f.Sort]; ok {
+		return f.Sort, f.Desc
+	}
+	return DefaultSort, true
 }
 
 // orderClause builds the ORDER BY for the global session list from the filter's
@@ -421,16 +476,68 @@ func IsSortKey(key string) bool {
 // "DESC NULLS LAST" clause forces a full sort instead of an index scan. Omitting
 // it lets the (col, id) and feed indexes satisfy the order directly.
 func (f SessionFilter) orderClause() string {
-	expr, ok := sessionSortColumns[f.Sort]
-	desc := f.Desc
-	if !ok {
-		expr, desc = sessionSortColumns[DefaultSort], true
-	}
+	key, desc := f.resolvedSort()
+	expr := sessionSortColumns[key]
 	dir := "ASC"
 	if desc {
 		dir = "DESC"
 	}
 	return fmt.Sprintf(" ORDER BY %s %s, s.id %s", expr, dir, dir)
+}
+
+// keysetColType names the Postgres type of each keyset sort column, so a cursor value carried
+// as text (SessionFilter.AfterVal) casts back to the exact value the column holds. The keys are
+// the columns in sessionKeysetColumns: last_active_at is a timestamptz, the two counts are
+// integers, and total_cost_usd is a double precision (not a numeric), so a shortest-round-trip
+// float text casts back to the identical float64 and the equality tiebreak stays exact.
+var keysetColType = map[string]string{
+	"last_active_at": "timestamptz",
+	"total_tokens":   "bigint",
+	"message_count":  "integer",
+	"total_cost_usd": "double precision",
+}
+
+// keysetCond returns the WHERE predicate that resumes the feed strictly after the After cursor
+// in the current sort order, the args it binds, and whether a cursor applies. It applies only
+// when After is set and the sort has a keyset column (sessionKeysetColumns); otherwise it
+// returns ok=false and the caller pages from the top. firstArg is the number of the first bind
+// slot it may claim: the cursor id, and (when the cursor carries an observed value) that value.
+//
+// The predicate mirrors orderClause's "(col, id)" ordering exactly: under the descending feed a
+// later row has a smaller (col, id), so it keeps rows where col is below the cursor's or, on a
+// tie, id is below it; an ascending sort flips both comparisons. The boundary value comes from
+// AfterVal, the value the rendered page actually saw, cast back to the column's type, so a later
+// change to the cursor row's own column (activity bumping last_active_at, a rebuild moving a
+// count) cannot move the boundary and duplicate or skip rows the reader has or has not seen. A
+// legacy cursor that carries no value falls back to a scalar subquery on the cursor id: exact
+// while the row is unchanged, and a cursor id that names no row makes the subquery NULL so the
+// predicate matches nothing and "Show more" ends cleanly rather than resuming from a wrong place.
+func (f SessionFilter) keysetCond(firstArg int) (cond string, cargs []any, ok bool) {
+	if f.After <= 0 {
+		return "", nil, false
+	}
+	key, desc := f.resolvedSort()
+	col, has := sessionKeysetColumns[key]
+	if !has {
+		return "", nil, false
+	}
+	op := "<"
+	if !desc {
+		op = ">"
+	}
+	idPH := "$" + itoa(firstArg)
+	cargs = append(cargs, f.After)
+	// The value expression appears twice below but binds one slot, so the cursor value (or the
+	// subquery on the cursor id) is evaluated against the same boundary in both the col
+	// comparison and the tie's equality.
+	valExpr := "(SELECT " + col + " FROM sessions WHERE id = " + idPH + ")"
+	if f.AfterVal != "" {
+		cargs = append(cargs, f.AfterVal)
+		valExpr = "$" + itoa(firstArg+1) + "::" + keysetColType[col]
+	}
+	cond = fmt.Sprintf("(s.%s %s %s OR (s.%s = %s AND s.id %s %s))",
+		col, op, valExpr, col, valExpr, op, idPH)
+	return cond, cargs, true
 }
 
 // SessionRow is one row of the global (cross-project) session list: a session
@@ -442,11 +549,26 @@ type SessionRow struct {
 	ProjectKey  string
 	ProjectName string
 	ProjectKind string
+	// Grade is the session's letter grade (A..F) from its current, non-stale signals
+	// row, nil when the session is unscored or has not settled yet. Outcome is that
+	// row's outcome (completed / abandoned / errored / unknown), empty when no current
+	// row exists. Both come from a LEFT JOIN in globalSessionSelect gated by
+	// signalsCurrent(), so a feed row's grade and outcome match the drill filters and
+	// the Insights panels rather than reading a stale verdict.
+	Grade   *string
+	Outcome string
 	// Search is the content-match snippet for this row, populated only when the
 	// list was run with a Query filter: a window of the first matching message's
 	// content centered on the match, so the feed can show what the session said
 	// around the search term. It is the zero value on an unfiltered list.
 	Search SearchSnippet
+	// Tree is the whole-work-item rollup for this row: its own cost plus every
+	// subagent it fanned out, and the count of those subagents. It is filled only by
+	// the feed path (ListAllSessions attaches it after the page is scanned), so a row
+	// read outside the feed carries the zero-value rollup (no fan-out). The feed shows
+	// the fan-out only when SubagentCount > 0, since a session that spawned nothing has
+	// no work-item cost beyond the cost the row already shows.
+	Tree TreeRollup
 }
 
 // SearchSnippet is a window of a matching message's content around the first
@@ -546,8 +668,17 @@ const titleCap = 240
 // this one fragment so a session titles the same on the detail page, the project
 // table, the global feed, and its OG card, and so the title rule changes in one
 // place. It assumes the outer query aliases the sessions row `s`.
+//
+// Claude Code prepends a fixed <local-command-caveat>...</local-command-caveat>
+// block (a couple hundred characters telling the model to ignore locally generated
+// messages) ahead of the user's actual words when a session ran a local command. The
+// block alone overruns titleCap, so a naive left() would title the whole session with
+// the caveat and never reach the prompt. Strip that one known wrapper on the full
+// content first, then cap: the visible title becomes the human's words, not the
+// harness boilerplate. The strip is anchored and non-greedy so it removes exactly the
+// leading caveat and nothing past its close; a message without one is unchanged.
 var titleLateralSQL = `LEFT JOIN LATERAL (
-	         SELECT left(m.content, ` + itoa(titleCap) + `) AS content
+	         SELECT left(regexp_replace(m.content, '^\s*<local-command-caveat>.*?</local-command-caveat>\s*', ''), ` + itoa(titleCap) + `) AS content
 	           FROM messages m
 	          WHERE m.session_id = s.id AND m.role = 'user'
 	          ORDER BY m.ordinal LIMIT 1
@@ -621,7 +752,12 @@ const messageReadColumns = `m.ordinal, m.role, m.content, m.thinking_text, m.mod
 // usage and the duplicate flag are now stored per row, so the live body refresh (handleSessionBody
 // re-fetching this on every SSE append) reads bounded indexed rows and does no growing whole-session
 // usage scan or message window. $1 is the session id.
-const messagesFullQuery = `
+//
+// messagesFullSelect is the shared SELECT..WHERE prefix; the windowed transcript-page reads
+// (read_transcript_page.go) append their own ordinal predicates and LIMIT to it, so every
+// full-fold read (whole session, tail window, forward append, walker seed) selects the same
+// columns and scans through the same scanMessages.
+const messagesFullSelect = `
 	SELECT ` + messageReadColumns + `,
 	       mtu.message_ordinal IS NOT NULL,
 	       coalesce(mtu.input_tokens,0), coalesce(mtu.output_tokens,0), coalesce(mtu.cache_read_tokens,0), coalesce(mtu.cache_write_tokens,0),
@@ -630,7 +766,9 @@ const messagesFullQuery = `
 	       mtu.cost_sum, coalesce(mtu.cost_count,0), coalesce(mtu.cost_incomplete, false)
 	  FROM messages m
 	  LEFT JOIN message_turn_usage mtu ON mtu.session_id = m.session_id AND mtu.message_ordinal = m.ordinal
-	 WHERE m.session_id = $1
+	 WHERE m.session_id = $1`
+
+const messagesFullQuery = messagesFullSelect + `
 	 ORDER BY m.ordinal`
 
 // messagesWindowQuery is the bounded transcript read behind MessagesAfter. It selects the message

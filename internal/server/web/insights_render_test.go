@@ -225,6 +225,9 @@ func TestInsightsPageRendersInstruments(t *testing.T) {
 
 	for _, want := range []string{
 		`id="insights"`, // the swap target
+		// the summary strip leads with the session-weighted GPA (A5 B3 C2 D1 over 11 graded =
+		// 34/11 = 3.09) so the page opens on a plain-language read of the window
+		`class="insights-summary"`, `Graded 11 of 15 sessions at GPA 3.09.`,
 		// the seven instrument headings
 		`>Fleet mix<`, `>Session gallery<`, `>Velocity<`, `>Tools<`, `>Health<`, `>Economics<`, `>Subagents<`,
 		// representative chart mount points the engine looks up by id

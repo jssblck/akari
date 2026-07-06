@@ -32,6 +32,10 @@ type Server struct {
 	ogRender        singleflight.Group
 	ogProjectRender singleflight.Group
 	ogSessionRender singleflight.Group
+	// insights memoizes the fleet Insights snapshot per trailing-window range for a
+	// short TTL, so the several-second query pipeline behind /insights runs once per
+	// window per minute rather than once per load. See insights_cache.go.
+	insights *insightsCache
 }
 
 // New builds a Server. The parse worker is shared with the server main loop; here
@@ -39,7 +43,7 @@ type Server struct {
 // gating. Its hooks fan out through the SSE hub: fleet-rebuild progress to the
 // status stream, and each committed rebuild to the browsers watching that session.
 func New(st *store.Store, cfg config.Server, worker *parse.Worker) *Server {
-	s := &Server{Store: st, Cfg: cfg, hub: newSSEHub(), worker: worker}
+	s := &Server{Store: st, Cfg: cfg, hub: newSSEHub(), worker: worker, insights: newInsightsCache()}
 	s.mcp = newMCPHandler(s)
 	// Fan fleet-rebuild progress out to any browser watching the status stream. The
 	// hub carries the status JSON as the payload, so a watcher updates its progress
@@ -167,6 +171,13 @@ func (s *Server) Routes() http.Handler {
 	// ungated: gating it would write HTML into the event stream, and the gated
 	// session page does not open it anyway.
 	mux.HandleFunc("GET /{$}", s.handleRoot)
+	// Catch-all for any unclaimed path: a styled 404 in the viewer's shell instead of
+	// net/http's bare "404 page not found" text. It is registered without a method so it
+	// stays the single least-specific pattern (all methods, all paths); every route above,
+	// including the exact-root "/{$}" and the method-less "/mcp", is more specific and
+	// wins. A GET "/" catch-all would instead be incomparable with "/mcp" (narrower method
+	// but broader path) and make ServeMux panic at registration.
+	mux.Handle("/", http.HandlerFunc(s.handleNotFound))
 	mux.HandleFunc("GET /overview", s.requireReadHTML(s.gateParsed(s.handleOverview)))
 	mux.HandleFunc("GET /insights", s.requireReadHTML(s.gateParsed(s.handleInsights)))
 	mux.HandleFunc("GET /projects", s.requireReadHTML(s.gateParsed(s.handleProjectsIndex)))

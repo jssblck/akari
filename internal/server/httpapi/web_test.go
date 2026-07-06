@@ -192,7 +192,7 @@ func TestWebFlow(t *testing.T) {
 		t.Fatalf("get /projects: %v", err)
 	}
 	body = readBody(t, resp)
-	if !strings.Contains(body, "No git-remote projects yet") {
+	if !strings.Contains(body, "No projects yet") {
 		t.Fatalf("projects page missing empty state, got:\n%s", body)
 	}
 
@@ -388,10 +388,10 @@ func TestAuthRedirectsTargetOverview(t *testing.T) {
 }
 
 // TestStandaloneOrphanedIndex drives the real ingest endpoint with both a remote
-// and non-remote kinds and confirms the projects index lists only the git-remote
-// project: standalone and orphaned folders are kept off this surface (they reach
-// the reader through the Sessions filter rail), while drilling straight into a
-// local folder still shows its state and path.
+// and non-remote kinds and confirms the projects index splits them: the git-remote
+// project heads a Repositories section, the standalone and orphaned folders a Local
+// folders section (by name, state tag, and recovered path, never the synthetic
+// key), and drilling straight into a local folder still shows its state and path.
 func TestStandaloneOrphanedIndex(t *testing.T) {
 	t.Parallel()
 	srv, st := newTestServer(t)
@@ -448,26 +448,29 @@ func TestStandaloneOrphanedIndex(t *testing.T) {
 		t.Fatalf("stamp sessions current: %v", err)
 	}
 
-	// The projects index lists the git-remote project and nothing else: no local
-	// folders, no "Sessions" section, and never the synthetic local: key.
+	// The projects index splits into a Repositories section (the git-remote project)
+	// and a Local folders section (the standalone and orphaned folders): each folder
+	// shows by name, state tag, and recovered path, but never the synthetic local: key.
 	resp, err := c.Get(srv.URL + "/projects")
 	if err != nil {
 		t.Fatalf("get /projects: %v", err)
 	}
 	body := readBody(t, resp)
-	if !strings.Contains(body, "github.com/grace-hopper/akari") {
-		t.Fatalf("projects index missing the remote project, got:\n%s", body)
-	}
-	// "Folders without a git remote" was the old local-folder section's subtitle;
-	// the folder names, paths, state tags, and synthetic key must all be gone too.
-	// (">Sessions<" is avoided here: the sidebar nav link would match it.)
-	for _, gone := range []string{
-		"Folders without a git remote", "standalone", "orphaned",
-		"scratch", "/home/grace/scratch", "deleted", "local:grace-laptop:",
+	for _, want := range []string{
+		"github.com/grace-hopper/akari", // the repository, under Repositories
+		"<h2>Repositories</h2>", "<h2>Local folders</h2>",
+		"standalone", "orphaned", // each folder's state tag
+		"scratch", "/home/grace/scratch", // the standalone folder by name and path
+		"deleted", "/home/grace/deleted", // the orphaned folder by name and path
 	} {
-		if strings.Contains(body, gone) {
-			t.Fatalf("projects index should exclude local folders; found %q in:\n%s", gone, body)
+		if !strings.Contains(body, want) {
+			t.Fatalf("projects index missing %q, got:\n%s", want, body)
 		}
+	}
+	// The synthetic key that carries the machine and path is never surfaced as a label;
+	// the folder name and the recovered path stand in for it.
+	if strings.Contains(body, "local:grace-laptop:") {
+		t.Fatalf("projects index should not surface the synthetic local: key, got:\n%s", body)
 	}
 
 	// Drilling into the standalone folder still shows its state tag and path: the
@@ -2204,20 +2207,27 @@ func TestSessionsSearchAndPaging(t *testing.T) {
 	}
 }
 
-// TestSessionsLimitClamp asserts the limit param is clamped to the store's window
-// and that an over-cap request does not error.
-func TestSessionsLimitClamp(t *testing.T) {
+// TestSessionsPagingParamsRobust asserts the feed's keyset paging params are parsed
+// defensively: a hostile or malformed cursor, running count, or day key all render a 200
+// (falling back to the first page) rather than erroring. A tampered ?after that names no
+// row resolves its cursor value to NULL in the store, so the predicate matches nothing and
+// the page is empty rather than a 500; the old ?limit param is ignored now, not clamped.
+func TestSessionsPagingParamsRobust(t *testing.T) {
 	t.Parallel()
 	srv, _ := newTestServer(t)
 	c := newClient(t)
 	if _, err := c.PostForm(srv.URL+"/register", url.Values{"username": {"grace"}, "password": {"hopper-1906"}}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	// A wildly over-cap limit and a garbage limit both render a 200, not a 500.
-	for _, q := range []string{"?limit=99999", "?limit=abc", "?limit=-5"} {
+	for _, q := range []string{
+		"?after=99999", "?after=abc", "?after=-5",
+		"?after=1&count=abc", "?after=1&count=-9", "?after=1&after_day=garbage",
+		"?after=1&maxtok=abc", "?after=1&maxtok=-5", // a bad token denominator falls back to the page max
+		"?limit=99999", // the retired paging param is ignored now, not an error
+	} {
 		resp := mustGet(t, c, srv.URL+"/sessions"+q)
 		if resp.StatusCode != http.StatusOK {
-			t.Errorf("/sessions%s = %d, want 200 (limit should clamp, not error)", q, resp.StatusCode)
+			t.Errorf("/sessions%s = %d, want 200 (paging params should degrade, not error)", q, resp.StatusCode)
 		}
 		resp.Body.Close()
 	}

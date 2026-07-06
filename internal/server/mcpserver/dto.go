@@ -239,6 +239,13 @@ type sessionDTO struct {
 	ProjectKey         string     `json:"project_key,omitempty"`
 	ProjectName        string     `json:"project_name,omitempty"`
 	ProjectKind        string     `json:"project_kind,omitempty"`
+	// Outcome and Grade are the session's stored verdict (completed / abandoned /
+	// errored, and the letter grade), carried by the reads that join the signals row
+	// (the cross-project feed and a session's subagents list). Both are absent while
+	// the session is unsettled or unscored, so absence means "no verdict yet", never
+	// a judgement.
+	Outcome string `json:"outcome,omitempty"`
+	Grade   string `json:"grade,omitempty"`
 }
 
 func sessionSummaryToDTO(s store.SessionSummary) sessionDTO {
@@ -256,6 +263,10 @@ func sessionSummaryToDTO(s store.SessionSummary) sessionDTO {
 func sessionRowToDTO(r store.SessionRow) sessionDTO {
 	d := sessionSummaryToDTO(r.SessionSummary)
 	d.ProjectID, d.ProjectKey, d.ProjectName, d.ProjectKind = r.ProjectID, r.ProjectKey, r.ProjectName, r.ProjectKind
+	d.Outcome = r.Outcome
+	if r.Grade != nil {
+		d.Grade = *r.Grade
+	}
 	return d
 }
 

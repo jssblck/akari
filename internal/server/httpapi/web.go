@@ -145,10 +145,12 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	render(w, r, http.StatusOK, web.LandingPage(og, viewer))
 }
 
-// handleOverview is the app's home surface at /overview: fleet-wide usage bounded
-// to the selected trailing window. The range selector refetches this same handler
-// and swaps the usage panel (hx-select="#usage"), so a plain load and an htmx swap
-// render from one path; the window also rides the URL via ?range=.
+// handleOverview is the app's home surface at /overview: the audit verdict and its
+// needs-attention shortlist over fleet-wide usage, bounded to the selected trailing
+// window and users. The range selector and the per-user filter refetch this same
+// handler and swap the audit-plus-usage wrapper (hx-select="#overview-usage"), so a
+// plain load and an htmx swap render from one path; the window and selection ride the
+// URL via ?range= and ?user=.
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	rng := web.ParseRange(r.URL.Query().Get("range"))
 	users, err := s.Store.ListUsers(r.Context())
@@ -157,12 +159,17 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	selected := web.SelectedUserIDs(r.URL.Query()["user"], users)
-	analytics, err := s.Store.Analytics(r.Context(), store.AnalyticsFilter{Since: web.RangeSince(rng, time.Now()), UserIDs: selected})
+	filter := store.AnalyticsFilter{Since: web.RangeSince(rng, time.Now()), UserIDs: selected}
+	// Read the usage analytics and the audit verdict from one snapshot: the Spend tile shows
+	// the analytics total with the audit's failed-run spend pulled out beneath it, so the two
+	// must come from one MVCC view or the subfigure could disagree with the total it annotates.
+	analytics, audit, err := s.Store.OverviewData(r.Context(), filter)
 	if err != nil {
 		s.renderErrorNav(w, r, http.StatusInternalServerError, "overview", "Could not load analytics.")
 		return
 	}
-	render(w, r, http.StatusOK, web.OverviewPage(s.pageForNav(r, "Overview", "overview"), analytics, rng, users, selected))
+	setDashboardCache(w)
+	render(w, r, http.StatusOK, web.OverviewPage(s.pageForNav(r, "Overview", "overview"), analytics, audit, rng, users, selected))
 }
 
 // handleInsights is the cross-cutting analytics surface at /insights: the quality and
@@ -172,19 +179,57 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 // window rides the URL via ?range=.
 func (s *Server) handleInsights(w http.ResponseWriter, r *http.Request) {
 	rng := web.ParseRange(r.URL.Query().Get("range"))
-	// The Bucket names the trend grid's unit (day for short windows, week for long), which
-	// switches on the trend computation inside Insights: the fleet page draws time series,
-	// so it always asks for a grid, unlike the project quality band which leaves it unset.
-	ins, err := s.Store.Insights(r.Context(), store.AnalyticsFilter{
-		Since:  web.RangeSince(rng, time.Now()),
-		Bucket: web.TrendBucket(rng),
+	// The snapshot is memoized per range for a short TTL (insights_cache.go): the
+	// pipeline behind it is a dozen aggregate queries over the whole window, so a
+	// map lookup here is the difference between an instant load and several seconds.
+	// The Bucket names the trend grid's unit (day for short windows, week for long),
+	// which switches on the trend computation inside Insights: the fleet page draws
+	// time series, so it always asks for a grid, unlike the project quality band.
+	start := time.Now()
+	ins, err := s.insights.load(r.Context(), rng, start, func(ctx context.Context) (store.Insights, error) {
+		return s.Store.Insights(ctx, store.AnalyticsFilter{
+			Since:  web.RangeSince(rng, time.Now()),
+			Bucket: web.TrendBucket(rng),
+		})
 	})
 	if err != nil {
 		s.renderErrorNav(w, r, http.StatusInternalServerError, "insights", "Could not load insights.")
 		return
 	}
+	// Expose the server-side load time so a cold miss (the full parallel pipeline) versus a
+	// warm cache hit (a map lookup) reads straight off the Server-Timing entry in devtools,
+	// which is how the revamp's perf target stays visible to a future regression.
+	w.Header().Set("Server-Timing", fmt.Sprintf("insights;dur=%.1f", float64(time.Since(start).Microseconds())/1000))
+	setDashboardCache(w)
 	ranges := web.RangeOptions("/insights", nil, rng)
 	render(w, r, http.StatusOK, web.InsightsPage(s.pageForNav(r, "Insights", "insights"), ins, rng, ranges))
+}
+
+// dashboardCacheMaxAge lets a browser reuse a dashboard page for a few seconds, so
+// back/forward navigation and the range selector's hx-select refetch do not re-run
+// the query pipeline. It is private (these pages carry the viewer's own sidebar and
+// windowed figures) and short enough that a reader who pauses sees fresh numbers.
+// The server-side insights cache absorbs the cross-viewer and post-expiry load
+// behind it. The sessions feed is deliberately excluded: it is already a single
+// indexed query and changes on every ingest, so a stale feed would mislead.
+const dashboardCacheMaxAge = 30
+
+func setDashboardCache(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "private, max-age="+strconv.Itoa(dashboardCacheMaxAge))
+}
+
+// handleNotFound is the catch-all for a GET whose path no route claims: a typed or
+// stale URL, or a guessed pretty project path (projects are keyed by numeric id, so
+// /projects/github.com/owner/repo lands here). It renders the styled error page in
+// the viewer's shell rather than net/http's bare "404 page not found" text, with a
+// way back into the app. It gates nothing: an error page shows no parsed data, and a
+// logged-out visitor should get the public 404 rather than a login bounce.
+func (s *Server) handleNotFound(w http.ResponseWriter, r *http.Request) {
+	if p, ok := s.resolve(r); ok && p.Scope == scopeFull {
+		render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(s.withPrincipal(r, p), "Not found"), http.StatusNotFound, "That page does not exist."))
+		return
+	}
+	render(w, r, http.StatusNotFound, web.PublicErrorPage(http.StatusNotFound, "That page does not exist."))
 }
 
 // handleProjectsIndex is the projects table at /projects (moved off the root when
@@ -195,12 +240,16 @@ func (s *Server) handleProjectsIndex(w http.ResponseWriter, r *http.Request) {
 		s.renderErrorNav(w, r, http.StatusInternalServerError, "projects", "Could not load projects.")
 		return
 	}
-	// The index lists git-remote projects only. Local (standalone/orphaned)
-	// folders reach the reader through the Sessions filter rail, so they are kept
-	// off this surface rather than crowding it with a second table.
-	var remotes []store.ProjectSummary
+	// The index splits git-remote repositories from local (standalone/orphaned)
+	// folders into two sections: a repository is the audit unit a reader scans for
+	// first, a local folder the looser catch-all beneath it. The store returns both
+	// kinds in one activity-ordered list; partition it here so the template renders
+	// each section in that order.
+	var remotes, locals []store.ProjectSummary
 	for _, pr := range projects {
-		if !web.IsLocalKind(pr.Kind) {
+		if web.IsLocalKind(pr.Kind) {
+			locals = append(locals, pr)
+		} else {
 			remotes = append(remotes, pr)
 		}
 	}
@@ -209,7 +258,8 @@ func (s *Server) handleProjectsIndex(w http.ResponseWriter, r *http.Request) {
 		s.renderErrorNav(w, r, http.StatusInternalServerError, "projects", "Could not load analytics.")
 		return
 	}
-	render(w, r, http.StatusOK, web.ProjectsPage(s.pageForNav(r, "Projects", "projects"), remotes, spark))
+	setDashboardCache(w)
+	render(w, r, http.StatusOK, web.ProjectsPage(s.pageForNav(r, "Projects", "projects"), remotes, locals, spark))
 }
 
 // handleSessions is the global, faceted session list across every project. An
@@ -281,20 +331,16 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	// Empty sessions (message_count = 0) are hidden by default; empty=1 shows them.
 	filter.IncludeEmpty = q.Get("empty") == "1"
+	// Subagent sessions are hidden by default so the feed reads as top-level work;
+	// subagents=1 folds them back in (they stay reachable from each parent's page).
+	filter.IncludeSubagents = q.Get("subagents") == "1"
 	// spanned=1 narrows to sessions with a measured span, the concurrency panel's cohort;
 	// it arrives only on the busiest-user drill so that feed matches what the panel swept.
 	filter.RequireSpan = q.Get("spanned") == "1"
-	// The paging limit rides the URL, doubled by "Show more" and clamped to the
-	// store's window. An absent or malformed value is the default page.
+	// The feed reads one fixed-size page (DefaultSessionLimit). "Show more" no longer grows
+	// this: it passes a keyset cursor (after) and appends the next page of the same size, so
+	// depth is unbounded and every page's read cost stays flat.
 	filter.Limit = web.DefaultSessionLimit
-	if v := strings.TrimSpace(q.Get("limit")); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			if n > web.MaxSessionLimit {
-				n = web.MaxSessionLimit
-			}
-			filter.Limit = n
-		}
-	}
 	// Click-to-sort: an unknown sort key falls back to the default order rather
 	// than erroring, so a stale or tampered link still renders the feed. The
 	// direction defaults to descending; the header links always carry an explicit
@@ -304,6 +350,51 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		filter.Sort = v
 	}
 	filter.Desc = q.Get("dir") != "asc"
+	// Keyset cursor: "Show more" carries the last row the reader saw as ?after=<id>, so the
+	// store resumes strictly after it in the current order rather than re-reading the page
+	// under a bigger limit. A malformed or non-positive value is no cursor (the first page).
+	// The store applies it only to the keyset-sortable orders and ignores it otherwise.
+	if v := strings.TrimSpace(q.Get("after")); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			filter.After = n
+		}
+	}
+	// after_day is the day-bucket key of the cursor row, carried only in the day-grouped
+	// default order so the appended page can suppress a heading that repeats the day the
+	// prior page ended on. count is the running total already shown, so the appended footer
+	// reports the cumulative "Showing N" without counting the corpus. carriedMax is the
+	// feed's token-bar denominator the first page established, so an appended page scales its
+	// bars against the same reference rather than re-normalizing to its own page maximum. All
+	// three are honored only on an actual continuation (a cursor is set), so a stray param on
+	// a first-page URL cannot inflate the count or skew the bars.
+	afterDay := strings.TrimSpace(q.Get("after_day"))
+	priorCount := 0
+	var carriedMax int64
+	if filter.After > 0 {
+		// av is the cursor row's sort value as the page rendered it, so the resume boundary
+		// stays fixed at what the reader saw even if that row's own column later moves (see
+		// store.SessionFilter.AfterVal). Validate it against the active sort's type so a
+		// hand-tampered value is dropped (falling back to the id-only cursor) rather than
+		// failing the SQL cast; a valid value only ever comes from our own ShowMorePath.
+		if v := strings.TrimSpace(q.Get("av")); v != "" && web.ValidKeysetValue(filter.Sort, v) {
+			filter.AfterVal = v
+		}
+		if v := strings.TrimSpace(q.Get("count")); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				priorCount = n
+			}
+		}
+		if v := strings.TrimSpace(q.Get("maxtok")); v != "" {
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+				carriedMax = n
+			}
+		}
+	}
+	// The day-continuation and the next cursor's day key are resolved against the viewer's
+	// zone, so attach it now rather than at render time (render's own withLocation is
+	// idempotent): the handler-side FeedDayKey below must bucket a row the same way the
+	// template does, or a page boundary could drop or double a day heading.
+	r = withLocation(r)
 	// The list fetches limit+1 rows and reports hasMore, so the footer learns whether a
 	// next page exists without a count(*) over the whole matching history: the render
 	// cost stays linear in the page, not the corpus.
@@ -324,9 +415,31 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		s.renderErrorNav(w, r, http.StatusInternalServerError, "sessions", "Could not load sessions.")
 		return
 	}
-	footer := web.BuildSessionFooter(filter, len(rows), hasMore, hasEmpty)
+	// lastDayKey is this page's last row's day bucket, carried into the next "Show more"
+	// cursor so the following page continues the same day without reprinting its heading.
+	// It applies only to the day-grouped default order; the flat sorts carry no day key.
+	lastDayKey := ""
+	if web.FeedIsGrouped(filter) && len(rows) > 0 {
+		lastDayKey = web.FeedDayKey(r.Context(), rows[len(rows)-1].LastActiveAt)
+	}
+	// The token-bar denominator is the first page's largest session, carried forward on each
+	// "Show more" (carriedMax) so a bar's width means the same magnitude across pages. When no
+	// cursor carries one (the first page, or a hand-edited link), fall back to this page's own
+	// maximum so bars still render.
+	maxTok := carriedMax
+	if maxTok <= 0 {
+		maxTok = web.FeedMaxTokens(rows)
+	}
+	footer := web.BuildSessionFooter(filter, rows, priorCount, hasMore, hasEmpty, lastDayKey, maxTok)
 	if r.Header.Get("HX-Request") == "true" {
-		render(w, r, http.StatusOK, web.GlobalSessionList(rows, filter, footer))
+		// "Show more" appends the next keyset page in place (FeedAppend replaces #feed-more
+		// with the new rows plus a fresh tail). A bare htmx request with no cursor (not
+		// something the UI issues) still degrades to the full list body.
+		if filter.After > 0 {
+			render(w, r, http.StatusOK, web.FeedAppend(rows, filter, footer, afterDay))
+		} else {
+			render(w, r, http.StatusOK, web.GlobalSessionList(rows, filter, footer))
+		}
 		return
 	}
 	facets, err := s.Store.GlobalFacets(r.Context())
@@ -425,47 +538,57 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 	render(w, r, http.StatusOK, web.ProjectPage(s.pageForNav(r, proj.RemoteKey, "projects"), proj, page.Sessions, page.Remainder, wf, filter, analytics, insights, rng))
 }
 
-// sessionView loads everything the session page (and its live body fragment)
-// needs: detail, transcript, tool metadata and attachments grouped by message, and
-// subagents. Each message carries its own per-turn usage (Message.Usage) and duplicate-prompt
-// verdict (Message.DuplicatePrompt), folded in the Messages read itself, so the transcript's
-// context/cost stamps and repeat badges need no second session-sized structure beside the message
-// slice the page already renders.
-func (s *Server) sessionView(r *http.Request, id int64) (store.SessionDetail, []store.Message, map[int][]store.ToolCallView, map[int][]store.AttachmentView, []store.SessionSummary, error) {
-	d, err := s.Store.SessionDetailByID(r.Context(), id)
+// sessionView loads everything the session page (and its live body fragment) renders:
+// detail, the bounded outline rows, the windowed transcript tail, tool metadata and
+// attachments grouped by message, subagents with their verdicts, the whole-work-item
+// rollup, the serving models, and the header stats. Each transcript message carries its
+// own per-turn usage (Message.Usage) and duplicate-prompt verdict
+// (Message.DuplicatePrompt), folded in the windowed read itself, so the transcript's
+// context/cost stamps and repeat badges need no second session-sized structure beside
+// the window the page renders.
+//
+// The transcript is the session's tail, not the whole session: an unbounded render is
+// what froze the tab on long sessions (P-2). Everything comes from one store snapshot
+// (store.SessionSnapshotByID), so the window, the shape surfaces, and the audit rows
+// can never mix projections across a mid-request rebuild.
+func (s *Server) sessionView(r *http.Request, id int64) (web.SessionView, error) {
+	snap, err := s.Store.SessionSnapshotByID(r.Context(), id)
 	if err != nil {
-		return d, nil, nil, nil, nil, err
+		return web.SessionView{}, err
 	}
-	msgs, err := s.Store.Messages(r.Context(), id)
-	if err != nil {
-		return d, nil, nil, nil, nil, err
+	return sessionViewFrom(snap), nil
+}
+
+// sessionViewFrom builds the web view from one store snapshot. Pure assembly: every
+// row it maps was read in the snapshot's transaction, so nothing here can straddle a
+// rebuild.
+func sessionViewFrom(snap store.SessionSnapshot) web.SessionView {
+	v := web.SessionView{
+		Detail:    snap.Audit.Detail,
+		Subagents: snap.Audit.Subagents,
+		Tree:      snap.Audit.Tree,
+		Models:    snap.Audit.Models,
+		Outline:   snap.Outline,
+		Tools:     web.ToolsByOrdinal(snap.Tools),
+		DupIDs:    snap.DupIDs,
+		Header:    sessionHeaderStats(snap.Audit.Detail, snap.Audit.Signals, snap.Audit.Fallbacks),
 	}
-	tools, err := s.Store.ToolCalls(r.Context(), id)
-	if err != nil {
-		return d, nil, nil, nil, nil, err
-	}
-	atts, err := s.Store.Attachments(r.Context(), id)
-	if err != nil {
-		return d, nil, nil, nil, nil, err
-	}
-	subs, err := s.Store.Subagents(r.Context(), id)
-	if err != nil {
-		return d, nil, nil, nil, nil, err
-	}
-	return d, msgs, web.ToolsByOrdinal(tools), web.AttachmentsByOrdinal(atts), subs, nil
+	v.SetPage(snap.Page)
+	return v
 }
 
 // sessionHeaderStats builds the derived stat-tile inputs the session instrument header
-// renders: the session's all-usage cache effectiveness and its stored quality signals.
-// Both session-page handlers and the live body fragment share it, so the header reads the
-// same way on first load and on every SSE refresh.
+// renders: the session's all-usage cache effectiveness, its stored quality signals, and
+// the header tile's capped fallback list. Pure derivation over rows the caller already
+// holds: the session page passes them from one store snapshot (SessionAudit), so the
+// tiles can never mix projections, and the public page passes its own pool reads.
 //
-// The Cache tile comes straight off the already-loaded SessionDetail rollups (the token
-// classes plus the parse-time cache-savings fold), so it costs nothing here. That is the
-// point of the rollup: the live body re-renders on every SSE update, and reading the tile
-// from the row the caller already holds keeps a long session's K refreshes linear rather
-// than rescanning its K usage rows each time. Only the stored signals still need a read.
-func (s *Server) sessionHeaderStats(ctx context.Context, d store.SessionDetail) (web.HeaderStats, error) {
+// The Cache tile comes straight off the SessionDetail rollups (the token classes plus
+// the parse-time cache-savings fold). That is the point of the rollup: the live body
+// re-renders on every SSE update, and reading the tile from the row the caller already
+// holds keeps a long session's K refreshes linear rather than rescanning its K usage
+// rows each time.
+func sessionHeaderStats(d store.SessionDetail, sig store.SessionSignals, fallbacks []store.ModelFallback) web.HeaderStats {
 	cache := store.CacheStats{
 		Input:             d.TotalInput,
 		Output:            d.TotalOutput,
@@ -473,23 +596,6 @@ func (s *Server) sessionHeaderStats(ctx context.Context, d store.SessionDetail) 
 		CacheWrite:        d.TotalCacheWrite,
 		SavingsUSD:        d.TotalCacheSavingsUSD,
 		SavingsIncomplete: d.CacheSavingsIncomplete,
-	}
-	sig, err := s.Store.SessionSignalsByID(ctx, d.ID)
-	if err != nil {
-		return web.HeaderStats{}, err
-	}
-	// Only a session whose rollup counted a fallback pays for the fallbacks read; the
-	// common no-fallback session skips it, so the header tile and transcript notices cost
-	// nothing on the overwhelming majority of pages. The rollup is the O(1) gate.
-	var fallbacks []store.ModelFallback
-	if d.ModelFallbackCount > 0 {
-		// Cap the read so a pathological session cannot grow the tooltip slice or the
-		// transcript-notice map without bound; the O(1) ModelFallbackCount stays the true
-		// total, and the tooltip renders "plus N more" from it when it overflows the cap.
-		fallbacks, err = s.Store.SessionModelFallbacks(ctx, d.ID, store.ModelFallbackListCap)
-		if err != nil {
-			return web.HeaderStats{}, err
-		}
 	}
 	// The observed-thinking band is an absolute cut on the token scale, carried whole by the
 	// stored signals row, so the readout reads straight from the row with no extra query: the
@@ -507,7 +613,7 @@ func (s *Server) sessionHeaderStats(ctx context.Context, d store.SessionDetail) 
 			Coverage:   sig.ThinkingCoverage(),
 		}
 	}
-	return web.HeaderStats{Cache: cache, Signals: sig, Fallbacks: fallbacks, Thinking: thinking}, nil
+	return web.HeaderStats{Cache: cache, Signals: sig, Fallbacks: fallbacks, Thinking: thinking}
 }
 
 func (s *Server) handleSessionPage(w http.ResponseWriter, r *http.Request) {
@@ -516,7 +622,7 @@ func (s *Server) handleSessionPage(w http.ResponseWriter, r *http.Request) {
 		s.renderError(w, r, http.StatusNotFound, "Session not found.")
 		return
 	}
-	d, msgs, tools, atts, subs, err := s.sessionView(r, id)
+	v, err := s.sessionView(r, id)
 	if errors.Is(err, store.ErrNotFound) {
 		s.renderError(w, r, http.StatusNotFound, "Session not found.")
 		return
@@ -525,33 +631,40 @@ func (s *Server) handleSessionPage(w http.ResponseWriter, r *http.Request) {
 		s.renderError(w, r, http.StatusInternalServerError, "Could not load session.")
 		return
 	}
-	// A bounded scalar (the GROUP BY runs in the database), so flagging a repeated
-	// tool-call id costs one count query, not an in-process scan of every tool call.
-	dupIDs, err := s.Store.DuplicateCallUIDCount(r.Context(), id)
-	if err != nil {
-		s.renderError(w, r, http.StatusInternalServerError, "Could not load session.")
-		return
-	}
-	hs, err := s.sessionHeaderStats(r.Context(), d)
-	if err != nil {
-		s.renderError(w, r, http.StatusInternalServerError, "Could not load session.")
-		return
-	}
-	title := web.SessionPageTitle(d)
+	title := web.SessionPageTitle(v.Detail)
 	p, _ := principalFrom(r.Context())
-	owner := p.UserID == d.OwnerID
-	render(w, r, http.StatusOK, web.SessionPage(s.pageForNav(r, title, "sessions"), d, msgs, tools, atts, subs, hs, dupIDs, true, owner))
+	owner := p.UserID == v.Detail.OwnerID
+	render(w, r, http.StatusOK, web.SessionPage(s.pageForNav(r, title, "sessions"), v, true, owner))
 }
 
-// handleSessionBody serves just the live-updating body fragment, re-fetched by
-// the page over SSE when new bytes are parsed.
+// handleSessionBody serves the live body's fragments. Three shapes, chosen by query
+// param, all stateless (the client names its own position, per the P-2 render map):
+//
+//   - ?after=N: the turns past the last ordinal the client rendered, for the SSE
+//     append, plus out-of-band swaps for the instruments and subagents. When the
+//     client is too far behind for one append (the window read hit its cap, or its
+//     ordinal has run past the projection after an epoch rebuild reshaped it), the
+//     response retargets to #session-body and re-renders the windowed body whole, so
+//     the client can never assemble a transcript with a hidden gap.
+//   - ?before=N: the window of turns preceding ordinal N, for "Show earlier".
+//   - bare: the whole windowed body plus the out-of-band ribbon and outline
+//     (SessionResync), the full-refresh fallback.
 func (s *Server) handleSessionBody(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
-	d, msgs, tools, atts, subs, err := s.sessionView(r, id)
+	q := r.URL.Query()
+	if a := q.Get("after"); a != "" {
+		s.serveSessionAppend(w, r, id, a)
+		return
+	}
+	if b := q.Get("before"); b != "" {
+		s.serveSessionEarlier(w, r, id, b)
+		return
+	}
+	v, err := s.sessionView(r, id)
 	if errors.Is(err, store.ErrNotFound) {
 		http.NotFound(w, r)
 		return
@@ -562,16 +675,76 @@ func (s *Server) handleSessionBody(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Could not load session.", http.StatusInternalServerError)
 		return
 	}
-	// The live fragment re-renders the stat header on every SSE update. The Cache tile now
-	// comes off the same SessionDetail the body already loaded, so it tracks the session's
-	// growing usage in step with the Tokens tile beside it without a second read; only the
-	// stored quality signals are fetched here.
-	hs, err := s.sessionHeaderStats(r.Context(), d)
+	// The full-refresh fallback arrives via htmx (app.js swaps it into #session-body),
+	// so the resync's out-of-band ribbon and outline land too: a transcript rendering
+	// its first rows populates the shape surfaces in the same swap.
+	render(w, r, http.StatusOK, web.SessionResync(v))
+}
+
+// serveSessionAppend answers ?after=N: the incremental SSE path.
+func (s *Server) serveSessionAppend(w http.ResponseWriter, r *http.Request, id int64, arg string) {
+	after, err := strconv.Atoi(arg)
 	if err != nil {
-		http.Error(w, "Could not load session.", http.StatusInternalServerError)
+		http.Error(w, "bad after cursor", http.StatusBadRequest)
 		return
 	}
-	render(w, r, http.StatusOK, web.SessionMain(d, msgs, tools, atts, subs, hs))
+	snap, err := s.Store.SessionAppendByID(r.Context(), id, after)
+	if err != nil {
+		s.fragmentError(w, err)
+		return
+	}
+	// An append can only extend a transcript the client already holds a true prefix
+	// of. Two cases break that: the read hit its cap (More: too many new rows for one
+	// fragment) and a cursor naming an ordinal the projection no longer has (an epoch
+	// rebuild reshaped or emptied the transcript under the open tab, so the DOM no
+	// longer matches). The seed proves the cursor: it reads backward from `after`
+	// inclusive, so its last row carries exactly `after` whenever that row exists. A
+	// client only sends ?after= for rows it actually rendered, so any invalid cursor,
+	// including one over a projection now empty, re-renders the windowed body whole;
+	// htmx honors the retarget headers.
+	cursorValid := len(snap.Page.Seed) > 0 && snap.Page.Seed[len(snap.Page.Seed)-1].Ordinal == after
+	if snap.Page.More || !cursorValid {
+		v, err := s.sessionView(r, id)
+		if err != nil {
+			s.fragmentError(w, err)
+			return
+		}
+		w.Header().Set("HX-Retarget", "#session-body")
+		w.Header().Set("HX-Reswap", "innerHTML")
+		render(w, r, http.StatusOK, web.SessionResync(v))
+		return
+	}
+	render(w, r, http.StatusOK, web.TranscriptAppend(sessionViewFrom(snap)))
+}
+
+// serveSessionEarlier answers ?before=N: the "Show earlier" path. The fragment renders
+// only settled rows, whose page carries its own tools, attachments, and fallback
+// notices from one store snapshot; there are no out-of-band refreshes, so the detail
+// and the page are all it needs.
+func (s *Server) serveSessionEarlier(w http.ResponseWriter, r *http.Request, id int64, arg string) {
+	before, err := strconv.Atoi(arg)
+	if err != nil {
+		http.Error(w, "bad before cursor", http.StatusBadRequest)
+		return
+	}
+	d, page, err := s.Store.SessionEarlierByID(r.Context(), id, before)
+	if err != nil {
+		s.fragmentError(w, err)
+		return
+	}
+	v := web.SessionView{Detail: d}
+	v.SetPage(page)
+	render(w, r, http.StatusOK, web.TranscriptEarlier(v))
+}
+
+// fragmentError maps a fragment load failure to its status: a vanished session is 404,
+// anything else a 500 (never "not found" for a database hiccup).
+func (s *Server) fragmentError(w http.ResponseWriter, err error) {
+	if errors.Is(err, store.ErrNotFound) {
+		http.Error(w, "Session not found.", http.StatusNotFound)
+		return
+	}
+	http.Error(w, "Could not load session.", http.StatusInternalServerError)
 }
 
 // handleSessionEvents is the SSE endpoint that signals a watching browser to

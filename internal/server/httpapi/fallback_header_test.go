@@ -4,22 +4,21 @@ import (
 	"context"
 	"testing"
 
-	"github.com/jssblck/akari/internal/config"
-	"github.com/jssblck/akari/internal/server/parse"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/storetest"
 )
 
-// TestSessionHeaderStatsLoadsFallbacks pins the ModelFallbackCount > 0 branch of
-// sessionHeaderStats: a session whose rollup counted a fallback loads the capped fallback
-// slice into HeaderStats (for the header tile and the transcript notices), while a session
-// with no fallback skips the read and leaves the slice empty. The header re-renders on every
-// SSE refresh, so gating the read on the O(1) rollup keeps the common no-fallback case free.
-func TestSessionHeaderStatsLoadsFallbacks(t *testing.T) {
+// TestSessionAuditLoadsFallbacks pins the ModelFallbackCount > 0 gate, which moved into
+// the store's audit bundle so the tile's list, its count, and the transcript rows it
+// annotates all come from one snapshot: a session whose rollup counted a fallback
+// carries the capped fallback slice on its audit (and the windowed page carries the
+// window's own rows), while a session with no fallback skips the read and leaves the
+// slice empty. The header re-renders on every SSE refresh, so gating the read on the
+// O(1) rollup keeps the common no-fallback case free.
+func TestSessionAuditLoadsFallbacks(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
 	ctx := context.Background()
-	srv := New(st, config.Server{}, parse.NewWorker(st, 1, 0))
 
 	u, err := st.Register(ctx, "grace", "hash", "")
 	if err != nil {
@@ -34,7 +33,13 @@ func TestSessionHeaderStatsLoadsFallbacks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Model the post-parse projection state: one fallback row and the matching rollup.
+	// Model the post-parse projection state: a message row, one fallback row hanging on
+	// it, and the matching rollup.
+	if _, err := st.Pool.Exec(ctx,
+		`INSERT INTO messages (session_id, ordinal, role, content) VALUES ($1, 1, 'assistant', 'served on the fallback model')`,
+		ann.SessionID); err != nil {
+		t.Fatalf("seed message: %v", err)
+	}
 	if _, err := st.Pool.Exec(ctx,
 		`INSERT INTO model_fallbacks (session_id, message_ordinal, from_model, to_model, trigger, occurred_at, dedup_key)
 		 VALUES ($1, 1, 'claude-fable-5', 'claude-opus-4-8', 'refusal', now(), 'req-hdr')`, ann.SessionID); err != nil {
@@ -44,19 +49,25 @@ func TestSessionHeaderStatsLoadsFallbacks(t *testing.T) {
 		t.Fatalf("stamp rollup: %v", err)
 	}
 
-	d, err := st.SessionDetailByID(ctx, ann.SessionID)
+	a, err := st.SessionAuditByID(ctx, ann.SessionID)
 	if err != nil {
-		t.Fatalf("detail: %v", err)
+		t.Fatalf("audit: %v", err)
 	}
-	hs, err := srv.sessionHeaderStats(ctx, d)
+	if len(a.Fallbacks) != 1 {
+		t.Fatalf("audit fallbacks = %d, want 1 (the positive-count branch must load them)", len(a.Fallbacks))
+	}
+	if a.Fallbacks[0].FromModel != "claude-fable-5" || a.Fallbacks[0].ToModel != "claude-opus-4-8" {
+		t.Errorf("loaded fallback models wrong: %+v", a.Fallbacks[0])
+	}
+
+	// The windowed page carries the same fallback beside the row it annotates, from the
+	// window's own snapshot.
+	snap, err := st.SessionSnapshotByID(ctx, ann.SessionID)
 	if err != nil {
-		t.Fatalf("sessionHeaderStats: %v", err)
+		t.Fatalf("snapshot: %v", err)
 	}
-	if len(hs.Fallbacks) != 1 {
-		t.Fatalf("HeaderStats.Fallbacks = %d, want 1 (the positive-count branch must load them)", len(hs.Fallbacks))
-	}
-	if hs.Fallbacks[0].FromModel != "claude-fable-5" || hs.Fallbacks[0].ToModel != "claude-opus-4-8" {
-		t.Errorf("loaded fallback models wrong: %+v", hs.Fallbacks[0])
+	if len(snap.Page.Fallbacks) != 1 || snap.Page.Fallbacks[0].MessageOrdinal == nil || *snap.Page.Fallbacks[0].MessageOrdinal != 1 {
+		t.Fatalf("window fallbacks = %+v, want the ordinal-1 notice", snap.Page.Fallbacks)
 	}
 
 	// A session with no fallback skips the read: the slice stays empty.
@@ -64,15 +75,11 @@ func TestSessionHeaderStatsLoadsFallbacks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bd, err := st.SessionDetailByID(ctx, bare.SessionID)
+	ba, err := st.SessionAuditByID(ctx, bare.SessionID)
 	if err != nil {
-		t.Fatalf("bare detail: %v", err)
+		t.Fatalf("bare audit: %v", err)
 	}
-	bhs, err := srv.sessionHeaderStats(ctx, bd)
-	if err != nil {
-		t.Fatalf("bare sessionHeaderStats: %v", err)
-	}
-	if len(bhs.Fallbacks) != 0 {
-		t.Errorf("a no-fallback session should load no fallbacks, got %d", len(bhs.Fallbacks))
+	if len(ba.Fallbacks) != 0 {
+		t.Errorf("a no-fallback session should load no fallbacks, got %d", len(ba.Fallbacks))
 	}
 }

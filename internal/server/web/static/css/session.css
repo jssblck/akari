@@ -32,6 +32,65 @@ main:has(> .session-page) { max-width: none; }
 /* ---- Session grid: outline + transcript (the body opens in a modal, not a third column) ---- */
 .session-grid { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: var(--sp-lg); align-items: start; }
 .session-main { min-width: 0; }
+/* The main column wraps the flow ribbon over the live body, so the ribbon (like the
+   outline) sits outside the SSE swap region and persists across live updates. */
+.session-maincol { min-width: 0; }
+
+/* ---- Audit header: the verdict strip over the stat band (workstream D) ---- */
+/* Reuses the Overview verdict's tile classes so the two surfaces read as the same
+   instrument; auto-fit instead of a fixed four columns because the session strip drops
+   its Wasted tile when nothing was wasted. */
+.session-verdict { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); margin-bottom: var(--sp-sm); }
+/* The verdict headline is a word (completed, errored), not a big number: one step down
+   from the Overview's numeric tiles so a long outcome word does not shout. */
+.session-verdict .vvalue { font-size: 1.1875rem; }
+/* The score arithmetic under the strip: the quality tooltip's breakdown promoted to one
+   quiet visible line, so a grade always shows its work. */
+.score-arith { margin: 0 0 var(--sp-md); font-variant-numeric: tabular-nums; }
+
+/* ---- Flow ribbon: the session's shape before its words (workstream D) ---- */
+/* One tick per turn, squeezed to fit one row: failures rose, edits sage, runs teal,
+   prompts brighter and taller so the turn cadence segments the strip. Lilac stays
+   reserved for active states, per the one-voice rule. */
+.flow {
+  display: flex; align-items: flex-end; gap: 2px;
+  padding: var(--sp-sm) var(--sp-sm) var(--sp-xs);
+  border: 1px solid var(--border); border-radius: var(--r-md);
+  background: var(--surface); margin-bottom: var(--sp-md);
+  min-height: 26px;
+}
+.flow-tick {
+  flex: 1 1 3px; max-width: 8px; min-width: 2px; height: 12px;
+  border-radius: 1px; background: var(--surface-3);
+  transition: transform var(--dur-fast) var(--ease-state);
+}
+.flow-tick:hover { transform: scaleY(1.35); }
+.flow-tick.ft-user { background: var(--faint); height: 16px; }
+.flow-tick.ft-edit { background: var(--ok); }
+.flow-tick.ft-run { background: var(--info); }
+.flow-tick.ft-fail { background: var(--err); height: 16px; }
+
+/* ---- Windowed transcript: the "Show earlier" bar (P-2) ---- */
+/* The transcript's top edge while earlier turns stay unrendered: a full-width, quiet
+   control in the hairline idiom. htmx swaps it for the previous window's rows. */
+.transcript-earlier {
+  display: flex; align-items: center; justify-content: center; gap: var(--sp-sm);
+  width: 100%; padding: var(--sp-sm) var(--sp-md);
+  background: var(--surface); border: 1px dashed var(--border); border-radius: var(--r-md);
+  color: var(--subtext); font-size: 0.8125rem; cursor: pointer;
+}
+.transcript-earlier:hover { border-color: var(--lilac); color: var(--text); }
+.transcript-earlier[disabled] { opacity: 0.6; cursor: progress; }
+
+/* ---- Subagent verdicts ---- */
+/* The outcome word in the subagents table: a plain toned word, not a pill, matching
+   the feed's outcome note. Completed stays muted; only failures carry colour. */
+.sub-outcome { font-size: 0.75rem; }
+.sub-outcome.tone-warn { color: var(--warn); }
+.sub-outcome.tone-err { color: var(--err); }
+.sub-task a { color: var(--text); }
+.sub-task { max-width: 44ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sub-verdict { white-space: nowrap; }
 
 /* ---- Outline (left pane) ---- */
 .outline-rail { position: sticky; top: var(--sp-md); align-self: start; max-height: calc(100vh - var(--sp-lg)); overflow-y: auto; }
@@ -252,6 +311,22 @@ a.attachment.file { width: fit-content; text-decoration: none; }
 
 /* ---- Subagents ---- */
 .subagents { margin: var(--sp-sm) 0 var(--sp-lg); padding-left: var(--sp-md); border-left: 1px solid var(--border); }
+
+/* A fan-out-heavy session folds its subagents behind a summary (SubagentCollapseThreshold).
+   The <details> reuses .subagents for the ruled indent; its summary reads as a quiet
+   disclosure row carrying the count-and-cost label, and the table pays its DOM cost only
+   once opened, so a session that spawned dozens of subagents no longer buries its
+   transcript. The native marker is replaced by a textual show/hide the ::after toggles off
+   the open state, so the affordance names the action rather than showing a bare triangle. */
+.subagents-fold > summary {
+  cursor: pointer; list-style: none; display: flex; align-items: baseline; gap: var(--sp-sm);
+  padding: var(--sp-xs) 0; color: var(--text);
+}
+.subagents-fold > summary::-webkit-details-marker { display: none; }
+.subagents-summary-label { font-variant-numeric: tabular-nums; }
+.subagents-fold:not([open]) > summary .subagents-summary-hint::after { content: "show"; }
+.subagents-fold[open] > summary .subagents-summary-hint::after { content: "hide"; }
+.subagents-fold > summary:hover .subagents-summary-hint { color: var(--lilac); }
 
 /* ---- Responsive ---- */
 @media (max-width: 1100px) {

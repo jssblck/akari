@@ -18,43 +18,89 @@ templ kindTag(kind string) {
 	}
 }
 
-// ProjectsPage is the projects index: a single full-width table of git-remote
-// projects, one row each. The page deliberately carries no usage panel (the
-// Overview owns fleet usage) and no local-folder list (those reach the reader
-// through the Sessions filter rail), so the table is the whole surface. The page
-// has no heading because the sidebar already marks this section as Projects.
-templ ProjectsPage(p Page, projects []store.ProjectSummary, spark map[int64][]float64) {
+// ProjectsPage is the projects index, split into two sections: git-remote
+// repositories (the audit unit a reader scans for first) and local folders
+// (standalone or orphaned working directories, the looser catch-all beneath).
+// The page carries no usage panel (the Overview owns fleet usage) and no page
+// heading (the sidebar already marks this section as Projects); each section
+// heads its own table. A section renders only when it holds a project, so a fleet
+// with no local folders shows the repositories table alone.
+templ ProjectsPage(p Page, remotes []store.ProjectSummary, locals []store.ProjectSummary, spark map[int64][]float64) {
 	@layout(p) {
-		if len(projects) == 0 {
-			<div class="empty">No git-remote projects yet.</div>
+		if len(remotes) == 0 && len(locals) == 0 {
+			<div class="empty">No projects yet.</div>
 		} else {
-			<div class="table-scroll">
-				<table class="grid projects">
-					<thead>
-						<tr>
-							<th class="proj-name">Project</th>
-							<th class="trend">30d</th>
-							<th class="num">Sessions</th>
-							<th class="num">Tokens</th>
-							<th class="num">Cost</th>
-							<th>Updated</th>
-						</tr>
-					</thead>
-					<tbody>
-						for _, pr := range projects {
-							<tr data-row-href={ ProjectPath(pr.ID) }>
-								<td class="proj-name"><a href={ ProjectHref(pr.ID) }>{ pr.RemoteKey }</a></td>
-								<td class="trend">@templ.Raw(Sparkline(spark[pr.ID]))</td>
-								<td class="num">{ fmt.Sprintf("%d", pr.SessionCount) }</td>
-								<td class="num">@tokensCell(pr)</td>
-								<td class="num">{ FmtCost(pr.TotalCostUSD, pr.CostIncomplete) }</td>
-								<td class="muted nowrap">{ FmtRelTime(ctx, pr.LastActivity) }</td>
-							</tr>
-						}
-					</tbody>
-				</table>
-			</div>
-			<p class="muted small projects-footnote">Local folders are under <a href="/sessions">Sessions</a>.</p>
+			if len(remotes) > 0 {
+				<section class="proj-section">
+					<div class="panel-head"><h2>Repositories</h2></div>
+					<div class="table-scroll">
+						<table class="grid projects">
+							<thead>
+								<tr>
+									<th class="proj-name">Project</th>
+									<th class="trend">30d</th>
+									<th class="num">Sessions</th>
+									<th class="num">Tokens</th>
+									<th class="num">Cost</th>
+									<th>Updated</th>
+								</tr>
+							</thead>
+							<tbody>
+								for _, pr := range remotes {
+									<tr data-row-href={ ProjectPath(pr.ID) }>
+										<td class="proj-name"><a href={ ProjectHref(pr.ID) }>{ pr.RemoteKey }</a></td>
+										<td class="trend">@templ.Raw(Sparkline(spark[pr.ID]))</td>
+										<td class="num">{ fmt.Sprintf("%d", pr.SessionCount) }</td>
+										<td class="num">@tokensCell(pr)</td>
+										<td class="num">{ FmtCost(pr.TotalCostUSD, pr.CostIncomplete) }</td>
+										<td class="muted nowrap">{ FmtRelTime(ctx, pr.LastActivity) }</td>
+									</tr>
+								}
+							</tbody>
+						</table>
+					</div>
+				</section>
+			}
+			if len(locals) > 0 {
+				<section class="proj-section">
+					<div class="panel-head">
+						<h2>Local folders</h2>
+						<span class="muted small">Working directories with no git remote, keyed by machine and path.</span>
+					</div>
+					<div class="table-scroll">
+						<table class="grid projects">
+							<thead>
+								<tr>
+									<th class="proj-name">Folder</th>
+									<th class="trend">30d</th>
+									<th class="num">Sessions</th>
+									<th class="num">Tokens</th>
+									<th class="num">Cost</th>
+									<th>Updated</th>
+								</tr>
+							</thead>
+							<tbody>
+								for _, pr := range locals {
+									<tr data-row-href={ ProjectPath(pr.ID) }>
+										<td class="proj-name">
+											<a href={ ProjectHref(pr.ID) }>{ ProjectTitle(pr) }</a>
+											@kindTag(pr.Kind)
+											if lp := LocalPath(pr); lp != "" {
+												<div class="proj-path muted small mono" title={ lp }>{ lp }</div>
+											}
+										</td>
+										<td class="trend">@templ.Raw(Sparkline(spark[pr.ID]))</td>
+										<td class="num">{ fmt.Sprintf("%d", pr.SessionCount) }</td>
+										<td class="num">@tokensCell(pr)</td>
+										<td class="num">{ FmtCost(pr.TotalCostUSD, pr.CostIncomplete) }</td>
+										<td class="muted nowrap">{ FmtRelTime(ctx, pr.LastActivity) }</td>
+									</tr>
+								}
+							</tbody>
+						</table>
+					</div>
+				</section>
+			}
 		}
 	}
 }

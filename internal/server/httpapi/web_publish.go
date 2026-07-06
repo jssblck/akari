@@ -317,17 +317,28 @@ func (s *Server) handlePublicSession(w http.ResponseWriter, r *http.Request) {
 	}
 	// Only public subagents may appear on a public page; a public parent does not
 	// make its children public.
-	var publicSubs []store.SessionSummary
+	var publicSubs []store.SubagentRow
 	for _, sub := range subs {
 		if sub.Visibility == "public" && sub.PublicID != nil {
 			publicSubs = append(publicSubs, sub)
 		}
 	}
-	hs, err := s.sessionHeaderStats(r.Context(), d)
+	sig, err := s.Store.SessionSignalsByID(r.Context(), d.ID)
 	if err != nil {
 		renderPublicError(w, r, http.StatusInternalServerError, "Could not load session.")
 		return
 	}
+	// Only a session whose rollup counted a fallback pays for the capped list read;
+	// it feeds the header tile's tooltip and the transcript notices.
+	var fallbacks []store.ModelFallback
+	if d.ModelFallbackCount > 0 {
+		fallbacks, err = s.Store.SessionModelFallbacks(r.Context(), d.ID, store.ModelFallbackListCap)
+		if err != nil {
+			render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load session."))
+			return
+		}
+	}
+	hs := sessionHeaderStats(d, sig, fallbacks)
 	// A published session's public id is non-nil (visibility gates on it), so the card
 	// URL and canonical URL both resolve. Unlike the overview and project cards the
 	// session card has no range, so it is advertised unconditionally: there is one card

@@ -6,52 +6,55 @@ import (
 	"github.com/jssblck/akari/internal/server/store"
 )
 
-templ SessionPage(p Page, d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, subagents []store.SessionSummary, hs HeaderStats, dupIDs int, live, owner bool) {
+templ SessionPage(p Page, v SessionView, live, owner bool) {
 	@layout(p) {
 		<div class="session-page">
 			<div class="session-head">
 				<div class="session-title">
 					<h1>
-						<a href={ ProjectHref(d.ProjectID) }>{ SessionProjectLabel(d) }</a>
+						<a href={ ProjectHref(v.Detail.ProjectID) }>{ SessionProjectLabel(v.Detail) }</a>
 						<span class="sep">/</span>
-						<span class="muted">session #{ fmt.Sprintf("%d", d.ID) }</span>
+						<span class="muted">session #{ fmt.Sprintf("%d", v.Detail.ID) }</span>
 					</h1>
-					if d.Title != "" {
-						<div class="session-subtitle muted" title={ d.Title }>{ d.Title }</div>
+					if v.Detail.Title != "" {
+						<div class="session-subtitle muted" title={ v.Detail.Title }>{ v.Detail.Title }</div>
 					}
 					<div class="session-meta">
-						<span class="tag agent">{ d.Agent }</span>
-						@kindTag(d.ProjectKind)
-						if d.Visibility == "public" {
+						<span class="tag agent">{ v.Detail.Agent }</span>
+						@kindTag(v.Detail.ProjectKind)
+						if v.Detail.Visibility == "public" {
 							<span class="tag public">public</span>
 						}
-						if dupIDs > 0 {
-							<span class="tag warn" title="Repeated tool-call ids: a resumed or compacted transcript replaying earlier turns.">{ DuplicateIDsLabel(dupIDs) }</span>
+						if v.DupIDs > 0 {
+							<span class="tag warn" title="Repeated tool-call ids: a resumed or compacted transcript replaying earlier turns.">{ DuplicateIDsLabel(v.DupIDs) }</span>
 						}
-						if d.GitBranch != "" {
-							<span class="muted">{ d.GitBranch }</span>
+						if v.Detail.GitBranch != "" {
+							<span class="muted">{ v.Detail.GitBranch }</span>
 						}
-						<span class="muted">{ d.Username }</span>
-						<span class="muted">{ d.Machine }</span>
+						<span class="muted">{ v.Detail.Username }</span>
+						<span class="muted">{ v.Detail.Machine }</span>
 					</div>
 				</div>
 				if owner || p.IsAdmin {
-					@sessionActions(d, owner)
+					@sessionActions(v.Detail, owner)
 				}
 			</div>
 			<div class="session-grid">
 				<aside class="outline-rail" aria-label="Outline">
-					@Outline(msgs, tools, SessionBlobBase(d.ID))
+					@Outline(v.Outline, v.Tools, SessionBlobBase(v.Detail.ID), false)
 				</aside>
-				if live {
-					<div id="session-body" class="session-main" data-sse={ SSEPath(d.ID) } data-body={ BodyPath(d.ID) }>
-						@SessionMain(d, msgs, tools, attachments, subagents, hs)
-					</div>
-				} else {
-					<div id="session-body" class="session-main">
-						@SessionMain(d, msgs, tools, attachments, subagents, hs)
-					</div>
-				}
+				<div class="session-maincol">
+					@flowRibbon(v, false)
+					if live {
+						<div id="session-body" class="session-main" data-sse={ SSEPath(v.Detail.ID) } data-body={ BodyPath(v.Detail.ID) }>
+							@SessionMain(v)
+						</div>
+					} else {
+						<div id="session-body" class="session-main">
+							@SessionMain(v)
+						</div>
+					}
+				</div>
 			</div>
 		</div>
 		@inspectorModal()
@@ -83,30 +86,245 @@ templ sessionActions(d store.SessionDetail, owner bool) {
 	</div>
 }
 
-// SessionMain is the live region of the session view: the stat header, any
-// subagents, and the transcript. Only this fragment is re-fetched and swapped on
-// a live SSE update, so the outline and inspector (its siblings in the grid)
-// persist across updates and are not re-rendered per refresh.
-templ SessionMain(d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, subagents []store.SessionSummary, hs HeaderStats) {
-	@sessionStats(d, hs)
-	if len(subagents) > 0 {
-		<h2>Subagents</h2>
-		<div class="subagents">
-			@SessionList(subagents)
-		</div>
-	}
+// SessionMain is the live region of the session view: the audit instruments (verdict
+// header and stat band), any subagents, and the windowed transcript. Only this fragment
+// is re-fetched and swapped whole on a full refresh; a live append swaps just the new
+// transcript rows plus out-of-band updates for the instruments and subagents, so the
+// outline, ribbon, and inspector (its siblings) persist across updates.
+templ SessionMain(v SessionView) {
+	@sessionInstruments(v, false)
+	@subagentsSection(v, false)
 	<h2>Transcript</h2>
-	@Transcript(msgs, d.Agent, tools, attachments, FallbacksByOrdinal(hs.Fallbacks), SessionBlobBase(d.ID))
+	@transcriptWindow(v)
+}
+
+// TranscriptEarlier is the fragment behind GET /sessions/{id}/body?before=N: the window
+// of turns preceding ordinal N, plus a fresh "Show earlier" bar when rows remain above
+// it. The bar swaps itself by outerHTML, so the new rows land exactly where the bar
+// stood (above the already-rendered turns) and the settled rows below never re-render,
+// the same pattern the feed's keyset tail uses.
+templ TranscriptEarlier(v SessionView) {
+	if v.Page.HasEarlier && len(v.Page.Msgs) > 0 {
+		@earlierBar(v.Detail.ID, v.Page.Msgs[0].Ordinal, v.Page.EarlierCount)
+	}
+	@TranscriptRows(v.Page.Seed, v.Page.Msgs, v.Detail.Agent, v.WindowTools, v.WindowAttachments, FallbacksByOrdinal(v.Page.Fallbacks), SessionBlobBase(v.Detail.ID))
+}
+
+// TranscriptAppend is the fragment behind GET /sessions/{id}/body?after=N, fetched on an
+// SSE wake: just the turns past the last ordinal the client rendered, appended to the
+// transcript with hx-swap beforeend, plus out-of-band swaps for the instruments, the
+// subagents block, the flow ribbon, and the outline rail, so every projection of the
+// transcript stays current without the full-body re-render that used to freeze long
+// sessions and reset the reader's scroll. The ribbon and outline refreshes ride only
+// when rows actually landed: a quiet tick (raw bytes ahead of the rebuild) changes no
+// turns, so it must not ship the whole-session shape for nothing.
+templ TranscriptAppend(v SessionView) {
+	@TranscriptRows(v.Page.Seed, v.Page.Msgs, v.Detail.Agent, v.WindowTools, v.WindowAttachments, FallbacksByOrdinal(v.Page.Fallbacks), SessionBlobBase(v.Detail.ID))
+	@sessionInstruments(v, true)
+	@subagentsSection(v, true)
+	if len(v.Page.Msgs) > 0 {
+		@flowRibbon(v, true)
+		@Outline(v.Outline, v.Tools, SessionBlobBase(v.Detail.ID), true)
+	}
+}
+
+// SessionResync is the whole-window re-render behind the append path's two fallback
+// cases (a client too far behind for one fragment, or a cursor an epoch rebuild
+// orphaned). The body re-renders via the retarget headers, and the ribbon and outline
+// ride as out-of-band swaps: a reshaped projection renumbers ordinals, so the shape
+// surfaces outside #session-body would otherwise keep anchors into the old numbering.
+templ SessionResync(v SessionView) {
+	@SessionMain(v)
+	@flowRibbon(v, true)
+	@Outline(v.Outline, v.Tools, SessionBlobBase(v.Detail.ID), true)
+}
+
+// sessionInstruments is the audit read above the transcript: the verdict header
+// (outcome, grade, cost, waste, duration) over the stat band. It swaps as one region:
+// whole on a full refresh, out-of-band on a live append, so both paths keep the verdict
+// and the tiles in step with the transcript below them.
+templ sessionInstruments(v SessionView, oob bool) {
+	<div
+		id="session-instruments"
+		if oob {
+			hx-swap-oob="outerHTML"
+		}
+	>
+		@auditHeader(v)
+		@sessionStats(v.Detail, v.Header)
+	</div>
+}
+
+// auditHeader leads the session view with the audit answer, the way the Overview's
+// verdict strip leads the fleet: how the run ended and what it scored, what it cost (and
+// what the whole work item cost when it fanned out), what was wasted, and how long it
+// ran on which models. The raw transcript comes after; a reviewer who only needs the
+// verdict never scrolls. The score arithmetic line under the strip promotes the quality
+// tooltip's breakdown to a visible sentence, so a grade is always accompanied by why.
+templ auditHeader(v SessionView) {
+	{{ sig := v.Header.Signals }}
+	{{ wasted, wastedIncomplete, wastedNote := SessionWasted(v.Detail, sig, v.Subagents) }}
+	<div class="verdict session-verdict">
+		<div class="vtile">
+			<div class="label">Verdict</div>
+			<div class={ VerdictValueClass(VerdictOutcomeTone(sig.Outcome)) }>{ VerdictHeadline(sig) }</div>
+			<div class="vsub muted small">{ VerdictSub(sig) }</div>
+		</div>
+		<div class="vtile">
+			<div class="label">Cost</div>
+			<div class="vvalue">{ FmtCost(v.Detail.TotalCostUSD, v.Detail.CostIncomplete) }</div>
+			if note := WorkItemNote(v.Tree); note != "" {
+				<div class="vsub muted small">{ note }</div>
+			}
+		</div>
+		if wasted > 0 || wastedNote != "" {
+			<div class="vtile">
+				<div class="label">Wasted</div>
+				<div class="vvalue tone-err">{ FmtCost(wasted, wastedIncomplete) }</div>
+				<div class="vsub muted small">{ wastedNote }</div>
+			</div>
+		}
+		<div class="vtile">
+			<div class="label">Duration</div>
+			<div class="vvalue">{ FmtDuration(v.Detail.StartedAt, v.Detail.EndedAt) }</div>
+			if ml := ModelsLine(v.Models); ml != "" {
+				<div class="vsub muted small mono" title="models that served this session, heaviest first">{ ml }</div>
+			}
+		</div>
+	</div>
+	if line := ScoreArithmeticLine(sig); line != "" {
+		<div class="score-arith mono muted small" title="how the grade was computed: 100 minus each penalty">{ line }</div>
+	}
+}
+
+// subagentsSection renders a parent session's direct subagents. A short list reads inline
+// under the heading; a fan-out-heavy one (past SubagentCollapseThreshold) folds away by
+// default behind a summary naming the child count, their summed cost, and how many
+// failed, and opens on demand, so the subagents do not push the transcript below the
+// fold on exactly the sessions a lead most wants to read. The wrapper div always
+// renders (even childless) so the live append's out-of-band swap has a stable target
+// when a session grows its first subagent mid-watch.
+templ subagentsSection(v SessionView, oob bool) {
+	<div
+		id="session-subagents"
+		if oob {
+			hx-swap-oob="outerHTML"
+		}
+	>
+		if len(v.Subagents) > 0 {
+			<h2>Subagents</h2>
+			if SubagentsCollapsed(v.Subagents) {
+				<details class="subagents subagents-fold">
+					<summary class="subagents-summary">
+						<span class="subagents-summary-label">{ SubagentsSummaryLabel(v.Subagents) }</span>
+						<span class="subagents-summary-hint muted small" aria-hidden="true"></span>
+					</summary>
+					@subagentsTable(v.Subagents)
+				</details>
+			} else {
+				<div class="subagents">
+					@subagentsTable(v.Subagents)
+				</div>
+			}
+		}
+	</div>
+}
+
+// subagentsTable lists a session's direct children for an auditor: what each child was
+// asked to do (its stripped first prompt), how it ended (outcome word and grade chip,
+// blank while unmeasured rather than a dash), and what it cost. The whole row links to
+// the child session, matching the feed's whole-row hit target.
+templ subagentsTable(subs []store.SubagentRow) {
+	<div class="table-scroll">
+		<table class="grid">
+			<thead>
+				<tr>
+					<th>Task</th>
+					<th>Agent</th>
+					<th>Verdict</th>
+					<th class="num">Messages</th>
+					<th class="num">Cost</th>
+					<th>Updated</th>
+				</tr>
+			</thead>
+			<tbody>
+				for _, s := range subs {
+					<tr data-row-href={ SessionPath(s.ID) }>
+						<td class="sub-task">
+							<a href={ SessionHref(s.ID) } title={ s.Title }>{ SubagentTitle(s) }</a>
+							if s.Visibility == "public" {
+								<span class="tag public">public</span>
+							}
+						</td>
+						<td><span class="tag agent">{ s.Agent }</span></td>
+						<td class="sub-verdict">
+							if note := RowOutcomeNote(s.Outcome); note != "" {
+								<span class={ "sub-outcome tone-" + VerdictOutcomeTone(s.Outcome) }>{ note }</span>
+							} else if s.Outcome == "completed" {
+								<span class="sub-outcome muted">completed</span>
+							}
+							if s.Grade != nil {
+								<span class={ "tag grade " + RowGradeClass(s.Grade) } title="quality grade">{ *s.Grade }</span>
+							}
+						</td>
+						<td class="num">{ fmt.Sprintf("%d", s.MessageCount) }</td>
+						<td class="num">{ FmtCost(s.TotalCostUSD, s.CostIncomplete) }</td>
+						<td class="muted">{ FmtTime(ctx, s.LastActiveAt) }</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+	</div>
+}
+
+// flowRibbon is the session's shape at a glance: one tick per turn, in transcript order,
+// colored by what the turn did (edit, run, failure), so a reviewer sees a long failure
+// streak or an edit churn loop before reading a word. It renders from the same bounded
+// outline read the rail uses, so it covers the whole session even while the transcript
+// below renders only a window; a tick's anchor rides the same fetch-then-scroll path an
+// outline entry does. Short sessions skip the ticks: their shape is visible by
+// scrolling. The wrapper div always renders (like the subagents block) so the live
+// append's out-of-band swap has a stable target and the ribbon grows with the session
+// instead of freezing at the turns the first page load knew about.
+templ flowRibbon(v SessionView, oob bool) {
+	<div
+		id="session-flow"
+		if oob {
+			hx-swap-oob="outerHTML"
+		}
+	>
+		if FlowRibbonVisible(v.Outline) {
+			<div class="flow" aria-label="Session flow: one tick per turn, colored by activity">
+				for _, m := range v.Outline {
+					<a
+						class={ "flow-tick " + FlowTickClass(m, v.Tools[m.Ordinal]) }
+						href={ templ.SafeURL(fmt.Sprintf("#msg-%d", m.Ordinal)) }
+						title={ FlowTickTitle(m, v.Tools[m.Ordinal]) }
+						data-ord={ fmt.Sprintf("%d", m.Ordinal) }
+					></a>
+				}
+			</div>
+		}
+	</div>
 }
 
 // Outline is the left pane of the session view: one entry per turn, with its
-// tool steps nested beneath. It renders straight from the transcript messages
+// tool steps nested beneath. It renders straight from the bounded outline read
 // and tool metadata the page already holds, so no second session-sized structure
 // is built. A turn links to its message; a step with a stored body opens that
 // body in the inspector pane (carrying the blob URLs so the inspector needs no
-// extra round trip to know what to fetch).
-templ Outline(msgs []store.Message, tools map[int][]store.ToolCallView, blobBase string) {
-	<div class="outline" aria-label="Session outline">
+// extra round trip to know what to fetch). The live append swaps it out-of-band
+// (the scrollable rail around it stays put, so the reader's position survives),
+// keeping its per-turn entries in step with the rows the append just added.
+templ Outline(msgs []store.Message, tools map[int][]store.ToolCallView, blobBase string, oob bool) {
+	<div
+		id="session-outline"
+		class="outline"
+		aria-label="Session outline"
+		if oob {
+			hx-swap-oob="outerHTML"
+		}
+	>
 		<div class="label outline-head">Outline</div>
 		for _, m := range msgs {
 			{{ steps := tools[m.Ordinal] }}
@@ -291,6 +509,13 @@ templ statQuality(s store.SessionSignals, t ThinkingReadout) {
 					<dd>{ fmt.Sprintf("%d", s.LongestFailureStreak) }</dd>
 				}
 			</dl>
+			if !s.Scored() {
+				// The dash is deferral, not a broken read: a grade is assigned off the hot
+				// path once the session settles (idle long enough or declared terminal), so a
+				// still-running or just-finished session shows no grade until then. Naming that
+				// here keeps the empty tile from reading as missing data.
+				<div class="tt-note muted small">Not graded yet. A session is graded once it settles.</div>
+			}
 			if s.HasHygieneSignal() {
 				<div class="tt-sub">Input</div>
 				<dl class="tt-grid">
@@ -406,104 +631,159 @@ templ stat(label, value, key string) {
 	</div>
 }
 
-// Transcript renders the session's messages as an instrumented trace. The two carried per-message
-// instruments (reply latency and context sheds) are derived while walking the message slice with a
-// TranscriptWalker holding only bounded state (see session_metrics.go), so the render path holds no
-// session-sized structure beyond the message slice the page already renders; the duplicate-prompt
-// verdict rides on each message (m.DuplicatePrompt), and each turn's usage rides on m.Usage, both
-// folded in the message read. The meta line carries a right-aligned cluster of stamps (latency,
-// then a context+cost stamp group that hosts a per-turn token breakdown card); a shed divider
-// hosting its own before/after breakdown card is drawn above the marked message; muted hygiene tags
-// sit after a user message's role tag. An assistant turn that carried a reasoning block wears a thinking-band chip
-// above its content (MessageThinkingBand), reading the turn's own deliberation on the same absolute scale as the
-// header readout, so a reader sees which turns the model worked hardest on without opening the (often redacted) trace.
+// transcriptWindow renders the transcript column's windowed body: the "Show earlier"
+// bar when turns precede the window, then the window's rows. The window is the
+// session's tail (the last TranscriptTailTurns user turns), so a reader lands on the
+// end of the run, where the verdict-relevant turns live, and pages backward on demand;
+// an unbounded render of a long session is what froze the tab (P-2).
+templ transcriptWindow(v SessionView) {
+	if len(v.Page.Msgs) == 0 {
+		<div class="empty">No messages parsed yet.</div>
+	} else {
+		<div class="transcript">
+			if v.Page.HasEarlier {
+				@earlierBar(v.Detail.ID, v.Page.Msgs[0].Ordinal, v.Page.EarlierCount)
+			}
+			@TranscriptRows(v.Page.Seed, v.Page.Msgs, v.Detail.Agent, v.WindowTools, v.WindowAttachments, FallbacksByOrdinal(v.Page.Fallbacks), SessionBlobBase(v.Detail.ID))
+		</div>
+	}
+}
+
+// earlierBar is the transcript's top edge while earlier turns stay unrendered: one
+// quiet control that fetches the previous window in place. It swaps itself by
+// outerHTML, so the fetched rows (and the next bar, when more remain) land exactly
+// where it stood and nothing below re-renders. app.js pins the scroll position across
+// the swap so the reader's current turn does not jump.
+templ earlierBar(sessionID int64, firstOrdinal, earlierCount int) {
+	<button
+		type="button"
+		id="transcript-earlier"
+		class="transcript-earlier"
+		hx-get={ fmt.Sprintf("%s?before=%d", BodyPath(sessionID), firstOrdinal) }
+		hx-target="#transcript-earlier"
+		hx-swap="outerHTML"
+		hx-disabled-elt="this"
+	>
+		<span>Show earlier</span>
+		<span class="muted small">{ EarlierCountLabel(earlierCount) }</span>
+	</button>
+}
+
+// TranscriptRows renders one window of transcript rows. The seed rows prime the walker's
+// carried state (reply latency, shed detection) without rendering, so a window that
+// starts mid-session still stamps its first turns correctly; a whole-session render
+// passes an empty seed. Rendered rows and fragment appends both come through here, so
+// every path derives the per-turn instruments the same way.
+templ TranscriptRows(seed []store.Message, msgs []store.Message, agent string, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, fallbacks map[int]store.ModelFallback, blobBase string) {
+	{{ walker := SeededWalker(seed) }}
+	for _, m := range msgs {
+		{{ metrics := walker.Next(m) }}
+		@transcriptMsg(m, metrics, agent, tools, attachments, fallbacks, blobBase)
+	}
+}
+
+// Transcript renders a whole session's messages as an instrumented trace, for surfaces
+// that still render full transcripts in one pass (the public session page). The signed-in
+// session view windows instead: see transcriptWindow.
 templ Transcript(msgs []store.Message, agent string, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, fallbacks map[int]store.ModelFallback, blobBase string) {
 	if len(msgs) == 0 {
 		<div class="empty">No messages parsed yet.</div>
 	} else {
-		{{ walker := &TranscriptWalker{} }}
 		<div class="transcript">
-			for _, m := range msgs {
-				{{ metrics := walker.Next(m) }}
-				if metrics.Shed != nil {
-					@shedDivider(*metrics.Shed)
+			@TranscriptRows(nil, msgs, agent, tools, attachments, fallbacks, blobBase)
+		</div>
+	}
+}
+
+// transcriptMsg renders one transcript row: the shed divider and fallback notice above
+// it when they apply, then the message itself with its meta line, thinking, content,
+// attachments, and tool chips. The two carried per-message instruments (reply latency
+// and context sheds) arrive via metrics, derived by the caller's TranscriptWalker
+// holding only bounded state (see session_metrics.go); the duplicate-prompt verdict
+// rides on the message (m.DuplicatePrompt) and each turn's usage on m.Usage, both
+// folded in the message read. The meta line carries a right-aligned cluster of stamps
+// (latency, then a context+cost stamp group that hosts a per-turn token breakdown
+// card); muted hygiene tags sit after a user message's role tag. An assistant turn that
+// carried a reasoning block wears a thinking-band chip above its content
+// (MessageThinkingBand), reading the turn's own deliberation on the same absolute scale
+// as the header readout.
+templ transcriptMsg(m store.Message, metrics MsgMetrics, agent string, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, fallbacks map[int]store.ModelFallback, blobBase string) {
+	if metrics.Shed != nil {
+		@shedDivider(*metrics.Shed)
+	}
+	if fb, ok := fallbacks[m.Ordinal]; ok {
+		@fallbackNotice(fb)
+	}
+	if m.Role == "context" {
+		@contextTurn(m)
+	} else {
+		<div class={ "msg " + RoleClass(m.Role) } id={ fmt.Sprintf("msg-%d", m.Ordinal) } data-ordinal={ fmt.Sprintf("%d", m.Ordinal) }>
+			<div class="meta">
+				<span class="role">{ m.Role }</span>
+				if m.Model != "" {
+					<span class="tag model">{ m.Model }</span>
 				}
-				if fb, ok := fallbacks[m.Ordinal]; ok {
-					@fallbackNotice(fb)
+				if m.Role == "user" && m.PromptFactsCurrent {
+					if m.PromptShort {
+						<span class="tag hygiene" title="under 4 words: give the agent something to grip">terse</span>
+					}
+					if m.PromptNoCode {
+						<span class="tag hygiene" title="a change request with no file, path, or code anchor">no code pointer</span>
+					}
+					if m.DuplicatePrompt {
+						<span class="tag hygiene" title="verbatim repeat of an earlier prompt">repeat</span>
+					}
 				}
-				if m.Role == "context" {
-					@contextTurn(m)
-				} else {
-				<div class={ "msg " + RoleClass(m.Role) } id={ fmt.Sprintf("msg-%d", m.Ordinal) } data-ordinal={ fmt.Sprintf("%d", m.Ordinal) }>
-					<div class="meta">
-						<span class="role">{ m.Role }</span>
-						if m.Model != "" {
-							<span class="tag model">{ m.Model }</span>
-						}
-						if m.Role == "user" && m.PromptFactsCurrent {
-							if m.PromptShort {
-								<span class="tag hygiene" title="under 4 words: give the agent something to grip">terse</span>
+				<span class="spacer"></span>
+				<span class="meta-metrics">
+					if metrics.Latency > 0 {
+						<span class="stamp-latency mono" title="time from the prompt to this reply">{ FmtTurnLatency(metrics.Latency) }</span>
+					}
+					if m.Usage != nil {
+						// One focusable host wraps the ctx and cost stamps and carries a single
+						// per-turn breakdown card (the four token classes, reasoning if present, the
+						// context total, and the turn cost or "unpriced"). The visible stamps stay as
+						// compact as before; the card is the detail, so no bare token figure renders
+						// without its breakdown.
+						<span class="tok-cell turn-metrics" tabindex="0">
+							<span class="stamp-ctx mono">{ FmtContextStamp(*m.Usage) }</span>
+							if m.Usage.CostUSD != nil {
+								<span class="stamp-cost mono">{ FmtCost(*m.Usage.CostUSD, m.Usage.CostIncomplete) }</span>
 							}
-							if m.PromptNoCode {
-								<span class="tag hygiene" title="a change request with no file, path, or code anchor">no code pointer</span>
-							}
-							if m.DuplicatePrompt {
-								<span class="tag hygiene" title="verbatim repeat of an earlier prompt">repeat</span>
-							}
-						}
-						<span class="spacer"></span>
-						<span class="meta-metrics">
-							if metrics.Latency > 0 {
-								<span class="stamp-latency mono" title="time from the prompt to this reply">{ FmtTurnLatency(metrics.Latency) }</span>
-							}
-							if m.Usage != nil {
-								// One focusable host wraps the ctx and cost stamps and carries a single
-								// per-turn breakdown card (the four token classes, reasoning if present, the
-								// context total, and the turn cost or "unpriced"). The visible stamps stay as
-								// compact as before; the card is the detail, so no bare token figure renders
-								// without its breakdown.
-								<span class="tok-cell turn-metrics" tabindex="0">
-									<span class="stamp-ctx mono">{ FmtContextStamp(*m.Usage) }</span>
-									if m.Usage.CostUSD != nil {
-										<span class="stamp-cost mono">{ FmtCost(*m.Usage.CostUSD, m.Usage.CostIncomplete) }</span>
-									}
-									@turnCard(*m.Usage)
-								</span>
-							}
+							@turnCard(*m.Usage)
 						</span>
-						<span class="muted small">{ FmtTime(ctx, m.Timestamp) }</span>
-					</div>
-					if band, ok := MessageThinkingBand(agent, m); ok {
-						<div class={ "thinking-band band-" + string(band) } title="observed deliberation on this turn, on an absolute token scale (exact where the agent reports it, else estimated from the reasoning trace)">
-							<span class="thinking-band-dot"></span>
-							<span class="thinking-band-label">thinking: { ThinkingBucketLabel(band) }</span>
-						</div>
 					}
-					if m.HasThinking && m.ThinkingText != "" {
-						<details class="thinking">
-							<summary>Thinking</summary>
-							<div class="thinking-body">{ m.ThinkingText }</div>
-						</details>
-					}
-					if m.Content != "" {
-						<div class="content">{ m.Content }</div>
-					}
-					if as := attachments[m.Ordinal]; len(as) > 0 {
-						<div class="attachments">
-							for _, a := range as {
-								@AttachmentTile(a, blobBase)
-							}
-						</div>
-					}
-					if tc := tools[m.Ordinal]; len(tc) > 0 {
-						<div class="tools">
-							for _, t := range tc {
-								@ToolChip(t, blobBase)
-							}
-						</div>
+				</span>
+				<span class="muted small">{ FmtTime(ctx, m.Timestamp) }</span>
+			</div>
+			if band, ok := MessageThinkingBand(agent, m); ok {
+				<div class={ "thinking-band band-" + string(band) } title="observed deliberation on this turn, on an absolute token scale (exact where the agent reports it, else estimated from the reasoning trace)">
+					<span class="thinking-band-dot"></span>
+					<span class="thinking-band-label">thinking: { ThinkingBucketLabel(band) }</span>
+				</div>
+			}
+			if m.HasThinking && m.ThinkingText != "" {
+				<details class="thinking">
+					<summary>Thinking</summary>
+					<div class="thinking-body">{ m.ThinkingText }</div>
+				</details>
+			}
+			if m.Content != "" {
+				<div class="content">{ m.Content }</div>
+			}
+			if as := attachments[m.Ordinal]; len(as) > 0 {
+				<div class="attachments">
+					for _, a := range as {
+						@AttachmentTile(a, blobBase)
 					}
 				</div>
-				}
+			}
+			if tc := tools[m.Ordinal]; len(tc) > 0 {
+				<div class="tools">
+					for _, t := range tc {
+						@ToolChip(t, blobBase)
+					}
+				</div>
 			}
 		</div>
 	}

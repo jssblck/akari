@@ -27,6 +27,15 @@ table.grid.projects th.proj-name, table.grid.projects td.proj-name { width: 100%
    only needs to let the card overflow the row, the same as the sessions table. */
 table.grid.projects td.num { overflow: visible; }
 
+/* The index splits into a Repositories section and a Local folders section, each a
+   headed table. Space the sections apart so the second heading reads as a new group,
+   not a continuation of the first table. */
+.proj-section + .proj-section { margin-top: var(--sp-xl); }
+/* A local folder's filesystem path, one muted mono line under the folder name, so the
+   synthetic machine:path key resolves to something a reader recognizes without the
+   path growing the row: it ellipsizes and keeps the full string on hover. */
+.proj-path { margin-top: 2px; max-width: 52ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
 /* ---- Project details: the per-project quality band ---- */
 /* The Quality band sits between the usage panel and the session list, reusing the
    Insights panels (.ins-panel), their three-column grid (.ins-grid), and the shared
@@ -42,10 +51,6 @@ table.grid.projects td.num { overflow: visible; }
    the row above the same as the Insights bands. */
 .proj-quality-tools { margin-top: var(--sp-xl); }
 .proj-quality-churn { margin-top: var(--sp-xl); }
-
-/* The footnote pointing local folders at Sessions: one quiet line under the
-   table, not a second heading. */
-.projects-footnote { margin-top: var(--sp-sm); }
 
 /* ---- Project details: session filters in the page header ---- */
 /* The filter toolbar rides in the header, right-aligned beside the title (margin

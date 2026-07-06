@@ -381,6 +381,61 @@ func TestListAllSessions(t *testing.T) {
 	}
 }
 
+// TestListAllSessionsHidesSubagents pins the browse feed's default: a subagent
+// session (relationship_type = 'subagent') is out of ListAllSessions unless
+// IncludeSubagents is set. It also confirms the exclusion is feed-only, not a change
+// to the shared conds(): CountAllSessions still counts the subagent, so the drill and
+// panel invariants that read the whole cohort are untouched.
+func TestListAllSessionsHidesSubagents(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	u, err := st.Register(ctx, "grace", "hash", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	projID, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+
+	root := seedSess(t, st, u.ID, projID, "claude", "rig", "root")
+	sub := seedSess(t, st, u.ID, projID, "claude", "rig", "sub")
+	if _, err := st.Pool.Exec(ctx,
+		`UPDATE sessions SET parent_session_id = $1, relationship_type = 'subagent' WHERE id = $2`,
+		root, sub); err != nil {
+		t.Fatalf("mark subagent: %v", err)
+	}
+
+	def, _, err := st.ListAllSessions(ctx, store.SessionFilter{})
+	if err != nil {
+		t.Fatalf("default list: %v", err)
+	}
+	if got := idSet(def); got[sub] {
+		t.Errorf("default feed included subagent %d: %v", sub, got)
+	}
+	if got := idSet(def); !got[root] {
+		t.Errorf("default feed dropped root %d: %v", root, got)
+	}
+
+	withSubs, _, err := st.ListAllSessions(ctx, store.SessionFilter{IncludeSubagents: true})
+	if err != nil {
+		t.Fatalf("include-subagents list: %v", err)
+	}
+	if got := idSet(withSubs); !got[sub] || !got[root] {
+		t.Errorf("include-subagents feed missing a session: %v", got)
+	}
+
+	// The exclusion is feed-only: the shared count still sees the subagent.
+	total, _, err := st.CountAllSessions(ctx, store.SessionFilter{})
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if total != 2 {
+		t.Errorf("CountAllSessions = %d, want 2 (count is not narrowed by the feed's subagent default)", total)
+	}
+}
+
 // TestListAllSessionsSort exercises the click-to-sort ordering across every
 // sortable column, in both directions, including the keys that sort on joined or
 // computed values: project (a CASE over the projects table) and tokens (the sum of

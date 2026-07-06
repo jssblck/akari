@@ -63,8 +63,20 @@ templ sessionsToolbar(facets store.GlobalFacetValues, sel store.SessionFilter) {
 		}
 		@tbSelect("Project", "project") {
 			<option value="" selected?={ sel.ProjectID == 0 }>All projects</option>
-			for _, pf := range facets.Projects {
-				<option value={ fmt.Sprintf("%d", pf.ID) } selected?={ sel.ProjectID == pf.ID }>{ ProjectFacetLabel(pf) }</option>
+			{{ repos, folders := SplitProjectFacets(facets.Projects) }}
+			if len(repos) > 0 {
+				<optgroup label="Repositories">
+					for _, pf := range repos {
+						<option value={ fmt.Sprintf("%d", pf.ID) } selected?={ sel.ProjectID == pf.ID }>{ ProjectFacetLabel(pf) }</option>
+					}
+				</optgroup>
+			}
+			if len(folders) > 0 {
+				<optgroup label="Local folders">
+					for _, pf := range folders {
+						<option value={ fmt.Sprintf("%d", pf.ID) } selected?={ sel.ProjectID == pf.ID }>{ ProjectFacetLabel(pf) }</option>
+					}
+				</optgroup>
 			}
 		}
 		if len(facets.Machines) > 1 {
@@ -82,6 +94,10 @@ templ sessionsToolbar(facets store.GlobalFacetValues, sel store.SessionFilter) {
 					<option value={ u.Value } selected?={ sel.Username == u.Value }>{ u.Value }</option>
 				}
 			}
+		}
+		@tbSelect("Subagents", "subagents") {
+			<option value="" selected?={ !sel.IncludeSubagents }>Hidden</option>
+			<option value="1" selected?={ sel.IncludeSubagents }>Shown</option>
 		}
 		<span class="spacer"></span>
 		@tbSelect("Sort", "sort") {
@@ -176,30 +192,57 @@ templ activeRangeChip(sel store.SessionFilter) {
 
 // GlobalSessionList renders the cross-project session feed: rows grouped under day
 // headings (in the default most-recent order) or as a flat ranked list (any other
-// sort). It is the body of the Sessions page. Each row carries the session's
-// metadata (project, branch, agent, message count, token volume, time); lilac is
-// reserved for the active filter, never spent per row.
+// sort), closed by the feed's self-replacing tail (feedMore). It is the body of the
+// Sessions page. Each row carries the session's metadata (project, branch, agent,
+// message count, token volume, time); lilac is reserved for the active filter, never
+// spent per row. The tail sits inside .feed as its last child, so a keyset "Show more"
+// appends the next page in place (see feedMore) rather than re-rendering the whole list.
 templ GlobalSessionList(rows []store.SessionRow, sel store.SessionFilter, footer SessionFooter) {
-	if len(rows) == 0 {
-		<div class="empty">No sessions match these filters.</div>
-		@sessionFooter(footer)
-	} else {
-		<div class="feed">
-			for _, g := range BuildSessionFeed(ctx, rows, FeedIsGrouped(sel)) {
-				if g.Label != "" {
-					<div class="day-head">
-						<span class="day-label label">{ g.Label }</span>
-						<span class="day-rule"></span>
-						<span class="day-count mono small">{ fmt.Sprintf("%d", len(g.Rows)) }</span>
-					</div>
+	<div class="feed">
+		if len(rows) == 0 {
+			<div class="empty">No sessions match these filters.</div>
+		} else {
+			@feedGroups(BuildSessionFeed(ctx, rows, FeedIsGrouped(sel), "", footer.MaxTok), footer.HasMore)
+		}
+		@feedMore(footer)
+	</div>
+}
+
+// feedGroups renders the day-grouped (or flat) session rows shared by the first page and
+// every appended keyset page, so a "Show more" continuation renders rows identically to
+// the initial load. hasMore suppresses the numeric count on the last day's heading: that
+// day may spill onto the next page, and an exact full-day count would cost a corpus
+// aggregate the keyset feed deliberately avoids, so a boundary-spanning day shows its
+// heading without a figure rather than a frozen undercount. A day fully on the page keeps
+// its count.
+templ feedGroups(groups []SessionDayGroup, hasMore bool) {
+	for i, g := range groups {
+		if g.Label != "" {
+			<div class="day-head">
+				<span class="day-label label">{ g.Label }</span>
+				<span class="day-rule"></span>
+				if !(hasMore && i == len(groups)-1) {
+					<span class="day-count mono small">{ fmt.Sprintf("%d", len(g.Rows)) }</span>
 				}
-				for _, fr := range g.Rows {
-					@feedRow(fr)
-				}
-			}
-		</div>
-		@sessionFooter(footer)
+			</div>
+		}
+		for _, fr := range g.Rows {
+			@feedRow(fr)
+		}
 	}
+}
+
+// FeedAppend is the fragment a keyset "Show more" returns: the next page's rows followed
+// by a fresh feedMore tail. The button targets #feed-more with an outerHTML swap, so this
+// fragment replaces the old tail in place: the new rows land at the end of .feed (where
+// the tail sat) and the new tail follows them, re-armed with the next cursor. prevKey is
+// the day-bucket key of the row the previous page ended on (the cursor's day): buildSessionFeed
+// drops the leading heading when this page continues that same day, so a page boundary never
+// reprints "Today". It builds the groups here, off the render ctx, so the row grouping and the
+// day-continuation use the same viewer zone the first page did.
+templ FeedAppend(rows []store.SessionRow, sel store.SessionFilter, footer SessionFooter, prevKey string) {
+	@feedGroups(BuildSessionFeed(ctx, rows, FeedIsGrouped(sel), prevKey, footer.MaxTok), footer.HasMore)
+	@feedMore(footer)
 }
 
 // feedRow renders one session as a metadata line over a muted second line. The
@@ -218,17 +261,27 @@ templ feedRow(fr FeedRow) {
 					<span class="srow-branch mono">{ fr.Row.GitBranch }</span>
 				}
 				@kindTag(fr.Row.ProjectKind)
+				if fr.Row.Grade != nil {
+					<span class={ "tag grade " + RowGradeClass(fr.Row.Grade) } title="quality grade">{ *fr.Row.Grade }</span>
+				}
+				if note := RowOutcomeNote(fr.Row.Outcome); note != "" {
+					<span class="tag outcome" title="session outcome">{ note }</span>
+				}
 				if fr.Row.Visibility == "public" {
 					<span class="tag public">public</span>
 				}
 				if fr.Row.ModelFallbackCount > 0 {
 					<span class="tag warn" title={ FallbackBadgeTitle(fr.Row.ModelFallbackCount) }>{ FallbackBadgeLabel(fr.Row.ModelFallbackCount) }</span>
 				}
+				if fr.Row.Tree.SubagentCount > 0 {
+					<span class="tag fanout" title={ FanoutTitle(fr.Row.Tree) }>{ FanoutLabel(fr.Row.Tree) }</span>
+				}
 			</div>
 			if fr.Row.Search.Has() {
 				@snippetLine(fr.Row.Search)
-			} else if fr.Row.Title != "" {
-				<div class="srow-sub" title={ fr.Row.Title }>{ fr.Row.Title }</div>
+			} else if StripPromptPreamble(fr.Row.Title) != "" {
+				{{ title := StripPromptPreamble(fr.Row.Title) }}
+				<div class="srow-sub" title={ title }>{ title }</div>
 			}
 		</div>
 		<span class="srow-msgs mono small" title="messages">{ fmt.Sprintf("%d", fr.Row.MessageCount) }</span>
@@ -248,12 +301,15 @@ templ snippetLine(s store.SearchSnippet) {
 	</div>
 }
 
-// sessionFooter is the line under the feed: the "N of M" count on the left, and on
-// the right a "Show more" button (or the at-cap note), with the empty-hidden toggle
-// when the scope holds an empty session. It is terse by rule: figures and one-word
-// verbs, nuance in titles.
-templ sessionFooter(ft SessionFooter) {
-	<div class="feed-footer">
+// feedMore is the feed's self-replacing tail: the running session count, the empty-hidden
+// toggle, and the keyset "Show more" control, rendered as the last child of .feed. On
+// "Show more" it replaces itself (hx-target #feed-more, hx-swap outerHTML) with the next
+// page's rows plus a fresh tail, so each click appends a page and re-arms the cursor
+// without re-rendering the rows already on screen. The href is a real next-slice URL so
+// the control still works without JavaScript, degrading to plain navigation. It is terse
+// by rule: figures and one-word verbs, nuance in titles.
+templ feedMore(ft SessionFooter) {
+	<div id="feed-more" class="feed-footer">
 		<span class="feed-count mono small">{ ft.CountLabel() }</span>
 		<span class="spacer"></span>
 		if ft.HasEmptyToggle() {
@@ -269,13 +325,10 @@ templ sessionFooter(ft SessionFooter) {
 				class="small showmore"
 				href={ templ.SafeURL(ft.MoreHref) }
 				hx-get={ ft.MoreHref }
-				hx-target="#session-list"
-				hx-select="#session-list"
+				hx-target="#feed-more"
 				hx-swap="outerHTML"
-				hx-push-url="true"
+				hx-push-url="false"
 			>Show more</a>
-		} else if ft.AtCap {
-			<span class="feed-cap muted small" title="Narrow by filter or search to see more">at cap</span>
 		}
 	</div>
 }

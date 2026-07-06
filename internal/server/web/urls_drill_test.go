@@ -10,8 +10,9 @@ import (
 
 // TestSessionsQueryRoundTrip pins that every filter field the session list carries
 // round-trips through sessionsQuery/SessionsPath: a filter with q, grade, outcome,
-// range, empty, and a grown limit all serialize, and the encoding stays stable
-// (sorted keys) so a swap target and a facet link agree byte for byte.
+// range, and empty all serialize, and the encoding stays stable (sorted keys) so a swap
+// target and a facet link agree byte for byte. Paging state (the keyset cursor) never
+// rides the base path: it is appended only by ShowMorePath.
 func TestSessionsQueryRoundTrip(t *testing.T) {
 	f := store.SessionFilter{
 		Query:        "refactor pricing",
@@ -19,7 +20,6 @@ func TestSessionsQueryRoundTrip(t *testing.T) {
 		Outcome:      "completed",
 		Range:        "30d",
 		IncludeEmpty: true,
-		Limit:        200,
 	}
 	got := SessionsPath(f)
 	if !strings.HasPrefix(got, SessionsBasePath+"?") {
@@ -35,17 +35,21 @@ func TestSessionsQueryRoundTrip(t *testing.T) {
 		"outcome": "completed",
 		"range":   "30d",
 		"empty":   "1",
-		"limit":   "200",
 	} {
 		if got := q.Get(key); got != want {
 			t.Errorf("round-trip %s = %q, want %q (full path %q)", key, got, want, got)
 		}
 	}
+	// Paging state is never in the base path: neither the retired limit nor the keyset
+	// cursor serialize, so a swap target stays the clean filter path.
+	if q.Get("limit") != "" || q.Get("after") != "" || q.Get("count") != "" {
+		t.Errorf("base path should carry no paging state, got %v", q)
+	}
 
-	// The default page size is NOT serialized (the bare limit is implied), so a
-	// first-page filter stays a clean path.
-	if got := SessionsPath(store.SessionFilter{Limit: DefaultSessionLimit}); got != SessionsBasePath {
-		t.Errorf("default-limit path = %q, want the bare /sessions", got)
+	// A filter carrying only paging state (a limit, a cursor) still serializes to the bare
+	// path: the cursor rides only ShowMorePath, never the base.
+	if got := SessionsPath(store.SessionFilter{Limit: DefaultSessionLimit, After: 42}); got != SessionsBasePath {
+		t.Errorf("paging-only filter path = %q, want the bare /sessions", got)
 	}
 	// A bare filter is the bare path.
 	if got := SessionsPath(store.SessionFilter{}); got != SessionsBasePath {
@@ -72,19 +76,20 @@ func TestAnyFilterActiveDrillBranches(t *testing.T) {
 }
 
 // TestClearHrefsDropOnlyTheirField pins that each chip's clear link drops exactly its
-// own field and holds the rest, and that the two that reset paging (search, empty) do
-// so while grade/outcome/range leave the page size alone.
+// own field and holds the rest. The base path never carries paging state, so a cleared
+// link naturally reopens at the first page (no cursor) without any field having to be
+// explicitly reset.
 func TestClearHrefsDropOnlyTheirField(t *testing.T) {
-	// A filter with every field set, plus a grown page, so a clear that wrongly touched
-	// another field would show in the round-trip.
+	// A filter with every narrowing field set, so a clear that wrongly touched another
+	// field would show in the round-trip.
 	base := store.SessionFilter{
 		Agent: "claude", Username: "ada", Query: "q",
 		Grade: "A", Outcome: "completed", Range: "30d",
-		IncludeEmpty: true, Limit: 200,
+		IncludeEmpty: true,
 	}
-	// GradeClearHref drops grade, keeps outcome, range, and the grown limit.
+	// GradeClearHref drops grade, keeps outcome and range.
 	g := mustQuery(t, string(GradeClearHref(base)))
-	if g.Get("grade") != "" || g.Get("outcome") != "completed" || g.Get("range") != "30d" || g.Get("limit") != "200" {
+	if g.Get("grade") != "" || g.Get("outcome") != "completed" || g.Get("range") != "30d" {
 		t.Errorf("GradeClearHref should drop only grade, got %v", g)
 	}
 	// OutcomeClearHref drops outcome, keeps grade.
@@ -97,39 +102,22 @@ func TestClearHrefsDropOnlyTheirField(t *testing.T) {
 	if r.Get("range") != "" || r.Get("grade") != "A" || r.Get("outcome") != "completed" {
 		t.Errorf("RangeClearHref should drop only range, got %v", r)
 	}
-	// SearchClearHref drops q AND resets the page (the expanded limit was scoped to the
-	// search results), while holding the facets and drill fields.
+	// SearchClearHref drops q AND resets the page to the first (it carries no keyset
+	// cursor, so the feed reopens at the top), while holding the facets and drill fields.
 	s := mustQuery(t, string(SearchClearHref(base)))
-	if s.Get("q") != "" || s.Get("limit") != "" || s.Get("grade") != "A" || s.Get("agent") != "claude" {
-		t.Errorf("SearchClearHref should drop q and limit, hold the rest, got %v", s)
+	if s.Get("q") != "" || s.Get("after") != "" || s.Get("grade") != "A" || s.Get("agent") != "claude" {
+		t.Errorf("SearchClearHref should drop q and the cursor, hold the rest, got %v", s)
 	}
-	// EmptyToggleHref flips empty and resets the page (the visible count changes), while
-	// holding the facets and drill fields.
+	// EmptyToggleHref flips empty and resets the page (the visible count changes, so the
+	// feed reopens at the top with no cursor), while holding the facets and drill fields.
 	e := mustQuery(t, string(EmptyToggleHref(base)))
-	if e.Get("empty") != "" || e.Get("limit") != "" || e.Get("grade") != "A" {
-		t.Errorf("EmptyToggleHref from shown should drop empty and reset limit, got %v", e)
+	if e.Get("empty") != "" || e.Get("after") != "" || e.Get("grade") != "A" {
+		t.Errorf("EmptyToggleHref from shown should drop empty and the cursor, got %v", e)
 	}
 	// From a hidden state the toggle turns empties on.
 	on := mustQuery(t, string(EmptyToggleHref(store.SessionFilter{Agent: "claude"})))
 	if on.Get("empty") != "1" || on.Get("agent") != "claude" {
 		t.Errorf("EmptyToggleHref from hidden should set empty=1 and hold the facet, got %v", on)
-	}
-}
-
-// TestNextSessionLimit pins the doubling and clamp: an unset limit starts at the
-// default, doubles toward the cap, and never exceeds it.
-func TestNextSessionLimit(t *testing.T) {
-	if got := NextSessionLimit(0); got != DefaultSessionLimit*2 {
-		t.Errorf("NextSessionLimit(0) = %d, want the default doubled %d", got, DefaultSessionLimit*2)
-	}
-	if got := NextSessionLimit(DefaultSessionLimit); got != DefaultSessionLimit*2 {
-		t.Errorf("NextSessionLimit(default) = %d, want %d", got, DefaultSessionLimit*2)
-	}
-	if got := NextSessionLimit(300); got != MaxSessionLimit {
-		t.Errorf("NextSessionLimit(300) = %d, want the cap %d (600 clamps down)", got, MaxSessionLimit)
-	}
-	if got := NextSessionLimit(MaxSessionLimit); got != MaxSessionLimit {
-		t.Errorf("NextSessionLimit(cap) = %d, want to stay at the cap", got)
 	}
 }
 

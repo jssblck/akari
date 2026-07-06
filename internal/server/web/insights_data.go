@@ -495,13 +495,22 @@ var fanoutLabels = map[string]string{
 }
 
 func subagentsData(s store.SubagentStats) map[string]any {
+	// Every bucket row must carry every fan-out key, even a bucket with no delegation.
+	// The client sums each row over FanoutOrder to size the stack; a key absent from the
+	// row reads as undefined in JS, and undefined poisons the sum to NaN, which collapses
+	// the whole chart's Y domain and paints "NaN" axis labels over a blank plot. Zero-fill
+	// the absent keys so an empty bucket stacks to zero height rather than blanking the
+	// instrument.
 	fanoutRows := make([]map[string]int, len(s.FanoutRows))
 	for i, r := range s.FanoutRows {
-		if r != nil {
-			fanoutRows[i] = r
-		} else {
-			fanoutRows[i] = map[string]int{}
+		row := make(map[string]int, len(s.FanoutOrder))
+		for _, k := range s.FanoutOrder {
+			row[k] = 0
 		}
+		for k, v := range r {
+			row[k] = v
+		}
+		fanoutRows[i] = row
 	}
 	return map[string]any{
 		"delegateShare":              s.DelegateShare,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strconv"
 	"time"
 
 	"github.com/jssblck/akari/internal/server/store"
@@ -24,9 +25,10 @@ type FeedRow struct {
 	// the same day group, so the template can mute the repeated label and let a run
 	// of same-project sessions read as one burst rather than a stuttering column.
 	FadeProject bool
-	// TokenPct is the row's total token volume as a percent of the feed's largest
-	// session, backing a magnitude bar so the big runs stand out without the reader
-	// parsing seven-digit figures. It is 0 for a zero-token session.
+	// TokenPct is the row's total token volume as a percent of the feed's token
+	// denominator (the largest session on the first loaded page, held stable across
+	// keyset pages), backing a magnitude bar so the big runs stand out without the
+	// reader parsing seven-digit figures. It is 0 for a zero-token session.
 	TokenPct int
 }
 
@@ -42,25 +44,52 @@ type SessionDayGroup struct {
 // most-recent order) the rows, already sorted newest first, are split under day
 // headings ("Today", "Yesterday", a weekday, then a date); otherwise they form a
 // single unlabeled group in the order the query returned. Within a group a row
-// whose project repeats the previous row's is flagged to mute its label. Token
-// bars scale against the largest session across the whole feed, so magnitudes are
-// comparable between groups.
-func BuildSessionFeed(ctx context.Context, rows []store.SessionRow, grouped bool) []SessionDayGroup {
-	return buildSessionFeed(time.Now(), Loc(ctx), rows, grouped)
+// whose project repeats the previous row's is flagged to mute its label. maxTok is
+// the token-bar denominator every row scales against: the first page establishes it
+// (FeedMaxTokens) and the keyset "Show more" carries it forward, so a bar's width
+// means the same magnitude on page three as on page one rather than re-normalizing
+// to each appended page's own maximum.
+func BuildSessionFeed(ctx context.Context, rows []store.SessionRow, grouped bool, prevKey string, maxTok int64) []SessionDayGroup {
+	return buildSessionFeed(time.Now(), Loc(ctx), rows, grouped, prevKey, maxTok)
 }
 
-// buildSessionFeed is BuildSessionFeed's clock- and zone-injected core, so the day
-// headings are testable without mocking the wall clock, and a session buckets under
-// the viewer's local calendar date rather than UTC's.
-func buildSessionFeed(now time.Time, loc *time.Location, rows []store.SessionRow, grouped bool) []SessionDayGroup {
-	if len(rows) == 0 {
-		return nil
-	}
+// FeedMaxTokens is the token-bar denominator for a page of feed rows: the largest
+// session's total token volume across the page. The first page computes it and the
+// keyset "Show more" carries it forward (SessionFooter.MaxTok) so every appended page
+// scales its bars against the same reference the reader already sees. Recomputing it
+// per page would make a bar's width incomparable across a "Show more" boundary: a page
+// of small sessions would render them full-width against their own small maximum. A
+// later page holding a session larger than this denominator clamps to a full bar
+// (tokenPct caps at 100), which reads as "the biggest so far" rather than misleading.
+func FeedMaxTokens(rows []store.SessionRow) int64 {
 	var maxTok int64
 	for _, r := range rows {
 		if t := RowTokens(r.SessionSummary); t > maxTok {
 			maxTok = t
 		}
+	}
+	return maxTok
+}
+
+// FeedDayKey is the day-bucket key of a timestamp in the viewer's zone, the same key
+// buildSessionFeed groups on. The keyset "Show more" carries the last rendered row's key so
+// the appended page can suppress a repeated day heading when it continues the same day (a
+// page boundary must not print "Today" twice). It is empty for a missing timestamp, matching
+// the undated bucket.
+func FeedDayKey(ctx context.Context, t *time.Time) string {
+	key, _ := dayBucket(time.Now(), Loc(ctx), t)
+	return key
+}
+
+// buildSessionFeed is BuildSessionFeed's clock- and zone-injected core, so the day
+// headings are testable without mocking the wall clock, and a session buckets under
+// the viewer's local calendar date rather than UTC's. prevKey is the day-bucket key of
+// the row immediately before this slice (the last row of the previous keyset page), or ""
+// on the first page: when the first group's day matches it, that group's heading is dropped
+// so an appended page continues the previous day rather than re-printing its heading.
+func buildSessionFeed(now time.Time, loc *time.Location, rows []store.SessionRow, grouped bool, prevKey string, maxTok int64) []SessionDayGroup {
+	if len(rows) == 0 {
+		return nil
 	}
 
 	var groups []SessionDayGroup
@@ -73,6 +102,12 @@ func buildSessionFeed(now time.Time, loc *time.Location, rows []store.SessionRow
 		if grouped {
 			key, label := dayBucket(now, loc, r.LastActiveAt)
 			if !started || key != curKey {
+				// Drop the heading on the very first group when it continues the day the
+				// previous keyset page ended on, so an appended "Show more" page does not
+				// reprint a heading ("Today") the DOM already shows above it.
+				if !started && key == prevKey {
+					label = ""
+				}
 				groups = append(groups, SessionDayGroup{Label: label})
 				curKey = key
 				prevProj = ""
@@ -228,6 +263,34 @@ func barStyle(pct int) string {
 	return fmt.Sprintf("width:%d%%", pct)
 }
 
+// FanoutLabel is the fan-out chip's text: the subtree's subagent count and its
+// whole-work-item cost, joined so a reader sees at a glance both how wide a prompt
+// fanned out and what the whole thing cost. The count is singular at one ("1
+// subagent"), and the cost carries the "+" lower-bound marker when any session in the
+// subtree could not be fully priced. It is only ever rendered when the count is
+// positive, so it never reads "0 subagents".
+func FanoutLabel(tr store.TreeRollup) string {
+	unit := "subagents"
+	if tr.SubagentCount == 1 {
+		unit = "subagent"
+	}
+	return fmt.Sprintf("%d %s · %s", tr.SubagentCount, unit, FmtCost(tr.CostUSD, tr.CostIncomplete))
+}
+
+// FanoutTitle is the fan-out chip's hover text, spelling out that the chip's cost is
+// the whole work item's, not the root turn's. The row's own token cell shows the root
+// session's own cost; a prompt that delegated to subagents spent far more than that
+// root turn, and this line names that gap so the two cost figures do not read as a
+// contradiction.
+func FanoutTitle(tr store.TreeRollup) string {
+	unit := "subagents"
+	if tr.SubagentCount == 1 {
+		unit = "subagent"
+	}
+	return fmt.Sprintf("Whole work item: %s across %d %s fanned out (the row's own cost is the root turn's alone)",
+		FmtCost(tr.CostUSD, tr.CostIncomplete), tr.SubagentCount, unit)
+}
+
 // FeedTime is the clock time a feed row shows, in the viewer's timezone. The day
 // already rides the group heading, so the row needs only the time of day; the exact
 // stamp is the cell's title on hover.
@@ -272,20 +335,25 @@ func SplitSnippet(s store.SearchSnippet) SnippetParts {
 // the page rather than the corpus: the old "N of M" carried a count(*) over the whole
 // matching history, which the incremental-efficiency gate flagged.
 type SessionFooter struct {
-	// Shown is how many rows the feed currently renders. When HasMore is false it is
-	// also the exact total, since the whole matching set fit in the page; when HasMore
-	// is true more rows match beyond it and the count reads "Showing N".
+	// Shown is how many rows the feed renders cumulatively: on the first page it is
+	// len(rows), and on each keyset "Show more" it is the prior total plus the appended
+	// page, so the count grows as the reader loads deeper. When HasMore is false it is the
+	// exact total (the whole set is loaded); when HasMore is true it reads "Showing N".
 	Shown int
-	// HasMore reports that at least one more row matches past the page (from
-	// ListAllSessions' limit+1 probe), so the footer offers the next page and the count
-	// reads "Showing N" rather than the exact "N sessions".
+	// HasMore reports that at least one more row matches past the loaded pages (from
+	// ListAllSessions' limit+1 probe), so the footer offers "Show more" and the count reads
+	// "Showing N" rather than the exact "N sessions".
 	HasMore bool
-	// MoreHref is the "Show more" target (a doubled-limit path), set only when more
-	// rows match than are shown and the page is below the cap.
+	// MoreHref is the "Show more" target: a keyset path carrying the last row's id as the
+	// cursor (and, in the day-grouped order, its day key), set only when more rows match.
+	// The button appends the next page onto the feed rather than re-rendering it, so depth
+	// is unbounded; there is no cap.
 	MoreHref string
-	// AtCap reports the feed is showing the maximum page (500) yet more match, so the
-	// footer names the cap and drops the button, asking the reader to narrow instead.
-	AtCap bool
+	// MaxTok is the feed's token-bar denominator, the largest session's token volume on
+	// the first loaded page. It rides the "Show more" cursor so each appended page scales
+	// its bars against the same reference the first page set, keeping a bar's width
+	// comparable across pages rather than re-normalizing to each page's own maximum.
+	MaxTok int64
 	// HasEmpty reports whether the current scope holds at least one empty (zero-message)
 	// session, so the toggle appears only when it would change the feed; IncludeEmpty
 	// reports whether those empties are being shown. Together they drive the terse
@@ -295,26 +363,28 @@ type SessionFooter struct {
 	EmptyHref    string
 }
 
-// BuildSessionFooter assembles the footer state from the loaded rows, the filter, and
-// two bounded probes: hasMore (does a further page exist) and hasEmpty (does any empty
-// session sit in scope). shown is len(rows); the "Show more" button appears only when
-// more rows match and the page is below the cap, and the empty toggle appears only
-// when the scope actually holds an empty session (or already shows them, so the reader
-// can hide them again).
-func BuildSessionFooter(f store.SessionFilter, shown int, hasMore, hasEmpty bool) SessionFooter {
+// BuildSessionFooter assembles the footer state from the loaded page and two bounded probes:
+// hasMore (does a further page exist, from the limit+1 read) and hasEmpty (does any empty
+// session sit in scope). priorCount is the running total already shown before this page (0 on
+// the first page, the cumulative count on a keyset append), so Shown reports the whole loaded
+// feed. lastDayKey is the day-bucket key of the page's last row, carried into the "Show more"
+// cursor so the next appended page can continue the same day without reprinting its heading;
+// it is empty for a flat (non-grouped) order, where day headings do not apply. maxTok is the
+// feed's token-bar denominator (FeedMaxTokens of the first page), carried into the "Show more"
+// cursor so appended pages scale their bars against the same reference. The "Show more" link
+// appears only when more rows match, and the empty toggle only when the scope holds an empty
+// session (or already shows them, so the reader can hide them again).
+func BuildSessionFooter(f store.SessionFilter, rows []store.SessionRow, priorCount int, hasMore, hasEmpty bool, lastDayKey string, maxTok int64) SessionFooter {
 	ft := SessionFooter{
-		Shown:        shown,
+		Shown:        priorCount + len(rows),
 		HasMore:      hasMore,
 		HasEmpty:     hasEmpty,
 		IncludeEmpty: f.IncludeEmpty,
+		MaxTok:       maxTok,
 	}
-	limit := effLimit(f)
-	switch {
-	case hasMore && limit >= MaxSessionLimit:
-		// At the cap with more matching: name the cap, no button, narrow instead.
-		ft.AtCap = true
-	case hasMore:
-		ft.MoreHref = ShowMorePath(f)
+	if hasMore && len(rows) > 0 {
+		last := rows[len(rows)-1]
+		ft.MoreHref = ShowMorePath(f, last.ID, keysetCursorValue(f, last), lastDayKey, ft.Shown, maxTok)
 	}
 	// The empty toggle is relevant only when hiding actually withholds something (or
 	// when already showing empties, so the reader can hide them again). Either way a
@@ -323,6 +393,57 @@ func BuildSessionFooter(f store.SessionFilter, shown int, hasMore, hasEmpty bool
 		ft.EmptyHref = string(EmptyToggleHref(f))
 	}
 	return ft
+}
+
+// keysetCursorValue formats the sort value of the feed's last visible row for the current
+// order, so "Show more" can carry the boundary the page actually saw. The next page then
+// resumes from that fixed value even if the cursor row's own column later moves (activity bumps
+// last_active_at, a rebuild moves a count or cost), which would otherwise duplicate or skip rows
+// (see store.SessionFilter.AfterVal and keysetCond). It returns "" for an order with no keyset
+// cursor, where the value is unused. Each format is the exact, round-trippable text of the
+// column's type: RFC3339 for the timestamp, plain integers for the counts, and the shortest
+// float text for the cost (a double precision column, so the text casts back to the same
+// float64). total_tokens sums the same four token classes migration 0014's generated column
+// does, so the Go sum equals the value the query sorted by.
+func keysetCursorValue(f store.SessionFilter, row store.SessionRow) string {
+	switch effSort(f) {
+	case store.DefaultSort: // "updated" -> last_active_at
+		if row.LastActiveAt == nil {
+			return ""
+		}
+		return row.LastActiveAt.UTC().Format(time.RFC3339Nano)
+	case "tokens":
+		return strconv.FormatInt(row.TotalInput+row.TotalOutput+row.TotalCacheRead+row.TotalCacheWrite, 10)
+	case "messages":
+		return strconv.Itoa(row.MessageCount)
+	case "cost":
+		return strconv.FormatFloat(row.TotalCostUSD, 'g', -1, 64)
+	default:
+		return ""
+	}
+}
+
+// ValidKeysetValue reports whether val is a well-formed cursor value for the given feed sort
+// key, so the handler can drop a tampered ?av (which would otherwise fail the SQL cast and 500)
+// and fall back to the id-only cursor. It mirrors keysetCursorValue's per-column formats; an
+// empty key reads as the default order, and a non-keyset order accepts no value.
+func ValidKeysetValue(sortKey, val string) bool {
+	if sortKey == "" {
+		sortKey = store.DefaultSort
+	}
+	switch sortKey {
+	case store.DefaultSort:
+		_, err := time.Parse(time.RFC3339Nano, val)
+		return err == nil
+	case "tokens", "messages":
+		_, err := strconv.ParseInt(val, 10, 64)
+		return err == nil
+	case "cost":
+		_, err := strconv.ParseFloat(val, 64)
+		return err == nil
+	default:
+		return false
+	}
 }
 
 // HasEmptyToggle reports whether the footer shows the empty-hidden toggle.
