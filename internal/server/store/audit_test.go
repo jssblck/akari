@@ -4,12 +4,15 @@ import (
 	"context"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/jssblck/akari/internal/server/store"
 )
 
-// setSessionCost stamps a session's rolled-up cost, which the audit's wasted-spend sum and
-// its costly-tier percentile both read straight off the session row (no usage_events join).
+// setSessionCost stamps a session's rolled-up cost, which the audit's costly-tier percentile
+// and each attention row's CostUSD read straight off the session row. The wasted-spend sum no
+// longer reads this column: it prices from usage_events dated by occurred_at (see wastedSpend),
+// so a test that asserts WastedUSD seeds usage_events for the failed runs as well.
 func setSessionCost(t *testing.T, st *store.Store, ctx context.Context, sid int64, cost float64) {
 	t.Helper()
 	if _, err := st.Pool.Exec(ctx, `UPDATE sessions SET total_cost_usd = $2 WHERE id = $1`, sid, cost); err != nil {
@@ -49,10 +52,15 @@ func TestOverviewAudit(t *testing.T) {
 	errored := seedSession(t, st, uid, pid, "errored")
 	insertGradeOutcomeSignal(t, st, ctx, errored, g("F"), "errored")
 	setSessionCost(t, st, ctx, errored, 5.00)
+	// The wasted-spend sum prices the failed runs from their dated usage_events, so seed the
+	// errored and abandoned runs' spend on the time axis; the session row's cost still feeds the
+	// costly-tier percentile and the attention CostUSD.
+	seedUsage(t, st, errored, "claude-opus-4-8", 5.00, 1000, 500, 1, "audit-errored-ue")
 
 	abandoned := seedSession(t, st, uid, pid, "abandoned")
 	insertGradeOutcomeSignal(t, st, ctx, abandoned, nil, "abandoned")
 	setSessionCost(t, st, ctx, abandoned, 3.00)
+	seedUsage(t, st, abandoned, "claude-opus-4-8", 3.00, 800, 400, 1, "audit-abandoned-ue")
 
 	gradedD := seedSession(t, st, uid, pid, "graded-d")
 	insertGradeOutcomeSignal(t, st, ctx, gradedD, g("D"), "completed")
@@ -105,8 +113,9 @@ func TestOverviewAudit(t *testing.T) {
 	if rate := au.CompletionRate(); math.Abs(rate-(4.0/6.0*100)) > 1e-9 {
 		t.Errorf("CompletionRate() = %v, want %v", rate, 4.0/6.0*100)
 	}
-	// Wasted spend is the errored ($5) plus abandoned ($3) top-level cost; the subagent's $9
-	// and the completed runs' cost are not waste.
+	// Wasted spend is the errored ($5) plus abandoned ($3) top-level runs' dated usage; the
+	// subagent's $9 and the completed runs' cost are not waste. The completed and costly runs
+	// carry no usage_events here, so only the two failed runs contribute to the sum.
 	if math.Abs(au.WastedUSD-8.00) > 1e-9 {
 		t.Errorf("WastedUSD = %v, want 8.00", au.WastedUSD)
 	}
@@ -162,11 +171,16 @@ func TestOverviewAuditCostsAreDirect(t *testing.T) {
 	root := seedSession(t, st, uid, pid, "errored-root")
 	insertGradeOutcomeSignal(t, st, ctx, root, g("F"), "errored")
 	setSessionCost(t, st, ctx, root, 2.00)
+	// The wasted-spend sum prices from dated usage_events, so seed the root's own $2 and the
+	// subagent's $50 on the time axis. wastedSpend keeps only the top-level root's events, so
+	// the subtree's $50 must not fold into the direct figure.
+	seedUsage(t, st, root, "claude-opus-4-8", 2.00, 500, 250, 1, "direct-root-ue")
 
 	// An expensive subagent under that failed root. Its spend is part of the work item's
 	// whole-tree cost, but the audit excludes subagents and counts only the root's own cost.
 	sub := seedSession(t, st, uid, pid, "expensive-subagent")
 	setSessionCost(t, st, ctx, sub, 50.00)
+	seedUsage(t, st, sub, "claude-opus-4-8", 50.00, 20000, 10000, 1, "direct-sub-ue")
 	linkSubagent(t, st, ctx, root, sub)
 
 	au, err := st.OverviewAudit(ctx, store.AnalyticsFilter{ProjectID: pid})
@@ -185,6 +199,47 @@ func TestOverviewAuditCostsAreDirect(t *testing.T) {
 	}
 	if math.Abs(got.CostUSD-2.00) > 1e-9 {
 		t.Errorf("Attention[0].CostUSD = %v, want 2.00 (direct root cost, not the whole-tree $52)", got.CostUSD)
+	}
+}
+
+// TestOverviewAuditWastedSpendTracksOccurredAt pins the fix for the Spend tile's basis
+// mismatch: WastedUSD shares the Spend total's usage_events occurred_at window, not the
+// session-started window the verdict counts use. A run that started before the window but
+// burned tokens inside it is money the window spent, so the Spend total counts it and the "on
+// failed runs" subfigure has to count it too, or the subfigure would claim to be a slice of a
+// total it sits outside. The run is not a work item of this window (it did not start here), yet
+// its in-window failed spend still lands in WastedUSD; on the old session-started basis it was
+// silently dropped.
+func TestOverviewAuditWastedSpendTracksOccurredAt(t *testing.T) {
+	t.Parallel()
+	st, ctx, uid, pid := signalsEnv(t)
+
+	// A run that started well before the window and was abandoned, but whose usage landed
+	// inside the window.
+	old := seedSession(t, st, uid, pid, "started-before-window")
+	insertGradeOutcomeSignal(t, st, ctx, old, nil, "abandoned")
+	setSessionCost(t, st, ctx, old, 4.00)
+	if _, err := st.Pool.Exec(ctx,
+		`UPDATE sessions SET started_at = now() - make_interval(days => 10) WHERE id = $1`, old); err != nil {
+		t.Fatalf("backdate session start: %v", err)
+	}
+	seedUsage(t, st, old, "claude-opus-4-8", 4.00, 900, 450, 1, "occurred-in-window-ue")
+
+	// A window that opens after the run started but before its usage occurred.
+	f := store.AnalyticsFilter{ProjectID: pid, Since: time.Now().Add(-3 * 24 * time.Hour)}
+	au, err := st.OverviewAudit(ctx, f)
+	if err != nil {
+		t.Fatalf("overview audit: %v", err)
+	}
+
+	// The run started before the window, so it is not one of the window's work items.
+	if au.WorkItems != 0 {
+		t.Errorf("WorkItems = %d, want 0 (the run started before the window opened)", au.WorkItems)
+	}
+	// But its failed spend occurred inside the window, so it is wasted spend of this window, the
+	// same usage the Spend total counts. On the old session-started basis this would have been 0.
+	if math.Abs(au.WastedUSD-4.00) > 1e-9 {
+		t.Errorf("WastedUSD = %v, want 4.00 (in-window usage of a run that started earlier)", au.WastedUSD)
 	}
 }
 

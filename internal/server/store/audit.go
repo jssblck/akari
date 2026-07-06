@@ -38,16 +38,23 @@ type AuditSummary struct {
 	// coverage the average speaks for rather than a bare number.
 	Graded      int
 	GradePoints float64
-	// WastedUSD is the direct cost of the errored and abandoned work items: each failed
-	// top-level session's own rolled-up cost, summed. It is deliberately the root run's own
-	// cost, not the whole-work-item cost the feed's fan-out chip shows (root plus its subagent
-	// subtree, see TreeRollup). Two reasons the verdict keeps the direct figure: it stays a
-	// single bounded scan of the session rows rather than a recursive per-corpus subtree walk
-	// on the hot Overview path, and the money reconciles with the fleet-wide spend tile, which
-	// already counts every subagent session once under its own row. So this is a lower bound on
-	// the true cost of failure, and TestOverviewAuditCostsAreDirect pins that a failed root's
-	// subagent spend is not folded in here. WastedIncomplete flags that some of those sessions
-	// carried unpriced usage, so even the direct figure is itself a lower bound.
+	// WastedUSD is the money the errored and abandoned top-level runs burned, the figure the
+	// Spend tile pulls out of its total as "on failed runs". It reads the same base the Spend
+	// total does (usage_events priced by cost_usd and dated by occurred_at, under the same
+	// window and scope), narrowed to events whose session failed and is itself a top-level work
+	// item. Because it only adds predicates to the sum behind Analytics.TotalCost, it is always
+	// a subset of that total and cannot exceed the aggregate it annotates, and a run that started
+	// before the window but spent tokens inside it counts here exactly as it counts in Spend.
+	//
+	// The relationship_type <> 'subagent' predicate keeps this the root run's own events, not the
+	// whole work item's (root plus its subagent subtree, see TreeRollup): a subagent's events
+	// carry the subagent's session id and drop out, so this is direct spend, a lower bound on the
+	// true cost of failure. That also keeps it one indexed scan of the window's usage_events
+	// rather than a recursive per-corpus subtree walk on the hot Overview path, and it matches the
+	// fleet-wide Spend total, which counts every subagent event once under its own session.
+	// TestOverviewAuditCostsAreDirect pins that a failed root's subagent spend is not folded in.
+	// WastedIncomplete carries Analytics.CostIncomplete's marker: some failed run in the window
+	// had token volume with no price, so even the direct figure is a lower bound.
 	WastedUSD        float64
 	WastedIncomplete bool
 	// Attention is the ranked shortlist of sessions worth a look, worst first: errored, then
@@ -117,12 +124,12 @@ const (
 	costlyMinCohort = 4
 )
 
-// OverviewAudit computes the audit verdict and the needs-attention shortlist for the
-// Overview, both scoped by f. It runs the two reads in one repeatable-read, read-only
-// snapshot so the verdict counts and the shortlist describe the same cohort: a session
-// insert or a signals_stale flip between the two queries could otherwise let the shortlist
-// name a run the verdict never counted. The snapshot takes no row locks, so it never
-// blocks ingest, matching QualityDistribution's standalone snapshot.
+// OverviewAudit computes the audit verdict, its wasted-spend figure, and the needs-attention
+// shortlist for the Overview, all scoped by f. It runs the three reads in one repeatable-read,
+// read-only snapshot so they describe the same cohort: a session insert or a signals_stale flip
+// between the queries could otherwise let the shortlist name a run the verdict never counted, or
+// let the wasted-spend sum price rows the count did not see. The snapshot takes no row locks, so
+// it never blocks ingest, matching QualityDistribution's standalone snapshot.
 func (s *Store) OverviewAudit(ctx context.Context, f AnalyticsFilter) (AuditSummary, error) {
 	var out AuditSummary
 	err := pgx.BeginTxFunc(ctx, s.Pool,
@@ -130,6 +137,10 @@ func (s *Store) OverviewAudit(ctx context.Context, f AnalyticsFilter) (AuditSumm
 		func(tx pgx.Tx) error {
 			var err error
 			out, err = s.overviewVerdict(ctx, tx, f)
+			if err != nil {
+				return err
+			}
+			out.WastedUSD, out.WastedIncomplete, err = s.wastedSpend(ctx, tx, f)
 			if err != nil {
 				return err
 			}
@@ -142,13 +153,16 @@ func (s *Store) OverviewAudit(ctx context.Context, f AnalyticsFilter) (AuditSumm
 	return out, nil
 }
 
-// overviewVerdict is the one-scan aggregate behind the verdict strip: the work-item count,
-// the settled/completed/wasted partition, the graded cohort and its grade-point sum, and
-// the wasted spend. It scopes over top-level sessions (relationship_type <> 'subagent')
-// left-joined to their current signals, so an unsettled or stale-graded session still
-// counts as a work item but folds into neither the settled nor the graded bucket, exactly
-// as the Insights distributions treat it. The grade-point CASE uses the app's A=4..F=0
-// scale so the resulting GPA reconciles with the Insights GPA line.
+// overviewVerdict is the one-scan aggregate behind the verdict strip's counts: the work-item
+// count, the settled/completed/wasted partition, and the graded cohort with its grade-point
+// sum. It scopes over top-level sessions (relationship_type <> 'subagent') left-joined to
+// their current signals, so an unsettled or stale-graded session still counts as a work item
+// but folds into neither the settled nor the graded bucket, exactly as the Insights
+// distributions treat it. The grade-point CASE uses the app's A=4..F=0 scale so the resulting
+// GPA reconciles with the Insights GPA line. The wasted-spend figure is not computed here: it
+// rides the usage_events occurred_at base rather than this session-started scan, so wastedSpend
+// reads it separately and the Spend tile's subfigure stays a true slice of the Spend total (see
+// AuditSummary.WastedUSD).
 func (s *Store) overviewVerdict(ctx context.Context, q querier, f AnalyticsFilter) (AuditSummary, error) {
 	filter, args := f.clauseFor("s.started_at")
 	var out AuditSummary
@@ -161,18 +175,48 @@ func (s *Store) overviewVerdict(ctx context.Context, q querier, f AnalyticsFilte
 		  count(*) FILTER (WHERE sig.grade IS NOT NULL),
 		  coalesce(sum(CASE sig.grade
 		                 WHEN 'A' THEN 4 WHEN 'B' THEN 3 WHEN 'C' THEN 2
-		                 WHEN 'D' THEN 1 WHEN 'F' THEN 0 END), 0)::float8,
-		  coalesce(sum(s.total_cost_usd) FILTER (WHERE sig.outcome IN ('errored', 'abandoned')), 0),
-		  coalesce(bool_or(s.cost_incomplete) FILTER (WHERE sig.outcome IN ('errored', 'abandoned')), false)
+		                 WHEN 'D' THEN 1 WHEN 'F' THEN 0 END), 0)::float8
 		  FROM sessions s
 		  LEFT JOIN session_signals sig ON sig.session_id = s.id AND `+signalsCurrent()+`
 		 WHERE s.relationship_type <> 'subagent'`+filter, args...).
 		Scan(&out.WorkItems, &out.Settled, &out.Completed, &out.Wasted,
-			&out.Graded, &out.GradePoints, &out.WastedUSD, &out.WastedIncomplete)
+			&out.Graded, &out.GradePoints)
 	if err != nil {
 		return AuditSummary{}, fmt.Errorf("overview verdict: %w", err)
 	}
 	return out, nil
+}
+
+// wastedSpend is the money the failed top-level runs burned in the window, the "on failed
+// runs" figure the Spend tile pulls out of its total. It reads the same base the Spend total
+// does (usage_events priced by cost_usd and dated by occurred_at, under the same scope and
+// window from f.clause), then narrows to events whose session errored or was abandoned and is
+// a top-level work item. It shares that base deliberately: this only adds restricting
+// predicates to the sum behind Analytics.TotalCost, so the result is always a subset of it and
+// cannot drift above the aggregate it annotates, and a run that started before the window but
+// spent inside it lands in both figures alike. The relationship_type <> 'subagent' predicate keeps
+// it the root run's own direct spend (a subagent's events carry the subagent's session id); see
+// AuditSummary.WastedUSD for why the audit keeps the direct figure. The second column mirrors
+// Analytics.CostIncomplete: some failed run in the window carried token volume with no price,
+// so the direct figure is itself a lower bound.
+func (s *Store) wastedSpend(ctx context.Context, q querier, f AnalyticsFilter) (float64, bool, error) {
+	filter, args := f.clause()
+	var usd float64
+	var incomplete bool
+	err := q.QueryRow(ctx, `
+		SELECT coalesce(sum(ue.cost_usd), 0),
+		       coalesce(`+costIncompleteExpr+`, false)
+		  FROM usage_events ue
+		  JOIN sessions s ON s.id = ue.session_id
+		  JOIN session_signals sig ON sig.session_id = s.id AND `+signalsCurrent()+`
+		 WHERE ue.occurred_at IS NOT NULL
+		   AND s.relationship_type <> 'subagent'
+		   AND sig.outcome IN ('errored', 'abandoned')`+filter, args...).
+		Scan(&usd, &incomplete)
+	if err != nil {
+		return 0, false, fmt.Errorf("wasted spend: %w", err)
+	}
+	return usd, incomplete, nil
 }
 
 // attentionRows ranks the top-level sessions worth review and returns the worst

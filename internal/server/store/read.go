@@ -403,7 +403,10 @@ var sessionSortColumns = map[string]string{
 	// reparse restamps updated_at but leaves last_active_at fixed, so an old
 	// session stays where its activity puts it. The query-string key stays
 	// "updated" so bookmarked feed URLs keep working; only the column it maps to
-	// changed. Index-walked by idx_sessions_feed_active (migration 0033).
+	// changed. Index-walked by idx_sessions_feed_active (migration 0033), with
+	// top-level-only twins for the subagent-hiding default feed: the global order
+	// (0046) and one per facet (0047), so a project, user, agent, or machine feed
+	// walks only its own top-level rows rather than the facet's subagent history.
 	"updated": "s.last_active_at",
 }
 

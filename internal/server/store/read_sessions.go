@@ -329,7 +329,11 @@ func (s *Store) ListAllSessions(ctx context.Context, f SessionFilter) (rows []Se
 		// the shared conds(), so CountAllSessions, the facet probes, the MCP SessionFeed,
 		// and the Insights drill-through invariants keep counting every session; only this
 		// list narrows to top-level work. relationship_type is NOT NULL (default ''), so a
-		// plain inequality is null-safe and needs no placeholder.
+		// plain inequality is null-safe and needs no placeholder. The top-level partial
+		// indexes match this exact predicate so the page still walks an index rather than
+		// scanning subagent rows: 0046's global sort orders for the unfaceted feed, and
+		// 0047's per-facet twins for the default recency order under a project, user, agent,
+		// or machine filter.
 		conds = append(conds, "s.relationship_type <> 'subagent'")
 	}
 
