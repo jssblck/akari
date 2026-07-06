@@ -752,7 +752,12 @@ const messageReadColumns = `m.ordinal, m.role, m.content, m.thinking_text, m.mod
 // usage and the duplicate flag are now stored per row, so the live body refresh (handleSessionBody
 // re-fetching this on every SSE append) reads bounded indexed rows and does no growing whole-session
 // usage scan or message window. $1 is the session id.
-const messagesFullQuery = `
+//
+// messagesFullSelect is the shared SELECT..WHERE prefix; the windowed transcript-page reads
+// (read_transcript_page.go) append their own ordinal predicates and LIMIT to it, so every
+// full-fold read (whole session, tail window, forward append, walker seed) selects the same
+// columns and scans through the same scanMessages.
+const messagesFullSelect = `
 	SELECT ` + messageReadColumns + `,
 	       mtu.message_ordinal IS NOT NULL,
 	       coalesce(mtu.input_tokens,0), coalesce(mtu.output_tokens,0), coalesce(mtu.cache_read_tokens,0), coalesce(mtu.cache_write_tokens,0),
@@ -761,7 +766,9 @@ const messagesFullQuery = `
 	       mtu.cost_sum, coalesce(mtu.cost_count,0), coalesce(mtu.cost_incomplete, false)
 	  FROM messages m
 	  LEFT JOIN message_turn_usage mtu ON mtu.session_id = m.session_id AND mtu.message_ordinal = m.ordinal
-	 WHERE m.session_id = $1
+	 WHERE m.session_id = $1`
+
+const messagesFullQuery = messagesFullSelect + `
 	 ORDER BY m.ordinal`
 
 // messagesWindowQuery is the bounded transcript read behind MessagesAfter. It selects the message

@@ -86,7 +86,7 @@ func (s *Store) MessageCount(ctx context.Context, sessionID int64) (int, error) 
 // fragment (handleSessionBody) re-fetching this on every SSE append reads bounded indexed rows
 // and does no growing whole-session usage aggregation or message-window scan for either.
 func (s *Store) Messages(ctx context.Context, sessionID int64) ([]Message, error) {
-	return s.scanMessages(ctx, sessionID, messagesFullQuery, sessionID)
+	return s.scanMessages(ctx, s.Pool, sessionID, messagesFullQuery, sessionID)
 }
 
 // MessagesAfter returns the next window of a session's transcript ordered by
@@ -106,20 +106,22 @@ func (s *Store) MessagesAfter(ctx context.Context, sessionID int64, after *int, 
 		limit = 2000
 	}
 	if after == nil {
-		return s.scanMessages(ctx, sessionID,
+		return s.scanMessages(ctx, s.Pool, sessionID,
 			messagesWindowQuery+` ORDER BY m.ordinal LIMIT $2`,
 			sessionID, limit)
 	}
-	return s.scanMessages(ctx, sessionID,
+	return s.scanMessages(ctx, s.Pool, sessionID,
 		messagesWindowQuery+` AND m.ordinal > $2 ORDER BY m.ordinal LIMIT $3`,
 		sessionID, *after, limit)
 }
 
-// scanMessages runs a transcript read and scans its rows into Messages. sessionID is carried only
-// to give the error path context: a cursor, network, or cancellation failure mid-read then names
-// the session and the operation rather than surfacing a bare driver error to the handler.
-func (s *Store) scanMessages(ctx context.Context, sessionID int64, query string, args ...any) ([]Message, error) {
-	rows, err := s.Pool.Query(ctx, query, args...)
+// scanMessages runs a transcript read and scans its rows into Messages. The querier is the pool
+// for a standalone read or a transaction when several windowed reads must see one snapshot
+// (read_transcript_page.go). sessionID is carried only to give the error path context: a cursor,
+// network, or cancellation failure mid-read then names the session and the operation rather than
+// surfacing a bare driver error to the handler.
+func (s *Store) scanMessages(ctx context.Context, q querier, sessionID int64, query string, args ...any) ([]Message, error) {
+	rows, err := q.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query messages for session %d: %w", sessionID, err)
 	}
@@ -434,22 +436,4 @@ func (s *Store) SessionRawTo(ctx context.Context, w io.Writer, sessionID, limit 
 		return written, truncated, total, txErr
 	}
 	return written, truncated, total, nil
-}
-
-// Subagents returns sessions whose parent is the given session.
-func (s *Store) Subagents(ctx context.Context, parentID int64) ([]SessionSummary, error) {
-	rows, err := s.Pool.Query(ctx, sessionSelect+" WHERE s.parent_session_id = $1 ORDER BY s.id", parentID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []SessionSummary
-	for rows.Next() {
-		sm, err := scanSession(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, sm)
-	}
-	return out, rows.Err()
 }
