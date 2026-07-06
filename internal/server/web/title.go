@@ -1,6 +1,10 @@
 package web
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/jssblck/akari/internal/quality"
+)
 
 // StripPromptPreamble reduces a session's first-message title to the part a reader
 // cares about, stripping the machine-generated preamble a coding-agent harness wraps
@@ -110,20 +114,14 @@ func tagContent(s, tag string) string {
 }
 
 // RowGradeClass is the CSS band for a feed row's grade chip, matching the session
-// Quality tile's report-card palette (A/B good, C watch, D/F poor). An absent grade
-// returns "" so the caller renders no chip.
+// Quality tile's report-card palette. The tiering lives in quality.GradeBand so the
+// feed chip cannot drift from the Quality tile and Insights bars; this only maps the
+// band onto the q-* class. An absent grade returns "" so the caller renders no chip.
 func RowGradeClass(grade *string) string {
 	if grade == nil {
 		return ""
 	}
-	switch *grade {
-	case "A", "B":
-		return "q-good"
-	case "C":
-		return "q-watch"
-	default: // D, F
-		return "q-poor"
-	}
+	return "q-" + quality.GradeBand(*grade)
 }
 
 // RowOutcomeNote returns a short outcome word to flag on a feed row, but only for the

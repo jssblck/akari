@@ -4,13 +4,9 @@ import (
 	"fmt"
 	"math"
 
+	"github.com/jssblck/akari/internal/quality"
 	"github.com/jssblck/akari/internal/server/store"
 )
-
-// insightsGradePoints maps a letter grade to its point on the A=4..F=0 scale the Overview
-// audit GPA and the Insights GPA line both use, so the summary strip's average reconciles
-// with the number the instruments below it show rather than drifting on a private scale.
-var insightsGradePoints = map[string]float64{"A": 4, "B": 3, "C": 2, "D": 1, "F": 0}
 
 // InsightsSummary is the plain-language read at the top of Insights: the window's quality,
 // spend, and tool reliability said in a sentence or three, so a lead gets the shape of the
@@ -32,7 +28,7 @@ func InsightsSummary(ins store.Insights) []string {
 	if q := ins.Quality; q.Graded > 0 {
 		var points float64
 		for _, gc := range q.Grades {
-			points += insightsGradePoints[gc.Key] * float64(gc.Count)
+			points += quality.GPAPoints(gc.Key) * float64(gc.Count)
 		}
 		gpa := points / float64(q.Graded)
 		out = append(out, fmt.Sprintf("Graded %d of %d sessions at GPA %.2f.", q.Graded, q.Sessions, gpa))
