@@ -236,6 +236,74 @@ at it so future regressions are visible in devtools).
    anchors must work with the windowed transcript (fetch-then-scroll for
    turns not yet in the DOM).
 
+#### Implementation map for items 1, 2, 4 (from the render-path survey)
+
+The render path was surveyed end to end; these are the exact seams the change
+touches and the decisions that are already made, so the executor does not
+re-derive them.
+
+- Handlers (`internal/server/httpapi/web.go`): `handleSessionPage` (line 568,
+  full page), `handleSessionBody` (line 603, the live fragment), and
+  `handleSessionEvents` (line 632, the SSE stream). All three load through
+  `sessionView` (line 489), which today calls the unbounded `Messages`,
+  `ToolCalls`, and `Attachments`. `handleSessionBody` takes no query params today
+  and re-renders the whole transcript on every wake, which is both the freeze and
+  the scroll reset. `sessionHeaderStats` (line 513) builds the stat-tile inputs.
+
+- SSE (`internal/server/httpapi/sse.go`, wired in `server.go:59` via
+  `worker.SetRebuiltHook`): the wake fires when the parse worker's rebuild
+  commits; `hub.publish(sessionID)` sends a bare `struct{}{}` (no sequence). The
+  frame is a literal `event: update\ndata: 1`. The client (`static/app.js`,
+  `initLive` around line 83) re-fetches `/sessions/{id}/body` and swaps
+  `#session-body` innerHTML whole. For item 2 the wake stays a bare signal; the
+  client should request `?after={lastOrdinal}` (read the last rendered
+  `data-ordinal` in the DOM) so the server stays stateless. `hx-swap-oob` is used
+  nowhere in the codebase yet (only inside vendored `htmx.min.js`), so the stat-band
+  OOB swap is a new pattern to introduce.
+
+- Store (`internal/server/store/read_detail.go`): `Messages` (line 88, full fold),
+  `MessagesAfter` (line 104, forward keyset on ordinal but it deliberately omits
+  the per-turn usage fold and duplicate-prompt flag), `ToolCallsInRange` /
+  `AttachmentsInRange` (lines 174, 281, already bounded by an ordinal window),
+  `MessageCount` (line 66, O(1) rollup). Missing and needed: a full-fold windowed
+  read. `MessagesAfter` uses `messagesWindowQuery` (`read.go:740`), which hardcodes
+  the usage columns to zero, so the web transcript (which renders per-turn usage,
+  cost, latency, and context sheds) cannot reuse it. Refactor `messagesFullQuery`
+  (`read.go:722`) into a select-plus-join fragment and build three reads off it:
+  the existing full read, a tail read (last N by ordinal, `ORDER BY ordinal DESC
+  LIMIT`, reversed in Go, for the initial window and "Show earlier"), and a
+  forward full-fold read (`ordinal > $2`, for the live append). The `messages` PK
+  is `(session_id, ordinal)` (`migrations/0001_init.sql:122`), so every window is
+  an index-range scan with no new index.
+
+- Template (`internal/server/web/session.templ`): `SessionMain` (line 90) renders
+  `sessionStats` + `subagentsBlock` + `Transcript`; only this fragment is swapped
+  on a live update, so the outline and inspector persist. `#session-body` (the
+  swap target), `#session-stats` (the OOB-swap candidate, app.js already diffs its
+  `.value[data-stat-key]` tiles), `.transcript` (the append container), and each
+  row's `msg-<ordinal>` id (matching the outline's `#msg-<ordinal>` hrefs) are the
+  stable anchors. The `TranscriptWalker` (`session_metrics.go`) carries in-order
+  previous-turn state for reply latency and context-shed detection, so a window
+  that starts mid-transcript must seed it: fetch one message before the window
+  (its ordinal and usage) to prime the walker without rendering it, or accept that
+  the boundary message shows no latency/shed delta.
+
+- Two design tensions to resolve, not skip. First, the outline must list every
+  turn even while the transcript renders only a window, so an outline click can
+  land on a turn not yet in the DOM (fetch-then-scroll, item 4); the outline read
+  therefore stays roughly full while the transcript read is windowed. Second,
+  "Show earlier" and a live append both mutate `.transcript` incrementally, so the
+  server fragment for each must be just the new rows (plus, for the append, an OOB
+  stat-band swap), never a full `SessionMain`.
+
+- Verification. The freeze fix (item 1) is verifiable with a long transcript via
+  curl plus a browser; the local dev seed's transcripts are short, so seed or
+  ingest a long one. The incremental SSE path (item 2) needs a genuinely settling
+  session: drive the ingest API (`POST /api/v1/ingest/session` then `.../chunk`
+  and `.../finalize`, which triggers a rebuild and the wake) against a session
+  open in the browser, and watch the append land without a full re-render or a
+  scroll jump.
+
 ### P-3 Feed pagination (shipped)
 
 Replaced limit-doubling with keyset pagination: "Show more" passes the last
