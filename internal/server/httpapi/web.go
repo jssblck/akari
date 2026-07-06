@@ -620,6 +620,18 @@ func (s *Server) handleSessionPage(w http.ResponseWriter, r *http.Request) {
 	// The outline lists every turn while the transcript renders only the most recent
 	// window, so a long session's first paint stays bounded. Both draw from the one
 	// message slice already loaded; the window is a re-slice, not a second read.
+	//
+	// The stat band above the transcript deliberately stays whole-session while the
+	// rows below are a window of it. Its tiles are session instruments, not a sum of
+	// the visible rows: the Messages tile reads the full count next to 100 rendered
+	// rows, Duration and Quality describe the session, and the Tokens and cost
+	// figures are the session rollups the feed and project pages show for the same
+	// session. The "Show earlier" bar names exactly how many messages sit above the
+	// window, so the band and the rows are not presented as reconciling. A
+	// windowed-scope token headline would also collide with the per-turn fold's
+	// documented exclusions (NULL-ordinal usage belongs to the session, not to any
+	// turn; see store.messagesFullQuery), which is why the header did not in general
+	// equal the sum of the stamps even when the whole transcript rendered.
 	win := web.WindowTail(msgs, web.TranscriptWindowSize)
 	render(w, r, http.StatusOK, web.SessionPage(s.pageForNav(r, title, "sessions"), d, msgs, win, tools, atts, subs, hs, dupIDs, true, owner))
 }

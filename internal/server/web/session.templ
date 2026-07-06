@@ -262,6 +262,11 @@ templ inspectorModal() {
 // the session's stored signals. With oob set (the live-append fragment), the band
 // carries hx-swap-oob so htmx replaces the on-page #session-stats out of band while
 // the fragment's rows append into the transcript.
+//
+// Every tile is session-scope even though the transcript below renders a window: the
+// full Messages count beside a bounded row list is the cue, and the "Show earlier"
+// bar names what is hidden. The band is the same session rollup the feed row shows,
+// not an aggregate of the visible rows (see the rationale on handleSessionPage).
 templ sessionStats(d store.SessionDetail, hs HeaderStats, oob bool) {
 	<div
 		class="stats sticky"
