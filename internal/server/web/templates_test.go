@@ -279,11 +279,11 @@ func TestProjectsPageLocalFoldersSection(t *testing.T) {
 	for _, want := range []string{
 		`<h2>Repositories</h2>`,
 		`<h2>Local folders</h2>`,
-		`<th>Machine</th>`,              // the host rides its own column
-		`<th>State</th>`,                // the state chip rides its own column
-		`>/home/grace/scratch</a>`,      // the folder links by full path, not the synthetic key
-		`class="tag standalone"`,        // the state chip renders in the State column
-		`<td class="muted">laptop</td>`, // the host fills the Machine column
+		`<th class="col-machine">Machine</th>`,      // the host rides its own column (folded away on phones)
+		`<th class="col-state">State</th>`,          // the state chip rides its own column (folded away on phones)
+		`>/home/grace/scratch</a>`,                  // the folder links by full path, not the synthetic key
+		`class="tag standalone"`,                    // the state chip renders in the State column
+		`<td class="muted col-machine">laptop</td>`, // the host fills the Machine column
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("local folders section missing %q", want)

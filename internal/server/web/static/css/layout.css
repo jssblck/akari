@@ -75,22 +75,68 @@ header.topbar nav .gh-link { display: inline-flex; }
   .notice.notice-out { opacity: 0; transition: none; }
 }
 
-/* ---- Responsive ---- */
-@media (max-width: 980px) {
-  /* Collapse the sidebar into a horizontal top strip so the content gets the
-     full width on narrow screens. */
-  .app { grid-template-columns: 1fr; }
-  .sidebar {
-    position: sticky; top: 0; height: auto; z-index: var(--z-sticky);
-    flex-direction: row; align-items: center; gap: var(--sp-md);
-    border-right: 0; border-bottom: 1px solid var(--border);
-    overflow-x: auto;
+/* ---- Mobile topbar + drawer (the compact shell) ----
+   Below the 900px shell breakpoint the sidebar column would squeeze the content,
+   so the shell swaps to the same idiom the guide already uses on a phone: a slim
+   sticky topbar (wordmark + menu button) and the sidebar as an off-canvas drawer
+   with a scrim. The drawer keeps the full labeled nav and the signed-in foot;
+   nothing is demoted to an icon. app.js drives body.drawer-open and the button's
+   aria-expanded; everything else here is presentation. */
+.mobile-topbar { display: none; }
+.sidebar-scrim { display: none; }
+
+@media (max-width: 900px) {
+  .app { display: block; }
+
+  .mobile-topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: var(--sp-md);
+    padding: var(--sp-xs) var(--sp-sm) var(--sp-xs) var(--sp-lg);
+    padding-top: max(var(--sp-xs), env(safe-area-inset-top));
+    position: sticky; top: 0; z-index: var(--z-sticky);
+    background: var(--surface); border-bottom: 1px solid var(--border);
   }
-  .sidebar .navgroup { flex-direction: row; }
-  .sidebar .spacer { flex: 1; }
-  .sidebar .sb-foot { border-top: 0; padding: 0; }
-  .sidebar .nav-label { display: none; }
+  .menu-toggle {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 44px; height: 44px; padding: 0;
+    background: transparent; color: var(--subtext); border: none;
+  }
+  .menu-toggle:hover { background: var(--surface-2); }
+
+  /* The drawer: off-canvas at rest, slid in by body.drawer-open. visibility gates
+     keyboard reach while closed and waits for the slide-out before hiding. */
+  .sidebar {
+    position: fixed; inset: 0 auto 0 0; width: min(280px, 84vw);
+    height: 100dvh; z-index: calc(var(--z-overlay) + 1);
+    padding-left: max(var(--sp-md), env(safe-area-inset-left));
+    padding-bottom: max(var(--sp-lg), env(safe-area-inset-bottom));
+    border-right: 1px solid var(--border-strong);
+    transform: translateX(-100%); visibility: hidden;
+    transition: transform var(--dur-base) var(--ease-settle), visibility 0s linear var(--dur-base);
+  }
+  body.drawer-open .sidebar {
+    transform: none; visibility: visible;
+    transition-delay: 0s;
+    box-shadow: var(--shadow-overlay);
+  }
+  /* Roomier, thumb-sized nav rows inside the drawer. */
+  .sidebar .nav { padding: 11px 12px; }
+
+  .sidebar-scrim {
+    display: block; position: fixed; inset: 0; z-index: var(--z-overlay);
+    background: rgba(8, 6, 14, 0.55);
+    opacity: 0; visibility: hidden; pointer-events: none;
+    transition: opacity var(--dur-base) var(--ease-state), visibility 0s linear var(--dur-base);
+  }
+  body.drawer-open .sidebar-scrim {
+    opacity: 1; visibility: visible; pointer-events: auto;
+    transition-delay: 0s;
+  }
+  body.drawer-open { overflow: hidden; }
 }
-@media (max-width: 720px) {
+@media (max-width: 640px) {
   header.topbar { gap: var(--sp-md); flex-wrap: wrap; padding: var(--sp-sm) var(--sp-md); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sidebar, .sidebar-scrim { transition: none; }
 }

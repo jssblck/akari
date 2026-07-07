@@ -320,10 +320,26 @@ a.attachment.file { width: fit-content; text-decoration: none; }
 @media (max-width: 1100px) {
   .session-grid { grid-template-columns: 200px minmax(0, 1fr); }
 }
-@media (max-width: 720px) {
+/* The compact shell: the outline rail is a desktop luxury; the transcript is the
+   hero and takes the full width. The flow ribbon keeps the shape-of-the-session
+   read, and outline anchors still resolve through the ribbon's ticks. */
+@media (max-width: 900px) {
   .session-grid { grid-template-columns: 1fr; }
   .outline-rail { display: none; }
+}
+/* Phone: the header stacks, the owner controls drop under the title, and the
+   tool-body inspector takes the whole screen rather than floating as a cramped
+   window. 100dvh (not vh) so the browser chrome collapsing does not clip the
+   dialog's footer. */
+@media (max-width: 640px) {
   .session-head { flex-direction: column; }
-  .modal-overlay { padding: var(--sp-md); }
-  .modal-dialog { width: 96vw; height: 92vh; }
+  .session-actions { justify-content: flex-start; }
+  .msg { scroll-margin-top: 72px; padding: var(--sp-md); }
+  .modal-overlay { padding: 0; }
+  .modal-dialog {
+    width: 100%; height: 100dvh; max-height: none;
+    border: none; border-radius: 0;
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
 }

@@ -251,20 +251,24 @@ td.num, th.num, table.grid td.num, table.grid th.num { text-align: right; font-f
 .analytics .stat:last-child { border-top-right-radius: var(--r-md); border-bottom-right-radius: var(--r-md); }
 .analytics .stat + .stat { border-left: 1px solid var(--border); }
 /* The session header fuses its readouts into the same instrument strip, sticky to
-   the top of the transcript. One bordered row split by hairlines reads as a single
-   gauge cluster and reclaims the vertical space the loose tiles used to wrap into.
-   It scrolls horizontally rather than wrapping when the viewport gets narrow. */
+   the top of the transcript. It lays out as an auto-fitting grid: one hairline-split
+   row when the tiles fit, and a clean multi-row cluster when they do not (the old
+   flex strip wrapped into ragged rows with missing rules). Each tile paints its own
+   top and left hairline with a box-shadow, so the rules stay coherent at any column
+   count; the shadows land on the container's own border line at the edges, so no
+   doubled frame shows. */
 .stats.sticky {
   position: sticky; top: 0; z-index: var(--z-sticky);
-  display: flex; gap: 0; margin: 0 0 var(--sp-lg); padding: 0;
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  gap: 0; margin: 0 0 var(--sp-lg); padding: 0;
   border: 1px solid var(--border); border-radius: var(--r-md);
   background: var(--surface);
 }
 .stats.sticky .stat {
-  flex: 1 0 auto; min-width: 118px; padding: 8px var(--sp-lg);
-  border: none; border-radius: 0; border-left: 1px solid var(--border);
+  min-width: 0; padding: 8px var(--sp-lg);
+  border: none; border-radius: 0;
+  box-shadow: -1px 0 0 var(--border), 0 -1px 0 var(--border);
 }
-.stats.sticky .stat:first-child { border-left: 0; }
 /* The Tokens tile folds input, output, cache read, cache write, and cost into one
    gauge; the Cache tile folds hit rate, the dollars saved, and the prompt-token split
    into another; the Quality tile folds the outcome, its confidence, the score, and the
@@ -404,8 +408,14 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--l
 .empty.big { padding: 64px var(--sp-xl); }
 .empty.big h1 { font-family: var(--mono); color: var(--lilac); }
 
-/* ---- Responsive ---- */
-@media (max-width: 860px) {
+/* ---- Responsive ----
+   The shared breakpoint scale, used across every stylesheet:
+     900px  the compact shell: the sidebar becomes a drawer (layout.css), single
+            column layouts, tighter page padding.
+     640px  phone: stacked rows, folded toolbars, full-screen modal, static strips.
+   session.css additionally narrows the outline rail at 1100px. Keep new rules on
+   these two stops rather than inventing per-page widths. */
+@media (max-width: 900px) {
   main { padding: var(--sp-lg); }
   /* The stat tips anchor left on their tile with a 190px floor, so a tile in the
      right half of a narrow strip pushes its card past the viewport; the card is
@@ -419,6 +429,40 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--l
   .stats:not(.sticky) { position: relative; }
   .tokens-stat, .cache-stat, .quality-stat, .fallback-stat { position: static; }
   .stat-tip { left: 0; right: 0; min-width: 0; width: auto; max-width: none; }
+}
+@media (max-width: 640px) {
+  main { padding: var(--sp-lg) var(--sp-md); }
+  /* Comfortable tap heights on the form controls, keyed to the viewport as well
+     as the coarse-pointer block below: device emulation and small desktop
+     windows should read like the phone layout they show. 16px field text also
+     stops iOS zooming the page when a field takes focus. Dense instrument
+     chrome (stamps, tags) keeps its compact scale. */
+  select, textarea, input:not([type="checkbox"]):not([type="radio"]) { min-height: 40px; font-size: 1rem; }
+  button:not(.stamp):not(.notice-dismiss):not(.seg):not(.insp-close), .btn { min-height: 40px; }
+  .seg { padding: 9px 12px; }
+  /* The session strip stops being sticky on a phone: two or three gauge rows
+     pinned to the top would cover half the transcript. It reads once at the top
+     instead, and the flow ribbon keeps the sense of position. relative (not
+     static) so the stat tooltips keep the strip as their containing block. */
+  .stats.sticky { position: relative; top: auto; }
+  /* Search and filter fields take the full row instead of a 320px floor that
+     forces a sideways layout. */
+  .filters .grow, input.grow { min-width: 0; width: 100%; }
+}
+
+/* ---- Touch ----
+   Coarse-pointer ergonomics, independent of viewport: comfortable tap heights on
+   the controls a phone reader actually drives, and 16px text in fields so iOS
+   stops zooming the page on focus. Dense instrument chrome (tags, stamps, chips)
+   stays compact; width plus spacing carries their tap area. */
+@media (pointer: coarse) {
+  button, .btn { min-height: 40px; }
+  button.small, .btn.small { min-height: 36px; }
+  input, select, textarea { min-height: 40px; font-size: 1rem; }
+  .seg { padding: 9px 14px; }
+  .stamp, button.stamp { min-height: 0; padding: 4px 10px; }
+  .notice-dismiss { min-height: 0; }
+  .sidebar .nav { padding: 11px 12px; }
 }
 
 /* ---- Reduced motion ---- */

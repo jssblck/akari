@@ -91,11 +91,33 @@ table.grid.projects td.num { overflow: visible; }
   border-bottom-color: var(--border);
   box-shadow: 0 6px 16px -12px rgba(0, 0, 0, 0.65);
 }
-/* Below 980px the sidebar itself becomes a sticky top strip (see layout.css), so a
-   second bar pinned to top:0 would collide with it. Drop the header out of the sticky
-   flow there and let it scroll with the page. */
-@media (max-width: 980px) {
+/* Below the 900px shell breakpoint the mobile topbar already pins to top:0 (see
+   layout.css), so a second bar there would collide with it. Drop the header out of
+   the sticky flow and let it scroll with the page. */
+@media (max-width: 900px) {
   .project-head { position: static; box-shadow: none; border-bottom-color: transparent; }
+}
+
+/* ---- Responsive (phone) ----
+   The tables shed their secondary columns instead of forcing a sideways scroll:
+   the projects index keeps name, sessions, tokens, and cost; the per-project
+   session table keeps the session (with its title line), tokens, cost, and
+   recency. Everything hidden here is still one tap away on the row's own page,
+   and .table-scroll remains as the escape hatch for what is left. */
+@media (max-width: 640px) {
+  th.trend, td.trend,
+  table.grid .col-machine, table.grid .col-state,
+  table.grid .col-agent, table.grid .col-user,
+  table.grid .col-branch, table.grid .col-msgs,
+  /* The projects index drops Updated too (it is ranked by recency already); the
+     session tables keep theirs, since recency is what a phone reader scans for. */
+  table.grid.projects .col-updated { display: none; }
+  /* Long project names and paths clip instead of widening the table. */
+  table.grid.projects th.proj-name, table.grid.projects td.proj-name { max-width: 0; }
+  table.grid.projects td.proj-name a { display: block; overflow: hidden; text-overflow: ellipsis; }
+  /* The session row's title line caps to what the phone column can hold; its
+     desktop 52ch would otherwise keep the whole table wide enough to pan. */
+  .grid td .row-sub { max-width: 148px; }
 }
 
 /* The stuck-state sentinel: a 1px marker at the header's rest position that app.js

@@ -39,6 +39,19 @@
 .tb-search input:focus-visible { outline: none; border-color: var(--lilac); box-shadow: var(--ring); }
 .tb-search input::placeholder { color: var(--faint); }
 
+/* The select fields live in one .tb-fields group so the phone layout can fold
+   them behind the Filters button. On desktop the group is display: contents, so
+   the fields keep participating in the toolbar's own flex row and nothing about
+   the wide layout changes. */
+.tb-fields { display: contents; }
+.tb-fold-toggle {
+  display: none;
+  align-items: center; gap: 6px;
+  font-size: 0.8125rem;
+}
+.tb-fold-toggle svg { flex: none; }
+.tb-fold-toggle[aria-expanded="true"] { border-color: var(--lilac); color: var(--lilac); }
+
 /* ---- Active filter chips ---- */
 .active-filters { display: flex; gap: var(--sp-sm); flex-wrap: wrap; align-items: center; margin-bottom: var(--sp-md); }
 .fchip {
@@ -188,12 +201,39 @@
   .showmore.htmx-request { animation: ctrl-busy 0.9s var(--ease-state) infinite; }
 }
 
-/* ---- Responsive ---- */
-/* On a narrow viewport the agent column and the token bar fold away, leaving
-   the project/branch line, message count, the token figure, and time. The reader
-   is almost always on desktop; this keeps the row intact when they are not. */
-@media (max-width: 760px) {
-  .srow { grid-template-columns: minmax(0, 1fr) 44px 64px 44px; }
-  .srow-agent { display: none; }
-  .tokbar { display: none; }
+/* ---- Responsive (phone) ---- */
+/* Below the 640px phone breakpoint the toolbar folds and each feed row restacks:
+   the metadata and title lines take the full width, and the figures drop to a
+   quiet second line (tokens left, time right). The agent column, message count,
+   and token bar fold away; the exact numbers stay one tap away on the token
+   card. */
+@media (max-width: 640px) {
+  /* Search takes the row, beside the Filters disclosure. */
+  .toolbar { align-items: stretch; }
+  .tb-search { flex: 1 1 auto; min-width: 0; }
+  .tb-search input { min-width: 0; width: 100%; }
+  .tb-fold-toggle { display: inline-flex; align-self: flex-end; }
+  /* Folded by default; the toggle opens the fields as a stacked panel. */
+  .tb-fields { display: none; }
+  .toolbar.filters-open .tb-fields {
+    display: flex; flex-direction: column; gap: var(--sp-sm);
+    width: 100%; padding: var(--sp-md);
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md);
+  }
+  .toolbar.filters-open .tb-field { width: 100%; }
+  .toolbar.filters-open .tb-field select { width: 100%; max-width: none; }
+
+  .srow {
+    grid-template-columns: minmax(0, 1fr) auto;
+    row-gap: 4px; padding: 10px var(--sp-sm);
+  }
+  .srow-agent, .srow-msgs, .tokbar { display: none; }
+  .srow-main { grid-column: 1 / -1; }
+  .srow-tok { justify-content: flex-start; }
+  .srow-tok .tok-total { min-width: 0; text-align: left; font-size: 0.75rem; }
+  .srow-time { font-size: 0.75rem; }
+  /* The token card anchors to the row's left edge now that the figure leads it,
+     and the 20vw content cap (sized for desktop) yields to the viewport. */
+  .srow .tok-tip { left: 0; right: auto; }
+  .tok-tip { max-width: min(90vw, 320px); }
 }

@@ -106,8 +106,14 @@
 
     var W = container.clientWidth || 720;
     var gap = 3, labelH = 16, padT = 2;
-    var cell = Math.max(7, Math.floor((W - (WEEKS - 1) * gap) / WEEKS));
+    // Floor the cell at a size a finger can still tell apart. When the floor
+    // binds (a phone can't fit a year of readable cells), the grid keeps its
+    // natural width and the container pans instead (.hm-scroll, overview.css),
+    // parked on the most recent weeks after render.
+    var cell = Math.max(9, Math.floor((W - (WEEKS - 1) * gap) / WEEKS));
     var gridW = WEEKS * cell + (WEEKS - 1) * gap;
+    var scrolls = gridW > W;
+    container.classList.toggle("hm-scroll", scrolls);
     var gridH = 7 * cell + 6 * gap;
     var H = padT + gridH + labelH;
 
@@ -137,7 +143,9 @@
       // Center above the cell, clamped to the container; flip below near the top.
       var tw = tooltip.offsetWidth, th = tooltip.offsetHeight;
       var left = cx + cell / 2 - tw / 2;
-      left = Math.max(0, Math.min(left, container.clientWidth - tw));
+      // In a panning grid the tooltip positions against the scrolled content,
+      // so clamp to the content width, not the (narrower) scrollport.
+      left = Math.max(0, Math.min(left, (scrolls ? container.scrollWidth : container.clientWidth) - tw));
       var top = cy - th - 8;
       if (top < 0) top = cy + cell + 8;
       tooltip.style.left = left + "px";
@@ -180,6 +188,8 @@
     svg.addEventListener("mouseleave", hide);
     container.appendChild(svg);
     container.appendChild(tooltip);
+    // Park the scroll at the trailing edge, where the most recent weeks are.
+    if (scrolls) container.scrollLeft = container.scrollWidth;
   }
 
   function initHeatmap(container) {
