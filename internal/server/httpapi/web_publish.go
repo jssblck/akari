@@ -151,10 +151,9 @@ func (s *Server) handlePublicProject(w http.ResponseWriter, r *http.Request) {
 	// overview) makes the usage headline cover exactly the days the trailing-year heatmap
 	// draws (the grid stops at today), and applying it to the quality band too keeps the two
 	// on one window rather than letting a future-started session count in the band while its
-	// future usage is excluded from the panel. OmitUsers skips the per-user aggregates the
-	// public page never renders (the by-user cost split and the People leaderboard), so the
-	// reads do not build per-user results proportional to the project's user count only to
-	// discard them.
+	// future usage is excluded from the panel. OmitUsers skips the by-user cost split the
+	// public page never renders, so the read does not build a per-user result proportional
+	// to the project's user count only to discard it.
 	//
 	// This shared upper bound is the one intentional gap from the signed-in project page,
 	// which leaves both projections unbounded above so its usage panel reconciles with its
@@ -169,7 +168,10 @@ func (s *Server) handlePublicProject(w http.ResponseWriter, r *http.Request) {
 		renderPublicError(w, r, http.StatusInternalServerError, "Could not load project overview.")
 		return
 	}
-	insights, err := s.Store.Insights(r.Context(), af)
+	// The public band renders the bar panels only (grades, outcomes, archetypes, tools,
+	// churn), so the read asks for the quality-band set; with no Bucket named it computes
+	// no trend series either.
+	insights, err := s.Store.Insights(r.Context(), af, store.QualityBandPanels)
 	if err != nil {
 		renderPublicError(w, r, http.StatusInternalServerError, "Could not load project overview.")
 		return

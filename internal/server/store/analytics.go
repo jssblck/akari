@@ -120,16 +120,13 @@ type AnalyticsFilter struct {
 	Username string
 	Agent    string
 	Machine  string
-	// OmitUsers skips the per-user aggregates neither the caller renders: the
-	// by-owning-user cost split in Analytics (analyticsByUser, leaving Analytics.Users
-	// nil) and the per-author quality leaderboard in Insights (userQualityFrom, leaving
-	// Insights.Users zero). Both group every matching row by user and materialize one
-	// aggregate per distinct user, so their size grows with the scope's user count; a
-	// caller that renders neither (the public project overview, whose panel passes
-	// showUsers false and whose quality band has no People panel) sets this so GET
-	// /p/<id> does not build per-user aggregates it throws away. The live authed
-	// surfaces leave it false, since they render the by-user split once a scope has more
-	// than one user.
+	// OmitUsers skips the by-owning-user cost split in Analytics (analyticsByUser,
+	// leaving Analytics.Users nil) when the caller renders no by-user breakdown. The
+	// split groups every matching row by user and materializes one aggregate per
+	// distinct user, so its size grows with the scope's user count; the public project
+	// overview (whose panel passes showUsers false) and the OG card set this so those
+	// reads do not build an aggregate they throw away. Insights ignores it: its
+	// optional instrument groups are named per call via InsightsPanels instead.
 	OmitUsers bool
 	// Bucket, when non-empty ("day" or "week"), asks Insights to also compute the trend
 	// series (Insights.Trends): the same scoped cohort aggregated into a time-bucket grid

@@ -26,10 +26,6 @@ type Insights struct {
 	Hygiene     PromptHygiene
 	Churn       FileChurn
 	Context     ContextHealthStats
-	// Users is the per-author quality leaderboard: who ran the window's sessions and how
-	// their work graded. It shares the snapshot so its per-user session counts reconcile
-	// with the quality total the distributions read.
-	Users UserQualityStats
 
 	// Trends is the time-bucketed read of the same cohort: every distribution above drawn
 	// as a series over the window's day or week buckets. It is computed only when the
@@ -42,6 +38,49 @@ type Insights struct {
 // HasData reports whether any scoped session carried signals, so the page can show an
 // empty state instead of a row of zero bars on a scope with no sessions.
 func (i Insights) HasData() bool { return i.Quality.Sessions > 0 }
+
+// InsightsPanels names the optional instrument groups one Insights call computes. The
+// quality core (the grade/outcome distribution, archetypes, hygiene, context health, and,
+// when the filter names a bucket, the signal trend series) is always computed: it is
+// cheap (one row per session off sessions and session_signals), and Quality gates
+// Insights.HasData, so every surface needs it. Everything else is opt-in, because the
+// callers genuinely differ: the fleet /insights page renders all seven instruments, but
+// the project page's quality band renders only the signal series plus the Tools
+// instrument, and it used to pay for the gallery, velocity, economics, rhythm, and
+// subagent scans anyway. A skipped group leaves its Insights (and Trends) fields zero,
+// which the JSON payload serializes as empty series no chart mount reads.
+type InsightsPanels struct {
+	// FleetMix is the per-bucket token share by model (Trends.FleetMix).
+	FleetMix bool
+	// Gallery is the per-session duration-by-cost scatter and its summary figures
+	// (Trends.Gallery).
+	Gallery bool
+	// Velocity covers the velocity instrument as a whole: the rolled-up cadence figures
+	// (Insights.Velocity), the per-bucket series (Trends.Velocity), the hour-of-week
+	// rhythm grid (Trends.Rhythm), and the concurrency figures (Insights.Concurrency)
+	// the instrument's readouts annotate. These are the message-scan panels, the most
+	// expensive reads on the page, so a surface without the instrument skips them all.
+	Velocity bool
+	// Tools is the tool reliability/mix instrument: Insights.Tools and Trends.Tools.
+	Tools bool
+	// Churn is the file-churn read the Tools instrument's churn tab draws:
+	// Insights.Churn and Trends.Churn.
+	Churn bool
+	// Economics is the spend-by-outcome and cache-savings series (Trends.Economics).
+	Economics bool
+	// Subagents is the delegation read (Trends.Subagents).
+	Subagents bool
+}
+
+// AllInsightsPanels asks for every instrument group, the fleet /insights page's set.
+var AllInsightsPanels = InsightsPanels{
+	FleetMix: true, Gallery: true, Velocity: true, Tools: true,
+	Churn: true, Economics: true, Subagents: true,
+}
+
+// QualityBandPanels is the project quality band's set (authed and public): the signal
+// series come with the core, and the band renders the Tools instrument beside them.
+var QualityBandPanels = InsightsPanels{Tools: true, Churn: true}
 
 // insightsPanelLimit bounds how many panels read concurrently, so one Insights call
 // never drains the pool out from under other requests. The control connection holds one
@@ -96,7 +135,7 @@ var snapshotIDRe = regexp.MustCompile(`^[0-9A-Fa-f]+-[0-9A-Fa-f]+-[0-9A-Fa-f]+$`
 // ReparseSession commits per session), it just must not straddle two snapshots within one
 // render. The panels fail fast on the first error (the errgroup cancels the rest), and every
 // transaction is read-only and takes no row locks, so the call never blocks ingest.
-func (s *Store) Insights(ctx context.Context, f AnalyticsFilter) (Insights, error) {
+func (s *Store) Insights(ctx context.Context, f AnalyticsFilter, panels InsightsPanels) (Insights, error) {
 	var out Insights
 
 	ctrl, err := s.Pool.Acquire(ctx)
@@ -163,7 +202,10 @@ func (s *Store) Insights(ctx context.Context, f AnalyticsFilter) (Insights, erro
 	// connection beyond the one the control transaction holds, sequentially on the control
 	// transaction itself. Distinct panels write distinct out fields and both dispatch paths
 	// synchronize before out is read, so the writes are race-free either way.
-	panels := []func(context.Context, querier) error{
+	// The always-on quality core first, then the opt-in instrument groups. A group the
+	// caller's panel set leaves false contributes no query at all; its Insights and
+	// Trends fields stay zero and the caller's surface has no mount that reads them.
+	reads := []func(context.Context, querier) error{
 		func(ctx context.Context, q querier) (err error) {
 			out.Quality, err = s.qualityDistributionFrom(ctx, q, f)
 			return
@@ -173,23 +215,7 @@ func (s *Store) Insights(ctx context.Context, f AnalyticsFilter) (Insights, erro
 			return
 		},
 		func(ctx context.Context, q querier) (err error) {
-			out.Concurrency, err = s.concurrencyStatsFrom(ctx, q, f)
-			return
-		},
-		func(ctx context.Context, q querier) (err error) {
-			out.Velocity, err = s.velocityStatsFrom(ctx, q, f)
-			return
-		},
-		func(ctx context.Context, q querier) (err error) {
-			out.Tools, err = s.toolStatsFrom(ctx, q, f)
-			return
-		},
-		func(ctx context.Context, q querier) (err error) {
 			out.Hygiene, err = s.promptHygieneFrom(ctx, q, f)
-			return
-		},
-		func(ctx context.Context, q querier) (err error) {
-			out.Churn, err = s.fileChurnFrom(ctx, q, f)
 			return
 		},
 		// Context health, and (when charted) the per-bucket signal series with it: the signal
@@ -208,6 +234,30 @@ func (s *Store) Insights(ctx context.Context, f AnalyticsFilter) (Insights, erro
 			return err
 		},
 	}
+	if panels.Velocity {
+		reads = append(reads,
+			func(ctx context.Context, q querier) (err error) {
+				out.Concurrency, err = s.concurrencyStatsFrom(ctx, q, f)
+				return
+			},
+			func(ctx context.Context, q querier) (err error) {
+				out.Velocity, err = s.velocityStatsFrom(ctx, q, f)
+				return
+			},
+		)
+	}
+	if panels.Tools {
+		reads = append(reads, func(ctx context.Context, q querier) (err error) {
+			out.Tools, err = s.toolStatsFrom(ctx, q, f)
+			return
+		})
+	}
+	if panels.Churn {
+		reads = append(reads, func(ctx context.Context, q querier) (err error) {
+			out.Churn, err = s.fileChurnFrom(ctx, q, f)
+			return
+		})
+	}
 	// The rest of the trend grid: one panel per independent builder, each writing a distinct
 	// out.Trends field. Splitting them out is the whole point of this pass. The grid used to be
 	// built by trendsFrom, which ran all of these serially on the single Context panel's
@@ -217,51 +267,54 @@ func (s *Store) Insights(ctx context.Context, f AnalyticsFilter) (Insights, erro
 	// builder. They still reconcile exactly with the distributions: all of them import the one
 	// control snapshot, so they read the same cohort.
 	if wantTrends {
-		panels = append(panels,
-			func(ctx context.Context, q querier) (err error) {
+		if panels.FleetMix {
+			reads = append(reads, func(ctx context.Context, q querier) (err error) {
 				out.Trends.FleetMix, err = s.fleetMixFrom(ctx, q, f, grid)
 				return
-			},
-			func(ctx context.Context, q querier) (err error) {
+			})
+		}
+		if panels.Economics {
+			reads = append(reads, func(ctx context.Context, q querier) (err error) {
 				out.Trends.Economics, err = s.economicsFrom(ctx, q, f, grid)
 				return
-			},
-			func(ctx context.Context, q querier) (err error) {
-				out.Trends.Velocity, err = s.velocityTrendsFrom(ctx, q, f, grid)
-				return
-			},
-			func(ctx context.Context, q querier) (err error) {
+			})
+		}
+		if panels.Velocity {
+			reads = append(reads,
+				func(ctx context.Context, q querier) (err error) {
+					out.Trends.Velocity, err = s.velocityTrendsFrom(ctx, q, f, grid)
+					return
+				},
+				func(ctx context.Context, q querier) (err error) {
+					out.Trends.Rhythm, err = s.rhythmFrom(ctx, q, f)
+					return
+				},
+			)
+		}
+		if panels.Tools {
+			reads = append(reads, func(ctx context.Context, q querier) (err error) {
 				out.Trends.Tools, err = s.toolTrendsFrom(ctx, q, f, grid)
 				return
-			},
-			func(ctx context.Context, q querier) (err error) {
+			})
+		}
+		if panels.Churn {
+			reads = append(reads, func(ctx context.Context, q querier) (err error) {
 				out.Trends.Churn, err = s.churnTrendFrom(ctx, q, f, grid)
 				return
-			},
-			func(ctx context.Context, q querier) (err error) {
+			})
+		}
+		if panels.Gallery {
+			reads = append(reads, func(ctx context.Context, q querier) (err error) {
 				out.Trends.Gallery, err = s.galleryFrom(ctx, q, f)
 				return
-			},
-			func(ctx context.Context, q querier) (err error) {
-				out.Trends.Rhythm, err = s.rhythmFrom(ctx, q, f)
-				return
-			},
-			func(ctx context.Context, q querier) (err error) {
+			})
+		}
+		if panels.Subagents {
+			reads = append(reads, func(ctx context.Context, q querier) (err error) {
 				out.Trends.Subagents, err = s.subagentTrendsFrom(ctx, q, f, grid)
 				return
-			},
-		)
-	}
-	// The per-author leaderboard is skipped when the caller will not render it (OmitUsers, set
-	// by the public project overview, whose quality band carries no People panel), so the read
-	// does not group every session by user and build an aggregate proportional to the scope's
-	// user count only to discard it. It sits outside every other panel's totals, so leaving
-	// Users zero changes nothing else.
-	if !f.OmitUsers {
-		panels = append(panels, func(ctx context.Context, q querier) (err error) {
-			out.Users, err = s.userQualityFrom(ctx, q, f)
-			return
-		})
+			})
+		}
 	}
 
 	// Dispatch the panels without ever letting this call hold a connection while blocking to
@@ -296,7 +349,7 @@ func (s *Store) Insights(ctx context.Context, f AnalyticsFilter) (Insights, erro
 	// control executor and the read is sequential.
 	executors := len(panelConns) + 1
 	buckets := make([][]func(context.Context, querier) error, executors)
-	for i, p := range panels {
+	for i, p := range reads {
 		buckets[i%executors] = append(buckets[i%executors], p)
 	}
 

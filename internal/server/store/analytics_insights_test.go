@@ -285,155 +285,16 @@ func TestReparseDoesNotFloatLastActive(t *testing.T) {
 	}
 }
 
-// TestUserQuality confirms the per-user leaderboard the Insights People panel reads: the
-// per-author session counts, the outcome partition (Unknown as the residue), the graded
-// coverage, the average score over scored rows only, and the busiest-first ordering. It goes
-// through the Insights snapshot (userQualityFrom is unexported and threaded only there), which
-// also exercises that the panel shares the quality total's cohort. It confirms the same run's
-// QualityDistribution.Graded, the coverage figure the Grades panel notes.
-func TestUserQuality(t *testing.T) {
-	t.Parallel()
-	st := storetest.NewStore(t)
-	ctx := context.Background()
-	ada := seedUser(t, st, "ada")
-	grace := seedUser(t, st, "grace")
-	pid, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
-	if err != nil {
-		t.Fatal(err)
-	}
-	recent := time.Now().Add(-24 * time.Hour)
-
-	// insertSignal derives a band-consistent score from the grade (A->95, B->82, C->67; see
-	// representativeScore), so a user's average score is the mean of those over their graded
-	// sessions, and nil when they have none. mk stamps a shape so the session is windowed, then a
-	// signals row (empty grade = the unscored/unknown bucket).
-	mk := func(user int64, src, outcome, grade string) int64 {
-		sid := seedSession(t, st, user, pid, src)
-		setSessionShape(t, st, ctx, sid, recent, recent.Add(10*time.Minute), 20, 2)
-		insertSignal(t, st, ctx, sid, outcome, grade)
-		return sid
-	}
-	// Ada: three graded (two completed A/B, one errored C) plus one ungraded/unknown session,
-	// so four sessions, three graded, and an outcome mix of 2 completed / 1 errored / 1 unknown.
-	mk(ada, "a1", "completed", "A")
-	mk(ada, "a2", "completed", "B")
-	mk(ada, "a3", "errored", "C")
-	// An ungraded session (no signals row at all): still counted under Ada, unknown outcome.
-	noneID := seedSession(t, st, ada, pid, "a4none")
-	setSessionShape(t, st, ctx, noneID, recent, recent.Add(10*time.Minute), 20, 2)
-	// Grace: one abandoned, graded D.
-	mk(grace, "g1", "abandoned", "D")
-
-	since := time.Now().Add(-90 * 24 * time.Hour)
-	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: since})
-	if err != nil {
-		t.Fatalf("insights: %v", err)
-	}
-
-	// Graded coverage on the distribution: 4 of 5 sessions carry a grade (Ada's a4none is the
-	// one unscored), so Graded is 4 against Sessions 5.
-	if ins.Quality.Sessions != 5 || ins.Quality.Graded != 4 {
-		t.Errorf("quality sessions/graded = %d/%d, want 5/4", ins.Quality.Sessions, ins.Quality.Graded)
-	}
-
-	users := ins.Users.Users
-	if len(users) != 2 {
-		t.Fatalf("users = %d, want 2", len(users))
-	}
-	// Busiest first: Ada (4) before Grace (1).
-	if users[0].Username != "ada" || users[1].Username != "grace" {
-		t.Fatalf("order = %s, %s, want ada, grace", users[0].Username, users[1].Username)
-	}
-	ada0 := users[0]
-	if ada0.Sessions != 4 || ada0.Graded != 3 {
-		t.Errorf("ada sessions/graded = %d/%d, want 4/3", ada0.Sessions, ada0.Graded)
-	}
-	if ada0.Completed != 2 || ada0.Errored != 1 || ada0.Abandoned != 0 || ada0.Unknown != 1 {
-		t.Errorf("ada outcome mix = c%d a%d e%d u%d, want c2 a0 e1 u1",
-			ada0.Completed, ada0.Abandoned, ada0.Errored, ada0.Unknown)
-	}
-	if ada0.Completed+ada0.Abandoned+ada0.Errored+ada0.Unknown != ada0.Sessions {
-		t.Errorf("ada outcome counts do not partition sessions: %+v", ada0)
-	}
-	// Ada's graded scores are 95 (A), 82 (B), 67 (C); their mean, rounded to one decimal, is 81.3.
-	if ada0.AvgScore == nil || *ada0.AvgScore != 81.3 {
-		t.Errorf("ada avg score = %v, want 81.3", ada0.AvgScore)
-	}
-	grace0 := users[1]
-	if grace0.Sessions != 1 || grace0.Graded != 1 || grace0.Abandoned != 1 {
-		t.Errorf("grace = {sessions %d, graded %d, abandoned %d}, want {1, 1, 1}", grace0.Sessions, grace0.Graded, grace0.Abandoned)
-	}
-
-	// OmitUsers drops the per-author leaderboard (the public project band sets it, since
-	// it renders no People panel) while every other panel stays populated: the flag skips
-	// only userQualityFrom, which sits outside the other panels' totals.
-	omit, err := st.Insights(ctx, store.AnalyticsFilter{Since: since, OmitUsers: true})
-	if err != nil {
-		t.Fatalf("insights OmitUsers: %v", err)
-	}
-	if len(omit.Users.Users) != 0 {
-		t.Errorf("OmitUsers should drop the People leaderboard, got %d rows: %+v", len(omit.Users.Users), omit.Users.Users)
-	}
-	if omit.Quality.Sessions != ins.Quality.Sessions || omit.Quality.Graded != ins.Quality.Graded {
-		t.Errorf("OmitUsers changed the quality distribution: sessions %d/%d graded %d/%d",
-			omit.Quality.Sessions, ins.Quality.Sessions, omit.Quality.Graded, ins.Quality.Graded)
-	}
-}
-
-// TestUserQualityAvgScoreNilWhenUnscored confirms an author with sessions but no scored
-// session in scope reports a nil AvgScore (the "unmeasured" default the panel dashes), not a
-// zero that would read as a real failing average.
-func TestUserQualityAvgScoreNilWhenUnscored(t *testing.T) {
-	t.Parallel()
-	st := storetest.NewStore(t)
-	ctx := context.Background()
-	ada := seedUser(t, st, "ada")
-	grace := seedUser(t, st, "grace")
-	pid, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
-	if err != nil {
-		t.Fatal(err)
-	}
-	recent := time.Now().Add(-24 * time.Hour)
-
-	// Ada: two ungraded/unknown sessions (explicit unscored rows). Grace: one graded so the
-	// panel has two authors and renders.
-	for _, src := range []string{"a1", "a2"} {
-		sid := seedSession(t, st, ada, pid, src)
-		setSessionShape(t, st, ctx, sid, recent, recent.Add(10*time.Minute), 20, 2)
-		insertSignal(t, st, ctx, sid, "unknown", "")
-	}
-	g := seedSession(t, st, grace, pid, "g1")
-	setSessionShape(t, st, ctx, g, recent, recent.Add(10*time.Minute), 20, 2)
-	insertSignal(t, st, ctx, g, "completed", "A")
-
-	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: time.Now().Add(-90 * 24 * time.Hour)})
-	if err != nil {
-		t.Fatalf("insights: %v", err)
-	}
-	var ada0 store.UserQuality
-	for _, u := range ins.Users.Users {
-		if u.Username == "ada" {
-			ada0 = u
-		}
-	}
-	if ada0.Username != "ada" {
-		t.Fatalf("ada not in users: %+v", ins.Users.Users)
-	}
-	if ada0.AvgScore != nil {
-		t.Errorf("ada avg score = %v, want nil (no scored session)", ada0.AvgScore)
-	}
-	if ada0.Sessions != 2 || ada0.Graded != 0 || ada0.Unknown != 2 {
-		t.Errorf("ada = {sessions %d, graded %d, unknown %d}, want {2, 0, 2}", ada0.Sessions, ada0.Graded, ada0.Unknown)
-	}
-}
 
 // TestInsightsPanelsShareCohort guards the parallel snapshot: Insights runs its panels
 // concurrently on separate connections that each import one exported MVCC snapshot, so the
-// overlapping denominators (the quality total, the archetype split, the concurrency count,
-// and the per-user session sum) must all describe the identical scoped cohort. If a panel
-// ever read on its own snapshot instead of the shared one, these totals could drift apart;
-// this pins them equal over a hand-seeded corpus, and exercises the bucket path so the
-// context-plus-trends panel and the control-transaction window resolution run too.
+// overlapping denominators (the quality total, the archetype split, and the concurrency
+// count) must all describe the identical scoped cohort. If a panel ever read on its own
+// snapshot instead of the shared one, these totals could drift apart; this pins them equal
+// over a hand-seeded corpus, and exercises the bucket path so the context-plus-trends panel
+// and the control-transaction window resolution run too. It then re-reads with the
+// quality-band panel set and pins that panel selection changes which groups are computed,
+// never the numbers inside the shared core.
 func TestInsightsPanelsShareCohort(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -461,14 +322,25 @@ func TestInsightsPanelsShareCohort(t *testing.T) {
 		{grace, "c5", "completed", "A"},
 		{grace, "c6", "unknown", ""},
 	}
+	var first int64
 	for i, s := range shape {
 		sid := seedSession(t, st, s.user, pid, s.src)
+		if first == 0 {
+			first = sid
+		}
 		start := recent.Add(time.Duration(i) * time.Minute)
 		setSessionShape(t, st, ctx, sid, start, start.Add(10*time.Minute), 20, 2)
 		insertSignal(t, st, ctx, sid, s.out, s.grade)
 	}
+	// A couple of tool calls on the first session, so the Tools group has data and the
+	// band-panel assertions below can tell "computed" from "skipped".
+	if _, err := st.Pool.Exec(ctx,
+		`INSERT INTO tool_calls (session_id, message_ordinal, call_index, tool_name, category, result_status)
+		 VALUES ($1, 1, 0, 'Read', 'read', 'ok'), ($1, 1, 1, 'Bash', 'bash', 'error')`, first); err != nil {
+		t.Fatalf("seed tool calls: %v", err)
+	}
 
-	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: time.Now().Add(-90 * 24 * time.Hour), Bucket: "day"})
+	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: time.Now().Add(-90 * 24 * time.Hour), Bucket: "day"}, store.AllInsightsPanels)
 	if err != nil {
 		t.Fatalf("insights: %v", err)
 	}
@@ -487,18 +359,41 @@ func TestInsightsPanelsShareCohort(t *testing.T) {
 	if archTotal != want {
 		t.Errorf("archetype total = %d, want %d (every scoped session bands once)", archTotal, want)
 	}
-	userTotal := 0
-	for _, u := range ins.Users.Users {
-		userTotal += u.Sessions
-	}
-	if userTotal != want {
-		t.Errorf("per-user session sum = %d, want %d (the leaderboard covers the same cohort)", userTotal, want)
-	}
 	if ins.Trends == nil {
 		t.Error("Trends is nil, want a populated grid for the bucketed call")
 	}
 	if !ins.HasData() {
 		t.Error("HasData() = false over a six-session corpus")
+	}
+
+	// The quality-band panel set computes the same core (identical quality distribution and
+	// signal series: the band's charts must not drift from the fleet page's over one corpus)
+	// while leaving the skipped instrument groups zero, so the project page pays for exactly
+	// what it mounts.
+	band, err := st.Insights(ctx, store.AnalyticsFilter{Since: time.Now().Add(-90 * 24 * time.Hour), Bucket: "day"}, store.QualityBandPanels)
+	if err != nil {
+		t.Fatalf("insights (band panels): %v", err)
+	}
+	if band.Quality.Sessions != ins.Quality.Sessions || band.Quality.Graded != ins.Quality.Graded {
+		t.Errorf("band quality differs from the full set's: sessions %d/%d graded %d/%d",
+			band.Quality.Sessions, ins.Quality.Sessions, band.Quality.Graded, ins.Quality.Graded)
+	}
+	if band.Concurrency.Sessions != 0 {
+		t.Errorf("band panels computed the skipped concurrency group: %+v", band.Concurrency)
+	}
+	if !band.Tools.HasData() {
+		t.Error("band panels skipped Tools, which the band renders")
+	}
+	if band.Trends == nil {
+		t.Fatal("band Trends is nil, want the signal series (the core computes them)")
+	}
+	if len(band.Trends.Signals.GradeShare) != len(ins.Trends.Signals.GradeShare) {
+		t.Errorf("band signal series buckets = %d, want %d (core trends must not depend on the panel set)",
+			len(band.Trends.Signals.GradeShare), len(ins.Trends.Signals.GradeShare))
+	}
+	if len(band.Trends.Gallery.Rows) != 0 || len(band.Trends.Economics.CostCompleted) != 0 {
+		t.Errorf("band panels computed skipped trend groups: gallery %d rows, economics %d buckets",
+			len(band.Trends.Gallery.Rows), len(band.Trends.Economics.CostCompleted))
 	}
 }
 
@@ -561,7 +456,7 @@ func TestInsightsBucketedGridUnderConnectionStarvation(t *testing.T) {
 		}
 	}()
 
-	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: time.Now().Add(-90 * 24 * time.Hour), Bucket: "day"})
+	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: time.Now().Add(-90 * 24 * time.Hour), Bucket: "day"}, store.AllInsightsPanels)
 	if err != nil {
 		t.Fatalf("insights under connection starvation: %v", err)
 	}

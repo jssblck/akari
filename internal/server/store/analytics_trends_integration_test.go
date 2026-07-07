@@ -124,7 +124,7 @@ func TestInsightsTrends(t *testing.T) {
 	}
 
 	since := time.Now().Add(-7 * 24 * time.Hour)
-	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: since, Bucket: "day"})
+	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: since, Bucket: "day"}, store.AllInsightsPanels)
 	if err != nil {
 		t.Fatalf("insights with trends: %v", err)
 	}
@@ -347,7 +347,7 @@ func TestInsightsTrends(t *testing.T) {
 
 	// The distributions-only path (no bucket) still leaves Trends nil, so a caller that does
 	// not want the grid pays nothing for it.
-	plain, err := st.Insights(ctx, store.AnalyticsFilter{Since: since})
+	plain, err := st.Insights(ctx, store.AnalyticsFilter{Since: since}, store.AllInsightsPanels)
 	if err != nil {
 		t.Fatalf("insights without trends: %v", err)
 	}
@@ -386,7 +386,7 @@ func TestInsightsGalleryCap(t *testing.T) {
 	}
 
 	since := time.Now().Add(-7 * 24 * time.Hour)
-	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: since, Bucket: "day"})
+	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: since, Bucket: "day"}, store.AllInsightsPanels)
 	if err != nil {
 		t.Fatalf("insights with trends: %v", err)
 	}
@@ -439,7 +439,7 @@ func TestInsightsChurnTreeCap(t *testing.T) {
 	}
 
 	since := time.Now().Add(-7 * 24 * time.Hour)
-	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: since, Bucket: "day"})
+	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: since, Bucket: "day"}, store.AllInsightsPanels)
 	if err != nil {
 		t.Fatalf("insights with trends: %v", err)
 	}
@@ -511,7 +511,7 @@ func TestInsightsChurnCapMultiProject(t *testing.T) {
 	}
 
 	since := time.Now().Add(-7 * 24 * time.Hour)
-	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: since, Bucket: "day"})
+	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: since, Bucket: "day"}, store.AllInsightsPanels)
 	if err != nil {
 		t.Fatalf("insights with trends: %v", err)
 	}
@@ -559,7 +559,7 @@ func TestEconomicsAbandonedIncompleteScoped(t *testing.T) {
 	insertGradeOutcomeSignal(t, st, ctx, aband, nil, "abandoned")
 	seedUsage(t, st, aband, "claude-opus-4-8", 4.00, 900, 450, 1, "econ-aband-priced")
 
-	ins, err := st.Insights(ctx, store.AnalyticsFilter{ProjectID: pid, Since: since, Bucket: "day"})
+	ins, err := st.Insights(ctx, store.AnalyticsFilter{ProjectID: pid, Since: since, Bucket: "day"}, store.AllInsightsPanels)
 	if err != nil {
 		t.Fatalf("insights: %v", err)
 	}
@@ -591,7 +591,7 @@ func TestEconomicsAbandonedIncompleteWhenAbandonedUnpriced(t *testing.T) {
 	seedUsage(t, st, aband, "claude-opus-4-8", 2.00, 400, 200, 1, "econ-aband-priced")
 	seedUsageUnpriced(t, st, aband, "mystery-model", 500, 250, "econ-aband-unpriced")
 
-	ins, err := st.Insights(ctx, store.AnalyticsFilter{ProjectID: pid, Since: since, Bucket: "day"})
+	ins, err := st.Insights(ctx, store.AnalyticsFilter{ProjectID: pid, Since: since, Bucket: "day"}, store.AllInsightsPanels)
 	if err != nil {
 		t.Fatalf("insights: %v", err)
 	}

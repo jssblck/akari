@@ -186,7 +186,7 @@ func (s *Server) handleInsights(w http.ResponseWriter, r *http.Request) {
 		return s.Store.Insights(ctx, store.AnalyticsFilter{
 			Since:  web.RangeSince(rng, time.Now()),
 			Bucket: web.TrendBucket(rng),
-		})
+		}, store.AllInsightsPanels)
 	})
 	if err != nil {
 		s.renderErrorNav(w, r, http.StatusInternalServerError, "insights", "Could not load insights.")
@@ -531,11 +531,18 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 	// this window") instead. See projectQuality for the matching caption.
 	insAf := af
 	insAf.Bucket = web.TrendBucket(rng)
-	insights, err := s.Store.Insights(r.Context(), insAf)
+	// The band renders only the signal series and the Tools instrument, so the read asks
+	// for exactly that (QualityBandPanels): the gallery, velocity, economics, rhythm, and
+	// subagent scans the fleet page pays for are skipped here, where nothing mounts them.
+	insStart := time.Now()
+	insights, err := s.Store.Insights(r.Context(), insAf, store.QualityBandPanels)
 	if err != nil {
 		s.renderError(w, r, http.StatusInternalServerError, "Could not load quality signals.")
 		return
 	}
+	// The same load-time readout /insights carries, so a regression in the project page's
+	// store reads shows in devtools the same way.
+	w.Header().Set("Server-Timing", fmt.Sprintf("insights;dur=%.1f", float64(time.Since(insStart).Microseconds())/1000))
 	wf := web.Facets{Agents: facets.Agents, Machines: facets.Machines, Users: facets.Users}
 	render(w, r, http.StatusOK, web.ProjectPage(s.pageForNav(r, proj.RemoteKey, "projects"), proj, page.Sessions, page.Remainder, wf, filter, analytics, insights, rng))
 }
