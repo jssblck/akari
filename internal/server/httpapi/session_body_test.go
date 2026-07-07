@@ -73,13 +73,13 @@ func TestSessionTranscriptFragments(t *testing.T) {
 		return resp, readBody(t, resp)
 	}
 
-	// The full page renders the audit header and only the tail window, with the
+	// The full page renders the instruments and only the tail window, with the
 	// earlier bar naming its cursor and count.
 	resp, body := get(fmt.Sprintf("/sessions/%d", sid))
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("session page = %d, want 200", resp.StatusCode)
 	}
-	for _, want := range []string{"session-verdict", `id="transcript-earlier"`, "before=30", "30 earlier messages", `id="msg-30"`, `id="msg-129"`} {
+	for _, want := range []string{`id="session-instruments"`, `id="transcript-earlier"`, "before=30", "30 earlier messages", `id="msg-30"`, `id="msg-129"`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("session page missing %q", want)
 		}
@@ -104,7 +104,7 @@ func TestSessionTranscriptFragments(t *testing.T) {
 	}
 
 	// ?after appends only the rows past the cursor, plus the out-of-band swaps that
-	// keep the verdict strip and subagents fold live.
+	// keep the instruments and subagents fold live.
 	resp, body = get(fmt.Sprintf("/sessions/%d/body?after=127", sid))
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("?after = %d, want 200", resp.StatusCode)

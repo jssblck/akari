@@ -36,18 +36,6 @@ main:has(> .session-page) { max-width: none; }
    outline) sits outside the SSE swap region and persists across live updates. */
 .session-maincol { min-width: 0; }
 
-/* ---- Audit header: the verdict strip over the stat band (workstream D) ---- */
-/* Reuses the Overview verdict's tile classes so the two surfaces read as the same
-   instrument; auto-fit instead of a fixed four columns because the session strip drops
-   its Wasted tile when nothing was wasted. */
-.session-verdict { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); margin-bottom: var(--sp-sm); }
-/* The verdict headline is a word (completed, errored), not a big number: one step down
-   from the Overview's numeric tiles so a long outcome word does not shout. */
-.session-verdict .vvalue { font-size: 1.1875rem; }
-/* The score arithmetic under the strip: the quality tooltip's breakdown promoted to one
-   quiet visible line, so a grade always shows its work. */
-.score-arith { margin: 0 0 var(--sp-md); font-variant-numeric: tabular-nums; }
-
 /* ---- Flow ribbon: the session's shape before its words (workstream D) ---- */
 /* One tick per turn, squeezed to fit one row: failures rose, edits sage, runs teal,
    prompts brighter and taller so the turn cadence segments the strip. Lilac stays

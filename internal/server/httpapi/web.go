@@ -546,8 +546,8 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 
 // sessionView loads everything the session page (and its live body fragment) renders:
 // detail, the bounded outline rows, the windowed transcript tail, tool metadata and
-// attachments grouped by message, subagents with their verdicts, the whole-work-item
-// rollup, the serving models, and the header stats. Each transcript message carries its
+// attachments grouped by message, subagents with their verdicts, and the header stats.
+// Each transcript message carries its
 // own per-turn usage (Message.Usage) and duplicate-prompt verdict
 // (Message.DuplicatePrompt), folded in the windowed read itself, so the transcript's
 // context/cost stamps and repeat badges need no second session-sized structure beside
@@ -572,8 +572,6 @@ func sessionViewFrom(snap store.SessionSnapshot) web.SessionView {
 	v := web.SessionView{
 		Detail:    snap.Audit.Detail,
 		Subagents: snap.Audit.Subagents,
-		Tree:      snap.Audit.Tree,
-		Models:    snap.Audit.Models,
 		Outline:   snap.Outline,
 		Tools:     web.ToolsByOrdinal(snap.Tools),
 		DupIDs:    snap.DupIDs,

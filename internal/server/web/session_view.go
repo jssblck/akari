@@ -2,7 +2,6 @@ package web
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/jssblck/akari/internal/server/store"
 )
@@ -31,13 +30,7 @@ type SessionView struct {
 	WindowAttachments map[int][]store.AttachmentView
 	Subagents         []store.SubagentRow
 	Header            HeaderStats
-	// Tree is the whole-work-item rollup (own cost plus every descendant subagent), the
-	// same fold the feed's fan-out chip reads, so the audit header names what the whole
-	// run cost and not just the root turn.
-	Tree store.TreeRollup
-	// Models is the session's serving models, heaviest first, for the audit header line.
-	Models []string
-	DupIDs int
+	DupIDs            int
 }
 
 // SetPage installs a transcript window on the view and groups the page's
@@ -49,7 +42,7 @@ func (v *SessionView) SetPage(page store.TranscriptPage) {
 }
 
 // SubagentFailures counts the direct children that ended in an error, for the collapsed
-// fold's "N failed" clause and the audit header's wasted-spend note.
+// fold's "N failed" clause.
 func SubagentFailures(subs []store.SubagentRow) int {
 	n := 0
 	for _, s := range subs {
@@ -60,38 +53,8 @@ func SubagentFailures(subs []store.SubagentRow) int {
 	return n
 }
 
-// SessionWasted is the session's wasted spend, mirroring the Overview verdict's
-// "wasted on failed runs" figure at single-work-item scale: the session's own cost when
-// it errored or was abandoned, plus the cost of every direct subagent that errored. The
-// note names where the waste came from; both are zero-valued for a healthy run, so the
-// header shows no waste tile at all.
-func SessionWasted(d store.SessionDetail, sig store.SessionSignals, subs []store.SubagentRow) (usd float64, incomplete bool, note string) {
-	var parts []string
-	if sig.Outcome == "errored" || sig.Outcome == "abandoned" {
-		usd += d.TotalCostUSD
-		incomplete = incomplete || d.CostIncomplete
-		parts = append(parts, "this run "+sig.Outcome)
-	}
-	var failed int
-	for _, s := range subs {
-		if s.Failed() {
-			failed++
-			usd += s.TotalCostUSD
-			incomplete = incomplete || s.CostIncomplete
-		}
-	}
-	if failed > 0 {
-		unit := "subagents"
-		if failed == 1 {
-			unit = "subagent"
-		}
-		parts = append(parts, fmt.Sprintf("%d failed %s", failed, unit))
-	}
-	return usd, incomplete, strings.Join(parts, " + ")
-}
-
-// VerdictOutcomeTone bands a session outcome onto the status palette for the audit
-// header's verdict tile: completed green, abandoned peach, errored rose, unknown
+// VerdictOutcomeTone bands a session outcome onto the status palette for the subagents
+// table's outcome column: completed green, abandoned peach, errored rose, unknown
 // toneless. It is the single-session shape of CompletionTone.
 func VerdictOutcomeTone(outcome string) string {
 	switch outcome {
@@ -104,77 +67,6 @@ func VerdictOutcomeTone(outcome string) string {
 	default:
 		return ""
 	}
-}
-
-// VerdictHeadline is the audit header's leading figure: the letter grade with the
-// outcome word for a scored session ("B · completed"), the outcome alone when the
-// session settled without a score, and a plain dash while the verdict is still pending
-// so the tile never invents a judgement.
-func VerdictHeadline(s store.SessionSignals) string {
-	if s.Scored() {
-		return *s.Grade + " · " + strings.ToLower(OutcomeLabel(s.Outcome))
-	}
-	if s.Outcome != "" && s.Outcome != "unknown" {
-		return strings.ToLower(OutcomeLabel(s.Outcome))
-	}
-	return "-"
-}
-
-// VerdictSub is the verdict tile's second line: the score for a scored session, and the
-// C3 fix for everything else, naming that grading happens at settle instead of leaving
-// a bare dash that reads as missing data.
-func VerdictSub(s store.SessionSignals) string {
-	if s.Scored() {
-		return fmt.Sprintf("scored %d / 100", *s.Score)
-	}
-	return "graded after the session settles"
-}
-
-// ScoreArithmeticLine spells out the grade the way the quality tooltip does, promoted to
-// a visible line under the verdict strip: 100 minus each penalty, equals the score. A
-// clean scored run reads "100, no penalties"; an unscored session returns "" so the line
-// does not render.
-func ScoreArithmeticLine(s store.SessionSignals) string {
-	if !s.Scored() {
-		return ""
-	}
-	items := ScoreBreakdownItems(s)
-	if len(items) == 0 {
-		return "100, no penalties"
-	}
-	var b strings.Builder
-	b.WriteString("100")
-	for _, it := range items {
-		fmt.Fprintf(&b, " - %d (%s)", it.Points, it.Label)
-	}
-	fmt.Fprintf(&b, " = %d", *s.Score)
-	return b.String()
-}
-
-// WorkItemNote is the Cost tile's second line: the whole-work-item cost and fan-out size
-// when the session delegated work ("work item $6.12 across 34 subagents"), or "" for a
-// session that spawned nothing, whose own cost already tells the whole story.
-func WorkItemNote(tree store.TreeRollup) string {
-	if tree.SubagentCount == 0 {
-		return ""
-	}
-	unit := "subagents"
-	if tree.SubagentCount == 1 {
-		unit = "subagent"
-	}
-	return fmt.Sprintf("work item %s across %d %s", FmtCost(tree.CostUSD, tree.CostIncomplete), tree.SubagentCount, unit)
-}
-
-// ModelsLine joins the session's serving models for the Duration tile's second line,
-// naming at most three and folding the rest into a count so the line stays one line.
-func ModelsLine(models []string) string {
-	if len(models) == 0 {
-		return ""
-	}
-	if len(models) > 3 {
-		return strings.Join(models[:3], ", ") + fmt.Sprintf(" +%d more", len(models)-3)
-	}
-	return strings.Join(models, ", ")
 }
 
 // EarlierCountLabel is the "Show earlier" bar's second half, naming how much of the
