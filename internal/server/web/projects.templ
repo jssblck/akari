@@ -65,13 +65,14 @@ templ ProjectsPage(p Page, remotes []store.ProjectSummary, locals []store.Projec
 				<section class="proj-section">
 					<div class="panel-head">
 						<h2>Local folders</h2>
-						<span class="muted small">Working directories with no git remote, keyed by machine and path.</span>
 					</div>
 					<div class="table-scroll">
 						<table class="grid projects">
 							<thead>
 								<tr>
 									<th class="proj-name">Folder</th>
+									<th>Machine</th>
+									<th>State</th>
 									<th class="trend">30d</th>
 									<th class="num">Sessions</th>
 									<th class="num">Tokens</th>
@@ -83,12 +84,10 @@ templ ProjectsPage(p Page, remotes []store.ProjectSummary, locals []store.Projec
 								for _, pr := range locals {
 									<tr data-row-href={ ProjectPath(pr.ID) }>
 										<td class="proj-name">
-											<a href={ ProjectHref(pr.ID) }>{ ProjectTitle(pr) }</a>
-											@kindTag(pr.Kind)
-											if lp := LocalPath(pr); lp != "" {
-												<div class="proj-path muted small mono" title={ lp }>{ lp }</div>
-											}
+											<a class="mono" href={ ProjectHref(pr.ID) } title={ LocalPath(pr) }>{ LocalPath(pr) }</a>
 										</td>
+										<td class="muted">{ pr.Host }</td>
+										<td>@kindTag(pr.Kind)</td>
 										<td class="trend">@templ.Raw(Sparkline(spark[pr.ID]))</td>
 										<td class="num">{ fmt.Sprintf("%d", pr.SessionCount) }</td>
 										<td class="num">@tokensCell(pr)</td>
@@ -145,7 +144,7 @@ templ ProjectPage(p Page, proj store.ProjectSummary, sessions []store.SessionSum
 				@projectSessionToolbar(proj.ID, facets, sel, rng)
 			</div>
 			@analyticsPanel(a, "chart-project", ProjectRangeOptions(proj.ID, sel, rng), rng, nil, nil, "#project-view", true)
-			@projectQuality(proj.ID, sel, ins, rng)
+			@projectQuality(ins)
 			<section>
 				<div class="panel-head">
 					<h2>Sessions</h2>
@@ -189,25 +188,22 @@ templ projectPublicity(proj store.ProjectSummary) {
 }
 
 // projectQuality is the project page's per-project answer to "how are agent sessions going
-// in this repo": the same instrument-styled quality band /insights carries, scoped to one
-// project and deliberately kept lean. It renders only when the scope has graded sessions
-// (ins.HasData), so a project with no sessions in the window shows no empty band; the usage
-// panel above already carries that scope's activity.
+// in this repo": the /insights measurement instruments, scoped to this project and cut down
+// to the quality-verdict subset. It renders the same client-drawn charts /insights does,
+// driven by the shared insights.js engine reading the project-scoped trend grid the handler
+// embeds in #insights-data, rather than the old server-drawn distribution bars. It shows only
+// when the scope has graded sessions AND a trend grid to draw (ins.HasData plus a populated
+// ins.Trends, which handleProjectPage requests by naming a bucket), so a project with nothing
+// to grade shows no empty band; the usage panel above already carries that scope's activity.
 //
 // The band stays a distilled subset of /insights on purpose (the design's "density earned"
-// doctrine rejects the wall of panels): a three-column distribution row (grades, outcomes,
-// archetypes), a tools row, and the churn list. It omits velocity, concurrency, hygiene,
-// and context, which belong to the fleet-wide read; the project page already carries the
-// usage panel, so the band earns only the quality-verdict panels.
+// doctrine rejects the wall of panels): a Quality instrument (grades, outcomes, and the
+// archetype mix as time series) and the shared Tools instrument (reliability, mix, failures,
+// and the file-churn treemap). It omits velocity, concurrency, hygiene, context, economics,
+// and subagents, which belong to the fleet-wide read; the project page already carries the
+// usage panel, so the band earns only the quality-verdict instruments.
 //
-// The grade and outcome bars drill into the sessions feed scoped to this project and the
-// page's active user/agent/machine filter (base = sel, which carries the project id and any
-// toolbar narrowing), plus the active range (rng), so a click lands on the same sessions the bar
-// counts, bounded to the same window, rather than the unscoped, all-time fleet feed. Churn drops
-// its per-bar project tag (showProject false): every row is this one project, so the tag would be
-// noise, and the caption drops the "grouped per project" clause the fleet page needs.
-//
-// The band's window semantics differ from the usage panel's on purpose: this band derives from the
+// The band's window semantics differ from the usage panel's on purpose: it derives from the
 // Insights read, which counts sessions by started_at falling in the window, while the usage panel
 // and the session table window on dated usage_events. A quality verdict is a per-session fact keyed
 // to when the session ran, so it follows the Insights convention (a caption on the section head
@@ -215,24 +211,41 @@ templ projectPublicity(proj store.ProjectSummary) {
 // windows on the event dates. Forcing one onto the other would misdate whichever it borrows, so the
 // gap is intentional and named rather than reconciled. See the handleProjectPage Insights call for
 // the matching note.
-templ projectQuality(projectID int64, sel store.SessionFilter, ins store.Insights, rng string) {
-	if ins.HasData() {
+//
+// The embedded #insights-data and the #tooltip ride inside #project-view, so the range and filter
+// toolbar's htmx swap carries a fresh project-scoped payload and insights.js redraws the charts on
+// afterSwap (it keys off the data script sitting in the swapped region, not a fixed section id).
+templ projectQuality(ins store.Insights) {
+	if ins.HasData() && ins.Trends.HasData() {
 		<section class="proj-quality">
-			<div class="proj-quality-head">
-				<span class="label">Quality</span>
-				<span class="muted small ins-caption">sessions that started in this window</span>
-			</div>
-			<div class="ins-grid">
-				@distributionPanel("Grades", "the quality score banded A to F, unscored for an ungraded session", GradedNote(ins.Quality), GradeBars(ins.Quality.Grades, sel, rng))
-				@distributionPanel("Outcomes", "how each session ended", "", OutcomeBars(ins.Quality.Outcomes, sel, rng))
-				@distributionPanel("Archetypes", "session shape by length and turns", "", ArchetypeBars(ins.Archetypes))
-			</div>
-			<div class="ins-tools proj-quality-tools">
-				@toolsPanel(ins.Tools)
-			</div>
-			<div class="ins-churn proj-quality-churn">
-				@churnPanel(ins.Churn, "files edited more than once in this window", false)
-			</div>
+			<section class="instrument" id="quality" aria-labelledby="quality-h">
+				<div class="instrument-head">
+					<h2 id="quality-h">Quality</h2>
+					<span class="muted small ins-caption">sessions that started in this window</span>
+				</div>
+				<div class="panel">
+					<div class="quality-grid">
+						<div class="quality-chart">
+							<div class="chart-title">Grades</div>
+							<div id="chart-grades"></div>
+						</div>
+						<div class="quality-chart">
+							<div class="chart-title">Outcomes</div>
+							<div id="chart-outcomes"></div>
+						</div>
+					</div>
+					<div class="quality-chart quality-chart-wide">
+						<div class="chart-title">Archetypes</div>
+						<div id="chart-archetypes"></div>
+					</div>
+					@instrumentCaption("How sessions graded, how they ended, and the shape they took, across the window.") {
+						<code>session_signals.grade</code> and <code>outcome</code> per bucket, over the archetype mix banded from each session's turns, message count, and span: the same series /insights draws, scoped to this project.
+					}
+				</div>
+			</section>
+			@toolsInstrument()
+			@insightsDataElement(ins)
+			<div class="chart-tooltip" id="tooltip" role="status"></div>
 		</section>
 	}
 }

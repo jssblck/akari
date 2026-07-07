@@ -135,58 +135,10 @@ func TestSubagentVerdictIgnoresStaleSignals(t *testing.T) {
 	}
 }
 
-// TestTreeRollupFor pins the single-session wrapper over the feed's recursive rollup:
-// the parent's figure folds its own cost plus its whole descendant subtree, and a
-// session that spawned nothing reads the zero rollup.
-func TestTreeRollupFor(t *testing.T) {
-	t.Parallel()
-	st := storetest.NewStore(t)
-	ctx := context.Background()
-
-	uid := seedUser(t, st, "grace")
-	pid, err := st.UpsertProject(ctx, "github.com/ada/engine", "github.com", "ada", "engine", "engine", "remote")
-	if err != nil {
-		t.Fatal(err)
-	}
-	announce := func(src string) int64 {
-		t.Helper()
-		ann, err := st.Announce(ctx, store.AnnounceParams{UserID: uid, Agent: "claude", SourceSessionID: src, ProjectID: pid})
-		if err != nil {
-			t.Fatalf("announce %q: %v", src, err)
-		}
-		return ann.SessionID
-	}
-	parent := announce("root")
-	childA := announce("root/subagents/a")
-	childB := announce("root/subagents/b")
-	for id, cost := range map[int64]float64{parent: 1.00, childA: 0.25, childB: 0.50} {
-		if _, err := st.Pool.Exec(ctx,
-			`UPDATE sessions SET total_cost_usd = $2 WHERE id = $1`, id, cost); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	roll, err := st.TreeRollupFor(ctx, parent)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if roll.SubagentCount != 2 || roll.CostUSD != 1.75 {
-		t.Fatalf("rollup = %+v, want 2 subagents at $1.75", roll)
-	}
-
-	leaf, err := st.TreeRollupFor(ctx, childA)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if leaf.SubagentCount != 0 {
-		t.Fatalf("a leaf session should roll up no subagents, got %+v", leaf)
-	}
-}
-
-// TestSessionAuditByID pins the one-snapshot audit bundle: the detail, signals,
-// subagents, work-item rollup, and models the header judges side by side all arrive
-// from a single read and agree with the individual reads on quiet data. (The snapshot
-// property itself is the repeatable-read transaction; this pins the wiring.)
+// TestSessionAuditByID pins the one-snapshot audit bundle: the detail, signals, and
+// subagents the instruments read side by side all arrive from a single read and agree
+// with the individual reads on quiet data. (The snapshot property itself is the
+// repeatable-read transaction; this pins the wiring.)
 func TestSessionAuditByID(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -218,7 +170,6 @@ func TestSessionAuditByID(t *testing.T) {
 	if _, err := st.Pool.Exec(ctx, `UPDATE sessions SET signals_stale = false WHERE id = $1`, parent.SessionID); err != nil {
 		t.Fatal(err)
 	}
-	seedUsage(t, st, parent.SessionID, "claude-fable-5", 1.0, 1000, 100, 0, "audit-u1")
 
 	a, err := st.SessionAuditByID(ctx, parent.SessionID)
 	if err != nil {
@@ -232,12 +183,6 @@ func TestSessionAuditByID(t *testing.T) {
 	}
 	if len(a.Subagents) != 1 || a.Subagents[0].ID != child.SessionID {
 		t.Fatalf("bundle subagents = %+v", a.Subagents)
-	}
-	if a.Tree.SubagentCount != 1 || a.Tree.CostUSD != 2.50 {
-		t.Fatalf("bundle rollup = %+v, want 1 subagent at $2.50", a.Tree)
-	}
-	if len(a.Models) != 1 || a.Models[0] != "claude-fable-5" {
-		t.Fatalf("bundle models = %v", a.Models)
 	}
 
 	if _, err := st.SessionAuditByID(ctx, 99999999); !errors.Is(err, store.ErrNotFound) {
@@ -330,31 +275,5 @@ func TestSessionAppendByID(t *testing.T) {
 	if len(gone.Page.Msgs) != 0 || len(gone.Page.Seed) != 0 {
 		t.Fatalf("emptied projection should return no rows and no seed, got msgs=%v seed=%v",
 			ordinals(gone.Page.Msgs), ordinals(gone.Page.Seed))
-	}
-}
-
-// TestSessionModels pins the audit header's model line: distinct models heaviest first
-// by total token volume, empty-model rows dropped, and the whole read capped.
-func TestSessionModels(t *testing.T) {
-	t.Parallel()
-	st := storetest.NewStore(t)
-	ctx := context.Background()
-
-	uid := seedUser(t, st, "grace")
-	pid, err := st.UpsertProject(ctx, "github.com/ada/engine", "github.com", "ada", "engine", "engine", "remote")
-	if err != nil {
-		t.Fatal(err)
-	}
-	sid := seedSessionWithStats(t, st, uid, pid, "claude", "src-models", 1.0, 10, 10)
-	seedUsage(t, st, sid, "claude-opus-4-8", 0.5, 100, 10, 0, "u1")
-	seedUsage(t, st, sid, "claude-fable-5", 1.0, 90000, 900, 0, "u2")
-	seedUsage(t, st, sid, "claude-fable-5", 1.0, 90000, 900, 0, "u3")
-
-	models, err := st.SessionModels(ctx, sid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(models) != 2 || models[0] != "claude-fable-5" || models[1] != "claude-opus-4-8" {
-		t.Fatalf("models = %v, want [claude-fable-5 claude-opus-4-8]", models)
 	}
 }

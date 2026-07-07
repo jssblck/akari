@@ -82,6 +82,13 @@ type ChurnTrend struct {
 	Clipped       int // hot files beyond the tree cap, noted rather than shown
 	TotalReEdits  int // deduped edits of hot files across the window (sums the tree's edits, before the cap)
 	TotalHotFiles int // distinct files re-edited (more than once) across the window
+	// Projects is the uncapped count of distinct projects the hot-file cohort spans, before the
+	// tree's maxChurnTreeFiles cap. The treemap uses it to tell a genuinely single-project window
+	// (root at that project's folders) from a multi-project one whose capped tree happens to show
+	// one project (keep the project-level breakdown). Reading the capped tree's project list
+	// instead would misjudge a window whose top-N files all sit in one project while a clipped
+	// file belongs to another.
+	Projects int
 }
 
 // GallerySession is one dot in the session gallery: a fully-spanned session placed by how
@@ -712,17 +719,18 @@ func (s *Store) churnTrendFrom(ctx context.Context, q querier, f AnalyticsFilter
 		 )
 		 SELECT CASE WHEN p.kind IN ('standalone', 'orphaned') THEN p.display_name ELSE p.remote_key END AS project,
 		        agg.churn_path, agg.edits, agg.sessions,
-		        (SELECT count(*) FROM agg) AS total
+		        (SELECT count(*) FROM agg) AS total,
+		        (SELECT count(DISTINCT project_id) FROM agg) AS proj_total
 		   FROM agg JOIN projects p ON p.id = agg.project_id
 		  ORDER BY agg.edits DESC, project, agg.churn_path
 		  LIMIT `+limitArg, args...)
 	if err != nil {
 		return ChurnTrend{}, fmt.Errorf("churn tree: %w", err)
 	}
-	var total int
+	var total, projTotal int
 	for trows.Next() {
 		var n ChurnNode
-		if err := trows.Scan(&n.Project, &n.Path, &n.Edits, &n.Sessions, &total); err != nil {
+		if err := trows.Scan(&n.Project, &n.Path, &n.Edits, &n.Sessions, &total, &projTotal); err != nil {
 			trows.Close()
 			return ChurnTrend{}, fmt.Errorf("scan churn tree: %w", err)
 		}
@@ -734,6 +742,9 @@ func (s *Store) churnTrendFrom(ctx context.Context, q querier, f AnalyticsFilter
 		return ChurnTrend{}, fmt.Errorf("iterate churn tree: %w", err)
 	}
 	out.TotalHotFiles = total
+	// The uncapped project span of the hot-file cohort. Both totals ride every tree row (correlated
+	// subqueries over the same agg CTE), so an empty tree leaves them zero, which reads as no churn.
+	out.Projects = projTotal
 	if total > len(out.Tree) {
 		out.Clipped = total - len(out.Tree)
 	}

@@ -36,36 +36,6 @@ main:has(> .session-page) { max-width: none; }
    outline) sits outside the SSE swap region and persists across live updates. */
 .session-maincol { min-width: 0; }
 
-/* ---- Audit header: the verdict strip over the stat band (workstream D) ---- */
-/* Four joined tiles, the same seam-and-radius treatment the usage panel's stats strip
-   wears, so the two blocks read as one instrument stack. Each tile stacks a label, a
-   figure, and a muted context line. The session strip uses auto-fit rather than fixed
-   columns because it drops its Wasted tile when nothing was wasted. */
-.verdict {
-  display: grid; border: 1px solid var(--border); border-radius: var(--r-md);
-  background: var(--surface); overflow: hidden; margin-bottom: var(--sp-md);
-}
-.vtile { padding: var(--sp-md) var(--sp-lg); min-width: 0; }
-.vtile + .vtile { border-left: 1px solid var(--border); }
-.vtile .label { display: block; margin-bottom: 4px; }
-.vvalue {
-  font-family: var(--mono); font-size: 1.5rem; line-height: 1.1;
-  font-variant-numeric: tabular-nums; color: var(--text);
-}
-/* The banded figure (the outcome word) carries its own verdict colour; the plain ones
-   (cost, duration) stay in the default ink. */
-.vvalue.tone-ok { color: var(--ok); }
-.vvalue.tone-warn { color: var(--warn); }
-.vvalue.tone-err { color: var(--err); }
-.vsub { margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.session-verdict { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); margin-bottom: var(--sp-sm); }
-/* The verdict headline is a word (completed, errored), not a big number: one step down
-   from a numeric tile so a long outcome word does not shout. */
-.session-verdict .vvalue { font-size: 1.1875rem; }
-/* The score arithmetic under the strip: the quality tooltip's breakdown promoted to one
-   quiet visible line, so a grade always shows its work. */
-.score-arith { margin: 0 0 var(--sp-md); font-variant-numeric: tabular-nums; }
-
 /* ---- Flow ribbon: the session's shape before its words (workstream D) ---- */
 /* One tick per turn, squeezed to fit one row: failures rose, edits sage, runs teal,
    prompts brighter and taller so the turn cadence segments the strip. Lilac stays

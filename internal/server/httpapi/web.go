@@ -514,9 +514,13 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The quality band draws from the same scope as the usage panel and the table (the same
-	// AnalyticsFilter: project, window, and any active user/agent/machine narrowing), so the
-	// grades, outcomes, tools, and churn describe exactly the sessions the rows below list
-	// rather than a project-wide read that would drift from the filtered table.
+	// project, window, and any active user/agent/machine narrowing), so the grades, outcomes,
+	// tools, and churn describe exactly the sessions the rows below list rather than a
+	// project-wide read that would drift from the filtered table. It names a trend Bucket so
+	// Insights computes the time-bucketed grid the band's charts draw: the project page renders
+	// the same client-side instruments /insights does, scoped here, rather than the old
+	// server-drawn distribution bars. The bucket also tightens the window to the charted span,
+	// so the band's headline cohort and its series count the same rows.
 	//
 	// Two windows meet here on purpose. Insights counts sessions by started_at falling in the
 	// trailing window; the usage panel and the session table above window on dated usage_events.
@@ -525,7 +529,9 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 	// is per-usage-event and windows on the event dates. Forcing one onto the other would misdate
 	// whichever it borrows, so the band's section head names its window ("sessions that started in
 	// this window") instead. See projectQuality for the matching caption.
-	insights, err := s.Store.Insights(r.Context(), af)
+	insAf := af
+	insAf.Bucket = web.TrendBucket(rng)
+	insights, err := s.Store.Insights(r.Context(), insAf)
 	if err != nil {
 		s.renderError(w, r, http.StatusInternalServerError, "Could not load quality signals.")
 		return
@@ -536,8 +542,8 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 
 // sessionView loads everything the session page (and its live body fragment) renders:
 // detail, the bounded outline rows, the windowed transcript tail, tool metadata and
-// attachments grouped by message, subagents with their verdicts, the whole-work-item
-// rollup, the serving models, and the header stats. Each transcript message carries its
+// attachments grouped by message, subagents with their verdicts, and the header stats.
+// Each transcript message carries its
 // own per-turn usage (Message.Usage) and duplicate-prompt verdict
 // (Message.DuplicatePrompt), folded in the windowed read itself, so the transcript's
 // context/cost stamps and repeat badges need no second session-sized structure beside
@@ -562,8 +568,6 @@ func sessionViewFrom(snap store.SessionSnapshot) web.SessionView {
 	v := web.SessionView{
 		Detail:    snap.Audit.Detail,
 		Subagents: snap.Audit.Subagents,
-		Tree:      snap.Audit.Tree,
-		Models:    snap.Audit.Models,
 		Outline:   snap.Outline,
 		Tools:     web.ToolsByOrdinal(snap.Tools),
 		DupIDs:    snap.DupIDs,

@@ -264,8 +264,9 @@ func TestProjectsPageRepositoriesSection(t *testing.T) {
 }
 
 // With local folders in scope the index renders a second section below Repositories: a
-// Local folders table whose rows lead with the folder name and its state chip, carry the
-// filesystem path recovered from the synthetic key, and link to the same project page.
+// Local folders table whose rows link by the full working-directory path recovered from
+// the synthetic key, carry the host in a Machine column and the state chip in its own
+// State column, and link to the same project page.
 func TestProjectsPageLocalFoldersSection(t *testing.T) {
 	p := Page{Title: "Projects", LoggedIn: true, Active: "projects", Username: "Ada Lovelace"}
 	remotes := []store.ProjectSummary{{ID: 1, RemoteKey: "hopper/akari", Kind: "remote", SessionCount: 3}}
@@ -278,9 +279,11 @@ func TestProjectsPageLocalFoldersSection(t *testing.T) {
 	for _, want := range []string{
 		`<h2>Repositories</h2>`,
 		`<h2>Local folders</h2>`,
-		`>scratch</a>`,           // the folder name links, not the synthetic key
-		`class="tag standalone"`, // the state chip rides the folder row
-		`/home/grace/scratch`,    // the path recovered from the local: key
+		`<th>Machine</th>`,              // the host rides its own column
+		`<th>State</th>`,                // the state chip rides its own column
+		`>/home/grace/scratch</a>`,      // the folder links by full path, not the synthetic key
+		`class="tag standalone"`,        // the state chip renders in the State column
+		`<td class="muted">laptop</td>`, // the host fills the Machine column
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("local folders section missing %q", want)
@@ -288,7 +291,11 @@ func TestProjectsPageLocalFoldersSection(t *testing.T) {
 	}
 	// The synthetic key never shows as a row label.
 	if strings.Contains(html, `>local:laptop:/home/grace/scratch</a>`) {
-		t.Error("a local folder should link by folder name, not its synthetic local: key")
+		t.Error("a local folder should link by full path, not its synthetic local: key")
+	}
+	// The folder no longer leads with its basename; the full path is the link text.
+	if strings.Contains(html, `>scratch</a>`) {
+		t.Error("a local folder should link by full path, not its basename")
 	}
 }
 
@@ -566,52 +573,61 @@ func TestProjectPageRendersHeatmap(t *testing.T) {
 	}
 }
 
-// With a populated Insights the project page grows a Quality band: the section label, the
-// three distribution panels, and the tools and churn panels, with the grade and outcome
-// drill-downs scoped to the project (and any active filter). The band is a lean subset of
-// /insights, so it deliberately omits the velocity, concurrency, hygiene, and context bands,
-// and its churn rows drop the per-bar project tag since every row is this one project.
+// With a populated Insights (distributions plus a trend grid) the project page grows a
+// Quality band built from the /insights measurement instruments, scoped to this project: a
+// Quality instrument holding the grades, outcomes, and archetype chart mounts, and the shared
+// Tools instrument (reliability/mix/failures/churn). The band embeds the project-scoped
+// #insights-data payload and the tooltip inside #project-view, so the shared insights.js engine
+// draws the charts and redraws them after a range or filter swap. The band is a lean subset of
+// /insights, so it omits the velocity, economics, hygiene, context, and subagent instruments.
 func TestProjectPageRendersQualityBand(t *testing.T) {
 	p := Page{Title: "akari", LoggedIn: true, Active: "projects", Username: "Anna Winlock"}
 	proj := store.ProjectSummary{ID: 7, RemoteKey: "hopper/akari", Kind: "remote", SessionCount: 15}
-	// The base scope carries the project and an active agent filter, so the drill-down
-	// hrefs must fold both in beside the bucket.
 	sel := store.SessionFilter{ProjectID: 7, Agent: "claude"}
-	html := renderComponent(t, ProjectPage(p, proj, nil, store.SessionRemainder{}, Facets{}, sel, analyticsWithData(), sampleInsights(), "90d"))
+	html := renderComponent(t, ProjectPage(p, proj, nil, store.SessionRemainder{}, Facets{}, sel, analyticsWithData(), sampleInsightsWithTrends(), "90d"))
 
 	for _, want := range []string{
-		// The band and its section label, plus the caption naming its window semantics (the
+		// The band and its instrument head, plus the caption naming its window semantics (the
 		// band windows on started_at, matching the Insights convention, distinct from the
-		// usage panel's usage-event window; documented here and at the handler call).
-		`class="proj-quality"`, `>Quality</span>`,
+		// usage panel's usage-event window; documented at the handler call and projectQuality).
+		`class="proj-quality"`, `id="quality"`, `>Quality</h2>`,
 		`sessions that started in this window`,
-		// The three distribution panels reuse the Insights grid.
-		`class="ins-grid"`, `>Grades<`, `>Outcomes<`, `>Archetypes<`,
-		// The coverage note rides the Grades head (11 of 15 graded reads 73%).
-		`73% graded`,
-		// A grade drill-down carries the project scope, the active agent filter, the bucket, the
-		// active range, AND empty=1, so it lands on the same sessions the bar counts, bounded to the
-		// same window and under the same empty-session policy rather than opening the all-time feed.
-		`href="/sessions?agent=claude&amp;empty=1&amp;grade=A&amp;project=7&amp;range=90d"`,
-		// An outcome drill-down likewise carries the project scope, the filter, the range, and empty=1.
-		`href="/sessions?agent=claude&amp;empty=1&amp;outcome=completed&amp;project=7&amp;range=90d"`,
-		// The tools and churn panels round out the band.
-		`>Tools<`, `>File churn<`, `>Read<`,
-		// The churn caption drops the fleet page's "grouped per project" clause.
-		`files edited more than once in this window<`,
+		// The three quality-verdict chart mounts the engine draws into (grades, outcomes, and
+		// the archetype mix as time series), each under its quiet title.
+		`class="quality-grid"`, `>Grades<`, `>Outcomes<`, `>Archetypes<`,
+		`id="chart-grades"`, `id="chart-outcomes"`, `id="chart-archetypes"`,
+		// The shared Tools instrument rounds out the band: its tab strip and the churn treemap.
+		`id="tools"`, `>Tools</h2>`, `id="tools-tabs"`, `id="chart-reliability"`, `id="treemap"`,
+		// The project-scoped data payload and the chart tooltip ride inside the swappable region so
+		// insights.js redraws on a range or filter swap.
+		`id="insights-data"`, `class="chart-tooltip"`, `id="tooltip"`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("project quality band missing %q", want)
 		}
 	}
-	// The band stays lean: none of the fleet-only bands appear on the project page.
-	for _, unwanted := range []string{`>Velocity<`, `>Concurrency<`, `>Prompt hygiene<`, `>Context health<`} {
+	// The band stays lean: none of the fleet-only instruments appear on the project page.
+	for _, unwanted := range []string{`id="velocity"`, `id="economics"`, `id="subagents"`, `id="health"`, `id="fleetmix"`, `id="gallery"`} {
 		if strings.Contains(html, unwanted) {
-			t.Errorf("project quality band should omit the fleet-only band %q", unwanted)
+			t.Errorf("project quality band should omit the fleet-only instrument %q", unwanted)
 		}
 	}
-	// Every churn row is this one project, so the per-bar project tag is dropped as noise.
-	if strings.Contains(html, `class="churn-proj"`) {
-		t.Error("project quality churn should drop the per-bar project tag")
+	// The old server-drawn distribution bars are gone: no grade drill-down links and no bar markup.
+	if strings.Contains(html, `href="/sessions?agent=claude&amp;empty=1&amp;grade=A`) {
+		t.Error("project quality band should no longer render server-drawn grade drill-down bars")
+	}
+}
+
+// A project with graded sessions but no trend grid (Insights called without a bucket) renders
+// no Quality band: the charts have nothing to draw, so the band self-guards on ins.Trends
+// rather than emitting empty chart mounts and a data-less payload.
+func TestProjectPageQualityBandNeedsTrends(t *testing.T) {
+	p := Page{Title: "akari", LoggedIn: true, Active: "projects", Username: "Anna Winlock"}
+	proj := store.ProjectSummary{ID: 7, RemoteKey: "hopper/akari", Kind: "remote", SessionCount: 15}
+	sel := store.SessionFilter{ProjectID: 7}
+	// sampleInsights has distributions (HasData) but no Trends grid.
+	html := renderComponent(t, ProjectPage(p, proj, nil, store.SessionRemainder{}, Facets{}, sel, analyticsWithData(), sampleInsights(), "90d"))
+	if strings.Contains(html, `class="proj-quality"`) {
+		t.Error("project page should render no Quality band when Insights carries no trend grid")
 	}
 }
