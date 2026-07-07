@@ -282,6 +282,12 @@ func announceIntoProjectTx(ctx context.Context, tx pgx.Tx, p AnnounceParams) (An
 		if err := recomputeToolCallRelPathsTx(ctx, tx, r.SessionID, p.Cwd); err != nil {
 			return AnnounceResult{}, err
 		}
+		// session_file_churn keys on the rel paths just rewritten, so it re-derives in the
+		// same transaction; a cwd-only announce triggers no rebuild, which is otherwise the
+		// only writer (see deriveSessionFileChurnTx).
+		if err := deriveSessionFileChurnTx(ctx, tx, r.SessionID); err != nil {
+			return AnnounceResult{}, err
+		}
 	}
 	if err := linkSubagentParentTx(ctx, tx, p, r.SessionID); err != nil {
 		return AnnounceResult{}, err

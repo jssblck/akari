@@ -299,6 +299,13 @@ func rebuildTx(ctx context.Context, tx pgx.Tx, sessionID int64, epoch int, byteL
 		return err
 	}
 
+	// The insights rollup tables re-derive from the projection rows just written, in this
+	// same transaction, so they are exactly as fresh as the projection and equal a fresh
+	// derivation by construction (see rollups.go).
+	if err := deriveSessionRollupsTx(ctx, tx, sessionID); err != nil {
+		return err
+	}
+
 	// The rollups are set absolutely from the folded rows, never incremented, so
 	// they equal the ledger by construction (sessions.total_* == sum over
 	// usage_events, message_count == count of messages rows). signals_stale is

@@ -170,4 +170,18 @@ package parse
 // a different message.id, so every tool_use of one response folds into its one row.
 // A parser output change: the golden fixtures move (the fixture carries the
 // interleaved shape), and the rebuild re-folds the corpus.
-const Epoch = 14
+//
+// Epoch 14 -> 15: the insights rollup tables (migration 0048; see
+// internal/server/store/rollups.go). rebuildTx now derives five per-session rollups
+// (session_usage_daily, session_tool_rollup, session_file_churn, session_turns,
+// session_activity_hourly) from the projection rows it writes, inside the same
+// transaction, and the insights reads move onto them. The reducer's output is unchanged
+// and the migration backfills the corpus from the existing projection, so nothing visible
+// depends on the reparse this bump forces; the bump exists for the rolling-deploy race. An
+// epoch-14 binary running beside this one rebuilds sessions without writing rollup rows,
+// and nothing would ever mark such a session due again: with the bump, whatever the old
+// binary rebuilt stays due (it stamps epoch 14) until a new binary re-derives it, so the
+// rollups converge on every session regardless of deploy interleaving. Also the rule going
+// forward: changing a rollup derivation is a rebuild-derived-output change and takes a
+// bump, exactly like a reducer or scoring change.
+const Epoch = 15
