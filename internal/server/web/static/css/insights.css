@@ -154,40 +154,11 @@
 .page-header {
   display: flex;
   align-items: flex-start;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 24px;
   flex-wrap: wrap;
   padding-bottom: 20px;
   border-bottom: 1px solid var(--border);
-}
-
-.page-header-left {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  max-width: 620px;
-}
-
-.page-header .section-label {
-  color: var(--accent);
-}
-
-.page-header-left p {
-  margin: 0;
-  color: var(--subtext);
-  font-size: 0.875rem;
-}
-
-/* Summary strip: the plain-language lead over the instruments. It reads a step up from the
-   header's sub-copy (larger, in --text, roomier leading) so it lands as the page's headline
-   read, and its figures sit on tabular numerics so the numbers line up as the eye scans. */
-.insights-summary {
-  margin: 20px 0 4px;
-  max-width: 640px;
-  color: var(--text);
-  font-size: 1rem;
-  line-height: 1.6;
-  font-variant-numeric: tabular-nums;
 }
 
 /* range control */
