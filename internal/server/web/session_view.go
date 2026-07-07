@@ -92,7 +92,7 @@ func SessionWasted(d store.SessionDetail, sig store.SessionSignals, subs []store
 
 // VerdictOutcomeTone bands a session outcome onto the status palette for the audit
 // header's verdict tile: completed green, abandoned peach, errored rose, unknown
-// toneless. It is the single-session shape of CompletionTone.
+// toneless.
 func VerdictOutcomeTone(outcome string) string {
 	switch outcome {
 	case "completed":
@@ -104,6 +104,16 @@ func VerdictOutcomeTone(outcome string) string {
 	default:
 		return ""
 	}
+}
+
+// VerdictValueClass is the class for a verdict tile's figure, adding a tone modifier
+// when the figure carries a banded verdict (the outcome word) and plain otherwise (cost,
+// duration). The modifier maps to the status palette in session.css.
+func VerdictValueClass(tone string) string {
+	if tone == "" {
+		return "vvalue"
+	}
+	return "vvalue tone-" + tone
 }
 
 // VerdictHeadline is the audit header's leading figure: the letter grade with the
