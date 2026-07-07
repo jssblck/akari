@@ -94,6 +94,7 @@ type akData struct {
 		TotalHotFiles int `json:"totalHotFiles"`
 		TotalReedits  int `json:"totalReedits"`
 		Clipped       int `json:"clipped"`
+		ProjectCount  int `json:"projectCount"`
 	} `json:"churnTrend"`
 
 	CostQuality struct {
@@ -280,6 +281,12 @@ func TestInsightsDataMapping(t *testing.T) {
 	// clipped and the serializer must carry it or the headline would exceed the visible breakdown.
 	if d.ChurnTrend.Clipped != 1 {
 		t.Errorf("churnTrend clipped = %d, want 1", d.ChurnTrend.Clipped)
+	}
+	// The uncapped project span drives the treemap's single-project shortcut. All the fixture's hot
+	// files sit in one project, so it reads 1; the JS reads this rather than the capped tree's
+	// project list, which a multi-project window could shrink to one.
+	if d.ChurnTrend.ProjectCount != 1 {
+		t.Errorf("churnTrend projectCount = %d, want 1 (uncapped single-project cohort)", d.ChurnTrend.ProjectCount)
 	}
 
 	// Economics: the median completed-session cost is read off the gallery cohort. Completed

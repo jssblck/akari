@@ -462,6 +462,10 @@ func churnTrendData(c store.ChurnTrend) map[string]any {
 		// but the tree renders only the busiest maxChurnTreeFiles, so the panel notes the clipped
 		// tail rather than letting the headline silently exceed the visible breakdown.
 		"clipped": c.Clipped,
+		// The uncapped project span of the hot-file cohort, so the treemap can tell a genuinely
+		// single-project window from a multi-project one whose capped tree happens to list one
+		// project. Reading the capped `projects` list instead would misjudge that case.
+		"projectCount": c.Projects,
 	}
 }
 

@@ -458,6 +458,85 @@ func TestInsightsChurnTreeCap(t *testing.T) {
 	if c.Clipped == 0 {
 		t.Error("churn clipped = 0 with more hot files than the tree cap; the headline would exceed the treemap silently")
 	}
+	// The whole cohort is one project, so the uncapped span is 1: the treemap's single-project
+	// shortcut may root at its folders.
+	if c.Projects != 1 {
+		t.Errorf("churn projects = %d, want 1 (the whole cohort is one project)", c.Projects)
+	}
+}
+
+// TestInsightsChurnCapMultiProject pins the treemap's single-project signal against the cap: when
+// a window's busiest hot files all sit in one project but a clipped file belongs to another, the
+// capped tree lists a single project while the window genuinely spans two. ChurnTrend.Projects must
+// report the uncapped span (2), not the tree's one, because the treemap keys its single-project
+// folder-rooting shortcut off it. A regression here would hide a real second project behind one
+// project's folders.
+func TestInsightsChurnCapMultiProject(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	grace := seedUser(t, st, "grace")
+	pidA, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pidB, err := st.UpsertProject(ctx, "github.com/jssblck/other", "github.com", "jssblck", "other", "other", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sidA := seedSession(t, st, grace, pidA, "churn-a")
+	sidB := seedSession(t, st, grace, pidB, "churn-b")
+	start := time.Now().Add(-2 * time.Hour).UTC()
+	setSessionShape(t, st, ctx, sidA, start, start.Add(20*time.Minute), 4, 2)
+	setSessionShape(t, st, ctx, sidB, start, start.Add(20*time.Minute), 4, 2)
+
+	// Project A fills the tree: maxChurnTreeFiles files, each edited three times, so they outrank
+	// project B's one file (edited twice) under the edits-descending order and take every tree slot.
+	const capFiles = 150
+	if _, err := st.Pool.Exec(ctx,
+		`INSERT INTO tool_calls (session_id, message_ordinal, call_index, tool_name, category, file_path)
+		 SELECT $1, fileno * 3 + editno, 0, 'Edit', 'edit', 'src/a' || fileno || '.go'
+		   FROM generate_series(1, $2) fileno, generate_series(0, 2) editno`,
+		sidA, capFiles); err != nil {
+		t.Fatalf("seed project A churn: %v", err)
+	}
+	// Project B: one hot file, edited twice. It clears the hot bar but is the clipped 151st, so the
+	// tree never carries project B even though the window touched it.
+	if _, err := st.Pool.Exec(ctx,
+		`INSERT INTO tool_calls (session_id, message_ordinal, call_index, tool_name, category, file_path)
+		 SELECT $1, 2 + editno, 0, 'Edit', 'edit', 'src/b1.go'
+		   FROM generate_series(0, 1) editno`,
+		sidB); err != nil {
+		t.Fatalf("seed project B churn: %v", err)
+	}
+
+	since := time.Now().Add(-7 * 24 * time.Hour)
+	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: since, Bucket: "day"})
+	if err != nil {
+		t.Fatalf("insights with trends: %v", err)
+	}
+	c := ins.Trends.Churn
+
+	if c.TotalHotFiles != capFiles+1 {
+		t.Errorf("total hot files = %d, want %d (A's cap plus B's one)", c.TotalHotFiles, capFiles+1)
+	}
+	if len(c.Tree) != capFiles {
+		t.Errorf("tree = %d nodes, want the cap %d", len(c.Tree), capFiles)
+	}
+	if c.Clipped != 1 {
+		t.Errorf("clipped = %d, want 1 (project B's file beyond the cap)", c.Clipped)
+	}
+	// The tree holds only project A, so the capped project list is a single project.
+	for _, n := range c.Tree {
+		if n.Project != "github.com/jssblck/akari" {
+			t.Fatalf("tree carried project %q; project A should fill the whole cap", n.Project)
+		}
+	}
+	// The uncapped span still reports both. This is the signal the treemap trusts, so it stays at
+	// the project level rather than diving into A's folders and hiding B.
+	if c.Projects != 2 {
+		t.Errorf("uncapped churn projects = %d, want 2 (A in the tree, B clipped); the treemap's single-project shortcut keys off this, not the capped tree", c.Projects)
+	}
 }
 
 // TestEconomicsAbandonedIncompleteScoped pins that the abandoned-spend incompleteness marker is

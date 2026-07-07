@@ -160,8 +160,9 @@ func sampleTrends() *store.Trends {
 				{Project: "akari", Folder: "internal/server/web", Path: "internal/server/web/insights.templ", Edits: 3, Sessions: 1},
 			},
 			// Three hot files in the window, two drawn in the tree, so one is clipped: the payload
-			// carries the clipped count and the panel notes the tail.
-			TotalReEdits: 21, TotalHotFiles: 3, Clipped: 1,
+			// carries the clipped count and the panel notes the tail. All three sit in one project,
+			// so the uncapped project span is 1 and the treemap roots at that project's folders.
+			TotalReEdits: 21, TotalHotFiles: 3, Clipped: 1, Projects: 1,
 		},
 		Signals: store.SignalTrends{
 			GradeShare: []map[string]float64{

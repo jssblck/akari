@@ -1682,9 +1682,17 @@
   // repo) has a trivial project level: one full-bleed cell that wastes a drill step. In that
   // case the treemap roots at that project's folders instead, so path [] is folders and
   // [folder] is files, one level shallower than the multi-project drill.
+  //
+  // The single-project test reads churnTrend.projectCount, the store's UNCAPPED count of distinct
+  // projects in the hot-file cohort, not D.projects.length. D.projects is serialized from the tree,
+  // which is capped at maxChurnTreeFiles: a genuinely multi-project window whose busiest files all
+  // sit in one project (with a clipped file in another) would list one project there while its
+  // headline totals count several, so rooting at that project's folders would hide a real
+  // second project. The uncapped count cannot be fooled that way.
   function soleProject() {
     const D = window.AK_DATA;
-    return D.projects && D.projects.length === 1 ? D.projects[0] : null;
+    const ct = D.churnTrend || {};
+    return ct.projectCount === 1 && D.projects && D.projects.length === 1 ? D.projects[0] : null;
   }
 
   function currentRows() {
