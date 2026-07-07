@@ -31,10 +31,6 @@ table.grid.projects td.num { overflow: visible; }
    headed table. Space the sections apart so the second heading reads as a new group,
    not a continuation of the first table. */
 .proj-section + .proj-section { margin-top: var(--sp-xl); }
-/* A local folder's filesystem path, one muted mono line under the folder name, so the
-   synthetic machine:path key resolves to something a reader recognizes without the
-   path growing the row: it ellipsizes and keeps the full string on hover. */
-.proj-path { margin-top: 2px; max-width: 52ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* ---- Project details: the per-project quality band ---- */
 /* The Quality band sits between the usage panel and the session list, reusing the /insights

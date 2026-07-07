@@ -264,8 +264,9 @@ func TestProjectsPageRepositoriesSection(t *testing.T) {
 }
 
 // With local folders in scope the index renders a second section below Repositories: a
-// Local folders table whose rows lead with the folder name and its state chip, carry the
-// filesystem path recovered from the synthetic key, and link to the same project page.
+// Local folders table whose rows link by the full working-directory path recovered from
+// the synthetic key, carry the host in a Machine column and the state chip in its own
+// State column, and link to the same project page.
 func TestProjectsPageLocalFoldersSection(t *testing.T) {
 	p := Page{Title: "Projects", LoggedIn: true, Active: "projects", Username: "Ada Lovelace"}
 	remotes := []store.ProjectSummary{{ID: 1, RemoteKey: "hopper/akari", Kind: "remote", SessionCount: 3}}
@@ -278,9 +279,11 @@ func TestProjectsPageLocalFoldersSection(t *testing.T) {
 	for _, want := range []string{
 		`<h2>Repositories</h2>`,
 		`<h2>Local folders</h2>`,
-		`>scratch</a>`,           // the folder name links, not the synthetic key
-		`class="tag standalone"`, // the state chip rides the folder row
-		`/home/grace/scratch`,    // the path recovered from the local: key
+		`<th>Machine</th>`,              // the host rides its own column
+		`<th>State</th>`,                // the state chip rides its own column
+		`>/home/grace/scratch</a>`,      // the folder links by full path, not the synthetic key
+		`class="tag standalone"`,        // the state chip renders in the State column
+		`<td class="muted">laptop</td>`, // the host fills the Machine column
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("local folders section missing %q", want)
@@ -288,7 +291,11 @@ func TestProjectsPageLocalFoldersSection(t *testing.T) {
 	}
 	// The synthetic key never shows as a row label.
 	if strings.Contains(html, `>local:laptop:/home/grace/scratch</a>`) {
-		t.Error("a local folder should link by folder name, not its synthetic local: key")
+		t.Error("a local folder should link by full path, not its synthetic local: key")
+	}
+	// The folder no longer leads with its basename; the full path is the link text.
+	if strings.Contains(html, `>scratch</a>`) {
+		t.Error("a local folder should link by full path, not its basename")
 	}
 }
 

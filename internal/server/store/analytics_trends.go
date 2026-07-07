@@ -275,50 +275,6 @@ func (s *Store) resolveTrendSince(ctx context.Context, q querier, f AnalyticsFil
 	return *earliest, nil
 }
 
-// trendsFrom computes the whole trend grid for the scope, reusing the shared snapshot
-// transaction so every series reconciles with the distributions taken in the same read.
-func (s *Store) trendsFrom(ctx context.Context, q querier, f AnalyticsFilter, ctx0 ContextHealthStats) (*Trends, error) {
-	now := time.Now()
-	since, err := s.resolveTrendSince(ctx, q, f, now)
-	if err != nil {
-		return nil, err
-	}
-	g := newTrendGrid(f.Bucket, since, now)
-	out := &Trends{Unit: g.Unit, BucketStarts: g.Starts, Labels: g.labels()}
-	if g.n() == 0 {
-		return out, nil
-	}
-
-	if out.FleetMix, err = s.fleetMixFrom(ctx, q, f, g); err != nil {
-		return nil, err
-	}
-	if out.Signals, err = s.signalTrendsFrom(ctx, q, f, g, ctx0); err != nil {
-		return nil, err
-	}
-	if out.Economics, err = s.economicsFrom(ctx, q, f, g); err != nil {
-		return nil, err
-	}
-	if out.Velocity, err = s.velocityTrendsFrom(ctx, q, f, g); err != nil {
-		return nil, err
-	}
-	if out.Tools, err = s.toolTrendsFrom(ctx, q, f, g); err != nil {
-		return nil, err
-	}
-	if out.Churn, err = s.churnTrendFrom(ctx, q, f, g); err != nil {
-		return nil, err
-	}
-	if out.Gallery, err = s.galleryFrom(ctx, q, f); err != nil {
-		return nil, err
-	}
-	if out.Rhythm, err = s.rhythmFrom(ctx, q, f); err != nil {
-		return nil, err
-	}
-	if out.Subagents, err = s.subagentTrendsFrom(ctx, q, f, g); err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
 // maxFleetMixModels keeps the busiest models as their own bands and folds the rest into an
 // "other" catch-all, so the stack reads as a handful of tracked models plus a tail rather
 // than a rainbow of one-session models.
