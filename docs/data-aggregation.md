@@ -20,20 +20,35 @@ The rule the codebase follows now:
 > index, the granular ledger for a chart), pin the invariant that keeps them equal
 > with a test, so they reconcile by construction rather than by luck.
 
-## The two bases
+## The three bases
 
-Token and cost data is aggregated from exactly two places.
+Token and cost data is aggregated from exactly three places.
 
 1. **The ledger: `usage_events`.** The granular, per-event record. One row per
    priced (or unpriced) usage event, carrying the four token classes (input,
    output, cache read, cache write), a cost, an `occurred_at`, and the dedup keys
    that make a replayed line idempotent. Summing it is the source of truth.
 
-2. **The rollups: `sessions.total_*`.** Per-session running totals
+2. **The session rollups: `sessions.total_*`.** Per-session running totals
    (`total_input_tokens`, `total_output_tokens`, `total_cache_read_tokens`,
    `total_cache_write_tokens`, `total_cost_usd`, plus `message_count` and the
    generated `total_tokens`). They are written by each session's rebuild so a
    long list or index never has to scan the ledger.
+
+3. **The daily rollup: `session_usage_daily`.** Per (session, UTC day, model)
+   sums of the four token classes and cost, plus an `unpriced` flag that
+   reproduces the ledger's cost-incomplete predicate. Written by the same
+   rebuild transaction (`internal/server/store/rollups.go`), it is the base the
+   Insights money panels read (fleet mix, economics, cache savings, subagent
+   cost share) so a page render never groups the ledger. An undated event folds
+   into a NULL day, keeping the undated gap identical to the session rollups'.
+   It is one of five insights rollup tables; the other four
+   (`session_tool_rollup`, `session_file_churn`, `session_turns`,
+   `session_activity_hourly`) carry no token or cost data but follow the same
+   discipline: derived in the rebuild transaction, keyed on session_id only,
+   pinned to their source rows by `TestRollupsDerivedInRebuild` and to the
+   migration backfill by `TestRollupBackfillMatchesDerivations`
+   (docs/insights-rollups.md).
 
 ## The load-bearing invariant
 
@@ -76,6 +91,20 @@ zero (Claude, Codex, and pi all stamp the turn a usage line belongs to, so a NUL
 the dashboard), but it is a real difference and is pinned to exactly the undated
 amount by `TestUndatedUsageIsTheOnlyRollupAnalyticsGap`.
 
+## Whole-day windows on the daily rollup
+
+`session_usage_daily` is day-grained, so the Insights reads over it window in
+whole UTC days (`AnalyticsFilter.clauseForRollupDay`). The upper bound is exact:
+Insights pins `Until` to a bucket boundary (a UTC midnight) before any rollup
+query runs. The lower bound is deliberately wider: a mid-day `Since` (the "now
+minus N days" ranges) counts the window's first UTC day in full, where the
+ledger scan cut it at the instant. The charts drew that first-day bucket either
+way, so the rollup read fills it as a complete bucket instead of a partially
+counted one. `TestUsageTrendsWholeDayWindow` pins the behavior so it stays a
+decision rather than drifting. The ledger surfaces (`Analytics`, `cacheStats`,
+the sparklines) keep their instant-precise windows, which is why they stay on
+the ledger.
+
 ## Where each view reads, and how it reconciles
 
 | View | Function | Base | Reconciliation |
@@ -86,6 +115,7 @@ amount by `TestUndatedUsageIsTheOnlyRollupAnalyticsGap`.
 | Projects index (tokens, cost columns) | `Store.ListProjects` | rollups | Lifetime per-project totals. Must equal the project usage panel's all-time figure (same datum, two pages). Pinned by `TestProjectsIndexReconcilesWithAnalytics`. |
 | Global session list / project session list / subagents | `Store.ListAllSessions` / `Store.ListSessions` / `Store.Subagents` | rollups | Per-session rollups; the `tokens` sort walks the generated `total_tokens` column. |
 | Session detail header (Tokens tile, cost) | `Store.SessionDetailByID` | rollups | Per-session rollups. The session page shows no ledger-derived figure beside them, so the invariant alone keeps them honest. |
+| Insights fleet mix, economics, cache savings, subagent cost share | `fleetMixFrom`, `economicsFrom`, `cacheSavingsTrend`, `subagentTrendsFrom` | daily rollup | Per-day-and-model sums the trend grid re-buckets; pinned to the ledger by `TestRollupsDerivedInRebuild` and windowed in whole days (see above). |
 
 ### Why the index stays on rollups
 

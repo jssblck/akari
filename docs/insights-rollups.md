@@ -1,9 +1,27 @@
 # Insights rollups: a materialization plan
 
-Status: proposed, not implemented. This is the plan for converting the metrics
-behind the Insights page (and the project page's quality band and usage panel)
-from query-time aggregation over the projection tables to rollup tables akari
-maintains itself.
+Status: implemented (migration 0048; derivations in
+`internal/server/store/rollups.go`; epoch 15). The plan below is kept as the
+design rationale. The implementation deviates from it in three places:
+
+- **The usage cluster conversion is scoped to the Insights consumers.**
+  `fleetMixFrom`, `economicsFrom`, `cacheSavingsTrend`, and the subagent cost
+  share read `session_usage_daily`; `Analytics`, `cacheStats`, and
+  `ProjectSparklines` stay on the `usage_events` ledger. Those surfaces window
+  on raw instants (`occurred_at >= now - Nd`), and a day-grain rollup cannot
+  reproduce a sub-day bound; keeping them on the ledger preserves their exact
+  semantics and their role as the reconciliation oracle
+  (docs/data-aggregation.md, "Whole-day windows on the daily rollup", covers
+  the Insights side's deliberate whole-day lower bound).
+- **`session_turns` stores `response_secs DOUBLE PRECISION`, measured turns
+  only,** rather than the plan's nullable `response_ms INT`: the float keeps
+  `extract(epoch ...)` verbatim so percentiles interpolate unchanged, and an
+  unmeasured turn contributed nothing to any consumer, so storing it bought
+  nothing.
+- **The announce path re-derives `session_file_churn`.** An announce that
+  changes a session's cwd rewrites `tool_calls.file_rel_path` in place (the one
+  projection write outside the rebuild), so the churn rollup re-derives in that
+  same transaction (`ingest.go`), which the plan had not called out.
 
 ## The problem
 

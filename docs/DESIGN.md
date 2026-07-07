@@ -863,6 +863,53 @@ CREATE UNIQUE INDEX idx_usage_dedup ON usage_events(session_id, dedup_key)
 CREATE UNIQUE INDEX idx_usage_source ON usage_events(session_id, source_offset, source_index)
   WHERE source_offset IS NOT NULL;
 
+-- Rebuild-derived companions to the projection, written in the same rebuild
+-- transaction as the rows above (sketched; migrations are authoritative):
+--   message_turn_usage: per-turn token estimates behind the thinking signals.
+--   model_fallbacks: merged fallback observations (see "Model fallbacks").
+--   session_signals: per-session graded signals, written by the settle pass
+--     (docs/signals.md).
+--   session_facets: per-session facet values the session-list filters read.
+
+-- Insights rollups (migration 0048): per-session pre-aggregations the /insights
+-- page and the project quality band read instead of scanning messages,
+-- tool_calls, and usage_events per render. Derived by rebuildTx in the same
+-- transaction as the projection (internal/server/store/rollups.go), so they are
+-- exactly as fresh as the projection with no refresh cadence; keyed on
+-- session_id only, with project/user/agent/machine/outcome joining in at read
+-- time. docs/insights-rollups.md has the full design.
+CREATE TABLE session_usage_daily (      -- usage per (UTC day, model); day NULL = undated
+  session_id BIGINT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  day DATE, model TEXT NOT NULL,
+  input_tokens BIGINT NOT NULL, output_tokens BIGINT NOT NULL,
+  cache_read_tokens BIGINT NOT NULL, cache_write_tokens BIGINT NOT NULL,
+  cost_usd DOUBLE PRECISION NOT NULL, unpriced BOOLEAN NOT NULL
+);
+CREATE TABLE session_tool_rollup (      -- deduped calls/failures per (tool, category)
+  session_id BIGINT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  tool_name TEXT NOT NULL, category TEXT NOT NULL,
+  calls INT NOT NULL, failures INT NOT NULL,
+  PRIMARY KEY (session_id, tool_name, category)
+);
+CREATE TABLE session_file_churn (       -- deduped edits per worktree-invariant path
+  session_id BIGINT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  churn_path TEXT NOT NULL, edits INT NOT NULL,
+  PRIMARY KEY (session_id, churn_path)
+);
+CREATE TABLE session_turns (            -- one row per measured prompt-to-reply cycle
+  session_id BIGINT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  turn INT NOT NULL, prompt_at TIMESTAMPTZ NOT NULL,
+  response_secs DOUBLE PRECISION NOT NULL,
+  PRIMARY KEY (session_id, turn)
+);
+CREATE TABLE session_activity_hourly (  -- messages, tool calls, active seconds per UTC (day, hour)
+  session_id BIGINT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  day DATE NOT NULL, hour SMALLINT NOT NULL,
+  messages INT NOT NULL, tool_calls INT NOT NULL,
+  active_seconds DOUBLE PRECISION NOT NULL,
+  PRIMARY KEY (session_id, day, hour)
+);
+
 -- Content-addressed store (Postgres large objects): anything too large to inline
 -- (binary attachments, bulky tool input/result bodies), deduped by content hash.
 -- The bytes are stored exactly as uploaded; the server never (de)compresses them.
