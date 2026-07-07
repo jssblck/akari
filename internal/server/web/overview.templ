@@ -27,13 +27,12 @@ templ OverviewPage(p Page, a store.Analytics, rng string, users []store.User, se
 				<a class="muted small" href="/account#publicity">Manage</a>
 			</div>
 		}
-		// The usage panel owns its own swap wrapper: a range or per-user change refetches
-		// the overview and replaces #overview-usage (the controls live inside the panel and
-		// target it), so the stats, the grid, and the breakdowns all move to the new window
-		// together.
-		<div id="overview-usage">
-			@analyticsPanel(a, "chart-global", RangeOptions("/overview", userValues(selected), rng), rng, users, selected, "#overview-usage", true)
-		</div>
+		// A range or per-user change refetches the overview and replaces #usage (the
+		// panel's own id; the controls live inside it and target it), so the stats,
+		// the grid, and the breakdowns all move to the new window together. The swap
+		// must target #usage, not a wrapper: the hydration hooks in charts.js and
+		// app.js key on that id to redraw the activity grid and re-grow the bars.
+		@analyticsPanel(a, "chart-global", RangeOptions("/overview", userValues(selected), rng), rng, users, selected, "#usage", true)
 	}
 }
 
