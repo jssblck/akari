@@ -225,9 +225,6 @@ func TestInsightsPageRendersInstruments(t *testing.T) {
 
 	for _, want := range []string{
 		`id="insights"`, // the swap target
-		// the summary strip leads with the session-weighted GPA (A5 B3 C2 D1 over 11 graded =
-		// 34/11 = 3.09) so the page opens on a plain-language read of the window
-		`class="insights-summary"`, `Graded 11 of 15 sessions at GPA 3.09.`,
 		// the seven instrument headings
 		`>Fleet mix<`, `>Session gallery<`, `>Velocity<`, `>Tools<`, `>Health<`, `>Economics<`, `>Subagents<`,
 		// representative chart mount points the engine looks up by id
@@ -243,8 +240,6 @@ func TestInsightsPageRendersInstruments(t *testing.T) {
 		`id="insights-data"`, `"nBuckets":2`, `"bucketLabels":["Jun 1","Jun 8"]`, `"deepestTree":3`,
 		// the live window selector: the active window is marked, the rest refetch and swap
 		`aria-current="true"`, `hx-get="/insights?range=7d"`, `hx-select="#insights"`,
-		// the session count in the header
-		`15 session`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("insights page missing %q", want)
@@ -252,10 +247,15 @@ func TestInsightsPageRendersInstruments(t *testing.T) {
 	}
 
 	// The old distribution-panel bars belong to the project quality band now, not the fleet
-	// page, so the fleet page renders none of that server-side bar markup.
-	for _, absent := range []string{`class="ins-grid"`, `class="mix-bar"`, `class="bar-fill"`} {
+	// page, so the fleet page renders none of that server-side bar markup. The summary strip and
+	// the page title/subtitle were dropped entirely, so none of their markup or copy appears.
+	for _, absent := range []string{
+		`class="ins-grid"`, `class="mix-bar"`, `class="bar-fill"`,
+		`class="insights-summary"`, `Spend totaled`,
+		`class="section-label"`, `class="page-header-left"`, `in the selected window`,
+	} {
 		if strings.Contains(html, absent) {
-			t.Errorf("insights page should not render %q (that markup moved to the quality band)", absent)
+			t.Errorf("insights page should not render %q (removed markup)", absent)
 		}
 	}
 }

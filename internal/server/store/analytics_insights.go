@@ -111,31 +111,43 @@ func (s *Store) Insights(ctx context.Context, f AnalyticsFilter) (Insights, erro
 	// Read-only: rollback is the clean release and never loses work.
 	defer ctrlTx.Rollback(ctx)
 
-	// When the caller wants the trend grid, bound the whole page to the charted span first,
-	// on both edges. The grid caps an unbounded "all" window at maxTrendBuckets and stops at
-	// the current bucket, so pinning f.Since to the first rendered bucket and f.Until to the
-	// end of the last one makes the headline distributions and every trend total count the
-	// same rows the series draw, and keeps each panel's query from scanning history the charts
-	// will not show. Without the upper bound a row timestamped ahead of render time counts in
-	// the headline while the grid drops its future bucket (g.index < 0), so the two disagree.
-	// Both bounds only tighten the window: a bounded range already sits inside its grid, so
-	// f.Since never moves back and f.Until never moves forward. Resolving this on the control
+	// When the caller wants the trend grid, resolve it once on the control transaction and bound
+	// the whole page to its charted span, on both edges. The grid caps an unbounded "all" window
+	// at maxTrendBuckets and stops at the current bucket, so pinning f.Since to the first rendered
+	// bucket and f.Until to the end of the last one makes the headline distributions and every
+	// trend total count the same rows the series draw, and keeps each panel's query from scanning
+	// history the charts will not show. Without the upper bound a row timestamped ahead of render
+	// time counts in the headline while the grid drops its future bucket (g.index < 0), so the two
+	// disagree. Both bounds only tighten the window: a bounded range already sits inside its grid,
+	// so f.Since never moves back and f.Until never moves forward. Resolving this on the control
 	// transaction fixes its snapshot (its first read), which is the snapshot every panel then
 	// shares, so the tightened window and the panels describe one consistent cohort.
+	//
+	// The resolved grid is kept (not thrown away): every per-bucket trend panel below reads it, so
+	// the whole grid is computed once here rather than re-resolved inside a trends builder.
+	var grid trendGrid
+	var wantTrends bool
 	if f.Bucket != "" {
 		now := time.Now()
 		since, terr := s.resolveTrendSince(ctx, ctrlTx, f, now)
 		if terr != nil {
 			return Insights{}, fmt.Errorf("insights snapshot: %w", terr)
 		}
-		if g := newTrendGrid(f.Bucket, since, now); g.n() > 0 {
-			if g.Starts[0].After(f.Since) {
-				f.Since = g.Starts[0]
+		grid = newTrendGrid(f.Bucket, since, now)
+		if grid.n() > 0 {
+			if grid.Starts[0].After(f.Since) {
+				f.Since = grid.Starts[0]
 			}
-			if upper := advanceBucket(g.Unit, g.Starts[g.n()-1]); f.Until.IsZero() || upper.Before(f.Until) {
+			if upper := advanceBucket(grid.Unit, grid.Starts[grid.n()-1]); f.Until.IsZero() || upper.Before(f.Until) {
 				f.Until = upper
 			}
+			wantTrends = true
 		}
+		// Pre-allocate the grid-shaped Trends so the trend panels can each write a distinct field
+		// concurrently (the same distinct-field discipline the distribution panels rely on). An
+		// empty grid still yields a non-nil Trends whose HasData reports false, matching the old
+		// behaviour where a bucketed call with no buckets returned an empty grid rather than nil.
+		out.Trends = &Trends{Unit: grid.Unit, BucketStarts: grid.Starts, Labels: grid.labels()}
 	}
 
 	var snapshotID string
@@ -180,18 +192,65 @@ func (s *Store) Insights(ctx context.Context, f AnalyticsFilter) (Insights, erro
 			out.Churn, err = s.fileChurnFrom(ctx, q, f)
 			return
 		},
-		// Context and, when charted, the trend grid share one panel: the trend reuses the context
-		// stats for its peak-context histogram markers, so it must run after Context, and keeping
-		// the pair on one connection avoids threading the intermediate result across goroutines.
+		// Context health, and (when charted) the per-bucket signal series with it: the signal
+		// trend annotates its peak-context histogram with the context panel's own order
+		// statistics (out.Context), so it must run after Context, and keeping the pair on one
+		// connection avoids threading that intermediate result across goroutines. Every other
+		// trend builder is independent, so they each become their own panel below and fan out
+		// across the pool instead of serializing on this one connection.
 		func(ctx context.Context, q querier) (err error) {
 			if out.Context, err = s.contextHealthFrom(ctx, q, f); err != nil {
 				return err
 			}
-			if f.Bucket != "" {
-				out.Trends, err = s.trendsFrom(ctx, q, f, out.Context)
+			if wantTrends {
+				out.Trends.Signals, err = s.signalTrendsFrom(ctx, q, f, grid, out.Context)
 			}
 			return err
 		},
+	}
+	// The rest of the trend grid: one panel per independent builder, each writing a distinct
+	// out.Trends field. Splitting them out is the whole point of this pass. The grid used to be
+	// built by trendsFrom, which ran all of these serially on the single Context panel's
+	// connection, so the page's wall time was the sum of every trend query even though seven
+	// panel lanes sat idle. As distinct panels they join the existing fan-out (each on a borrowed
+	// connection under the shared snapshot), so the trend cost collapses toward the slowest single
+	// builder. They still reconcile exactly with the distributions: all of them import the one
+	// control snapshot, so they read the same cohort.
+	if wantTrends {
+		panels = append(panels,
+			func(ctx context.Context, q querier) (err error) {
+				out.Trends.FleetMix, err = s.fleetMixFrom(ctx, q, f, grid)
+				return
+			},
+			func(ctx context.Context, q querier) (err error) {
+				out.Trends.Economics, err = s.economicsFrom(ctx, q, f, grid)
+				return
+			},
+			func(ctx context.Context, q querier) (err error) {
+				out.Trends.Velocity, err = s.velocityTrendsFrom(ctx, q, f, grid)
+				return
+			},
+			func(ctx context.Context, q querier) (err error) {
+				out.Trends.Tools, err = s.toolTrendsFrom(ctx, q, f, grid)
+				return
+			},
+			func(ctx context.Context, q querier) (err error) {
+				out.Trends.Churn, err = s.churnTrendFrom(ctx, q, f, grid)
+				return
+			},
+			func(ctx context.Context, q querier) (err error) {
+				out.Trends.Gallery, err = s.galleryFrom(ctx, q, f)
+				return
+			},
+			func(ctx context.Context, q querier) (err error) {
+				out.Trends.Rhythm, err = s.rhythmFrom(ctx, q, f)
+				return
+			},
+			func(ctx context.Context, q querier) (err error) {
+				out.Trends.Subagents, err = s.subagentTrendsFrom(ctx, q, f, grid)
+				return
+			},
+		)
 	}
 	// The per-author leaderboard is skipped when the caller will not render it (OmitUsers, set
 	// by the public project overview, whose quality band carries no People panel), so the read

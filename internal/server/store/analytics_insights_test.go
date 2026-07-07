@@ -2,10 +2,12 @@ package store_test
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jssblck/akari/internal/quality"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/storetest"
@@ -497,6 +499,112 @@ func TestInsightsPanelsShareCohort(t *testing.T) {
 	}
 	if !ins.HasData() {
 		t.Error("HasData() = false over a six-session corpus")
+	}
+}
+
+// TestInsightsBucketedGridUnderConnectionStarvation guards the fully-serial fallback that the
+// split trend panels newly stress. When the pool has no connection to spare beyond the one the
+// control transaction holds, Insights runs every panel sequentially on that control connection
+// rather than block acquiring another (the deadlock-avoidance path panelWorkers gates). The
+// trend grid used to be a single panel; it is now nine, so this path piles nine extra panels
+// onto the one control connection. Holding the rest of the pool pins every panel there, then
+// the assertions confirm the bucketed grid still populates fully and consistently: a starved
+// pool must degrade to a slow-but-correct render, never a deadlock or a silently missing chart
+// (which is how a trend panel dropped from the fallback dispatch would show up).
+func TestInsightsBucketedGridUnderConnectionStarvation(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	ada := seedUser(t, st, "ada")
+	pid, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recent := time.Now().Add(-24 * time.Hour)
+	for i, sh := range []struct{ out, grade string }{
+		{"completed", "A"},
+		{"completed", "B"},
+		{"abandoned", "D"},
+	} {
+		sid := seedSession(t, st, ada, pid, fmt.Sprintf("s%d", i))
+		start := recent.Add(time.Duration(i) * time.Minute)
+		setSessionShape(t, st, ctx, sid, start, start.Add(10*time.Minute), 20, 2)
+		insertSignal(t, st, ctx, sid, sh.out, sh.grade)
+		// A priced usage event so the money panels (fleet mix, economics) have tokens and cost to
+		// read, not just the session-shape panels; $1.50 each, occurring inside the window.
+		if _, err := st.Pool.Exec(ctx,
+			`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, occurred_at, dedup_key)
+			 VALUES ($1, 'claude-opus-4', 1000, 500, 0, 0, 1.5, $2, 'u1')`,
+			sid, start); err != nil {
+			t.Fatalf("seed usage for %d: %v", sid, err)
+		}
+	}
+
+	// Hold every connection but one. Insights then acquires the last for its control transaction
+	// and AcquireAllIdle finds nothing spare, so panelWorkers routes every panel, distribution
+	// and trend alike, sequentially onto that one control connection.
+	maxConns := int(st.Pool.Config().MaxConns)
+	if maxConns < 2 {
+		t.Skipf("pool max conns = %d, need at least 2 to leave a control connection", maxConns)
+	}
+	var held []*pgxpool.Conn
+	for i := 0; i < maxConns-1; i++ {
+		c, err := st.Pool.Acquire(ctx)
+		if err != nil {
+			t.Fatalf("hold pool connection %d: %v", i, err)
+		}
+		held = append(held, c)
+	}
+	defer func() {
+		for _, c := range held {
+			c.Release()
+		}
+	}()
+
+	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: time.Now().Add(-90 * 24 * time.Hour), Bucket: "day"})
+	if err != nil {
+		t.Fatalf("insights under connection starvation: %v", err)
+	}
+
+	// The distributions still read the three-session cohort.
+	if ins.Quality.Sessions != 3 {
+		t.Errorf("Quality.Sessions = %d, want 3", ins.Quality.Sessions)
+	}
+
+	// Every trend panel ran on the shared control connection: each field below is owned by a
+	// distinct appended panel, so a zero here would mean that panel was skipped in the fallback.
+	tr := ins.Trends
+	if tr == nil || !tr.HasData() {
+		t.Fatalf("Trends missing or empty under starvation: %+v", tr)
+	}
+	if !tr.FleetMix.HasData() {
+		t.Error("FleetMix empty: the fleet-mix panel did not run on the control connection")
+	}
+	var outcomeTotal int
+	for _, n := range tr.Signals.OutcomeTotal {
+		outcomeTotal += n
+	}
+	if outcomeTotal != 3 {
+		t.Errorf("signal outcome total = %d, want 3 (the signal-trend panel ran)", outcomeTotal)
+	}
+	if got := tr.Economics.TotalSpend; got < 4.49 || got > 4.51 {
+		t.Errorf("economics spend = %v, want 4.5 (three sessions at $1.50; the economics panel ran)", got)
+	}
+	if tr.Gallery.Total != 3 {
+		t.Errorf("gallery total = %d, want 3 (the gallery panel ran)", tr.Gallery.Total)
+	}
+	if len(tr.Velocity.ActiveHours) != len(tr.BucketStarts) {
+		t.Errorf("velocity series not grid-shaped: %d active-hour buckets vs %d grid buckets (the velocity panel ran)", len(tr.Velocity.ActiveHours), len(tr.BucketStarts))
+	}
+	// Rhythm and Subagents are appended last, so a fallback loop that stopped early would drop
+	// them. Neither has seeded input here (no messages, no subagents), so assert the always-
+	// allocated shape their builders return rather than volume: the 7-day rhythm grid and the
+	// grid-length delegation series both prove their panel reached the end of the dispatch.
+	if len(tr.Rhythm.Cells) != 7 {
+		t.Errorf("rhythm grid has %d day rows, want 7 (the rhythm panel ran)", len(tr.Rhythm.Cells))
+	}
+	if len(tr.Subagents.DelegateShare) != len(tr.BucketStarts) {
+		t.Errorf("subagent series not grid-shaped: %d vs %d buckets (the subagents panel, appended last, ran)", len(tr.Subagents.DelegateShare), len(tr.BucketStarts))
 	}
 }
 
