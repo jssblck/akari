@@ -183,59 +183,7 @@ templ insightsInstruments() {
 		</div>
 	</section>
 	<!-- 4. Tools -->
-	<section class="instrument" id="tools" aria-labelledby="tools-h">
-		<div class="instrument-head">
-			<h2 id="tools-h">Tools</h2>
-		</div>
-		<div class="panel">
-			<div role="tablist" aria-label="Tools instruments" class="tabstrip" id="tools-tabs">
-				<button role="tab" id="ttab-all" aria-controls="tpanel-all" aria-selected="true" tabindex="0">All instruments</button>
-				<button role="tab" id="ttab-reliability" aria-controls="tpanel-reliability" aria-selected="false" tabindex="-1">Reliability</button>
-				<button role="tab" id="ttab-mix" aria-controls="tpanel-mix" aria-selected="false" tabindex="-1">Mix</button>
-				<button role="tab" id="ttab-failures" aria-controls="tpanel-failures" aria-selected="false" tabindex="-1">Failures</button>
-				<button role="tab" id="ttab-churn" aria-controls="tpanel-churn" aria-selected="false" tabindex="-1">Churn</button>
-			</div>
-			<div class="tabpanel" id="tpanel-all" role="tabpanel" aria-labelledby="ttab-all" tabindex="0">
-				<div class="grid-2x2">
-					<button class="mini-multiple" data-jump="tools-tabs:ttab-reliability" data-scroll="tools" id="mini-reliability"></button>
-					<button class="mini-multiple" data-jump="tools-tabs:ttab-mix" data-scroll="tools" id="mini-toolmix"></button>
-					<button class="mini-multiple" data-jump="tools-tabs:ttab-failures" data-scroll="tools" id="mini-failures"></button>
-					<button class="mini-multiple" data-jump="tools-tabs:ttab-churn" data-scroll="tools" id="mini-churntrend"></button>
-				</div>
-			</div>
-			<div class="tabpanel instrument-solo" id="tpanel-reliability" role="tabpanel" aria-labelledby="ttab-reliability" tabindex="0" hidden>
-				<div class="overflow-x"><div id="chart-reliability" style="min-width:480px;"></div></div>
-				<ul class="legend" id="reliability-legend" style="margin-top:10px;"></ul>
-				@instrumentCaption("Which tools the fleet leans on most, and which ones fail most.") {
-					Every tool in one frame: volume says how much you lean on it, height says how often it bites. <code>tool_calls</code> grouped by <code>tool_name</code>; error = <code>result_status='error'</code>.
-				}
-			</div>
-			<div class="tabpanel instrument-solo" id="tpanel-mix" role="tabpanel" aria-labelledby="ttab-mix" tabindex="0" hidden>
-				<div id="chart-toolmix-full"></div>
-				<ul class="legend" id="toolmix-legend" style="margin-top:10px;"></ul>
-				@instrumentCaption("How the balance of tool categories shifted over time.") {
-					Share of each bucket's tool calls by category. Same <code>tool_calls</code> rows as the reliability map, grouped by category and drawn over time instead of collapsed to one snapshot.
-				}
-			</div>
-			<div class="tabpanel instrument-solo" id="tpanel-failures" role="tabpanel" aria-labelledby="ttab-failures" tabindex="0" hidden>
-				<div id="chart-failures-full"></div>
-				@instrumentCaption("The tool failure rate over time, so a regression shows up the week it lands.") {
-					Same <code>tool_calls</code> base as the scatter, drawn over time instead of collapsed to a snapshot. The fleet rate plus the window's worst offenders.
-				}
-			</div>
-			<div class="tabpanel instrument-solo" id="tpanel-churn" role="tabpanel" aria-labelledby="ttab-churn" tabindex="0" hidden>
-				<div class="figures-row" id="churn-figures"></div>
-				<div id="chart-churntrend-full"></div>
-				<div class="treemap-breadcrumb" id="treemap-breadcrumb" aria-label="Treemap drill path"></div>
-				<div class="treemap" id="treemap"></div>
-				<div class="muted small" id="churn-clip" style="margin-top:6px;"></div>
-				<ul class="legend" id="churn-legend" style="margin-top:10px;"></ul>
-				@instrumentCaption("Which files the fleet edited most, and how that trended.") {
-					The headline is the trend; the treemap answers which files. Drill from project to folder to file, <kbd>Escape</kbd> or a breadcrumb crumb goes back up.
-				}
-			</div>
-		</div>
-	</section>
+	@toolsInstrument()
 	<!-- 5. Health -->
 	<section class="instrument" id="health" aria-labelledby="health-h">
 		<div class="instrument-head">
@@ -332,6 +280,69 @@ templ insightsInstruments() {
 			@instrumentCaption("How much work runs through delegation: how often the fleet spawns subagents, how wide the fan-out runs, and what share of spend rides on it.") {
 				<code>parent_session_id</code> and <code>relationship_type</code> ride every session row and appear in no other aggregate. The stack below shows how wide the fan-out runs, not just how often delegation happens.
 			}
+		</div>
+	</section>
+}
+
+// toolsInstrument is the Tools measurement panel: the reliability scatter, the category mix,
+// the failure-rate trend, and the file-churn treemap, one tab each behind an "all instruments"
+// overview of mini-multiples. It is shared, not fleet-only: /insights renders it inline in its
+// seven-instrument strip, and the project page's Quality band reuses it verbatim (its tab ids
+// and chart mounts are the contract insights.js draws into), so the two surfaces read the tool
+// health identically and the markup lives in one place. The churn tab folds the file-churn
+// read in with the tools, which is why the project band needs no separate churn instrument.
+templ toolsInstrument() {
+	<section class="instrument" id="tools" aria-labelledby="tools-h">
+		<div class="instrument-head">
+			<h2 id="tools-h">Tools</h2>
+		</div>
+		<div class="panel">
+			<div role="tablist" aria-label="Tools instruments" class="tabstrip" id="tools-tabs">
+				<button role="tab" id="ttab-all" aria-controls="tpanel-all" aria-selected="true" tabindex="0">All instruments</button>
+				<button role="tab" id="ttab-reliability" aria-controls="tpanel-reliability" aria-selected="false" tabindex="-1">Reliability</button>
+				<button role="tab" id="ttab-mix" aria-controls="tpanel-mix" aria-selected="false" tabindex="-1">Mix</button>
+				<button role="tab" id="ttab-failures" aria-controls="tpanel-failures" aria-selected="false" tabindex="-1">Failures</button>
+				<button role="tab" id="ttab-churn" aria-controls="tpanel-churn" aria-selected="false" tabindex="-1">Churn</button>
+			</div>
+			<div class="tabpanel" id="tpanel-all" role="tabpanel" aria-labelledby="ttab-all" tabindex="0">
+				<div class="grid-2x2">
+					<button class="mini-multiple" data-jump="tools-tabs:ttab-reliability" data-scroll="tools" id="mini-reliability"></button>
+					<button class="mini-multiple" data-jump="tools-tabs:ttab-mix" data-scroll="tools" id="mini-toolmix"></button>
+					<button class="mini-multiple" data-jump="tools-tabs:ttab-failures" data-scroll="tools" id="mini-failures"></button>
+					<button class="mini-multiple" data-jump="tools-tabs:ttab-churn" data-scroll="tools" id="mini-churntrend"></button>
+				</div>
+			</div>
+			<div class="tabpanel instrument-solo" id="tpanel-reliability" role="tabpanel" aria-labelledby="ttab-reliability" tabindex="0" hidden>
+				<div class="overflow-x"><div id="chart-reliability" style="min-width:480px;"></div></div>
+				<ul class="legend" id="reliability-legend" style="margin-top:10px;"></ul>
+				@instrumentCaption("Which tools the fleet leans on most, and which ones fail most.") {
+					Every tool in one frame: volume says how much you lean on it, height says how often it bites. <code>tool_calls</code> grouped by <code>tool_name</code>; error = <code>result_status='error'</code>.
+				}
+			</div>
+			<div class="tabpanel instrument-solo" id="tpanel-mix" role="tabpanel" aria-labelledby="ttab-mix" tabindex="0" hidden>
+				<div id="chart-toolmix-full"></div>
+				<ul class="legend" id="toolmix-legend" style="margin-top:10px;"></ul>
+				@instrumentCaption("How the balance of tool categories shifted over time.") {
+					Share of each bucket's tool calls by category. Same <code>tool_calls</code> rows as the reliability map, grouped by category and drawn over time instead of collapsed to one snapshot.
+				}
+			</div>
+			<div class="tabpanel instrument-solo" id="tpanel-failures" role="tabpanel" aria-labelledby="ttab-failures" tabindex="0" hidden>
+				<div id="chart-failures-full"></div>
+				@instrumentCaption("The tool failure rate over time, so a regression shows up the week it lands.") {
+					Same <code>tool_calls</code> base as the scatter, drawn over time instead of collapsed to a snapshot. The fleet rate plus the window's worst offenders.
+				}
+			</div>
+			<div class="tabpanel instrument-solo" id="tpanel-churn" role="tabpanel" aria-labelledby="ttab-churn" tabindex="0" hidden>
+				<div class="figures-row" id="churn-figures"></div>
+				<div id="chart-churntrend-full"></div>
+				<div class="treemap-breadcrumb" id="treemap-breadcrumb" aria-label="Treemap drill path"></div>
+				<div class="treemap" id="treemap"></div>
+				<div class="muted small" id="churn-clip" style="margin-top:6px;"></div>
+				<ul class="legend" id="churn-legend" style="margin-top:10px;"></ul>
+				@instrumentCaption("Which files were edited most, and how that trended.") {
+					The headline is the trend; the treemap answers which files. Drill from project to folder to file, <kbd>Escape</kbd> or a breadcrumb crumb goes back up.
+				}
+			</div>
 		</div>
 	</section>
 }

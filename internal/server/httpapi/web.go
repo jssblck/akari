@@ -518,9 +518,13 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The quality band draws from the same scope as the usage panel and the table (the same
-	// AnalyticsFilter: project, window, and any active user/agent/machine narrowing), so the
-	// grades, outcomes, tools, and churn describe exactly the sessions the rows below list
-	// rather than a project-wide read that would drift from the filtered table.
+	// project, window, and any active user/agent/machine narrowing), so the grades, outcomes,
+	// tools, and churn describe exactly the sessions the rows below list rather than a
+	// project-wide read that would drift from the filtered table. It names a trend Bucket so
+	// Insights computes the time-bucketed grid the band's charts draw: the project page renders
+	// the same client-side instruments /insights does, scoped here, rather than the old
+	// server-drawn distribution bars. The bucket also tightens the window to the charted span,
+	// so the band's headline cohort and its series count the same rows.
 	//
 	// Two windows meet here on purpose. Insights counts sessions by started_at falling in the
 	// trailing window; the usage panel and the session table above window on dated usage_events.
@@ -529,7 +533,9 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 	// is per-usage-event and windows on the event dates. Forcing one onto the other would misdate
 	// whichever it borrows, so the band's section head names its window ("sessions that started in
 	// this window") instead. See projectQuality for the matching caption.
-	insights, err := s.Store.Insights(r.Context(), af)
+	insAf := af
+	insAf.Bucket = web.TrendBucket(rng)
+	insights, err := s.Store.Insights(r.Context(), insAf)
 	if err != nil {
 		s.renderError(w, r, http.StatusInternalServerError, "Could not load quality signals.")
 		return

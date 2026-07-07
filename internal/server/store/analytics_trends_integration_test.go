@@ -191,6 +191,27 @@ func TestInsightsTrends(t *testing.T) {
 		t.Errorf("quality headline sessions = %d, bucketed outcome total = %d; they must reconcile (a future-started row leaked into the headline but not the series)", ins.Quality.Sessions, outcomeTotal)
 	}
 
+	// Archetype mix per bucket: every started session bands into exactly one shape (no signals
+	// gate), so a bucket that saw sessions carries shares summing to 100, and at least one bucket
+	// in the window did. This is the series the project page's Quality instrument draws.
+	sawArchetypeBucket := false
+	for i, share := range tr.Signals.ArchetypeShare {
+		var sum float64
+		for _, v := range share {
+			sum += v
+		}
+		if sum == 0 {
+			continue // an idle bucket bands nothing
+		}
+		sawArchetypeBucket = true
+		if sum < 99.9 || sum > 100.1 {
+			t.Errorf("archetype shares in bucket %d sum to %.2f, want 100 (every session bands into one shape)", i, sum)
+		}
+	}
+	if !sawArchetypeBucket {
+		t.Error("archetype trend carried no populated bucket, want the window's sessions banded by shape")
+	}
+
 	// Economics: spend covers every outcome (six sessions at $1.50), abandoned spend covers only
 	// the one outcome = 'abandoned' session, so the errored and completed dollars are excluded.
 	if got := tr.Economics.TotalSpend; got < 8.99 || got > 9.01 {

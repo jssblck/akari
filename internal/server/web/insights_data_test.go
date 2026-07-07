@@ -66,7 +66,13 @@ type akData struct {
 		} `json:"worst"`
 	} `json:"toolFailures"`
 
-	Grades   []map[string]float64 `json:"grades"`
+	Grades     []map[string]float64 `json:"grades"`
+	Archetypes struct {
+		Order  []string             `json:"order"`
+		Colors map[string]string    `json:"colors"`
+		Labels map[string]string    `json:"labels"`
+		Rows   []map[string]float64 `json:"rows"`
+	} `json:"archetypes"`
 	Outcomes []map[string]float64 `json:"outcomes"`
 	Hygiene  struct {
 		NoPointer []float64 `json:"noPointer"`
@@ -229,6 +235,20 @@ func TestInsightsDataMapping(t *testing.T) {
 	}
 	if len(d.Hygiene.NoPointer) != 2 || d.Hygiene.NoPointer[0] != 5 {
 		t.Errorf("hygiene.noPointer = %v, want [5 4]", d.Hygiene.NoPointer)
+	}
+
+	// Archetypes: the per-bucket mix carries the fixed lightest-to-heaviest order, the shared
+	// swatch map (quick reads as viz-2), and each row's shares (bucket 0 quick = 40%). This is
+	// the series the project page's Quality instrument draws; /insights carries it but mounts
+	// no archetype chart.
+	if len(d.Archetypes.Order) != 5 || d.Archetypes.Order[0] != "quick" || d.Archetypes.Order[4] != "automation" {
+		t.Errorf("archetypes.order = %v, want quick..automation", d.Archetypes.Order)
+	}
+	if d.Archetypes.Colors["quick"] != "var(--viz-2)" || d.Archetypes.Labels["quick"] != "Quick" {
+		t.Errorf("archetypes quick style = %q/%q, want var(--viz-2)/Quick", d.Archetypes.Colors["quick"], d.Archetypes.Labels["quick"])
+	}
+	if len(d.Archetypes.Rows) != 2 || d.Archetypes.Rows[0]["quick"] != 40 {
+		t.Errorf("archetypes.rows[0].quick = %v, want 40", d.Archetypes.Rows[0])
 	}
 
 	// Context: resets per bucket, the p50/p90/max markers, and the summary label from the

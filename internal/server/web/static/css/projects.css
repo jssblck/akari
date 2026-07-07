@@ -37,20 +37,33 @@ table.grid.projects td.num { overflow: visible; }
 .proj-path { margin-top: 2px; max-width: 52ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* ---- Project details: the per-project quality band ---- */
-/* The Quality band sits between the usage panel and the session list, reusing the
-   Insights panels (.ins-panel), their three-column grid (.ins-grid), and the shared
-   breakdown bars. This sheet adds only the band's own spacing and its section label,
-   since insights.css already scopes the panels globally (not under .insights), so the
-   grid collapses at narrow widths here the same way it does on /insights. */
-.proj-quality { margin: var(--sp-xl) 0; }
-/* The band leads with an 11px uppercase muted label (base .label), the same tone the
-   Insights panels head with, so "Quality" reads as a section marker rather than a heading
-   competing with the page title. */
-.proj-quality-head { margin-bottom: var(--sp-lg); }
-/* The tools and churn panels sit full width below the distribution grid, each spaced off
-   the row above the same as the Insights bands. */
-.proj-quality-tools { margin-top: var(--sp-xl); }
-.proj-quality-churn { margin-top: var(--sp-xl); }
+/* The Quality band sits between the usage panel and the session list, reusing the /insights
+   measurement instruments (the .instrument sections and .panel surface) and the shared
+   insights.js chart engine, scoped to this project. It stacks two instruments, Quality and
+   Tools, so it reads as two grouped panels with generous spacing between them, matching the
+   fleet page's rhythm. */
+.proj-quality {
+  margin: var(--sp-xl) 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-xl);
+}
+/* The Quality instrument holds the three verdict charts: grades and outcomes share a
+   two-up row (each wants ~500px to keep its axis labels legible), and the archetype mix
+   spans the full panel width beneath them. The grid collapses to one column on narrow
+   viewports so a cramped chart never crushes its ticks. */
+.quality-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sp-lg);
+}
+@media (max-width: 900px) {
+  .quality-grid { grid-template-columns: 1fr; }
+}
+.quality-chart-wide { margin-top: var(--sp-lg); }
+/* A quiet title over each chart, matching the mini-multiple caption tone so the three
+   charts read as one labelled set rather than three unlabelled plots. */
+.quality-chart .chart-title { margin-bottom: 6px; display: block; }
 
 /* ---- Project details: session filters in the page header ---- */
 /* The filter toolbar rides in the header, right-aligned beside the title (margin
