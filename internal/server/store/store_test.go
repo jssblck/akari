@@ -1196,3 +1196,21 @@ func TestAnnounceTerminalOnKeptRemoteSession(t *testing.T) {
 
 func hashHex(s string) string      { return hashHexBytes([]byte(s)) }
 func hashHexBytes(b []byte) string { sum := sha256.Sum256(b); return hex.EncodeToString(sum[:]) }
+
+// setSessionCost stamps a session's rolled-up cost directly, for tests that need a session
+// row to carry a specific total without driving the whole ingest-and-rebuild path.
+func setSessionCost(t *testing.T, st *store.Store, ctx context.Context, sid int64, cost float64) {
+	t.Helper()
+	if _, err := st.Pool.Exec(ctx, `UPDATE sessions SET total_cost_usd = $2 WHERE id = $1`, sid, cost); err != nil {
+		t.Fatalf("set cost for session %d: %v", sid, err)
+	}
+}
+
+// markSubagent demotes a session to a subagent, for tests that need a row excluded from the
+// work-item scope (a team lead audits work items, not the fan-out under them).
+func markSubagent(t *testing.T, st *store.Store, ctx context.Context, sid int64) {
+	t.Helper()
+	if _, err := st.Pool.Exec(ctx, `UPDATE sessions SET relationship_type = 'subagent' WHERE id = $1`, sid); err != nil {
+		t.Fatalf("mark subagent for session %d: %v", sid, err)
+	}
+}

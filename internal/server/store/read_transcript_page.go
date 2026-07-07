@@ -10,8 +10,8 @@ import (
 )
 
 // The web transcript renders a bounded window instead of the whole session (an unbounded
-// server render is what froze the tab on long sessions, see docs/ui-revamp-plan.md P-2).
-// These constants bound every windowed read:
+// server render is what froze the tab on long sessions). These constants bound every
+// windowed read:
 //
 //   - TranscriptTailTurns: how many user turns the initial page and each "Show earlier"
 //     fetch cover. A turn is one user message plus the assistant run that follows, so the
