@@ -168,10 +168,10 @@ func (s SubagentStats) HasData() bool {
 	return s.SubagentSessionsInWindow > 0 || s.SessionsThatDelegatePct > 0
 }
 
-// velocityTrendsFrom computes the per-bucket velocity series. It reuses the turn-labelling
-// CTE the headline velocity figures use, grouped by the bucket of each turn's prompt, plus a
-// per-bucket active-time / message / tool scan for the throughput rates and a wall-clock span
-// sum for the idle-gap read.
+// velocityTrendsFrom computes the per-bucket velocity series over the velocity rollups:
+// latency percentiles from session_turns grouped by the bucket of each turn's prompt,
+// throughput from session_activity_hourly, and a wall-clock span sum over sessions for the
+// idle-gap read.
 func (s *Store) velocityTrendsFrom(ctx context.Context, q querier, f AnalyticsFilter, g trendGrid) (VelocityTrends, error) {
 	out := VelocityTrends{
 		ActiveHours: make([]float64, g.n()),
@@ -186,35 +186,14 @@ func (s *Store) velocityTrendsFrom(ctx context.Context, q querier, f AnalyticsFi
 	// Response-time percentiles per bucket, bucketed on the turn's prompt instant.
 	filter, args := f.clauseFor("s.started_at")
 	rows, err := q.Query(ctx, fmt.Sprintf(
-		`WITH m AS (
-		   SELECT m.session_id, m.ordinal, m.role, m.timestamp,
-		          count(*) FILTER (WHERE m.role = 'user')
-		            OVER (PARTITION BY m.session_id ORDER BY m.ordinal
-		                  ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS turn
-		     FROM messages m
-		     JOIN sessions s ON s.id = m.session_id
-		    WHERE TRUE%s
-		 ),
-		 user_turns AS (
-		   SELECT session_id, turn, min(timestamp) FILTER (WHERE role = 'user') AS user_at
-		     FROM m WHERE turn >= 1 GROUP BY session_id, turn
-		 ),
-		 asst_turns AS (
-		   SELECT DISTINCT ON (session_id, turn) session_id, turn, timestamp AS asst_at
-		     FROM m WHERE turn >= 1 AND role = 'assistant' AND timestamp IS NOT NULL
-		    ORDER BY session_id, turn, ordinal
-		 ),
-		 lat AS (
-		   SELECT %s AS b, extract(epoch FROM (a.asst_at - u.user_at)) AS secs
-		     FROM user_turns u
-		     JOIN asst_turns a ON a.session_id = u.session_id AND a.turn = u.turn
-		    WHERE u.user_at IS NOT NULL AND a.asst_at >= u.user_at
-		 )
-		 SELECT b,
-		        coalesce(percentile_cont(0.5)  WITHIN GROUP (ORDER BY secs), 0),
-		        coalesce(percentile_cont(0.9)  WITHIN GROUP (ORDER BY secs), 0),
-		        coalesce(percentile_cont(0.99) WITHIN GROUP (ORDER BY secs), 0)
-		   FROM lat GROUP BY b`, filter, g.sqlBucket("u.user_at")), args...)
+		`SELECT %s AS b,
+		        coalesce(percentile_cont(0.5)  WITHIN GROUP (ORDER BY st.response_secs), 0),
+		        coalesce(percentile_cont(0.9)  WITHIN GROUP (ORDER BY st.response_secs), 0),
+		        coalesce(percentile_cont(0.99) WITHIN GROUP (ORDER BY st.response_secs), 0)
+		   FROM session_turns st
+		   JOIN sessions s ON s.id = st.session_id
+		  WHERE TRUE%s
+		  GROUP BY b`, g.sqlBucket("st.prompt_at"), filter), args...)
 	if err != nil {
 		return VelocityTrends{}, fmt.Errorf("response time trend: %w", err)
 	}
@@ -234,78 +213,42 @@ func (s *Store) velocityTrendsFrom(ctx context.Context, q querier, f AnalyticsFi
 		return VelocityTrends{}, fmt.Errorf("iterate response time trend: %w", err)
 	}
 
-	// Active time and message count per bucket (gap sum over the idle threshold), bucketed
-	// on the later message's instant.
-	active := make([]float64, g.n())
-	msgs := make([]int, g.n())
+	// Active time and message and tool volume per bucket, one sum over the activity rollup.
+	// The rollup attributed each kept gap to the later message's hour, so re-bucketing its
+	// UTC days reproduces the old later-message bucketing.
 	filter, args = f.clauseFor("s.started_at")
 	arows, err := q.Query(ctx, fmt.Sprintf(
-		`WITH gp AS (
-		   SELECT %s AS b,
-		          extract(epoch FROM (m.timestamp - lag(m.timestamp)
-		            OVER (PARTITION BY m.session_id ORDER BY m.ordinal))) AS gap
-		     FROM messages m
-		     JOIN sessions s ON s.id = m.session_id
-		    WHERE m.timestamp IS NOT NULL%s
-		 )
-		 SELECT b, coalesce(sum(gap) FILTER (WHERE gap > 0 AND gap <= %d), 0), count(*)
-		   FROM gp GROUP BY b`, g.sqlBucket("m.timestamp"), filter, activeGapSeconds), args...)
+		`SELECT %s AS b,
+		        coalesce(sum(ah.active_seconds), 0),
+		        coalesce(sum(ah.messages), 0)::bigint,
+		        coalesce(sum(ah.tool_calls), 0)::bigint
+		   FROM session_activity_hourly ah
+		   JOIN sessions s ON s.id = ah.session_id
+		  WHERE TRUE%s
+		  GROUP BY b`, g.sqlBucketDay("ah.day"), filter), args...)
 	if err != nil {
 		return VelocityTrends{}, fmt.Errorf("active time trend: %w", err)
 	}
 	for arows.Next() {
 		var b time.Time
 		var secs float64
-		var n int
-		if err := arows.Scan(&b, &secs, &n); err != nil {
+		var nMsgs, nTools int
+		if err := arows.Scan(&b, &secs, &nMsgs, &nTools); err != nil {
 			arows.Close()
 			return VelocityTrends{}, fmt.Errorf("scan active time trend: %w", err)
 		}
 		if i := g.index(b); i >= 0 {
-			active[i] = secs
-			msgs[i] = n
 			out.ActiveHours[i] = secs / 3600
+			if secs > 0 {
+				mins := secs / 60
+				out.MsgsPerMin[i] = float64(nMsgs) / mins
+				out.ToolsPerMin[i] = float64(nTools) / mins
+			}
 		}
 	}
 	arows.Close()
 	if err := arows.Err(); err != nil {
 		return VelocityTrends{}, fmt.Errorf("iterate active time trend: %w", err)
-	}
-
-	// Tool volume per bucket, over the timestamped calls the active time reads.
-	tools := make([]int, g.n())
-	filter, args = f.clauseFor("s.started_at")
-	trows, err := q.Query(ctx, fmt.Sprintf(
-		`SELECT %s AS b, count(*)
-		   FROM tool_calls tc
-		   JOIN messages m ON m.session_id = tc.session_id AND m.ordinal = tc.message_ordinal
-		   JOIN sessions s ON s.id = tc.session_id
-		  WHERE m.timestamp IS NOT NULL%s
-		  GROUP BY b`, g.sqlBucket("m.timestamp"), filter), args...)
-	if err != nil {
-		return VelocityTrends{}, fmt.Errorf("tool volume trend: %w", err)
-	}
-	for trows.Next() {
-		var b time.Time
-		var n int
-		if err := trows.Scan(&b, &n); err != nil {
-			trows.Close()
-			return VelocityTrends{}, fmt.Errorf("scan tool volume trend: %w", err)
-		}
-		if i := g.index(b); i >= 0 {
-			tools[i] = n
-		}
-	}
-	trows.Close()
-	if err := trows.Err(); err != nil {
-		return VelocityTrends{}, fmt.Errorf("iterate tool volume trend: %w", err)
-	}
-	for i := range active {
-		if active[i] > 0 {
-			mins := active[i] / 60
-			out.MsgsPerMin[i] = float64(msgs[i]) / mins
-			out.ToolsPerMin[i] = float64(tools[i]) / mins
-		}
 	}
 
 	// Wall-clock session span per bucket, on the session's start.
@@ -788,55 +731,31 @@ func (s *Store) rhythmFrom(ctx context.Context, q querier, f AnalyticsFilter) (R
 		}
 	}
 
+	// The activity rollup carries both volumes per UTC (day, hour); the day of week derives
+	// from the stored day, so the punchcard is one indexed read instead of two message scans.
 	filter, args := f.clauseFor("s.started_at")
 	mrows, err := q.Query(ctx,
-		`SELECT extract(isodow FROM m.timestamp AT TIME ZONE 'UTC')::int,
-		        extract(hour   FROM m.timestamp AT TIME ZONE 'UTC')::int,
-		        count(*)
-		   FROM messages m
-		   JOIN sessions s ON s.id = m.session_id
-		  WHERE m.timestamp IS NOT NULL`+filter+`
+		`SELECT extract(isodow FROM ah.day)::int,
+		        ah.hour::int,
+		        sum(ah.messages + ah.tool_calls)::bigint
+		   FROM session_activity_hourly ah
+		   JOIN sessions s ON s.id = ah.session_id
+		  WHERE TRUE`+filter+`
 		  GROUP BY 1, 2`, args...)
 	if err != nil {
-		return RhythmGrid{}, fmt.Errorf("rhythm messages: %w", err)
+		return RhythmGrid{}, fmt.Errorf("rhythm activity: %w", err)
 	}
 	for mrows.Next() {
 		var dow, hour, n int
 		if err := mrows.Scan(&dow, &hour, &n); err != nil {
 			mrows.Close()
-			return RhythmGrid{}, fmt.Errorf("scan rhythm messages: %w", err)
+			return RhythmGrid{}, fmt.Errorf("scan rhythm activity: %w", err)
 		}
 		add(dow, hour, n)
 	}
 	mrows.Close()
 	if err := mrows.Err(); err != nil {
-		return RhythmGrid{}, fmt.Errorf("iterate rhythm messages: %w", err)
-	}
-
-	filter, args = f.clauseFor("s.started_at")
-	trows, err := q.Query(ctx,
-		`SELECT extract(isodow FROM m.timestamp AT TIME ZONE 'UTC')::int,
-		        extract(hour   FROM m.timestamp AT TIME ZONE 'UTC')::int,
-		        count(*)
-		   FROM tool_calls tc
-		   JOIN messages m ON m.session_id = tc.session_id AND m.ordinal = tc.message_ordinal
-		   JOIN sessions s ON s.id = tc.session_id
-		  WHERE m.timestamp IS NOT NULL`+filter+`
-		  GROUP BY 1, 2`, args...)
-	if err != nil {
-		return RhythmGrid{}, fmt.Errorf("rhythm tools: %w", err)
-	}
-	for trows.Next() {
-		var dow, hour, n int
-		if err := trows.Scan(&dow, &hour, &n); err != nil {
-			trows.Close()
-			return RhythmGrid{}, fmt.Errorf("scan rhythm tools: %w", err)
-		}
-		add(dow, hour, n)
-	}
-	trows.Close()
-	if err := trows.Err(); err != nil {
-		return RhythmGrid{}, fmt.Errorf("iterate rhythm tools: %w", err)
+		return RhythmGrid{}, fmt.Errorf("iterate rhythm activity: %w", err)
 	}
 	return RhythmGrid{Cells: cells}, nil
 }
