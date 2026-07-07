@@ -160,8 +160,9 @@ func sampleTrends() *store.Trends {
 				{Project: "akari", Folder: "internal/server/web", Path: "internal/server/web/insights.templ", Edits: 3, Sessions: 1},
 			},
 			// Three hot files in the window, two drawn in the tree, so one is clipped: the payload
-			// carries the clipped count and the panel notes the tail.
-			TotalReEdits: 21, TotalHotFiles: 3, Clipped: 1,
+			// carries the clipped count and the panel notes the tail. All three sit in one project,
+			// so the uncapped project span is 1 and the treemap roots at that project's folders.
+			TotalReEdits: 21, TotalHotFiles: 3, Clipped: 1, Projects: 1,
 		},
 		Signals: store.SignalTrends{
 			GradeShare: []map[string]float64{
@@ -169,6 +170,12 @@ func sampleTrends() *store.Trends {
 				{"A": 42, "B": 31, "C": 18, "D": 4, "F": 0, "": 5},
 			},
 			GPA: []float64{3.1, 3.2},
+			// Archetype mix per bucket, each row summing to 100, so chartArchetypes stacks two full
+			// columns and the project page's Quality instrument draws a real spectrum.
+			ArchetypeShare: []map[string]float64{
+				{"quick": 40, "standard": 33, "deep": 14, "marathon": 6, "automation": 7},
+				{"quick": 38, "standard": 34, "deep": 16, "marathon": 5, "automation": 7},
+			},
 			// Raw outcome counts behind the rates: bucket 0 is 10 completed, 2 abandoned, 3 other of
 			// 15; bucket 1 is 13, 1, 4 of 18. The bars partition on these, the lines read the rates.
 			CompletedRate: []float64{66.7, 72.2}, AbandonedRate: []float64{13.3, 5.6}, OutcomeTotal: []int{15, 18},
@@ -225,9 +232,6 @@ func TestInsightsPageRendersInstruments(t *testing.T) {
 
 	for _, want := range []string{
 		`id="insights"`, // the swap target
-		// the summary strip leads with the session-weighted GPA (A5 B3 C2 D1 over 11 graded =
-		// 34/11 = 3.09) so the page opens on a plain-language read of the window
-		`class="insights-summary"`, `Graded 11 of 15 sessions at GPA 3.09.`,
 		// the seven instrument headings
 		`>Fleet mix<`, `>Session gallery<`, `>Velocity<`, `>Tools<`, `>Health<`, `>Economics<`, `>Subagents<`,
 		// representative chart mount points the engine looks up by id
@@ -243,8 +247,6 @@ func TestInsightsPageRendersInstruments(t *testing.T) {
 		`id="insights-data"`, `"nBuckets":2`, `"bucketLabels":["Jun 1","Jun 8"]`, `"deepestTree":3`,
 		// the live window selector: the active window is marked, the rest refetch and swap
 		`aria-current="true"`, `hx-get="/insights?range=7d"`, `hx-select="#insights"`,
-		// the session count in the header
-		`15 session`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("insights page missing %q", want)
@@ -252,10 +254,15 @@ func TestInsightsPageRendersInstruments(t *testing.T) {
 	}
 
 	// The old distribution-panel bars belong to the project quality band now, not the fleet
-	// page, so the fleet page renders none of that server-side bar markup.
-	for _, absent := range []string{`class="ins-grid"`, `class="mix-bar"`, `class="bar-fill"`} {
+	// page, so the fleet page renders none of that server-side bar markup. The summary strip and
+	// the page title/subtitle were dropped entirely, so none of their markup or copy appears.
+	for _, absent := range []string{
+		`class="ins-grid"`, `class="mix-bar"`, `class="bar-fill"`,
+		`class="insights-summary"`, `Spend totaled`,
+		`class="section-label"`, `class="page-header-left"`, `in the selected window`,
+	} {
 		if strings.Contains(html, absent) {
-			t.Errorf("insights page should not render %q (that markup moved to the quality band)", absent)
+			t.Errorf("insights page should not render %q (removed markup)", absent)
 		}
 	}
 }

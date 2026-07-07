@@ -1155,6 +1155,57 @@
     return wrap;
   }
 
+  // chartArchetypes draws the per-bucket archetype mix as a stacked area, the same shape as
+  // chartGrades minus the GPA overlay: each band is an archetype's share of the bucket's
+  // sessions, stacked lightest to heaviest so the plot reads as the fleet's session-weight
+  // spectrum shifting over the window. It reads D.archetypes ({order, colors, labels, rows}),
+  // the contract archetypesTrendData emits, and is mounted only by the project page's Quality
+  // instrument (there is no archetype mount on /insights).
+  function chartArchetypes() {
+    const D = window.AK_DATA;
+    const M = D.archetypes;
+    const w = W, h = H, pL = padL, pR = padR, pT = padT, pB = padB;
+    const svg = A.svgRoot(w, h);
+    const xScale = A.scaleLinear([0, D.nBuckets - 1], [pL, w - pR]);
+    const yScale = A.scaleLinear([0, 100], [h - pB, pT]);
+
+    A.axisTicksY(svg, [0, 25, 50, 75, 100], pL, w - pR, yScale, (v) => v + '%');
+    A.bucketAxis(svg, w, h, pB, pL, pR, false);
+
+    const clip = A.clipGroup(svg, pL, pT, w - pL - pR, h - pT - pB);
+    let cum = new Array(D.nBuckets).fill(0);
+    M.order.forEach((key) => {
+      const bottom = cum.slice();
+      const top = cum.map((c, i) => c + (M.rows[i][key] || 0));
+      const bottomPts = bottom.map((v, i) => [xScale(i), yScale(v)]);
+      const topPts = top.map((v, i) => [xScale(i), yScale(v)]);
+      clip.appendChild(A.svgEl('path', { d: A.pathBand(topPts, bottomPts), fill: M.colors[key], opacity: '0.82' }));
+      cum = top;
+    });
+    A.axisBaseline(svg, pL, w - pR, h - pB);
+
+    const wrap = document.createElement('div');
+    wrap.appendChild(svg);
+    const legend = document.createElement('ul');
+    legend.className = 'legend';
+    legend.style.marginTop = '10px';
+    M.order.forEach((key) => {
+      const li = document.createElement('li');
+      li.className = 'legend-chip';
+      li.innerHTML = '<span class="legend-swatch" style="background:' + M.colors[key] + '"></span>' + M.labels[key];
+      legend.appendChild(li);
+    });
+    wrap.appendChild(legend);
+
+    A.attachHoverBucket(svg, w, h, pL, pR, pT, pB, xScale, (i) => {
+      let html = '<div class="tt-title">' + D.bucketLabels[i] + '</div>';
+      M.order.forEach((key) => { html += '<div class="tt-row" style="color:' + M.colors[key] + '">' + M.labels[key] + ' <b>' + (M.rows[i][key] || 0).toFixed(1) + '%</b></div>'; });
+      return html;
+    });
+
+    return wrap;
+  }
+
   function chartOutcomes() {
     const D = window.AK_DATA;
     const w = W, h = H, pL = padL, pR = 16, pT = padT, pB = padB;
@@ -1477,7 +1528,19 @@
     renderAllMinis();
   }
 
-  window.AK_HEALTH = { renderHealth };
+  // renderQuality is the project page's lean cut of the health instrument: the three
+  // quality-verdict charts (grades, outcomes, archetypes) drawn full width, without the
+  // fleet page's hygiene, context, or mini-multiple overview. It reuses the same chart
+  // functions and mount ids as renderHealth, so the two never diverge; the project page
+  // carries the chart-grades/chart-outcomes/chart-archetypes mounts and none of the rest,
+  // and runInsights dispatches this when the #quality instrument is present.
+  function renderQuality() {
+    mount('chart-grades', chartGrades());
+    mount('chart-outcomes', chartOutcomes());
+    mount('chart-archetypes', chartArchetypes());
+  }
+
+  window.AK_HEALTH = { renderHealth, renderQuality };
 })();
 
 
@@ -1614,7 +1677,30 @@
     })).sort((a, b) => b.value - a.value);
   }
 
+  // soleProject returns the one project a corpus touched, or null when several did. A
+  // single-project scope (the project page's churn, or a fleet window that only touched one
+  // repo) has a trivial project level: one full-bleed cell that wastes a drill step. In that
+  // case the treemap roots at that project's folders instead, so path [] is folders and
+  // [folder] is files, one level shallower than the multi-project drill.
+  //
+  // The single-project test reads churnTrend.projectCount, the store's UNCAPPED count of distinct
+  // projects in the hot-file cohort, not D.projects.length. D.projects is serialized from the tree,
+  // which is capped at maxChurnTreeFiles: a genuinely multi-project window whose busiest files all
+  // sit in one project (with a clipped file in another) would list one project there while its
+  // headline totals count several, so rooting at that project's folders would hide a real
+  // second project. The uncapped count cannot be fooled that way.
+  function soleProject() {
+    const D = window.AK_DATA;
+    const ct = D.churnTrend || {};
+    return ct.projectCount === 1 && D.projects && D.projects.length === 1 ? D.projects[0] : null;
+  }
+
   function currentRows() {
+    const sole = soleProject();
+    if (sole) {
+      if (path.length === 0) return { rows: folderRows(sole), level: 'folder' };
+      return { rows: fileRows(sole, path[0]), level: 'file' };
+    }
     if (path.length === 0) return { rows: projectRows(), level: 'project' };
     if (path.length === 1) return { rows: folderRows(path[0]), level: 'folder' };
     return { rows: fileRows(path[0], path[1]), level: 'file' };
@@ -1624,9 +1710,19 @@
     const el = document.getElementById('treemap-breadcrumb');
     if (!el) return;
     el.innerHTML = '';
-    const crumbs = [{ label: 'all projects', depth: 0 }];
-    if (path[0]) crumbs.push({ label: path[0].replace('/', '-'), depth: 1 });
-    if (path[1]) crumbs.push({ label: path[1].replace(/\//g, '-'), depth: 2 });
+    // In sole-project mode the root crumb names the project's folder view (path [] = folders);
+    // otherwise it is the multi-project overview (path [] = projects), with the project as the
+    // depth-1 crumb.
+    const sole = soleProject();
+    const crumbs = sole
+      ? [{ label: sole.replace('/', '-') + ' folders', depth: 0 }]
+      : [{ label: 'all projects', depth: 0 }];
+    if (sole) {
+      if (path[0]) crumbs.push({ label: path[0].replace(/\//g, '-'), depth: 1 });
+    } else {
+      if (path[0]) crumbs.push({ label: path[0].replace('/', '-'), depth: 1 });
+      if (path[1]) crumbs.push({ label: path[1].replace(/\//g, '-'), depth: 2 });
+    }
 
     crumbs.forEach((c, i) => {
       if (i > 0) {
@@ -1734,6 +1830,9 @@
     const el = document.getElementById('churn-legend');
     if (!el) return;
     el.innerHTML = '';
+    // The legend maps each project to its hue; with a single project every cell shares one hue,
+    // so the one-chip legend is noise. Sole-project scopes (the project page) skip it.
+    if (soleProject()) return;
     D.projects.forEach((p) => {
       const li = document.createElement('li');
       li.className = 'legend-chip';
@@ -2215,19 +2314,26 @@
     // swap unless explicitly reset here.
     if (window.AK_CHURN) window.AK_CHURN.resetDrill();
 
+    // The tab strips and render modules are gated on the section that mounts them, so the
+    // same engine drives the full /insights page (every section present) and the project
+    // page's lean subset (only the Quality and Tools instruments), each drawing only what its
+    // markup carries. initTabStrip and wireJumpButtons already no-op on a missing strip, but
+    // gating the render modules matters: several assume their mount points exist.
+    const has = (id) => !!document.getElementById(id);
     window.AK_TABS.initTabStrip('velocity-tabs');
     window.AK_TABS.initTabStrip('tools-tabs');
     window.AK_TABS.initTabStrip('health-tabs');
     window.AK_TABS.initTabStrip('economics-tabs');
     window.AK_TABS.wireJumpButtons();
 
-    window.AK_FLEETMIX.renderFleetMix();
-    window.AK_GALLERY.renderGallery();
-    window.AK_VELOCITY.renderVelocity();
-    window.AK_TOOLS.renderTools();
-    window.AK_HEALTH.renderHealth();
-    window.AK_ECONOMICS.renderEconomics();
-    window.AK_SUBAGENTS.renderSubagents();
+    if (has('fleetmix')) window.AK_FLEETMIX.renderFleetMix();
+    if (has('gallery')) window.AK_GALLERY.renderGallery();
+    if (has('velocity')) window.AK_VELOCITY.renderVelocity();
+    if (has('tools')) window.AK_TOOLS.renderTools();
+    if (has('health')) window.AK_HEALTH.renderHealth();
+    if (has('quality')) window.AK_HEALTH.renderQuality();
+    if (has('economics')) window.AK_ECONOMICS.renderEconomics();
+    if (has('subagents')) window.AK_SUBAGENTS.renderSubagents();
 
     // treemap is measured off its own bounding box; re-render on resize
     // (debounced) so the squarified layout tracks the actual column width.
@@ -2256,10 +2362,15 @@
 
   document.addEventListener('htmx:afterSwap', (e) => {
     const t = (e.detail && e.detail.target) || e.target;
-    if (!t || t.id !== 'insights') return;
-    // Read the live node by id, not the event's target: an outerHTML swap
-    // reports the detached old node, whose #insights-data is stale.
-    if (!document.getElementById('insights')) return;
+    if (!t || !t.id) return;
+    // Redraw after any swap that brought in a fresh #insights-data payload: the fleet
+    // #insights section swapped by its range control, and the project page's #project-view
+    // swapped by its range or filter toolbar (its Quality band embeds the same script). Read
+    // the live node by id, not the event's target: an outerHTML swap reports the detached old
+    // node, whose data script is stale. querySelector on the live node covers both because the
+    // script sits inside each swapped region.
+    const live = document.getElementById(t.id);
+    if (!live || !live.querySelector('#insights-data')) return;
     runInsights();
   });
 })();

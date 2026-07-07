@@ -67,7 +67,11 @@
   gap: 28px;
 }
 
-#insights .panel {
+/* The panel surface is scoped to the two instrument hosts rather than global, so the class
+   name stays free for other uses: /insights and the project page's Quality band
+   (.proj-quality), which reuses the same instrument markup and chart engine. */
+#insights .panel,
+.proj-quality .panel {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -154,40 +158,11 @@
 .page-header {
   display: flex;
   align-items: flex-start;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 24px;
   flex-wrap: wrap;
   padding-bottom: 20px;
   border-bottom: 1px solid var(--border);
-}
-
-.page-header-left {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  max-width: 620px;
-}
-
-.page-header .section-label {
-  color: var(--accent);
-}
-
-.page-header-left p {
-  margin: 0;
-  color: var(--subtext);
-  font-size: 0.875rem;
-}
-
-/* Summary strip: the plain-language lead over the instruments. It reads a step up from the
-   header's sub-copy (larger, in --text, roomier leading) so it lands as the page's headline
-   read, and its figures sit on tabular numerics so the numbers line up as the eye scans. */
-.insights-summary {
-  margin: 20px 0 4px;
-  max-width: 640px;
-  color: var(--text);
-  font-size: 1rem;
-  line-height: 1.6;
-  font-variant-numeric: tabular-nums;
 }
 
 /* range control */
@@ -256,7 +231,9 @@
 }
 
 #insights button:focus-visible,
-#insights [tabindex]:focus-visible {
+#insights [tabindex]:focus-visible,
+.proj-quality button:focus-visible,
+.proj-quality [tabindex]:focus-visible {
   outline: none;
   box-shadow: 0 0 0 3px rgba(198, 168, 242, 0.4);
 }

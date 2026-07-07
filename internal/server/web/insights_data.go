@@ -55,6 +55,7 @@ func InsightsData(ins store.Insights) (string, error) {
 		"toolFailures": failuresData(t.Tools),
 
 		"grades":           gradesData(t.Signals),
+		"archetypes":       archetypesTrendData(t.Signals),
 		"outcomes":         outcomesData(t.Signals),
 		"hygiene":          hygieneData(t.Signals),
 		"contextHistogram": histogramData(t.Signals.ContextHistogram),
@@ -157,6 +158,35 @@ var archetypeColor = map[string]string{
 	"deep":       "var(--viz-6)",
 	"marathon":   "var(--viz-7)",
 	"automation": "var(--viz-8)",
+}
+
+// archetypeTrendOrder fixes the stacked-area band order for the archetype mix chart,
+// lightest to heaviest with automation last, matching the store's archetypeOrder and the
+// distribution's spectrum reading. The chart engine stacks the bands in this order.
+var archetypeTrendOrder = []string{"quick", "standard", "deep", "marathon", "automation"}
+
+// archetypesTrendData serializes the per-bucket archetype mix into the {order, colors,
+// labels, rows} shape the stacked-area engine reads, the same contract fleetMix and toolMix
+// use. rows[i][key] is the archetype's percent of bucket i's sessions; an empty bucket
+// serializes as an empty map, which the chart stacks to zero height. There is no archetype
+// mount on /insights, so this rides the payload only for the project page's Quality
+// instrument, where chartArchetypes draws it.
+func archetypesTrendData(s store.SignalTrends) map[string]any {
+	colors := map[string]string{}
+	labels := map[string]string{}
+	for _, a := range archetypeTrendOrder {
+		colors[a] = archetypeColor[a]
+		labels[a] = titleCase(a)
+	}
+	rows := make([]map[string]float64, len(s.ArchetypeShare))
+	for i, share := range s.ArchetypeShare {
+		if share == nil {
+			rows[i] = map[string]float64{}
+			continue
+		}
+		rows[i] = share
+	}
+	return map[string]any{"order": archetypeTrendOrder, "colors": colors, "labels": labels, "rows": rows}
 }
 
 func fleetMixData(fm store.FleetMix, labels []string, n int) map[string]any {
@@ -432,6 +462,10 @@ func churnTrendData(c store.ChurnTrend) map[string]any {
 		// but the tree renders only the busiest maxChurnTreeFiles, so the panel notes the clipped
 		// tail rather than letting the headline silently exceed the visible breakdown.
 		"clipped": c.Clipped,
+		// The uncapped project span of the hot-file cohort, so the treemap can tell a genuinely
+		// single-project window from a multi-project one whose capped tree happens to list one
+		// project. Reading the capped `projects` list instead would misjudge that case.
+		"projectCount": c.Projects,
 	}
 }
 
