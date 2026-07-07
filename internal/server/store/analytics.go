@@ -428,6 +428,33 @@ func (f AnalyticsFilter) clauseFor(timeExpr string) (string, []any) {
 	return clauses, args
 }
 
+// clauseForRollupDay is clauseFor against a rollup's UTC DATE column (session_usage_daily),
+// windowing in whole days. Until floors exactly when it is a UTC midnight, which it always
+// is on this path (Insights pins it to a bucket boundary before any rollup query runs); a
+// mid-day Until ceils to keep its partial day, a superset rather than a silent drop. Since
+// floors to its UTC day unconditionally, so the window's first day counts in full even when
+// Since is a mid-day instant (the "now minus N days" ranges). That is the one place the
+// rollup read is deliberately wider than the old per-event scan, which cut the first day at
+// the instant: a day-bucketed chart drew that first bucket partially filled anyway, so the
+// rollup read fills it as a complete bucket instead. docs/data-aggregation.md documents the
+// deviation.
+func (f AnalyticsFilter) clauseForRollupDay(dayExpr string) (string, []any) {
+	day := f
+	if !day.Since.IsZero() {
+		u := day.Since.UTC()
+		day.Since = time.Date(u.Year(), u.Month(), u.Day(), 0, 0, 0, 0, time.UTC)
+	}
+	if !day.Until.IsZero() {
+		u := day.Until.UTC()
+		floor := time.Date(u.Year(), u.Month(), u.Day(), 0, 0, 0, 0, time.UTC)
+		if u.After(floor) {
+			floor = floor.AddDate(0, 0, 1)
+		}
+		day.Until = floor
+	}
+	return day.clauseFor(dayExpr)
+}
+
 func (s *Store) analyticsSeries(ctx context.Context, q querier, f AnalyticsFilter) ([]DayPoint, error) {
 	filter, args := f.clause()
 	rows, err := q.Query(ctx,

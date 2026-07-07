@@ -203,6 +203,23 @@ func deriveSessionRollupsTx(ctx context.Context, tx pgx.Tx, sessionID int64) err
 	return nil
 }
 
+// DeriveSessionRollups rewrites one session's insights rollups from its current
+// projection rows, in a transaction of its own. Production code never needs it (rebuildTx
+// and the announce path maintain the rollups inline); it exists for tests that seed
+// projection rows with direct INSERTs, bypassing the rebuild, and must bring the rollups
+// along through the same derivation SQL the write path runs.
+func (s *Store) DeriveSessionRollups(ctx context.Context, sessionID int64) error {
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("derive rollups for session %d: begin: %w", sessionID, err)
+	}
+	defer tx.Rollback(ctx)
+	if err := deriveSessionRollupsTx(ctx, tx, sessionID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 // deriveSessionFileChurnTx rewrites one session's file-churn rollup alone. The announce
 // path calls this when a cwd change rewrites tool_calls.file_rel_path in place (the one
 // projection write outside the rebuild): churn_path is derived from that column, so the

@@ -433,6 +433,7 @@ func TestInsightsBucketedGridUnderConnectionStarvation(t *testing.T) {
 			sid, start); err != nil {
 			t.Fatalf("seed usage for %d: %v", sid, err)
 		}
+		deriveUsageRollup(t, st, sid)
 	}
 
 	// Hold every connection but one. Insights then acquires the last for its control transaction

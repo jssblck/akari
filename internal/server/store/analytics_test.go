@@ -30,6 +30,17 @@ func seedSessionWithStats(t *testing.T, st *store.Store, userID, projectID int64
 	return id
 }
 
+// deriveUsageRollup re-derives a session's insights rollups after a direct
+// usage_events INSERT. The seed helpers bypass the rebuild (which is what maintains the
+// rollups in production), so without this the converted Insights reads would see none of
+// the seeded usage.
+func deriveUsageRollup(t *testing.T, st *store.Store, sessionID int64) {
+	t.Helper()
+	if err := st.DeriveSessionRollups(context.Background(), sessionID); err != nil {
+		t.Fatalf("derive rollups for seeded usage: %v", err)
+	}
+}
+
 func seedUsage(t *testing.T, st *store.Store, sessionID int64, model string, cost float64, in, out int64, daysAgo int, dedup string) {
 	t.Helper()
 	_, err := st.Pool.Exec(context.Background(),
@@ -39,6 +50,7 @@ func seedUsage(t *testing.T, st *store.Store, sessionID int64, model string, cos
 	if err != nil {
 		t.Fatalf("seed usage: %v", err)
 	}
+	deriveUsageRollup(t, st, sessionID)
 }
 
 // seedUsageCache is seedUsage with the two cache-token classes set, so the cache
@@ -53,6 +65,7 @@ func seedUsageCache(t *testing.T, st *store.Store, sessionID int64, model string
 	if err != nil {
 		t.Fatalf("seed usage cache: %v", err)
 	}
+	deriveUsageRollup(t, st, sessionID)
 }
 
 // seedUsageUndated inserts a usage event with a NULL occurred_at, the shape a
@@ -68,6 +81,7 @@ func seedUsageUndated(t *testing.T, st *store.Store, sessionID int64, model stri
 	if err != nil {
 		t.Fatalf("seed undated usage: %v", err)
 	}
+	deriveUsageRollup(t, st, sessionID)
 }
 
 // seedUsageAt inserts a usage event at an explicit occurred_at, so the window's
@@ -82,6 +96,7 @@ func seedUsageAt(t *testing.T, st *store.Store, sessionID int64, model string, c
 	if err != nil {
 		t.Fatalf("seed usage at: %v", err)
 	}
+	deriveUsageRollup(t, st, sessionID)
 }
 
 // seedUsageCacheAt is seedUsageCache with an explicit occurred_at, so a cached event
@@ -97,6 +112,7 @@ func seedUsageCacheAt(t *testing.T, st *store.Store, sessionID int64, model stri
 	if err != nil {
 		t.Fatalf("seed usage cache at: %v", err)
 	}
+	deriveUsageRollup(t, st, sessionID)
 }
 
 // seedUsageUnpriced inserts a dated usage event that carries real token volume but
@@ -112,6 +128,7 @@ func seedUsageUnpriced(t *testing.T, st *store.Store, sessionID int64, model str
 	if err != nil {
 		t.Fatalf("seed unpriced usage: %v", err)
 	}
+	deriveUsageRollup(t, st, sessionID)
 }
 
 // TestCostIncompleteRollsUp pins that an unpriced usage event (tokens, no cost)

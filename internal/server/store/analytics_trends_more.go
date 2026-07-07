@@ -983,18 +983,18 @@ func (s *Store) subagentTrendsFrom(ctx context.Context, q querier, f AnalyticsFi
 		out.SessionsThatDelegatePct = float64(totalDelegating) / float64(totalRoots) * 100
 	}
 
-	// Cost share per bucket: subagent spend over total spend, on occurred_at.
-	filter, args = f.clause()
+	// Cost share per bucket: subagent spend over total spend, on the usage rollup's UTC day.
+	filter, args = f.clauseForRollupDay("sud.day")
 	var totalCost, subCost float64
 	crows, err := q.Query(ctx, fmt.Sprintf(
 		`SELECT %s AS b,
-		        coalesce(sum(ue.cost_usd), 0),
-		        coalesce(sum(ue.cost_usd) FILTER (WHERE s.relationship_type = 'subagent'), 0),
-		        coalesce(`+costIncompleteExpr+`, false)
-		   FROM usage_events ue
-		   JOIN sessions s ON s.id = ue.session_id
-		  WHERE ue.occurred_at IS NOT NULL%s
-		  GROUP BY b`, g.sqlBucket("ue.occurred_at"), filter), args...)
+		        coalesce(sum(sud.cost_usd), 0),
+		        coalesce(sum(sud.cost_usd) FILTER (WHERE s.relationship_type = 'subagent'), 0),
+		        coalesce(bool_or(sud.unpriced), false)
+		   FROM session_usage_daily sud
+		   JOIN sessions s ON s.id = sud.session_id
+		  WHERE sud.day IS NOT NULL%s
+		  GROUP BY b`, g.sqlBucketDay("sud.day"), filter), args...)
 	if err != nil {
 		return SubagentStats{}, fmt.Errorf("subagent cost trend: %w", err)
 	}
