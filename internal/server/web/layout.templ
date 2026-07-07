@@ -7,7 +7,9 @@ templ layout(p Page) {
 	<html lang="en">
 		<head>
 			<meta charset="utf-8"/>
-			<meta name="viewport" content="width=device-width, initial-scale=1"/>
+			// viewport-fit=cover lets the shell paint edge to edge on notched phones; the
+			// bars and drawer pad themselves back out with env(safe-area-inset-*).
+			<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
 			<title>{ p.Title } - akari</title>
 			@faviconLinks()
 			@tzCookieScript()
@@ -25,7 +27,12 @@ templ layout(p Page) {
 		<body>
 			if p.LoggedIn {
 				<div class="app">
+					@mobileTopbar()
 					@sidebar(p)
+					// The drawer scrim: shown while the mobile drawer is open (app.js flips
+					// body.drawer-open); a tap on it closes the drawer. Hidden entirely on
+					// desktop, where the sidebar is a fixed column.
+					<div class="sidebar-scrim" data-drawer-scrim aria-hidden="true"></div>
 					<div class="content-scroll">
 						<main class={ "page-" + p.Active }>
 							if notice := Notice(ctx); notice != "" {
@@ -123,11 +130,34 @@ templ navItem(href, key, label, active string) {
 	</a>
 }
 
+// mobileTopbar is the compact sticky bar the app shell shows below the 900px
+// shell breakpoint (layout.css hides it on desktop): the wordmark and a menu
+// button that opens the sidebar as an off-canvas drawer. It mirrors the guide's
+// mobile header, so the two surfaces share one navigation idiom on a phone.
+templ mobileTopbar() {
+	<header class="mobile-topbar">
+		<a class="brand" href="/overview">@brandMark()</a>
+		<button
+			type="button"
+			class="menu-toggle"
+			data-drawer-toggle
+			aria-label="Menu"
+			aria-expanded="false"
+			aria-controls="app-sidebar"
+		>
+			<svg viewBox="0 0 16 16" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+				<path d="M2 4h12M2 8h12M2 12h12"></path>
+			</svg>
+		</button>
+	</header>
+}
+
 // sidebar is the persistent left navigation that replaced the three-link top
 // bar: the wordmark, the primary sections, and the signed-in user with a log-out
-// control pinned to the foot.
+// control pinned to the foot. Below the 900px shell breakpoint it renders as an
+// off-canvas drawer the mobile topbar's menu button opens (layout.css + app.js).
 templ sidebar(p Page) {
-	<aside class="sidebar">
+	<aside class="sidebar" id="app-sidebar">
 		<a class="brand" href="/overview">@brandMark()</a>
 		<nav class="navgroup" aria-label="Primary">
 			@navItem("/overview", "overview", "Overview", p.Active)
@@ -211,7 +241,7 @@ templ publicLayout(title string, og OGMeta, viewer Page) {
 	<html lang="en">
 		<head>
 			<meta charset="utf-8"/>
-			<meta name="viewport" content="width=device-width, initial-scale=1"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
 			<title>{ title } - akari</title>
 			@faviconLinks()
 			@tzCookieScript()

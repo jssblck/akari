@@ -207,6 +207,11 @@
   border-radius: var(--radius-md);
   padding: 2px;
   background: var(--surface);
+  /* A strip wider than its panel pans inside itself rather than widening the
+     document (which put a horizontal scrollbar on the whole page at phone
+     widths). max-width keeps the border in view; the tabs scroll within. */
+  max-width: 100%;
+  overflow-x: auto;
 }
 
 .tabstrip button[role="tab"] {
@@ -219,6 +224,8 @@
   padding: 6px 13px;
   cursor: pointer;
   transition: background-color 0.18s ease, color 0.18s ease;
+  flex: none;
+  white-space: nowrap;
 }
 
 .tabstrip button[role="tab"]:hover {
@@ -403,6 +410,12 @@ section.instrument {
 
 @media (max-width: 640px) {
   .grid-2x2 { grid-template-columns: 1fr; }
+  /* main already pads the phone gutter (base.css); the page adds none of its own. */
+  #insights .page { padding: 20px 0 48px; }
+  /* The window selector spans the row with evenly stretched stops instead of a
+     right-anchored cluster hanging past a phone's edge. */
+  .range-control { display: flex; width: 100%; }
+  .range-control button { flex: 1 1 auto; padding: 9px 6px; white-space: nowrap; }
 }
 
 .mini-multiple {

@@ -665,6 +665,63 @@
     else form.submit();
   });
 
+  // ---------------- Mobile drawer ----------------
+  // Below the 900px shell breakpoint the sidebar is an off-canvas drawer
+  // (layout.css); the topbar's menu button opens it and body.drawer-open drives
+  // the slide, the scrim, and the scroll lock. Closing returns focus to the
+  // button so a keyboard or screen-reader user is not stranded behind the scrim.
+  function drawerToggleEl() { return document.querySelector("[data-drawer-toggle]"); }
+  function setDrawer(open) {
+    var toggle = drawerToggleEl();
+    if (!toggle) return;
+    document.body.classList.toggle("drawer-open", open);
+    toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    if (open) {
+      var first = document.querySelector("#app-sidebar .nav");
+      if (first) first.focus();
+    } else if (toggle.offsetParent !== null) {
+      toggle.focus();
+    }
+  }
+  function drawerOpen() { return document.body.classList.contains("drawer-open"); }
+  document.addEventListener("click", function (ev) {
+    if (ev.target.closest && ev.target.closest("[data-drawer-toggle]")) {
+      setDrawer(!drawerOpen());
+      return;
+    }
+    if (!drawerOpen()) return;
+    // A tap on the scrim, or on any nav link/control inside the drawer, closes it.
+    if (ev.target.closest && ev.target.closest("[data-drawer-scrim]")) { setDrawer(false); return; }
+    if (ev.target.closest && ev.target.closest("#app-sidebar a, #app-sidebar button")) {
+      document.body.classList.remove("drawer-open");
+      var t = drawerToggleEl();
+      if (t) t.setAttribute("aria-expanded", "false");
+    }
+  });
+  document.addEventListener("keydown", function (ev) {
+    if (ev.key === "Escape" && drawerOpen()) setDrawer(false);
+  });
+  // Leaving the compact shell (a rotation, a window resize) clears the drawer
+  // state so the desktop sidebar never comes back scroll-locked.
+  if (window.matchMedia) {
+    var shellMQ = window.matchMedia("(min-width: 901px)");
+    var onShell = function (e) { if (e.matches && drawerOpen()) setDrawer(false); };
+    if (shellMQ.addEventListener) shellMQ.addEventListener("change", onShell);
+    else if (shellMQ.addListener) shellMQ.addListener(onShell);
+  }
+
+  // ---------------- Filter toolbar fold ----------------
+  // On a phone the filter selects fold behind the toolbar's Filters button
+  // (sessions.css); the button just flips the panel and its own expanded state.
+  document.addEventListener("click", function (ev) {
+    var btn = ev.target.closest ? ev.target.closest("[data-toolbar-toggle]") : null;
+    if (!btn) return;
+    var bar = btn.closest(".toolbar");
+    if (!bar) return;
+    var open = bar.classList.toggle("filters-open");
+    btn.setAttribute("aria-expanded", open ? "true" : "false");
+  });
+
   // ---------------- Notice banner ----------------
   // The one-shot success banner (see layout.templ) removes itself on a dismiss
   // click and auto-removes after a few seconds. Under prefers-reduced-motion the

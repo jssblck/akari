@@ -144,6 +144,11 @@
   padding: var(--sp-md);
 }
 .heatmap svg { display: block; width: 100%; height: auto; }
+/* When the viewport is too narrow for a year of readable cells, charts.js keeps
+   the grid at its natural size, flags the container, and scrolls it to the most
+   recent weeks; the calendar pans instead of collapsing into unreadable specks. */
+.heatmap.hm-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.heatmap.hm-scroll svg { width: auto; max-width: none; }
 .heatmap .hm-cell { transition: opacity var(--dur-fast) var(--ease-state); }
 .heatmap .hm-cell:hover { stroke: var(--text); stroke-width: 1; }
 .heatmap .lvl-0 { fill: var(--surface-3); }
@@ -191,6 +196,26 @@
 .bar-fill { height: 100%; width: 0; border-radius: 999px; background: var(--lilac); transition: width 700ms var(--ease-settle); }
 
 /* ---- Responsive ---- */
-@media (max-width: 860px) {
+@media (max-width: 900px) {
   .breakdowns { grid-template-columns: 1fr; gap: var(--sp-lg); }
+}
+@media (max-width: 640px) {
+  /* The fused readout strip refolds into a 2x2 gauge cluster: four tiles at a
+     quarter of a phone's width each truncate their own values. nth-child hairlines
+     keep the machined single-panel read (the strip always holds exactly these
+     four: Cost, Tokens, Cache, Sessions). */
+  .analytics .stats { display: grid; grid-template-columns: 1fr 1fr; }
+  .analytics .stat + .stat { border-left: none; }
+  .analytics .stat:nth-child(2n) { border-left: 1px solid var(--border); }
+  .analytics .stat:nth-child(n+3) { border-top: 1px solid var(--border); }
+  /* Controls stack left-aligned in document order (window, users, metric) instead
+     of right-anchored fragments wrapping mid-row; the hairline separators read as
+     noise once the row breaks, so they fold away. */
+  .heatmap-controls { justify-content: flex-start; row-gap: var(--sp-sm); }
+  .heatmap-controls .ctrl-sep { display: none; }
+  .heatmap-controls .chart-toolbar { display: flex; }
+  .heatmap-controls .chart-toolbar .seg { flex: 1 1 auto; }
+  /* The control now sits at the row's left edge, so its menu opens leftward off
+     screen if it keeps the desktop right anchor. */
+  .userfilter-menu { left: 0; right: auto; max-width: calc(100vw - 2 * var(--sp-md)); }
 }

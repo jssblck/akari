@@ -55,7 +55,9 @@ templ sessionsToolbar(facets store.GlobalFacetValues, sel store.SessionFilter) {
 				spellcheck="false"
 			/>
 		</label>
-		@tbSelect("Agent", "agent") {
+		@toolbarFoldToggle()
+		<div class="tb-fields" id="tb-fields">
+			@tbSelect("Agent", "agent") {
 			<option value="" selected?={ sel.Agent == "" }>All agents</option>
 			for _, a := range facets.Agents {
 				<option value={ a.Value } selected?={ sel.Agent == a.Value }>{ a.Value }</option>
@@ -95,18 +97,34 @@ templ sessionsToolbar(facets store.GlobalFacetValues, sel store.SessionFilter) {
 				}
 			}
 		}
-		@tbSelect("Subagents", "subagents") {
-			<option value="" selected?={ !sel.IncludeSubagents }>Hidden</option>
-			<option value="1" selected?={ sel.IncludeSubagents }>Shown</option>
-		}
-		<span class="spacer"></span>
-		@tbSelect("Sort", "sort") {
-			for _, o := range SessionSortOptions() {
-				<option value={ o.Key } selected?={ sortSelected(sel, o.Key) }>{ o.Label }</option>
+			@tbSelect("Subagents", "subagents") {
+				<option value="" selected?={ !sel.IncludeSubagents }>Hidden</option>
+				<option value="1" selected?={ sel.IncludeSubagents }>Shown</option>
 			}
-		}
+			<span class="spacer"></span>
+			@tbSelect("Sort", "sort") {
+				for _, o := range SessionSortOptions() {
+					<option value={ o.Key } selected?={ sortSelected(sel, o.Key) }>{ o.Label }</option>
+				}
+			}
+		</div>
 		<noscript><button type="submit">Apply</button></noscript>
 	</form>
+}
+
+// toolbarFoldToggle is the phone-only "Filters" disclosure button for a filter
+// toolbar. Desktop never shows it (the fields lay out inline via display:
+// contents); below the 640px phone breakpoint the fields fold away and this
+// button opens them as a stacked panel (app.js toggles .filters-open and the
+// aria-expanded state). The active-filter chips under the toolbar keep applied
+// filters visible even while the panel is folded.
+templ toolbarFoldToggle() {
+	<button type="button" class="tb-fold-toggle secondary" data-toolbar-toggle aria-expanded="false" aria-controls="tb-fields">
+		<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
+			<path d="M2 4h12M4.5 8h7M6.5 12h3"></path>
+		</svg>
+		Filters
+	</button>
 }
 
 // tbSelect is one labeled toolbar control: a knurled-cap label over an

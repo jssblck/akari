@@ -42,7 +42,7 @@ templ ProjectsPage(p Page, remotes []store.ProjectSummary, locals []store.Projec
 									<th class="num">Sessions</th>
 									<th class="num">Tokens</th>
 									<th class="num">Cost</th>
-									<th>Updated</th>
+									<th class="col-updated">Updated</th>
 								</tr>
 							</thead>
 							<tbody>
@@ -53,7 +53,7 @@ templ ProjectsPage(p Page, remotes []store.ProjectSummary, locals []store.Projec
 										<td class="num">{ fmt.Sprintf("%d", pr.SessionCount) }</td>
 										<td class="num">@tokensCell(pr)</td>
 										<td class="num">{ FmtCost(pr.TotalCostUSD, pr.CostIncomplete) }</td>
-										<td class="muted nowrap">{ FmtRelTime(ctx, pr.LastActivity) }</td>
+										<td class="muted nowrap col-updated">{ FmtRelTime(ctx, pr.LastActivity) }</td>
 									</tr>
 								}
 							</tbody>
@@ -71,13 +71,13 @@ templ ProjectsPage(p Page, remotes []store.ProjectSummary, locals []store.Projec
 							<thead>
 								<tr>
 									<th class="proj-name">Folder</th>
-									<th>Machine</th>
-									<th>State</th>
+									<th class="col-machine">Machine</th>
+									<th class="col-state">State</th>
 									<th class="trend">30d</th>
 									<th class="num">Sessions</th>
 									<th class="num">Tokens</th>
 									<th class="num">Cost</th>
-									<th>Updated</th>
+									<th class="col-updated">Updated</th>
 								</tr>
 							</thead>
 							<tbody>
@@ -86,13 +86,13 @@ templ ProjectsPage(p Page, remotes []store.ProjectSummary, locals []store.Projec
 										<td class="proj-name">
 											<a class="mono" href={ ProjectHref(pr.ID) } title={ LocalPath(pr) }>{ LocalPath(pr) }</a>
 										</td>
-										<td class="muted">{ pr.Host }</td>
-										<td>@kindTag(pr.Kind)</td>
+										<td class="muted col-machine">{ pr.Host }</td>
+										<td class="col-state">@kindTag(pr.Kind)</td>
 										<td class="trend">@templ.Raw(Sparkline(spark[pr.ID]))</td>
 										<td class="num">{ fmt.Sprintf("%d", pr.SessionCount) }</td>
 										<td class="num">@tokensCell(pr)</td>
 										<td class="num">{ FmtCost(pr.TotalCostUSD, pr.CostIncomplete) }</td>
-										<td class="muted nowrap">{ FmtRelTime(ctx, pr.LastActivity) }</td>
+										<td class="muted nowrap col-updated">{ FmtRelTime(ctx, pr.LastActivity) }</td>
 									</tr>
 								}
 							</tbody>
@@ -262,24 +262,27 @@ templ projectQuality(ins store.Insights) {
 templ projectSessionToolbar(projectID int64, facets Facets, sel store.SessionFilter, rng string) {
 	<form class="toolbar" method="get" hx-get={ ProjectPath(projectID) } hx-target="#project-view" hx-select="#project-view" hx-swap="outerHTML" hx-push-url="true">
 		<input type="hidden" name="range" value={ rng }/>
-		@tbSelect("Agent", "agent") {
-			<option value="" selected?={ sel.Agent == "" }>All agents</option>
-			for _, ag := range facets.Agents {
-				<option value={ ag } selected?={ sel.Agent == ag }>{ ag }</option>
+		@toolbarFoldToggle()
+		<div class="tb-fields" id="tb-fields">
+			@tbSelect("Agent", "agent") {
+				<option value="" selected?={ sel.Agent == "" }>All agents</option>
+				for _, ag := range facets.Agents {
+					<option value={ ag } selected?={ sel.Agent == ag }>{ ag }</option>
+				}
 			}
-		}
-		@tbSelect("User", "user") {
-			<option value="" selected?={ sel.Username == "" }>All users</option>
-			for _, u := range facets.Users {
-				<option value={ u } selected?={ sel.Username == u }>{ u }</option>
+			@tbSelect("User", "user") {
+				<option value="" selected?={ sel.Username == "" }>All users</option>
+				for _, u := range facets.Users {
+					<option value={ u } selected?={ sel.Username == u }>{ u }</option>
+				}
 			}
-		}
-		@tbSelect("Machine", "machine") {
-			<option value="" selected?={ sel.Machine == "" }>All machines</option>
-			for _, m := range facets.Machines {
-				<option value={ m } selected?={ sel.Machine == m }>{ m }</option>
+			@tbSelect("Machine", "machine") {
+				<option value="" selected?={ sel.Machine == "" }>All machines</option>
+				for _, m := range facets.Machines {
+					<option value={ m } selected?={ sel.Machine == m }>{ m }</option>
+				}
 			}
-		}
+		</div>
 		<noscript><button type="submit">Apply</button></noscript>
 	</form>
 }
@@ -304,11 +307,11 @@ templ ProjectSessionList(sessions []store.SessionSummary, rem store.SessionRemai
 				<thead>
 					<tr>
 						<th>Session</th>
-						<th>Agent</th>
-						<th>User</th>
-						<th>Machine</th>
-						<th>Branch</th>
-						<th class="num">Messages</th>
+						<th class="col-agent">Agent</th>
+						<th class="col-user">User</th>
+						<th class="col-machine">Machine</th>
+						<th class="col-branch">Branch</th>
+						<th class="num col-msgs">Messages</th>
 						<th class="num">Tokens</th>
 						<th class="num">Cost</th>
 						<th>Updated</th>
@@ -326,11 +329,11 @@ templ ProjectSessionList(sessions []store.SessionSummary, rem store.SessionRemai
 									<div class="row-sub muted small" title={ s.Title }>{ s.Title }</div>
 								}
 							</td>
-							<td><span class="tag agent">{ s.Agent }</span></td>
-							<td>{ s.Username }</td>
-							<td class="muted">{ s.Machine }</td>
-							<td class="muted">{ s.GitBranch }</td>
-							<td class="num">{ fmt.Sprintf("%d", s.MessageCount) }</td>
+							<td class="col-agent"><span class="tag agent">{ s.Agent }</span></td>
+							<td class="col-user">{ s.Username }</td>
+							<td class="muted col-machine">{ s.Machine }</td>
+							<td class="muted col-branch">{ s.GitBranch }</td>
+							<td class="num col-msgs">{ fmt.Sprintf("%d", s.MessageCount) }</td>
 							<td class="num">@sessionTokensCell(s)</td>
 							<td class="num">{ FmtCost(s.TotalCostUSD, s.CostIncomplete) }</td>
 							<td class="muted nowrap" title={ FmtTimeLong(ctx, s.LastActiveAt) }>{ FmtRelTime(ctx, s.LastActiveAt) }</td>
@@ -387,10 +390,10 @@ templ SessionList(sessions []store.SessionSummary) {
 					<tr>
 						<th>Session</th>
 						<th>Agent</th>
-						<th>User</th>
-						<th>Machine</th>
-						<th>Branch</th>
-						<th class="num">Messages</th>
+						<th class="col-user">User</th>
+						<th class="col-machine">Machine</th>
+						<th class="col-branch">Branch</th>
+						<th class="num col-msgs">Messages</th>
 						<th class="num">Cost</th>
 						<th>Updated</th>
 					</tr>
@@ -405,10 +408,10 @@ templ SessionList(sessions []store.SessionSummary) {
 								}
 							</td>
 							<td><span class="tag agent">{ s.Agent }</span></td>
-							<td>{ s.Username }</td>
-							<td class="muted">{ s.Machine }</td>
-							<td class="muted">{ s.GitBranch }</td>
-							<td class="num">{ fmt.Sprintf("%d", s.MessageCount) }</td>
+							<td class="col-user">{ s.Username }</td>
+							<td class="muted col-machine">{ s.Machine }</td>
+							<td class="muted col-branch">{ s.GitBranch }</td>
+							<td class="num col-msgs">{ fmt.Sprintf("%d", s.MessageCount) }</td>
 							<td class="num">{ FmtCost(s.TotalCostUSD, s.CostIncomplete) }</td>
 							<td class="muted">{ FmtTime(ctx, s.LastActiveAt) }</td>
 						</tr>
