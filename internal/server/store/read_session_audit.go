@@ -7,15 +7,13 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// The session detail's audit header reads: which models served the session, what the
-// whole work item (the session plus its fan-out) cost, and how each direct subagent
-// ended. All are read-time presentation reads over existing projection rows; none is
-// rebuild-derived, so none moves parse.Epoch.
+// The session detail's audit read covers how each direct subagent ended and the header
+// tile's model-fallback list. Both are read-time presentation reads over existing
+// projection rows; neither is rebuild-derived, so neither moves parse.Epoch.
 
-// SessionAudit is everything the audit header judges together, read from one MVCC
-// snapshot: the session row, its current signals, its direct subagents with their
-// verdicts, the whole-work-item rollup, and the serving models. The header shows the
-// session's own cost, the subagents' costs, and the rollup of both side by side; a
+// SessionAudit is everything the session instruments read together, from one MVCC
+// snapshot: the session row, its current signals, and its direct subagents with their
+// verdicts. The stat band shows the session's own cost beside the subagents' costs; a
 // rebuild committing between separate reads could update sessions.total_cost_usd under
 // the page and make those figures disagree, so they are pinned the same way the feed
 // pins its rows (analyticsSnapshot's reasoning at single-session scale).
@@ -23,8 +21,6 @@ type SessionAudit struct {
 	Detail    SessionDetail
 	Signals   SessionSignals
 	Subagents []SubagentRow
-	Tree      TreeRollup
-	Models    []string
 	// Fallbacks is the header tile's capped fallback list (ModelFallbackListCap rows),
 	// loaded only when Detail's rollup counted one, from the same snapshot as the
 	// count, so the tile's list and its "plus N more" remainder always reconcile.
@@ -61,14 +57,6 @@ func (s *Store) sessionAudit(ctx context.Context, tx pgx.Tx, sessionID int64) (S
 	if a.Subagents, err = s.subagents(ctx, tx, sessionID); err != nil {
 		return a, err
 	}
-	roll, err := s.treeRollups(ctx, tx, []int64{sessionID})
-	if err != nil {
-		return a, err
-	}
-	a.Tree = roll[sessionID]
-	if a.Models, err = s.sessionModels(ctx, tx, sessionID); err != nil {
-		return a, err
-	}
 	// Only a session whose rollup counted a fallback pays for the list read; the
 	// common no-fallback session skips it.
 	if a.Detail.ModelFallbackCount > 0 {
@@ -77,53 +65,6 @@ func (s *Store) sessionAudit(ctx context.Context, tx pgx.Tx, sessionID int64) (S
 		}
 	}
 	return a, nil
-}
-
-// SessionModels returns the distinct models that served a session, heaviest first by
-// total token volume, capped so a pathological session cannot grow the header line. The
-// header shows the working set, not an exhaustive ledger; the per-model split lives on
-// the Insights instruments.
-func (s *Store) SessionModels(ctx context.Context, sessionID int64) ([]string, error) {
-	return s.sessionModels(ctx, s.Pool, sessionID)
-}
-
-func (s *Store) sessionModels(ctx context.Context, q querier, sessionID int64) ([]string, error) {
-	rows, err := q.Query(ctx,
-		`SELECT model FROM usage_events
-		  WHERE session_id = $1 AND model <> ''
-		  GROUP BY model
-		  ORDER BY sum(coalesce(input_tokens,0) + coalesce(output_tokens,0) +
-		               coalesce(cache_read_tokens,0) + coalesce(cache_write_tokens,0)) DESC,
-		           model
-		  LIMIT 6`, sessionID)
-	if err != nil {
-		return nil, fmt.Errorf("query models for session %d: %w", sessionID, err)
-	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var m string
-		if err := rows.Scan(&m); err != nil {
-			return nil, fmt.Errorf("scan model for session %d: %w", sessionID, err)
-		}
-		out = append(out, m)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate models for session %d: %w", sessionID, err)
-	}
-	return out, nil
-}
-
-// TreeRollupFor computes one session's whole-work-item rollup (its own cost plus every
-// subagent in its subtree), the same recursive fold the feed attaches per page
-// (attachTreeRollups), for the session detail's audit header. A session that spawned
-// nothing returns the zero rollup, which the header reads as "no fan-out".
-func (s *Store) TreeRollupFor(ctx context.Context, sessionID int64) (TreeRollup, error) {
-	roll, err := s.treeRollups(ctx, s.Pool, []int64{sessionID})
-	if err != nil {
-		return TreeRollup{}, err
-	}
-	return roll[sessionID], nil
 }
 
 // SubagentRow is one direct child session in a parent's subagents table: the summary

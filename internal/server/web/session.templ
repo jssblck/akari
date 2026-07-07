@@ -139,10 +139,9 @@ templ SessionResync(v SessionView) {
 	@Outline(v.Outline, v.Tools, SessionBlobBase(v.Detail.ID), true)
 }
 
-// sessionInstruments is the audit read above the transcript: the verdict header
-// (outcome, grade, cost, waste, duration) over the stat band. It swaps as one region:
-// whole on a full refresh, out-of-band on a live append, so both paths keep the verdict
-// and the tiles in step with the transcript below them.
+// sessionInstruments is the audit read above the transcript: the stat band. It swaps as
+// one region: whole on a full refresh, out-of-band on a live append, so the tiles stay in
+// step with the transcript below them.
 templ sessionInstruments(v SessionView, oob bool) {
 	<div
 		id="session-instruments"
@@ -150,51 +149,8 @@ templ sessionInstruments(v SessionView, oob bool) {
 			hx-swap-oob="outerHTML"
 		}
 	>
-		@auditHeader(v)
 		@sessionStats(v.Detail, v.Header)
 	</div>
-}
-
-// auditHeader leads the session view with the audit answer, the way the Overview's
-// verdict strip leads the fleet: how the run ended and what it scored, what it cost (and
-// what the whole work item cost when it fanned out), what was wasted, and how long it
-// ran on which models. The raw transcript comes after; a reviewer who only needs the
-// verdict never scrolls. The score arithmetic line under the strip promotes the quality
-// tooltip's breakdown to a visible sentence, so a grade is always accompanied by why.
-templ auditHeader(v SessionView) {
-	{{ sig := v.Header.Signals }}
-	{{ wasted, wastedIncomplete, wastedNote := SessionWasted(v.Detail, sig, v.Subagents) }}
-	<div class="verdict session-verdict">
-		<div class="vtile">
-			<div class="label">Verdict</div>
-			<div class={ VerdictValueClass(VerdictOutcomeTone(sig.Outcome)) }>{ VerdictHeadline(sig) }</div>
-			<div class="vsub muted small">{ VerdictSub(sig) }</div>
-		</div>
-		<div class="vtile">
-			<div class="label">Cost</div>
-			<div class="vvalue">{ FmtCost(v.Detail.TotalCostUSD, v.Detail.CostIncomplete) }</div>
-			if note := WorkItemNote(v.Tree); note != "" {
-				<div class="vsub muted small">{ note }</div>
-			}
-		</div>
-		if wasted > 0 || wastedNote != "" {
-			<div class="vtile">
-				<div class="label">Wasted</div>
-				<div class="vvalue tone-err">{ FmtCost(wasted, wastedIncomplete) }</div>
-				<div class="vsub muted small">{ wastedNote }</div>
-			</div>
-		}
-		<div class="vtile">
-			<div class="label">Duration</div>
-			<div class="vvalue">{ FmtDuration(v.Detail.StartedAt, v.Detail.EndedAt) }</div>
-			if ml := ModelsLine(v.Models); ml != "" {
-				<div class="vsub muted small mono" title="models that served this session, heaviest first">{ ml }</div>
-			}
-		</div>
-	</div>
-	if line := ScoreArithmeticLine(sig); line != "" {
-		<div class="score-arith mono muted small" title="how the grade was computed: 100 minus each penalty">{ line }</div>
-	}
 }
 
 // subagentsSection renders a parent session's direct subagents. A short list reads inline
