@@ -61,16 +61,21 @@ func TestOverviewPageRendersHeatmap(t *testing.T) {
 	}
 }
 
-// The overview's range selector refetches the overview and swaps the whole
-// audit-plus-usage wrapper (#overview-usage), so the verdict and the grid move to the
-// new window together. The wrapper must carry the stable id, the usage panel keeps its
-// own id="usage" inside it, and the selector must offer every window, mark the active
-// one, and refetch into that wrapper target.
+// The overview's range selector refetches the overview and swaps the usage panel
+// (#usage), so the stats, the grid, and the breakdowns move to the new window
+// together. The target must be the panel's own id, not a wrapper: the htmx
+// afterSwap hooks in charts.js and app.js key on id="usage" to rehydrate the
+// activity grid and re-grow the bars, so a wrapper id would leave the fresh
+// panel unrendered. The selector must offer every window, mark the active one,
+// and refetch into that panel target.
 func TestOverviewPageRangeSelector(t *testing.T) {
 	p := Page{Title: "Overview", LoggedIn: true, Active: "overview", Username: "Grace Hopper"}
 	html := renderComponent(t, OverviewPage(p, analyticsWithData(), "90d", nil, nil))
 
-	for _, want := range []string{`id="overview-usage"`, `id="usage"`, `aria-label="Date range"`, `hx-get="/overview?range=7d"`, `hx-get="/overview?range=all"`, `hx-target="#overview-usage"`, `hx-select="#overview-usage"`} {
+	if strings.Contains(html, "overview-usage") {
+		t.Error(`the overview must swap #usage directly; a stale #overview-usage wrapper breaks the JS rehydration hooks`)
+	}
+	for _, want := range []string{`id="usage"`, `aria-label="Date range"`, `hx-get="/overview?range=7d"`, `hx-get="/overview?range=all"`, `hx-target="#usage"`, `hx-select="#usage"`} {
 		if !strings.Contains(html, want) {
 			t.Errorf("range selector missing %q", want)
 		}

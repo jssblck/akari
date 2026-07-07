@@ -147,7 +147,7 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 
 // handleOverview is the app's home surface at /overview: fleet-wide usage bounded to the
 // selected trailing window and users. The range selector and the per-user filter refetch
-// this same handler and swap the usage wrapper (hx-select="#overview-usage"), so a plain
+// this same handler and swap the usage panel (hx-select="#usage"), so a plain
 // load and an htmx swap render from one path; the window and selection ride the URL via
 // ?range= and ?user=.
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
