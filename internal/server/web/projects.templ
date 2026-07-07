@@ -65,13 +65,14 @@ templ ProjectsPage(p Page, remotes []store.ProjectSummary, locals []store.Projec
 				<section class="proj-section">
 					<div class="panel-head">
 						<h2>Local folders</h2>
-						<span class="muted small">Working directories with no git remote, keyed by machine and path.</span>
 					</div>
 					<div class="table-scroll">
 						<table class="grid projects">
 							<thead>
 								<tr>
 									<th class="proj-name">Folder</th>
+									<th>Machine</th>
+									<th>State</th>
 									<th class="trend">30d</th>
 									<th class="num">Sessions</th>
 									<th class="num">Tokens</th>
@@ -83,12 +84,10 @@ templ ProjectsPage(p Page, remotes []store.ProjectSummary, locals []store.Projec
 								for _, pr := range locals {
 									<tr data-row-href={ ProjectPath(pr.ID) }>
 										<td class="proj-name">
-											<a href={ ProjectHref(pr.ID) }>{ ProjectTitle(pr) }</a>
-											@kindTag(pr.Kind)
-											if lp := LocalPath(pr); lp != "" {
-												<div class="proj-path muted small mono" title={ lp }>{ lp }</div>
-											}
+											<a class="mono" href={ ProjectHref(pr.ID) } title={ LocalPath(pr) }>{ LocalPath(pr) }</a>
 										</td>
+										<td class="muted">{ pr.Host }</td>
+										<td>@kindTag(pr.Kind)</td>
 										<td class="trend">@templ.Raw(Sparkline(spark[pr.ID]))</td>
 										<td class="num">{ fmt.Sprintf("%d", pr.SessionCount) }</td>
 										<td class="num">@tokensCell(pr)</td>
