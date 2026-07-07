@@ -345,8 +345,9 @@ const maxReliabilityTools = 60
 const maxMixCategories = 6
 
 // toolTrendsFrom computes the reliability scatter (whole window), the category mix per
-// bucket, and the failure rate per bucket. All three dedupe replayed calls the same way the
-// headline tool stats do, and bucket on the session's start.
+// bucket, and the failure rate per bucket, all over the session_tool_rollup rows of
+// started_at-windowed sessions (the rollup deduped replays at write time, the same way the
+// headline tool stats read), bucketing on the session's start.
 func (s *Store) toolTrendsFrom(ctx context.Context, q querier, f AnalyticsFilter, g trendGrid) (ToolTrends, error) {
 	var out ToolTrends
 
@@ -355,28 +356,15 @@ func (s *Store) toolTrendsFrom(ctx context.Context, q querier, f AnalyticsFilter
 	limitArg := fmt.Sprintf("$%d", len(args)+1)
 	args = append(args, maxReliabilityTools)
 	rows, err := q.Query(ctx,
-		`WITH scoped AS (
-		   SELECT tc.session_id, tc.message_ordinal, tc.call_index, tc.tool_name,
-		          coalesce(NULLIF(tc.category, ''), 'other') AS cat,
-		          tc.input_sha256, tc.result_status, tc.call_uid
-		     FROM tool_calls tc
-		     JOIN sessions s ON s.id = tc.session_id
-		    WHERE TRUE`+filter+`
-		 ),
-		 ranked AS (
-		   SELECT tool_name, cat, session_id, result_status,
-		          row_number() OVER (
-		            PARTITION BY `+dedupToolCallsPartition+`
-		            ORDER BY message_ordinal, call_index
-		          ) AS rn
-		     FROM scoped
-		 )
-		 SELECT tool_name, min(cat) AS cat, count(*) AS calls,
-		        count(*) FILTER (WHERE result_status = 'error') AS failures,
-		        count(DISTINCT session_id) AS sessions
-		   FROM ranked WHERE rn = 1
-		  GROUP BY tool_name
-		  ORDER BY calls DESC, tool_name
+		`SELECT tr.tool_name, min(tr.category) AS cat,
+		        sum(tr.calls)::bigint AS calls,
+		        sum(tr.failures)::bigint AS failures,
+		        count(DISTINCT tr.session_id) AS sessions
+		   FROM session_tool_rollup tr
+		   JOIN sessions s ON s.id = tr.session_id
+		  WHERE TRUE`+filter+`
+		  GROUP BY tr.tool_name
+		  ORDER BY calls DESC, tr.tool_name
 		  LIMIT `+limitArg, args...)
 	if err != nil {
 		return ToolTrends{}, fmt.Errorf("tool reliability: %w", err)
@@ -394,27 +382,14 @@ func (s *Store) toolTrendsFrom(ctx context.Context, q querier, f AnalyticsFilter
 		return ToolTrends{}, fmt.Errorf("iterate tool reliability: %w", err)
 	}
 
-	// Category mix per bucket, from the same deduped base, bucketed on the session start.
+	// Category mix per bucket, from the same rollup base, bucketed on the session start.
 	filter, args = f.clauseFor("s.started_at")
 	mrows, err := q.Query(ctx, fmt.Sprintf(
-		`WITH scoped AS (
-		   SELECT tc.session_id, tc.message_ordinal, tc.call_index, tc.tool_name,
-		          coalesce(NULLIF(tc.category, ''), 'other') AS cat,
-		          tc.input_sha256, tc.result_status, tc.call_uid,
-		          %s AS b
-		     FROM tool_calls tc
-		     JOIN sessions s ON s.id = tc.session_id
-		    WHERE TRUE%s
-		 ),
-		 ranked AS (
-		   SELECT cat, b,
-		          row_number() OVER (
-		            PARTITION BY `+dedupToolCallsPartition+`
-		            ORDER BY message_ordinal, call_index
-		          ) AS rn
-		     FROM scoped
-		 )
-		 SELECT b, cat, count(*) FROM ranked WHERE rn = 1 GROUP BY b, cat`,
+		`SELECT %s AS b, tr.category, sum(tr.calls)::bigint
+		   FROM session_tool_rollup tr
+		   JOIN sessions s ON s.id = tr.session_id
+		  WHERE TRUE%s
+		  GROUP BY 1, 2`,
 		g.sqlBucket("s.started_at"), filter), args...)
 	if err != nil {
 		return ToolTrends{}, fmt.Errorf("tool mix trend: %w", err)
@@ -510,26 +485,14 @@ const maxFailTools = 3
 func (s *Store) toolFailureTrend(ctx context.Context, q querier, f AnalyticsFilter, g trendGrid, out *ToolTrends) error {
 	out.FailFleet = make([]float64, g.n())
 
-	// Fleet rate per bucket over the deduped base.
+	// Fleet rate per bucket over the rollup base.
 	filter, args := f.clauseFor("s.started_at")
 	rows, err := q.Query(ctx, fmt.Sprintf(
-		`WITH scoped AS (
-		   SELECT tc.session_id, tc.message_ordinal, tc.call_index, tc.tool_name,
-		          tc.input_sha256, tc.result_status, tc.call_uid, %s AS b
-		     FROM tool_calls tc
-		     JOIN sessions s ON s.id = tc.session_id
-		    WHERE TRUE%s
-		 ),
-		 ranked AS (
-		   SELECT b, result_status,
-		          row_number() OVER (
-		            PARTITION BY `+dedupToolCallsPartition+`
-		            ORDER BY message_ordinal, call_index
-		          ) AS rn
-		     FROM scoped
-		 )
-		 SELECT b, count(*), count(*) FILTER (WHERE result_status = 'error')
-		   FROM ranked WHERE rn = 1 GROUP BY b`, g.sqlBucket("s.started_at"), filter), args...)
+		`SELECT %s AS b, sum(tr.calls)::bigint, sum(tr.failures)::bigint
+		   FROM session_tool_rollup tr
+		   JOIN sessions s ON s.id = tr.session_id
+		  WHERE TRUE%s
+		  GROUP BY 1`, g.sqlBucket("s.started_at"), filter), args...)
 	if err != nil {
 		return fmt.Errorf("tool failure fleet trend: %w", err)
 	}
@@ -573,23 +536,11 @@ func (s *Store) toolFailureTrend(ctx context.Context, q querier, f AnalyticsFilt
 	args = append(args, names)
 	nameArg := fmt.Sprintf("$%d", len(args))
 	frows, err := q.Query(ctx, fmt.Sprintf(
-		`WITH scoped AS (
-		   SELECT tc.session_id, tc.message_ordinal, tc.call_index, tc.tool_name,
-		          tc.input_sha256, tc.result_status, tc.call_uid, %s AS b
-		     FROM tool_calls tc
-		     JOIN sessions s ON s.id = tc.session_id
-		    WHERE tc.tool_name = ANY(%s)%s
-		 ),
-		 ranked AS (
-		   SELECT tool_name, b, result_status,
-		          row_number() OVER (
-		            PARTITION BY `+dedupToolCallsPartition+`
-		            ORDER BY message_ordinal, call_index
-		          ) AS rn
-		     FROM scoped
-		 )
-		 SELECT tool_name, b, count(*), count(*) FILTER (WHERE result_status = 'error')
-		   FROM ranked WHERE rn = 1 GROUP BY tool_name, b`,
+		`SELECT tr.tool_name, %s AS b, sum(tr.calls)::bigint, sum(tr.failures)::bigint
+		   FROM session_tool_rollup tr
+		   JOIN sessions s ON s.id = tr.session_id
+		  WHERE tr.tool_name = ANY(%s)%s
+		  GROUP BY tr.tool_name, b`,
 		g.sqlBucket("s.started_at"), nameArg, filter), args...)
 	if err != nil {
 		return fmt.Errorf("tool failure worst trend: %w", err)
@@ -625,9 +576,10 @@ func (s *Store) toolFailureTrend(ctx context.Context, q querier, f AnalyticsFilt
 const maxChurnTreeFiles = 150
 
 // churnTrendFrom computes the per-bucket hot-file re-edit volume and hot-file count, plus the
-// project/folder/file tree the treemap drills. Edits dedupe replayed calls and bucket on the
-// session start; both the trend and the tree count only files edited more than once, so the
-// headline re-edit total reconciles with the file breakdown the tree renders.
+// project/folder/file tree the treemap drills, over the session_file_churn rollup (edits
+// deduped at write time), bucketing on the session start; both the trend and the tree count
+// only files edited more than once, so the headline re-edit total reconciles with the file
+// breakdown the tree renders.
 func (s *Store) churnTrendFrom(ctx context.Context, q querier, f AnalyticsFilter, g trendGrid) (ChurnTrend, error) {
 	out := ChurnTrend{ReEdits: make([]int, g.n()), Files: make([]int, g.n())}
 
@@ -639,28 +591,15 @@ func (s *Store) churnTrendFrom(ctx context.Context, q querier, f AnalyticsFilter
 	// counts, per bucket, the files whose window total clears the bar. Both the edit sum and the
 	// file count filter on that same hot predicate, so ReEdits/TotalReEdits count only edits of
 	// re-edited files and reconcile with the tree the treemap renders (whose files are the same
-	// HAVING count(*) > 1 set); a one-off edit to a unique file lands in neither.
+	// HAVING sum(edits) > 1 set); a one-off edit to a unique file lands in neither.
 	filter, args := f.clauseFor("s.started_at")
 	rows, err := q.Query(ctx, fmt.Sprintf(
-		`WITH scoped AS (
-		   SELECT tc.session_id, tc.message_ordinal, tc.call_index, tc.tool_name,
-		          s.project_id, COALESCE(tc.file_rel_path, tc.file_path) AS churn_path,
-		          tc.input_sha256, tc.result_status, tc.call_uid, %s AS b
-		     FROM tool_calls tc
-		     JOIN sessions s ON s.id = tc.session_id
-		    WHERE tc.category = 'edit' AND tc.file_path IS NOT NULL%s
-		 ),
-		 ranked AS (
-		   SELECT project_id, churn_path, b,
-		          row_number() OVER (
-		            PARTITION BY `+dedupToolCallsPartition+`
-		            ORDER BY message_ordinal, call_index
-		          ) AS rn
-		     FROM scoped
-		 ),
-		 perfile AS (
-		   SELECT b, project_id, churn_path, count(*) AS edits_in_bucket
-		     FROM ranked WHERE rn = 1 GROUP BY b, project_id, churn_path
+		`WITH perfile AS (
+		   SELECT %s AS b, s.project_id, fc.churn_path, sum(fc.edits) AS edits_in_bucket
+		     FROM session_file_churn fc
+		     JOIN sessions s ON s.id = fc.session_id
+		    WHERE TRUE%s
+		    GROUP BY 1, s.project_id, fc.churn_path
 		 ),
 		 totals AS (
 		   SELECT project_id, churn_path, sum(edits_in_bucket) AS edits_total
@@ -697,25 +636,15 @@ func (s *Store) churnTrendFrom(ctx context.Context, q querier, f AnalyticsFilter
 	limitArg := fmt.Sprintf("$%d", len(args)+1)
 	args = append(args, maxChurnTreeFiles)
 	trows, err := q.Query(ctx,
-		`WITH scoped AS (
-		   SELECT tc.session_id, tc.message_ordinal, tc.call_index, tc.tool_name,
-		          s.project_id, COALESCE(tc.file_rel_path, tc.file_path) AS churn_path,
-		          tc.input_sha256, tc.result_status, tc.call_uid
-		     FROM tool_calls tc
-		     JOIN sessions s ON s.id = tc.session_id
-		    WHERE tc.category = 'edit' AND tc.file_path IS NOT NULL`+filter+`
-		 ),
-		 ranked AS (
-		   SELECT project_id, churn_path, session_id,
-		          row_number() OVER (
-		            PARTITION BY `+dedupToolCallsPartition+`
-		            ORDER BY message_ordinal, call_index
-		          ) AS rn
-		     FROM scoped
-		 ),
-		 agg AS (
-		   SELECT project_id, churn_path, count(*) AS edits, count(DISTINCT session_id) AS sessions
-		     FROM ranked WHERE rn = 1 GROUP BY project_id, churn_path HAVING count(*) > 1
+		`WITH agg AS (
+		   SELECT s.project_id, fc.churn_path,
+		          sum(fc.edits)::bigint AS edits,
+		          count(DISTINCT fc.session_id) AS sessions
+		     FROM session_file_churn fc
+		     JOIN sessions s ON s.id = fc.session_id
+		    WHERE TRUE`+filter+`
+		    GROUP BY s.project_id, fc.churn_path
+		   HAVING sum(fc.edits) > 1
 		 )
 		 SELECT CASE WHEN p.kind IN ('standalone', 'orphaned') THEN p.display_name ELSE p.remote_key END AS project,
 		        agg.churn_path, agg.edits, agg.sessions,

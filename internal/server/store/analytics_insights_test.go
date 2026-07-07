@@ -339,6 +339,7 @@ func TestInsightsPanelsShareCohort(t *testing.T) {
 		 VALUES ($1, 1, 0, 'Read', 'read', 'ok'), ($1, 1, 1, 'Bash', 'bash', 'error')`, first); err != nil {
 		t.Fatalf("seed tool calls: %v", err)
 	}
+	deriveRollups(t, st, first)
 
 	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: time.Now().Add(-90 * 24 * time.Hour), Bucket: "day"}, store.AllInsightsPanels)
 	if err != nil {
@@ -433,7 +434,7 @@ func TestInsightsBucketedGridUnderConnectionStarvation(t *testing.T) {
 			sid, start); err != nil {
 			t.Fatalf("seed usage for %d: %v", sid, err)
 		}
-		deriveUsageRollup(t, st, sid)
+		deriveRollups(t, st, sid)
 	}
 
 	// Hold every connection but one. Insights then acquires the last for its control transaction

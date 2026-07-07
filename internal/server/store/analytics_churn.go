@@ -46,21 +46,21 @@ func (s *Store) FileChurn(ctx context.Context, f AnalyticsFilter) (FileChurn, er
 	return s.fileChurnFrom(ctx, s.Pool, f)
 }
 
-// fileChurnFrom computes which files a scope edited repeatedly. It dedupes replayed edit calls
-// with the shared cohort partition (see dedupToolCallsPartition), keeps only edits that
-// carry a parsed file path (the projection stores an edit whose path did not parse as NULL
-// via nullString, so file_path IS NOT NULL drops them, the same guard the per-session
-// edit_churn signal uses so an unattributable edit invents no thrash), groups by
-// (project, path), and keeps the pairs edited more than once.
+// fileChurnFrom computes which files a scope edited repeatedly, over the
+// session_file_churn rollup of started_at-windowed sessions. The rollup already deduped
+// replayed edit calls and dropped path-less edits at write time (deriveSessionRollupsTx,
+// the same guards the per-session edit_churn signal uses), so the cohort read groups the
+// per-session rows by (project, path) and keeps the pairs edited more than once.
 //
-// The grouping key is (s.project_id, coalesce(tc.file_rel_path, tc.file_path)): file_path is
-// absolute, so the same repo file edited from several git worktrees of one repo fragments into
-// a row per checkout and the aggregate reads as noise. Projects already collapse worktrees (they
-// key on the canonical git remote), and file_rel_path is the worktree-invariant session-relative
-// path, so pairing the two collapses those rows back into one. A path with no relative form
-// (edited outside the workspace, or from a session with no announced cwd) coalesces onto its
-// absolute file_path, so it still counts under its own name rather than vanishing; it just does
-// not merge across worktrees. The project is joined for its display label (remote_key, or
+// The grouping key is (s.project_id, fc.churn_path), where churn_path is the
+// worktree-invariant file_rel_path coalesced onto the absolute file_path at derivation
+// time: file_path alone is absolute, so the same repo file edited from several git
+// worktrees of one repo would fragment into a row per checkout and the aggregate read as
+// noise. Projects already collapse worktrees (they key on the canonical git remote), so
+// pairing the two collapses those rows back into one. A path with no relative form (edited
+// outside the workspace, or from a session with no announced cwd) rides its absolute
+// file_path, so it still counts under its own name rather than vanishing; it just does not
+// merge across worktrees. The project is joined for its display label (remote_key, or
 // display_name for a standalone/orphaned project), the same CASE the session list sorts on.
 //
 // The panel shows only the busiest maxChurnFiles, so the cap belongs in SQL, not in Go: the
@@ -69,7 +69,7 @@ func (s *Store) FileChurn(ctx context.Context, f AnalyticsFilter) (FileChurn, er
 // few. The dropped-tail count still needs the whole-set total, which a count(*) OVER () window
 // could not give under a LIMIT (the window would count only the returned rows), so it comes from
 // a scalar (SELECT count(*) FROM agg) instead. agg is referenced twice (the top-N select and the
-// count), which makes Postgres materialize it once, so the dedup and grouping run a single time.
+// count), which makes Postgres materialize it once, so the grouping runs a single time.
 func (s *Store) fileChurnFrom(ctx context.Context, q querier, f AnalyticsFilter) (FileChurn, error) {
 	var fc FileChurn
 
@@ -77,30 +77,15 @@ func (s *Store) fileChurnFrom(ctx context.Context, q querier, f AnalyticsFilter)
 	limitArg := fmt.Sprintf("$%d", len(args)+1)
 	args = append(args, maxChurnFiles)
 	rows, err := q.Query(ctx,
-		`WITH scoped AS (
-		   SELECT tc.session_id, tc.message_ordinal, tc.call_index, tc.tool_name,
-		          s.project_id,
-		          COALESCE(tc.file_rel_path, tc.file_path) AS churn_path,
-		          tc.input_sha256, tc.result_status, tc.call_uid
-		     FROM tool_calls tc
-		     JOIN sessions s ON s.id = tc.session_id
-		    WHERE tc.category = 'edit' AND tc.file_path IS NOT NULL`+filter+`
-		 ),
-		 ranked AS (
-		   SELECT project_id, churn_path, session_id,
-		          row_number() OVER (
-		            PARTITION BY `+dedupToolCallsPartition+`
-		            ORDER BY message_ordinal, call_index
-		          ) AS rn
-		     FROM scoped
-		 ),
-		 agg AS (
-		   SELECT project_id, churn_path,
-		          count(*) AS edits,
-		          count(DISTINCT session_id) AS sessions
-		     FROM ranked WHERE rn = 1
-		    GROUP BY project_id, churn_path
-		   HAVING count(*) > 1
+		`WITH agg AS (
+		   SELECT s.project_id, fc.churn_path,
+		          sum(fc.edits)::bigint AS edits,
+		          count(DISTINCT fc.session_id) AS sessions
+		     FROM session_file_churn fc
+		     JOIN sessions s ON s.id = fc.session_id
+		    WHERE TRUE`+filter+`
+		    GROUP BY s.project_id, fc.churn_path
+		   HAVING sum(fc.edits) > 1
 		 )
 		 SELECT agg.project_id,
 		        CASE WHEN p.kind IN ('standalone', 'orphaned') THEN p.display_name ELSE p.remote_key END AS project,

@@ -116,7 +116,7 @@ func TestInsightsTrends(t *testing.T) {
 		root1); err != nil {
 		t.Fatalf("seed unpriced usage: %v", err)
 	}
-	deriveUsageRollup(t, st, root1)
+	deriveRollups(t, st, root1)
 	// The session's maintained cost_incomplete flag, so the gallery's per-session cost figures
 	// carry the same lower-bound marker the canonical rollups do.
 	if _, err := st.Pool.Exec(ctx,
@@ -438,6 +438,7 @@ func TestInsightsChurnTreeCap(t *testing.T) {
 		sid, hot); err != nil {
 		t.Fatalf("bulk seed churn edits: %v", err)
 	}
+	deriveRollups(t, st, sid)
 
 	since := time.Now().Add(-7 * 24 * time.Hour)
 	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: since, Bucket: "day"}, store.AllInsightsPanels)
@@ -501,6 +502,7 @@ func TestInsightsChurnCapMultiProject(t *testing.T) {
 		sidA, capFiles); err != nil {
 		t.Fatalf("seed project A churn: %v", err)
 	}
+	deriveRollups(t, st, sidA)
 	// Project B: one hot file, edited twice. It clears the hot bar but is the clipped 151st, so the
 	// tree never carries project B even though the window touched it.
 	if _, err := st.Pool.Exec(ctx,
@@ -510,6 +512,7 @@ func TestInsightsChurnCapMultiProject(t *testing.T) {
 		sidB); err != nil {
 		t.Fatalf("seed project B churn: %v", err)
 	}
+	deriveRollups(t, st, sidB)
 
 	since := time.Now().Add(-7 * 24 * time.Hour)
 	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: since, Bucket: "day"}, store.AllInsightsPanels)
