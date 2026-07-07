@@ -160,8 +160,9 @@ func sampleTrends() *store.Trends {
 				{Project: "akari", Folder: "internal/server/web", Path: "internal/server/web/insights.templ", Edits: 3, Sessions: 1},
 			},
 			// Three hot files in the window, two drawn in the tree, so one is clipped: the payload
-			// carries the clipped count and the panel notes the tail.
-			TotalReEdits: 21, TotalHotFiles: 3, Clipped: 1,
+			// carries the clipped count and the panel notes the tail. All three sit in one project,
+			// so the uncapped project span is 1 and the treemap roots at that project's folders.
+			TotalReEdits: 21, TotalHotFiles: 3, Clipped: 1, Projects: 1,
 		},
 		Signals: store.SignalTrends{
 			GradeShare: []map[string]float64{
@@ -169,6 +170,12 @@ func sampleTrends() *store.Trends {
 				{"A": 42, "B": 31, "C": 18, "D": 4, "F": 0, "": 5},
 			},
 			GPA: []float64{3.1, 3.2},
+			// Archetype mix per bucket, each row summing to 100, so chartArchetypes stacks two full
+			// columns and the project page's Quality instrument draws a real spectrum.
+			ArchetypeShare: []map[string]float64{
+				{"quick": 40, "standard": 33, "deep": 14, "marathon": 6, "automation": 7},
+				{"quick": 38, "standard": 34, "deep": 16, "marathon": 5, "automation": 7},
+			},
 			// Raw outcome counts behind the rates: bucket 0 is 10 completed, 2 abandoned, 3 other of
 			// 15; bucket 1 is 13, 1, 4 of 18. The bars partition on these, the lines read the rates.
 			CompletedRate: []float64{66.7, 72.2}, AbandonedRate: []float64{13.3, 5.6}, OutcomeTotal: []int{15, 18},

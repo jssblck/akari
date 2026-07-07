@@ -67,7 +67,11 @@
   gap: 28px;
 }
 
-#insights .panel {
+/* The panel surface is scoped to the two instrument hosts rather than global, so the class
+   name stays free for other uses: /insights and the project page's Quality band
+   (.proj-quality), which reuses the same instrument markup and chart engine. */
+#insights .panel,
+.proj-quality .panel {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -227,7 +231,9 @@
 }
 
 #insights button:focus-visible,
-#insights [tabindex]:focus-visible {
+#insights [tabindex]:focus-visible,
+.proj-quality button:focus-visible,
+.proj-quality [tabindex]:focus-visible {
   outline: none;
   box-shadow: 0 0 0 3px rgba(198, 168, 242, 0.4);
 }

@@ -66,6 +66,14 @@ type SignalTrends struct {
 	GradeShare []map[string]float64
 	GPA        []float64 // grade-point average per bucket over the graded sessions, 0..4
 
+	// ArchetypeShare holds the per-bucket archetype mix. ArchetypeShare[i] maps an archetype
+	// key (quick/standard/deep/marathon/automation) to its percent of bucket i's sessions,
+	// banded by the same archetypeCaseExpr the distribution uses so the trend and the rolled-up
+	// mix read one numeric source. Unlike the grade and outcome series it needs no signals join:
+	// a session's shape is a fact of its own columns (user turns, message count, span), so an
+	// ungraded session still bands, and the denominator is every started session in the bucket.
+	ArchetypeShare []map[string]float64
+
 	CompletedRate []float64 // percent of bucket i's sessions that completed
 	AbandonedRate []float64 // percent that abandoned
 	OutcomeTotal  []int     // sessions in bucket i (the rate denominator)
@@ -382,6 +390,7 @@ func (s *Store) signalTrendsFrom(ctx context.Context, q querier, f AnalyticsFilt
 	out := SignalTrends{
 		GradeShare:          make([]map[string]float64, g.n()),
 		GPA:                 make([]float64, g.n()),
+		ArchetypeShare:      make([]map[string]float64, g.n()),
 		CompletedRate:       make([]float64, g.n()),
 		AbandonedRate:       make([]float64, g.n()),
 		OutcomeTotal:        make([]int, g.n()),
@@ -393,6 +402,7 @@ func (s *Store) signalTrendsFrom(ctx context.Context, q querier, f AnalyticsFilt
 	}
 	for i := range out.GradeShare {
 		out.GradeShare[i] = map[string]float64{}
+		out.ArchetypeShare[i] = map[string]float64{}
 	}
 
 	// Grades and outcomes: one scan per bucket over the gated cohort. A missing grade
@@ -466,6 +476,51 @@ func (s *Store) signalTrendsFrom(ctx context.Context, q querier, f AnalyticsFilt
 	// the grid and zero for an empty bucket).
 	out.CompletedCount = completed
 	out.AbandonedCount = abandoned
+
+	// Archetype mix per bucket: the same banding CASE the distribution uses, grouped by bucket
+	// and shape. It carries no session_signals join (a session's shape is a fact of its own
+	// columns), so it counts every started session in the window, matching the archetype
+	// distribution's denominator. archetypeCaseExpr's numeric thresholds are already interpolated
+	// at init, so it enters this query as a literal fragment.
+	filter, args = f.clauseFor("s.started_at")
+	arows, err := q.Query(ctx, fmt.Sprintf(
+		`SELECT %s AS b, %s AS arch, count(*)
+		   FROM sessions s
+		  WHERE s.started_at IS NOT NULL%s
+		  GROUP BY 1, 2`, g.sqlBucket("s.started_at"), archetypeCaseExpr, filter), args...)
+	if err != nil {
+		return SignalTrends{}, fmt.Errorf("archetype trend: %w", err)
+	}
+	archCounts := make([]map[string]int, g.n())
+	for i := range archCounts {
+		archCounts[i] = map[string]int{}
+	}
+	archTotal := make([]int, g.n())
+	for arows.Next() {
+		var b time.Time
+		var arch string
+		var n int
+		if err := arows.Scan(&b, &arch, &n); err != nil {
+			arows.Close()
+			return SignalTrends{}, fmt.Errorf("scan archetype trend: %w", err)
+		}
+		if i := g.index(b); i >= 0 {
+			archCounts[i][arch] += n
+			archTotal[i] += n
+		}
+	}
+	arows.Close()
+	if err := arows.Err(); err != nil {
+		return SignalTrends{}, fmt.Errorf("iterate archetype trend: %w", err)
+	}
+	for i := range archCounts {
+		if archTotal[i] == 0 {
+			continue
+		}
+		for _, ak := range archetypeOrder {
+			out.ArchetypeShare[i][ak] = float64(archCounts[i][ak]) / float64(archTotal[i]) * 100
+		}
+	}
 
 	// Hygiene: per-bucket sums over the gated cohort. Rates divide by the bucket's
 	// prompt total (or session total for unstructured starts).

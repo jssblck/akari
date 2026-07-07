@@ -66,7 +66,13 @@ type akData struct {
 		} `json:"worst"`
 	} `json:"toolFailures"`
 
-	Grades   []map[string]float64 `json:"grades"`
+	Grades     []map[string]float64 `json:"grades"`
+	Archetypes struct {
+		Order  []string             `json:"order"`
+		Colors map[string]string    `json:"colors"`
+		Labels map[string]string    `json:"labels"`
+		Rows   []map[string]float64 `json:"rows"`
+	} `json:"archetypes"`
 	Outcomes []map[string]float64 `json:"outcomes"`
 	Hygiene  struct {
 		NoPointer []float64 `json:"noPointer"`
@@ -88,6 +94,7 @@ type akData struct {
 		TotalHotFiles int `json:"totalHotFiles"`
 		TotalReedits  int `json:"totalReedits"`
 		Clipped       int `json:"clipped"`
+		ProjectCount  int `json:"projectCount"`
 	} `json:"churnTrend"`
 
 	CostQuality struct {
@@ -231,6 +238,20 @@ func TestInsightsDataMapping(t *testing.T) {
 		t.Errorf("hygiene.noPointer = %v, want [5 4]", d.Hygiene.NoPointer)
 	}
 
+	// Archetypes: the per-bucket mix carries the fixed lightest-to-heaviest order, the shared
+	// swatch map (quick reads as viz-2), and each row's shares (bucket 0 quick = 40%). This is
+	// the series the project page's Quality instrument draws; /insights carries it but mounts
+	// no archetype chart.
+	if len(d.Archetypes.Order) != 5 || d.Archetypes.Order[0] != "quick" || d.Archetypes.Order[4] != "automation" {
+		t.Errorf("archetypes.order = %v, want quick..automation", d.Archetypes.Order)
+	}
+	if d.Archetypes.Colors["quick"] != "var(--viz-2)" || d.Archetypes.Labels["quick"] != "Quick" {
+		t.Errorf("archetypes quick style = %q/%q, want var(--viz-2)/Quick", d.Archetypes.Colors["quick"], d.Archetypes.Labels["quick"])
+	}
+	if len(d.Archetypes.Rows) != 2 || d.Archetypes.Rows[0]["quick"] != 40 {
+		t.Errorf("archetypes.rows[0].quick = %v, want 40", d.Archetypes.Rows[0])
+	}
+
 	// Context: resets per bucket, the p50/p90/max markers, and the summary label from the
 	// window's context percentile (128000 tokens -> 128.0k).
 	if len(d.ContextResets) != 2 || d.ContextResets[0] != 2 {
@@ -260,6 +281,12 @@ func TestInsightsDataMapping(t *testing.T) {
 	// clipped and the serializer must carry it or the headline would exceed the visible breakdown.
 	if d.ChurnTrend.Clipped != 1 {
 		t.Errorf("churnTrend clipped = %d, want 1", d.ChurnTrend.Clipped)
+	}
+	// The uncapped project span drives the treemap's single-project shortcut. All the fixture's hot
+	// files sit in one project, so it reads 1; the JS reads this rather than the capped tree's
+	// project list, which a multi-project window could shrink to one.
+	if d.ChurnTrend.ProjectCount != 1 {
+		t.Errorf("churnTrend projectCount = %d, want 1 (uncapped single-project cohort)", d.ChurnTrend.ProjectCount)
 	}
 
 	// Economics: the median completed-session cost is read off the gallery cohort. Completed
