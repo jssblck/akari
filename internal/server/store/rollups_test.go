@@ -324,3 +324,32 @@ func TestAnnounceCwdChangeRederivesFileChurn(t *testing.T) {
 		`(` + fmt.Sprint(sid) + `,/home/grace/akari/a.go,2)`,
 	})
 }
+
+// TestResetRawClearsRollups pins the reset path: ResetRaw deletes the projection rows the
+// rollups summarize without re-deriving anything, so it must empty every rollup table in
+// the same transaction or the insights reads would keep serving data whose source rows are
+// gone until the forced rebuild lands.
+func TestResetRawClearsRollups(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	uid := seedUser(t, st, "grace")
+	pid, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid := seedSession(t, st, uid, pid, "reset-clears-rollups")
+	rebuildWith(t, st, sid, rollupsDelta())
+	for _, table := range rollupTablesUnderTest {
+		if rows := dumpTable(t, st, table, sid); len(rows) == 0 {
+			t.Fatalf("%s empty after rebuild; the reset assertion below would pass vacuously", table)
+		}
+	}
+
+	if err := st.ResetRaw(ctx, sid); err != nil {
+		t.Fatalf("reset raw: %v", err)
+	}
+	for _, table := range rollupTablesUnderTest {
+		assertRows(t, st, table, sid, nil)
+	}
+}

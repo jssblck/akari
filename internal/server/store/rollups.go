@@ -190,10 +190,8 @@ var rollupDerivations = []struct {
 // rebuildTx under the session row lock, so concurrent rebuilds of one session serialize
 // and the rollups commit atomically with the projection they summarize.
 func deriveSessionRollupsTx(ctx context.Context, tx pgx.Tx, sessionID int64) error {
-	for _, t := range rollupTables {
-		if _, err := tx.Exec(ctx, `DELETE FROM `+t+` WHERE session_id = $1`, sessionID); err != nil {
-			return fmt.Errorf("clear %s for session %d: %w", t, sessionID, err)
-		}
+	if err := clearSessionRollupsTx(ctx, tx, sessionID); err != nil {
+		return err
 	}
 	for _, d := range rollupDerivations {
 		if _, err := tx.Exec(ctx, d.derive, sessionID); err != nil {
@@ -218,6 +216,20 @@ func (s *Store) DeriveSessionRollups(ctx context.Context, sessionID int64) error
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// clearSessionRollupsTx deletes one session's rows from every insights rollup table. It
+// is the shared clear step of deriveSessionRollupsTx and the projection-clearing half of
+// ResetRaw: a reset deletes the source projection rows without re-deriving, so it must
+// empty the rollups through the same table list or a stale rollup would keep advertising
+// data whose source rows are gone until the next rebuild.
+func clearSessionRollupsTx(ctx context.Context, tx pgx.Tx, sessionID int64) error {
+	for _, t := range rollupTables {
+		if _, err := tx.Exec(ctx, `DELETE FROM `+t+` WHERE session_id = $1`, sessionID); err != nil {
+			return fmt.Errorf("clear %s for session %d: %w", t, sessionID, err)
+		}
+	}
+	return nil
 }
 
 // deriveSessionFileChurnTx rewrites one session's file-churn rollup alone. The announce

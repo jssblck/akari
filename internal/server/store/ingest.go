@@ -567,6 +567,12 @@ func (s *Store) ResetRaw(ctx context.Context, sessionID int64) error {
 				return fmt.Errorf("reset session %d (%s): %w", sessionID, q, err)
 			}
 		}
+		// The insights rollups summarize the projection rows just deleted, so they
+		// clear with them; the rebuild the epoch reset below forces re-derives them
+		// from whatever bytes arrive next.
+		if err := clearSessionRollupsTx(ctx, tx, sessionID); err != nil {
+			return err
+		}
 		// parser_epoch 0 sits behind every real epoch, so the session reads as due
 		// and the worker rebuilds (to an empty projection if no bytes ever arrive,
 		// re-stamping the epoch either way). The failure markers and any
