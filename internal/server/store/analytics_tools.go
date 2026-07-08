@@ -99,24 +99,25 @@ func (s *Store) ToolStats(ctx context.Context, f AnalyticsFilter) (ToolStats, er
 	return out, nil
 }
 
-// toolStatsFrom computes the scope's tool volume, reliability, and mix. The per-tool query
-// dedupes replayed calls exactly as the per-session signals do (a resumed or compacted
-// transcript replays prior turns verbatim, and a call's id legitimately rides several
-// rows), but partitions the dedup by session_id as well, since a call id is only unique
-// within its session.
+// toolStatsFrom computes the scope's tool volume, reliability, and mix, over the
+// session_tool_rollup rows of started_at-windowed sessions. The rollup already collapsed
+// replayed calls at write time (deriveSessionRollupsTx runs the same dedup the per-session
+// signals apply), so the cohort read is a plain sum: per tool across the summed categories,
+// which reproduces the old per-tool grouping exactly.
 //
-// TotalCalls and TotalFailures are summed here from the deduped raw tool_calls, NOT from the
-// per-session session_signals.tool_calls/tool_failures that gatherSignalFacts already stores.
-// That is deliberate, not a duplicated derivation. session_signals rows exist only for settled,
+// TotalCalls and TotalFailures are summed from the rollup, NOT from the per-session
+// session_signals.tool_calls/tool_failures that gatherSignalFacts already stores. That is
+// deliberate, not a duplicated derivation. session_signals rows exist only for settled,
 // graded sessions (the settle pass writes them once a session idles past the abandoned
-// threshold, and a pre-reparse or stale-facts session is left ungraded on purpose), so summing
-// them would silently drop every live, unsettled, or ungraded session from the fleet tool
-// picture, which the Insights panel must show. The two projections are still the same
-// arithmetic: dedupToolCallsPartition is gatherSignalFacts's per-session key with session_id
-// prepended, and both count a failure as result_status = 'error', so over any fully-graded
-// cohort sum(session_signals.tool_calls) == TotalCalls and sum(tool_failures) == TotalFailures
-// exactly. TestToolStatsReconcilesWithSessionSignals pins that equality on a settled cohort, so
-// the shared dedup shape cannot drift between the two paths without failing a test.
+// threshold, and a pre-reparse or stale-facts session is left ungraded on purpose), so
+// summing them would silently drop every live, unsettled, or ungraded session from the
+// fleet tool picture, which the Insights panel must show. The two projections are still the
+// same arithmetic: the rollup derivation and gatherSignalFacts share the dedup key, and
+// both count a failure as result_status = 'error', so over any fully-graded cohort
+// sum(session_signals.tool_calls) == TotalCalls and sum(tool_failures) == TotalFailures
+// exactly. TestToolStatsReconcilesWithSessionSignals pins that equality on a settled
+// cohort, so the shared dedup shape cannot drift between the two paths without failing a
+// test.
 //
 // The panel shows only the busiest maxToolBars, so the cap belongs in SQL: the query LIMITs to
 // that many rows and Postgres bounded-sorts just the top slice rather than ordering and streaming
@@ -125,7 +126,7 @@ func (s *Store) ToolStats(ctx context.Context, f AnalyticsFilter) (ToolStats, er
 // error rate is the true fleet rate even when the bar list is short, and a window count would count
 // only the returned rows under a LIMIT, so total_calls, total_failures, and distinct_tools come from
 // scalar subqueries over agg. agg is referenced several times, which makes Postgres materialize it
-// once, so the dedup and grouping run a single time.
+// once, so the grouping runs a single time.
 func (s *Store) toolStatsFrom(ctx context.Context, q querier, f AnalyticsFilter) (ToolStats, error) {
 	var ts ToolStats
 
@@ -133,27 +134,14 @@ func (s *Store) toolStatsFrom(ctx context.Context, q querier, f AnalyticsFilter)
 	limitArg := fmt.Sprintf("$%d", len(args)+1)
 	args = append(args, maxToolBars)
 	rows, err := q.Query(ctx,
-		`WITH scoped AS (
-		   SELECT tc.session_id, tc.message_ordinal, tc.call_index, tc.tool_name,
-		          tc.input_sha256, tc.result_status, tc.call_uid
-		     FROM tool_calls tc
-		     JOIN sessions s ON s.id = tc.session_id
+		`WITH agg AS (
+		   SELECT tr.tool_name,
+		          sum(tr.calls)::bigint    AS calls,
+		          sum(tr.failures)::bigint AS failures
+		     FROM session_tool_rollup tr
+		     JOIN sessions s ON s.id = tr.session_id
 		    WHERE TRUE`+filter+`
-		 ),
-		 ranked AS (
-		   SELECT tool_name, result_status,
-		          row_number() OVER (
-		            PARTITION BY `+dedupToolCallsPartition+`
-		            ORDER BY message_ordinal, call_index
-		          ) AS rn
-		     FROM scoped
-		 ),
-		 agg AS (
-		   SELECT tool_name,
-		          count(*) AS calls,
-		          count(*) FILTER (WHERE result_status = 'error') AS failures
-		     FROM ranked WHERE rn = 1
-		    GROUP BY tool_name
+		    GROUP BY tr.tool_name
 		 )
 		 SELECT tool_name, calls, failures,
 		        (SELECT coalesce(sum(calls), 0)    FROM agg) AS total_calls,

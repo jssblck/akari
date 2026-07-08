@@ -79,18 +79,8 @@ func sampleInsights() store.Insights {
 			{Key: "quick", Count: 6}, {Key: "standard", Count: 5}, {Key: "deep", Count: 2},
 			{Key: "marathon", Count: 1}, {Key: "automation", Count: 1},
 		},
-		Users: store.UserQualityStats{
-			Users: []store.UserQuality{
-				{Username: "ada", Sessions: 9, Graded: 7, Completed: 6, Abandoned: 1, Errored: 1, Unknown: 1, AvgScore: f64(82.5)},
-				{Username: "grace", Sessions: 6, Graded: 4, Completed: 3, Abandoned: 0, Errored: 1, Unknown: 2, AvgScore: nil},
-			},
-			Clipped: 1,
-		},
 	}
 }
-
-// f64 boxes a float for the nullable AvgScore fixtures.
-func f64(v float64) *float64 { return &v }
 
 // sampleTrends is a small two-bucket trend grid touching every series the insights data
 // serializer reads, so a page rendered with it draws the full instrument set and the

@@ -66,110 +66,59 @@ func (s *Store) VelocityStats(ctx context.Context, f AnalyticsFilter) (VelocityS
 	return out, nil
 }
 
-// velocityStatsFrom computes the scope's cadence figures in three reads over the message
-// timeline.
+// velocityStatsFrom computes the scope's cadence figures in two reads over the velocity
+// rollups; messages itself never enters the read path.
 //
-// A turn is one prompt and the reply it draws: a running count of user-role messages
-// labels every message with the turn it belongs to (the user message that opens the turn,
-// then the assistant messages that answer it before the next prompt). Pure tool-result
-// entries never reach the messages table (the Claude parser drops a user entry that
-// carries only results), so a user-role message is a real prompt and the turn latency is
-// the honest prompt-to-first-reply wait. The percentiles run over those per-turn waits;
-// the first-response figure restricts to each session's opening turn, which pays the
-// one-time context load and so reads slower than the steady state.
+// A turn is one prompt and the reply it draws. The turn labelling (a running count of
+// user-role messages, so an undated prompt still opens its own turn and a later reply
+// cannot misattribute; the reply instant is the first timestamped assistant message by
+// ordinal) happens once, at write time, in deriveSessionRollupsTx: session_turns stores
+// one row per measured turn with its float-second latency verbatim, so the percentiles
+// here interpolate the same values the per-read fold produced. The first-response figure
+// restricts to each session's opening turn (turn = 1), which pays the one-time context
+// load and so reads slower than the steady state.
 //
 // Throughput divides the message and tool-call counts by active time: the summed gaps
 // between consecutive messages, each gap kept only when it is short enough to be work
-// rather than an idle pause (see activeGapSeconds). Both the counts and the active time
-// read the stored projection rows as they are, replays included, so the numerator and the
-// denominator stay on the same footing and the rate never skews from deduping one side.
+// rather than an idle pause (see activeGapSeconds). session_activity_hourly carries all
+// three per (session, UTC day, hour), derived from the stored projection rows as they
+// are, replays included, so the numerator and the denominator stay on the same footing
+// and the rate never skews from deduping one side.
 func (s *Store) velocityStatsFrom(ctx context.Context, q querier, f AnalyticsFilter) (VelocityStats, error) {
 	var v VelocityStats
 
 	// Turn-cycle latency percentiles, plus the turn and session counts.
-	//
-	// The turn label counts user messages over EVERY message in the session, not just the
-	// timestamped ones: an undated prompt must still open its own turn so a later reply
-	// lands on that turn rather than being misattributed to the prior prompt as a false
-	// latency. Timestamps are required only when deriving the per-turn user and reply
-	// instants (the aggregates skip NULLs, so an undated turn falls out cleanly). The reply
-	// instant is the FIRST assistant message by ordinal that carries a timestamp, so a
-	// later assistant row whose clock drifted earlier cannot understate the latency.
 	filter, args := f.clauseFor("s.started_at")
 	var p50, p90, firstP50 float64
 	if err := q.QueryRow(ctx,
-		`WITH m AS (
-		   SELECT m.session_id, m.ordinal, m.role, m.timestamp,
-		          count(*) FILTER (WHERE m.role = 'user')
-		            OVER (PARTITION BY m.session_id ORDER BY m.ordinal
-		                  ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS turn
-		     FROM messages m
-		     JOIN sessions s ON s.id = m.session_id
-		    WHERE TRUE`+filter+`
-		 ),
-		 user_turns AS (
-		   SELECT session_id, turn, min(timestamp) FILTER (WHERE role = 'user') AS user_at
-		     FROM m
-		    WHERE turn >= 1
-		    GROUP BY session_id, turn
-		 ),
-		 asst_turns AS (
-		   -- The first assistant message by ordinal that carries a timestamp, picked with
-		   -- DISTINCT ON so one long turn does not materialize every assistant timestamp into
-		   -- an array just to read its head.
-		   SELECT DISTINCT ON (session_id, turn) session_id, turn, timestamp AS asst_at
-		     FROM m
-		    WHERE turn >= 1 AND role = 'assistant' AND timestamp IS NOT NULL
-		    ORDER BY session_id, turn, ordinal
-		 ),
-		 lat AS (
-		   SELECT u.session_id, u.turn,
-		          extract(epoch FROM (a.asst_at - u.user_at)) AS secs
-		     FROM user_turns u
-		     JOIN asst_turns a ON a.session_id = u.session_id AND a.turn = u.turn
-		    WHERE u.user_at IS NOT NULL AND a.asst_at >= u.user_at
-		 )
-		 SELECT
-		   coalesce(percentile_cont(0.5) WITHIN GROUP (ORDER BY secs), 0),
-		   coalesce(percentile_cont(0.9) WITHIN GROUP (ORDER BY secs), 0),
-		   coalesce(percentile_cont(0.5) WITHIN GROUP (ORDER BY secs) FILTER (WHERE turn = 1), 0),
+		`SELECT
+		   coalesce(percentile_cont(0.5) WITHIN GROUP (ORDER BY st.response_secs), 0),
+		   coalesce(percentile_cont(0.9) WITHIN GROUP (ORDER BY st.response_secs), 0),
+		   coalesce(percentile_cont(0.5) WITHIN GROUP (ORDER BY st.response_secs) FILTER (WHERE st.turn = 1), 0),
 		   count(*),
-		   count(DISTINCT session_id)
-		 FROM lat`, args...).Scan(&p50, &p90, &firstP50, &v.Turns, &v.Sessions); err != nil {
+		   count(DISTINCT st.session_id)
+		 FROM session_turns st
+		 JOIN sessions s ON s.id = st.session_id
+		 WHERE TRUE`+filter, args...).Scan(&p50, &p90, &firstP50, &v.Turns, &v.Sessions); err != nil {
 		return VelocityStats{}, fmt.Errorf("velocity latency percentiles: %w", err)
 	}
 	v.ResponseP50 = secondsToDuration(p50)
 	v.ResponseP90 = secondsToDuration(p90)
 	v.FirstResponseP50 = secondsToDuration(firstP50)
 
-	// Active time and the message count that rides on it.
+	// Active time and the message and tool counts that ride on it, one sum over the
+	// activity rollup (the old read needed a lag() scan of messages plus a tool_calls join;
+	// the rollup already paid both at write time).
 	filter, args = f.clauseFor("s.started_at")
-	var msgCount int
+	var msgCount, toolCount int
 	if err := q.QueryRow(ctx,
-		fmt.Sprintf(`WITH g AS (
-		   SELECT extract(epoch FROM (m.timestamp - lag(m.timestamp)
-		            OVER (PARTITION BY m.session_id ORDER BY m.ordinal))) AS gap
-		     FROM messages m
-		     JOIN sessions s ON s.id = m.session_id
-		    WHERE m.timestamp IS NOT NULL%s
-		 )
-		 SELECT count(*), coalesce(sum(gap) FILTER (WHERE gap > 0 AND gap <= %d), 0) FROM g`,
-			filter, activeGapSeconds), args...).Scan(&msgCount, &v.ActiveSeconds); err != nil {
+		`SELECT coalesce(sum(ah.messages), 0)::bigint,
+		        coalesce(sum(ah.tool_calls), 0)::bigint,
+		        coalesce(sum(ah.active_seconds), 0)
+		   FROM session_activity_hourly ah
+		   JOIN sessions s ON s.id = ah.session_id
+		  WHERE TRUE`+filter, args...).Scan(&msgCount, &toolCount, &v.ActiveSeconds); err != nil {
 		return VelocityStats{}, fmt.Errorf("velocity active time: %w", err)
-	}
-
-	// Tool-call volume over the same cohort, for the tools-per-minute rate. The count is
-	// restricted to calls whose owning message is timestamped, the same base the active
-	// time and message count read, so the numerator and denominator describe one timeline.
-	filter, args = f.clauseFor("s.started_at")
-	var toolCount int
-	if err := q.QueryRow(ctx,
-		`SELECT count(*)
-		   FROM tool_calls tc
-		   JOIN messages m ON m.session_id = tc.session_id AND m.ordinal = tc.message_ordinal
-		   JOIN sessions s ON s.id = tc.session_id
-		  WHERE m.timestamp IS NOT NULL`+filter, args...).Scan(&toolCount); err != nil {
-		return VelocityStats{}, fmt.Errorf("velocity tool count: %w", err)
 	}
 
 	if v.ActiveSeconds > 0 {

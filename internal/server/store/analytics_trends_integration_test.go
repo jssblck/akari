@@ -116,6 +116,7 @@ func TestInsightsTrends(t *testing.T) {
 		root1); err != nil {
 		t.Fatalf("seed unpriced usage: %v", err)
 	}
+	deriveRollups(t, st, root1)
 	// The session's maintained cost_incomplete flag, so the gallery's per-session cost figures
 	// carry the same lower-bound marker the canonical rollups do.
 	if _, err := st.Pool.Exec(ctx,
@@ -124,7 +125,7 @@ func TestInsightsTrends(t *testing.T) {
 	}
 
 	since := time.Now().Add(-7 * 24 * time.Hour)
-	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: since, Bucket: "day"})
+	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: since, Bucket: "day"}, store.AllInsightsPanels)
 	if err != nil {
 		t.Fatalf("insights with trends: %v", err)
 	}
@@ -347,7 +348,7 @@ func TestInsightsTrends(t *testing.T) {
 
 	// The distributions-only path (no bucket) still leaves Trends nil, so a caller that does
 	// not want the grid pays nothing for it.
-	plain, err := st.Insights(ctx, store.AnalyticsFilter{Since: since})
+	plain, err := st.Insights(ctx, store.AnalyticsFilter{Since: since}, store.AllInsightsPanels)
 	if err != nil {
 		t.Fatalf("insights without trends: %v", err)
 	}
@@ -386,7 +387,7 @@ func TestInsightsGalleryCap(t *testing.T) {
 	}
 
 	since := time.Now().Add(-7 * 24 * time.Hour)
-	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: since, Bucket: "day"})
+	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: since, Bucket: "day"}, store.AllInsightsPanels)
 	if err != nil {
 		t.Fatalf("insights with trends: %v", err)
 	}
@@ -437,9 +438,10 @@ func TestInsightsChurnTreeCap(t *testing.T) {
 		sid, hot); err != nil {
 		t.Fatalf("bulk seed churn edits: %v", err)
 	}
+	deriveRollups(t, st, sid)
 
 	since := time.Now().Add(-7 * 24 * time.Hour)
-	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: since, Bucket: "day"})
+	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: since, Bucket: "day"}, store.AllInsightsPanels)
 	if err != nil {
 		t.Fatalf("insights with trends: %v", err)
 	}
@@ -500,6 +502,7 @@ func TestInsightsChurnCapMultiProject(t *testing.T) {
 		sidA, capFiles); err != nil {
 		t.Fatalf("seed project A churn: %v", err)
 	}
+	deriveRollups(t, st, sidA)
 	// Project B: one hot file, edited twice. It clears the hot bar but is the clipped 151st, so the
 	// tree never carries project B even though the window touched it.
 	if _, err := st.Pool.Exec(ctx,
@@ -509,9 +512,10 @@ func TestInsightsChurnCapMultiProject(t *testing.T) {
 		sidB); err != nil {
 		t.Fatalf("seed project B churn: %v", err)
 	}
+	deriveRollups(t, st, sidB)
 
 	since := time.Now().Add(-7 * 24 * time.Hour)
-	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: since, Bucket: "day"})
+	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: since, Bucket: "day"}, store.AllInsightsPanels)
 	if err != nil {
 		t.Fatalf("insights with trends: %v", err)
 	}
@@ -539,6 +543,72 @@ func TestInsightsChurnCapMultiProject(t *testing.T) {
 	}
 }
 
+// TestUsageTrendsWholeDayWindow pins the usage cluster's rollup read (fleet mix, economics,
+// cache savings, subagent cost share now read session_usage_daily) against its two
+// documented window edges. First, the whole-day Since: the rollup is day-grained, so a
+// mid-day Since counts the window's first UTC day in full, where the old per-event scan cut
+// it at the instant. The chart drew that first day's bucket either way, so the complete
+// bucket is the intended read; this test is what makes that deviation a decision instead of
+// an accident. Second, undated usage (a NULL rollup day) stays off every dated figure, the
+// same gap the analytics ledger documents.
+func TestUsageTrendsWholeDayWindow(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	ada := seedUser(t, st, "ada")
+	pid, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The window opens mid-day: noon UTC three days ago. The first usage event lands on that
+	// same UTC day but before noon, so the two reads genuinely disagree about it.
+	d := time.Now().UTC().AddDate(0, 0, -3)
+	day := time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, time.UTC)
+	since := day.Add(12 * time.Hour)
+
+	cost := func(v float64) *float64 { return &v }
+	sid := seedSession(t, st, ada, pid, "whole-day")
+	rebuildWith(t, st, sid, store.ProjectionDelta{
+		Messages: []store.MessageDelta{{Ordinal: 0, Role: "user", Content: "go", Timestamp: day.Add(2 * time.Hour)}},
+		Usage: []store.ProjUsage{
+			// Before the mid-day Since, same UTC day: only the whole-day read counts it.
+			{Model: "m1", Input: 100, Output: 10, CostUSD: cost(1.0), OccurredAt: day.Add(2 * time.Hour), DedupKey: "w1", SourceOffset: 10},
+			// After Since, same day: both reads count it.
+			{Model: "m1", Input: 100, Output: 10, CostUSD: cost(2.0), OccurredAt: day.Add(20 * time.Hour), DedupKey: "w2", SourceOffset: 20},
+			// Undated: excluded from every dated figure regardless of window.
+			{Model: "m1", Input: 100, Output: 10, CostUSD: cost(5.0), DedupKey: "w3", SourceOffset: 30},
+			// Next day, second model, token-bearing and unpriced: a fleet-mix band and the
+			// lower-bound flag.
+			{Model: "m2", Input: 50, OccurredAt: day.Add(34 * time.Hour), DedupKey: "w4", SourceOffset: 40},
+		},
+		Started: day.Add(2 * time.Hour),
+		Ended:   day.Add(20 * time.Hour),
+	})
+
+	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: since, Bucket: "day"}, store.AllInsightsPanels)
+	if err != nil {
+		t.Fatalf("insights: %v", err)
+	}
+	e := ins.Trends.Economics
+	// $1 (pre-noon, first day) + $2 (post-noon) = $3. The old instant-cut read said $2; the
+	// undated $5 is out either way. A $7 or $8 here means undated usage leaked onto the axis.
+	if e.TotalSpend < 2.99 || e.TotalSpend > 3.01 {
+		t.Errorf("total spend = %v, want 3.0 (the window's first UTC day counts in full; undated usage excluded)", e.TotalSpend)
+	}
+	if !e.CostIncomplete {
+		t.Error("CostIncomplete = false, want true (the m2 event carries tokens with no price)")
+	}
+	// Both models band in the mix: m1's tokens on the first day (including the pre-noon
+	// event's) and m2's on the second.
+	if got := len(ins.Trends.FleetMix.Models); got != 2 {
+		t.Errorf("fleet mix bands = %d, want 2 (m1 and m2)", got)
+	}
+	if !ins.Trends.Subagents.CostShareIncomplete {
+		t.Error("subagent CostShareIncomplete = false, want true (the same unpriced event flags the share's numerator and denominator)")
+	}
+}
+
 // TestEconomicsAbandonedIncompleteScoped pins that the abandoned-spend incompleteness marker is
 // the abandoned subset's own, not the whole window's. A completed session with unpriced usage
 // makes the window incomplete, but when every abandoned session is fully priced the abandoned
@@ -559,7 +629,7 @@ func TestEconomicsAbandonedIncompleteScoped(t *testing.T) {
 	insertGradeOutcomeSignal(t, st, ctx, aband, nil, "abandoned")
 	seedUsage(t, st, aband, "claude-opus-4-8", 4.00, 900, 450, 1, "econ-aband-priced")
 
-	ins, err := st.Insights(ctx, store.AnalyticsFilter{ProjectID: pid, Since: since, Bucket: "day"})
+	ins, err := st.Insights(ctx, store.AnalyticsFilter{ProjectID: pid, Since: since, Bucket: "day"}, store.AllInsightsPanels)
 	if err != nil {
 		t.Fatalf("insights: %v", err)
 	}
@@ -591,7 +661,7 @@ func TestEconomicsAbandonedIncompleteWhenAbandonedUnpriced(t *testing.T) {
 	seedUsage(t, st, aband, "claude-opus-4-8", 2.00, 400, 200, 1, "econ-aband-priced")
 	seedUsageUnpriced(t, st, aband, "mystery-model", 500, 250, "econ-aband-unpriced")
 
-	ins, err := st.Insights(ctx, store.AnalyticsFilter{ProjectID: pid, Since: since, Bucket: "day"})
+	ins, err := st.Insights(ctx, store.AnalyticsFilter{ProjectID: pid, Since: since, Bucket: "day"}, store.AllInsightsPanels)
 	if err != nil {
 		t.Fatalf("insights: %v", err)
 	}

@@ -48,6 +48,9 @@ the raw bytes:
   fold),
 - a column the rebuild derives (prompt facts, `duplicate_prompt`,
   `file_rel_path`, the per-turn usage rollup),
+- an insights rollup derivation (`internal/server/store/rollups.go`: the five
+  session-grain tables rebuildTx writes; the reparse the bump forces is what
+  re-derives the corpus),
 - the signal set, the scoring, or the outcome rules,
 - prompt classification (`quality.ClassifyPrompt`),
 - the pricing table (a reprice changes stored per-row cost and the

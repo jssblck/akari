@@ -282,6 +282,12 @@ func announceIntoProjectTx(ctx context.Context, tx pgx.Tx, p AnnounceParams) (An
 		if err := recomputeToolCallRelPathsTx(ctx, tx, r.SessionID, p.Cwd); err != nil {
 			return AnnounceResult{}, err
 		}
+		// session_file_churn keys on the rel paths just rewritten, so it re-derives in the
+		// same transaction; a cwd-only announce triggers no rebuild, which is otherwise the
+		// only writer (see deriveSessionFileChurnTx).
+		if err := deriveSessionFileChurnTx(ctx, tx, r.SessionID); err != nil {
+			return AnnounceResult{}, err
+		}
 	}
 	if err := linkSubagentParentTx(ctx, tx, p, r.SessionID); err != nil {
 		return AnnounceResult{}, err
@@ -560,6 +566,12 @@ func (s *Store) ResetRaw(ctx context.Context, sessionID int64) error {
 			if _, err := tx.Exec(ctx, q, sessionID); err != nil {
 				return fmt.Errorf("reset session %d (%s): %w", sessionID, q, err)
 			}
+		}
+		// The insights rollups summarize the projection rows just deleted, so they
+		// clear with them; the rebuild the epoch reset below forces re-derives them
+		// from whatever bytes arrive next.
+		if err := clearSessionRollupsTx(ctx, tx, sessionID); err != nil {
+			return err
 		}
 		// parser_epoch 0 sits behind every real epoch, so the session reads as due
 		// and the worker rebuilds (to an empty projection if no bytes ever arrive,

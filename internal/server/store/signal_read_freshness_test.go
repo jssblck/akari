@@ -170,7 +170,7 @@ func TestInsightsCohortTotalsReconcile(t *testing.T) {
 		t.Fatalf("grade: %v", err)
 	}
 
-	ins, err := st.Insights(ctx, store.AnalyticsFilter{ProjectID: pid})
+	ins, err := st.Insights(ctx, store.AnalyticsFilter{ProjectID: pid}, store.AllInsightsPanels)
 	if err != nil {
 		t.Fatalf("insights: %v", err)
 	}

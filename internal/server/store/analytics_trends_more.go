@@ -168,10 +168,10 @@ func (s SubagentStats) HasData() bool {
 	return s.SubagentSessionsInWindow > 0 || s.SessionsThatDelegatePct > 0
 }
 
-// velocityTrendsFrom computes the per-bucket velocity series. It reuses the turn-labelling
-// CTE the headline velocity figures use, grouped by the bucket of each turn's prompt, plus a
-// per-bucket active-time / message / tool scan for the throughput rates and a wall-clock span
-// sum for the idle-gap read.
+// velocityTrendsFrom computes the per-bucket velocity series over the velocity rollups:
+// latency percentiles from session_turns grouped by the bucket of each turn's prompt,
+// throughput from session_activity_hourly, and a wall-clock span sum over sessions for the
+// idle-gap read.
 func (s *Store) velocityTrendsFrom(ctx context.Context, q querier, f AnalyticsFilter, g trendGrid) (VelocityTrends, error) {
 	out := VelocityTrends{
 		ActiveHours: make([]float64, g.n()),
@@ -186,35 +186,14 @@ func (s *Store) velocityTrendsFrom(ctx context.Context, q querier, f AnalyticsFi
 	// Response-time percentiles per bucket, bucketed on the turn's prompt instant.
 	filter, args := f.clauseFor("s.started_at")
 	rows, err := q.Query(ctx, fmt.Sprintf(
-		`WITH m AS (
-		   SELECT m.session_id, m.ordinal, m.role, m.timestamp,
-		          count(*) FILTER (WHERE m.role = 'user')
-		            OVER (PARTITION BY m.session_id ORDER BY m.ordinal
-		                  ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS turn
-		     FROM messages m
-		     JOIN sessions s ON s.id = m.session_id
-		    WHERE TRUE%s
-		 ),
-		 user_turns AS (
-		   SELECT session_id, turn, min(timestamp) FILTER (WHERE role = 'user') AS user_at
-		     FROM m WHERE turn >= 1 GROUP BY session_id, turn
-		 ),
-		 asst_turns AS (
-		   SELECT DISTINCT ON (session_id, turn) session_id, turn, timestamp AS asst_at
-		     FROM m WHERE turn >= 1 AND role = 'assistant' AND timestamp IS NOT NULL
-		    ORDER BY session_id, turn, ordinal
-		 ),
-		 lat AS (
-		   SELECT %s AS b, extract(epoch FROM (a.asst_at - u.user_at)) AS secs
-		     FROM user_turns u
-		     JOIN asst_turns a ON a.session_id = u.session_id AND a.turn = u.turn
-		    WHERE u.user_at IS NOT NULL AND a.asst_at >= u.user_at
-		 )
-		 SELECT b,
-		        coalesce(percentile_cont(0.5)  WITHIN GROUP (ORDER BY secs), 0),
-		        coalesce(percentile_cont(0.9)  WITHIN GROUP (ORDER BY secs), 0),
-		        coalesce(percentile_cont(0.99) WITHIN GROUP (ORDER BY secs), 0)
-		   FROM lat GROUP BY b`, filter, g.sqlBucket("u.user_at")), args...)
+		`SELECT %s AS b,
+		        coalesce(percentile_cont(0.5)  WITHIN GROUP (ORDER BY st.response_secs), 0),
+		        coalesce(percentile_cont(0.9)  WITHIN GROUP (ORDER BY st.response_secs), 0),
+		        coalesce(percentile_cont(0.99) WITHIN GROUP (ORDER BY st.response_secs), 0)
+		   FROM session_turns st
+		   JOIN sessions s ON s.id = st.session_id
+		  WHERE TRUE%s
+		  GROUP BY b`, g.sqlBucket("st.prompt_at"), filter), args...)
 	if err != nil {
 		return VelocityTrends{}, fmt.Errorf("response time trend: %w", err)
 	}
@@ -234,78 +213,42 @@ func (s *Store) velocityTrendsFrom(ctx context.Context, q querier, f AnalyticsFi
 		return VelocityTrends{}, fmt.Errorf("iterate response time trend: %w", err)
 	}
 
-	// Active time and message count per bucket (gap sum over the idle threshold), bucketed
-	// on the later message's instant.
-	active := make([]float64, g.n())
-	msgs := make([]int, g.n())
+	// Active time and message and tool volume per bucket, one sum over the activity rollup.
+	// The rollup attributed each kept gap to the later message's hour, so re-bucketing its
+	// UTC days reproduces the old later-message bucketing.
 	filter, args = f.clauseFor("s.started_at")
 	arows, err := q.Query(ctx, fmt.Sprintf(
-		`WITH gp AS (
-		   SELECT %s AS b,
-		          extract(epoch FROM (m.timestamp - lag(m.timestamp)
-		            OVER (PARTITION BY m.session_id ORDER BY m.ordinal))) AS gap
-		     FROM messages m
-		     JOIN sessions s ON s.id = m.session_id
-		    WHERE m.timestamp IS NOT NULL%s
-		 )
-		 SELECT b, coalesce(sum(gap) FILTER (WHERE gap > 0 AND gap <= %d), 0), count(*)
-		   FROM gp GROUP BY b`, g.sqlBucket("m.timestamp"), filter, activeGapSeconds), args...)
+		`SELECT %s AS b,
+		        coalesce(sum(ah.active_seconds), 0),
+		        coalesce(sum(ah.messages), 0)::bigint,
+		        coalesce(sum(ah.tool_calls), 0)::bigint
+		   FROM session_activity_hourly ah
+		   JOIN sessions s ON s.id = ah.session_id
+		  WHERE TRUE%s
+		  GROUP BY b`, g.sqlBucketDay("ah.day"), filter), args...)
 	if err != nil {
 		return VelocityTrends{}, fmt.Errorf("active time trend: %w", err)
 	}
 	for arows.Next() {
 		var b time.Time
 		var secs float64
-		var n int
-		if err := arows.Scan(&b, &secs, &n); err != nil {
+		var nMsgs, nTools int
+		if err := arows.Scan(&b, &secs, &nMsgs, &nTools); err != nil {
 			arows.Close()
 			return VelocityTrends{}, fmt.Errorf("scan active time trend: %w", err)
 		}
 		if i := g.index(b); i >= 0 {
-			active[i] = secs
-			msgs[i] = n
 			out.ActiveHours[i] = secs / 3600
+			if secs > 0 {
+				mins := secs / 60
+				out.MsgsPerMin[i] = float64(nMsgs) / mins
+				out.ToolsPerMin[i] = float64(nTools) / mins
+			}
 		}
 	}
 	arows.Close()
 	if err := arows.Err(); err != nil {
 		return VelocityTrends{}, fmt.Errorf("iterate active time trend: %w", err)
-	}
-
-	// Tool volume per bucket, over the timestamped calls the active time reads.
-	tools := make([]int, g.n())
-	filter, args = f.clauseFor("s.started_at")
-	trows, err := q.Query(ctx, fmt.Sprintf(
-		`SELECT %s AS b, count(*)
-		   FROM tool_calls tc
-		   JOIN messages m ON m.session_id = tc.session_id AND m.ordinal = tc.message_ordinal
-		   JOIN sessions s ON s.id = tc.session_id
-		  WHERE m.timestamp IS NOT NULL%s
-		  GROUP BY b`, g.sqlBucket("m.timestamp"), filter), args...)
-	if err != nil {
-		return VelocityTrends{}, fmt.Errorf("tool volume trend: %w", err)
-	}
-	for trows.Next() {
-		var b time.Time
-		var n int
-		if err := trows.Scan(&b, &n); err != nil {
-			trows.Close()
-			return VelocityTrends{}, fmt.Errorf("scan tool volume trend: %w", err)
-		}
-		if i := g.index(b); i >= 0 {
-			tools[i] = n
-		}
-	}
-	trows.Close()
-	if err := trows.Err(); err != nil {
-		return VelocityTrends{}, fmt.Errorf("iterate tool volume trend: %w", err)
-	}
-	for i := range active {
-		if active[i] > 0 {
-			mins := active[i] / 60
-			out.MsgsPerMin[i] = float64(msgs[i]) / mins
-			out.ToolsPerMin[i] = float64(tools[i]) / mins
-		}
 	}
 
 	// Wall-clock session span per bucket, on the session's start.
@@ -345,8 +288,9 @@ const maxReliabilityTools = 60
 const maxMixCategories = 6
 
 // toolTrendsFrom computes the reliability scatter (whole window), the category mix per
-// bucket, and the failure rate per bucket. All three dedupe replayed calls the same way the
-// headline tool stats do, and bucket on the session's start.
+// bucket, and the failure rate per bucket, all over the session_tool_rollup rows of
+// started_at-windowed sessions (the rollup deduped replays at write time, the same way the
+// headline tool stats read), bucketing on the session's start.
 func (s *Store) toolTrendsFrom(ctx context.Context, q querier, f AnalyticsFilter, g trendGrid) (ToolTrends, error) {
 	var out ToolTrends
 
@@ -355,28 +299,15 @@ func (s *Store) toolTrendsFrom(ctx context.Context, q querier, f AnalyticsFilter
 	limitArg := fmt.Sprintf("$%d", len(args)+1)
 	args = append(args, maxReliabilityTools)
 	rows, err := q.Query(ctx,
-		`WITH scoped AS (
-		   SELECT tc.session_id, tc.message_ordinal, tc.call_index, tc.tool_name,
-		          coalesce(NULLIF(tc.category, ''), 'other') AS cat,
-		          tc.input_sha256, tc.result_status, tc.call_uid
-		     FROM tool_calls tc
-		     JOIN sessions s ON s.id = tc.session_id
-		    WHERE TRUE`+filter+`
-		 ),
-		 ranked AS (
-		   SELECT tool_name, cat, session_id, result_status,
-		          row_number() OVER (
-		            PARTITION BY `+dedupToolCallsPartition+`
-		            ORDER BY message_ordinal, call_index
-		          ) AS rn
-		     FROM scoped
-		 )
-		 SELECT tool_name, min(cat) AS cat, count(*) AS calls,
-		        count(*) FILTER (WHERE result_status = 'error') AS failures,
-		        count(DISTINCT session_id) AS sessions
-		   FROM ranked WHERE rn = 1
-		  GROUP BY tool_name
-		  ORDER BY calls DESC, tool_name
+		`SELECT tr.tool_name, min(tr.category) AS cat,
+		        sum(tr.calls)::bigint AS calls,
+		        sum(tr.failures)::bigint AS failures,
+		        count(DISTINCT tr.session_id) AS sessions
+		   FROM session_tool_rollup tr
+		   JOIN sessions s ON s.id = tr.session_id
+		  WHERE TRUE`+filter+`
+		  GROUP BY tr.tool_name
+		  ORDER BY calls DESC, tr.tool_name
 		  LIMIT `+limitArg, args...)
 	if err != nil {
 		return ToolTrends{}, fmt.Errorf("tool reliability: %w", err)
@@ -394,27 +325,14 @@ func (s *Store) toolTrendsFrom(ctx context.Context, q querier, f AnalyticsFilter
 		return ToolTrends{}, fmt.Errorf("iterate tool reliability: %w", err)
 	}
 
-	// Category mix per bucket, from the same deduped base, bucketed on the session start.
+	// Category mix per bucket, from the same rollup base, bucketed on the session start.
 	filter, args = f.clauseFor("s.started_at")
 	mrows, err := q.Query(ctx, fmt.Sprintf(
-		`WITH scoped AS (
-		   SELECT tc.session_id, tc.message_ordinal, tc.call_index, tc.tool_name,
-		          coalesce(NULLIF(tc.category, ''), 'other') AS cat,
-		          tc.input_sha256, tc.result_status, tc.call_uid,
-		          %s AS b
-		     FROM tool_calls tc
-		     JOIN sessions s ON s.id = tc.session_id
-		    WHERE TRUE%s
-		 ),
-		 ranked AS (
-		   SELECT cat, b,
-		          row_number() OVER (
-		            PARTITION BY `+dedupToolCallsPartition+`
-		            ORDER BY message_ordinal, call_index
-		          ) AS rn
-		     FROM scoped
-		 )
-		 SELECT b, cat, count(*) FROM ranked WHERE rn = 1 GROUP BY b, cat`,
+		`SELECT %s AS b, tr.category, sum(tr.calls)::bigint
+		   FROM session_tool_rollup tr
+		   JOIN sessions s ON s.id = tr.session_id
+		  WHERE TRUE%s
+		  GROUP BY 1, 2`,
 		g.sqlBucket("s.started_at"), filter), args...)
 	if err != nil {
 		return ToolTrends{}, fmt.Errorf("tool mix trend: %w", err)
@@ -510,26 +428,14 @@ const maxFailTools = 3
 func (s *Store) toolFailureTrend(ctx context.Context, q querier, f AnalyticsFilter, g trendGrid, out *ToolTrends) error {
 	out.FailFleet = make([]float64, g.n())
 
-	// Fleet rate per bucket over the deduped base.
+	// Fleet rate per bucket over the rollup base.
 	filter, args := f.clauseFor("s.started_at")
 	rows, err := q.Query(ctx, fmt.Sprintf(
-		`WITH scoped AS (
-		   SELECT tc.session_id, tc.message_ordinal, tc.call_index, tc.tool_name,
-		          tc.input_sha256, tc.result_status, tc.call_uid, %s AS b
-		     FROM tool_calls tc
-		     JOIN sessions s ON s.id = tc.session_id
-		    WHERE TRUE%s
-		 ),
-		 ranked AS (
-		   SELECT b, result_status,
-		          row_number() OVER (
-		            PARTITION BY `+dedupToolCallsPartition+`
-		            ORDER BY message_ordinal, call_index
-		          ) AS rn
-		     FROM scoped
-		 )
-		 SELECT b, count(*), count(*) FILTER (WHERE result_status = 'error')
-		   FROM ranked WHERE rn = 1 GROUP BY b`, g.sqlBucket("s.started_at"), filter), args...)
+		`SELECT %s AS b, sum(tr.calls)::bigint, sum(tr.failures)::bigint
+		   FROM session_tool_rollup tr
+		   JOIN sessions s ON s.id = tr.session_id
+		  WHERE TRUE%s
+		  GROUP BY 1`, g.sqlBucket("s.started_at"), filter), args...)
 	if err != nil {
 		return fmt.Errorf("tool failure fleet trend: %w", err)
 	}
@@ -573,23 +479,11 @@ func (s *Store) toolFailureTrend(ctx context.Context, q querier, f AnalyticsFilt
 	args = append(args, names)
 	nameArg := fmt.Sprintf("$%d", len(args))
 	frows, err := q.Query(ctx, fmt.Sprintf(
-		`WITH scoped AS (
-		   SELECT tc.session_id, tc.message_ordinal, tc.call_index, tc.tool_name,
-		          tc.input_sha256, tc.result_status, tc.call_uid, %s AS b
-		     FROM tool_calls tc
-		     JOIN sessions s ON s.id = tc.session_id
-		    WHERE tc.tool_name = ANY(%s)%s
-		 ),
-		 ranked AS (
-		   SELECT tool_name, b, result_status,
-		          row_number() OVER (
-		            PARTITION BY `+dedupToolCallsPartition+`
-		            ORDER BY message_ordinal, call_index
-		          ) AS rn
-		     FROM scoped
-		 )
-		 SELECT tool_name, b, count(*), count(*) FILTER (WHERE result_status = 'error')
-		   FROM ranked WHERE rn = 1 GROUP BY tool_name, b`,
+		`SELECT tr.tool_name, %s AS b, sum(tr.calls)::bigint, sum(tr.failures)::bigint
+		   FROM session_tool_rollup tr
+		   JOIN sessions s ON s.id = tr.session_id
+		  WHERE tr.tool_name = ANY(%s)%s
+		  GROUP BY tr.tool_name, b`,
 		g.sqlBucket("s.started_at"), nameArg, filter), args...)
 	if err != nil {
 		return fmt.Errorf("tool failure worst trend: %w", err)
@@ -625,9 +519,10 @@ func (s *Store) toolFailureTrend(ctx context.Context, q querier, f AnalyticsFilt
 const maxChurnTreeFiles = 150
 
 // churnTrendFrom computes the per-bucket hot-file re-edit volume and hot-file count, plus the
-// project/folder/file tree the treemap drills. Edits dedupe replayed calls and bucket on the
-// session start; both the trend and the tree count only files edited more than once, so the
-// headline re-edit total reconciles with the file breakdown the tree renders.
+// project/folder/file tree the treemap drills, over the session_file_churn rollup (edits
+// deduped at write time), bucketing on the session start; both the trend and the tree count
+// only files edited more than once, so the headline re-edit total reconciles with the file
+// breakdown the tree renders.
 func (s *Store) churnTrendFrom(ctx context.Context, q querier, f AnalyticsFilter, g trendGrid) (ChurnTrend, error) {
 	out := ChurnTrend{ReEdits: make([]int, g.n()), Files: make([]int, g.n())}
 
@@ -639,28 +534,15 @@ func (s *Store) churnTrendFrom(ctx context.Context, q querier, f AnalyticsFilter
 	// counts, per bucket, the files whose window total clears the bar. Both the edit sum and the
 	// file count filter on that same hot predicate, so ReEdits/TotalReEdits count only edits of
 	// re-edited files and reconcile with the tree the treemap renders (whose files are the same
-	// HAVING count(*) > 1 set); a one-off edit to a unique file lands in neither.
+	// HAVING sum(edits) > 1 set); a one-off edit to a unique file lands in neither.
 	filter, args := f.clauseFor("s.started_at")
 	rows, err := q.Query(ctx, fmt.Sprintf(
-		`WITH scoped AS (
-		   SELECT tc.session_id, tc.message_ordinal, tc.call_index, tc.tool_name,
-		          s.project_id, COALESCE(tc.file_rel_path, tc.file_path) AS churn_path,
-		          tc.input_sha256, tc.result_status, tc.call_uid, %s AS b
-		     FROM tool_calls tc
-		     JOIN sessions s ON s.id = tc.session_id
-		    WHERE tc.category = 'edit' AND tc.file_path IS NOT NULL%s
-		 ),
-		 ranked AS (
-		   SELECT project_id, churn_path, b,
-		          row_number() OVER (
-		            PARTITION BY `+dedupToolCallsPartition+`
-		            ORDER BY message_ordinal, call_index
-		          ) AS rn
-		     FROM scoped
-		 ),
-		 perfile AS (
-		   SELECT b, project_id, churn_path, count(*) AS edits_in_bucket
-		     FROM ranked WHERE rn = 1 GROUP BY b, project_id, churn_path
+		`WITH perfile AS (
+		   SELECT %s AS b, s.project_id, fc.churn_path, sum(fc.edits) AS edits_in_bucket
+		     FROM session_file_churn fc
+		     JOIN sessions s ON s.id = fc.session_id
+		    WHERE TRUE%s
+		    GROUP BY 1, s.project_id, fc.churn_path
 		 ),
 		 totals AS (
 		   SELECT project_id, churn_path, sum(edits_in_bucket) AS edits_total
@@ -697,25 +579,15 @@ func (s *Store) churnTrendFrom(ctx context.Context, q querier, f AnalyticsFilter
 	limitArg := fmt.Sprintf("$%d", len(args)+1)
 	args = append(args, maxChurnTreeFiles)
 	trows, err := q.Query(ctx,
-		`WITH scoped AS (
-		   SELECT tc.session_id, tc.message_ordinal, tc.call_index, tc.tool_name,
-		          s.project_id, COALESCE(tc.file_rel_path, tc.file_path) AS churn_path,
-		          tc.input_sha256, tc.result_status, tc.call_uid
-		     FROM tool_calls tc
-		     JOIN sessions s ON s.id = tc.session_id
-		    WHERE tc.category = 'edit' AND tc.file_path IS NOT NULL`+filter+`
-		 ),
-		 ranked AS (
-		   SELECT project_id, churn_path, session_id,
-		          row_number() OVER (
-		            PARTITION BY `+dedupToolCallsPartition+`
-		            ORDER BY message_ordinal, call_index
-		          ) AS rn
-		     FROM scoped
-		 ),
-		 agg AS (
-		   SELECT project_id, churn_path, count(*) AS edits, count(DISTINCT session_id) AS sessions
-		     FROM ranked WHERE rn = 1 GROUP BY project_id, churn_path HAVING count(*) > 1
+		`WITH agg AS (
+		   SELECT s.project_id, fc.churn_path,
+		          sum(fc.edits)::bigint AS edits,
+		          count(DISTINCT fc.session_id) AS sessions
+		     FROM session_file_churn fc
+		     JOIN sessions s ON s.id = fc.session_id
+		    WHERE TRUE`+filter+`
+		    GROUP BY s.project_id, fc.churn_path
+		   HAVING sum(fc.edits) > 1
 		 )
 		 SELECT CASE WHEN p.kind IN ('standalone', 'orphaned') THEN p.display_name ELSE p.remote_key END AS project,
 		        agg.churn_path, agg.edits, agg.sessions,
@@ -859,55 +731,31 @@ func (s *Store) rhythmFrom(ctx context.Context, q querier, f AnalyticsFilter) (R
 		}
 	}
 
+	// The activity rollup carries both volumes per UTC (day, hour); the day of week derives
+	// from the stored day, so the punchcard is one indexed read instead of two message scans.
 	filter, args := f.clauseFor("s.started_at")
 	mrows, err := q.Query(ctx,
-		`SELECT extract(isodow FROM m.timestamp AT TIME ZONE 'UTC')::int,
-		        extract(hour   FROM m.timestamp AT TIME ZONE 'UTC')::int,
-		        count(*)
-		   FROM messages m
-		   JOIN sessions s ON s.id = m.session_id
-		  WHERE m.timestamp IS NOT NULL`+filter+`
+		`SELECT extract(isodow FROM ah.day)::int,
+		        ah.hour::int,
+		        sum(ah.messages + ah.tool_calls)::bigint
+		   FROM session_activity_hourly ah
+		   JOIN sessions s ON s.id = ah.session_id
+		  WHERE TRUE`+filter+`
 		  GROUP BY 1, 2`, args...)
 	if err != nil {
-		return RhythmGrid{}, fmt.Errorf("rhythm messages: %w", err)
+		return RhythmGrid{}, fmt.Errorf("rhythm activity: %w", err)
 	}
 	for mrows.Next() {
 		var dow, hour, n int
 		if err := mrows.Scan(&dow, &hour, &n); err != nil {
 			mrows.Close()
-			return RhythmGrid{}, fmt.Errorf("scan rhythm messages: %w", err)
+			return RhythmGrid{}, fmt.Errorf("scan rhythm activity: %w", err)
 		}
 		add(dow, hour, n)
 	}
 	mrows.Close()
 	if err := mrows.Err(); err != nil {
-		return RhythmGrid{}, fmt.Errorf("iterate rhythm messages: %w", err)
-	}
-
-	filter, args = f.clauseFor("s.started_at")
-	trows, err := q.Query(ctx,
-		`SELECT extract(isodow FROM m.timestamp AT TIME ZONE 'UTC')::int,
-		        extract(hour   FROM m.timestamp AT TIME ZONE 'UTC')::int,
-		        count(*)
-		   FROM tool_calls tc
-		   JOIN messages m ON m.session_id = tc.session_id AND m.ordinal = tc.message_ordinal
-		   JOIN sessions s ON s.id = tc.session_id
-		  WHERE m.timestamp IS NOT NULL`+filter+`
-		  GROUP BY 1, 2`, args...)
-	if err != nil {
-		return RhythmGrid{}, fmt.Errorf("rhythm tools: %w", err)
-	}
-	for trows.Next() {
-		var dow, hour, n int
-		if err := trows.Scan(&dow, &hour, &n); err != nil {
-			trows.Close()
-			return RhythmGrid{}, fmt.Errorf("scan rhythm tools: %w", err)
-		}
-		add(dow, hour, n)
-	}
-	trows.Close()
-	if err := trows.Err(); err != nil {
-		return RhythmGrid{}, fmt.Errorf("iterate rhythm tools: %w", err)
+		return RhythmGrid{}, fmt.Errorf("iterate rhythm activity: %w", err)
 	}
 	return RhythmGrid{Cells: cells}, nil
 }
@@ -983,18 +831,18 @@ func (s *Store) subagentTrendsFrom(ctx context.Context, q querier, f AnalyticsFi
 		out.SessionsThatDelegatePct = float64(totalDelegating) / float64(totalRoots) * 100
 	}
 
-	// Cost share per bucket: subagent spend over total spend, on occurred_at.
-	filter, args = f.clause()
+	// Cost share per bucket: subagent spend over total spend, on the usage rollup's UTC day.
+	filter, args = f.clauseForRollupDay("sud.day")
 	var totalCost, subCost float64
 	crows, err := q.Query(ctx, fmt.Sprintf(
 		`SELECT %s AS b,
-		        coalesce(sum(ue.cost_usd), 0),
-		        coalesce(sum(ue.cost_usd) FILTER (WHERE s.relationship_type = 'subagent'), 0),
-		        coalesce(`+costIncompleteExpr+`, false)
-		   FROM usage_events ue
-		   JOIN sessions s ON s.id = ue.session_id
-		  WHERE ue.occurred_at IS NOT NULL%s
-		  GROUP BY b`, g.sqlBucket("ue.occurred_at"), filter), args...)
+		        coalesce(sum(sud.cost_usd), 0),
+		        coalesce(sum(sud.cost_usd) FILTER (WHERE s.relationship_type = 'subagent'), 0),
+		        coalesce(bool_or(sud.unpriced), false)
+		   FROM session_usage_daily sud
+		   JOIN sessions s ON s.id = sud.session_id
+		  WHERE sud.day IS NOT NULL%s
+		  GROUP BY b`, g.sqlBucketDay("sud.day"), filter), args...)
 	if err != nil {
 		return SubagentStats{}, fmt.Errorf("subagent cost trend: %w", err)
 	}

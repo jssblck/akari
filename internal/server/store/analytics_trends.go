@@ -255,6 +255,14 @@ func (g trendGrid) sqlBucket(col string) string {
 	return fmt.Sprintf("date_trunc('%s', %s AT TIME ZONE 'UTC')", g.Unit, col)
 }
 
+// sqlBucketDay is sqlBucket for a rollup's UTC DATE column: the date is already the UTC
+// day, so it truncates the plain cast rather than shifting a timestamptz. Day sums roll up
+// exactly onto the week grid (date_trunc('week') of a date's midnight is the same Monday
+// the source instant truncated to).
+func (g trendGrid) sqlBucketDay(col string) string {
+	return fmt.Sprintf("date_trunc('%s', %s::timestamp)", g.Unit, col)
+}
+
 // resolveTrendSince returns the effective lower bound for the grid: the filter's Since when
 // set, else the earliest scoped session start (the "all" window), else a short fallback so
 // an empty corpus still yields a one-bucket grid rather than an empty one.
@@ -281,19 +289,20 @@ func (s *Store) resolveTrendSince(ctx context.Context, q querier, f AnalyticsFil
 const maxFleetMixModels = 6
 
 // fleetMixFrom computes each model's token share per bucket. It sums total tokens (input +
-// output + cache read + cache write) per (bucket, model) over the usage events of scoped
-// sessions, bucketing on occurred_at (when the usage happened) the same way the cost series
-// does, then normalizes each bucket to percent and keeps the busiest models with the tail
-// folded into "other".
+// output + cache read + cache write) per (bucket, model) over the session_usage_daily
+// rollup of scoped sessions, bucketing on the rollup's UTC day (when the usage happened,
+// day-grained) with the whole-day window, then normalizes each bucket to percent and keeps
+// the busiest models with the tail folded into "other". A NULL day is undated usage, off
+// the time axis here as everywhere.
 func (s *Store) fleetMixFrom(ctx context.Context, q querier, f AnalyticsFilter, g trendGrid) (FleetMix, error) {
-	filter, args := f.clause() // occurred_at window, matching the cost/token series
+	filter, args := f.clauseForRollupDay("sud.day")
 	rows, err := q.Query(ctx,
-		`SELECT `+g.sqlBucket("ue.occurred_at")+` AS b,
-		        ue.model,
-		        coalesce(sum(ue.input_tokens + ue.output_tokens + ue.cache_read_tokens + ue.cache_write_tokens), 0)
-		   FROM usage_events ue
-		   JOIN sessions s ON s.id = ue.session_id
-		  WHERE ue.occurred_at IS NOT NULL`+filter+`
+		`SELECT `+g.sqlBucketDay("sud.day")+` AS b,
+		        sud.model,
+		        coalesce(sum(sud.input_tokens + sud.output_tokens + sud.cache_read_tokens + sud.cache_write_tokens), 0)
+		   FROM session_usage_daily sud
+		   JOIN sessions s ON s.id = sud.session_id
+		  WHERE sud.day IS NOT NULL`+filter+`
 		  GROUP BY 1, 2`, args...)
 	if err != nil {
 		return FleetMix{}, fmt.Errorf("fleet mix: %w", err)
@@ -665,10 +674,12 @@ func (s *Store) contextHistogramFrom(ctx context.Context, q querier, f Analytics
 }
 
 // economicsFrom computes the per-bucket spend split by session outcome and the cache
-// savings. Spend buckets on occurred_at (when the money was spent) and is gated to the
-// session's outcome so completed-vs-abandoned dollars reconcile with the outcome
-// distribution. Cache savings is priced at day-and-model granularity (so a bucket that
-// straddles a rate change still prices each day correctly) then re-bucketed to the grid.
+// savings, over the session_usage_daily rollup. Spend buckets on the rollup's UTC day
+// (when the money was spent, day-grained) and is gated to the session's outcome so
+// completed-vs-abandoned dollars reconcile with the outcome distribution; the outcome
+// joins in from session_signals at read time per the rollup grain rule. Cache savings is
+// priced at day-and-model granularity (so a bucket that straddles a rate change still
+// prices each day correctly) then re-bucketed to the grid.
 func (s *Store) economicsFrom(ctx context.Context, q querier, f AnalyticsFilter, g trendGrid) (Economics, error) {
 	out := Economics{
 		CostCompleted: make([]float64, g.n()),
@@ -679,23 +690,23 @@ func (s *Store) economicsFrom(ctx context.Context, q querier, f AnalyticsFilter,
 		CacheMeasured: make([]bool, g.n()),
 	}
 
-	filter, args := f.clause() // occurred_at window
+	filter, args := f.clauseForRollupDay("sud.day")
 	rows, err := q.Query(ctx, fmt.Sprintf(
 		`SELECT %s AS b,
-		        coalesce(sum(ue.cost_usd) FILTER (WHERE sig.outcome = 'completed'), 0),
-		        coalesce(sum(ue.cost_usd) FILTER (WHERE sig.outcome = 'abandoned'), 0),
-		        coalesce(sum(ue.cost_usd), 0),
-		        coalesce(sum(ue.cache_read_tokens), 0),
-		        coalesce(sum(ue.input_tokens), 0),
-		        coalesce(sum(ue.cache_write_tokens), 0),
-		        coalesce(`+costIncompleteExpr+`, false),
-		        coalesce(`+costIncompleteExpr+` FILTER (WHERE sig.outcome = 'abandoned'), false)
-		   FROM usage_events ue
-		   JOIN sessions s ON s.id = ue.session_id
+		        coalesce(sum(sud.cost_usd) FILTER (WHERE sig.outcome = 'completed'), 0),
+		        coalesce(sum(sud.cost_usd) FILTER (WHERE sig.outcome = 'abandoned'), 0),
+		        coalesce(sum(sud.cost_usd), 0),
+		        coalesce(sum(sud.cache_read_tokens), 0),
+		        coalesce(sum(sud.input_tokens), 0),
+		        coalesce(sum(sud.cache_write_tokens), 0),
+		        coalesce(bool_or(sud.unpriced), false),
+		        coalesce(bool_or(sud.unpriced) FILTER (WHERE sig.outcome = 'abandoned'), false)
+		   FROM session_usage_daily sud
+		   JOIN sessions s ON s.id = sud.session_id
 		   LEFT JOIN session_signals sig
 		     ON sig.session_id = s.id AND `+signalsCurrent()+`
-		  WHERE ue.occurred_at IS NOT NULL%s
-		  GROUP BY 1`, g.sqlBucket("ue.occurred_at"), filter), args...)
+		  WHERE sud.day IS NOT NULL%s
+		  GROUP BY 1`, g.sqlBucketDay("sud.day"), filter), args...)
 	if err != nil {
 		return Economics{}, fmt.Errorf("cost of quality trend: %w", err)
 	}
@@ -768,20 +779,21 @@ func (s *Store) economicsFrom(ctx context.Context, q querier, f AnalyticsFilter,
 	return out, nil
 }
 
-// cacheSavingsTrend prices what caching saved and folds it into the grid. It groups cache
-// tokens by day and model (the granularity pricing's date-effective windows need), prices
-// each with pricing.CacheSavings at that day's rate, then sums the day's savings into its
-// trend bucket, so a weekly bucket that spans a rate change still totals correctly.
+// cacheSavingsTrend prices what caching saved and folds it into the grid. The
+// session_usage_daily rollup already sits at day-and-model granularity (exactly what
+// pricing's date-effective windows need), so each (day, model) row group prices with
+// pricing.CacheSavings at that day's rate, then the day's savings sum into its trend
+// bucket, so a weekly bucket that spans a rate change still totals correctly.
 func (s *Store) cacheSavingsTrend(ctx context.Context, q querier, f AnalyticsFilter, g trendGrid, out *Economics) error {
-	filter, args := f.clause()
+	filter, args := f.clauseForRollupDay("sud.day")
 	rows, err := q.Query(ctx,
-		`SELECT date_trunc('day', ue.occurred_at AT TIME ZONE 'UTC') AS d,
-		        ue.model,
-		        coalesce(sum(ue.cache_read_tokens), 0),
-		        coalesce(sum(ue.cache_write_tokens), 0)
-		   FROM usage_events ue
-		   JOIN sessions s ON s.id = ue.session_id
-		  WHERE ue.occurred_at IS NOT NULL`+filter+`
+		`SELECT sud.day::timestamp AS d,
+		        sud.model,
+		        coalesce(sum(sud.cache_read_tokens), 0),
+		        coalesce(sum(sud.cache_write_tokens), 0)
+		   FROM session_usage_daily sud
+		   JOIN sessions s ON s.id = sud.session_id
+		  WHERE sud.day IS NOT NULL`+filter+`
 		  GROUP BY 1, 2`, args...)
 	if err != nil {
 		return fmt.Errorf("cache savings trend: %w", err)
