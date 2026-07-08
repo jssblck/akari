@@ -1,9 +1,8 @@
-/* The projects index: a full-bleed table whose columns grow to their content,
-   with a 30-day cost sparkline per row. The token cell reuses the global session
-   list's .tok-cell hover card (defined in sessions.css), so only the overflow
-   rule is needed here. */
+/* The projects index: a hairline ledger (one caps label line, then a grid row
+   per project on the page ground) with a 30-day cost sparkline per row. The
+   token cell reuses the global session list's .tok-cell hover card (defined in
+   sessions.css). */
 
-th.trend, td.trend { width: 108px; }
 .sparkline { width: 96px; height: 24px; display: block; }
 
 /* A table row's first-prompt subtitle: one muted, clamped line under the session
@@ -13,23 +12,94 @@ th.trend, td.trend { width: 108px; }
   margin-top: 2px; max-width: 52ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
-/* ---- Projects index: a full-bleed table whose columns grow to their content ---- */
-/* The projects index is the page's only surface, so it drops the centered
-   max-width and runs the table the full content width. */
-main.page-projects { max-width: none; }
-/* Every figure column sizes to its content (no wrapping); the project-name
-   column takes width:100% so it absorbs the slack, letting names show in full
-   instead of clipping while the table still fills the available width. */
-table.grid.projects th, table.grid.projects td { white-space: nowrap; }
-table.grid.projects th.proj-name, table.grid.projects td.proj-name { width: 100%; }
-/* The tokens cell reuses the global session list's .tok-cell hover card, so its
-   styling (and the shared heatmap-tooltip rules) already apply here. The cell
-   only needs to let the card overflow the row, the same as the sessions table. */
-table.grid.projects td.num { overflow: visible; }
+/* ---- Projects index: the hairline ledger ---- */
+/* Each section is one .ledger: a caps label line (.ledger-head), then a grid row
+   per project (.lrow). Head and rows lay out on one fixed column template so
+   figures align down the section without table markup; the name column takes the
+   slack through minmax(0, 1fr) and wraps (overflow-wrap) instead of clipping.
+   Both sections share the template (the figure columns are the same six); the
+   locals section's extra facts (state, machine) ride under the path rather than
+   holding columns, so the template fits from the 900px stop up without shedding.
+   The Updated track is sized to FmtRelTime's widest form, the absolute
+   "2006-01-02 15:04" fallback. */
+.ledger-head, .ledger .lrow {
+  display: grid; align-items: center; column-gap: var(--sp-lg);
+  grid-template-columns: minmax(0, 1fr) 108px 80px 150px 110px 136px;
+  padding: 10px var(--sp-sm);
+  border-bottom: 1px solid var(--border);
+}
+.ledger-head {
+  padding-block: 6px;
+  color: var(--muted); font-weight: 500; font-size: 0.6875rem;
+  text-transform: uppercase; letter-spacing: 0.08em;
+}
+.ledger .rr { text-align: right; }
+.ledger .lrow { transition: background var(--dur-fast) var(--ease-state); }
+.ledger .lrow:hover { background: var(--surface-2); }
+
+/* The name is the row's one full-weight element. A remote key dims its host
+   segment and a local path dims its parent directories (the .host span), so the
+   part a reader recognizes carries the weight; the local path keeps the shared
+   mono treatment paths get everywhere else. */
+.ledger .pname, .ledger .ppath { font-weight: 600; overflow-wrap: anywhere; }
+.ledger .ppath { font-family: var(--mono); font-size: 0.8125rem; }
+.ledger .pname .host, .ledger .ppath .host { color: var(--faint); font-weight: 400; }
+
+/* Figures: mono and tabular per the design system, right-aligned under their
+   labels. Cost is the anchor a reader scans this page for, so it alone keeps the
+   full text colour; the rest recede a step. */
+.ledger .lsess, .ledger .ltok, .ledger .lcost, .ledger .lupd {
+  font-family: var(--mono); font-variant-numeric: tabular-nums;
+  white-space: nowrap; text-align: right;
+}
+.ledger .lsess, .ledger .ltok { color: var(--subtext); }
+.ledger .lcost { color: var(--text); font-weight: 500; }
+.ledger .lupd { color: var(--muted); }
+/* A local folder's state chip and machine, under the path. */
+.ledger .lsub {
+  display: flex; align-items: center; gap: 6px; margin-top: 3px;
+  color: var(--muted); font: 450 0.75rem/1.5 var(--mono);
+}
+
+/* The folded second line (compact shell only; desktop keeps the columns). */
+.ledger .lmeta {
+  display: none;
+  font: 450 0.75rem/1.5 var(--mono); font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+.ledger .lmeta .sep { color: var(--faint); padding: 0 3px; }
+/* templ collapses the whitespace between the state chip and the machine name,
+   so the chip carries the gap itself. */
+.ledger .lmeta .tag { margin-right: 4px; }
+
+/* Below 1100px (the stop session.css also narrows at) the row folds to the
+   two-line form: name and cost on the first line, the meta line and a smaller
+   sparkline on the second. The figure columns hide (their values fold into
+   .lmeta), so the name never clips to make columns fit. The fold sits above the
+   900px shell stop because the sidebar still holds 232px of the window there,
+   which is exactly the slack the single-line template needs. Baseline alignment
+   keeps the cost on the name's first line when a long name wraps. */
+@media (max-width: 1100px) {
+  .ledger-head { display: none; }
+  .ledger .lrow {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "name cost" "meta trend";
+    row-gap: 5px; align-items: baseline;
+    padding: 11px 2px 12px;
+  }
+  .ledger .lname { grid-area: name; }
+  .ledger .lcost { grid-area: cost; }
+  .ledger .lmeta { grid-area: meta; display: block; }
+  .ledger .ltrend { grid-area: trend; align-self: center; justify-self: end; }
+  /* The state chip and machine lead the meta line here, so the sub-line under
+     the path would say it twice. */
+  .ledger .lsess, .ledger .ltok, .ledger .lupd, .ledger .lsub { display: none; }
+  .ledger .sparkline { width: 64px; height: 16px; }
+}
 
 /* The index splits into a Repositories section and a Local folders section, each a
-   headed table. Space the sections apart so the second heading reads as a new group,
-   not a continuation of the first table. */
+   headed ledger. Space the sections apart so the second heading reads as a new group,
+   not a continuation of the first. */
 .proj-section + .proj-section { margin-top: var(--sp-xl); }
 
 /* ---- Project details: the per-project quality band ---- */
@@ -99,22 +169,15 @@ table.grid.projects td.num { overflow: visible; }
 }
 
 /* ---- Responsive (phone) ----
-   The tables shed their secondary columns instead of forcing a sideways scroll:
-   the projects index keeps name, sessions, tokens, and cost; the per-project
-   session table keeps the session (with its title line), tokens, cost, and
-   recency. Everything hidden here is still one tap away on the row's own page,
-   and .table-scroll remains as the escape hatch for what is left. */
+   The per-project session table sheds its secondary columns instead of forcing
+   a sideways scroll: it keeps the session (with its title line), tokens, cost,
+   and recency. Everything hidden here is still one tap away on the row's own
+   page, and .table-scroll remains as the escape hatch for what is left. (The
+   projects index no longer sheds anything; its ledger rows fold instead, above.) */
 @media (max-width: 640px) {
-  th.trend, td.trend,
-  table.grid .col-machine, table.grid .col-state,
+  table.grid .col-machine,
   table.grid .col-agent, table.grid .col-user,
-  table.grid .col-branch, table.grid .col-msgs,
-  /* The projects index drops Updated too (it is ranked by recency already); the
-     session tables keep theirs, since recency is what a phone reader scans for. */
-  table.grid.projects .col-updated { display: none; }
-  /* Long project names and paths clip instead of widening the table. */
-  table.grid.projects th.proj-name, table.grid.projects td.proj-name { max-width: 0; }
-  table.grid.projects td.proj-name a { display: block; overflow: hidden; text-overflow: ellipsis; }
+  table.grid .col-branch, table.grid .col-msgs { display: none; }
   /* The session row's title line caps to what the phone column can hold; its
      desktop 52ch would otherwise keep the whole table wide enough to pan. */
   .grid td .row-sub { max-width: 148px; }

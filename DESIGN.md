@@ -344,11 +344,24 @@ rows are flat. A shadow on a static card is a 2014 tell.
   it does not just color the field.
 
 ### Tables (the data grid)
-The primary surface for the projects index, session lists, and account tables.
+The primary surface for session lists and account tables.
 - Hairline row separators in Scribe Line; no vertical rules, no zebra fill.
 - Header cells use the 11px uppercase Muted Label.
 - Numeric columns are right-aligned Geist Mono with tabular figures.
 - Row hover tints to Surface Raised over 120ms; the whole row is the hit target.
+
+### Ledgers (tabular data without table chrome)
+The projects index's surface: the data grid's discipline carried by grid rows
+directly on the Room ground, for list pages where a wide table would force
+column-shedding or a sideways pan at narrow widths.
+- One caps label line per section (the 11px Muted Label), then hairline-ruled
+  rows; the same separators, numeric alignment, and row-hover rules as tables.
+- The identifying name is the row's one full-weight element; a routine lead
+  (a host prefix, parent directories) dims to Faint so the recognizable part
+  carries the weight. The anchor figure a reader scans for (cost) keeps full
+  Text colour; other figures recede to Subtext or Muted.
+- On narrow viewports the row folds to a two-line form (name and anchor figure,
+  then a compact mono meta line) instead of shedding columns.
 
 ### Cards / Containers
 - **Corner:** 6px radius (`{rounded.md}`).

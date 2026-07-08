@@ -457,7 +457,9 @@ func TestStandaloneOrphanedIndex(t *testing.T) {
 	}
 	body := readBody(t, resp)
 	for _, want := range []string{
-		"github.com/grace-hopper/akari", // the repository, under Repositories
+		// The repository, under Repositories: the ledger dims the host segment in
+		// its own span, so the key renders split across the two nodes.
+		`<span class="host">github.com/</span>grace-hopper/akari`,
 		"<h2>Repositories</h2>", "<h2>Local folders</h2>",
 		"standalone", "orphaned", // each folder's state tag
 		"scratch", "/home/grace/scratch", // the standalone folder by name and path

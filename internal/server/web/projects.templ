@@ -23,8 +23,15 @@ templ kindTag(kind string) {
 // (standalone or orphaned working directories, the looser catch-all beneath).
 // The page carries no usage panel (the Overview owns fleet usage) and no page
 // heading (the sidebar already marks this section as Projects); each section
-// heads its own table. A section renders only when it holds a project, so a fleet
-// with no local folders shows the repositories table alone.
+// heads its own ledger. A section renders only when it holds a project, so a
+// fleet with no local folders shows the repositories ledger alone.
+//
+// Each section is a hairline ledger rather than a table: one caps label line,
+// then a grid row per project directly on the page ground (no table chrome, no
+// sideways scroll). Above 1100px the row is a single line with a column per
+// figure; below it the same row folds to the two-line compact form (name and
+// cost, then a compact meta line and the sparkline) via the grid-area rules in
+// projects.css, so no column ever sheds or clips the name.
 templ ProjectsPage(p Page, remotes []store.ProjectSummary, locals []store.ProjectSummary, spark map[int64][]float64) {
 	@layout(p) {
 		if len(remotes) == 0 && len(locals) == 0 {
@@ -33,31 +40,41 @@ templ ProjectsPage(p Page, remotes []store.ProjectSummary, locals []store.Projec
 			if len(remotes) > 0 {
 				<section class="proj-section">
 					<div class="panel-head"><h2>Repositories</h2></div>
-					<div class="table-scroll">
-						<table class="grid projects">
-							<thead>
-								<tr>
-									<th class="proj-name">Project</th>
-									<th class="trend">30d</th>
-									<th class="num">Sessions</th>
-									<th class="num">Tokens</th>
-									<th class="num">Cost</th>
-									<th class="col-updated">Updated</th>
-								</tr>
-							</thead>
-							<tbody>
-								for _, pr := range remotes {
-									<tr data-row-href={ ProjectPath(pr.ID) }>
-										<td class="proj-name"><a href={ ProjectHref(pr.ID) }>{ pr.RemoteKey }</a></td>
-										<td class="trend">@templ.Raw(Sparkline(spark[pr.ID]))</td>
-										<td class="num">{ fmt.Sprintf("%d", pr.SessionCount) }</td>
-										<td class="num">@tokensCell(pr)</td>
-										<td class="num">{ FmtCost(pr.TotalCostUSD, pr.CostIncomplete) }</td>
-										<td class="muted nowrap col-updated">{ FmtRelTime(ctx, pr.LastActivity) }</td>
-									</tr>
-								}
-							</tbody>
-						</table>
+					<div class="ledger repos">
+						<div class="ledger-head" aria-hidden="true">
+							<span>Project</span>
+							<span>30d</span>
+							<span class="rr">Sessions</span>
+							<span class="rr">Tokens</span>
+							<span class="rr">Cost</span>
+							<span class="rr">Updated</span>
+						</div>
+						for _, pr := range remotes {
+							<div class="lrow" data-row-href={ ProjectPath(pr.ID) }>
+								<span class="lname">
+									<a class="pname" href={ ProjectHref(pr.ID) }>
+										if RemoteKeyHost(pr.RemoteKey) != "" {
+											<span class="host">{ RemoteKeyHost(pr.RemoteKey) }</span>{ RemoteKeyName(pr.RemoteKey) }
+										} else {
+											{ pr.RemoteKey }
+										}
+									</a>
+								</span>
+								<span class="ltrend">@templ.Raw(Sparkline(spark[pr.ID]))</span>
+								<span class="lsess">{ FmtTokens(int64(pr.SessionCount)) }</span>
+								<span class="ltok">@tokensCell(pr)</span>
+								<span class="lcost">{ FmtCost(pr.TotalCostUSD, pr.CostIncomplete) }</span>
+								<span class="lupd">{ FmtRelTime(ctx, pr.LastActivity) }</span>
+								<span class="lmeta">
+									{ FmtTokens(int64(pr.SessionCount)) } session{ plural(pr.SessionCount) }
+									<span class="sep">·</span>
+									@tokensCellCompact(pr)
+									{ " tokens" }
+									<span class="sep">·</span>
+									{ FmtRelTime(ctx, pr.LastActivity) }
+								</span>
+							</div>
+						}
 					</div>
 				</section>
 			}
@@ -66,37 +83,52 @@ templ ProjectsPage(p Page, remotes []store.ProjectSummary, locals []store.Projec
 					<div class="panel-head">
 						<h2>Local folders</h2>
 					</div>
-					<div class="table-scroll">
-						<table class="grid projects">
-							<thead>
-								<tr>
-									<th class="proj-name">Folder</th>
-									<th class="col-machine">Machine</th>
-									<th class="col-state">State</th>
-									<th class="trend">30d</th>
-									<th class="num">Sessions</th>
-									<th class="num">Tokens</th>
-									<th class="num">Cost</th>
-									<th class="col-updated">Updated</th>
-								</tr>
-							</thead>
-							<tbody>
-								for _, pr := range locals {
-									<tr data-row-href={ ProjectPath(pr.ID) }>
-										<td class="proj-name">
-											<a class="mono" href={ ProjectHref(pr.ID) } title={ LocalPath(pr) }>{ LocalPath(pr) }</a>
-										</td>
-										<td class="muted col-machine">{ pr.Host }</td>
-										<td class="col-state">@kindTag(pr.Kind)</td>
-										<td class="trend">@templ.Raw(Sparkline(spark[pr.ID]))</td>
-										<td class="num">{ fmt.Sprintf("%d", pr.SessionCount) }</td>
-										<td class="num">@tokensCell(pr)</td>
-										<td class="num">{ FmtCost(pr.TotalCostUSD, pr.CostIncomplete) }</td>
-										<td class="muted nowrap col-updated">{ FmtRelTime(ctx, pr.LastActivity) }</td>
-									</tr>
-								}
-							</tbody>
-						</table>
+					<div class="ledger locals">
+						<div class="ledger-head" aria-hidden="true">
+							<span>Folder</span>
+							<span>30d</span>
+							<span class="rr">Sessions</span>
+							<span class="rr">Tokens</span>
+							<span class="rr">Cost</span>
+							<span class="rr">Updated</span>
+						</div>
+						for _, pr := range locals {
+							<div class="lrow" data-row-href={ ProjectPath(pr.ID) }>
+								<span class="lname">
+									<a class="ppath" href={ ProjectHref(pr.ID) } title={ LocalPath(pr) }>
+										if LocalPathDir(LocalPath(pr)) != "" {
+											<span class="host">{ LocalPathDir(LocalPath(pr)) }</span>{ LocalPathLeaf(LocalPath(pr)) }
+										} else {
+											{ LocalPath(pr) }
+										}
+									</a>
+									// State and machine ride under the path (the feed's row-sub
+									// pattern) rather than in grid columns of their own: a
+									// column each would starve the path at laptop widths, and
+									// under the path they stay visible at every width instead
+									// of folding away. The compact form hides this line; its
+									// meta line leads with the same pair.
+									<span class="lsub">
+										@kindTag(pr.Kind)
+										<span>{ pr.Host }</span>
+									</span>
+								</span>
+								<span class="ltrend">@templ.Raw(Sparkline(spark[pr.ID]))</span>
+								<span class="lsess">{ FmtTokens(int64(pr.SessionCount)) }</span>
+								<span class="ltok">@tokensCell(pr)</span>
+								<span class="lcost">{ FmtCost(pr.TotalCostUSD, pr.CostIncomplete) }</span>
+								<span class="lupd">{ FmtRelTime(ctx, pr.LastActivity) }</span>
+								<span class="lmeta">
+									@kindTag(pr.Kind)
+									{ pr.Host }
+									<span class="sep">·</span>
+									{ FmtTokens(int64(pr.SessionCount)) } session{ plural(pr.SessionCount) }
+									<span class="sep">·</span>
+									@tokensCellCompact(pr)
+									{ " tokens" }
+								</span>
+							</div>
+						}
 					</div>
 				</section>
 			}
@@ -112,6 +144,17 @@ templ ProjectsPage(p Page, remotes []store.ProjectSummary, locals []store.Projec
 templ tokensCell(pr store.ProjectSummary) {
 	<span class="tok-cell" tabindex="0">
 		<span class="tok-total">{ FmtTokens(pr.TotalTokens()) }</span>
+		@tokenCard(pr.TotalTokens(), pr.TotalInput, pr.TotalOutput, pr.TotalCacheRead, pr.TotalCacheWrite, 0, pr.TotalCostUSD, pr.CostIncomplete)
+	</span>
+}
+
+// tokensCellCompact is tokensCell at the feed's compact magnitude ("6.4B"), for
+// the ledger's folded meta line where the exact figure would crowd the row. The
+// same breakdown card rides on it, so the exact total and its four classes stay
+// one focus away.
+templ tokensCellCompact(pr store.ProjectSummary) {
+	<span class="tok-cell" tabindex="0">
+		<span class="tok-total">{ FmtTokensCompact(pr.TotalTokens()) }</span>
 		@tokenCard(pr.TotalTokens(), pr.TotalInput, pr.TotalOutput, pr.TotalCacheRead, pr.TotalCacheWrite, 0, pr.TotalCostUSD, pr.CostIncomplete)
 	</span>
 }
