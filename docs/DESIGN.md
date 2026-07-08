@@ -528,6 +528,25 @@ serves until the commit, then the new one does. Peak memory is proportional to
 the transformed transcript, which the CAS lifting keeps small however large the
 original tool bodies were.
 
+**Lock ordering.** Concurrent rebuilds, ingest, and the CAS sweep stay
+deadlock-free by taking shared rows in one global order. A rebuild locks its
+session row before its raw row (the order the delete and reset paths share)
+and writes the sessions row exactly once per transaction. That single-write rule exists because
+Postgres re-fires a row's foreign-key checks when a transaction updates the
+row a second time, even with the key columns unchanged; on a subagent session
+the re-check takes FOR KEY SHARE on the parent session's row, which closed a
+cycle against a concurrent rebuild of the parent blocked on shared blob pins
+(the 2026-07 epoch-drain deadlock, reproduced by
+TestConcurrentRebuildDeadlockStress). Every writer that locks multiple
+blob_pins or blobs rows takes them in sha order: the rebuild's session-wide
+pin, the client-CAS check-and-pin, and new-blob inserts. The sweep's
+expired-pin reap uses SKIP LOCKED instead of waiting, since a pin row locked
+mid-refresh will be unexpired by the time the lock clears. If a cycle ever
+slips through regardless, the deadlock surfaces as an ordinary operational
+error: Postgres aborts one transaction, that rebuild rolls back whole, and the
+worker parks and retries it under the failure model below. The backstop is
+retry, never a torn projection.
+
 **Failure model.** A reducer error on malformed bytes is deterministic
 (re-running fails identically), so the worker rolls the rebuild back and
 records the attempt on the failure markers: `session_raw.parse_error` plus the

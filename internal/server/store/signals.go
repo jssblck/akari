@@ -125,7 +125,7 @@ func (s SessionSignals) ThinkingCoverage() float64 {
 
 // signalFacts are the raw, projection-derived inputs a refresh gathers before scoring:
 // the tool-health counts that feed quality.Score and the outcome facts that feed
-// quality.Classify. Keeping them in one struct lets refreshSignalsTx read them in two
+// quality.Classify. Keeping them in one struct lets gradeSignalsTx read them in two
 // queries and hand them to the pure scoring model.
 type signalFacts struct {
 	toolCalls            int
@@ -448,18 +448,32 @@ func gatherPromptHygiene(ctx context.Context, tx pgx.Tx, sessionID int64) (quali
 	return h, promptCount, nil
 }
 
-// refreshSignalsTx recomputes a session's signals from its projection and UPSERTs the
-// session_signals row, inside the caller's transaction. It is driven by the settle
-// tick (each due session in its own transaction) and by a rebuild of a settled or
-// terminal session (in the rebuild transaction, so the signals commit atomically
-// with the projection they summarize; the rows it reads are already written and
-// visible in-txn). It is a whole-session recompute, not an incremental fold: the
-// signals depend on cross-message order (retry runs, failure streaks, the last
-// word), which is also why the ingest path never computes them.
-func refreshSignalsTx(ctx context.Context, tx pgx.Tx, sessionID int64) error {
+// gradeSignalsTx recomputes a session's signals from its projection and UPSERTs the
+// session_signals row, inside the caller's transaction, returning whether the
+// session's outcome is stable (idle past the abandoned window, or declared
+// terminal). It is driven by the settle tick (each due session in its own
+// transaction) and by a rebuild of a settled or terminal session (in the rebuild
+// transaction, so the signals commit atomically with the projection they
+// summarize; the rows it reads are already written and visible in-txn). It is a
+// whole-session recompute, not an incremental fold: the signals depend on
+// cross-message order (retry runs, failure streaks, the last word), which is also
+// why the ingest path never computes them.
+//
+// It deliberately does NOT write the sessions row. A rebuild folds the final
+// signals_stale value into its one sessions UPDATE (rebuildTx), and a second
+// same-transaction update of that row would re-fire the parent_session_id FK
+// check even with the column unchanged (Postgres re-checks a row's foreign keys
+// when its prior version was written by the same transaction), taking FOR KEY
+// SHARE on the PARENT session's row while this transaction holds shared blob_pins
+// rows. A concurrent rebuild of the parent holds its row FOR UPDATE (lockSession)
+// and blocks on those same pins: that lock-order inversion is the parent/child
+// rebuild deadlock TestConcurrentRebuildDeadlockStress reproduces. Callers that
+// run outside a rebuild (RefreshSessionSignals) clear the flag themselves, as
+// their transaction's first and only sessions write.
+func gradeSignalsTx(ctx context.Context, tx pgx.Tx, sessionID int64) (idleLongEnough bool, err error) {
 	f, err := gatherSignalFacts(ctx, tx, sessionID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	outcome, conf := quality.Classify(quality.Facts{
 		UserMessages:     f.userMessages,
@@ -518,27 +532,14 @@ func refreshSignalsTx(ctx context.Context, tx pgx.Tx, sessionID int64) error {
 		f.peakContextTokens, f.contextResets,
 		f.assistantTurns, f.thinkingTurns, f.thinkingTailTokens, f.thinkingPeakTokens)
 	if err != nil {
-		return fmt.Errorf("upsert signals for session %d: %w", sessionID, err)
+		return false, fmt.Errorf("upsert signals for session %d: %w", sessionID, err)
 	}
-	// Clear the settle-tick due flag now that the grade matches the projection, but only if
-	// the session's outcome is stable, meaning idleLongEnough holds (it has settled past the
-	// idle window, or the client declared it terminal). A rebuild runs refreshSignalsTx on
-	// whatever it rebuilds, including a still-live session whose outcome is not yet stable
-	// (abandoned versus unknown turns on the idle gap), so leaving signals_stale set there
-	// keeps the settle tick on the hook to re-grade once the session crosses the idle
-	// threshold. A settled or terminal session clears the flag and drops out of the settle
-	// index until its next projection change. now() is the transaction clock, so a settle
-	// refresh that just read idleLongEnough against it stays consistent with the clear.
-	if _, err := tx.Exec(ctx,
-		`UPDATE sessions SET signals_stale = $2 WHERE id = $1`, sessionID, !f.idleLongEnough); err != nil {
-		return fmt.Errorf("clear signals_stale for session %d: %w", sessionID, err)
-	}
-	return nil
+	return f.idleLongEnough, nil
 }
 
 // RefreshSessionSignals recomputes one session's signals in its own transaction. It is the
 // standalone form the settle tick (RefreshSettledSignals) and the tests use; a rebuild
-// calls refreshSignalsTx inside its existing transaction instead, so the signals commit
+// calls gradeSignalsTx inside its existing transaction instead, so the signals commit
 // with the projection rather than in a second round trip.
 //
 // It grades only a session whose parse state is settled at the running epoch: the
@@ -584,7 +585,24 @@ func (s *Store) RefreshSessionSignals(ctx context.Context, sessionID int64) erro
 				return nil
 			}
 		}
-		return refreshSignalsTx(ctx, tx, sessionID)
+		idle, err := gradeSignalsTx(ctx, tx, sessionID)
+		if err != nil {
+			return err
+		}
+		// Clear the settle-tick due flag now that the grade matches the projection, but
+		// only if the session's outcome is stable, meaning idleLongEnough holds (it has
+		// settled past the idle window, or the client declared it terminal). A refresh of
+		// a still-live session (a finalize called early) leaves the flag set, keeping the
+		// settle tick on the hook to re-grade once the session crosses the idle threshold.
+		// now() is the transaction clock, so the grade that just read idleLongEnough
+		// against it stays consistent with the clear. This is the transaction's first and
+		// only sessions write, so the parent_session_id FK check does not re-fire (see
+		// gradeSignalsTx).
+		if _, err := tx.Exec(ctx,
+			`UPDATE sessions SET signals_stale = $2 WHERE id = $1`, sessionID, !idle); err != nil {
+			return fmt.Errorf("clear signals_stale for session %d: %w", sessionID, err)
+		}
+		return nil
 	})
 }
 
@@ -599,15 +617,15 @@ func (s *Store) RefreshSessionSignals(ctx context.Context, sessionID int64) erro
 // abandonedIdleMinutes in the past) or terminal (the client declared it finished via
 // `akari sync --finalize`, so it is gradeable now without waiting out the idle window). The
 // flag is the single-table marker that replaces a cross-table due predicate: a rebuild of a
-// live session leaves it set, and refreshSignalsTx clears it only when it grades a
-// settled-or-terminal session. So it captures every way a stored grade can fall behind its
+// live session leaves it set, and a grade clears it only for a settled-or-terminal
+// session. So it captures every way a stored grade can fall behind its
 // source, without a join the settle scan would have to evaluate per row:
 //
 //   - Never graded (a fresh ingest, or a session that predates signals): the column defaults
 //     true, so it is due from creation until the first grade.
-//   - Graded before the session settled (a rebuild that ran refreshSignalsTx while the
-//     session was still live, so its outcome was not yet stable): that refresh left the flag
-//     set because the session was not idleLongEnough, so this tick re-grades it once settled.
+//   - Graded before the session settled (a rebuild that ran while the session was still
+//     live, so its outcome was not yet stable): that rebuild left the flag set because the
+//     session was not idleLongEnough, so this tick re-grades it once settled.
 //
 // (A projection change needs no flag write of its own: a rebuild always ends by grading or,
 // for a live session, leaving the flag set, so the grade can never silently trail the
@@ -784,9 +802,9 @@ var settledSignalBatch = 500
 // row reads as an unknown, unscored result rather than an error, so the session page renders
 // a neutral state instead of a stale or missing grade. A row is usable only when the session
 // is not flagged signals_stale, so the header and the fleet aggregates gate on the same flag
-// and agree on exactly which grades count. refreshSignalsTx leaves the flag set when it grades
-// a still-live session, so a not-yet-stable outcome (abandoned versus unknown turns on the
-// idle gap) never reaches a reader before the settle tick pins it.
+// and agree on exactly which grades count. A refresh of a still-live session leaves the flag
+// set, so a not-yet-stable outcome (abandoned versus unknown turns on the idle gap) never
+// reaches a reader before the settle tick pins it.
 //
 // Gating on the flag rather than a refreshed_at >= updated_at comparison is deliberate.
 // updated_at also moves on metadata-only writes (an announce re-announce, an owner
