@@ -101,6 +101,42 @@ func LocalPath(p store.ProjectSummary) string {
 	return strings.TrimPrefix(p.RemoteKey, "local:"+p.Host+":")
 }
 
+// RemoteKeyHost is the dimmable lead of a remote key: the host segment including
+// its trailing slash ("github.com/" from "github.com/hopper/akari"). The projects
+// ledger renders it faint so the owner/repo part carries the visual weight. A key
+// with fewer than two slashes has no host to dim (it is already just owner/repo,
+// or a bare name), so this returns "" and the whole key reads at full weight.
+func RemoteKeyHost(key string) string {
+	i := strings.Index(key, "/")
+	if i < 0 || !strings.Contains(key[i+1:], "/") {
+		return ""
+	}
+	return key[:i+1]
+}
+
+// RemoteKeyName is the remainder of a remote key after RemoteKeyHost: the part a
+// reader recognizes the project by.
+func RemoteKeyName(key string) string {
+	return strings.TrimPrefix(key, RemoteKeyHost(key))
+}
+
+// LocalPathDir is the dimmable lead of a local working-directory path: everything
+// through the last separator (either slash flavor, since paths arrive from any
+// client OS). The ledger renders it faint so the folder name carries the weight.
+func LocalPathDir(path string) string {
+	i := strings.LastIndexAny(path, `/\`)
+	if i < 0 {
+		return ""
+	}
+	return path[:i+1]
+}
+
+// LocalPathLeaf is the final segment of a local path, the counterpart of
+// LocalPathDir.
+func LocalPathLeaf(path string) string {
+	return strings.TrimPrefix(path, LocalPathDir(path))
+}
+
 // ToolsByOrdinal groups tool calls by the message ordinal they belong to, so the
 // session view can render a message's tool calls beneath it.
 func ToolsByOrdinal(tools []store.ToolCallView) map[int][]store.ToolCallView {
