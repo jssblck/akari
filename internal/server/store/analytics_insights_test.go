@@ -285,7 +285,6 @@ func TestReparseDoesNotFloatLastActive(t *testing.T) {
 	}
 }
 
-
 // TestInsightsPanelsShareCohort guards the parallel snapshot: Insights runs its panels
 // concurrently on separate connections that each import one exported MVCC snapshot, so the
 // overlapping denominators (the quality total, the archetype split, and the concurrency
