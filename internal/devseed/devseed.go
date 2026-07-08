@@ -352,6 +352,11 @@ func reassignSessions(ctx context.Context, pool *pgxpool.Pool, userIDs []int64, 
 			rootUser[f.root] = userIDs[rng.Intn(len(userIDs))]
 		}
 	}
+	// The updates run in ascending session id (sessionFamilies returns rows in id
+	// order). This transaction locks many session rows one by one, and only a
+	// single shared order keeps it from forming a lock cycle with the server's
+	// concurrent writers (the parse worker's rebuilds, announce's subagent
+	// linking) while ingest is still running.
 	dist := make(map[int64]int, len(userIDs))
 	err = pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		for _, f := range fam {
@@ -392,8 +397,11 @@ func deleteAllSessions(ctx context.Context, pool *pgxpool.Pool) (int64, error) {
 // is a subagent, otherwise the session's own id. Reassignment groups on the root.
 type famMember struct{ id, root int64 }
 
-// sessionFamilies lists every session with its family root, ordered by id so the owner draw
-// is deterministic. The root is the top-level session a family shares (the linker points
+// sessionFamilies lists every session with its family root, ordered by id. The order is
+// doubly load-bearing: it makes the owner draw deterministic, and reassignSessions locks
+// rows in this order inside one transaction, so it must be a single global order to stay
+// deadlock-free against the server's writers. The root is the top-level session a family
+// shares (the linker points
 // every subagent straight at the session that spawned it, so a child's parent is itself a
 // root), which coalesce collapses to the session's own id for a top-level session.
 func sessionFamilies(ctx context.Context, pool *pgxpool.Pool) ([]famMember, error) {

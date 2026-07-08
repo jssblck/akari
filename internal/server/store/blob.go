@@ -202,6 +202,12 @@ func resolveBlobsTx(ctx context.Context, tx pgx.Tx, refs []blobRef, writes []blo
 			return fmt.Errorf("%s: %w", r.errCtx, ErrBlobNotUploaded)
 		}
 	}
+	// Store genuinely new content in sha order, the same global order every
+	// pinner locks in. Two concurrent projection writes carrying the same new
+	// bodies would otherwise insert them in each transcript's own order and can
+	// deadlock on the blobs unique index, each waiting on the other's uncommitted
+	// insert of the sha it wants next.
+	sort.Slice(writes, func(i, j int) bool { return writes[i].sha < writes[j].sha })
 	for _, w := range writes {
 		if present[w.sha] {
 			continue // already stored, and the batch SELECT locked it against the sweep
@@ -572,21 +578,44 @@ func (s *Store) SessionReferencesBlob(ctx context.Context, sessionID int64, sha2
 // blob. It returns the number of blobs removed.
 //
 // A freshly uploaded body the client has not yet referenced from a transcript is
-// protected by an unexpired pin (see PutBlob): the orphan predicate excludes any
-// blob with a live blob_pins row, so the gap between uploading a body and
-// uploading the transcript that references it cannot lose the body. Expired pins
-// are cleared first so a body whose transcript never arrived is eventually
-// reclaimable.
+// protected by a pin (see PutBlob): the orphan predicate excludes any blob that
+// still has a blob_pins row after the reap, so the gap between uploading a body and
+// uploading the transcript that references it cannot lose the body. Expired pins are
+// reaped first so a body whose transcript never arrived is eventually reclaimable.
+//
+// The reap and the orphan predicate are read together, not each in isolation. The
+// reap deletes expired pins through SKIP LOCKED, so the only expired pin rows that
+// survive it are ones a refresher holds locked mid-upsert: those are about to become
+// unexpired, so they must keep their blob, yet their committed expires_at still reads
+// as expired. That is why the orphan predicate keys on the mere existence of a pin
+// row rather than on expires_at > now(): had it trusted the committed expiry it would
+// classify a blob whose pin is mid-refresh as unpinned and cascade the blob (and the
+// pin the refresher is about to commit) away. A refresh touches only expires_at, not
+// the FK column, so it takes no FOR KEY SHARE on the blobs row to stop the sweep on
+// its own.
 func (s *Store) SweepBlobs(ctx context.Context) (int, error) {
 	var removed int
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, "DELETE FROM blob_pins WHERE expires_at <= now()"); err != nil {
+		// Reap expired pins through a SKIP LOCKED subquery rather than a bare
+		// DELETE. A pin row locked right now is mid-refresh (an upsert extending
+		// its expiry), so it will be unexpired the moment that writer commits:
+		// skipping it is the correct outcome, and waiting for it was a deadlock
+		// vector, since the bare DELETE took pin rows in heap order while every
+		// pinner locks them in sha order.
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM blob_pins p
+			  USING (SELECT sha256 FROM blob_pins WHERE expires_at <= now()
+			          FOR UPDATE SKIP LOCKED) expired
+			  WHERE p.sha256 = expired.sha256`); err != nil {
 			return fmt.Errorf("clear expired blob pins: %w", err)
 		}
 		// FOR UPDATE conflicts with the FOR KEY SHARE a live writer holds on a blob
 		// it is about to reference; SKIP LOCKED makes the sweep pass over those
 		// rather than block on (or delete) a blob mid-write. The orphan predicate is
-		// re-evaluated against committed state as each row is locked.
+		// re-evaluated against committed state as each row is locked. The blob_pins
+		// arm keys on existence, not expires_at: after the reap above, a surviving
+		// pin row is either live or held by a mid-refresh upsert, and both must keep
+		// the blob (see the reap comment).
 		rows, err := tx.Query(ctx,
 			`SELECT sha256, lo_oid FROM blobs b
 			  WHERE NOT EXISTS (
@@ -595,8 +624,7 @@ func (s *Store) SweepBlobs(ctx context.Context) (int, error) {
 			    AND NOT EXISTS (
 			          SELECT 1 FROM attachments a WHERE a.sha256 = b.sha256)
 			    AND NOT EXISTS (
-			          SELECT 1 FROM blob_pins p
-			           WHERE p.sha256 = b.sha256 AND p.expires_at > now())
+			          SELECT 1 FROM blob_pins p WHERE p.sha256 = b.sha256)
 			  FOR UPDATE SKIP LOCKED`)
 		if err != nil {
 			return err

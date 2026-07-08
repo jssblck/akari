@@ -306,12 +306,34 @@ func rebuildTx(ctx context.Context, tx pgx.Tx, sessionID int64, epoch int, byteL
 		return err
 	}
 
+	// Decide now whether the session is gradeable (settled past the idle window,
+	// or declared terminal), so the final signals_stale value rides the single
+	// sessions UPDATE below. The transaction holds the row FOR UPDATE, so
+	// terminal cannot move under it, and $2 is the ended_at that same UPDATE is
+	// about to store; both evaluate against the transaction's now(), so this is
+	// exactly the predicate gatherSignalFacts reads back as idleLongEnough. The
+	// sessions row must be written ONCE per rebuild transaction: a second write
+	// re-fires the parent_session_id FK check even with the column unchanged
+	// (Postgres re-checks a row's foreign keys when its prior version was written
+	// by the same transaction), taking FOR KEY SHARE on the parent session's row
+	// while this transaction holds shared blob_pins rows, which deadlocks against
+	// a concurrent rebuild of the parent (see gradeSignalsTx and
+	// TestConcurrentRebuildDeadlockStress).
+	var gradeable bool
+	if err := tx.QueryRow(ctx,
+		`SELECT s.terminal OR ($2::timestamptz IS NOT NULL
+		                       AND $2::timestamptz < now() - make_interval(mins => $3))
+		   FROM sessions s WHERE s.id = $1`,
+		sessionID, nullTime(d.Ended), abandonedIdleMinutes).Scan(&gradeable); err != nil {
+		return fmt.Errorf("check gradeability for session %d: %w", sessionID, err)
+	}
+
 	// The rollups are set absolutely from the folded rows, never incremented, so
 	// they equal the ledger by construction (sessions.total_* == sum over
-	// usage_events, message_count == count of messages rows). signals_stale is
-	// set here and re-settled by refreshSignalsTx below: it stays true for a
-	// still-live session (whose outcome is not yet stable) and clears for a
-	// settled or terminal one.
+	// usage_events, message_count == count of messages rows). signals_stale lands
+	// at its final value here: true for a still-live session (whose outcome is
+	// not yet stable, so the settle tick re-grades it later), false for a settled
+	// or terminal one, whose fresh grade commits below in this same transaction.
 	userMessages := 0
 	for _, m := range d.Messages {
 		if m.Role == roleUser {
@@ -334,13 +356,13 @@ func rebuildTx(ctx context.Context, tx pgx.Tx, sessionID int64, epoch int, byteL
 		   started_at = $13,
 		   ended_at = $14,
 		   updated_at = now(),
-		   signals_stale = true
+		   signals_stale = $15
 		 WHERE id = $1`,
 		sessionID, len(d.Messages), userMessages, fallbackCount,
 		roll.input, roll.output, roll.cacheWrite, roll.cacheRead,
 		roll.costUSD, roll.costIncomplete,
 		roll.cacheSavingsUSD, roll.cacheSavingsIncomplete,
-		nullTime(d.Started), nullTime(d.Ended)); err != nil {
+		nullTime(d.Started), nullTime(d.Ended), !gradeable); err != nil {
 		return fmt.Errorf("update aggregates for session %d: %w", sessionID, err)
 	}
 
@@ -359,20 +381,13 @@ func rebuildTx(ctx context.Context, tx pgx.Tx, sessionID int64, epoch int, byteL
 	}
 
 	// The projection is fully rebuilt; recompute the session's signals from it in
-	// this same transaction when the session is gradeable (settled past the idle
-	// window, or declared terminal), so the grade commits atomically with the
-	// projection it summarizes. A still-live session instead has its now-stale
-	// signals row dropped and stays flagged signals_stale: its outcome is
-	// time-dependent (abandoned versus unknown turns on the idle gap), so storing
-	// a verdict now would bake in a value that drifts, and the settle tick grades
-	// it once it crosses the threshold.
-	var gradeable bool
-	if err := tx.QueryRow(ctx,
-		`SELECT s.terminal OR (s.ended_at IS NOT NULL AND s.ended_at < now() - make_interval(mins => $2))
-		   FROM sessions s WHERE s.id = $1`,
-		sessionID, abandonedIdleMinutes).Scan(&gradeable); err != nil {
-		return fmt.Errorf("check gradeability for session %d: %w", sessionID, err)
-	}
+	// this same transaction when the session is gradeable, so the grade commits
+	// atomically with the projection it summarizes (the aggregates UPDATE above
+	// already cleared signals_stale for this case). A still-live session instead
+	// has its now-stale signals row dropped and stays flagged signals_stale: its
+	// outcome is time-dependent (abandoned versus unknown turns on the idle gap),
+	// so storing a verdict now would bake in a value that drifts, and the settle
+	// tick grades it once it crosses the threshold.
 	if !gradeable {
 		if _, err := tx.Exec(ctx,
 			`DELETE FROM session_signals WHERE session_id = $1`, sessionID); err != nil {
@@ -380,7 +395,20 @@ func rebuildTx(ctx context.Context, tx pgx.Tx, sessionID int64, epoch int, byteL
 		}
 		return nil
 	}
-	return refreshSignalsTx(ctx, tx, sessionID)
+	idle, err := gradeSignalsTx(ctx, tx, sessionID)
+	if err != nil {
+		return err
+	}
+	// The grade's own idle read must agree with the gradeability decided before
+	// the aggregates UPDATE: both evaluate terminal OR ended_at-past-the-window
+	// on the same row values under the same transaction clock. A mismatch means
+	// one predicate was edited without the other and the stored signals_stale no
+	// longer matches the grade, so fail the rebuild rather than commit a flag
+	// that would strand the session graded-but-stale (or stale-but-current).
+	if !idle {
+		return fmt.Errorf("session %d graded as gradeable but its facts read still-live; gradeability and idleLongEnough have diverged", sessionID)
+	}
+	return nil
 }
 
 // writeMessages derives each user turn's prompt facts and duplicate verdict over

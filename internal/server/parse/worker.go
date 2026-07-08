@@ -314,6 +314,9 @@ func (w *Worker) rebuildBatch(ctx context.Context, batch []store.DueSession) bat
 			if err != nil && ctx.Err() == nil && !isParserError(err) {
 				// Operational failure: park the retry so a persistent one (a CAS
 				// blob that never arrives) is not re-attempted on every chunk wake.
+				// A deadlock abort (40P01) lands here too by design: the rebuild
+				// rolled back whole, the session is still due, and the deferred
+				// retry succeeds once the conflicting transaction has finished.
 				// The park is also what lets the due scan run without a cursor, so
 				// its failure is fatal to the drain (handled below), not ignored.
 				parkErr = w.st.RecordRebuildBackoff(ctx, t.ID)

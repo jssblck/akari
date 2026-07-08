@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/storetest"
@@ -63,6 +64,78 @@ func TestPutBlobPinsAgainstSweep(t *testing.T) {
 	}
 	if _, err := st.BlobMeta(ctx, sha); err == nil {
 		t.Fatal("expired, unreferenced blob should be gone after sweep")
+	}
+}
+
+// TestSweepKeepsBlobWhoseExpiredPinIsMidRefresh guards the loss window the
+// SKIP LOCKED reap opened: a pin sitting in the expired band that a refresher is
+// extending right now must still protect its blob. The refresher's upsert takes the
+// ON CONFLICT DO UPDATE path, which touches only expires_at (not the FK column), so
+// it locks the pin row but takes no FOR KEY SHARE on the blobs row. The reap skips
+// the locked pin, so if the orphan step trusts the committed (still-expired)
+// expires_at it will classify the blob as unpinned and cascade it (and the pin the
+// refresher is about to commit) away. Any pin row that survives the reap is either
+// live or mid-refresh; both must keep the blob.
+func TestSweepKeepsBlobWhoseExpiredPinIsMidRefresh(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	body := []byte("a body whose pin is being refreshed as the sweep runs")
+	sha := store.HashBytes(body)
+	if err := st.PutBlob(ctx, sha, "text/plain", "application/octet-stream", bytes.NewReader(body)); err != nil {
+		t.Fatalf("put blob: %v", err)
+	}
+	// Drive the pin into the expired band the reap targets.
+	if _, err := st.Pool.Exec(ctx, "UPDATE blob_pins SET expires_at = now() - interval '1 hour'"); err != nil {
+		t.Fatal(err)
+	}
+
+	// A refresher extends the expired pin but has not committed. It holds the pin
+	// row's write lock; because only expires_at changes, it holds no lock on the
+	// blobs row, so nothing stops the sweep from reaching that blob.
+	tx, err := st.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO blob_pins (sha256, expires_at) VALUES ($1, now() + interval '1 hour')
+		 ON CONFLICT (sha256) DO UPDATE SET expires_at = EXCLUDED.expires_at`, sha); err != nil {
+		t.Fatalf("refresh pin: %v", err)
+	}
+
+	// Sweep while the refresh is in flight. With any surviving pin treated as
+	// protective the sweep leaves the blob alone and returns promptly; the buggy
+	// predicate read the committed expired expires_at, picked the blob as an orphan,
+	// and blocked on the refresher's lock to cascade it away.
+	type sweepResult struct {
+		removed int
+		err     error
+	}
+	done := make(chan sweepResult, 1)
+	go func() {
+		removed, err := st.SweepBlobs(ctx)
+		done <- sweepResult{removed, err}
+	}()
+
+	select {
+	case res := <-done:
+		if res.err != nil {
+			t.Fatalf("sweep: %v", res.err)
+		}
+		if res.removed != 0 {
+			t.Fatalf("sweep removed %d blob(s) whose pin was mid-refresh, want 0", res.removed)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("sweep blocked on a mid-refresh pin: it tried to cascade away a blob a refresher was protecting")
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit pin refresh: %v", err)
+	}
+	if _, err := st.BlobMeta(ctx, sha); err != nil {
+		t.Fatalf("blob whose pin was refreshed must survive the sweep: %v", err)
 	}
 }
 
