@@ -224,15 +224,17 @@ func TestOverviewPageByUserBreakdownGatedOnMultipleUsers(t *testing.T) {
 	}
 }
 
-// The projects index heads a Repositories table: no usage panel (the Overview owns
+// The projects index heads a Repositories ledger: no usage panel (the Overview owns
 // fleet usage) and no page heading (the sidebar marks the section), but a section
 // heading per kind. With no local folders in scope the Local folders section stays
-// absent. The token columns collapse to one "Tokens" total whose figure is the sum
-// across all four classes, and the row carries a hover card breaking that total out.
+// absent. The ledger renders one row per project (no table markup), dims the remote
+// key's host segment so the owner/repo part carries the weight, and folds the token
+// classes into one total whose hover card breaks the four classes out. The folded
+// phone form's meta line rides in the same row with the compact token figure.
 func TestProjectsPageRepositoriesSection(t *testing.T) {
 	p := Page{Title: "Projects", LoggedIn: true, Active: "projects", Username: "Ada Lovelace"}
 	projects := []store.ProjectSummary{{
-		ID: 1, RemoteKey: "hopper/akari", Kind: "remote", SessionCount: 3,
+		ID: 1, RemoteKey: "github.com/hopper/akari", Kind: "remote", SessionCount: 3,
 		TotalInput: 100, TotalOutput: 50, TotalCacheRead: 30, TotalCacheWrite: 20,
 	}}
 	html := renderComponent(t, ProjectsPage(p, projects, nil, nil))
@@ -242,20 +244,35 @@ func TestProjectsPageRepositoriesSection(t *testing.T) {
 			t.Errorf("projects index should carry no usage panel or page heading; found %q", gone)
 		}
 	}
-	// The Repositories section heads the table; with no locals the Local folders
+	// The Repositories section heads the ledger; with no locals the Local folders
 	// section does not render.
 	if !strings.Contains(html, `<h2>Repositories</h2>`) {
-		t.Error("projects index should head the repositories table with a Repositories section")
+		t.Error("projects index should head the repositories ledger with a Repositories section")
 	}
 	if strings.Contains(html, `Local folders`) {
 		t.Error("with no local folders in scope, the Local folders section should not render")
 	}
-	// The merged column shows the grand total (100+50+30+20 = 200) with thousands
+	// The ledger replaces the table wholesale: no table markup, no sideways-scroll
+	// wrapper, and the whole row navigates.
+	for _, gone := range []string{`<table`, `table-scroll`} {
+		if strings.Contains(html, gone) {
+			t.Errorf("projects index should render a ledger, not a table; found %q", gone)
+		}
+	}
+	if !strings.Contains(html, `class="lrow" data-row-href="/projects/1"`) {
+		t.Error("a ledger row should carry data-row-href so the whole row is the hit target")
+	}
+	// The host segment dims inside the link and the owner/repo part follows it with
+	// no whitespace, so the name reads as one seamless key.
+	if !strings.Contains(html, `<span class="host">github.com/</span>hopper/akari</a>`) {
+		t.Error("a remote key should dim its host segment and join the owner/repo part seamlessly")
+	}
+	// The Tokens column shows the grand total (100+50+30+20 = 200) with thousands
 	// separators, plus all four classes in the hover card. Each class is asserted
 	// as its full dt/dd pair with a distinct value, so dropping a row or wiring a
 	// class to the wrong figure (for example In showing the output total) fails.
 	for _, want := range []string{
-		`<th class="num">Tokens</th>`, `class="tok-total">200<`,
+		`<span class="rr">Tokens</span>`, `class="tok-total">200<`,
 		`<dt>In</dt><dd>100</dd>`, `<dt>Out</dt><dd>50</dd>`,
 		`<dt>Cache read</dt><dd>30</dd>`, `<dt>Cache write</dt><dd>20</dd>`,
 	} {
@@ -263,15 +280,21 @@ func TestProjectsPageRepositoriesSection(t *testing.T) {
 			t.Errorf("projects tokens cell missing %q", want)
 		}
 	}
-	if strings.Contains(html, `<th class="num">Input</th>`) {
+	// The folded meta line carries the session count and the compact token figure
+	// so the phone form loses nothing the columns held.
+	if !strings.Contains(html, `3 sessions`) {
+		t.Error("the folded meta line should carry the session count")
+	}
+	if strings.Contains(html, `<span class="rr">Input</span>`) {
 		t.Error("projects index should fold Input/Output/Cost into one Tokens column, not list Input")
 	}
 }
 
 // With local folders in scope the index renders a second section below Repositories: a
-// Local folders table whose rows link by the full working-directory path recovered from
-// the synthetic key, carry the host in a Machine column and the state chip in its own
-// State column, and link to the same project page.
+// Local folders ledger whose rows link by the full working-directory path recovered
+// from the synthetic key (parent directories dimmed, the folder name at full weight),
+// carry the state chip and machine in a sub-line under the path, and link to the same
+// project page.
 func TestProjectsPageLocalFoldersSection(t *testing.T) {
 	p := Page{Title: "Projects", LoggedIn: true, Active: "projects", Username: "Ada Lovelace"}
 	remotes := []store.ProjectSummary{{ID: 1, RemoteKey: "hopper/akari", Kind: "remote", SessionCount: 3}}
@@ -284,23 +307,26 @@ func TestProjectsPageLocalFoldersSection(t *testing.T) {
 	for _, want := range []string{
 		`<h2>Repositories</h2>`,
 		`<h2>Local folders</h2>`,
-		`<th class="col-machine">Machine</th>`,      // the host rides its own column (folded away on phones)
-		`<th class="col-state">State</th>`,          // the state chip rides its own column (folded away on phones)
-		`>/home/grace/scratch</a>`,                  // the folder links by full path, not the synthetic key
-		`class="tag standalone"`,                    // the state chip renders in the State column
-		`<td class="muted col-machine">laptop</td>`, // the host fills the Machine column
+		// The folder links by full path (not the synthetic key), with the parent
+		// directories dimmed and the folder name joined seamlessly.
+		`<span class="host">/home/grace/</span>scratch</a>`,
+		`title="/home/grace/scratch"`, // the full path stays readable on hover
+		`class="tag standalone"`,      // the state chip rides the sub-line under the path
+		`class="lsub"`,                // ... alongside the machine
+		`<span>laptop</span>`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("local folders section missing %q", want)
 		}
 	}
 	// The synthetic key never shows as a row label.
-	if strings.Contains(html, `>local:laptop:/home/grace/scratch</a>`) {
+	if strings.Contains(html, `local:laptop:`) {
 		t.Error("a local folder should link by full path, not its synthetic local: key")
 	}
-	// The folder no longer leads with its basename; the full path is the link text.
-	if strings.Contains(html, `>scratch</a>`) {
-		t.Error("a local folder should link by full path, not its basename")
+	// A remote key with no host segment (owner/repo only) renders at full weight,
+	// with nothing dimmed.
+	if !strings.Contains(html, `>hopper/akari</a>`) {
+		t.Error("a two-segment remote key has no host to dim and should render whole")
 	}
 }
 
