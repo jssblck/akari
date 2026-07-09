@@ -1,18 +1,29 @@
 name: bastion
 
 # Agentic code review on every pull request. Reviewers live in .bastion.yaml
-# and run through the Codex CLI, billing against the PR
-# author's Codex subscription (restored from a per-author secret below). This is
-# the same set of reviewers contributors run locally with `bastion review`.
+# and run through the Codex CLI, billing against the PR author's Codex
+# subscription (restored from a per-author secret below). This is the same set
+# of reviewers contributors run locally with `bastion review`.
+#
+# The jssblck/bastion action owns the review: it installs the engine, fetches
+# the attestation notes ref (a signed local green replays instead of
+# re-executing, since .bastion.yaml sets `attestations: true`), restores the
+# branch's prior run so an unchanged reviewer carries its pass instead of
+# re-running, reviews with the PR's description and discussion as context,
+# uploads the run artifact, posts the report, and only then fails on a block,
+# so the comment and check runs land either way.
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
 
+# `actions: read` lets the action restore the branch's prior run artifact for
+# incremental carry.
 permissions:
   contents: read
   pull-requests: write
   checks: write
+  actions: read
 
 jobs:
   review:
@@ -25,9 +36,6 @@ jobs:
     if: github.event.pull_request.head.repo.full_name == github.repository
 
     env:
-      # Keep run storage inside the workspace so the report step finds the run
-      # the review step just produced.
-      BASTION_DATA_DIR: ${{ github.workspace }}/.bastion
       # An optional GitHub App gives the PR comment a bot identity instead of the
       # default Actions token. Leave the secrets unset to fall back to GITHUB_TOKEN.
       HAS_BASTION_APP: ${{ secrets.BASTION_APP_ID != '' && secrets.BASTION_APP_PRIVATE_KEY != '' }}
@@ -43,14 +51,10 @@ jobs:
           # Reviewers diff against the base branch, so the full history must be
           # present for `origin/<base>` to resolve.
           fetch-depth: 0
-
-      - name: Install the Bastion CLI
-        run: |
-          set -euo pipefail
-          curl -sSfL https://raw.githubusercontent.com/jssblck/bastion/main/scripts/install.sh \
-            | bash -s -- --bin-dir "$HOME/.local/bin"
-          # The installer does not modify PATH; expose its bin dir to later steps.
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          # The PR head, not the synthetic merge commit: attestation replay
+          # binds to the head tree the author attested, which a merge commit
+          # never matches.
+          ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Install the Codex CLI
         # Bastion shells out to `codex`, so the runner needs it on PATH. Pinned
@@ -86,29 +90,19 @@ jobs:
           printf '%s' "$cred" > "$HOME/.codex/auth.json"
           chmod 600 "$HOME/.codex/auth.json"
 
-      - name: Review
-        run: bastion review --base "origin/${{ github.base_ref }}"
-
       - id: app-token
         name: Mint a GitHub App token (optional)
-        if: ${{ always() && env.HAS_BASTION_APP == 'true' }}
+        if: ${{ env.HAS_BASTION_APP == 'true' }}
         uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.BASTION_APP_ID }}
           private-key: ${{ secrets.BASTION_APP_PRIVATE_KEY }}
 
-      - name: Report to the PR
-        # Always report, even when a gate blocked, so the PR shows the verdict and
-        # per-reviewer check runs (including the aggregate `bastion` check).
-        if: always()
-        env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
-        run: |
-          set -euo pipefail
-          bastion github report \
-            --repo "${{ github.repository }}" \
-            --pr "${{ github.event.pull_request.number }}" \
-            --sha "${{ github.event.pull_request.head.sha }}"
+      - name: Review and report
+        uses: jssblck/bastion@v0
+        with:
+          # Empty when the app is not configured, which falls back to the job token.
+          report-token: ${{ steps.app-token.outputs.token }}
 
       - name: Install the akari client
         # Pull the published client so this CI review's Codex sessions can be
