@@ -9,28 +9,34 @@
 # bills against a Codex subscription: yours when you run it locally, and the PR
 # author's when it runs in CI (the workflow restores their credential first).
 #
-# This set was deliberately consolidated from nine reviewers to four after a
-# review-churn audit (July 2026). Each reviewer run costs roughly a million
-# input tokens regardless of what it finds, and bastion re-runs every triggered
-# reviewer after every fix, so the bill is reviewers x passes. The audit found
-# that five of the nine reviewers had never produced a blocking finding, that
-# two (opengraph-cards and projection-consistency) repeatedly blocked on the
-# same finding twice per pass, and that most blocks were edge-state or
-# formatting nits rather than reachable defects. The consolidation keeps every
-# concern that ever caught a real bug and merges overlapping lanes:
-#   - go-correctness merges the old concurrency gate with the load-bearing part
-#     of error-handling (dropped errors, panics, hangs). Error wrapping style is
-#     a note, never a block.
-#   - projection-consistency absorbs token-consistency and opengraph-cards:
-#     both were instances of its general rule (two representations of one fact
-#     must reconcile), and splitting them meant one drift blocked twice.
-#   - hot-path-efficiency merges incremental-efficiency and streaming-memory,
-#     which shared triggers and referenced each other's scope.
-#   - auth-safety is unchanged: it triggers on one small package and almost
-#     never runs, so it costs nothing to keep.
-# test-coverage was removed: as an advisor it re-listed 10 to 28 optional
-# findings on every pass at 10k+ output tokens a run and never gated anything.
-# Coverage judgment belongs to the author and `make test`.
+# This set has been consolidated twice, both times off an audit of the review
+# history. Each reviewer run costs roughly a million input tokens regardless of
+# what it finds, and bastion re-runs every triggered reviewer after every fix,
+# so the bill is reviewers x passes.
+#
+# July 2026, nine to four (PR #96): five reviewers had never produced a
+# blocking finding, two blocked twice per pass on the same drift, and most
+# blocks were edge-state nits. The merges: concurrency plus the load-bearing
+# part of error-handling became go-correctness (error wrapping style is a
+# note, never a block); token-consistency and opengraph-cards folded into
+# projection-consistency, whose general rule (two representations of one fact
+# must reconcile) they both instantiated; incremental-efficiency and
+# streaming-memory became hot-path-efficiency. test-coverage was removed: as
+# an advisor it re-listed 10 to 28 optional findings on every pass and never
+# gated anything.
+#
+# July 2026 again, four to three: hot-path-efficiency was cut for budget. Its
+# blocking record was real but concentrated: eight of its ten genuine blocks
+# landed in the two big architecture rewrites (PRs #104 and #106), its
+# findings were performance degradations rather than corruption or data loss,
+# and on an ordinary PR it billed its million input tokens to find nothing.
+# The two survivors kept catching severe, unique defects right up to the
+# audit: go-correctness a pool deadlock, a blob-deleting sweep race, and a
+# rolling-deploy projection downgrade; projection-consistency drift on more
+# than half of all PRs, including rollups left stale on reset. For the next
+# parse/store rewrite, restore hot-path-efficiency for that branch from this
+# file's git history. auth-safety triggers on one small package and almost
+# never runs, so it costs nothing to keep.
 #
 # Gate reviewers carry a shared "severity bar": a block halts the author, so it
 # is spent only on a defect the change actually introduces or worsens, that is
@@ -45,6 +51,13 @@
 # Changing this file changes review policy, so CODEOWNERS protects it (see
 # .github/CODEOWNERS) and branch protection requires the aggregate `bastion`
 # check before merge.
+
+# CI replays a signed local green instead of re-executing it, so a changeset's
+# review is paid for once instead of twice. After the final commit and a green
+# `bastion review`, run `bastion attest` and push refs/notes/bastion before
+# opening the PR; the using-bastion skill covers the exact steps. An
+# un-attested PR still reviews the ordinary way.
+attestations: true
 
 reviewers:
   - name: go-correctness
@@ -182,82 +195,6 @@ reviewers:
       broken maintain path), and give the fix: read the canonical source,
       thread every field through the fold, or add the pinning test. If the
       change keeps its projections consistent, pass.
-
-  - name: hot-path-efficiency
-    trigger:
-      - internal/parser/**/*.go
-      - internal/server/parse/**/*.go
-      - internal/server/store/**/*.go
-      - internal/server/httpapi/ingest.go
-      - internal/client/upload/**/*.go
-    mode: gate
-    backend: codex
-    prompt: |
-      Review one concern only: the cost model of the ingest and parse path.
-      akari's architecture is an append-only source of truth (raw JSONL bytes
-      plus the CAS) with disposable derived state refolded from it: when a
-      unit's inputs change, the server recomputes that whole unit from its
-      source and swaps it atomically. Judge efficiency against that model, not
-      against an incremental-update ideal. A whole-unit recompute of a bounded
-      unit is the intended shape (it buys determinism and a single write
-      path); recomputing is not itself a finding. What this gate exists to
-      catch is cost that outgrows its unit: work or memory that scales with
-      the corpus, with total history, or with something that has no real
-      bound.
-
-      Block when changed code on a per-chunk, per-append, per-request, or
-      per-recompute path does any of these:
-        - Scales with the corpus to serve one unit's event: a full-table or
-          unindexed scan across all sessions, a fleet-wide query, or a pass
-          over every unit to find the one that changed. Per-event lookups must
-          be keyed or indexed to the units that actually need work.
-        - Re-processes total history on the append path itself: re-hashing,
-          re-copying, or re-uploading all accumulated raw bytes per append.
-          The raw side is the unbounded side: digests resume from saved
-          state, cursors advance, appends never rewrite stored values (a blob
-          the storage layer detoasts and rewrites per append is this bug).
-        - Holds the unbounded side in memory: reading a whole raw transcript,
-          blob, or request body into one buffer when a bounded reader can
-          stream it in fixed-size pieces. One unit's folded derived rows are
-          the bounded side; holding one unit's derived state while writing it
-          is the design. Holding MANY units' derived state at once is
-          corpus-scale and blocks.
-        - Recomputes without a dirtiness trigger: reprocessing a unit whose
-          inputs did not change, or fanning N pending events into N identical
-          recomputes where a dirty flag or coalesced wake already covers them
-          with one. One recompute per dirty transition is expected; redundant
-          recomputes with no bound on the redundancy block.
-        - Is superlinear inside one pass: a nested loop whose inner pass
-          rescans a collection that grows with the outer loop, or re-sorting
-          and re-indexing per element.
-
-      Reason about cost as (number of calls) times (work per call), and name
-      the quantity each factor scales with. Work per call proportional to one
-      bounded unit, triggered once per dirty transition, is the intended
-      shape. Work per call proportional to the corpus, or triggered without
-      bound for one transition, is what you block.
-
-      Severity bar before you block. A block halts the author until they act,
-      so spend it only on cost this change introduces or materially worsens
-      AND whose growth occurs on akari's real data:
-        - Name which quantity actually grows without bound in a real
-          deployment. Sessions stay megabyte-scale: messages are small and
-          bulky tool bodies live in the CAS, so a cost bounded by one session
-          is a note at most. The corpus (sessions accumulating over history)
-          grows without bound, so corpus-scale cost on a hot path blocks.
-        - Scope to the diff; do not re-raise a cost the author or a prior PR
-          already justified. If a comment or the PR explains why a whole unit
-          must be resident or recomputed and the claim holds, pass and say so.
-        - This gate protects the server. Client-side extra work (re-reading a
-          file it holds, recomputing a digest, encoding twice to save a round
-          trip) within bounded memory is acceptable; block client code only
-          when a sync scales with total history rather than the appended
-          tail.
-
-      Cite file and line, state the growth driver and which quantity it
-      scales with, and name the fix. Do not comment on error wording, naming,
-      or style. If every changed cost is bounded by its unit and triggered by
-      real dirtiness, pass.
 
   - name: auth-safety
     trigger: [internal/server/auth/**/*.go]
