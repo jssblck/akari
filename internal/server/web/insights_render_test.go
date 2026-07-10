@@ -99,8 +99,8 @@ func sampleTrends() *store.Trends {
 		Labels:       []string{"Jun 1", "Jun 8"},
 		FleetMix: store.FleetMix{
 			Models: []store.ModelSeries{
-				{Model: "claude-sonnet-5", Share: []float64{60, 55}, First: 0},
-				{Model: "claude-opus-4-8", Share: []float64{40, 45}, First: 1},
+				{Model: "claude-sonnet-5", Share: []float64{60, 55}, First: 0, WindowShare: 57.5},
+				{Model: "claude-opus-4-8", Share: []float64{40, 45}, First: 1, WindowShare: 42.5},
 			},
 			// The store's whole-window arrival scan: opus first carries tokens in
 			// bucket 1, so it is the newest arrival (see fleetMixFrom).

@@ -193,6 +193,10 @@ func fleetMixData(fm store.FleetMix, labels []string, n int) map[string]any {
 	order := make([]string, 0, len(fm.Models))
 	colors := map[string]string{}
 	modelLabels := map[string]string{}
+	// windowShare feeds the busiest-model figure: a window-level claim ("which models
+	// did the work"), so it must not be derived from the rows, whose trailing bucket is
+	// the current partial day or week and often empty.
+	windowShare := map[string]float64{}
 	rows := make([]map[string]float64, n)
 	for i := range rows {
 		rows[i] = map[string]float64{}
@@ -207,11 +211,12 @@ func fleetMixData(fm store.FleetMix, labels []string, n int) map[string]any {
 			pi++
 		}
 		modelLabels[m.Model] = prettyModel(m.Model)
+		windowShare[m.Model] = m.WindowShare
 		for i := 0; i < n && i < len(m.Share); i++ {
 			rows[i][m.Model] = m.Share[i]
 		}
 	}
-	out := map[string]any{"order": order, "colors": colors, "labels": modelLabels, "rows": rows}
+	out := map[string]any{"order": order, "colors": colors, "labels": modelLabels, "rows": rows, "windowShare": windowShare}
 	// The arrival marker and callout come from the store's fleet-history scan
 	// (FleetMix.NewestModel: first tokens ever, landing inside this window), not from
 	// the kept bands above: a band's first in-window bucket conflates a quiet-start

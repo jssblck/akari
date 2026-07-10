@@ -38,12 +38,16 @@ func (t *Trends) HasData() bool { return t != nil && len(t.BucketStarts) > 0 }
 // ModelSeries is one model's token share across the bucket grid: Share[i] is the model's
 // percent of bucket i's total tokens, and First is the first bucket index it appears in
 // (so a model that arrived mid-window draws a line only from its arrival, not a flat zero
-// run before it existed). Models are ordered by total tokens descending, with an "other"
+// run before it existed). WindowShare is the model's percent of the whole window's tokens,
+// the figure-level answer to "which model did the work": a headline must not read the
+// trailing bucket, which is the current partial day or week and often empty, naming an
+// arbitrary model at 0%. Models are ordered by total tokens descending, with an "other"
 // fold of the long tail last.
 type ModelSeries struct {
-	Model string
-	Share []float64
-	First int
+	Model       string
+	Share       []float64
+	First       int
+	WindowShare float64
 }
 
 // FleetMix is the per-bucket token share by model, the stacked-area read of a model
@@ -429,10 +433,18 @@ func (s *Store) fleetMixFrom(ctx context.Context, q querier, f AnalyticsFilter, 
 	if err := frows.Err(); err != nil {
 		return FleetMix{}, fmt.Errorf("iterate fleet mix arrivals: %w", err)
 	}
+	// windowTotal is nonzero here: the empty-corpus return above already handled the
+	// case where no (bucket, model) row carried positive tokens.
+	var windowTotal int64
+	for _, t := range bucketTotal {
+		windowTotal += t
+	}
 	build := func(name string, toks []int64) ModelSeries {
 		share := make([]float64, g.n())
 		first := -1
+		var total int64
 		for i := range toks {
+			total += toks[i]
 			if bucketTotal[i] > 0 {
 				share[i] = float64(toks[i]) / float64(bucketTotal[i]) * 100
 			}
@@ -440,7 +452,10 @@ func (s *Store) fleetMixFrom(ctx context.Context, q querier, f AnalyticsFilter, 
 				first = i
 			}
 		}
-		return ModelSeries{Model: name, Share: share, First: first}
+		return ModelSeries{
+			Model: name, Share: share, First: first,
+			WindowShare: float64(total) / float64(windowTotal) * 100,
+		}
 	}
 	for _, m := range kept {
 		out.Models = append(out.Models, build(m, tokens[m]))
