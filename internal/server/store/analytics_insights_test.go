@@ -934,4 +934,16 @@ func TestInsightsRangesAgreeAcrossWindows(t *testing.T) {
 	if got := short.Trends.FleetMix.NewestModel; got != "newcomer" {
 		t.Errorf("7d NewestModel = %q, want newcomer", got)
 	}
+
+	// Whole-window token shares, which the busiest-model figure reads: the incumbent
+	// carried 2200 of the year window's 3300 tokens across its two sessions, and the
+	// ranking puts it first. A share read off the trailing bucket instead would be 0 for
+	// both on any day without usage.
+	models := long.Trends.FleetMix.Models
+	if len(models) != 2 || models[0].Model != "incumbent" || models[1].Model != "newcomer" {
+		t.Fatalf("year fleet mix models = %+v, want [incumbent newcomer]", models)
+	}
+	if math.Abs(models[0].WindowShare-200.0/3) > 0.01 || math.Abs(models[1].WindowShare-100.0/3) > 0.01 {
+		t.Errorf("year WindowShare = %.2f/%.2f, want 66.67/33.33", models[0].WindowShare, models[1].WindowShare)
+	}
 }

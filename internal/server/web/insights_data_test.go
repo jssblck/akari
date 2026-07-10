@@ -17,12 +17,13 @@ type akData struct {
 	BucketLabels []string `json:"bucketLabels"`
 
 	FleetMix struct {
-		Order              []string          `json:"order"`
-		Colors             map[string]string `json:"colors"`
-		Labels             map[string]string `json:"labels"`
-		ArrivalWeek        *int              `json:"arrivalWeek"`
-		NewestArrivalLabel string            `json:"newestArrivalLabel"`
-		NewestArrivalDate  string            `json:"newestArrivalDate"`
+		Order              []string           `json:"order"`
+		Colors             map[string]string  `json:"colors"`
+		Labels             map[string]string  `json:"labels"`
+		WindowShare        map[string]float64 `json:"windowShare"`
+		ArrivalWeek        *int               `json:"arrivalWeek"`
+		NewestArrivalLabel string             `json:"newestArrivalLabel"`
+		NewestArrivalDate  string             `json:"newestArrivalDate"`
 	} `json:"fleetMix"`
 
 	SessionGallery struct {
@@ -158,6 +159,11 @@ func TestInsightsDataMapping(t *testing.T) {
 	}
 	if d.FleetMix.Labels["claude-opus-4-8"] != "opus-4-8" {
 		t.Errorf("fleetMix.labels[opus] = %q, want opus-4-8 (prettified)", d.FleetMix.Labels["claude-opus-4-8"])
+	}
+	// The whole-window shares ride along per model: the busiest-model figure reads these,
+	// not the trailing (partial, often empty) bucket's row.
+	if d.FleetMix.WindowShare["claude-sonnet-5"] != 57.5 || d.FleetMix.WindowShare["claude-opus-4-8"] != 42.5 {
+		t.Errorf("fleetMix.windowShare = %v, want sonnet 57.5 / opus 42.5", d.FleetMix.WindowShare)
 	}
 	if d.FleetMix.ArrivalWeek == nil || *d.FleetMix.ArrivalWeek != 1 {
 		t.Errorf("fleetMix.arrivalWeek = %v, want 1", d.FleetMix.ArrivalWeek)

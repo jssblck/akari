@@ -302,12 +302,19 @@
     if (!el) return;
     el.innerHTML = '';
     const M = D.fleetMix;
-    const last = M.rows[D.nBuckets - 1];
-    const busiest = M.order.reduce((a, b) => (last[b] > last[a] ? b : a));
     const figs = [
       { v: String(M.order.length), k: 'models in window' },
-      { v: M.labels[busiest], k: 'busiest model · ' + last[busiest].toFixed(0) + '% share' },
     ];
+    // The busiest-model figure is a window-level claim (the caption asks which models
+    // did the work), so it reads the server's whole-window token share, not the
+    // trailing bucket, which is the current partial day or week and often empty. The
+    // "other" fold is excluded: it is a tail of models, not a model.
+    const share = M.windowShare || {};
+    const models = M.order.filter((key) => key !== 'other');
+    if (models.length) {
+      const busiest = models.reduce((a, b) => ((share[b] || 0) > (share[a] || 0) ? b : a));
+      figs.push({ v: M.labels[busiest], k: 'busiest model · ' + (share[busiest] || 0).toFixed(0) + '% of window tokens' });
+    }
     if (M.newestArrivalLabel) {
       figs.push({ v: M.newestArrivalLabel, k: 'newest arrival' + (M.newestArrivalDate ? ' · first seen ' + M.newestArrivalDate : '') });
     }
