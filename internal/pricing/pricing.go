@@ -113,7 +113,32 @@ var table = map[string][]DatedRate{
 	"claude-haiku-4-5": flat(Rate{Input: 1, Output: 5, CacheWrite: 1.25, CacheRead: 0.10}),
 	"claude-3-5-haiku": flat(Rate{Input: 0.80, Output: 4, CacheWrite: 1, CacheRead: 0.08}),
 
-	// OpenAI GPT-5 family, current generation (June 2026).
+	// OpenAI GPT-5 family, current generation (July 2026).
+	//
+	// GPT-5.6 is a three-tier family: sol is the flagship, terra the mini-class
+	// balance tier, luna the nano-class throughput tier (Codex's models.json and the
+	// docs' latest-model map). Sol reprises gpt-5.5's $5/$30 sticker and terra
+	// reprises gpt-5.4's $2.50/$15; luna is new at $1/$6. Output is a flat 6x input
+	// across all three. "gpt-5.6" is the documented default alias that routes to sol,
+	// so it is priced at sol's rate (a real billable ID, not a prefix catch-all).
+	// There is no gpt-5.6-pro slug: GPT-5.6 Pro is a Responses reasoning mode on the
+	// base model, so nothing new to price.
+	//
+	// GPT-5.6 is the first OpenAI family to BILL cache writes (creation tokens at
+	// 1.25x input; the $6.25/$3.125/$1.25 column on the pricing page), a real break
+	// from the free-write convention every older OpenAI model follows (see below).
+	// CacheWrite still stays zero here, but for a different reason than the older
+	// models: not because writes are free, but because Codex does not yet persist the
+	// write count. Its rollout carries only input_tokens and cached_input_tokens, so
+	// akari has no cache-write volume to multiply. Setting a nonzero rate now would be
+	// inert (times zero) and would misrepresent the table as complete. This under-bills
+	// the write premium (0.25x input on written tokens only, always an undercount) until
+	// Codex emits the count and the parser reads it. Tracked in issue #126, which also
+	// records the input = total - cached - cacheWrite subtraction the parser fix needs.
+	"gpt-5.6":       flat(Rate{Input: 5, Output: 30, CacheRead: 0.50}),
+	"gpt-5.6-sol":   flat(Rate{Input: 5, Output: 30, CacheRead: 0.50}),
+	"gpt-5.6-terra": flat(Rate{Input: 2.50, Output: 15, CacheRead: 0.25}),
+	"gpt-5.6-luna":  flat(Rate{Input: 1, Output: 6, CacheRead: 0.10}),
 	//
 	// CacheWrite is deliberately left unset (zero) for every OpenAI model, and that
 	// is not a missing rate: OpenAI does not bill cache creation as its own line.
