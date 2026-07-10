@@ -124,10 +124,17 @@ var table = map[string][]DatedRate{
 	// There is no gpt-5.6-pro slug: GPT-5.6 Pro is a Responses reasoning mode on the
 	// base model, so nothing new to price.
 	//
-	// The pricing page also lists a cache-write/priority column at 1.25x input; it is
-	// deliberately not carried here for the same reason CacheWrite is unset on every
-	// OpenAI model (see below): the Codex parser reports cache-creation tokens as
-	// ordinary input and never emits a separate cache-write count.
+	// GPT-5.6 is the first OpenAI family to BILL cache writes (creation tokens at
+	// 1.25x input; the $6.25/$3.125/$1.25 column on the pricing page), a real break
+	// from the free-write convention every older OpenAI model follows (see below).
+	// CacheWrite still stays zero here, but for a different reason than the older
+	// models: not because writes are free, but because Codex does not yet persist the
+	// write count. Its rollout carries only input_tokens and cached_input_tokens, so
+	// akari has no cache-write volume to multiply. Setting a nonzero rate now would be
+	// inert (times zero) and would misrepresent the table as complete. This under-bills
+	// the write premium (0.25x input on written tokens only, always an undercount) until
+	// Codex emits the count and the parser reads it. Tracked in issue #126, which also
+	// records the input = total - cached - cacheWrite subtraction the parser fix needs.
 	"gpt-5.6":       flat(Rate{Input: 5, Output: 30, CacheRead: 0.50}),
 	"gpt-5.6-sol":   flat(Rate{Input: 5, Output: 30, CacheRead: 0.50}),
 	"gpt-5.6-terra": flat(Rate{Input: 2.50, Output: 15, CacheRead: 0.25}),
