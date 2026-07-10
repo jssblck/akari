@@ -67,7 +67,12 @@ func TestCanonicalBodyReaderResultStrings(t *testing.T) {
 		{"plain", `"export function login() {}"`},
 		{"escapes", `"line1\nline2 \"q\" \\ end"`},
 		{"unicode", `"café"`},
-		{"astral", `"😀 end"`}, // a surrogate pair (emoji) to exercise 4-byte UTF-8
+		{"astral", `"😀 end"`},
+		{"escaped unicode", `"\u263a"`},
+		{"escaped astral pair", `"\ud83d\ude00"`},
+		{"trailing unpaired high surrogate", `"\ud800"`},
+		{"unpaired high surrogate before text", `"\ud800x"`},
+		{"unpaired low surrogate", `"\udc00"`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

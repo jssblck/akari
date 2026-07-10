@@ -122,6 +122,16 @@ func TestJSONSpanParity(t *testing.T) {
 			path: []Step{Key("message"), Key("content"), Idx(0), Key("content")},
 		},
 		{
+			name: "escaped unicode object key",
+			line: `{"caf\u00e9":{"value":1}}`,
+			path: []Step{Key("café"), Key("value")},
+		},
+		{
+			name: "escaped astral object key",
+			line: `{"\ud83d\ude00":{"value":1}}`,
+			path: []Step{Key("😀"), Key("value")},
+		},
+		{
 			name: "number scalar value",
 			line: `{"a":{"b":42},"c":7}`,
 			path: []Step{Key("a"), Key("b")},

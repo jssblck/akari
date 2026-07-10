@@ -130,7 +130,7 @@ type PromptFacts struct {
 // beside the row; the per-turn rules it applies are the same ones the Insights hygiene panel reads.
 func ClassifyPrompt(prompt string) PromptFacts {
 	return PromptFacts{
-		Short:         countWordsUpTo(prompt, shortPromptWords) < shortPromptWords,
+		Short:         countWordsUpTo(prompt, duplicateMinWords) < duplicateMinWords,
 		NoCodeContext: changeVerbRe.MatchString(prompt) && !hasCodeAnchor(prompt),
 		BareGreeting:  isBareGreeting(prompt),
 		Digest:        normalizedDigest(prompt),

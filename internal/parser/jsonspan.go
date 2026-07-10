@@ -2,6 +2,7 @@ package parser
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 )
@@ -914,51 +915,19 @@ func decodeKey(raw []byte) string {
 	if !hasEsc {
 		return string(body)
 	}
-	out := make([]byte, 0, len(body))
-	for i := 0; i < len(body); i++ {
-		c := body[i]
-		if c != '\\' {
-			out = append(out, c)
-			continue
-		}
-		i++
-		if i >= len(body) {
-			break
-		}
-		switch body[i] {
-		case '"':
-			out = append(out, '"')
-		case '\\':
-			out = append(out, '\\')
-		case '/':
-			out = append(out, '/')
-		case 'b':
-			out = append(out, '\b')
-		case 'f':
-			out = append(out, '\f')
-		case 'n':
-			out = append(out, '\n')
-		case 'r':
-			out = append(out, '\r')
-		case 't':
-			out = append(out, '\t')
-		case 'u':
-			r := decodeHex4(body[i+1:])
-			i += 4
-			out = appendRune4(out, r)
-		default:
-			out = append(out, body[i])
-		}
+	var key string
+	if err := json.Unmarshal(raw, &key); err != nil {
+		return ""
 	}
-	return string(out)
+	return key
 }
 
 // decodeHex4 reads up to four hex digits and returns the code point. Malformed
-// input (assumed not to occur for well-formed keys) yields the replacement
-// character.
+// input (assumed not to occur for well-formed JSON strings) yields the
+// replacement character.
 func decodeHex4(b []byte) rune {
 	if len(b) < 4 {
-		return '�'
+		return '\uFFFD'
 	}
 	var r rune
 	for i := 0; i < 4; i++ {
@@ -972,7 +941,7 @@ func decodeHex4(b []byte) rune {
 		case c >= 'A' && c <= 'F':
 			v = rune(c-'A') + 10
 		default:
-			return '�'
+			return '\uFFFD'
 		}
 		r = r<<4 | v
 	}
