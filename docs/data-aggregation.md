@@ -9,9 +9,8 @@ by an order of magnitude).
 
 This is the token/cost instance of a general pattern: any maintained projection of
 the same underlying data (a denormalized rollup, a counter, a facet, a cache, a
-running hash) can drift from its source unless something forces it equal. The
-`projection-consistency` bastion reviewer enforces the general rule across the
-codebase; this document is the worked example, the one cluster written out in full.
+running hash) can drift from its source unless something forces it equal. This
+document is the worked example, the one cluster written out in full.
 
 The rule the codebase follows now:
 
@@ -138,4 +137,4 @@ If you add a surface that shows a token or cost figure:
 3. If you add a fifth token class or a new usage column, thread it through the
    rebuild fold (`store.RebuildSession`) and every aggregate query, and extend the
    invariant test. Dropping a class from one side is the regression these tests
-   and the `projection-consistency` bastion reviewer exist to catch.
+   exist to catch.

@@ -22,9 +22,6 @@ internal/server/web/*_templ.go
 .DS_Store
 *.swp
 
-# Bastion run storage (the CI workflow points BASTION_DATA_DIR here)
-/.bastion/
-
 # Local Claude Code agent worktree state. Shared agent config under .claude/
 # (such as .claude/skills/) is committed; this per-machine scratch state is not.
 /.claude/worktrees/
