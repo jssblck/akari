@@ -37,6 +37,11 @@ func (s *Server) gateParsed(next http.HandlerFunc) http.HandlerFunc {
 // to watch the status stream), so a finished rebuild brings the real page back.
 func (s *Server) gatePublicParsed(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// These URLs are capabilities the owner can revoke at any moment. Apply the
+		// policy before the fleet gate so published pages, revoked-link 404s, backend
+		// errors, and the temporary reparse stand-in can never be replayed from a
+		// browser or shared cache after publication state changes.
+		w.Header().Set("Cache-Control", "no-store")
 		st := s.worker.FleetStatus(r.Context())
 		if !st.InProgress {
 			next(w, r)

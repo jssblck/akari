@@ -180,6 +180,28 @@ func runOAuthFlow(t *testing.T, srvURL string, c *http.Client) map[string]any {
 		t.Fatalf("redirect carried no code: %s", loc.String())
 	}
 
+	// A failed binding check must not burn the code. Clients can recover from a
+	// locally misconfigured verifier by retrying the still-valid exchange.
+	resp, err = c.PostForm(srvURL+"/oauth/token", url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {code},
+		"redirect_uri":  {redirectURI},
+		"client_id":     {clientID},
+		"code_verifier": {"wrong-verifier"},
+	})
+	if err != nil {
+		t.Fatalf("invalid token exchange: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		resp.Body.Close()
+		t.Fatalf("invalid token exchange status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+	var oauthErr map[string]any
+	decodeBody(t, resp, &oauthErr)
+	if oauthErr["error"] != "invalid_grant" {
+		t.Fatalf("invalid token exchange error = %v, want invalid_grant", oauthErr["error"])
+	}
+
 	// Exchange the code for tokens.
 	resp, err = c.PostForm(srvURL+"/oauth/token", url.Values{
 		"grant_type":    {"authorization_code"},

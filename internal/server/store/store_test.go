@@ -50,6 +50,40 @@ func TestRegisterFirstAdminThenInvite(t *testing.T) {
 	}
 }
 
+func TestCheckRegistrationInvitePreflightsWithoutConsuming(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	// Bootstrap remains open before the first account exists.
+	if err := st.CheckRegistrationInvite(ctx, ""); err != nil {
+		t.Fatalf("first-user preflight: %v", err)
+	}
+	admin, err := st.Register(ctx, "grace", "hash", "")
+	if err != nil {
+		t.Fatalf("register first user: %v", err)
+	}
+	if err := st.CheckRegistrationInvite(ctx, "missing"); !errors.Is(err, store.ErrInvalidInvite) {
+		t.Fatalf("missing invite preflight = %v, want ErrInvalidInvite", err)
+	}
+
+	inviteHash := hashHex("preflight-invite")
+	if _, err := st.CreateInvite(ctx, inviteHash, admin.ID, "for ada", nil); err != nil {
+		t.Fatalf("create invite: %v", err)
+	}
+	if err := st.CheckRegistrationInvite(ctx, inviteHash); err != nil {
+		t.Fatalf("valid invite preflight: %v", err)
+	}
+	// The preflight is read-only. Register must still be able to atomically
+	// redeem the same invite afterward.
+	if _, err := st.Register(ctx, "ada", "hash", inviteHash); err != nil {
+		t.Fatalf("register after preflight: %v", err)
+	}
+	if err := st.CheckRegistrationInvite(ctx, inviteHash); !errors.Is(err, store.ErrInvalidInvite) {
+		t.Fatalf("redeemed invite preflight = %v, want ErrInvalidInvite", err)
+	}
+}
+
 // TestListInvites covers the three statuses the account page renders: unused,
 // redeemed (joined to the redeemer's username), and expired. It seeds one of
 // each and checks ListInvites reports all three, newest first.

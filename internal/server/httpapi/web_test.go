@@ -2018,11 +2018,10 @@ func TestOGImageServesStaleCardDuringReparse(t *testing.T) {
 	}
 }
 
-// TestOGImageCacheControlHonorsTTL pins the served Cache-Control window to the
-// configured TTL: a crawler's max-age matches how long the server itself treats the
-// cached card as fresh, so repeat unfurls stay off the render path for the same span
-// rather than a hardcoded default.
-func TestOGImageCacheControlHonorsTTL(t *testing.T) {
+// TestOGImageRequiresPublicationRevalidation keeps a fetched public card from
+// remaining reusable after its owner unpublishes the corresponding page. The
+// configured TTL still applies to the server's render cache.
+func TestOGImageRequiresPublicationRevalidation(t *testing.T) {
 	t.Parallel()
 	const ttl = 15 * time.Minute
 	st := storetest.NewStore(t)
@@ -2050,8 +2049,8 @@ func TestOGImageCacheControlHonorsTTL(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("og.png = %d, want 200", resp.StatusCode)
 	}
-	if got, want := resp.Header.Get("Cache-Control"), fmt.Sprintf("public, max-age=%d", int(ttl.Seconds())); got != want {
-		t.Fatalf("Cache-Control = %q, want %q (mirrors the configured TTL)", got, want)
+	if got, want := resp.Header.Get("Cache-Control"), "no-store"; got != want {
+		t.Fatalf("Cache-Control = %q, want %q", got, want)
 	}
 }
 
@@ -2237,12 +2236,15 @@ func TestSessionsPagingParamsRobust(t *testing.T) {
 
 func TestSafeNext(t *testing.T) {
 	cases := map[string]string{
-		"":                  "/overview",
-		"/projects/1":       "/projects/1",
-		"//evil.example":    "/overview",
-		"https://evil/x":    "/overview",
-		"/sessions?q=a":     "/sessions?q=a",
-		"javascript:alert1": "/overview",
+		"":                   "/overview",
+		"/projects/1":        "/projects/1",
+		"//evil.example":     "/overview",
+		"/\\evil.example":    "/overview",
+		"/%5cevil.example":   "/overview",
+		"https://evil/x":     "/overview",
+		"/sessions?q=a":      "/sessions?q=a",
+		"javascript:alert1":  "/overview",
+		"/sessions#messages": "/sessions#messages",
 	}
 	for in, want := range cases {
 		if got := safeNext(in); got != want {

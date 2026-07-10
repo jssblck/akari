@@ -390,3 +390,20 @@ func TestFleetMixArrivalSurvivesTheFold(t *testing.T) {
 		t.Error("arrivalWeek present with no mid-window arrival")
 	}
 }
+
+func TestInsightsDataUsesEmptyArraysForSparsePanels(t *testing.T) {
+	ins := sampleInsightsWithTrends()
+	ins.Trends.FleetMix.Models = nil
+	ins.Trends.Churn.Tree = nil
+	raw, err := InsightsData(ins)
+	if err != nil {
+		t.Fatalf("InsightsData: %v", err)
+	}
+	var data akData
+	if err := json.Unmarshal([]byte(raw), &data); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if data.FleetMix.Order == nil || data.Churn == nil || data.Projects == nil {
+		t.Fatalf("sparse panels serialized null arrays: fleet=%v churn=%v projects=%v", data.FleetMix.Order, data.Churn, data.Projects)
+	}
+}

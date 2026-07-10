@@ -47,6 +47,7 @@ func (s *Server) handleAccountPage(w http.ResponseWriter, r *http.Request) {
 // set the session cookie and redirect instead of returning JSON.
 
 func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
+	setPrivateNoStore(w)
 	if p, ok := s.resolve(r); ok && p.Scope == scopeFull {
 		http.Redirect(w, r, overviewPath, http.StatusSeeOther)
 		return
@@ -56,6 +57,7 @@ func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLoginForm(w http.ResponseWriter, r *http.Request) {
+	setPrivateNoStore(w)
 	if err := r.ParseForm(); err != nil {
 		render(w, r, http.StatusBadRequest, web.LoginPage(web.Page{Title: "Log in"}, "/", "Invalid form."))
 		return
@@ -88,10 +90,12 @@ func (s *Server) handleLoginForm(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRegisterPage(w http.ResponseWriter, r *http.Request) {
+	setPrivateNoStore(w)
 	render(w, r, http.StatusOK, web.RegisterPage(web.Page{Title: "Register"}, ""))
 }
 
 func (s *Server) handleRegisterForm(w http.ResponseWriter, r *http.Request) {
+	setPrivateNoStore(w)
 	if err := r.ParseForm(); err != nil {
 		render(w, r, http.StatusBadRequest, web.RegisterPage(web.Page{Title: "Register"}, "Invalid form."))
 		return
@@ -103,14 +107,21 @@ func (s *Server) handleRegisterForm(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusBadRequest, web.RegisterPage(web.Page{Title: "Register"}, "Username and password are required."))
 		return
 	}
+	inviteHash := ""
+	if invite != "" {
+		inviteHash = auth.HashToken(invite)
+	}
+	if err := s.Store.CheckRegistrationInvite(r.Context(), inviteHash); errors.Is(err, store.ErrInvalidInvite) {
+		render(w, r, http.StatusForbidden, web.RegisterPage(web.Page{Title: "Register"}, "A valid invite token is required."))
+		return
+	} else if err != nil {
+		render(w, r, http.StatusInternalServerError, web.RegisterPage(web.Page{Title: "Register"}, "Could not create account."))
+		return
+	}
 	hash, err := auth.HashPassword(password)
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.RegisterPage(web.Page{Title: "Register"}, "Could not create account."))
 		return
-	}
-	inviteHash := ""
-	if invite != "" {
-		inviteHash = auth.HashToken(invite)
 	}
 	u, err := s.Store.Register(r.Context(), username, hash, inviteHash)
 	switch {
@@ -132,10 +143,16 @@ func (s *Server) handleRegisterForm(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogoutForm(w http.ResponseWriter, r *http.Request) {
+	setPrivateNoStore(w)
+	var deleteErr error
 	if c, err := r.Cookie(cookieName); err == nil {
-		_ = s.Store.DeleteWebSession(r.Context(), auth.HashToken(c.Value))
+		deleteErr = s.Store.DeleteWebSession(r.Context(), auth.HashToken(c.Value))
 	}
 	s.clearSessionCookie(w)
+	if deleteErr != nil {
+		renderPublicError(w, r, http.StatusInternalServerError, "Could not sign out.")
+		return
+	}
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 

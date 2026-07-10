@@ -181,13 +181,6 @@ func (s *Server) Routes() http.Handler {
 	// ungated: gating it would write HTML into the event stream, and the gated
 	// session page does not open it anyway.
 	mux.HandleFunc("GET /{$}", s.handleRoot)
-	// Catch-all for any unclaimed path: a styled 404 in the viewer's shell instead of
-	// net/http's bare "404 page not found" text. It is registered without a method so it
-	// stays the single least-specific pattern (all methods, all paths); every route above,
-	// including the exact-root "/{$}" and the method-less "/mcp", is more specific and
-	// wins. A GET "/" catch-all would instead be incomparable with "/mcp" (narrower method
-	// but broader path) and make ServeMux panic at registration.
-	mux.Handle("/", http.HandlerFunc(s.handleNotFound))
 	mux.HandleFunc("GET /overview", s.requireReadHTML(s.gateParsed(s.handleOverview)))
 	mux.HandleFunc("GET /insights", s.requireReadHTML(s.gateParsed(s.handleInsights)))
 	mux.HandleFunc("GET /projects", s.requireReadHTML(s.gateParsed(s.handleProjectsIndex)))
@@ -216,7 +209,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /account/overview/publish", s.requireFull(s.handlePublishOverview))
 	mux.HandleFunc("POST /account/overview/unpublish", s.requireFull(s.handleUnpublishOverview))
 
-	return mux
+	return withStyledNotFound(mux, s.handleNotFound)
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {

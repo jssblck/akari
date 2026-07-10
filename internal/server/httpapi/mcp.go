@@ -57,6 +57,7 @@ func newMCPHandler(s *Server) http.Handler {
 // than configured. On success the verified user rides the request context down to
 // the tool handlers as TokenInfo.
 func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
+	setPrivateNoStore(w)
 	mw := mcpauth.RequireBearerToken(s.verifyMCPToken, &mcpauth.RequireBearerTokenOptions{
 		ResourceMetadataURL: s.baseURL(r) + resourceMetaPath,
 	})

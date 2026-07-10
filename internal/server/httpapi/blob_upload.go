@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 
@@ -68,12 +69,34 @@ func (s *Server) handleBlobUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body := http.MaxBytesReader(w, r.Body, maxBlobUpload)
+	s.storeBlobUpload(w, r, sha, mediaType, contentType, maxBlobUpload)
+}
+
+// storeBlobUpload applies the byte limit while streaming the request into the
+// CAS. The limit is an argument so the over-limit behavior can be exercised with
+// a small body instead of allocating a multi-gigabyte test fixture.
+func (s *Server) storeBlobUpload(w http.ResponseWriter, r *http.Request, sha, mediaType, contentType string, limit int64) {
+	if r.ContentLength > limit {
+		writeError(w, http.StatusRequestEntityTooLarge, "blob exceeds upload limit")
+		return
+	}
+	body := http.MaxBytesReader(w, r.Body, limit)
 	defer body.Close()
+	tracked := &blobLimitReader{r: idleReadDeadline(w, body)}
 	// A 2 GiB blob can take longer than the server-wide ReadTimeout to receive on
 	// a slow link; refresh the read deadline as bytes arrive so an actively
 	// progressing upload is not aborted mid-stream (see deadlines.go).
-	if err := s.Store.PutBlob(r.Context(), sha, mediaType, contentType, idleReadDeadline(w, body)); err != nil {
+	err := s.Store.PutBlob(r.Context(), sha, mediaType, contentType, tracked)
+	if tracked.exceeded {
+		writeError(w, http.StatusRequestEntityTooLarge, "blob exceeds upload limit")
+		return
+	}
+	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, "blob exceeds upload limit")
+			return
+		}
 		// A hash mismatch is the client's error (the bytes do not match the declared
 		// key); everything else is a server fault.
 		if errors.Is(err, store.ErrBlobHashMismatch) {
@@ -84,6 +107,23 @@ func (s *Server) handleBlobUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"sha256": sha})
+}
+
+// blobLimitReader records MaxBytesReader's sentinel even when the CAS duplicate
+// path deliberately ignores a drain error. The handler can therefore return 413
+// consistently for both new and already-present hashes.
+type blobLimitReader struct {
+	r        io.Reader
+	exceeded bool
+}
+
+func (r *blobLimitReader) Read(p []byte) (int, error) {
+	n, err := r.r.Read(p)
+	var maxErr *http.MaxBytesError
+	if errors.As(err, &maxErr) {
+		r.exceeded = true
+	}
+	return n, err
 }
 
 // normalizeStorageContentType validates the declared storage encoding of an upload.

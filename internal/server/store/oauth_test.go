@@ -166,24 +166,71 @@ func TestAuthCodeIsSingleUseAndExpires(t *testing.T) {
 		t.Fatalf("create code: %v", err)
 	}
 
-	got, err := st.ConsumeAuthCode(ctx, "code-hash-1")
+	got, err := st.AuthCodeForExchange(ctx, "code-hash-1")
 	if err != nil {
-		t.Fatalf("first consume: %v", err)
+		t.Fatalf("load code: %v", err)
 	}
 	if got.UserID != uid || got.ClientID != "c1" || got.CodeChallenge != "chal" || got.Resource != "http://x/mcp" {
-		t.Fatalf("consumed code mismatch: %+v", got)
+		t.Fatalf("code mismatch: %+v", got)
+	}
+	refreshExpiry := time.Now().Add(time.Hour)
+	token := store.OAuthTokenParams{
+		AccessHash: "access-1", RefreshHash: "refresh-1", ClientID: "c1", UserID: uid,
+		Scope: "read", Resource: "http://x/mcp", AccessExpiresAt: time.Now().Add(time.Hour), RefreshExpiresAt: &refreshExpiry,
+	}
+	if err := st.RedeemAuthCode(ctx, "code-hash-1", token); err != nil {
+		t.Fatalf("first redemption: %v", err)
 	}
 	// A second redemption of the same code must fail: that is the replay gate.
-	if _, err := st.ConsumeAuthCode(ctx, "code-hash-1"); !errors.Is(err, store.ErrInvalidGrant) {
+	if err := st.RedeemAuthCode(ctx, "code-hash-1", token); !errors.Is(err, store.ErrInvalidGrant) {
 		t.Fatalf("replay: want ErrInvalidGrant, got %v", err)
+	}
+	if _, err := st.AuthCodeForExchange(ctx, "code-hash-1"); !errors.Is(err, store.ErrInvalidGrant) {
+		t.Fatalf("consumed lookup: want ErrInvalidGrant, got %v", err)
 	}
 
 	// An already-expired code is never redeemable.
 	if err := st.CreateAuthCode(ctx, "code-hash-2", ac, time.Now().Add(-time.Second)); err != nil {
 		t.Fatalf("create expired code: %v", err)
 	}
-	if _, err := st.ConsumeAuthCode(ctx, "code-hash-2"); !errors.Is(err, store.ErrInvalidGrant) {
+	if _, err := st.AuthCodeForExchange(ctx, "code-hash-2"); !errors.Is(err, store.ErrInvalidGrant) {
 		t.Fatalf("expired: want ErrInvalidGrant, got %v", err)
+	}
+}
+
+func TestRedeemAuthCodeRollsBackWhenTokenInsertFails(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	uid := seedUser(t, st, "ada")
+	if err := st.CreateOAuthClient(ctx, "c1", "agent", []string{"http://127.0.0.1/cb"}); err != nil {
+		t.Fatalf("create client: %v", err)
+	}
+	ac := store.AuthCode{ClientID: "c1", UserID: uid, RedirectURI: "http://127.0.0.1/cb", CodeChallenge: "chal", Scope: "read", Resource: "http://x/mcp"}
+	if err := st.CreateAuthCode(ctx, "rollback-code", ac, time.Now().Add(time.Minute)); err != nil {
+		t.Fatalf("create code: %v", err)
+	}
+
+	refreshExpiry := time.Now().Add(time.Hour)
+	existing := store.OAuthTokenParams{
+		AccessHash: "duplicate-access", RefreshHash: "existing-refresh", ClientID: "c1", UserID: uid,
+		Scope: "read", Resource: "http://x/mcp", AccessExpiresAt: time.Now().Add(time.Hour), RefreshExpiresAt: &refreshExpiry,
+	}
+	if err := st.CreateOAuthToken(ctx, existing); err != nil {
+		t.Fatalf("create existing token: %v", err)
+	}
+	failed := existing
+	failed.RefreshHash = "new-refresh"
+	if err := st.RedeemAuthCode(ctx, "rollback-code", failed); err == nil {
+		t.Fatal("redemption with a duplicate access hash unexpectedly succeeded")
+	}
+	if _, err := st.AuthCodeForExchange(ctx, "rollback-code"); err != nil {
+		t.Fatalf("failed token insert consumed code: %v", err)
+	}
+
+	failed.AccessHash = "unique-access"
+	if err := st.RedeemAuthCode(ctx, "rollback-code", failed); err != nil {
+		t.Fatalf("redemption after rollback: %v", err)
 	}
 }
 

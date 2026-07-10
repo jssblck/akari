@@ -57,18 +57,34 @@ func VerifyPassword(password, encoded string) (bool, error) {
 	if _, err := fmt.Sscanf(parts[2], "v=%d", &version); err != nil {
 		return false, ErrInvalidHash
 	}
+	if version != argon2.Version || parts[2] != fmt.Sprintf("v=%d", version) {
+		return false, ErrInvalidHash
+	}
 	var mem uint32
 	var time uint32
 	var threads uint8
 	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &mem, &time, &threads); err != nil {
 		return false, ErrInvalidHash
 	}
+	if parts[3] != fmt.Sprintf("m=%d,t=%d,p=%d", mem, time, threads) ||
+		time == 0 || time > argonTime ||
+		threads == 0 || threads > argonThreads ||
+		mem < 8*uint32(threads) || mem > argonMemory {
+		return false, ErrInvalidHash
+	}
+	// Stored hashes are an untrusted database boundary. Bound the encoded fields
+	// before decoding them so a corrupt row cannot force a large allocation, then
+	// require the exact sizes HashPassword emits before invoking Argon2.
+	if len(parts[4]) != base64.RawStdEncoding.EncodedLen(argonSaltLen) ||
+		len(parts[5]) != base64.RawStdEncoding.EncodedLen(argonKeyLen) {
+		return false, ErrInvalidHash
+	}
 	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
-	if err != nil {
+	if err != nil || len(salt) != argonSaltLen {
 		return false, ErrInvalidHash
 	}
 	want, err := base64.RawStdEncoding.DecodeString(parts[5])
-	if err != nil {
+	if err != nil || len(want) != argonKeyLen {
 		return false, ErrInvalidHash
 	}
 	got := argon2.IDKey([]byte(password), salt, time, mem, threads, uint32(len(want)))

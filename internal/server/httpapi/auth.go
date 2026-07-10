@@ -131,6 +131,7 @@ func (s *Server) withPrincipal(r *http.Request, p principal) *http.Request {
 // surface, not for uploading sessions.
 func (s *Server) requireIngest(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		setPrivateNoStore(w)
 		p, ok := s.resolve(r)
 		if !ok {
 			writeError(w, http.StatusUnauthorized, "authentication required")
@@ -147,6 +148,7 @@ func (s *Server) requireIngest(next http.HandlerFunc) http.HandlerFunc {
 // requireFull demands a full-scope credential (browser session or full token).
 func (s *Server) requireFull(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		setPrivateNoStore(w)
 		p, ok := s.resolve(r)
 		if !ok {
 			writeError(w, http.StatusUnauthorized, "authentication required")
@@ -174,6 +176,7 @@ func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (s *Server) setSessionCookie(w http.ResponseWriter, id string) {
+	setPrivateNoStore(w)
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieName,
 		Value:    id,
@@ -219,6 +222,7 @@ type registerRequest struct {
 }
 
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
+	setPrivateNoStore(w)
 	var req registerRequest
 	if !decodeJSON(w, r, &req) {
 		return
@@ -228,14 +232,21 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "username and password are required")
 		return
 	}
+	inviteHash := ""
+	if req.InviteToken != "" {
+		inviteHash = auth.HashToken(req.InviteToken)
+	}
+	if err := s.Store.CheckRegistrationInvite(r.Context(), inviteHash); errors.Is(err, store.ErrInvalidInvite) {
+		writeError(w, http.StatusForbidden, "a valid invite token is required to register")
+		return
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "check invite token")
+		return
+	}
 	hash, err := auth.HashPassword(req.Password)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "hash password")
 		return
-	}
-	inviteHash := ""
-	if req.InviteToken != "" {
-		inviteHash = auth.HashToken(req.InviteToken)
 	}
 	u, err := s.Store.Register(r.Context(), req.Username, hash, inviteHash)
 	switch {
@@ -264,6 +275,7 @@ type loginRequest struct {
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	setPrivateNoStore(w)
 	var req loginRequest
 	if !decodeJSON(w, r, &req) {
 		return
@@ -294,11 +306,21 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	setPrivateNoStore(w)
+	var deleteErr error
 	if c, err := r.Cookie(cookieName); err == nil {
-		_ = s.Store.DeleteWebSession(r.Context(), auth.HashToken(c.Value))
+		deleteErr = s.Store.DeleteWebSession(r.Context(), auth.HashToken(c.Value))
 	}
 	s.clearSessionCookie(w)
+	if deleteErr != nil {
+		writeError(w, http.StatusInternalServerError, "delete session")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "logged out"})
+}
+
+func setPrivateNoStore(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "private, no-store")
 }
 
 type createTokenRequest struct {

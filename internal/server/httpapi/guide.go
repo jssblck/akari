@@ -63,7 +63,7 @@ func (s *Server) serveGuideChapter(w http.ResponseWriter, r *http.Request, slug 
 		GithubURL:   c.GitHubURL(),
 		Nav:         guideNav(c.Slug),
 		Toc:         guideTocItems(rendered.Headings),
-		LoggedIn:    s.guideViewerLoggedIn(r),
+		LoggedIn:    s.guideViewerLoggedIn(w, r),
 	}
 	prev, next := c.Neighbors()
 	if prev != nil {
@@ -115,9 +115,13 @@ func (s *Server) handleLLMsFullTxt(w http.ResponseWriter, r *http.Request) {
 // guideViewerLoggedIn reports whether the request carries a full-scope credential
 // (a browser session in practice), which switches the docs header's corner action
 // from "Log in" to "Open app". The guide itself is readable regardless.
-func (s *Server) guideViewerLoggedIn(r *http.Request) bool {
+func (s *Server) guideViewerLoggedIn(w http.ResponseWriter, r *http.Request) bool {
 	p, ok := s.resolve(r)
-	return ok && p.Scope == scopeFull
+	loggedIn := ok && p.Scope == scopeFull
+	if loggedIn {
+		setPrivateNoStore(w)
+	}
+	return loggedIn
 }
 
 // guideNav builds the sidebar rail from the chapter registry, marking the active
