@@ -156,9 +156,10 @@ templ accountInvites(invites []store.Invite, newInvite string) {
 // makes the setting discoverable from the account surface (the badge on the
 // overview is the second entry point). The toggle's state reads from the page's
 // OverviewPublic flag, populated by the same lookup that fills the username, so
-// the section needs no extra query. When public, the /u/<username> link is shown
-// alongside a View link and the make-private control; anyone can reach a
-// published overview by username, so this is a public page, not a secret one.
+// the section needs no extra query. When public, the chip links to the public
+// page, the /u/<username> URL is shown beside it, and the make-private control
+// follows; anyone can reach a published overview by username, so this is a
+// public page, not a secret one.
 // Making it private hides the page but the URL is the username, so publishing
 // again brings the same link back.
 templ accountPublicity(p Page) {
@@ -169,16 +170,16 @@ templ accountPublicity(p Page) {
 		</p>
 		if p.OverviewPublic {
 			<div class="publicity-live">
-				<span class="tag public">public</span>
-				<a class="share-link" href={ PublicOverviewHref(p.Username) } title="Public overview link">{ PublicOverviewPath(p.Username) }</a>
-				<a class="ghost small" href={ PublicOverviewHref(p.Username) } target="_blank" rel="noopener">View</a>
+				@publicTag(PublicOverviewHref(p.Username))
+				<a class="share-link muted small" href={ PublicOverviewHref(p.Username) } target="_blank" rel="noopener" title="Public overview link">{ PublicOverviewPath(p.Username) }</a>
+				@copyLink(PublicOverviewPath(p.Username))
 				<form method="post" action="/account/overview/unpublish" class="inline">
 					<button class="secondary small" type="submit" title="Hide the public page. The URL is your username, so making it public again brings the same link back.">Make private</button>
 				</form>
 			</div>
 		} else {
 			<form method="post" action="/account/overview/publish" class="inline">
-				<button type="submit" title="Anyone can read your usage overview by username while it is public.">Make overview public</button>
+				<button class="secondary small" type="submit" title="Anyone can read your usage overview by username while it is public.">Make overview public</button>
 			</form>
 		}
 	</section>

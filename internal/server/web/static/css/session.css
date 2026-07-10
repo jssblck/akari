@@ -65,7 +65,7 @@ main:has(> .session-page) { max-width: none; }
   display: flex; align-items: center; justify-content: center; gap: var(--sp-sm);
   width: 100%; padding: var(--sp-sm) var(--sp-md);
   background: var(--surface); border: 1px dashed var(--border); border-radius: var(--r-md);
-  color: var(--subtext); font-size: 0.8125rem; cursor: pointer;
+  color: var(--subtext); font-size: 0.8125rem;
 }
 .transcript-earlier:hover { border-color: var(--lilac); color: var(--text); }
 .transcript-earlier[disabled] { opacity: 0.6; cursor: progress; }
@@ -166,7 +166,7 @@ body.modal-open { overflow: hidden; }
    reads quieter than a real message (faint ground, no accent) and its content only unfolds on
    demand, so the session's real opening prompt is the first turn the eye lands on. */
 .msg-context { background: var(--surface); border-style: dashed; padding: 0; }
-.context-turn > .context-summary { display: flex; align-items: center; gap: var(--sp-sm); font-size: 0.75rem; cursor: pointer; list-style: none; padding: var(--sp-md) var(--sp-lg); }
+.context-turn > .context-summary { display: flex; align-items: center; gap: var(--sp-sm); font-size: 0.75rem; list-style: none; padding: var(--sp-md) var(--sp-lg); }
 .context-turn > .context-summary::-webkit-details-marker { display: none; }
 .context-turn > .context-summary .role { color: var(--subtext); font-weight: 500; letter-spacing: 0.04em; text-transform: uppercase; font-size: 0.6875rem; }
 .context-turn > .context-summary .tag.context-kind { color: var(--muted); }
@@ -307,7 +307,7 @@ a.attachment.file { width: fit-content; text-decoration: none; }
    transcript. The native marker is replaced by a textual show/hide the ::after toggles off
    the open state, so the affordance names the action rather than showing a bare triangle. */
 .subagents-fold > summary {
-  cursor: pointer; list-style: none; display: flex; align-items: baseline; gap: var(--sp-sm);
+  list-style: none; display: flex; align-items: baseline; gap: var(--sp-sm);
   padding: var(--sp-xs) 0; color: var(--text);
 }
 .subagents-fold > summary::-webkit-details-marker { display: none; }

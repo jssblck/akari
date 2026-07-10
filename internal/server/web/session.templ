@@ -22,9 +22,7 @@ templ SessionPage(p Page, v SessionView, live, owner bool) {
 					<div class="session-meta">
 						<span class="tag agent">{ v.Detail.Agent }</span>
 						@kindTag(v.Detail.ProjectKind)
-						if v.Detail.Visibility == "public" {
-							<span class="tag public">public</span>
-						}
+						@sessionPublicTag(v.Detail.Visibility, v.Detail.PublicID)
 						if v.DupIDs > 0 {
 							<span class="tag warn" title="Repeated tool-call ids: a resumed or compacted transcript replaying earlier turns.">{ DuplicateIDsLabel(v.DupIDs) }</span>
 						}
@@ -70,13 +68,14 @@ templ sessionActions(d store.SessionDetail, owner bool) {
 	<div class="session-actions">
 		if owner {
 			if d.Visibility == "public" && d.PublicID != nil {
-				<a class="share-link muted small" href={ PublicHref(*d.PublicID) } title="Public share link">{ PublicPath(*d.PublicID) }</a>
+				<a class="share-link muted small" href={ PublicHref(*d.PublicID) } target="_blank" rel="noopener" title="Public share link">{ PublicPath(*d.PublicID) }</a>
+				@copyLink(PublicPath(*d.PublicID))
 				<form method="post" action={ templ.SafeURL(fmt.Sprintf("/sessions/%d/unpublish", d.ID)) } class="inline">
-					<button class="secondary small" type="submit">Unpublish</button>
+					<button class="secondary small" type="submit" title="Removes the public link. Publishing again mints a new link, so the old one stays dead.">Unpublish</button>
 				</form>
 			} else {
 				<form method="post" action={ templ.SafeURL(fmt.Sprintf("/sessions/%d/publish", d.ID)) } class="inline">
-					<button class="small" type="submit" title="Mint a public share link.">Publish</button>
+					<button class="secondary small" type="submit" title="Mint a public share link.">Publish</button>
 				</form>
 			}
 		}
@@ -208,9 +207,7 @@ templ subagentsTable(subs []store.SubagentRow) {
 					<tr data-row-href={ SessionPath(s.ID) }>
 						<td class="sub-task">
 							<a href={ SessionHref(s.ID) } title={ s.Title }>{ SubagentTitle(s) }</a>
-							if s.Visibility == "public" {
-								<span class="tag public">public</span>
-							}
+							@sessionPublicTag(s.Visibility, s.PublicID)
 						</td>
 						<td><span class="tag agent">{ s.Agent }</span></td>
 						<td class="sub-verdict">

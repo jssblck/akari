@@ -217,7 +217,10 @@
     Array.prototype.slice.call(document.querySelectorAll('.seg[data-heatmap-target="' + id + '"]')).forEach(function (btn) {
       btn.addEventListener("click", function () {
         metric = btn.getAttribute("data-metric");
-        document.querySelectorAll('.seg[data-heatmap-target="' + id + '"]').forEach(function (b) { b.classList.toggle("active", b === btn); });
+        document.querySelectorAll('.seg[data-heatmap-target="' + id + '"]').forEach(function (b) {
+          b.classList.toggle("active", b === btn);
+          b.setAttribute("aria-pressed", b === btn ? "true" : "false");
+        });
         draw();
       });
     });

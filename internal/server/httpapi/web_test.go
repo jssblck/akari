@@ -681,16 +681,16 @@ func TestOverviewRangeWindow(t *testing.T) {
 
 	// The default load opens on the year window.
 	body := readBody(t, mustGet(t, c, srv.URL+"/overview"))
-	if !strings.Contains(body, `class="seg active" hx-get="/overview?range=year"`) {
+	if !strings.Contains(body, `class="seg active" aria-current="true" hx-get="/overview?range=year"`) {
 		t.Fatalf("default overview should mark the year window active, got:\n%s", body)
 	}
 
 	// ?range=90d moves the active window and leaves the default unmarked.
 	body = readBody(t, mustGet(t, c, srv.URL+"/overview?range=90d"))
-	if !strings.Contains(body, `class="seg active" hx-get="/overview?range=90d"`) {
+	if !strings.Contains(body, `class="seg active" aria-current="true" hx-get="/overview?range=90d"`) {
 		t.Fatalf("range=90d should mark the 90-day window active, got:\n%s", body)
 	}
-	if strings.Contains(body, `class="seg active" hx-get="/overview?range=year"`) {
+	if strings.Contains(body, `class="seg active" aria-current="true" hx-get="/overview?range=year"`) {
 		t.Fatalf("range=90d should not also mark the default window active, got:\n%s", body)
 	}
 }
@@ -773,16 +773,16 @@ func TestProjectPageRangeWindow(t *testing.T) {
 	if !strings.Contains(body, "data-heatmap") || strings.Contains(body, "data-chart-target") {
 		t.Fatalf("project page should render the heatmap and no line chart, got:\n%s", body)
 	}
-	if !strings.Contains(body, `class="seg active" hx-get="`+base+`?range=year"`) {
+	if !strings.Contains(body, `class="seg active" aria-current="true" hx-get="`+base+`?range=year"`) {
 		t.Fatalf("default project page should mark the year window active, got:\n%s", body)
 	}
 
 	// ?range=90d moves the active window and leaves the default unmarked.
 	body = readBody(t, mustGet(t, c, srv.URL+base+"?range=90d"))
-	if !strings.Contains(body, `class="seg active" hx-get="`+base+`?range=90d"`) {
+	if !strings.Contains(body, `class="seg active" aria-current="true" hx-get="`+base+`?range=90d"`) {
 		t.Fatalf("range=90d should mark the 90-day window active, got:\n%s", body)
 	}
-	if strings.Contains(body, `class="seg active" hx-get="`+base+`?range=year"`) {
+	if strings.Contains(body, `class="seg active" aria-current="true" hx-get="`+base+`?range=year"`) {
 		t.Fatalf("range=90d should not also mark the default window active, got:\n%s", body)
 	}
 
@@ -1174,7 +1174,7 @@ func TestPublicOverviewFlow(t *testing.T) {
 	}
 	// The signed-in overview carries no public badge while private.
 	body = readBody(t, mustGet(t, c, srv.URL+"/overview"))
-	if strings.Contains(body, "View public page") {
+	if strings.Contains(body, "overview-public-badge") {
 		t.Fatalf("overview should not show the public badge before publishing, got:\n%s", body)
 	}
 
@@ -1193,7 +1193,7 @@ func TestPublicOverviewFlow(t *testing.T) {
 		t.Fatalf("account page should show the username link and make-private control, got:\n%s", body)
 	}
 	body = readBody(t, mustGet(t, c, srv.URL+"/overview"))
-	if !strings.Contains(body, "View public page") || !strings.Contains(body, pubPath) {
+	if !strings.Contains(body, "overview-public-badge") || !strings.Contains(body, pubPath) {
 		t.Fatalf("overview should show the public badge after publishing, got:\n%s", body)
 	}
 
@@ -1338,8 +1338,8 @@ func TestPublicProjectFlow(t *testing.T) {
 	if !strings.Contains(body, "By user") {
 		t.Fatalf("signed-in project page should carry the by-user breakdown, got:\n%s", body)
 	}
-	if strings.Contains(body, "View public page") {
-		t.Fatalf("project page should not show the public badge before publishing, got:\n%s", body)
+	if strings.Contains(body, `class="tag public tag-link"`) {
+		t.Fatalf("project page should not show the public chip link before publishing, got:\n%s", body)
 	}
 
 	// Publish via the project page control.

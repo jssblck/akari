@@ -47,7 +47,7 @@ func userValues(userIDs []int64) url.Values {
 // SelectedUserIDs parses the overview's repeated ?user= ids against the known
 // accounts, keeping only ids that name a real user and returning them in the
 // users-list order. A tampered, stale, or non-numeric id silently drops out, and
-// the stable order keeps the collapsed pills from reshuffling between requests.
+// the stable order keeps the collapsed chips from reshuffling between requests.
 func SelectedUserIDs(raw []string, users []store.User) []int64 {
 	if len(raw) == 0 {
 		return nil
@@ -86,7 +86,7 @@ func selectedSet(selected []int64) map[int64]bool {
 }
 
 // selectedUsers resolves the selected ids back to their accounts, in users-list
-// order, so the collapsed control can render one pill per chosen user.
+// order, so the collapsed control can render one chip per chosen user.
 func selectedUsers(users []store.User, selected []int64) []store.User {
 	if len(selected) == 0 {
 		return nil

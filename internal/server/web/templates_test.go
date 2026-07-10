@@ -85,15 +85,16 @@ func TestOverviewPageRangeSelector(t *testing.T) {
 			t.Errorf("range selector should offer %q", dr.Label)
 		}
 	}
-	// The active window (90d) is the one marked.
-	if !strings.Contains(html, `class="seg active" hx-get="/overview?range=90d"`) {
-		t.Error("the active range button should carry the active class")
+	// The active window (90d) is the one marked, both visually and for
+	// assistive tech.
+	if !strings.Contains(html, `class="seg active" aria-current="true" hx-get="/overview?range=90d"`) {
+		t.Error("the active range button should carry the active class and aria-current")
 	}
 }
 
 // The per-user filter sits beside the range selector: a disclosure offering an
 // "All Users" reset and a checkbox per account, the active selection marked both
-// as checked boxes and as collapsed pills. The range buttons must carry the active
+// as checked boxes and as collapsed chips. The range buttons must carry the active
 // users so switching the window holds the selection, and the menu must serialize
 // its hidden range plus the checked boxes back to the overview.
 func TestOverviewPageUserFilter(t *testing.T) {
@@ -114,9 +115,9 @@ func TestOverviewPageUserFilter(t *testing.T) {
 			t.Errorf("user filter missing %q", want)
 		}
 	}
-	// The selected account renders a collapsed pill and a checked box.
-	if !strings.Contains(html, `class="userfilter-pill">grace</span>`) {
-		t.Error("the selected user should show as a collapsed pill")
+	// The selected account renders a collapsed chip and a checked box.
+	if !strings.Contains(html, `class="userfilter-chip">grace</span>`) {
+		t.Error("the selected user should show as a collapsed chip")
 	}
 	if !strings.Contains(html, `value="5" checked`) {
 		t.Error("the selected user's checkbox should be checked")
@@ -572,7 +573,7 @@ func TestProjectPageRendersHeatmap(t *testing.T) {
 		// The selector refetches the project's own path, carries the active window,
 		// and rides the active agent filter so switching the window keeps it.
 		`hx-get="/projects/7?agent=claude&amp;range=7d"`,
-		`class="seg active" hx-get="/projects/7?agent=claude&amp;range=90d"`,
+		`class="seg active" aria-current="true" hx-get="/projects/7?agent=claude&amp;range=90d"`,
 		`hx-target="#project-view"`, `hx-select="#project-view"`,
 		// The filter form carries the window so a filter submit does not reset it.
 		`<input type="hidden" name="range" value="90d"`,
