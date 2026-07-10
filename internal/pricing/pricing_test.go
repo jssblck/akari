@@ -140,7 +140,12 @@ func TestRateAtGPT(t *testing.T) {
 		model         string
 		input, output float64
 	}{
-		// Current generation.
+		// Current generation. GPT-5.6 is a three-tier family; the gpt-5.6 alias
+		// routes to sol and prices at sol's rate.
+		{"gpt-5.6", 5, 30},
+		{"gpt-5.6-sol", 5, 30},
+		{"gpt-5.6-terra", 2.50, 15},
+		{"gpt-5.6-luna", 1, 6},
 		{"gpt-5.5", 5, 30},
 		{"gpt-5.5-pro", 30, 180},
 		{"gpt-5.4", 2.50, 15},
@@ -199,8 +204,9 @@ func TestUnlistedModelsAreUnknown(t *testing.T) {
 		"claude-sonnet-4-7",
 		"claude-haiku-4-9", "claude-haiku-5",
 		"claude-fable-6", "claude-mythos-6",
-		"gpt-5.6", "gpt-6", "gpt-7",
+		"gpt-5.7", "gpt-6", "gpt-7",
 		"gpt-5.4-turbo", "gpt-5.5-ultra", // same-version variants we never priced
+		"gpt-5.6-mini", "gpt-5.6-nano", // GPT-5.6's real tiers are sol/terra/luna, not mini/nano
 	} {
 		if Known(model) {
 			t.Errorf("unlisted model %q reports known; expected unknown", model)

@@ -184,4 +184,14 @@ package parse
 // rollups converge on every session regardless of deploy interleaving. Also the rule going
 // forward: changing a rollup derivation is a rebuild-derived-output change and takes a
 // bump, exactly like a reducer or scoring change.
-const Epoch = 15
+//
+// Epoch 15 -> 16: price the GPT-5.6 family (gpt-5.6-sol, gpt-5.6-terra,
+// gpt-5.6-luna, and the gpt-5.6 alias that routes to sol; see internal/pricing).
+// GPT-5.6 usage was unknown to the pricing table before, so its usage_events rows
+// carry a NULL per-row cost and its sessions read cost_incomplete. This bump
+// rebuilds the corpus so every GPT-5.6 usage row re-prices through pricing.Cost in
+// one pass. It is a pricing change, not a reducer-shape change, and no golden
+// fixture uses a GPT-5.6 model, so the projection delta for the fixtures is
+// byte-for-byte identical and the golden snapshots do not move; the bump is the
+// reprice signal and stands on its own.
+const Epoch = 16
