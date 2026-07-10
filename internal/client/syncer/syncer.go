@@ -81,6 +81,9 @@ func New(r fileResolver, u fileUploader, machine string, finalize bool) *Syncer 
 // processing many files can record and continue.
 func (s *Syncer) SyncOne(ctx context.Context, f discover.File) Result {
 	res := s.resolver.Resolve(ctx, f)
+	if res.Err != nil {
+		return Result{File: f, Err: res.Err}
+	}
 	if res.Skipped {
 		return Result{File: f, Skipped: true, Reason: res.Reason}
 	}

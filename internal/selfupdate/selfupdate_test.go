@@ -8,11 +8,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -99,6 +102,145 @@ func TestFetchZip(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(dest); !bytes.Equal(got, payload) {
 		t.Errorf("extracted binary = %q, want %q", got, payload)
+	}
+}
+
+func TestWriteBinaryRejectsOversizeInsteadOfInstallingTruncatedFile(t *testing.T) {
+	dest := filepath.Join(t.TempDir(), "akari")
+	err := writeBinaryLimit(dest, bytes.NewReader([]byte("0123456789")), 8)
+	if err == nil {
+		t.Fatal("writeBinaryLimit accepted an oversized binary")
+	}
+	if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
+		t.Fatalf("oversized destination remains after failure: %v", statErr)
+	}
+}
+
+func TestGetRejectsOversizedMetadataInsteadOfAcceptingValidPrefix(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"tag_name":"v1.2.3"}`+strings.Repeat(" ", 32)+"trailing")
+	}))
+	t.Cleanup(server.Close)
+
+	client := New()
+	_, err := client.getLimit(context.Background(), server.URL, "application/json", 32)
+	if err == nil || !strings.Contains(err.Error(), "exceeds 32-byte limit") {
+		t.Fatalf("getLimit oversized metadata error = %v, want explicit limit error", err)
+	}
+}
+
+func TestDownloadToFileRejectsOversizeAndRemovesPartialArchive(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "0123456789")
+	}))
+	t.Cleanup(server.Close)
+
+	dest := filepath.Join(t.TempDir(), "release.tar.gz")
+	client := New()
+	err := client.downloadToFileLimit(context.Background(), server.URL, dest, 8)
+	if err == nil || !strings.Contains(err.Error(), "exceeds 8-byte limit") {
+		t.Fatalf("downloadToFileLimit oversized archive error = %v, want explicit limit error", err)
+	}
+	if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
+		t.Fatalf("oversized partial archive remains after failure: %v", statErr)
+	}
+}
+
+func TestExtractRejectsNonRegularBinaryEntries(t *testing.T) {
+	t.Run("tar directory", func(t *testing.T) {
+		archivePath := filepath.Join(t.TempDir(), "akari.tar.gz")
+		var archive bytes.Buffer
+		gz := gzip.NewWriter(&archive)
+		tw := tar.NewWriter(gz)
+		if err := tw.WriteHeader(&tar.Header{Name: "akari", Typeflag: tar.TypeDir, Mode: 0o755}); err != nil {
+			t.Fatal(err)
+		}
+		if err := tw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := gz.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(archivePath, archive.Bytes(), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := extractTarGz(archivePath, "akari", filepath.Join(t.TempDir(), "dest")); err == nil {
+			t.Fatal("extractTarGz accepted a directory as the binary")
+		}
+	})
+
+	t.Run("tar hard link", func(t *testing.T) {
+		archivePath := filepath.Join(t.TempDir(), "akari.tar.gz")
+		var archive bytes.Buffer
+		gz := gzip.NewWriter(&archive)
+		tw := tar.NewWriter(gz)
+		if err := tw.WriteHeader(&tar.Header{Name: "akari", Typeflag: tar.TypeLink, Linkname: "real-akari", Mode: 0o755}); err != nil {
+			t.Fatal(err)
+		}
+		if err := tw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := gz.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(archivePath, archive.Bytes(), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := extractTarGz(archivePath, "akari", filepath.Join(t.TempDir(), "dest")); err == nil {
+			t.Fatal("extractTarGz accepted a hard link as the binary")
+		}
+	})
+
+	t.Run("zip directory", func(t *testing.T) {
+		archivePath := filepath.Join(t.TempDir(), "akari.zip")
+		var archive bytes.Buffer
+		zw := zip.NewWriter(&archive)
+		if _, err := zw.Create("akari.exe/"); err != nil {
+			t.Fatal(err)
+		}
+		if err := zw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(archivePath, archive.Bytes(), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := extractZip(archivePath, "akari.exe", filepath.Join(t.TempDir(), "dest.exe")); err == nil {
+			t.Fatal("extractZip accepted a directory as the binary")
+		}
+	})
+}
+
+func TestExtractZipReadsThroughChecksum(t *testing.T) {
+	payload := []byte("MZ Grace Hopper")
+	var archive bytes.Buffer
+	zw := zip.NewWriter(&archive)
+	header := &zip.FileHeader{Name: "akari.exe", Method: zip.Store}
+	w, err := zw.CreateHeader(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw := archive.Bytes()
+	at := bytes.Index(raw, payload)
+	if at < 0 {
+		t.Fatal("stored zip payload not found")
+	}
+	raw[at] ^= 0xff
+	archivePath := filepath.Join(t.TempDir(), "akari.zip")
+	if err := os.WriteFile(archivePath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = extractZip(archivePath, "akari.exe", filepath.Join(t.TempDir(), "dest.exe"))
+	if err == nil {
+		t.Fatal("extractZip accepted an entry with a bad CRC")
+	}
+	if err != zip.ErrChecksum && !errors.Is(err, zip.ErrChecksum) {
+		t.Fatalf("extractZip CRC error = %v, want %v", err, zip.ErrChecksum)
 	}
 }
 

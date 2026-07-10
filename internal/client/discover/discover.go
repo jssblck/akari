@@ -164,6 +164,13 @@ func Discover(roots []Root, ex Excluder) ([]File, error) {
 			if ex.Excluded(path) {
 				return nil
 			}
+			// Session readers use ordinary blocking file opens. Refuse pipes, devices,
+			// sockets, and symlinks to them before they can stall a whole sync. Stat
+			// follows symlinks, so a symlink to a regular session remains supported.
+			info, err := os.Stat(path)
+			if err != nil || !info.Mode().IsRegular() {
+				return nil
+			}
 			if seen[path] {
 				return nil
 			}

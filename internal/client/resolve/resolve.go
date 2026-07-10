@@ -13,6 +13,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,6 +24,7 @@ import (
 	"github.com/jssblck/akari/internal/client/discover"
 	"github.com/jssblck/akari/internal/gitremote"
 	"github.com/tidwall/gjson"
+	"golang.org/x/sync/singleflight"
 )
 
 // errNotSession marks a file whose header could be read but carries no
@@ -65,8 +67,10 @@ const (
 // Result is the outcome of resolving one file. Kind classifies the session;
 // ProjectKey is the canonical remote only when Kind is KindRemote. Reason carries
 // the human-readable detail behind a standalone or orphaned classification (and
-// the failure detail when Skipped). Skipped is true only when the file's header
-// could not be read at all, leaving nothing to upload.
+// a positive non-session verdict). Skipped is true only when readable content is
+// not a session for its declared agent. Err carries I/O and structural read
+// failures so a backup command cannot silently count an unreadable session as a
+// successful skip.
 //
 // LocalRoot is set only for a standalone session whose folder is a live git
 // worktree: it holds the main worktree shared by every worktree of the repo, so
@@ -82,46 +86,88 @@ type Result struct {
 	LocalRoot  string
 	Skipped    bool
 	Reason     string
+	Err        error
 }
 
 // GitRunner runs a git subcommand in dir and returns its trimmed stdout. The
 // default shells out to the system git; tests inject their own.
 type GitRunner func(ctx context.Context, dir string, args ...string) (string, error)
 
-// Resolver resolves files to projects, caching git lookups per directory for the
-// process lifetime (the client keeps no on-disk state).
+// Resolver resolves files to projects. Its bounded in-memory cache avoids repeat
+// Git processes, invalidates direct repository config changes immediately, and
+// caps the age of results that depend on other Git config sources.
 type Resolver struct {
 	aliases map[string]string
 	git     GitRunner
 	timeout time.Duration
+	now     func() time.Time
+	stat    func(string) (os.FileInfo, error)
 
-	mu    sync.Mutex
-	cache map[string]cacheEntry
+	mu               sync.Mutex
+	cache            map[string]cacheEntry
+	cacheUse         uint64
+	cacheVersion     uint64
+	cacheLimit       int
+	cacheFallbackTTL time.Duration
+	lookups          singleflight.Group
 }
 
 type cacheEntry struct {
-	key    string
-	root   string // the local project root for a no-remote worktree; empty otherwise
-	reason string // non-empty means this directory resolves to a skip
+	key                  string
+	root                 string // the local project root for a no-remote worktree; empty otherwise
+	reason               string // non-empty means this directory resolves as standalone
+	config               configFingerprint
+	cachedAt             time.Time
+	fingerprintFailureAt time.Time
+	lastUsed             uint64
+	version              uint64
 }
+
+type configFingerprint struct {
+	path string
+	info os.FileInfo
+}
+
+type projectResult struct {
+	key    string
+	root   string
+	reason string
+}
+
+type cacheEntryCheck uint8
+
+const (
+	cacheEntryValid cacheEntryCheck = iota
+	cacheEntryExpired
+	cacheEntryChanged
+	cacheEntryStatFailed
+)
+
+const (
+	defaultCacheLimit       = 1024
+	defaultCacheFallbackTTL = 5 * time.Minute
+)
 
 // New builds a Resolver with the default system-git runner and ssh alias map.
 func New() *Resolver {
-	return &Resolver{
-		aliases: gitremote.LoadSSHAliases(),
-		git:     systemGit,
-		timeout: 5 * time.Second,
-		cache:   map[string]cacheEntry{},
-	}
+	return newResolver(systemGit, gitremote.LoadSSHAliases())
 }
 
 // NewWith builds a Resolver with an explicit git runner and alias map, for tests.
 func NewWith(git GitRunner, aliases map[string]string) *Resolver {
+	return newResolver(git, aliases)
+}
+
+func newResolver(git GitRunner, aliases map[string]string) *Resolver {
 	return &Resolver{
-		aliases: aliases,
-		git:     git,
-		timeout: 5 * time.Second,
-		cache:   map[string]cacheEntry{},
+		aliases:          aliases,
+		git:              git,
+		timeout:          5 * time.Second,
+		now:              time.Now,
+		stat:             os.Stat,
+		cache:            map[string]cacheEntry{},
+		cacheLimit:       defaultCacheLimit,
+		cacheFallbackTTL: defaultCacheFallbackTTL,
 	}
 }
 
@@ -136,7 +182,7 @@ func (r *Resolver) Resolve(ctx context.Context, f discover.File) Result {
 		if errors.Is(err, errNotSession) {
 			return Result{File: f, Skipped: true, Reason: "not a " + f.Agent + " session: " + err.Error()}
 		}
-		return Result{File: f, Skipped: true, Reason: "could not read header: " + err.Error()}
+		return Result{File: f, Err: fmt.Errorf("read session header: %w", err)}
 	}
 	res := Result{File: f, Header: h}
 
@@ -163,44 +209,204 @@ func (r *Resolver) Resolve(ctx context.Context, f discover.File) Result {
 // empty; root is the local project root for a no-remote worktree (empty
 // otherwise).
 func (r *Resolver) project(ctx context.Context, cwd string) (key, root, reason string) {
-	r.mu.Lock()
-	if e, ok := r.cache[cwd]; ok {
-		r.mu.Unlock()
-		return e.key, e.root, e.reason
+	if cached, ok := r.cachedProject(cwd, r.now()); ok {
+		return cached.key, cached.root, cached.reason
 	}
-	r.mu.Unlock()
 
-	key, root, reason = r.resolveGit(ctx, cwd)
-
-	r.mu.Lock()
-	r.cache[cwd] = cacheEntry{key: key, root: root, reason: reason}
-	r.mu.Unlock()
-	return key, root, reason
+	result := r.lookupProject(ctx, cwd)
+	select {
+	case <-ctx.Done():
+		return "", "", cwd + " project lookup canceled: " + ctx.Err().Error()
+	case completed := <-result:
+		if completed.Err != nil {
+			return "", "", cwd + " project lookup failed: " + completed.Err.Error()
+		}
+		resolved, ok := completed.Val.(projectResult)
+		if !ok {
+			return "", "", cwd + " project lookup returned an invalid result"
+		}
+		return resolved.key, resolved.root, resolved.reason
+	}
 }
 
-func (r *Resolver) resolveGit(ctx context.Context, cwd string) (key, root, reason string) {
+func (r *Resolver) lookupProject(ctx context.Context, cwd string) <-chan singleflight.Result {
+	return r.lookups.DoChan(cwd, func() (any, error) {
+		// A follower can miss just before the leader fills the cache. Rechecking
+		// inside the flight avoids a second Git lookup in that handoff window.
+		if cached, ok := r.cachedProject(cwd, r.now()); ok {
+			return cached, nil
+		}
+
+		// The lookup belongs to the resolver rather than the first caller. One
+		// canceled waiter must not abort work shared by other files, but the fixed
+		// timeout still bounds a Git process after every waiter has left.
+		lookupStarted := r.now()
+		lookupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.timeout)
+		defer cancel()
+
+		key, root, reason, config := r.resolveGit(lookupCtx, cwd)
+		resolved := projectResult{key: key, root: root, reason: reason}
+		return r.storeProject(cwd, resolved, config, lookupStarted), nil
+	})
+}
+
+func (r *Resolver) cachedProject(cwd string, now time.Time) (projectResult, bool) {
+	for {
+		r.mu.Lock()
+		e, ok := r.cache[cwd]
+		if !ok {
+			r.mu.Unlock()
+			return projectResult{}, false
+		}
+		r.cacheUse++
+		e.lastUsed = r.cacheUse
+		r.cache[cwd] = e
+		r.mu.Unlock()
+
+		// A config path may be on a slow network filesystem. Probe it without the
+		// global cache lock so unrelated repositories can still resolve.
+		check := r.checkCacheEntry(e, now)
+
+		r.mu.Lock()
+		current, ok := r.cache[cwd]
+		if !ok {
+			r.mu.Unlock()
+			return projectResult{}, false
+		}
+		if current.version != e.version {
+			r.mu.Unlock()
+			now = r.now()
+			continue
+		}
+		now = r.now()
+		if !now.Before(current.cachedAt.Add(r.cacheFallbackTTL)) {
+			delete(r.cache, cwd)
+			r.mu.Unlock()
+			return projectResult{}, false
+		}
+
+		switch check {
+		case cacheEntryExpired, cacheEntryChanged:
+			delete(r.cache, cwd)
+			r.mu.Unlock()
+			return projectResult{}, false
+		case cacheEntryStatFailed:
+			if current.fingerprintFailureAt.IsZero() {
+				current.fingerprintFailureAt = now
+			}
+			if !now.Before(current.fingerprintFailureAt.Add(r.cacheFallbackTTL)) {
+				delete(r.cache, cwd)
+				r.mu.Unlock()
+				return projectResult{}, false
+			}
+		case cacheEntryValid:
+			current.fingerprintFailureAt = time.Time{}
+		}
+		r.cache[cwd] = current
+		resolved := projectResult{key: current.key, root: current.root, reason: current.reason}
+		r.mu.Unlock()
+		return resolved, true
+	}
+}
+
+func (r *Resolver) storeProject(cwd string, resolved projectResult, config configFingerprint, now time.Time) projectResult {
+	e := cacheEntry{key: resolved.key, root: resolved.root, reason: resolved.reason, config: config, cachedAt: now}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// Same-key lookups are serialized by singleflight. Keep this guard so a
+	// future alternate cache writer cannot let an older lookup replace newer
+	// state.
+	if current, exists := r.cache[cwd]; exists && current.cachedAt.After(e.cachedAt) {
+		return projectResult{key: current.key, root: current.root, reason: current.reason}
+	}
+	r.cacheUse++
+	e.lastUsed = r.cacheUse
+	r.cacheVersion++
+	e.version = r.cacheVersion
+	if _, exists := r.cache[cwd]; !exists && len(r.cache) >= r.cacheLimit {
+		r.evictLeastRecentlyUsed()
+	}
+	r.cache[cwd] = e
+	return resolved
+}
+
+func (r *Resolver) checkCacheEntry(e cacheEntry, now time.Time) cacheEntryCheck {
+	// Git may read included, worktree, global, or command-scoped config that the
+	// repository config fingerprint cannot observe. The maximum age bounds stale
+	// results from those sources and retries transient Git failures.
+	if !now.Before(e.cachedAt.Add(r.cacheFallbackTTL)) {
+		return cacheEntryExpired
+	}
+	if e.config.info == nil {
+		return cacheEntryValid
+	}
+	info, err := r.stat(e.config.path)
+	if err != nil {
+		return cacheEntryStatFailed
+	}
+	if os.SameFile(e.config.info, info) &&
+		e.config.info.Size() == info.Size() &&
+		e.config.info.ModTime().Equal(info.ModTime()) {
+		return cacheEntryValid
+	}
+	return cacheEntryChanged
+}
+
+func (r *Resolver) evictLeastRecentlyUsed() {
+	var oldestPath string
+	var oldestUse uint64
+	for path, e := range r.cache {
+		if oldestPath == "" || e.lastUsed < oldestUse {
+			oldestPath, oldestUse = path, e.lastUsed
+		}
+	}
+	if oldestPath != "" {
+		delete(r.cache, oldestPath)
+	}
+}
+
+func (r *Resolver) resolveGit(ctx context.Context, cwd string) (key, root, reason string, config configFingerprint) {
 	ctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
 
 	if _, err := r.git(ctx, cwd, "rev-parse", "--is-inside-work-tree"); err != nil {
-		return "", "", cwd + " is not a git repository"
+		return "", "", cwd + " is not a git repository", configFingerprint{}
 	}
+	config = r.gitConfigFingerprint(ctx, cwd)
 	out, err := r.git(ctx, cwd, "remote", "get-url", "--all", "origin")
 	if err != nil {
-		return "", r.localRoot(ctx, cwd), cwd + " has no origin remote"
+		return "", r.localRoot(ctx, cwd), cwd + " has no origin remote", config
 	}
 	urls := nonEmptyLines(out)
 	switch {
 	case len(urls) == 0:
-		return "", r.localRoot(ctx, cwd), cwd + " has no origin remote"
+		return "", r.localRoot(ctx, cwd), cwd + " has no origin remote", config
 	case len(urls) > 1:
-		return "", r.localRoot(ctx, cwd), cwd + " origin has multiple URLs"
+		return "", r.localRoot(ctx, cwd), cwd + " origin has multiple URLs", config
 	}
 	remote, err := gitremote.Canonicalize(urls[0], r.aliases)
 	if err != nil {
-		return "", r.localRoot(ctx, cwd), cwd + " origin URL is unrecognized: " + err.Error()
+		return "", r.localRoot(ctx, cwd), cwd + " origin URL is unrecognized: " + err.Error(), config
 	}
-	return remote.Key, "", ""
+	return remote.Key, "", "", config
+}
+
+func (r *Resolver) gitConfigFingerprint(ctx context.Context, cwd string) configFingerprint {
+	path, err := r.git(ctx, cwd, "rev-parse", "--git-path", "config")
+	path = strings.TrimSpace(path)
+	if err != nil || path == "" {
+		return configFingerprint{}
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(cwd, path)
+	}
+	path = filepath.Clean(path)
+	info, err := r.stat(path)
+	if err != nil || info.IsDir() {
+		return configFingerprint{}
+	}
+	return configFingerprint{path: path, info: info}
 }
 
 // localRoot resolves the directory shared by every worktree of a no-remote repo:
@@ -253,6 +459,13 @@ func (r *Resolver) localRoot(ctx context.Context, cwd string) string {
 // extra_root) returns errNotSession so Resolve can skip it with a clear reason
 // rather than upload it as a junk standalone/orphaned session.
 func PeekHeader(f discover.File) (Header, error) {
+	info, err := os.Stat(f.Path)
+	if err != nil {
+		return Header{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return Header{}, fmt.Errorf("session path %s is not a regular file", f.Path)
+	}
 	file, err := os.Open(f.Path)
 	if err != nil {
 		return Header{}, err

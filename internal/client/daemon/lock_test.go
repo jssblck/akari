@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -16,8 +17,8 @@ func TestAcquireAndRelease(t *testing.T) {
 	}
 
 	// A second acquire while the first is held (by this live process) must fail.
-	if _, err := Acquire(path); err == nil {
-		t.Fatal("second acquire should fail while the lock is held")
+	if _, err := Acquire(path); !errors.Is(err, ErrAlreadyRunning) {
+		t.Fatalf("second acquire error = %v, want ErrAlreadyRunning", err)
 	}
 
 	if err := lock.Release(); err != nil {
@@ -46,33 +47,33 @@ func TestAcquireReclaimsStaleLock(t *testing.T) {
 	defer lock.Release()
 
 	// The reclaimed lock now names this process.
-	pid, ok := readPid(path)
-	if !ok || pid != os.Getpid() {
-		t.Errorf("pidfile pid = %d (ok=%v), want %d", pid, ok, os.Getpid())
+	pid, err := readPid(path)
+	if err != nil || pid != os.Getpid() {
+		t.Errorf("pidfile pid = %d (err=%v), want %d", pid, err, os.Getpid())
 	}
 }
 
 func TestIsRunning(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "akari.pid")
-	if IsRunning(path) {
+	if running, err := IsRunning(path); err != nil || running {
 		t.Error("nothing holds the lock yet")
 	}
 	lock, err := Acquire(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !IsRunning(path) {
+	if running, err := IsRunning(path); err != nil || !running {
 		t.Error("the held lock should report running")
 	}
 	lock.Release()
-	if IsRunning(path) {
+	if running, err := IsRunning(path); err != nil || running {
 		t.Error("released lock should report not running")
 	}
 }
 
 func TestStatusNotRunning(t *testing.T) {
 	paths := Paths{Pidfile: filepath.Join(t.TempDir(), "akari.pid")}
-	if running, _ := Status(paths); running {
+	if running, _, err := Status(paths); err != nil || running {
 		t.Error("status should be not-running when no pidfile exists")
 	}
 }

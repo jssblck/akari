@@ -162,6 +162,18 @@ func TestResolveSkipsNonSession(t *testing.T) {
 	}
 }
 
+func TestResolveReportsHeaderReadFailure(t *testing.T) {
+	t.Parallel()
+	missing := discover.File{Agent: "claude", Path: filepath.Join(t.TempDir(), "missing.jsonl")}
+	res := NewWith(nil, nil).Resolve(context.Background(), missing)
+	if res.Err == nil {
+		t.Fatal("Resolve counted a missing session file as a successful result")
+	}
+	if res.Skipped {
+		t.Fatal("Resolve classified an I/O failure as a non-session skip")
+	}
+}
+
 // TestClaudeSourceIDUnique is the regression guard for the source-id collision:
 // a Claude main session file and every subagent and workflow file beneath it all
 // record the same in-file sessionId, so before the fix they folded onto one
@@ -668,8 +680,9 @@ func TestResolveCachesPerDirectory(t *testing.T) {
 			t.Fatalf("unexpected skip: %s", res.Reason)
 		}
 	}
-	// Two git calls for the first resolve; the rest are served from cache.
-	if calls != 2 {
-		t.Errorf("git calls = %d, want 2 (cached after first)", calls)
+	// The first resolve checks the repo, origin, and config path; later resolves
+	// validate the cached config fingerprint without starting git.
+	if calls != 3 {
+		t.Errorf("git calls = %d, want 3 (cached after first)", calls)
 	}
 }

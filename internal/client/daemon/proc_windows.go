@@ -3,6 +3,7 @@
 package daemon
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"strconv"
@@ -50,6 +51,10 @@ func lockRegion() *windows.Overlapped {
 func lockFile(f *os.File) error {
 	return windows.LockFileEx(windows.Handle(f.Fd()),
 		windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, lockRegion())
+}
+
+func isLockContention(err error) bool {
+	return errors.Is(err, windows.ERROR_LOCK_VIOLATION)
 }
 
 func unlockFile(f *os.File) error {

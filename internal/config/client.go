@@ -95,20 +95,28 @@ func resolveClientPath(path string) (string, error) {
 	return DefaultClientPath()
 }
 
-// ReadClient decodes the config without validating it. It reports whether the
-// file existed (a missing file is not an error: callers like login start from a
-// blank config) and returns an error only on a genuine read or parse failure, so
-// a corrupt file is never silently treated as empty.
+// ReadClient decodes the config without checking required values. It reports
+// whether the file existed (a missing file is not an error: callers like login
+// start from a blank config), but rejects malformed TOML and unknown keys. A
+// misspelled exclusion or root setting must not silently weaken backup policy.
 func ReadClient(path string) (cfg Client, exists bool, err error) {
 	path, err = resolveClientPath(path)
 	if err != nil {
 		return Client{}, false, err
 	}
-	if _, err := toml.DecodeFile(path, &cfg); err != nil {
+	metadata, err := toml.DecodeFile(path, &cfg)
+	if err != nil {
 		if os.IsNotExist(err) {
 			return Client{}, false, nil
 		}
 		return Client{}, false, fmt.Errorf("read config %s: %w", path, err)
+	}
+	if undecoded := metadata.Undecoded(); len(undecoded) > 0 {
+		keys := make([]string, len(undecoded))
+		for i, key := range undecoded {
+			keys[i] = key.String()
+		}
+		return Client{}, false, fmt.Errorf("read config %s: unknown keys: %s", path, strings.Join(keys, ", "))
 	}
 	return cfg, true, nil
 }
@@ -138,14 +146,20 @@ func LoadClient(path string) (Client, error) {
 		if r.Agent == "" || r.Path == "" {
 			return Client{}, fmt.Errorf("config %s: extra_roots[%d] needs both agent and path", resolved, i)
 		}
+		switch r.Agent {
+		case "claude", "codex", "pi":
+		default:
+			return Client{}, fmt.Errorf("config %s: extra_roots[%d].agent must be claude, codex, or pi", resolved, i)
+		}
 	}
 	return c, nil
 }
 
 // SaveClient writes the config to path (creating parent directories) with
-// owner-only permissions since it holds an API token. It writes to a temporary
-// file and atomically renames it into place, so a crash or write error cannot
-// truncate or destroy an existing config.
+// protected per-user permissions since it holds an API token. Unix grants only
+// the owner; Windows also retains SYSTEM and local-administrator recovery
+// access. The temporary file is protected at creation and atomically renamed,
+// so a crash or write error cannot truncate or expose an existing config.
 func SaveClient(path string, c Client) error {
 	path, err := resolveClientPath(path)
 	if err != nil {
@@ -156,17 +170,12 @@ func SaveClient(path string, c Client) error {
 		return fmt.Errorf("create config dir: %w", err)
 	}
 
-	tmp, err := os.CreateTemp(dir, ".config-*.toml.tmp")
+	tmp, err := createSecureTemp(dir)
 	if err != nil {
 		return fmt.Errorf("create temp config: %w", err)
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName) // no-op once the rename succeeds
-
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return fmt.Errorf("chmod temp config: %w", err)
-	}
 	if err := toml.NewEncoder(tmp).Encode(c); err != nil {
 		tmp.Close()
 		return fmt.Errorf("encode config: %w", err)

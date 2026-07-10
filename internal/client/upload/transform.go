@@ -853,6 +853,19 @@ func (a *chunkAssembler) takeReady(final bool) (data []byte, origLen int64, ok b
 		// Claude/pi where the last line is always a boundary).
 		cut = len(a.lines) - 1
 	}
+	openBytes := a.pendingBytes
+	if a.lastBoundary >= 0 {
+		openBytes -= a.boundaryBytes
+	}
+	if !a.flushAll && openBytes >= maxTurnBytes {
+		// A closed prefix below chunkTarget must not mask an oversized open suffix.
+		// Release the prefix first; after the sink commits it, the next drain pass sees
+		// the suffix with no boundary and force-flushes it line-aligned.
+		if a.lastBoundary >= 0 {
+			return a.cutChunk(a.capSafeCut(a.lastBoundary))
+		}
+		return a.forcePartialFlush()
+	}
 	if cut < 0 {
 		// No turn boundary yet. A Codex turn folds across lines, so normally the run is
 		// withheld until its closing user line. The accepted bound: rewritten turns are
@@ -865,9 +878,6 @@ func (a *chunkAssembler) takeReady(final bool) (data []byte, origLen int64, ok b
 		// as a hard backstop so worst-case memory is bounded by maxTurnBytes, not by
 		// turn length. This sacrifices turn-alignment for that one pathological chunk; it
 		// is not expected to fire in practice.
-		if a.pendingBytes >= maxTurnBytes {
-			return a.forcePartialFlush()
-		}
 		return nil, 0, false
 	}
 	if !final && a.boundaryBytes < chunkTarget {
@@ -877,7 +887,39 @@ func (a *chunkAssembler) takeReady(final bool) (data []byte, origLen int64, ok b
 		return nil, 0, false
 	}
 
-	return a.cutChunk(cut)
+	return a.cutChunk(a.capSafeCut(cut))
+}
+
+// capSafeCut keeps one protocol chunk at or below hardCap without splitting a
+// transformed JSONL line. It prefers a boundary within the cap. When the first
+// boundary run itself is too large, it uses the same line-aligned partial-turn
+// fallback as maxTurnBytes and returns the largest whole-line prefix that fits.
+func (a *chunkAssembler) capSafeCut(want int) int {
+	var total int64
+	lastLine := -1
+	lastBoundary := -1
+	for i := 0; i <= want; i++ {
+		next := total + int64(len(a.lines[i].data))
+		if next > hardCap {
+			break
+		}
+		total = next
+		lastLine = i
+		if a.lines[i].isBoundary {
+			lastBoundary = i
+		}
+	}
+	if lastLine == want {
+		return want
+	}
+	if lastBoundary >= 0 {
+		return lastBoundary
+	}
+	// handleSmallLine and handleBigLine reject an individual line above hardCap,
+	// so a ready run always has at least one whole line that fits.
+	slog.Warn("akari: forcing a non-turn-aligned partial chunk at the protocol cap",
+		"file", a.file, "rewritten_bytes", a.pendingBytes, "cap", hardCap)
+	return lastLine
 }
 
 // maxTurnBytes is the hard backstop on the rewritten bytes a single open Codex turn
@@ -895,7 +937,7 @@ func (a *chunkAssembler) forcePartialFlush() (data []byte, origLen int64, ok boo
 	last := len(a.lines) - 1
 	slog.Warn("akari: forcing a non-turn-aligned partial chunk for an oversized open turn",
 		"file", a.file, "rewritten_bytes", a.pendingBytes, "cap", maxTurnBytes)
-	return a.cutChunk(last)
+	return a.cutChunk(a.capSafeCut(last))
 }
 
 // cutChunk builds the chunk covering lines [0, cut], leaving the rest pending. It

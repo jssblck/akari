@@ -39,11 +39,15 @@ func runDaemon(args []string) error {
 		if err := daemon.Start(self, watchArgs, paths); err != nil {
 			return err
 		}
-		running, pid := daemon.Status(paths)
+		running, pid, err := daemon.Status(paths)
+		if err != nil {
+			return err
+		}
 		if running {
 			fmt.Printf("akari watch started (pid %d); logging to %s\n", pid, paths.Logfile)
+			return nil
 		}
-		return nil
+		return fmt.Errorf("background watch did not acquire its daemon lock")
 
 	case "stop":
 		if err := daemon.Stop(paths); err != nil {
@@ -53,7 +57,10 @@ func runDaemon(args []string) error {
 		return nil
 
 	case "status":
-		running, pid := daemon.Status(paths)
+		running, pid, err := daemon.Status(paths)
+		if err != nil {
+			return err
+		}
 		if running {
 			fmt.Printf("running (pid %d)\n", pid)
 		} else {
