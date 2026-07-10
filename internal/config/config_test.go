@@ -73,6 +73,39 @@ func TestLoadServerOGCleanupInterval(t *testing.T) {
 	}
 }
 
+func TestLoadServerInsightsRefreshInterval(t *testing.T) {
+	t.Setenv("AKARI_DATABASE_URL", "postgres://x/y")
+	// Isolate from any ambient value the harness may export.
+	t.Setenv("AKARI_INSIGHTS_REFRESH_INTERVAL", "")
+
+	// Default when unset.
+	s, err := LoadServer()
+	if err != nil {
+		t.Fatalf("LoadServer: %v", err)
+	}
+	if s.InsightsRefreshInterval != time.Hour {
+		t.Fatalf("default InsightsRefreshInterval = %v, want 1h", s.InsightsRefreshInterval)
+	}
+
+	// Explicit duration.
+	t.Setenv("AKARI_INSIGHTS_REFRESH_INTERVAL", "15m")
+	if s, err = LoadServer(); err != nil || s.InsightsRefreshInterval != 15*time.Minute {
+		t.Fatalf("InsightsRefreshInterval = %v (err %v), want 15m", s.InsightsRefreshInterval, err)
+	}
+
+	// "0" disables the background loop.
+	t.Setenv("AKARI_INSIGHTS_REFRESH_INTERVAL", "0")
+	if s, err = LoadServer(); err != nil || s.InsightsRefreshInterval != 0 {
+		t.Fatalf("InsightsRefreshInterval = %v (err %v), want 0", s.InsightsRefreshInterval, err)
+	}
+
+	// A malformed value is a load error, not a silent default.
+	t.Setenv("AKARI_INSIGHTS_REFRESH_INTERVAL", "banana")
+	if _, err = LoadServer(); err == nil {
+		t.Fatal("LoadServer accepted a malformed AKARI_INSIGHTS_REFRESH_INTERVAL")
+	}
+}
+
 func TestParseDuration(t *testing.T) {
 	cases := []struct {
 		in       string

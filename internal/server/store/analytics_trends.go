@@ -51,6 +51,20 @@ type ModelSeries struct {
 // another shrinks, without reading release notes.
 type FleetMix struct {
 	Models []ModelSeries
+
+	// NewestModel and NewestFirst name the newest arrival: the scoped model whose
+	// first tokens EVER land latest, provided that first day falls inside this grid
+	// past its first bucket. Arrival is a fleet-history fact, not a window-relative
+	// one, and it is computed over every model, not just the kept bands. Both halves
+	// of that matter: a window-relative "first bucket with tokens" would call any
+	// incumbent with a quiet first day an arrival on a short window, and the top-N
+	// fold (ranked by whole-window tokens) buries a true arrival in "other" on a long
+	// one; either way two windows would name different "newest" models over the same
+	// corpus. NewestModel is empty (NewestFirst -1) when nothing arrived inside the
+	// window: incumbents predate it, and "unknown" usage is skipped because a batch
+	// of unattributed tokens is not a model's story.
+	NewestModel string
+	NewestFirst int
 }
 
 // HasData reports whether any model carried tokens in the window.
@@ -338,7 +352,7 @@ func (s *Store) fleetMixFrom(ctx context.Context, q querier, f AnalyticsFilter, 
 		return FleetMix{}, fmt.Errorf("iterate fleet mix: %w", err)
 	}
 	if len(modelTotal) == 0 {
-		return FleetMix{}, nil
+		return FleetMix{NewestFirst: -1}, nil
 	}
 
 	// Rank models by total tokens; keep the top N as their own bands, fold the rest into
@@ -364,7 +378,57 @@ func (s *Store) fleetMixFrom(ctx context.Context, q querier, f AnalyticsFilter, 
 		}
 	}
 
-	out := FleetMix{}
+	out := FleetMix{NewestFirst: -1}
+	// The arrival callout reads each model's first tokens EVER (same non-time scope,
+	// no window bound), not its first in-window bucket: an incumbent with a quiet
+	// first day is not an arrival, and the whole-history minimum is immune to the
+	// top-N fold below (see the FleetMix field comment). A first day at or before the
+	// grid's opening bucket is an incumbent (index 0 is indistinguishable from the
+	// window seam), and one past the grid cannot happen for a model the windowed scan
+	// saw. Ties go to the busiest model so the callout is deterministic.
+	unbounded := f
+	unbounded.Since, unbounded.Until = time.Time{}, time.Time{}
+	ffilter, fargs := unbounded.clauseForRollupDay("sud.day")
+	frows, err := q.Query(ctx,
+		`SELECT sud.model, min(sud.day)
+		   FROM session_usage_daily sud
+		   JOIN sessions s ON s.id = sud.session_id
+		  WHERE sud.day IS NOT NULL`+ffilter+`
+		  GROUP BY sud.model`, fargs...)
+	if err != nil {
+		return FleetMix{}, fmt.Errorf("fleet mix arrivals: %w", err)
+	}
+	defer frows.Close()
+	for frows.Next() {
+		var model string
+		var first time.Time
+		if err := frows.Scan(&model, &first); err != nil {
+			return FleetMix{}, fmt.Errorf("scan fleet mix arrival: %w", err)
+		}
+		if model == "" || model == "unknown" {
+			continue
+		}
+		if _, inWindow := tokens[model]; !inWindow {
+			continue
+		}
+		i := g.index(first)
+		if i <= 0 {
+			continue
+		}
+		// Later bucket wins; ties go to the busier model, then the lesser name, so the
+		// callout never flaps between two runs over the same corpus (GROUP BY returns
+		// rows in no particular order).
+		switch {
+		case i > out.NewestFirst,
+			i == out.NewestFirst && modelTotal[model] > modelTotal[out.NewestModel],
+			i == out.NewestFirst && modelTotal[model] == modelTotal[out.NewestModel] && model < out.NewestModel:
+			out.NewestFirst = i
+			out.NewestModel = model
+		}
+	}
+	if err := frows.Err(); err != nil {
+		return FleetMix{}, fmt.Errorf("iterate fleet mix arrivals: %w", err)
+	}
 	build := func(name string, toks []int64) ModelSeries {
 		share := make([]float64, g.n())
 		first := -1

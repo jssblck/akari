@@ -30,7 +30,15 @@ You can also scope the overview to specific accounts.
 
 **Insights** reads how the window's sessions went, where the Overview reads what
 they cost. The same trailing-window selector bounds every panel, and the toolbar
-shows how many sessions the window holds. Top to bottom:
+shows how many sessions the window holds.
+
+The page serves a precomputed snapshot rather than live data: every window
+recomputes together on an hourly cadence (and right after a reparse), so the
+range views agree, and the note beside the range selector says how old the
+snapshot is. Figures here can trail the live feed by up to an
+hour; the Overview and the Sessions feed stay live.
+
+Top to bottom:
 
 
 - **Concurrency and velocity**: how many sessions ran at once at the fleet's peak

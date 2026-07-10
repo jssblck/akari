@@ -144,6 +144,13 @@
   border-bottom: 1px solid var(--border);
 }
 
+/* The snapshot provenance note sits opposite the range control: margin pushes it to
+   the left edge while the header keeps its flex-end flow for the controls. */
+.page-header .snapshot-age {
+  align-self: center;
+  margin-right: auto;
+}
+
 /* range control */
 
 .range-control {

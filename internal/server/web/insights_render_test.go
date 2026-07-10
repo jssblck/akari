@@ -97,10 +97,16 @@ func sampleTrends() *store.Trends {
 		Unit:         "week",
 		BucketStarts: []time.Time{time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC), time.Date(2026, 6, 8, 0, 0, 0, 0, time.UTC)},
 		Labels:       []string{"Jun 1", "Jun 8"},
-		FleetMix: store.FleetMix{Models: []store.ModelSeries{
-			{Model: "claude-sonnet-5", Share: []float64{60, 55}, First: 0},
-			{Model: "claude-opus-4-8", Share: []float64{40, 45}, First: 1},
-		}},
+		FleetMix: store.FleetMix{
+			Models: []store.ModelSeries{
+				{Model: "claude-sonnet-5", Share: []float64{60, 55}, First: 0},
+				{Model: "claude-opus-4-8", Share: []float64{40, 45}, First: 1},
+			},
+			// The store's whole-window arrival scan: opus first carries tokens in
+			// bucket 1, so it is the newest arrival (see fleetMixFrom).
+			NewestModel: "claude-opus-4-8",
+			NewestFirst: 1,
+		},
 		Gallery: store.Gallery{
 			Rows: []store.GallerySession{
 				{DurationS: 600, CostUSD: 1.2, Archetype: "quick", Grade: "A", Outcome: "completed"},
@@ -218,10 +224,12 @@ func sampleInsightsWithTrends() store.Insights {
 func TestInsightsPageRendersInstruments(t *testing.T) {
 	p := Page{Title: "Insights", LoggedIn: true, Active: "insights", Username: "ada"}
 	ranges := RangeOptions("/insights", nil, "30d")
-	html := renderComponent(t, InsightsPage(p, sampleInsightsWithTrends(), "30d", ranges))
+	html := renderComponent(t, InsightsPage(p, sampleInsightsWithTrends(), "30d", ranges, time.Now().Add(-12*time.Minute)))
 
 	for _, want := range []string{
 		`id="insights"`, // the swap target
+		// the snapshot provenance note: the page serves precomputed data, so its age shows
+		`class="snapshot-age muted small"`, `updated 12 min ago`,
 		// the seven instrument headings
 		`>Fleet mix<`, `>Session gallery<`, `>Velocity<`, `>Tools<`, `>Health<`, `>Economics<`, `>Subagents<`,
 		// representative chart mount points the engine looks up by id
@@ -263,7 +271,7 @@ func TestInsightsPageRendersInstruments(t *testing.T) {
 func TestInsightsPageRangeControlIsLive(t *testing.T) {
 	p := Page{Title: "Insights", LoggedIn: true, Active: "insights", Username: "ada"}
 	ranges := RangeOptions("/insights", nil, "30d")
-	html := renderComponent(t, InsightsPage(p, sampleInsightsWithTrends(), "30d", ranges))
+	html := renderComponent(t, InsightsPage(p, sampleInsightsWithTrends(), "30d", ranges, time.Now()))
 
 	for _, want := range []string{
 		`hx-get="/insights?range=7d"`,
@@ -287,12 +295,13 @@ func TestInsightsPageEmptyState(t *testing.T) {
 	p := Page{Title: "Insights", LoggedIn: true, Active: "insights", Username: "ada"}
 	ranges := RangeOptions("/insights", nil, "7d")
 	empty := store.Insights{} // Trends nil
-	html := renderComponent(t, InsightsPage(p, empty, "7d", ranges))
+	// A zero computed-at (an error path or a fixture) renders no provenance note.
+	html := renderComponent(t, InsightsPage(p, empty, "7d", ranges, time.Time{}))
 
 	if !strings.Contains(html, "No sessions in this window yet.") {
 		t.Error("empty insights page should show the empty state")
 	}
-	for _, absent := range []string{`id="insights-data"`, `id="chart-fleetmix-full"`, `id="velocity-tabs"`} {
+	for _, absent := range []string{`id="insights-data"`, `id="chart-fleetmix-full"`, `id="velocity-tabs"`, `snapshot-age`} {
 		if strings.Contains(html, absent) {
 			t.Errorf("empty insights page should not render %q", absent)
 		}

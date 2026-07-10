@@ -855,3 +855,83 @@ func TestConcurrencyStats(t *testing.T) {
 		t.Errorf("ada scope = {sessions %d, peak %d, busiest %s}, want {3, 2, ada}", adaOnly.Sessions, adaOnly.FleetPeak, adaOnly.BusiestUser)
 	}
 }
+
+// TestInsightsRangesAgreeAcrossWindows drives the multi-filter read the fleet /insights
+// refresher uses: every window computed in one call, under one snapshot and one clock.
+// The windows legitimately differ on totals (a session outside the short window is not in
+// it), but on any fact both windows can see they must agree; the newest-arrival callout is
+// the one that bit in production, so it is the one pinned here. The per-filter windowing
+// and bucket units must survive the shared pass unchanged.
+func TestInsightsRangesAgreeAcrossWindows(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	ada := seedUser(t, st, "ada")
+	pid, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	day := func(daysAgo int) time.Time {
+		d := time.Now().UTC().AddDate(0, 0, -daysAgo)
+		return time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, time.UTC)
+	}
+	seed := func(src, model string, at time.Time) {
+		sid := seedSession(t, st, ada, pid, src)
+		rebuildWith(t, st, sid, store.ProjectionDelta{
+			Messages: []store.MessageDelta{{Ordinal: 0, Role: "user", Content: "go", Timestamp: at}},
+			Usage: []store.ProjUsage{{
+				Model: model, Input: 1000, Output: 100,
+				OccurredAt: at, DedupKey: src, SourceOffset: 10,
+			}},
+			Started: at,
+			Ended:   at.Add(30 * time.Minute),
+		})
+	}
+	// The incumbent's first-ever tokens predate the 7d window; the newcomer arrived two
+	// days ago, inside both windows and after each window's first bucket. Ten days
+	// apart, so the two can never share a week bucket and the newcomer is strictly the
+	// later arrival. The incumbent also ran yesterday: its first IN-WINDOW usage on the
+	// 7d view lands later than the newcomer's, which is exactly the case that made the
+	// old window-relative arrival scan call the incumbent "newest" on the short window
+	// while the long window said the newcomer. Arrival is fleet history, so the
+	// quiet-start incumbent must not read as an arrival anywhere.
+	seed("ranges-incumbent", "incumbent", day(12).Add(10*time.Hour))
+	seed("ranges-newcomer", "newcomer", day(2).Add(10*time.Hour))
+	seed("ranges-incumbent-recent", "incumbent", day(1).Add(10*time.Hour))
+
+	now := time.Now()
+	outs, err := st.InsightsRanges(ctx, []store.AnalyticsFilter{
+		{Since: now.AddDate(0, 0, -7), Bucket: "day"},
+		{Since: now.AddDate(0, 0, -365), Bucket: "week"},
+	}, store.AllInsightsPanels)
+	if err != nil {
+		t.Fatalf("insights ranges: %v", err)
+	}
+	if len(outs) != 2 {
+		t.Fatalf("got %d results, want 2", len(outs))
+	}
+	short, long := outs[0], outs[1]
+
+	// Per-filter windowing and grids survive the shared pass.
+	if short.Trends == nil || long.Trends == nil {
+		t.Fatal("both windows should carry a trend grid")
+	}
+	if short.Trends.Unit != "day" || long.Trends.Unit != "week" {
+		t.Errorf("units = %q/%q, want day/week", short.Trends.Unit, long.Trends.Unit)
+	}
+	if short.Quality.Sessions != 2 {
+		t.Errorf("7d sessions = %d, want 2 (the incumbent's first session predates the window)", short.Quality.Sessions)
+	}
+	if long.Quality.Sessions != 3 {
+		t.Errorf("year sessions = %d, want 3", long.Quality.Sessions)
+	}
+
+	// The cross-window fact: both views name the same newest arrival.
+	if got := long.Trends.FleetMix.NewestModel; got != "newcomer" {
+		t.Errorf("year NewestModel = %q, want newcomer", got)
+	}
+	if got := short.Trends.FleetMix.NewestModel; got != "newcomer" {
+		t.Errorf("7d NewestModel = %q, want newcomer", got)
+	}
+}

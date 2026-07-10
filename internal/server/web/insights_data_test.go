@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"math"
 	"testing"
+
+	"github.com/jssblck/akari/internal/server/store"
 )
 
 // akData is the subset of the AK_DATA contract this test asserts on, typed so the JSON
@@ -343,5 +345,42 @@ func TestInsightsDataMapping(t *testing.T) {
 func TestInsightsDataNoTrends(t *testing.T) {
 	if _, err := InsightsData(sampleInsights()); err == nil {
 		t.Error("InsightsData should error when there is no trend grid")
+	}
+}
+
+// TestFleetMixArrivalSurvivesTheFold pins the fix for the cross-window "newest arrival"
+// disagreement: on a long window a just-arrived model's whole-window token share is tiny,
+// so the top-N fold pushes it into "other" and it appears in no kept band. The callout must
+// still name it, because it reads the store's fleet-history scan (FleetMix.NewestModel), not
+// the bands.
+func TestFleetMixArrivalSurvivesTheFold(t *testing.T) {
+	labels := []string{"Jun 1", "Jun 8", "Jun 15"}
+	fm := store.FleetMix{
+		Models: []store.ModelSeries{
+			{Model: "claude-sonnet-5", Share: []float64{60, 55, 50}, First: 0},
+			{Model: "other", Share: []float64{40, 45, 50}, First: 0},
+		},
+		NewestModel: "gpt-5.6-luna",
+		NewestFirst: 2,
+	}
+	out := fleetMixData(fm, labels, 3)
+	if got := out["newestArrivalLabel"]; got != "gpt-5.6-luna" {
+		t.Errorf("newestArrivalLabel = %v, want gpt-5.6-luna (the folded arrival)", got)
+	}
+	if got := out["arrivalWeek"]; got != 2 {
+		t.Errorf("arrivalWeek = %v, want 2", got)
+	}
+	if got := out["newestArrivalDate"]; got != "Jun 15" {
+		t.Errorf("newestArrivalDate = %v, want Jun 15", got)
+	}
+
+	// No mid-window arrival (every model an incumbent): the callout stays absent.
+	fm.NewestModel, fm.NewestFirst = "", -1
+	out = fleetMixData(fm, labels, 3)
+	if _, ok := out["newestArrivalLabel"]; ok {
+		t.Error("newestArrivalLabel present with no mid-window arrival")
+	}
+	if _, ok := out["arrivalWeek"]; ok {
+		t.Error("arrivalWeek present with no mid-window arrival")
 	}
 }
