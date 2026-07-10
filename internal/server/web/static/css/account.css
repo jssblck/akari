@@ -26,11 +26,9 @@
 .reparse-public-track { max-width: 360px; margin: var(--sp-lg) auto; }
 
 /* ---- Publicity ---- */
-/* The control that publishes the signed-in user's own usage overview. The lede
-   caps to the page's reading width so the explanation does not run edge to edge,
-   and the live row aligns the public tag, the copyable link, and the controls on
-   one baseline (reusing the session header's .share-link clamp so a long
-   capability id ellipsizes rather than wrapping). */
-.publicity-lede { max-width: 60ch; margin: 0 0 var(--sp-md); }
+/* The control that publishes the signed-in user's own usage overview. The live
+   row centers the linked public chip, the copyable URL, its copy button, and
+   the make-private control on one line (reusing the session header's
+   .share-link clamp so a long path ellipsizes rather than wrapping). */
 .publicity-live { display: flex; align-items: center; gap: var(--sp-sm); flex-wrap: wrap; }
 .publicity-live .share-link { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 32ch; }

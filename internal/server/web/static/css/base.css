@@ -341,9 +341,10 @@ td.num, th.num, table.grid td.num, table.grid th.num { text-align: right; font-f
 .tag.public { color: var(--ok); border-color: rgba(159, 214, 166, 0.4); }
 .tag.model { color: var(--subtext); font-family: var(--mono); letter-spacing: 0; }
 /* Project state: standalone (no remote) reads as a caution; orphaned (folder
-   gone) reads as an error. */
-.tag.standalone { color: var(--warn); border-color: rgba(240, 197, 146, 0.4); }
-.tag.orphaned { color: var(--err); border-color: rgba(239, 154, 169, 0.4); }
+   gone) reads as an error. Both carry explanatory titles, so they take the same
+   help cursor every other tooltip-bearing tag does. */
+.tag.standalone { color: var(--warn); border-color: rgba(240, 197, 146, 0.4); cursor: help; }
+.tag.orphaned { color: var(--err); border-color: rgba(239, 154, 169, 0.4); cursor: help; }
 /* Data-quality caution: the session repeats a tool-call id across rows. */
 .tag.warn { color: var(--warn); border-color: rgba(240, 197, 146, 0.4); cursor: help; }
 /* Feed-row quality chips: the grade reads in the report-card banding the Quality tile
@@ -354,6 +355,22 @@ td.num, th.num, table.grid td.num, table.grid th.num { text-align: right; font-f
 .tag.grade.q-watch { color: var(--warn); border-color: rgba(240, 197, 146, 0.4); }
 .tag.grade.q-poor { color: var(--err); border-color: rgba(239, 154, 169, 0.4); }
 .tag.outcome { color: var(--err); border-color: rgba(239, 154, 169, 0.4); cursor: help; }
+/* A tag that is also a link: the public chip opens the published page in a new
+   tab, so it lays out as inline-flex to seat the external-link glyph and lifts
+   its fill on hover instead of underlining (an underline under an 11px chip
+   reads as clutter). The glyph is the clickability cue; hover firms the sage
+   border and brings the glyph to full strength. */
+a.tag { text-decoration: none; }
+a.tag:hover { text-decoration: none; }
+.tag-link { display: inline-flex; align-items: center; gap: 4px; transition: background var(--dur-fast) var(--ease-state), border-color var(--dur-fast) var(--ease-state); }
+.tag-link .ext-glyph { flex: none; opacity: 0.65; transition: opacity var(--dur-fast) var(--ease-state); }
+.tag-link:hover { background: var(--surface-3); }
+.tag-link:hover .ext-glyph { opacity: 1; }
+.tag.public.tag-link:hover { border-color: rgba(159, 214, 166, 0.7); }
+/* The publish-state cluster (the public chip and its make-private control) as it
+   rides inline in a page header. Purely a flex seat: any strip spacing belongs
+   to the surface that hosts it (see .overview-public-badge in overview.css). */
+.publicity { display: inline-flex; align-items: center; gap: var(--sp-sm); }
 /* Fan-out chip: a root session's whole-work-item rollup (how many subagents it spun
    out and the total cost including all of them). It reads as structure, not a verdict,
    so it takes the neutral subtext color and a mono figure rather than a status hue. */
@@ -375,6 +392,14 @@ button.ghost:hover { background: var(--surface-2); }
 button.danger { background: var(--surface-2); color: var(--err); border: 1px solid rgba(239, 154, 169, 0.4); }
 button.danger:hover { background: var(--err); color: var(--ink); border-color: var(--err); }
 button.small, .btn.small { padding: 5px 10px; font-size: 0.8125rem; }
+/* The icon-only copy control that pairs with a visible share URL (see copyLink
+   in publicity.templ). It flips to the sage check while a copy settles; both
+   glyphs occupy the same box, so the swap never shifts layout. */
+.copy-link { display: inline-flex; align-items: center; justify-content: center; padding: 4px 6px; line-height: 0; color: var(--muted); }
+.copy-link:hover { color: var(--subtext); }
+.copy-link .glyph-check { display: none; color: var(--ok); }
+.copy-link.copied .glyph-copy { display: none; }
+.copy-link.copied .glyph-check { display: inline; }
 
 /* ---- Segmented controls (density / metric) ---- */
 .seg-group, .chart-toolbar { display: inline-flex; gap: 0; border: 1px solid var(--border); border-radius: var(--r-sm); overflow: hidden; }

@@ -18,12 +18,11 @@ templ OverviewPage(p Page, a store.Analytics, rng string, users []store.User, se
 		if p.OverviewPublic {
 			// A second entry point to the publicity control, so a published overview is
 			// discoverable from the overview itself and not only buried in account
-			// settings. The badge links to the public view at /u/<username> (which is
-			// scoped to this one user, unlike this fleet-wide page), and Manage jumps to
-			// the account control to toggle it off.
+			// settings. The public chip links to the public view at /u/<username> (which
+			// is scoped to this one user, unlike this fleet-wide page), and Manage jumps
+			// to the account control to toggle it off.
 			<div class="overview-public-badge">
-				<span class="tag public">public</span>
-				<a class="share-link" href={ PublicOverviewHref(p.Username) } target="_blank" rel="noopener" title="Your public overview link">View public page</a>
+				@publicTag(PublicOverviewHref(p.Username))
 				<a class="muted small" href="/account#publicity">Manage</a>
 			</div>
 		}
@@ -154,8 +153,8 @@ templ heatmapBlock(a store.Analytics, chartID string, ranges []RangeOption, rng 
 				}
 				<span class="ctrl-sep" aria-hidden="true"></span>
 				<div class="chart-toolbar" role="group" aria-label="Metric">
-					<button type="button" class="seg active" data-metric="tokens" data-heatmap-target={ chartID }>Tokens</button>
-					<button type="button" class="seg" data-metric="cost" data-heatmap-target={ chartID }>Dollars</button>
+					<button type="button" class="seg active" aria-pressed="true" data-metric="tokens" data-heatmap-target={ chartID }>Tokens</button>
+					<button type="button" class="seg" aria-pressed="false" data-metric="cost" data-heatmap-target={ chartID }>Dollars</button>
 				</div>
 			</div>
 		</div>
@@ -172,9 +171,14 @@ templ heatmapBlock(a store.Analytics, chartID string, ranges []RangeOption, rng 
 templ rangeSelector(ranges []RangeOption, swap string) {
 	<div class="chart-toolbar" role="group" aria-label="Date range">
 		for _, o := range ranges {
+			// aria-current names the active window for assistive tech, matching the
+			// Insights range control; the .active class alone is visual-only.
 			<button
 				type="button"
 				class={ rangeSegClass(o.Active) }
+				if o.Active {
+					aria-current="true"
+				}
 				hx-get={ o.Href }
 				hx-target={ swap }
 				hx-select={ swap }
@@ -186,7 +190,7 @@ templ rangeSelector(ranges []RangeOption, swap string) {
 }
 
 // userFilter is the per-user activity scope: a skinned disclosure beside the range
-// selector. Collapsed, it shows the current selection as a row of pills (or "All
+// selector. Collapsed, it shows the current selection as a row of chips (or "All
 // Users" when unscoped), clipped to the control's width so it never wraps or grows
 // the controls row. Open, it offers an "All Users" reset and a checkbox per
 // account; toggling a box refetches the usage panel scoped to the checked users
@@ -198,12 +202,12 @@ templ userFilter(users []store.User, selected []int64, rng string, swap string) 
 	{{ sel := selectedSet(selected) }}
 	<details class="userfilter">
 		<summary class="userfilter-summary">
-			<span class="userfilter-pills">
+			<span class="userfilter-chips">
 				if len(selected) == 0 {
 					<span class="userfilter-all">All Users</span>
 				} else {
 					for _, u := range selectedUsers(users, selected) {
-						<span class="userfilter-pill">{ u.Username }</span>
+						<span class="userfilter-chip">{ u.Username }</span>
 					}
 				}
 			</span>

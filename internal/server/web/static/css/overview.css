@@ -6,11 +6,10 @@
 
 /* ---- Public overview ---- */
 /* The badge on the signed-in overview when the user has published it: a quiet
-   strip above the usage panel linking to the public page and the account control.
+   strip above the usage panel, the linked public chip beside the account control.
    On the logged-out public page the same panel sits under a small project-style
    head naming the account. */
 .overview-public-badge { display: flex; align-items: center; gap: var(--sp-sm); margin-bottom: var(--sp-md); }
-.overview-public-badge .share-link { font-family: var(--mono); }
 .public-overview-head { display: flex; align-items: center; gap: var(--sp-sm); margin-bottom: var(--sp-lg); }
 .public-overview-head h1 { display: flex; align-items: baseline; gap: var(--sp-sm); margin: 0; }
 .public-overview-head .sep { color: var(--border); }
@@ -88,25 +87,27 @@
   max-width: 240px; height: 100%; padding: 0 10px;
   border: 1px solid var(--border); border-radius: var(--r-sm);
   background: var(--surface); color: var(--subtext);
-  font-size: 0.8125rem; line-height: 1; cursor: pointer; list-style: none; user-select: none;
+  font-size: 0.8125rem; line-height: 1; list-style: none; user-select: none;
   transition: background var(--dur-fast) var(--ease-state), border-color var(--dur-fast) var(--ease-state);
 }
 .userfilter-summary::-webkit-details-marker { display: none; }
 .userfilter-summary:hover { background: var(--surface-2); }
 .userfilter[open] .userfilter-summary { border-color: var(--border-strong); }
-/* Pills lay out in a single non-wrapping row, clipped at the control's edge with a
-   soft right-edge fade so an overflowing selection trails off rather than spilling
-   past the control or growing the row to a second line. */
-.userfilter-pills {
+/* Selection chips lay out in a single non-wrapping row, clipped at the control's
+   edge with a soft right-edge fade so an overflowing selection trails off rather
+   than spilling past the control or growing the row to a second line. */
+.userfilter-chips {
   display: flex; flex-wrap: nowrap; gap: 4px; min-width: 0; overflow: hidden;
   -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 16px), transparent);
           mask-image: linear-gradient(to right, #000 calc(100% - 16px), transparent);
 }
 .userfilter-all { color: var(--muted); white-space: nowrap; }
-.userfilter-pill {
+/* Machined rectangles like every other chip (The Tag Is Not A Pill); lilac is
+   earned here because a checked user is an active filter. */
+.userfilter-chip {
   flex: none; white-space: nowrap;
   background: var(--surface-3); color: var(--lilac);
-  border-radius: 999px; padding: 1px 8px; font-size: 0.75rem;
+  border-radius: var(--r-sm); padding: 1px 8px; font-size: 0.75rem;
 }
 .userfilter-caret { flex: none; color: var(--muted); transition: transform var(--dur-fast) var(--ease-state); }
 .userfilter[open] .userfilter-caret { transform: rotate(180deg); }
@@ -125,7 +126,7 @@
 .userfilter-opt, .userfilter-reset {
   display: flex; align-items: center; gap: 8px;
   width: 100%; padding: 5px 8px; border: none; border-radius: var(--r-sm);
-  background: none; color: var(--subtext); font-size: 0.8125rem; text-align: left; cursor: pointer;
+  background: none; color: var(--subtext); font-size: 0.8125rem; text-align: left;
   transition: background var(--dur-fast) var(--ease-state);
 }
 .userfilter-opt:hover, .userfilter-reset:hover { background: var(--surface-3); }
@@ -135,7 +136,7 @@
 /* Real native checkboxes, themed to the signal lilac: standard look and behaviour,
    no hand-drawn box. The reset's box is decorative (the button is the control), so
    clicks fall through to the button rather than toggling it. */
-.userfilter-box { flex: none; width: 14px; height: 14px; margin: 0; accent-color: var(--lilac); cursor: pointer; }
+.userfilter-box { flex: none; width: 14px; height: 14px; margin: 0; accent-color: var(--lilac); }
 .userfilter-reset .userfilter-box { pointer-events: none; }
 .userfilter-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .heatmap {

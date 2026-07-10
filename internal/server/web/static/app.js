@@ -633,7 +633,10 @@
     if (!target || !target.closest) return null;
     var row = target.closest("[data-row-href]");
     if (!row) return null;
-    if (target.closest("a, button, input, select, textarea, label, summary")) return null;
+    // .tok-cell is the focusable token figure whose breakdown card opens on
+    // hover or focus; on a touch screen the tap that would open it must not
+    // bubble into a row navigation, or the card is unreachable there.
+    if (target.closest("a, button, input, select, textarea, label, summary, .tok-cell")) return null;
     return row.getAttribute("data-row-href");
   }
   document.addEventListener("click", function (ev) {
@@ -720,6 +723,57 @@
     if (!bar) return;
     var open = bar.classList.toggle("filters-open");
     btn.setAttribute("aria-expanded", open ? "true" : "false");
+  });
+
+  // ---------------- Copy-link buttons ----------------
+  // A button carrying data-copy puts that path on the clipboard as an absolute
+  // URL. The app disables text selection over chrome (base.css's native-app
+  // feel), so a visible share URL cannot be select-copied; this button owns
+  // "copy the link". The copied state flips the glyph to a check for a beat
+  // (CSS keys off .copied) and updates the accessible name to match.
+  // The legacy path (a transient selectable field plus execCommand) covers the
+  // plain-http LAN instance where the async clipboard API is absent, and the
+  // async API's own rejections (an unfocused document).
+  function writeClipboardLegacy(text) {
+    return new Promise(function (resolve, reject) {
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        document.execCommand("copy") ? resolve() : reject(new Error("copy rejected"));
+      } catch (err) {
+        reject(err);
+      } finally {
+        document.body.removeChild(ta);
+      }
+    });
+  }
+  function writeClipboard(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText && window.isSecureContext) {
+      return navigator.clipboard.writeText(text).catch(function () {
+        return writeClipboardLegacy(text);
+      });
+    }
+    return writeClipboardLegacy(text);
+  }
+  document.addEventListener("click", function (ev) {
+    var btn = ev.target.closest ? ev.target.closest("[data-copy]") : null;
+    if (!btn) return;
+    ev.preventDefault();
+    var url = new URL(btn.getAttribute("data-copy"), window.location.href).toString();
+    writeClipboard(url).then(function () {
+      btn.classList.add("copied");
+      btn.setAttribute("aria-label", "Copied");
+      btn.setAttribute("title", "Copied");
+      window.setTimeout(function () {
+        btn.classList.remove("copied");
+        btn.setAttribute("aria-label", "Copy link");
+        btn.setAttribute("title", "Copy link");
+      }, 1400);
+    }, function () {});
   });
 
   // ---------------- Notice banner ----------------

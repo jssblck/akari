@@ -1,0 +1,62 @@
+package web
+
+// publicTag is the one "public" chip, shared by every surface that marks a
+// published session, project, or overview. Given an href the chip itself is the
+// link to the published page: it opens in a new tab and carries the external-link
+// glyph so it reads as clickable, replacing the separate "View public page" text
+// links that used to ride beside a plain chip. Given an empty href it renders the
+// plain state marker, for surfaces where the reader is already on the public page
+// or no public link exists.
+templ publicTag(href templ.SafeURL) {
+	if href != "" {
+		<a class="tag public tag-link" href={ href } target="_blank" rel="noopener" title="Open the public page in a new tab">
+			public
+			@externalGlyph()
+		</a>
+	} else {
+		<span class="tag public">public</span>
+	}
+}
+
+// sessionPublicTag renders a session's public chip from its row fields: nothing
+// while the session is private, the linked chip when its public id is known, and
+// the plain marker otherwise. Session tables and the feed all mark publicity
+// through this one component so the chip behaves identically everywhere.
+templ sessionPublicTag(visibility string, publicID *string) {
+	if visibility == "public" {
+		if publicID != nil {
+			@publicTag(PublicHref(*publicID))
+		} else {
+			@publicTag("")
+		}
+	}
+}
+
+// copyLink is the one-click copy control beside a visible share URL. The app
+// disables text selection over chrome (base.css's native-app feel), so the URL
+// text cannot be select-copied and clicking it opens the page; this button is
+// how the link reaches the clipboard. data-copy carries the path; app.js
+// resolves it against the origin, writes the clipboard, and flips the glyph to
+// the check for a beat.
+templ copyLink(path string) {
+	<button type="button" class="copy-link ghost small" data-copy={ path } aria-label="Copy link" title="Copy link">
+		<svg class="glyph-copy" viewBox="0 0 12 12" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true">
+			<rect x="4" y="4" width="6.5" height="6.5" rx="1"></rect>
+			<path d="M8 2.5v-.7a0.8 0.8 0 0 0-0.8-0.8H2.3a0.8 0.8 0 0 0-0.8 0.8v4.9c0 .44.36.8.8.8h.7"></path>
+		</svg>
+		<svg class="glyph-check" viewBox="0 0 12 12" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
+			<path d="M2.5 6.5 5 9l4.5-6"></path>
+		</svg>
+	</button>
+}
+
+// externalGlyph is the arrow-out-of-box mark for a link that opens in a new tab.
+// It inherits the link's color and rides inside inline-flex hosts (the linked
+// public chip), which carry the gap.
+templ externalGlyph() {
+	<svg class="ext-glyph" viewBox="0 0 12 12" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true">
+		<path d="M9.8 6.8v2.2a0.8 0.8 0 0 1-0.8 0.8H3a0.8 0.8 0 0 1-0.8-0.8V3a0.8 0.8 0 0 1 0.8-0.8h2.2"></path>
+		<path d="M7.3 1.8h2.9v2.9"></path>
+		<path d="M10.2 1.8 5.9 6.1"></path>
+	</svg>
+}

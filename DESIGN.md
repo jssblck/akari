@@ -327,6 +327,11 @@ rows are flat. A shadow on a static card is a 2014 tell.
   takes its signal hue.
 - **The Tag Is Not A Pill.** Never render a fully rounded pill badge; that is the
   consumer tell. Tags are small stamped rectangles.
+- **A tag that opens something is a link, not a caption.** When a state chip has
+  a destination (the public tag opens the published page), the chip itself is
+  the anchor: it carries the small arrow-out-of-box glyph as the clickability
+  and new-tab cue, and hover lifts the fill rather than underlining. No separate
+  "View ..." text link beside a chip.
 
 ### Stat Tiles (instrument readouts)
 - **Style:** Surface card, 6px radius, a Muted 11px uppercase Label over a large

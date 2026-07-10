@@ -285,9 +285,7 @@ templ feedRow(fr FeedRow) {
 				if note := RowOutcomeNote(fr.Row.Outcome); note != "" {
 					<span class="tag outcome" title="session outcome">{ note }</span>
 				}
-				if fr.Row.Visibility == "public" {
-					<span class="tag public">public</span>
-				}
+				@sessionPublicTag(fr.Row.Visibility, fr.Row.PublicID)
 				if fr.Row.ModelFallbackCount > 0 {
 					<span class="tag warn" title={ FallbackBadgeTitle(fr.Row.ModelFallbackCount) }>{ FallbackBadgeLabel(fr.Row.ModelFallbackCount) }</span>
 				}
