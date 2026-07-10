@@ -444,6 +444,28 @@ func TestRebuildBackoffDefersDueRetry(t *testing.T) {
 	if got := backoffSecs(); got != 30 {
 		t.Fatalf("first backoff = %ds, want 30", got)
 	}
+	// A newer binary can park a byte-dirty session whose last successful
+	// projection is ahead of this worker. The old worker must ignore that retry
+	// even after it elapses; otherwise its timer spins at zero while DueSessions
+	// correctly refuses to downgrade the newer projection.
+	if _, err := st.Pool.Exec(ctx,
+		`UPDATE session_raw
+		    SET parser_epoch = $2, parse_retry_at = now() - interval '1 second'
+		  WHERE session_id = $1`, sid, testEpoch+1); err != nil {
+		t.Fatal(err)
+	}
+	if delay, scheduled, err := st.NextRebuildRetryDelay(ctx, testEpoch); err != nil || scheduled {
+		t.Fatalf("older epoch retry schedule = (%s, %v, %v), want no eligible retry", delay, scheduled, err)
+	}
+	if delay, scheduled, err := st.NextRebuildRetryDelay(ctx, testEpoch+1); err != nil || !scheduled || delay > 0 {
+		t.Fatalf("current epoch retry schedule = (%s, %v, %v), want elapsed eligible retry", delay, scheduled, err)
+	}
+	if _, err := st.Pool.Exec(ctx,
+		`UPDATE session_raw
+		    SET parser_epoch = 0, parse_retry_at = now() + interval '30 seconds'
+		  WHERE session_id = $1`, sid); err != nil {
+		t.Fatal(err)
+	}
 	// The gates ignore the deferral (the rebuild is still pending work), while
 	// the drain's ready count excludes it (it is not this drain's workload).
 	if n, err := st.EpochStaleCount(ctx, testEpoch); err != nil || n != 1 {

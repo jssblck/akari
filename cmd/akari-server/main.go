@@ -22,7 +22,6 @@ import (
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/shutdown"
 	"github.com/jssblck/akari/internal/version"
-	"github.com/jssblck/akari/migrations"
 )
 
 func main() {
@@ -92,9 +91,7 @@ func run() error {
 	}
 	defer st.Close()
 
-	migrateCtx, cancel := context.WithTimeout(rootCtx, 60*time.Second)
-	defer cancel()
-	if err := st.Migrate(migrateCtx, migrations.FS); err != nil {
+	if err := migrateStore(rootCtx, st); err != nil {
 		return err
 	}
 	log.Printf("migrations applied")

@@ -3,12 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/jssblck/akari/internal/config"
 	"github.com/jssblck/akari/internal/server/parse"
 	"github.com/jssblck/akari/internal/server/store"
-	"github.com/jssblck/akari/migrations"
 )
 
 // runSettle grades every settled-but-ungraded session once, then exits. The
@@ -28,9 +26,7 @@ func runSettle(args []string) error {
 	}
 	defer st.Close()
 
-	migrateCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-	if err := st.Migrate(migrateCtx, migrations.FS); err != nil {
+	if err := migrateStore(ctx, st); err != nil {
 		return err
 	}
 	// The grading guard keys on the running epoch (RefreshSessionSignals skips

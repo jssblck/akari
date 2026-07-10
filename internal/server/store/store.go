@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -24,6 +25,10 @@ type Store struct {
 	// mix old and new parses, so those snapshots decline to cache. Zero (never
 	// set) gates nothing, which is what tests that never touch epochs want.
 	parserEpoch int
+
+	// windowSessionRowsReadHook is a deterministic concurrency seam used by the
+	// snapshot regression test. Production stores leave it nil.
+	windowSessionRowsReadHook func()
 }
 
 // SetParserEpoch records the running binary's parser epoch for the
@@ -54,7 +59,46 @@ func (s *Store) Migrate(ctx context.Context, migrationFS embed.FS) error {
 	if err != nil {
 		return fmt.Errorf("acquire migration conn: %w", err)
 	}
-	defer conn.Release()
+	lockAttempted := false
+	defer func() {
+		if !lockAttempted {
+			conn.Release()
+			return
+		}
+		// The caller's context may have expired because a migration was cancelled.
+		// Use a short cleanup context so a session-level advisory lock never returns
+		// to the pool with the connection that owns it. If unlock fails, discard the
+		// connection; closing its backend releases the lock in PostgreSQL.
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		var unlocked bool
+		if err := conn.QueryRow(cleanupCtx,
+			`SELECT pg_advisory_unlock(
+			   hashtext(current_database()),
+			   hashtext('akari-schema-migrations')
+			 )`).Scan(&unlocked); err != nil || !unlocked {
+			raw := conn.Hijack()
+			_ = raw.Close(context.Background())
+			return
+		}
+		conn.Release()
+	}()
+
+	// Startup is multi-instance. Serialize the whole read-and-apply sequence on
+	// this dedicated connection so two fresh replicas cannot both observe a
+	// missing version and interleave its DDL. The database name scopes the lock
+	// within a shared PostgreSQL cluster.
+	//
+	// Mark the attempt before sending it. Cancellation can race with PostgreSQL
+	// granting the lock, so an error does not prove this session owns no lock.
+	lockAttempted = true
+	if _, err := conn.Exec(ctx,
+		`SELECT pg_advisory_lock(
+		   hashtext(current_database()),
+		   hashtext('akari-schema-migrations')
+		 )`); err != nil {
+		return fmt.Errorf("lock schema migrations: %w", err)
+	}
 	pg := conn.Conn().PgConn()
 
 	// Track applied migrations. The simple protocol lets us run multi-statement
@@ -68,7 +112,7 @@ func (s *Store) Migrate(ctx context.Context, migrationFS embed.FS) error {
 		return fmt.Errorf("ensure schema_migrations: %w", err)
 	}
 
-	applied, err := s.appliedVersions(ctx)
+	applied, err := appliedVersions(ctx, conn)
 	if err != nil {
 		return err
 	}
@@ -99,8 +143,8 @@ func (s *Store) Migrate(ctx context.Context, migrationFS embed.FS) error {
 	return nil
 }
 
-func (s *Store) appliedVersions(ctx context.Context) (map[string]bool, error) {
-	rows, err := s.Pool.Query(ctx, "SELECT version FROM schema_migrations")
+func appliedVersions(ctx context.Context, conn *pgxpool.Conn) (map[string]bool, error) {
+	rows, err := conn.Query(ctx, "SELECT version FROM schema_migrations")
 	if err != nil {
 		return nil, fmt.Errorf("read applied migrations: %w", err)
 	}

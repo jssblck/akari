@@ -25,6 +25,12 @@ var duePageSize = 256
 // over-gating after a rebuild finishes is safe, serving mixed pages is not.
 const defaultFleetCacheTTL = 2 * time.Second
 
+// retryScheduleFallback bounds recovery after the worker cannot drain the due
+// set or read the next parked retry time. Retrying keeps a transient database
+// error from turning into permanently unscheduled work when the maintenance
+// tick is disabled.
+const retryScheduleFallback = 30 * time.Second
+
 // Status is a snapshot of the current (or last) fleet rebuild. It is what the
 // HTTP status endpoint and the SSE progress stream serialize, so its JSON tags
 // are the wire contract the frontend reads. Ordinary live-session rebuilds (a
@@ -155,27 +161,80 @@ func (w *Worker) Run(ctx context.Context) {
 		defer t.Stop()
 		tick = t.C
 	}
-	w.drainLogged(ctx)
+	retryTimer := time.NewTimer(time.Hour)
+	stopTimer(retryTimer)
+	defer retryTimer.Stop()
+	drainFailed := w.drainLogged(ctx)
+	retry := w.armRetryTimer(ctx, retryTimer, drainFailed)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-w.wake:
-			w.drainLogged(ctx)
+			drainFailed = w.drainLogged(ctx)
+			retry = w.armRetryTimer(ctx, retryTimer, drainFailed)
+		case <-retry:
+			drainFailed = w.drainLogged(ctx)
+			retry = w.armRetryTimer(ctx, retryTimer, drainFailed)
 		case <-tick:
-			w.drainLogged(ctx)
+			drainFailed = w.drainLogged(ctx)
 			w.settle(ctx)
+			retry = w.armRetryTimer(ctx, retryTimer, drainFailed)
 		}
+	}
+}
+
+// armRetryTimer schedules the earliest operational retry recorded in the
+// store. parse_retry_at advancing past now changes database state but sends no
+// process-local wake, so this timer is the recovery path when no later append or
+// maintenance tick arrives.
+func (w *Worker) armRetryTimer(ctx context.Context, timer *time.Timer, drainFailed bool) <-chan time.Time {
+	stopTimer(timer)
+	if ctx.Err() != nil {
+		return nil
+	}
+	delay, scheduled, err := w.st.NextRebuildRetryDelay(ctx, Epoch)
+	if err != nil {
+		log.Printf("parse worker: schedule retry: %v", err)
+		timer.Reset(retryScheduleFallback)
+		return timer.C
+	}
+	// A transient due-scan failure may happen before any session is parked. With
+	// no maintenance tick and no later append, a successful "no retry rows"
+	// lookup would otherwise put the worker to sleep forever despite pending
+	// work. Bound the next attempt after any drain failure; if a parked retry is
+	// due sooner, preserve that earlier schedule.
+	if drainFailed && (!scheduled || delay > retryScheduleFallback) {
+		timer.Reset(retryScheduleFallback)
+		return timer.C
+	}
+	if !scheduled {
+		return nil
+	}
+	timer.Reset(delay)
+	return timer.C
+}
+
+func stopTimer(timer *time.Timer) {
+	if timer.Stop() {
+		return
+	}
+	select {
+	case <-timer.C:
+	default:
 	}
 }
 
 // drainLogged is the Run loop's form of drain: operational trouble is logged
 // and the loop moves on, because the failed sessions stay due and the next
 // wake or tick retries them. Only the foreground Drain propagates the error.
-func (w *Worker) drainLogged(ctx context.Context) {
-	if err := w.drain(ctx); err != nil && ctx.Err() == nil {
-		log.Printf("parse worker: drain: %v", err)
+func (w *Worker) drainLogged(ctx context.Context) bool {
+	err := w.drain(ctx)
+	if err == nil || ctx.Err() != nil {
+		return false
 	}
+	log.Printf("parse worker: drain: %v", err)
+	return true
 }
 
 // Drain runs one synchronous drain over the current due set and returns the
