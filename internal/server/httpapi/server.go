@@ -3,6 +3,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 
@@ -32,10 +33,11 @@ type Server struct {
 	ogRender        singleflight.Group
 	ogProjectRender singleflight.Group
 	ogSessionRender singleflight.Group
-	// insights memoizes the fleet Insights snapshot per trailing-window range for a
-	// short TTL, so the several-second query pipeline behind /insights runs once per
-	// window per minute rather than once per load. See insights_cache.go.
-	insights *insightsCache
+	// insights holds the fleet Insights snapshot: every trailing window computed in
+	// one store pass, recomputed hourly in the background (and on reparse completion)
+	// so the range views always describe one corpus state and every load is a map
+	// lookup. See insights_refresh.go.
+	insights *insightsRefresher
 }
 
 // New builds a Server. The parse worker is shared with the server main loop; here
@@ -43,7 +45,10 @@ type Server struct {
 // gating. Its hooks fan out through the SSE hub: fleet-rebuild progress to the
 // status stream, and each committed rebuild to the browsers watching that session.
 func New(st *store.Store, cfg config.Server, worker *parse.Worker) *Server {
-	s := &Server{Store: st, Cfg: cfg, hub: newSSEHub(), worker: worker, insights: newInsightsCache()}
+	s := &Server{Store: st, Cfg: cfg, hub: newSSEHub(), worker: worker}
+	s.insights = newInsightsRefresher(func(ctx context.Context) (map[string]store.Insights, error) {
+		return computeFleetInsights(ctx, st)
+	})
 	s.mcp = newMCPHandler(s)
 	// Fan fleet-rebuild progress out to any browser watching the status stream. The
 	// hub carries the status JSON as the payload, so a watcher updates its progress
@@ -51,6 +56,11 @@ func New(st *store.Store, cfg config.Server, worker *parse.Worker) *Server {
 	worker.SetStatusHook(func(status parse.Status) {
 		if b, err := json.Marshal(status); err == nil {
 			s.hub.publishReparse(string(b))
+		}
+		// A finished fleet drain just rewrote the corpus under the insights snapshot;
+		// recompute now rather than serving pre-reparse figures until the next tick.
+		if !status.InProgress {
+			s.insights.kickRefresh()
 		}
 	})
 	// Wake the browsers watching a session when its rebuild commits, so the live

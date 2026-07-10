@@ -113,98 +113,142 @@ func panelWorkers(maxConns int) int {
 // unexpected string into SQL.
 var snapshotIDRe = regexp.MustCompile(`^[0-9A-Fa-f]+-[0-9A-Fa-f]+-[0-9A-Fa-f]+$`)
 
-// Insights gathers the page's panels concurrently against one shared MVCC snapshot. The
-// panels overlap: the quality split's session total, the archetype split, and the cohort
-// denominators of the hygiene, context, and tool panels all describe the same scoped
-// session set, so reading them on independent connections that each took their own snapshot
-// would let a concurrent ingest land between two panels and make the page disagree with
-// itself (the quality total and the archetype total, say, off by the one session that
-// arrived mid-render).
+// Insights is the single-scope read of the page's panels: one filter, one shared MVCC
+// snapshot. It is a one-element InsightsRanges call; the project and public-project
+// quality bands come through here.
+func (s *Store) Insights(ctx context.Context, f AnalyticsFilter, panels InsightsPanels) (Insights, error) {
+	outs, err := s.InsightsRanges(ctx, []AnalyticsFilter{f}, panels)
+	if err != nil {
+		return Insights{}, err
+	}
+	return outs[0], nil
+}
+
+// InsightsRanges gathers each filter's panels concurrently against one shared MVCC
+// snapshot. The panels of one filter overlap: the quality split's session total, the
+// archetype split, and the cohort denominators of the hygiene, context, and tool panels
+// all describe the same scoped session set, so reading them on independent connections
+// that each took their own snapshot would let a concurrent ingest land between two panels
+// and make the page disagree with itself (the quality total and the archetype total, say,
+// off by the one session that arrived mid-render).
+//
+// The filters share that snapshot too, and one clock: every window's trailing bound and
+// trend grid measure back from the same instant, and every window's panels read the same
+// corpus state. That is what lets the fleet /insights refresher compute all five trailing
+// windows in one pass that cannot disagree with itself: a session that lands mid-pass is
+// either in every window that spans it or in none.
 //
 // A control transaction fixes the snapshot and exports it (pg_export_snapshot); every panel
 // then runs on its own pooled connection under a read-only REPEATABLE READ transaction that
 // imports that exact snapshot (SET TRANSACTION SNAPSHOT). So the overlapping totals still
 // reconcile exactly, as they did under the old single-transaction sequential read, but the
-// panels' wall time is now the slowest single panel rather than their sum: the roughly
-// eighteen aggregate queries the page runs no longer serialize on one connection. The
-// control transaction stays open until every panel has imported the snapshot (it is the
-// last thing released), which is what keeps the exported snapshot valid for the importers.
+// panels' wall time is now the slowest single panel rather than their sum: the aggregate
+// queries the page runs no longer serialize on one connection. The control transaction
+// stays open until every panel has imported the snapshot (it is the last thing released),
+// which is what keeps the exported snapshot valid for the importers.
 //
 // Unlike AnalyticsSnapshot it takes no reparse-lock gate: a live page tolerates a snapshot
 // that falls during a reparse (each session is atomically old or new in it, since
 // ReparseSession commits per session), it just must not straddle two snapshots within one
 // render. The panels fail fast on the first error (the errgroup cancels the rest), and every
 // transaction is read-only and takes no row locks, so the call never blocks ingest.
-func (s *Store) Insights(ctx context.Context, f AnalyticsFilter, panels InsightsPanels) (Insights, error) {
-	var out Insights
+func (s *Store) InsightsRanges(ctx context.Context, filters []AnalyticsFilter, panels InsightsPanels) ([]Insights, error) {
+	outs := make([]Insights, len(filters))
+	if len(filters) == 0 {
+		return outs, nil
+	}
 
 	ctrl, err := s.Pool.Acquire(ctx)
 	if err != nil {
-		return Insights{}, fmt.Errorf("insights snapshot: acquire control conn: %w", err)
+		return nil, fmt.Errorf("insights snapshot: acquire control conn: %w", err)
 	}
 	defer ctrl.Release()
 	ctrlTx, err := ctrl.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
-		return Insights{}, fmt.Errorf("insights snapshot: begin control tx: %w", err)
+		return nil, fmt.Errorf("insights snapshot: begin control tx: %w", err)
 	}
 	// Read-only: rollback is the clean release and never loses work.
 	defer ctrlTx.Rollback(ctx)
 
-	// When the caller wants the trend grid, resolve it once on the control transaction and bound
-	// the whole page to its charted span, on both edges. The grid caps an unbounded "all" window
-	// at maxTrendBuckets and stops at the current bucket, so pinning f.Since to the first rendered
-	// bucket and f.Until to the end of the last one makes the headline distributions and every
-	// trend total count the same rows the series draw, and keeps each panel's query from scanning
-	// history the charts will not show. Without the upper bound a row timestamped ahead of render
-	// time counts in the headline while the grid drops its future bucket (g.index < 0), so the two
-	// disagree. Both bounds only tighten the window: a bounded range already sits inside its grid,
-	// so f.Since never moves back and f.Until never moves forward. Resolving this on the control
-	// transaction fixes its snapshot (its first read), which is the snapshot every panel then
-	// shares, so the tightened window and the panels describe one consistent cohort.
-	//
-	// The resolved grid is kept (not thrown away): every per-bucket trend panel below reads it, so
-	// the whole grid is computed once here rather than re-resolved inside a trends builder.
-	var grid trendGrid
-	var wantTrends bool
-	if f.Bucket != "" {
-		now := time.Now()
-		since, terr := s.resolveTrendSince(ctx, ctrlTx, f, now)
-		if terr != nil {
-			return Insights{}, fmt.Errorf("insights snapshot: %w", terr)
-		}
-		grid = newTrendGrid(f.Bucket, since, now)
-		if grid.n() > 0 {
-			if grid.Starts[0].After(f.Since) {
-				f.Since = grid.Starts[0]
+	// One clock for the whole call, stamped before any window math: two filters that
+	// both say "the trailing 7 days" must mean the same 7 days.
+	now := time.Now()
+
+	// Resolve each filter's trend grid on the control transaction, then collect every
+	// filter's panel reads into one flat list for the shared dispatch below. Each read
+	// closure writes a distinct field of its own filter's outs slot, so the dispatch
+	// can interleave filters freely without a race.
+	var reads []func(context.Context, querier) error
+	for i := range filters {
+		f := filters[i]
+		out := &outs[i]
+
+		// When the caller wants the trend grid, resolve it once on the control transaction and
+		// bound the whole page to its charted span, on both edges. The grid caps an unbounded
+		// "all" window at maxTrendBuckets and stops at the current bucket, so pinning f.Since to
+		// the first rendered bucket and f.Until to the end of the last one makes the headline
+		// distributions and every trend total count the same rows the series draw, and keeps each
+		// panel's query from scanning history the charts will not show. Without the upper bound a
+		// row timestamped ahead of render time counts in the headline while the grid drops its
+		// future bucket (g.index < 0), so the two disagree. Both bounds only tighten the window: a
+		// bounded range already sits inside its grid, so f.Since never moves back and f.Until
+		// never moves forward. Resolving this on the control transaction fixes its snapshot (its
+		// first read), which is the snapshot every panel then shares, so the tightened window and
+		// the panels describe one consistent cohort.
+		//
+		// The resolved grid is kept (not thrown away): every per-bucket trend panel reads it, so
+		// the whole grid is computed once here rather than re-resolved inside a trends builder.
+		var grid trendGrid
+		var wantTrends bool
+		if f.Bucket != "" {
+			since, terr := s.resolveTrendSince(ctx, ctrlTx, f, now)
+			if terr != nil {
+				return nil, fmt.Errorf("insights snapshot: %w", terr)
 			}
-			if upper := advanceBucket(grid.Unit, grid.Starts[grid.n()-1]); f.Until.IsZero() || upper.Before(f.Until) {
-				f.Until = upper
+			grid = newTrendGrid(f.Bucket, since, now)
+			if grid.n() > 0 {
+				if grid.Starts[0].After(f.Since) {
+					f.Since = grid.Starts[0]
+				}
+				if upper := advanceBucket(grid.Unit, grid.Starts[grid.n()-1]); f.Until.IsZero() || upper.Before(f.Until) {
+					f.Until = upper
+				}
+				wantTrends = true
 			}
-			wantTrends = true
+			// Pre-allocate the grid-shaped Trends so the trend panels can each write a distinct field
+			// concurrently (the same distinct-field discipline the distribution panels rely on). An
+			// empty grid still yields a non-nil Trends whose HasData reports false, matching the old
+			// behaviour where a bucketed call with no buckets returned an empty grid rather than nil.
+			out.Trends = &Trends{Unit: grid.Unit, BucketStarts: grid.Starts, Labels: grid.labels()}
 		}
-		// Pre-allocate the grid-shaped Trends so the trend panels can each write a distinct field
-		// concurrently (the same distinct-field discipline the distribution panels rely on). An
-		// empty grid still yields a non-nil Trends whose HasData reports false, matching the old
-		// behaviour where a bucketed call with no buckets returned an empty grid rather than nil.
-		out.Trends = &Trends{Unit: grid.Unit, BucketStarts: grid.Starts, Labels: grid.labels()}
+
+		reads = append(reads, s.insightsReads(f, panels, grid, wantTrends, out)...)
 	}
 
 	var snapshotID string
 	if err := ctrlTx.QueryRow(ctx, "SELECT pg_export_snapshot()").Scan(&snapshotID); err != nil {
-		return Insights{}, fmt.Errorf("insights snapshot: export snapshot: %w", err)
+		return nil, fmt.Errorf("insights snapshot: export snapshot: %w", err)
 	}
 	if !snapshotIDRe.MatchString(snapshotID) {
-		return Insights{}, fmt.Errorf("insights snapshot: unexpected snapshot id %q", snapshotID)
+		return nil, fmt.Errorf("insights snapshot: unexpected snapshot id %q", snapshotID)
 	}
 
-	// The panels, each writing a distinct out field. They run either concurrently (each on its
-	// own pooled connection importing the control snapshot) or, when the pool cannot spare a
-	// connection beyond the one the control transaction holds, sequentially on the control
-	// transaction itself. Distinct panels write distinct out fields and both dispatch paths
-	// synchronize before out is read, so the writes are race-free either way.
-	// The always-on quality core first, then the opt-in instrument groups. A group the
-	// caller's panel set leaves false contributes no query at all; its Insights and
-	// Trends fields stay zero and the caller's surface has no mount that reads them.
+	if err := s.dispatchInsightsReads(ctx, ctrlTx, snapshotID, reads); err != nil {
+		return nil, err
+	}
+	return outs, nil
+}
+
+// insightsReads builds one filter's panel reads, each writing a distinct field of out.
+// They run either concurrently (each on its own pooled connection importing the control
+// snapshot) or, when the pool cannot spare a connection beyond the one the control
+// transaction holds, sequentially on the control transaction itself. Distinct panels
+// write distinct out fields and both dispatch paths synchronize before out is read, so
+// the writes are race-free either way.
+// The always-on quality core first, then the opt-in instrument groups. A group the
+// caller's panel set leaves false contributes no query at all; its Insights and
+// Trends fields stay zero and the caller's surface has no mount that reads them.
+func (s *Store) insightsReads(f AnalyticsFilter, panels InsightsPanels, grid trendGrid, wantTrends bool, out *Insights) []func(context.Context, querier) error {
 	reads := []func(context.Context, querier) error{
 		func(ctx context.Context, q querier) (err error) {
 			out.Quality, err = s.qualityDistributionFrom(ctx, q, f)
@@ -316,17 +360,21 @@ func (s *Store) Insights(ctx context.Context, f AnalyticsFilter, panels Insights
 			})
 		}
 	}
+	return reads
+}
 
-	// Dispatch the panels without ever letting this call hold a connection while blocking to
-	// acquire another. That hold-and-wait is the deadlock: N concurrent Insights calls (the
-	// project and public-project pages reach this without the HTTP cache) would each pin a
-	// control connection, exhaust the pool, then all block acquiring a panel connection that can
-	// never free. So the call borrows only the connections the pool has idle right now
-	// (AcquireAllIdle never blocks), capped by panelWorkers to leave headroom, and runs the rest
-	// of the panels on the control transaction it already holds. Under contention it borrows
-	// nothing and the read is fully sequential on the control connection, which is deadlock-free
-	// because the call then waits on no further connection: it finishes and releases, so any
-	// caller blocked acquiring a control connection makes progress.
+// dispatchInsightsReads runs the collected panel reads under the exported snapshot.
+// It dispatches without ever letting the call hold a connection while blocking to
+// acquire another. That hold-and-wait is the deadlock: N concurrent Insights calls (the
+// project and public-project pages reach this without the HTTP cache) would each pin a
+// control connection, exhaust the pool, then all block acquiring a panel connection that can
+// never free. So the call borrows only the connections the pool has idle right now
+// (AcquireAllIdle never blocks), capped by panelWorkers to leave headroom, and runs the rest
+// of the panels on the control transaction it already holds. Under contention it borrows
+// nothing and the read is fully sequential on the control connection, which is deadlock-free
+// because the call then waits on no further connection: it finishes and releases, so any
+// caller blocked acquiring a control connection makes progress.
+func (s *Store) dispatchInsightsReads(ctx context.Context, ctrlTx pgx.Tx, snapshotID string, reads []func(context.Context, querier) error) error {
 	var panelConns []*pgxpool.Conn
 	if workers := panelWorkers(int(s.Pool.Config().MaxConns)); workers > 0 {
 		idle := s.Pool.AcquireAllIdle(ctx)
@@ -388,7 +436,7 @@ func (s *Store) Insights(ctx context.Context, f AnalyticsFilter, panels Insights
 	if err := g.Wait(); err != nil {
 		// The panel queries name their own failures; wrap so the /insights 500 path reads as an
 		// insights-snapshot failure rather than a raw database error.
-		return Insights{}, fmt.Errorf("insights snapshot: %w", err)
+		return fmt.Errorf("insights snapshot: %w", err)
 	}
-	return out, nil
+	return nil
 }

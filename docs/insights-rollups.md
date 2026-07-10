@@ -22,6 +22,17 @@ design rationale. The implementation deviates from it in three places:
   changes a session's cwd rewrites `tool_calls.file_rel_path` in place (the one
   projection write outside the rebuild), so the churn rollup re-derives in that
   same transaction (`ingest.go`), which the plan had not called out.
+- **The 60-second fleet cache became a synchronized snapshot** (a post-plan
+  change, not part of the rollup work). The per-range lazy TTL cache let the
+  range views drift: each window was computed at its own instant against its
+  own MVCC snapshot, so two views could disagree about a fact both display (the
+  fleet mix's newest-arrival callout was the reported case). The fleet page now
+  serves every range from one precomputed snapshot: `store.InsightsRanges`
+  computes all five windows under one exported snapshot and one clock, and a
+  background loop recomputes the set hourly (`AKARI_INSIGHTS_REFRESH_INTERVAL`)
+  and on fleet-reparse completion
+  (`internal/server/httpapi/insights_refresh.go`). The rollup conversion is
+  what makes the full five-window pass cheap enough to run on a cadence.
 
 ## The problem
 
@@ -354,7 +365,9 @@ schema work, since it is a day of work and makes the baseline honest.
 The 60-second fleet cache stays (it still absorbs burst loads for free), but
 after conversion the cold path should be tens of milliseconds, and the cache
 stops being the thing standing between the user and a multi-second render. The
-uncached project page should not need a cache at all.
+uncached project page should not need a cache at all. (Post-plan, the fleet
+cache was replaced by the synchronized hourly snapshot described in the status
+deviations above.)
 
 ## Phases
 

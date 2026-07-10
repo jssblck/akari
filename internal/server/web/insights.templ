@@ -1,6 +1,10 @@
 package web
 
-import "github.com/jssblck/akari/internal/server/store"
+import (
+	"time"
+
+	"github.com/jssblck/akari/internal/server/store"
+)
 
 // InsightsPage is the fleet-wide analytics surface at /insights: seven measurement
 // instruments, each drawn client-side by static/js/insights.js from the trend grid the
@@ -14,11 +18,18 @@ import "github.com/jssblck/akari/internal/server/store"
 // own chart engine and draws no server-side bars. The whole section carries id="insights"
 // so the range selector can swap it in one shot, carrying the fresh data script with it;
 // insights.js re-runs on htmx:afterSwap and redraws from the new payload.
-templ InsightsPage(p Page, ins store.Insights, rng string, ranges []RangeOption) {
+templ InsightsPage(p Page, ins store.Insights, rng string, ranges []RangeOption, computedAt time.Time) {
 	@layout(p) {
 		<section id="insights">
 			<div class="page">
 				<header class="page-header">
+					// The page serves from a snapshot recomputed on a cadence (up to an hour
+					// old), not live data, so say when it was taken: a reader comparing these
+					// figures against a live surface (the overview, the sessions feed) needs
+					// the snapshot's age to explain the gap.
+					if !computedAt.IsZero() {
+						<span class="snapshot-age muted small" title={ FmtTimeLong(ctx, &computedAt) }>{ FmtSnapshotAge(computedAt) }</span>
+					}
 					@insightsRangeControl(ranges)
 				</header>
 				if ins.Trends == nil || !ins.Trends.HasData() {

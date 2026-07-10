@@ -80,6 +80,13 @@ type Server struct {
 	// (AKARI_PARSE_WORKERS). Distinct sessions rebuild in parallel; two rebuilds
 	// of one session serialize on its row locks. Defaults to 4.
 	ParseWorkers int
+	// InsightsRefreshInterval is how often the fleet /insights snapshot recomputes in
+	// the background (AKARI_INSIGHTS_REFRESH_INTERVAL, a Go duration). Every trailing
+	// window recomputes together in one pass, so the range views cannot drift apart.
+	// Defaults to 1h; set "0" to disable the background loop, in which case the
+	// snapshot computes once on first request and then only when a fleet reparse
+	// completes.
+	InsightsRefreshInterval time.Duration
 }
 
 // LoadServer reads server configuration from the environment, applying defaults
@@ -125,6 +132,11 @@ func LoadServer() (Server, error) {
 		return Server{}, fmt.Errorf("AKARI_PARSE_WORKERS: %w", err)
 	}
 	s.ParseWorkers = workers
+	insights, err := parseDuration(os.Getenv("AKARI_INSIGHTS_REFRESH_INTERVAL"), time.Hour)
+	if err != nil {
+		return Server{}, fmt.Errorf("AKARI_INSIGHTS_REFRESH_INTERVAL: %w", err)
+	}
+	s.InsightsRefreshInterval = insights
 	return s, nil
 }
 

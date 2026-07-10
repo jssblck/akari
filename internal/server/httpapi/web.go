@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -175,30 +174,23 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 // window rides the URL via ?range=.
 func (s *Server) handleInsights(w http.ResponseWriter, r *http.Request) {
 	rng := web.ParseRange(r.URL.Query().Get("range"))
-	// The snapshot is memoized per range for a short TTL (insights_cache.go): the
-	// pipeline behind it is a dozen aggregate queries over the whole window, so a
-	// map lookup here is the difference between an instant load and several seconds.
-	// The Bucket names the trend grid's unit (day for short windows, week for long),
-	// which switches on the trend computation inside Insights: the fleet page draws
-	// time series, so it always asks for a grid, unlike the project quality band.
+	// Every range serves from one precomputed snapshot (insights_refresh.go): the
+	// background loop recomputes all the windows together each hour, so a load here
+	// is a map lookup and two range views never describe different corpus states.
+	// Only a cold start (first request before the warm pass lands) computes inline.
 	start := time.Now()
-	ins, err := s.insights.load(r.Context(), rng, start, func(ctx context.Context) (store.Insights, error) {
-		return s.Store.Insights(ctx, store.AnalyticsFilter{
-			Since:  web.RangeSince(rng, time.Now()),
-			Bucket: web.TrendBucket(rng),
-		}, store.AllInsightsPanels)
-	})
+	ins, at, err := s.insights.get(r.Context(), rng)
 	if err != nil {
 		s.renderErrorNav(w, r, http.StatusInternalServerError, "insights", "Could not load insights.")
 		return
 	}
-	// Expose the server-side load time so a cold miss (the full parallel pipeline) versus a
-	// warm cache hit (a map lookup) reads straight off the Server-Timing entry in devtools,
+	// Expose the server-side load time so a cold start (the full pipeline) versus a
+	// snapshot hit (a map lookup) reads straight off the Server-Timing entry in devtools,
 	// which is how the revamp's perf target stays visible to a future regression.
 	w.Header().Set("Server-Timing", fmt.Sprintf("insights;dur=%.1f", float64(time.Since(start).Microseconds())/1000))
 	setDashboardCache(w)
 	ranges := web.RangeOptions("/insights", nil, rng)
-	render(w, r, http.StatusOK, web.InsightsPage(s.pageForNav(r, "Insights", "insights"), ins, rng, ranges))
+	render(w, r, http.StatusOK, web.InsightsPage(s.pageForNav(r, "Insights", "insights"), ins, rng, ranges, at))
 }
 
 // dashboardCacheMaxAge lets a browser reuse a dashboard page for a few seconds, so

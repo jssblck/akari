@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -606,6 +607,68 @@ func TestUsageTrendsWholeDayWindow(t *testing.T) {
 	}
 	if !ins.Trends.Subagents.CostShareIncomplete {
 		t.Error("subagent CostShareIncomplete = false, want true (the same unpriced event flags the share's numerator and denominator)")
+	}
+}
+
+// TestFleetMixArrivalScansPastTheFold pins the fleet-history arrival scan against the
+// fold: the fold ranks
+// models by total tokens over the window, so a just-arrived model with a tiny share lands
+// in "other" on a long window, and an arrival callout derived from the kept bands would
+// name a staler model than a short window does for the same corpus. NewestModel must name
+// the folded newcomer anyway.
+func TestFleetMixArrivalScansPastTheFold(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+	ada := seedUser(t, st, "ada")
+	pid, err := st.UpsertProject(ctx, "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	d := time.Now().UTC().AddDate(0, 0, -6)
+	day0 := time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, time.UTC)
+
+	// Seven heavy incumbents present from the window's first day fill every kept band
+	// (maxFleetMixModels is 6, so the lightest incumbent folds too). The newcomer's
+	// first tokens land on day 4 and its total is a rounding error beside the
+	// incumbents', so ranking by window total buries it in "other".
+	usage := make([]store.ProjUsage, 0, 8)
+	for i := 0; i < 7; i++ {
+		usage = append(usage, store.ProjUsage{
+			Model: fmt.Sprintf("incumbent-%d", i), Input: 1_000_000, Output: 100_000,
+			OccurredAt: day0.Add(time.Duration(i+1) * time.Hour),
+			DedupKey:   fmt.Sprintf("fold-inc-%d", i), SourceOffset: int64(10 + i),
+		})
+	}
+	usage = append(usage, store.ProjUsage{
+		Model: "newcomer", Input: 10, Output: 1,
+		OccurredAt: day0.Add(4*24*time.Hour + 2*time.Hour),
+		DedupKey:   "fold-new", SourceOffset: 50,
+	})
+	sid := seedSession(t, st, ada, pid, "fold-arrival")
+	rebuildWith(t, st, sid, store.ProjectionDelta{
+		Messages: []store.MessageDelta{{Ordinal: 0, Role: "user", Content: "go", Timestamp: day0.Add(time.Hour)}},
+		Usage:    usage,
+		Started:  day0.Add(time.Hour),
+		Ended:    day0.Add(4*24*time.Hour + 3*time.Hour),
+	})
+
+	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: day0, Bucket: "day"}, store.AllInsightsPanels)
+	if err != nil {
+		t.Fatalf("insights: %v", err)
+	}
+	fm := ins.Trends.FleetMix
+	for _, m := range fm.Models {
+		if m.Model == "newcomer" {
+			t.Fatalf("newcomer should have folded into other (bands: %+v); the fixture no longer exercises the fold", fm.Models)
+		}
+	}
+	if fm.NewestModel != "newcomer" {
+		t.Errorf("NewestModel = %q, want newcomer (the folded arrival)", fm.NewestModel)
+	}
+	if fm.NewestFirst <= 0 {
+		t.Errorf("NewestFirst = %d, want a mid-window bucket (> 0)", fm.NewestFirst)
 	}
 }
 

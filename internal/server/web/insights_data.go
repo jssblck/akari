@@ -197,11 +197,6 @@ func fleetMixData(fm store.FleetMix, labels []string, n int) map[string]any {
 	for i := range rows {
 		rows[i] = map[string]float64{}
 	}
-	// arrivalWeek tracks the latest bucket any tracked model first appears in, so the chart
-	// can mark a mid-window model migration. The "other" fold is skipped: its arrival is not
-	// a single model's story.
-	arrival := -1
-	arrivalModel := ""
 	pi := 0
 	for _, m := range fm.Models {
 		order = append(order, m.Model)
@@ -215,17 +210,19 @@ func fleetMixData(fm store.FleetMix, labels []string, n int) map[string]any {
 		for i := 0; i < n && i < len(m.Share); i++ {
 			rows[i][m.Model] = m.Share[i]
 		}
-		if m.Model != "other" && m.First > arrival {
-			arrival = m.First
-			arrivalModel = m.Model
-		}
 	}
 	out := map[string]any{"order": order, "colors": colors, "labels": modelLabels, "rows": rows}
-	if arrival > 0 {
-		out["arrivalWeek"] = arrival
-		out["newestArrivalLabel"] = prettyModel(arrivalModel)
-		if arrival < len(labels) {
-			out["newestArrivalDate"] = labels[arrival]
+	// The arrival marker and callout come from the store's fleet-history scan
+	// (FleetMix.NewestModel: first tokens ever, landing inside this window), not from
+	// the kept bands above: a band's first in-window bucket conflates a quiet-start
+	// incumbent with a true arrival, and on a long window a just-arrived model folds
+	// into "other" entirely. Deriving from the bands made different windows name
+	// different "newest" models over the same corpus.
+	if fm.NewestFirst > 0 && fm.NewestModel != "" {
+		out["arrivalWeek"] = fm.NewestFirst
+		out["newestArrivalLabel"] = prettyModel(fm.NewestModel)
+		if fm.NewestFirst < len(labels) {
+			out["newestArrivalDate"] = labels[fm.NewestFirst]
 		}
 	}
 	return out

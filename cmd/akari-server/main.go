@@ -112,11 +112,22 @@ func run() error {
 	// httpapi.New installs the worker's SSE hooks, so it must run before the
 	// worker's first drain can fire them; Run starts further down, right before
 	// the server begins listening.
-	handler := httpapi.New(st, cfg, worker).Routes()
+	api := httpapi.New(st, cfg, worker)
+	handler := api.Routes()
 	workerDone := make(chan struct{})
 	go func() {
 		defer close(workerDone)
 		worker.Run(rootCtx)
+	}()
+
+	// Keep the fleet /insights snapshot warm: every trailing window recomputes
+	// together on the configured cadence (plus a recompute when a fleet reparse
+	// finishes), so page loads are map lookups and the range views agree.
+	// insightsDone lets shutdown wait for the loop before the pool closes.
+	insightsDone := make(chan struct{})
+	go func() {
+		defer close(insightsDone)
+		api.RunInsightsRefresher(rootCtx)
 	}()
 
 	// Reclaim orphaned CAS blobs in the background. Deleting a session or
@@ -154,6 +165,7 @@ func run() error {
 		stop()
 		<-sweepDone
 		<-ogDone
+		<-insightsDone
 		<-workerDone
 	}()
 
@@ -185,6 +197,7 @@ func run() error {
 		}
 		<-sweepDone
 		<-ogDone
+		<-insightsDone
 		<-workerDone
 		close(idleClosed)
 	}()
@@ -194,6 +207,9 @@ func run() error {
 	}
 	if cfg.OGCleanupInterval > 0 {
 		log.Printf("overview preview cache cleanup every %s", cfg.OGCleanupInterval)
+	}
+	if cfg.InsightsRefreshInterval > 0 {
+		log.Printf("insights snapshot refresh every %s", cfg.InsightsRefreshInterval)
 	}
 	if cfg.SignalsSettleInterval > 0 {
 		log.Printf("parse worker maintenance tick every %s (%d rebuild worker(s))", cfg.SignalsSettleInterval, cfg.ParseWorkers)
