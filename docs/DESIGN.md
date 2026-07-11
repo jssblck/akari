@@ -1046,7 +1046,11 @@ session pages render a bounded transcript tail and fetch earlier windows through
 the revocable public capability URL. Each earlier-page request carries the
 projection revision from the page it extends. If a rebuild changed that revision,
 the server replaces the bounded body from a fresh snapshot instead of appending
-rows whose ordinals may describe another projection. No Node toolchain; the binary
+rows whose ordinals may describe another projection. The revision increments on
+every successful rebuild even when its output is unchanged, so a rebuild that lands
+mid-pagination always forces this resync: a conservative choice, since telling a
+genuinely unchanged projection apart from a merely re-committed one would need
+comparing rendered output rather than a counter. No Node toolchain; the binary
 is self-contained.
 
 Pages:

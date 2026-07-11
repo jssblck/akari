@@ -10,6 +10,7 @@ import (
 
 	"github.com/jssblck/akari/internal/server/auth"
 	"github.com/jssblck/akari/internal/server/parse"
+	"github.com/jssblck/akari/internal/server/store"
 )
 
 // registerAdmin registers the first account (which becomes admin) on a fresh
@@ -130,6 +131,50 @@ func TestParsedEndpointsGateDuringReparse(t *testing.T) {
 	worker.SetStatusForTest(parse.Status{})
 	if body := getBody(t, c, srv.URL+"/overview"); !strings.Contains(body, "Overview") || strings.Contains(body, "Reparse in progress") {
 		t.Fatalf("overview should render normally after the reparse clears, got:\n%s", body)
+	}
+}
+
+// TestPublicSessionBodyGateDuringReparse confirms the public transcript fragment
+// endpoint (GET /s/{public_id}/body, the "Show earlier" button's hx-get target with
+// hx-swap="outerHTML") renders the small reparse banner rather than the full
+// PublicReparsePage document for an htmx request while a fleet rebuild is in
+// progress: swapping a whole page into the button's own DOM slot would wreck the
+// page. A plain navigation to the same URL (no HX-Request header) still gets the
+// full reparse stand-in page, matching the authenticated sibling's gateParsed.
+func TestPublicSessionBodyGateDuringReparse(t *testing.T) {
+	t.Parallel()
+	srv, st, worker := newTestServerWithReparse(t)
+	seedPublishedPaginationSession(t, st, store.ProjectionDelta{Messages: publicMessages("gated", 240)})
+
+	worker.SetStatusForTest(parse.Status{InProgress: true, Done: 2, Total: 5, Failed: 1})
+	t.Cleanup(func() { worker.SetStatusForTest(parse.Status{}) })
+
+	fragURL := srv.URL + "/s/" + publicPaginationID + "/body?before=100&revision=1"
+
+	req, err := http.NewRequest(http.MethodGet, fragURL, nil)
+	if err != nil {
+		t.Fatalf("build fragment request: %v", err)
+	}
+	req.Header.Set("HX-Request", "true")
+	fragResp := mustDo(t, http.DefaultClient, req)
+	frag := readBody(t, fragResp)
+	if fragResp.StatusCode != http.StatusOK {
+		t.Fatalf("hx-request gated body status = %d, want 200", fragResp.StatusCode)
+	}
+	if !strings.Contains(frag, "Reparse in progress") {
+		t.Fatalf("hx-request gated body should carry the reparse banner, got:\n%s", frag)
+	}
+	if lower := strings.ToLower(frag); strings.Contains(lower, "<!doctype") || strings.Contains(lower, "<html") {
+		t.Fatalf("hx-request gated body should be a fragment, not a full document, got:\n%s", frag)
+	}
+
+	navResp := mustGet(t, http.DefaultClient, fragURL)
+	nav := readBody(t, navResp)
+	if navResp.StatusCode != http.StatusOK {
+		t.Fatalf("plain-navigation gated body status = %d, want 200", navResp.StatusCode)
+	}
+	if lower := strings.ToLower(nav); !strings.Contains(lower, "<!doctype") || !strings.Contains(lower, "<html") {
+		t.Fatalf("plain-navigation gated body should be the full reparse page, got:\n%s", nav)
 	}
 }
 

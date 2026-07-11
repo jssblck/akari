@@ -114,6 +114,15 @@ func TestPublicSessionTranscriptPaginationIsBoundedAndGapFree(t *testing.T) {
 		t.Fatal("public image attachment fetched implicitly instead of rendering as an explicit link")
 	}
 
+	// The outline rail covers the whole session, not just the tail window the
+	// transcript renders: a visitor can jump to the first turn even though it sits
+	// well outside the initial 100-message page.
+	for _, want := range []string{`id="ol-0"`, `href="#msg-0"`, `id="ol-239"`, `href="#msg-239"`} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("initial public page outline missing %q, want anchors for both the first and last message:\n%s", want, page)
+		}
+	}
+
 	earlier := earlierPath(t, page)
 	fragmentResp := mustGet(t, http.DefaultClient, srv.URL+earlier)
 	fragment := responseBody(t, fragmentResp)

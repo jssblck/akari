@@ -35,7 +35,7 @@ templ PublicSessionPage(v SessionView, og OGMeta) {
 templ PublicSessionBody(v SessionView) {
 	<div class="session-grid">
 		<aside class="outline-rail" aria-label="Outline">
-			@Outline(v.Page.Msgs, v.WindowTools, PublicBlobBase(*v.Detail.PublicID), false)
+			@Outline(v.Outline, v.Tools, PublicBlobBase(*v.Detail.PublicID), false)
 		</aside>
 		<div class="session-main">
 			@sessionStats(v.Detail, v.Header)

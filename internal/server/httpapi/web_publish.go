@@ -356,6 +356,8 @@ func publicSessionViewFrom(snap store.PublicSessionSnapshot) web.SessionView {
 	v := web.SessionView{
 		Detail:             snap.Audit.Detail,
 		Header:             sessionHeaderStats(snap.Audit.Detail, snap.Audit.Signals, snap.Audit.Fallbacks),
+		Outline:            snap.Outline,
+		Tools:              web.ToolsByOrdinal(snap.Tools),
 		ProjectionRevision: snap.ProjectionRevision,
 	}
 	// Publishing a parent does not publish its children. Filter rows read in the
