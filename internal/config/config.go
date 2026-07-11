@@ -127,7 +127,23 @@ type Server struct {
 }
 
 const (
+	// defaultRequestBudgetCapacity mirrors requestbudget.DefaultCapacity
+	// (internal/server/requestbudget/budget.go). This package stays a leaf shared by
+	// both binaries (the akari client imports it too), so it does not import a
+	// server-only package like requestbudget just to reuse one constant; this value
+	// must instead be kept equal to requestbudget.DefaultCapacity by hand. Drift here
+	// only changes the default a fresh AKARI_REQUEST_BUDGET_CAPACITY-less server boots
+	// with, not a hard failure.
 	defaultRequestBudgetCapacity = 16
+	// minimumRequestBudgetCapacity mirrors requestbudget.MinCapacity, kept in sync by
+	// hand for the same layering reason defaultRequestBudgetCapacity mirrors
+	// requestbudget.DefaultCapacity. Unlike the default, drift here is load-bearing:
+	// httpapi.New re-validates capacity against requestbudget.MinCapacity when
+	// constructing the budget, so a minimumRequestBudgetCapacity smaller than
+	// requestbudget.MinCapacity lets an operator configure a capacity that passes
+	// LoadServer's check here but panics at startup when New rejects it, and a value
+	// larger than requestbudget.MinCapacity silently over-validates, rejecting
+	// capacities the budget itself would accept.
 	minimumRequestBudgetCapacity = 12
 	// DefaultOAuthRegistrationsPerHour is exported for programmatic Server
 	// construction, which otherwise bypasses LoadServer's environment defaults.

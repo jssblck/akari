@@ -250,7 +250,9 @@ A short checklist for a real deployment:
   standard output and error.
 - **Scrape `/metrics`** for request-budget queue depth, wait time, rejection
   counts, and per-class utilization. The Prometheus text response contains no
-  user or request identifiers.
+  user or request identifiers. The endpoint is unauthenticated by design (a
+  scraper needs no credential), so it should not be publicly reachable;
+  restrict it to your metrics collector at the reverse proxy.
 - **If you use reverse-proxy single sign-on**, make sure the server is reachable
   only through the proxy that sets the identity header (see
   [Single sign-on behind a trusted proxy](#single-sign-on-behind-a-trusted-proxy)).
