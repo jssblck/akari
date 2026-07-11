@@ -373,6 +373,7 @@ func rebuildTx(ctx context.Context, tx pgx.Tx, sessionID int64, epoch int, byteL
 	if _, err := tx.Exec(ctx,
 		`UPDATE session_raw
 		    SET parsed_byte_len = $2, parser_epoch = $3,
+		        projection_revision = projection_revision + 1,
 		        parse_error = '', parse_error_epoch = 0, parse_error_byte_len = 0,
 		        parse_retry_at = NULL, parse_retry_backoff_secs = 0
 		  WHERE session_id = $1`,

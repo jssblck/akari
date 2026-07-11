@@ -139,6 +139,7 @@ func (s *Server) Routes() http.Handler {
 	// parsed projection), so these are not behind the reparse gate.
 	mux.HandleFunc("GET /api/v1/session/{id}/blob/{sha256}", s.requireFull(s.handleSessionBlob))
 	mux.HandleFunc("GET /s/{public_id}/blob/{sha256}", s.handlePublicBlob)
+	mux.HandleFunc("GET /s/{public_id}/body", s.gatePublicParsed(s.handlePublicSessionBody))
 
 	// Reparse status and live progress. The status JSON is the poll fallback; the
 	// SSE stream pushes the same payload so a watching page updates its progress bar

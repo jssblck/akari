@@ -106,7 +106,7 @@ templ TranscriptEarlier(v SessionView) {
 	if v.Page.HasEarlier && len(v.Page.Msgs) > 0 {
 		@earlierBar(v.Detail.ID, v.Page.Msgs[0].Ordinal, v.Page.EarlierCount)
 	}
-	@TranscriptRows(v.Page.Seed, v.Page.Msgs, v.Detail.Agent, v.WindowTools, v.WindowAttachments, FallbacksByOrdinal(v.Page.Fallbacks), SessionBlobBase(v.Detail.ID))
+	@TranscriptRows(v.Page.Seed, v.Page.Msgs, v.Detail.Agent, v.WindowTools, v.WindowAttachments, FallbacksByOrdinal(v.Page.Fallbacks), SessionBlobBase(v.Detail.ID), true)
 }
 
 // TranscriptAppend is the fragment behind GET /sessions/{id}/body?after=N, fetched on an
@@ -118,7 +118,7 @@ templ TranscriptEarlier(v SessionView) {
 // when rows actually landed: a quiet tick (raw bytes ahead of the rebuild) changes no
 // turns, so it must not ship the whole-session shape for nothing.
 templ TranscriptAppend(v SessionView) {
-	@TranscriptRows(v.Page.Seed, v.Page.Msgs, v.Detail.Agent, v.WindowTools, v.WindowAttachments, FallbacksByOrdinal(v.Page.Fallbacks), SessionBlobBase(v.Detail.ID))
+	@TranscriptRows(v.Page.Seed, v.Page.Msgs, v.Detail.Agent, v.WindowTools, v.WindowAttachments, FallbacksByOrdinal(v.Page.Fallbacks), SessionBlobBase(v.Detail.ID), true)
 	@sessionInstruments(v, true)
 	@subagentsSection(v, true)
 	if len(v.Page.Msgs) > 0 {
@@ -597,7 +597,7 @@ templ transcriptWindow(v SessionView) {
 			if v.Page.HasEarlier {
 				@earlierBar(v.Detail.ID, v.Page.Msgs[0].Ordinal, v.Page.EarlierCount)
 			}
-			@TranscriptRows(v.Page.Seed, v.Page.Msgs, v.Detail.Agent, v.WindowTools, v.WindowAttachments, FallbacksByOrdinal(v.Page.Fallbacks), SessionBlobBase(v.Detail.ID))
+			@TranscriptRows(v.Page.Seed, v.Page.Msgs, v.Detail.Agent, v.WindowTools, v.WindowAttachments, FallbacksByOrdinal(v.Page.Fallbacks), SessionBlobBase(v.Detail.ID), true)
 		</div>
 	}
 }
@@ -627,24 +627,11 @@ templ earlierBar(sessionID int64, firstOrdinal, earlierCount int) {
 // starts mid-session still stamps its first turns correctly; a whole-session render
 // passes an empty seed. Rendered rows and fragment appends both come through here, so
 // every path derives the per-turn instruments the same way.
-templ TranscriptRows(seed []store.Message, msgs []store.Message, agent string, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, fallbacks map[int]store.ModelFallback, blobBase string) {
+templ TranscriptRows(seed []store.Message, msgs []store.Message, agent string, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, fallbacks map[int]store.ModelFallback, blobBase string, embedImages bool) {
 	{{ walker := SeededWalker(seed) }}
 	for _, m := range msgs {
 		{{ metrics := walker.Next(m) }}
-		@transcriptMsg(m, metrics, agent, tools, attachments, fallbacks, blobBase)
-	}
-}
-
-// Transcript renders a whole session's messages as an instrumented trace, for surfaces
-// that still render full transcripts in one pass (the public session page). The signed-in
-// session view windows instead: see transcriptWindow.
-templ Transcript(msgs []store.Message, agent string, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, fallbacks map[int]store.ModelFallback, blobBase string) {
-	if len(msgs) == 0 {
-		<div class="empty">No messages parsed yet.</div>
-	} else {
-		<div class="transcript">
-			@TranscriptRows(nil, msgs, agent, tools, attachments, fallbacks, blobBase)
-		</div>
+		@transcriptMsg(m, metrics, agent, tools, attachments, fallbacks, blobBase, embedImages)
 	}
 }
 
@@ -660,7 +647,7 @@ templ Transcript(msgs []store.Message, agent string, tools map[int][]store.ToolC
 // carried a reasoning block wears a thinking-band chip above its content
 // (MessageThinkingBand), reading the turn's own deliberation on the same absolute scale
 // as the header readout.
-templ transcriptMsg(m store.Message, metrics MsgMetrics, agent string, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, fallbacks map[int]store.ModelFallback, blobBase string) {
+templ transcriptMsg(m store.Message, metrics MsgMetrics, agent string, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, fallbacks map[int]store.ModelFallback, blobBase string, embedImages bool) {
 	if metrics.Shed != nil {
 		@shedDivider(*metrics.Shed)
 	}
@@ -727,7 +714,7 @@ templ transcriptMsg(m store.Message, metrics MsgMetrics, agent string, tools map
 			if as := attachments[m.Ordinal]; len(as) > 0 {
 				<div class="attachments">
 					for _, a := range as {
-						@AttachmentTile(a, blobBase)
+						@AttachmentTile(a, blobBase, embedImages)
 					}
 				</div>
 			}
@@ -819,11 +806,11 @@ templ fallbackNotice(f store.ModelFallback) {
 	</div>
 }
 
-// AttachmentTile renders one binary attachment. An image is shown inline from its
-// CAS blob (the same URL the inspector would fetch), captioned with its filename
-// and size; a non-image is a labelled link so it can still be opened.
-templ AttachmentTile(a store.AttachmentView, blobBase string) {
-	if IsImageMedia(a.MediaType) {
+// AttachmentTile renders one binary attachment. Authenticated pages may embed an
+// image from its CAS blob, while public pages keep every attachment behind the
+// explicit metadata link so opening the page fetches no attachment body.
+templ AttachmentTile(a store.AttachmentView, blobBase string, embedImages bool) {
+	if IsImageMedia(a.MediaType) && embedImages {
 		<figure class="attachment image">
 			<a href={ BlobURL(blobBase, a.SHA256) } target="_blank" rel="noopener">
 				<img src={ BlobURL(blobBase, a.SHA256) } alt={ AttachmentAlt(a) } loading="lazy"/>

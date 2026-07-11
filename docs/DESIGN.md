@@ -776,6 +776,7 @@ CREATE TABLE session_raw (
   sha256_state    BYTEA,                        -- resumable digest, so hashing is O(append)
   parsed_byte_len BIGINT NOT NULL DEFAULT 0,    -- raw length the last successful rebuild covered
   parser_epoch    INT NOT NULL DEFAULT 0,       -- parse.Epoch that rebuild ran at
+  projection_revision BIGINT NOT NULL DEFAULT 0, -- increments on every committed rebuild
   parse_error     TEXT NOT NULL DEFAULT '',     -- last deterministic parse failure, '' when clean
   parse_error_epoch    INT NOT NULL DEFAULT 0,     -- epoch that failure was attempted at
   parse_error_byte_len BIGINT NOT NULL DEFAULT 0,  -- raw length that failure covered
@@ -1038,10 +1039,15 @@ client) decompresses it transparently while the server spends no CPU decoding it
 ### Web UI (server-rendered)
 
 The UI is server-rendered Go using `templ` for templates and HTMX for
-interactivity (filtering, pagination). In-progress sessions update live over
-server-sent events: the session view subscribes to an SSE stream and swaps in new
-messages and stats as the server parses incoming bytes. No Node toolchain; the
-binary is self-contained.
+interactivity (filtering, pagination). In-progress authenticated sessions update
+live over server-sent events: the session view subscribes to an SSE stream and
+swaps in new messages and stats as the server parses incoming bytes. Public
+session pages render a bounded transcript tail and fetch earlier windows through
+the revocable public capability URL. Each earlier-page request carries the
+projection revision from the page it extends. If a rebuild changed that revision,
+the server replaces the bounded body from a fresh snapshot instead of appending
+rows whose ordinals may describe another projection. No Node toolchain; the binary
+is self-contained.
 
 Pages:
 
@@ -1062,8 +1068,12 @@ Pages:
   step for that call. Any subagent sessions are shown nested under the call
   that spawned them. A publish/unpublish control for the owner.
 - **Public session view**: the same session view at `/s/{public_id}` (the
-  unguessable id minted on publish), served without auth. Unpublishing clears the
-  id and the link dies.
+  unguessable id minted on publish), served without auth. The initial transcript
+  and each earlier page are bounded, and the session header plus transcript window
+  come from one repeatable-read snapshot. Tool bodies and attachments remain
+  metadata until the reader explicitly fetches their public blob URL. Every page,
+  fragment, and blob response is `no-store` and rechecks publication, so
+  unpublishing clears the id and stops the link and its dependent fetches.
 - **Search**: trigram search across message content, scoped to a project or
   global, with the same user / agent / date filters available on results.
 - **Account**: manage API tokens (create with a scope, name, revoke); admins
