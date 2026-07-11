@@ -71,6 +71,9 @@ Only the database URL is required.
 | `AKARI_PROXY_AUTH_HEADER` | unset | Enables reverse-proxy single sign-on. The request header a trusted proxy in front sets to the authenticated username (for example `X-Auth-Request-Preferred-Username`). When set, akari trusts that header as the signed-in user and provisions the account on first sight. Leave unset for a direct, locally-authenticated deployment. See [Single sign-on behind a trusted proxy](#single-sign-on-behind-a-trusted-proxy). |
 | `AKARI_PROXY_AUTH_SECRET` | unset | Optional shared secret the proxy must echo (in `AKARI_PROXY_AUTH_SECRET_HEADER`) for the identity header to be trusted. Defense in depth for when network isolation alone is not enough. Only consulted when `AKARI_PROXY_AUTH_HEADER` is set. |
 | `AKARI_PROXY_AUTH_SECRET_HEADER` | `X-Akari-Proxy-Secret` | The header carrying `AKARI_PROXY_AUTH_SECRET`. Only consulted when that secret is set. |
+| `AKARI_PASSWORD_WORKERS` | `2` | Maximum Argon2 password hashes and verifications running at once. Each worker can use 64 MiB, so size this from the memory available to the server. Must be positive. |
+| `AKARI_PASSWORD_QUEUE_DEPTH` | `32` | Maximum password operations waiting behind active workers. Requests beyond this bound fail closed. Must be positive. |
+| `AKARI_PASSWORD_QUEUE_TIMEOUT` | `3s` | Maximum time an admitted password operation waits for a worker. A Go duration; must be positive. |
 | `AKARI_SWEEP_INTERVAL` | `1h` | How often the server reclaims orphaned content-addressed blobs. A Go duration (`30m`, `2h`); `0` disables the background sweep. |
 | `AKARI_OG_CACHE_TTL` | `1h` | How long a rendered Open Graph preview card of a published overview is served from cache before the next request re-renders it. A Go duration; must be positive. |
 | `AKARI_OG_CLEANUP_INTERVAL` | `24h` | How often the server prunes expired preview cards (older than `AKARI_OG_CACHE_TTL`) from the cache. A Go duration; `0` disables the sweep. |
@@ -97,6 +100,23 @@ the server in a browser and register to claim it. That account can then mint
 invite tokens (Account page) for everyone
 else, who redeem them when they register. The full account and token model is
 [Accounts and sharing](./accounts-and-sharing.md).
+
+Login and registration share the password-work limits above. Unknown usernames
+run a dummy Argon2 verification after admission, so an invalid login does not
+expose whether the account exists through the ordinary fast path. Process-local
+abuse ceilings also bound sustained attempts per normalized username and direct
+network peer. Akari does not trust `X-Forwarded-For` for this purpose; deployments
+with several replicas should enforce a fleet-wide source limit at the trusted
+edge as well.
+
+**Behind a reverse proxy, the per-source limit becomes a single shared bucket.**
+Every request the server sees arrives from the proxy's own address, so the
+per-source ceiling stops distinguishing one client from another and instead caps
+the whole instance's login and registration traffic together. A busy moment can
+then 401 legitimate logins with nothing to tell them apart from real credential
+attacks. The per-username limiter is unaffected and still protects individual
+accounts. If you need per-client source limits behind a proxy, enforce them there
+instead: the proxy sees the real client address, akari does not.
 
 ## Single sign-on behind a trusted proxy
 

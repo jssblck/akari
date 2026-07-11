@@ -16,10 +16,12 @@ import (
 
 // Server holds the dependencies shared by all handlers.
 type Server struct {
-	Store  *store.Store
-	Cfg    config.Server
-	hub    *sseHub
-	worker *parse.Worker
+	Store        *store.Store
+	Cfg          config.Server
+	passwords    *passwordWork
+	authAttempts *authAttemptLimiter
+	hub          *sseHub
+	worker       *parse.Worker
 	// mcp is the Streamable-HTTP handler for the remote MCP server, built once and
 	// shared across requests; handleMCP wraps it per request with the bearer check.
 	mcp http.Handler
@@ -45,7 +47,10 @@ type Server struct {
 // gating. Its hooks fan out through the SSE hub: fleet-rebuild progress to the
 // status stream, and each committed rebuild to the browsers watching that session.
 func New(st *store.Store, cfg config.Server, worker *parse.Worker) *Server {
-	s := &Server{Store: st, Cfg: cfg, hub: newSSEHub(), worker: worker}
+	s := &Server{
+		Store: st, Cfg: cfg, hub: newSSEHub(), worker: worker,
+		passwords: newPasswordWork(cfg), authAttempts: newAuthAttemptLimiter(),
+	}
 	s.insights = newInsightsRefresher(func(ctx context.Context) (map[string]store.Insights, error) {
 		return computeFleetInsights(ctx, st)
 	})
