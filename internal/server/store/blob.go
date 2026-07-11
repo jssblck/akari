@@ -610,6 +610,9 @@ func (s *Store) SweepBlobs(ctx context.Context) (int, error) {
 			return removed, err
 		}
 		removed += n
+		if s.sweepBatchCommittedHook != nil {
+			s.sweepBatchCommittedHook(n)
+		}
 		if n < sweepBlobBatchSize {
 			return removed, nil
 		}
