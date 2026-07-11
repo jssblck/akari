@@ -42,13 +42,13 @@ const mcpSessionTimeout = 30 * time.Minute
 // documented choice for a proxied deployment and costs no real protection.
 func newMCPHandler(s *Server) http.Handler {
 	srv := mcpserver.New(s.Store)
-	return mcpsdk.NewStreamableHTTPHandler(
+	return newMCPBodySpooler(mcpsdk.NewStreamableHTTPHandler(
 		func(*http.Request) *mcpsdk.Server { return srv },
 		&mcpsdk.StreamableHTTPOptions{
 			SessionTimeout:             mcpSessionTimeout,
 			DisableLocalhostProtection: true,
 		},
-	)
+	))
 }
 
 // handleMCP serves the MCP endpoint behind a bearer check. The check is built per
