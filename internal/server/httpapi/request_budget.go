@@ -11,8 +11,9 @@ import (
 const requestBudgetRetryAfter = "1"
 
 // admit wraps a complete expensive handler in the shared weighted budget. It is
-// used where the whole operation has one resource lifetime, such as public
-// analytics and dynamic registration.
+// used where the whole operation has one resource lifetime, such as preview-card
+// rendering and dynamic registration. Analytics pages acquire inside their shared
+// snapshot refresh so cache hits consume no capacity.
 func (s *Server) admit(class requestbudget.WorkClass, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !s.runAdmitted(w, r, class, func() { next(w, r) }) {

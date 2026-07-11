@@ -82,7 +82,6 @@ Only the database URL is required.
 | `AKARI_REQUEST_BUDGET_CAPACITY` | `16` | Process-wide weighted capacity for expensive public work. Must be at least `12`, the weight of one maximum-sized MCP POST under the 100 MiB ceiling tracked by issue #134. Password work weighs `8`, public analytics `4`, MCP POST parsing and spooling `12`, and dynamic OAuth registration `1`. |
 | `AKARI_REQUEST_BUDGET_WAIT_TIMEOUT` | `5s` | Maximum time expensive work waits for capacity. A timed-out request receives HTTP 503 with `Retry-After: 1`. Must be a positive Go duration. |
 | `AKARI_OAUTH_REGISTRATIONS_PER_HOUR` | `1000` | Abuse ceiling for successful dynamic OAuth client registrations in a rolling hour. Postgres coordinates this limit across all server replicas. Excess registrations receive HTTP 429 with `Retry-After: 3600`. |
-
 ### Browser origin and reverse proxies
 
 akari rejects unsafe browser requests unless they come from its public origin.

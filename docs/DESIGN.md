@@ -260,15 +260,25 @@ One process-wide weighted queue admits request work whose CPU, memory, database,
 or temporary-disk cost is meaningful. The default capacity is 16 units, where a
 unit represents approximately 8 MiB of bounded memory or an equivalent database
 work share. MCP POST parsing and spooling weigh 12 (the 100 MiB request ceiling
-owned by issue #134), public analytics weigh 4, and dynamic OAuth registration
-weighs 1. Password hashing is deliberately not a budget class: its Argon2
-concurrency is bounded by the dedicated password worker pool, whose overload
-response keeps login failures uniform instead of leaking a distinguishable 503. A shared queue lets a
-mixed workload consume the same finite capacity instead of bypassing independent
-per-route concurrency limits.
+owned by issue #134), public analytics snapshot refreshes weigh 4, and dynamic
+OAuth registration weighs 1. Password hashing is deliberately not a budget class:
+its Argon2 concurrency is bounded by the dedicated password worker pool, whose
+overload response keeps login failures uniform instead of leaking a
+distinguishable 503.
+Snapshot hits need no admission; one singleflight refresh holds the weight for all
+waiters on that scope. The publication gate check that runs before it, and a cache
+hit on the OG preview cards, sit outside the queue the same way: both are deliberately
+left unadmitted, so a flood of 404/gate traffic against an unpublished or unknown
+entity is bounded by the database connection pool rather than the weighted queue, a
+tradeoff accepted because that traffic is cheap and gated before it can reach the
+expensive path the budget exists to protect. A shared queue lets a mixed workload
+consume the same finite capacity instead of bypassing independent per-route
+concurrency limits.
 
 Admission waits for up to `AKARI_REQUEST_BUDGET_WAIT_TIMEOUT` (5 seconds by
 default). A request that cannot enter receives HTTP 503 with `Retry-After: 1`.
+An analytics refresh may serve a still-eligible stale generation instead, as
+documented in [public-analytics-snapshots.md](./public-analytics-snapshots.md).
 Disconnecting cancels its wait, and every admitted handler releases its weight on
 all exits. `/metrics` exposes queue depth, wait histograms, timeout and cancellation
 counts, acquisitions, in-use weight, and per-class utilization in Prometheus text

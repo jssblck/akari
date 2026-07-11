@@ -71,16 +71,11 @@ func TestAnalyticsUntilExcludesFuture(t *testing.T) {
 	}
 }
 
-// TestPublicAndAuthedProjectAnalyticsReconcile pins the one intentional gap between
-// the two project usage surfaces. The signed-in project page reads Analytics with no
-// upper bound (so its panel reconciles with its unbounded session table), while the
-// public /p/<id> page bounds the panel to the end of today (so its headline reconciles
-// with the trailing-year heatmap, which stops at today). The two therefore agree for
-// every real, past-dated usage event and differ only by a future-dated one, which is a
-// malformed-transcript case that does not occur in practice. This test seeds exactly
-// that boundary: a past event both surfaces count, and a future event only the authed
-// surface counts, so the sole divergence is the future event and nothing else.
-func TestPublicAndAuthedProjectAnalyticsReconcile(t *testing.T) {
+// TestAnalyticsOmitUsersOnlyChangesBreakdown pins the shared project snapshot's
+// shape. Its end-of-today bound excludes malformed future usage, while retaining the
+// by-user split lets the authenticated view reuse the same generation. Omitting that
+// split for another caller may change only Users, never the headline.
+func TestAnalyticsOmitUsersOnlyChangesBreakdown(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
 	ctx := context.Background()
@@ -98,44 +93,25 @@ func TestPublicAndAuthedProjectAnalyticsReconcile(t *testing.T) {
 	seedUsage(t, st, sid, "claude-opus-4-8", 9.0, 900, 90, -3, "future") // 3 days ahead, authed-only
 
 	since := time.Now().Add(-365 * 24 * time.Hour)
-	// The two filters the handlers build (minus the authed page's user/agent/machine
-	// narrowing, absent on a bare project load): the authed panel is unbounded above; the
-	// public panel bounds to the end of today and omits the by-user split it never renders.
-	authed, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: projectID, Since: since})
+	shared, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: projectID, Since: since, Until: endOfTodayUTC()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	public, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: projectID, Since: since, Until: endOfTodayUTC(), OmitUsers: true})
+	omitted, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: projectID, Since: since, Until: endOfTodayUTC(), OmitUsers: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	// The authed surface folds in the future event; the public surface excludes it.
-	if authed.TotalIn != 1000 {
-		t.Fatalf("authed TotalIn = %d, want 1000 (past + future)", authed.TotalIn)
+	if shared.TotalIn != 100 || omitted.TotalIn != 100 {
+		t.Fatalf("bounded totals = (shared %d, omitted %d), want (100, 100)", shared.TotalIn, omitted.TotalIn)
 	}
-	if public.TotalIn != 100 {
-		t.Fatalf("public TotalIn = %d, want 100 (future excluded)", public.TotalIn)
+	if shared.TotalOut != omitted.TotalOut || !costsEqual(shared.TotalCost, omitted.TotalCost) || shared.Sessions != omitted.Sessions {
+		t.Fatalf("OmitUsers changed the headline: shared=%+v omitted=%+v", shared, omitted)
 	}
-	// The gap is exactly the future event and nothing else: bounding the authed filter
-	// the same way the public one is bound makes the two headlines identical, proving the
-	// only difference between the surfaces is the Until bound (not OmitUsers, which sits
-	// outside the headline the by-agent split sums).
-	authedBounded, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: projectID, Since: since, Until: endOfTodayUTC()})
-	if err != nil {
-		t.Fatal(err)
+	if omitted.Users != nil {
+		t.Errorf("OmitUsers left a by-user split: %+v", omitted.Users)
 	}
-	if authedBounded.TotalIn != public.TotalIn || authedBounded.TotalOut != public.TotalOut ||
-		!costsEqual(authedBounded.TotalCost, public.TotalCost) || authedBounded.Sessions != public.Sessions {
-		t.Fatalf("bounded authed and public disagree beyond the by-user split: authed=%+v public=%+v", authedBounded, public)
-	}
-	// The public read omits the by-user split; the authed read carries it. That is the
-	// only other difference, and it never touches the reconciled headline above.
-	if public.Users != nil {
-		t.Errorf("public Analytics should omit the by-user split, got %+v", public.Users)
-	}
-	if len(authed.Users) == 0 {
-		t.Error("authed Analytics should carry the by-user split")
+	if len(shared.Users) == 0 {
+		t.Error("shared snapshot should carry the authenticated view's by-user split")
 	}
 }
 

@@ -42,6 +42,9 @@ type Server struct {
 	// so the range views always describe one corpus state and every load is a map
 	// lookup. See insights_refresh.go.
 	insights *insightsRefresher
+	// analyticsSnapshots bounds and shares user/project aggregate generations across
+	// public pages and the authenticated views with the same data shape.
+	analyticsSnapshots *analyticsSnapshotCache
 }
 
 // New builds a Server. The parse worker is shared with the server main loop; here
@@ -71,6 +74,12 @@ func New(st *store.Store, cfg config.Server, worker *parse.Worker) *Server {
 	s.insights = newInsightsRefresher(func(ctx context.Context) (map[string]store.Insights, error) {
 		return computeFleetInsights(ctx, st)
 	})
+	s.analyticsSnapshots = newAnalyticsSnapshotCache(
+		cfg.AnalyticsSnapshotFreshness,
+		cfg.AnalyticsSnapshotStaleFor,
+		cfg.AnalyticsSnapshotLimit,
+		s.computeAnalyticsSnapshot,
+	)
 	s.mcp = newMCPHandler(s)
 	// Fan fleet-rebuild progress out to any browser watching the status stream. The
 	// hub carries the status JSON as the payload, so a watcher updates its progress
@@ -83,6 +92,7 @@ func New(st *store.Store, cfg config.Server, worker *parse.Worker) *Server {
 		// recompute now rather than serving pre-reparse figures until the next tick.
 		if !status.InProgress {
 			s.insights.kickRefresh()
+			s.analyticsSnapshots.invalidateAll()
 		}
 	})
 	// Wake the browsers watching a session when its rebuild commits, so the live
@@ -176,11 +186,11 @@ func (s *Server) Routes() http.Handler {
 	// A user's published usage overview at /u/<username>: aggregate, scoped to that
 	// one account, and gated during a reparse like the public session view (it shows
 	// parsed data).
-	mux.HandleFunc("GET /u/{username}", s.admit(requestbudget.PublicAnalytics, s.gatePublicParsed(s.handlePublicOverview)))
+	mux.HandleFunc("GET /u/{username}", s.gatePublicParsed(s.handlePublicOverview))
 	// A project's published usage overview at /p/<id>: aggregate, scoped to that one
 	// project across every account, with no session list. Gated during a reparse like
 	// the other public parsed pages.
-	mux.HandleFunc("GET /p/{id}", s.admit(requestbudget.PublicAnalytics, s.gatePublicParsed(s.handlePublicProject)))
+	mux.HandleFunc("GET /p/{id}", s.gatePublicParsed(s.handlePublicProject))
 	// The Open Graph preview cards for the three per-entity public pages. Each serves
 	// PNG bytes rendered on demand and held in a TTL cache, so none is reparse-gated: the
 	// more specific /og.png pattern wins over the page pattern (/u/{username}, /p/{id},
