@@ -173,6 +173,54 @@ func TestLoadServerInsightsRefreshInterval(t *testing.T) {
 	}
 }
 
+func TestLoadServerRequestBudget(t *testing.T) {
+	t.Setenv("AKARI_DATABASE_URL", "postgres://x/y")
+	t.Setenv("AKARI_REQUEST_BUDGET_CAPACITY", "")
+	t.Setenv("AKARI_REQUEST_BUDGET_WAIT_TIMEOUT", "")
+	t.Setenv("AKARI_OAUTH_REGISTRATIONS_PER_HOUR", "")
+
+	s, err := LoadServer()
+	if err != nil {
+		t.Fatalf("LoadServer: %v", err)
+	}
+	if s.RequestBudgetCapacity != 16 || s.RequestBudgetWaitTimeout != 5*time.Second || s.OAuthRegistrationsPerHour != 1000 {
+		t.Fatalf("request budget defaults = (%d, %v, %d), want (16, 5s, 1000)",
+			s.RequestBudgetCapacity, s.RequestBudgetWaitTimeout, s.OAuthRegistrationsPerHour)
+	}
+
+	t.Setenv("AKARI_REQUEST_BUDGET_CAPACITY", "24")
+	t.Setenv("AKARI_REQUEST_BUDGET_WAIT_TIMEOUT", "750ms")
+	t.Setenv("AKARI_OAUTH_REGISTRATIONS_PER_HOUR", "2000")
+	s, err = LoadServer()
+	if err != nil {
+		t.Fatalf("LoadServer with explicit budget: %v", err)
+	}
+	if s.RequestBudgetCapacity != 24 || s.RequestBudgetWaitTimeout != 750*time.Millisecond || s.OAuthRegistrationsPerHour != 2000 {
+		t.Fatalf("request budget config = (%d, %v, %d), want (24, 750ms, 2000)",
+			s.RequestBudgetCapacity, s.RequestBudgetWaitTimeout, s.OAuthRegistrationsPerHour)
+	}
+}
+
+func TestLoadServerRejectsInvalidRequestBudget(t *testing.T) {
+	t.Setenv("AKARI_DATABASE_URL", "postgres://x/y")
+	t.Setenv("AKARI_REQUEST_BUDGET_CAPACITY", "11")
+	if _, err := LoadServer(); err == nil {
+		t.Fatal("LoadServer accepted capacity below the heaviest work class")
+	}
+
+	t.Setenv("AKARI_REQUEST_BUDGET_CAPACITY", "16")
+	t.Setenv("AKARI_REQUEST_BUDGET_WAIT_TIMEOUT", "0")
+	if _, err := LoadServer(); err == nil {
+		t.Fatal("LoadServer accepted zero budget wait timeout")
+	}
+
+	t.Setenv("AKARI_REQUEST_BUDGET_WAIT_TIMEOUT", "5s")
+	t.Setenv("AKARI_OAUTH_REGISTRATIONS_PER_HOUR", "0")
+	if _, err := LoadServer(); err == nil {
+		t.Fatal("LoadServer accepted zero OAuth registration ceiling")
+	}
+}
+
 func TestParseDuration(t *testing.T) {
 	cases := []struct {
 		in       string

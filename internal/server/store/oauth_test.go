@@ -137,7 +137,7 @@ func TestOAuthClientRoundTrip(t *testing.T) {
 	ctx := context.Background()
 
 	uris := []string{"http://127.0.0.1:7777/callback", "https://app.example/cb"}
-	if err := st.CreateOAuthClient(ctx, "client-abc", "Grace's agent", uris); err != nil {
+	if err := st.CreateOAuthClient(ctx, "client-abc", "Grace's agent", uris, 1000); err != nil {
 		t.Fatalf("create client: %v", err)
 	}
 	got, err := st.OAuthClient(ctx, "client-abc")
@@ -157,7 +157,7 @@ func TestAuthCodeIsSingleUseAndExpires(t *testing.T) {
 	st := storetest.NewStore(t)
 	ctx := context.Background()
 	uid := seedUser(t, st, "grace")
-	if err := st.CreateOAuthClient(ctx, "c1", "agent", []string{"http://127.0.0.1/cb"}); err != nil {
+	if err := st.CreateOAuthClient(ctx, "c1", "agent", []string{"http://127.0.0.1/cb"}, 1000); err != nil {
 		t.Fatalf("create client: %v", err)
 	}
 
@@ -203,7 +203,7 @@ func TestRedeemAuthCodeRollsBackWhenTokenInsertFails(t *testing.T) {
 	st := storetest.NewStore(t)
 	ctx := context.Background()
 	uid := seedUser(t, st, "ada")
-	if err := st.CreateOAuthClient(ctx, "c1", "agent", []string{"http://127.0.0.1/cb"}); err != nil {
+	if err := st.CreateOAuthClient(ctx, "c1", "agent", []string{"http://127.0.0.1/cb"}, 1000); err != nil {
 		t.Fatalf("create client: %v", err)
 	}
 	ac := store.AuthCode{ClientID: "c1", UserID: uid, RedirectURI: "http://127.0.0.1/cb", CodeChallenge: "chal", Scope: "read", Resource: "http://x/mcp"}
@@ -239,7 +239,7 @@ func TestOAuthAccessAuthRejectsExpiredAndRevoked(t *testing.T) {
 	st := storetest.NewStore(t)
 	ctx := context.Background()
 	uid := seedUser(t, st, "grace")
-	if err := st.CreateOAuthClient(ctx, "c1", "agent", []string{"http://127.0.0.1/cb"}); err != nil {
+	if err := st.CreateOAuthClient(ctx, "c1", "agent", []string{"http://127.0.0.1/cb"}, 1000); err != nil {
 		t.Fatalf("create client: %v", err)
 	}
 
@@ -278,7 +278,7 @@ func TestRotateRefreshTokenIsSingleUse(t *testing.T) {
 	st := storetest.NewStore(t)
 	ctx := context.Background()
 	uid := seedUser(t, st, "grace")
-	if err := st.CreateOAuthClient(ctx, "c1", "agent", []string{"http://127.0.0.1/cb"}); err != nil {
+	if err := st.CreateOAuthClient(ctx, "c1", "agent", []string{"http://127.0.0.1/cb"}, 1000); err != nil {
 		t.Fatalf("create client: %v", err)
 	}
 	refresh := time.Now().Add(time.Hour)
@@ -314,7 +314,7 @@ func TestListOAuthGrants(t *testing.T) {
 	st := storetest.NewStore(t)
 	ctx := context.Background()
 	uid := seedUser(t, st, "grace")
-	if err := st.CreateOAuthClient(ctx, "c1", "Ada's agent", []string{"http://127.0.0.1/cb"}); err != nil {
+	if err := st.CreateOAuthClient(ctx, "c1", "Ada's agent", []string{"http://127.0.0.1/cb"}, 1000); err != nil {
 		t.Fatalf("create client: %v", err)
 	}
 	refresh := time.Now().Add(time.Hour)

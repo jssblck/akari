@@ -134,7 +134,11 @@ func (s *Server) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 		writeOAuthError(w, http.StatusInternalServerError, "server_error", "could not generate client id")
 		return
 	}
-	if err := s.Store.CreateOAuthClient(r.Context(), id, strings.TrimSpace(body.ClientName), body.RedirectURIs); err != nil {
+	if err := s.Store.CreateOAuthClient(r.Context(), id, strings.TrimSpace(body.ClientName), body.RedirectURIs, s.Cfg.OAuthRegistrationsPerHour); errors.Is(err, store.ErrOAuthRegistrationLimit) {
+		w.Header().Set("Retry-After", "3600")
+		writeOAuthError(w, http.StatusTooManyRequests, "temporarily_unavailable", "dynamic client registration limit reached")
+		return
+	} else if err != nil {
 		writeOAuthError(w, http.StatusInternalServerError, "server_error", "could not store client")
 		return
 	}

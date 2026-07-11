@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -12,6 +13,12 @@ import (
 // unknown, already used, expired, or revoked. It maps to the OAuth
 // "invalid_grant" error at the token endpoint.
 var ErrInvalidGrant = errors.New("invalid or expired grant")
+
+// ErrOAuthRegistrationLimit is returned when the shared rolling-hour ceiling
+// has been reached. The database transaction that enforces it is serialized
+// across server replicas, so a deployment cannot multiply durable growth by
+// adding processes.
+var ErrOAuthRegistrationLimit = errors.New("oauth registration limit reached")
 
 // OAuthClient is a dynamically registered MCP client (a coding agent). Clients are
 // public: they authenticate with PKCE and hold no secret, so this is identity and
@@ -47,13 +54,40 @@ type OAuthGrant struct {
 	LastUsedAt  time.Time
 }
 
-// CreateOAuthClient stores a dynamic client registration and returns nothing but an
-// error: the caller already holds the generated id.
-func (s *Store) CreateOAuthClient(ctx context.Context, id, name string, redirectURIs []string) error {
-	_, err := s.Pool.Exec(ctx,
+// CreateOAuthClient stores a dynamic client registration if fewer than limit
+// clients were created in the preceding hour. A transaction-scoped advisory lock
+// makes the count-and-insert decision atomic across every server replica.
+func (s *Store) CreateOAuthClient(ctx context.Context, id, name string, redirectURIs []string, limit int) error {
+	if limit <= 0 {
+		return fmt.Errorf("oauth registration limit must be positive")
+	}
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	// This lock id is local to akari's registration transaction. It does not lock
+	// rows or block unrelated OAuth reads and writes.
+	const registrationLockID int64 = 0x616b6172696f6175
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, registrationLockID); err != nil {
+		return err
+	}
+	var reached bool
+	if err := tx.QueryRow(ctx,
+		`SELECT count(*) >= $1 FROM oauth_clients WHERE created_at >= now() - interval '1 hour'`,
+		limit).Scan(&reached); err != nil {
+		return err
+	}
+	if reached {
+		return ErrOAuthRegistrationLimit
+	}
+	if _, err := tx.Exec(ctx,
 		`INSERT INTO oauth_clients (id, client_name, redirect_uris) VALUES ($1, $2, $3)`,
-		id, name, redirectURIs)
-	return err
+		id, name, redirectURIs); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // OAuthClient looks up a registered client by id.

@@ -11,6 +11,7 @@ import (
 
 	"github.com/jssblck/akari/internal/config"
 	"github.com/jssblck/akari/internal/server/parse"
+	"github.com/jssblck/akari/internal/server/requestbudget"
 	"github.com/jssblck/akari/internal/server/store"
 )
 
@@ -22,6 +23,7 @@ type Server struct {
 	authAttempts *authAttemptLimiter
 	hub          *sseHub
 	worker       *parse.Worker
+	budget       *requestbudget.Budget
 	// mcp is the Streamable-HTTP handler for the remote MCP server, built once and
 	// shared across requests; handleMCP wraps it per request with the bearer check.
 	mcp http.Handler
@@ -47,8 +49,23 @@ type Server struct {
 // gating. Its hooks fan out through the SSE hub: fleet-rebuild progress to the
 // status stream, and each committed rebuild to the browsers watching that session.
 func New(st *store.Store, cfg config.Server, worker *parse.Worker) *Server {
+	capacity := int64(cfg.RequestBudgetCapacity)
+	if capacity == 0 {
+		capacity = requestbudget.DefaultCapacity
+	}
+	waitTimeout := cfg.RequestBudgetWaitTimeout
+	if waitTimeout == 0 {
+		waitTimeout = requestbudget.DefaultWaitTimeout
+	}
+	budget, err := requestbudget.New(capacity, waitTimeout)
+	if err != nil {
+		panic("invalid request budget configuration: " + err.Error())
+	}
+	if cfg.OAuthRegistrationsPerHour == 0 {
+		cfg.OAuthRegistrationsPerHour = config.DefaultOAuthRegistrationsPerHour
+	}
 	s := &Server{
-		Store: st, Cfg: cfg, hub: newSSEHub(), worker: worker,
+		Store: st, Cfg: cfg, hub: newSSEHub(), worker: worker, budget: budget,
 		passwords: newPasswordWork(cfg), authAttempts: newAuthAttemptLimiter(),
 	}
 	s.insights = newInsightsRefresher(func(ctx context.Context) (map[string]store.Insights, error) {
@@ -82,6 +99,7 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.Handle("GET /metrics", s.budget)
 
 	// Auth and accounts.
 	mux.HandleFunc("POST /api/v1/auth/register", s.handleRegister)
@@ -101,14 +119,14 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource", s.handleProtectedResourceMetadata)
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp", s.handleProtectedResourceMetadata)
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server", s.handleAuthServerMetadata)
-	mux.HandleFunc("POST /oauth/register", s.handleOAuthRegister)
+	mux.HandleFunc("POST /oauth/register", s.admit(requestbudget.OAuthRegistration, s.handleOAuthRegister))
 	mux.HandleFunc("GET /oauth/authorize", s.handleOAuthAuthorize)
 	mux.HandleFunc("POST /oauth/authorize", s.handleOAuthDecision)
 	mux.HandleFunc("POST /oauth/token", s.handleOAuthToken)
 	// The MCP transport multiplexes POST (messages), GET (the SSE stream), and
 	// DELETE (session teardown) on one path, so it registers without a method filter
 	// and authenticates each request itself via the bearer check in handleMCP.
-	mux.Handle(mcpPath, http.HandlerFunc(s.handleMCP))
+	mux.Handle(mcpPath, s.admitMCP(http.HandlerFunc(s.handleMCP)))
 
 	// Ingest.
 	mux.HandleFunc("POST /api/v1/ingest/session", s.requireIngest(s.handleAnnounce))
@@ -158,15 +176,20 @@ func (s *Server) Routes() http.Handler {
 	// A user's published usage overview at /u/<username>: aggregate, scoped to that
 	// one account, and gated during a reparse like the public session view (it shows
 	// parsed data).
-	mux.HandleFunc("GET /u/{username}", s.gatePublicParsed(s.handlePublicOverview))
+	mux.HandleFunc("GET /u/{username}", s.admit(requestbudget.PublicAnalytics, s.gatePublicParsed(s.handlePublicOverview)))
 	// A project's published usage overview at /p/<id>: aggregate, scoped to that one
 	// project across every account, with no session list. Gated during a reparse like
 	// the other public parsed pages.
-	mux.HandleFunc("GET /p/{id}", s.gatePublicParsed(s.handlePublicProject))
+	mux.HandleFunc("GET /p/{id}", s.admit(requestbudget.PublicAnalytics, s.gatePublicParsed(s.handlePublicProject)))
 	// The Open Graph preview cards for the three per-entity public pages. Each serves
 	// PNG bytes rendered on demand and held in a TTL cache, so none is reparse-gated: the
 	// more specific /og.png pattern wins over the page pattern (/u/{username}, /p/{id},
-	// /s/{public_id}) for these exact paths.
+	// /s/{public_id}) for these exact paths. Unlike the page routes above, these are not
+	// wrapped in s.admit: a cache hit or a 404 costs no admission, and a cache miss is
+	// charged exactly once per coalesced render by the singleflight leader inside
+	// renderCoalesced, not once per request. Wrapping the whole handler here would charge
+	// admission for every concurrent unfurl of the same card and for every cache hit, the
+	// opposite of what the budget is for.
 	mux.HandleFunc("GET /u/{username}/og.png", s.handlePublicOverviewOGImage)
 	mux.HandleFunc("GET /p/{id}/og.png", s.handlePublicProjectOGImage)
 	mux.HandleFunc("GET /s/{public_id}/og.png", s.handlePublicSessionOGImage)
