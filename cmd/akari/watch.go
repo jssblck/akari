@@ -24,7 +24,7 @@ import (
 func runWatch(ctx context.Context, args []string) (runErr error) {
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
 	configPath := fs.String("config", "", "config file path (default: platform config dir)")
-	daemonLogPath := fs.String("daemon-log", "", "")
+	daemonLogPath := fs.String("daemon-log", "", "internal: log file path used when watch is relaunched as a detached daemon process")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

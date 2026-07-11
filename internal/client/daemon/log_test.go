@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -157,6 +158,69 @@ func TestLogSerializesConcurrentRecords(t *testing.T) {
 			t.Errorf("record %d appears %d times", i, got)
 		}
 	}
+}
+
+func TestLogSurfacesDroppedRecordsAfterRotationRecovers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "akari.log")
+	const maxBytes = 4096
+	log, err := openLog(path, maxBytes, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+
+	// A record exactly maxBytes long pins the log at its boundary, so every
+	// following write attempts a rotation regardless of its own size.
+	seed := bytes.Repeat([]byte("s"), maxBytes)
+	if _, err := log.Write(seed); err != nil {
+		t.Fatal(err)
+	}
+
+	injected := errors.New("injected rotation failure")
+	previousRename := renameFile
+	renameFile = func(string, string) error { return injected }
+	t.Cleanup(func() { renameFile = previousRename })
+
+	for i := 0; i < 3; i++ {
+		n, err := log.Write([]byte("lost-record"))
+		if err == nil {
+			t.Fatalf("write %d succeeded despite a forced rotation failure", i)
+		}
+		if n != 0 {
+			t.Fatalf("write %d reported %d bytes written, want 0", i, n)
+		}
+	}
+	// The three dropped records never reached disk; the log still holds only
+	// the seed record that pinned it at the boundary.
+	assertFileContents(t, path, string(seed))
+	if _, err := os.Stat(backupPath(path, 1)); !os.IsNotExist(err) {
+		t.Fatalf("rotation produced a backup despite every rename failing: %v", err)
+	}
+
+	renameFile = previousRename
+	if _, err := log.Write([]byte("recovered")); err != nil {
+		t.Fatalf("write after rotation recovers: %v", err)
+	}
+
+	active, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantNotice := "akari: log rotation failed 3 times; 3 records dropped; last error:"
+	if !bytes.Contains(active, []byte(wantNotice)) {
+		t.Fatalf("active log = %q, want it to contain %q", active, wantNotice)
+	}
+	if !bytes.Contains(active, []byte(injected.Error())) {
+		t.Fatalf("active log = %q, want it to contain %q", active, injected.Error())
+	}
+	if !bytes.HasSuffix(active, []byte("recovered")) {
+		t.Fatalf("active log = %q, want it to end with the record written after recovery", active)
+	}
+	if bytes.Contains(active, []byte("lost-record")) {
+		t.Fatalf("active log = %q, want no trace of the dropped records", active)
+	}
+
+	assertFileContents(t, backupPath(path, 1), string(seed))
 }
 
 func assertFileContents(t *testing.T, path, want string) {

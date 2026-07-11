@@ -18,6 +18,12 @@ const (
 	LogBackups = 3
 )
 
+// renameFile performs the renames rotation depends on. It is a variable so
+// tests can force a rotation failure (a locked file, a permission error)
+// without needing an OS condition that is awkward to reproduce reliably,
+// especially on Windows where the failure this guards against is common.
+var renameFile = os.Rename
+
 // RotatingLog is the sole writer for a daemon log. Rotation closes the active
 // handle before renaming it, which is required while the daemon is running on
 // Windows. The mutex keeps each Write and its rotation handoff indivisible.
@@ -28,6 +34,12 @@ type RotatingLog struct {
 	size     int64
 	maxBytes int64
 	backups  int
+
+	// droppedRecords and lastRotationErr track a rotation failure streak so it
+	// can be surfaced in the log itself instead of vanishing behind the
+	// log.Logger.Printf caller, which discards Write's returned error.
+	droppedRecords  int64
+	lastRotationErr error
 }
 
 // OpenLog opens the built-in daemon's bounded, owner-only log set.
@@ -136,6 +148,14 @@ func (l *RotatingLog) openActive() error {
 // Write appends all bytes in order, rotating before a record would cross the
 // size boundary. An unusually large single write is split across bounded files
 // without dropping bytes that still fit within the retained history.
+//
+// When rotation fails, the record that triggered it is dropped rather than
+// written through: writing through would defeat the disk bound rotation
+// exists to enforce. The drop is not silent, though. It is counted, and as
+// soon as a rotation next succeeds (in this call or a later one), or a plain
+// write finds a drop still unreported, a synthesized notice line is written
+// ahead of the caller's record so an operator reading the log can see how
+// much was lost and why.
 func (l *RotatingLog) Write(p []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -144,11 +164,28 @@ func (l *RotatingLog) Write(p []byte) (int, error) {
 		return 0, os.ErrClosed
 	}
 	written := 0
+	noticeAttempted := false
 	for len(p) > 0 {
 		if l.size > 0 && (l.size == l.maxBytes || int64(len(p)) > l.maxBytes-l.size) {
 			if err := l.rotate(); err != nil {
+				l.droppedRecords++
+				l.lastRotationErr = err
 				return written, err
 			}
+		}
+		if l.droppedRecords > 0 && !noticeAttempted {
+			// Bypass the normal boundary check: routing this through the same
+			// rotate-then-write path could fail the same way rotation just
+			// failed and recurse into reporting a failure to report a failure.
+			// Letting the notice push the file slightly past maxBytes is the
+			// safer tradeoff. Looping back re-evaluates the boundary check
+			// against the post-notice size before any real record is written.
+			// noticeAttempted caps this to once per call: if the notice write
+			// itself keeps failing, the caller's record still gets a chance
+			// to go out, and the streak is retried on the next call.
+			noticeAttempted = true
+			l.writeDropNotice()
+			continue
 		}
 		space := l.maxBytes - l.size
 		chunk := int64(len(p))
@@ -167,6 +204,22 @@ func (l *RotatingLog) Write(p []byte) (int, error) {
 		}
 	}
 	return written, nil
+}
+
+// writeDropNotice appends one record naming how many records prior rotation
+// failures dropped and the most recent error, then clears the streak. If the
+// write itself fails, the streak is left intact so the next successful
+// rotation or write tries again instead of losing the count.
+func (l *RotatingLog) writeDropNotice() {
+	notice := fmt.Sprintf("akari: log rotation failed %d times; %d records dropped; last error: %v\n",
+		l.droppedRecords, l.droppedRecords, l.lastRotationErr)
+	n, err := l.file.Write([]byte(notice))
+	l.size += int64(n)
+	if err != nil {
+		return
+	}
+	l.droppedRecords = 0
+	l.lastRotationErr = nil
 }
 
 func (l *RotatingLog) rotate() error {
@@ -189,12 +242,12 @@ func (l *RotatingLog) rotate() error {
 	for i := l.backups - 1; i >= 1; i-- {
 		from := backupPath(l.path, i)
 		to := backupPath(l.path, i+1)
-		if err := os.Rename(from, to); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := renameFile(from, to); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return l.reopenAfterRotationError(fmt.Errorf("rotate daemon log %s to %s: %w", from, to, err))
 		}
 	}
 	first := backupPath(l.path, 1)
-	if err := os.Rename(l.path, first); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := renameFile(l.path, first); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return l.reopenAfterRotationError(fmt.Errorf("rotate daemon log %s to %s: %w", l.path, first, err))
 	}
 	if err := secureLogPath(first); err != nil && !errors.Is(err, os.ErrNotExist) {
