@@ -1,12 +1,75 @@
 package config
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
 
+func TestLoadServerPublicOrigin(t *testing.T) {
+	t.Setenv("AKARI_DATABASE_URL", "postgres://x/y")
+	t.Setenv("AKARI_URL", "")
+
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "canonical", raw: "https://akari.example", want: "https://akari.example"},
+		{name: "case and default port", raw: "HTTPS://AKARI.EXAMPLE:443/", want: "https://akari.example"},
+		{name: "nondefault port", raw: "http://localhost:8080", want: "http://localhost:8080"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AKARI_PUBLIC_URL", tc.raw)
+			cfg, err := LoadServer()
+			if err != nil {
+				t.Fatalf("LoadServer: %v", err)
+			}
+			if cfg.PublicURL != tc.want {
+				t.Fatalf("PublicURL = %q, want %q", cfg.PublicURL, tc.want)
+			}
+		})
+	}
+
+	for _, raw := range []string{
+		"akari.example",
+		"ftp://akari.example",
+		"https://akari.example/path",
+		"https://akari.example?query=1",
+		"https://user@akari.example",
+		"https://akari.example#fragment",
+	} {
+		t.Run("reject "+raw, func(t *testing.T) {
+			t.Setenv("AKARI_PUBLIC_URL", raw)
+			if _, err := LoadServer(); err == nil || !strings.Contains(err.Error(), "AKARI_PUBLIC_URL") {
+				t.Fatalf("LoadServer(%q) error = %v, want AKARI_PUBLIC_URL error", raw, err)
+			}
+		})
+	}
+}
+
+// TestLoadServerPublicOriginFallbackLabel confirms a validation failure names
+// whichever variable actually supplied the value. An operator who never set
+// AKARI_PUBLIC_URL, only the AKARI_URL eph exports, should see AKARI_URL
+// named in the error, not the unset variable.
+func TestLoadServerPublicOriginFallbackLabel(t *testing.T) {
+	t.Setenv("AKARI_DATABASE_URL", "postgres://x/y")
+	t.Setenv("AKARI_PUBLIC_URL", "")
+	t.Setenv("AKARI_URL", "akari.example")
+
+	_, err := LoadServer()
+	if err == nil || !strings.Contains(err.Error(), "AKARI_URL") {
+		t.Fatalf("LoadServer() error = %v, want AKARI_URL error", err)
+	}
+	if strings.Contains(err.Error(), "AKARI_PUBLIC_URL") {
+		t.Fatalf("LoadServer() error = %v, wrongly names AKARI_PUBLIC_URL for an AKARI_URL value", err)
+	}
+}
+
 func TestLoadServerOGCacheTTL(t *testing.T) {
 	t.Setenv("AKARI_DATABASE_URL", "postgres://x/y")
+	t.Setenv("AKARI_PUBLIC_URL", "")
+	t.Setenv("AKARI_URL", "")
 	// Isolate from any ambient value the harness may export.
 	t.Setenv("AKARI_OG_CACHE_TTL", "")
 
@@ -41,6 +104,8 @@ func TestLoadServerOGCacheTTL(t *testing.T) {
 
 func TestLoadServerOGCleanupInterval(t *testing.T) {
 	t.Setenv("AKARI_DATABASE_URL", "postgres://x/y")
+	t.Setenv("AKARI_PUBLIC_URL", "")
+	t.Setenv("AKARI_URL", "")
 	// Isolate from any ambient values the harness may export.
 	t.Setenv("AKARI_OG_CACHE_TTL", "")
 	t.Setenv("AKARI_OG_CLEANUP_INTERVAL", "")
@@ -75,6 +140,8 @@ func TestLoadServerOGCleanupInterval(t *testing.T) {
 
 func TestLoadServerInsightsRefreshInterval(t *testing.T) {
 	t.Setenv("AKARI_DATABASE_URL", "postgres://x/y")
+	t.Setenv("AKARI_PUBLIC_URL", "")
+	t.Setenv("AKARI_URL", "")
 	// Isolate from any ambient value the harness may export.
 	t.Setenv("AKARI_INSIGHTS_REFRESH_INTERVAL", "")
 
@@ -177,5 +244,53 @@ func TestParseDuration(t *testing.T) {
 		if !c.wantErr && got != c.want {
 			t.Errorf("parseDuration(%q) = %v, want %v", c.in, got, c.want)
 		}
+	}
+}
+
+func TestLoadServerPasswordWorkDefaultsAndValidation(t *testing.T) {
+	t.Setenv("AKARI_DATABASE_URL", "postgres://x/y")
+	t.Setenv("AKARI_PASSWORD_WORKERS", "")
+	t.Setenv("AKARI_PASSWORD_QUEUE_DEPTH", "")
+	t.Setenv("AKARI_PASSWORD_QUEUE_TIMEOUT", "")
+	s, err := LoadServer()
+	if err != nil {
+		t.Fatalf("LoadServer: %v", err)
+	}
+	if s.PasswordWorkers != DefaultPasswordWorkers ||
+		s.PasswordQueueDepth != DefaultPasswordQueueDepth ||
+		s.PasswordQueueTimeout != DefaultPasswordQueueTimeout {
+		t.Fatalf("password work defaults = (%d, %d, %v), want (%d, %d, %v)",
+			s.PasswordWorkers, s.PasswordQueueDepth, s.PasswordQueueTimeout,
+			DefaultPasswordWorkers, DefaultPasswordQueueDepth, DefaultPasswordQueueTimeout)
+	}
+
+	t.Setenv("AKARI_PASSWORD_WORKERS", "4")
+	t.Setenv("AKARI_PASSWORD_QUEUE_DEPTH", "48")
+	t.Setenv("AKARI_PASSWORD_QUEUE_TIMEOUT", "1500ms")
+	s, err = LoadServer()
+	if err != nil {
+		t.Fatalf("LoadServer configured password work: %v", err)
+	}
+	if s.PasswordWorkers != 4 || s.PasswordQueueDepth != 48 || s.PasswordQueueTimeout != 1500*time.Millisecond {
+		t.Fatalf("configured password work = (%d, %d, %v)", s.PasswordWorkers, s.PasswordQueueDepth, s.PasswordQueueTimeout)
+	}
+
+	for name, variable := range map[string]string{
+		"workers": "AKARI_PASSWORD_WORKERS", "queue depth": "AKARI_PASSWORD_QUEUE_DEPTH",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("AKARI_PASSWORD_WORKERS", "4")
+			t.Setenv("AKARI_PASSWORD_QUEUE_DEPTH", "48")
+			t.Setenv(variable, "0")
+			if _, err := LoadServer(); err == nil {
+				t.Fatalf("LoadServer accepted zero %s", variable)
+			}
+		})
+	}
+	t.Setenv("AKARI_PASSWORD_WORKERS", "4")
+	t.Setenv("AKARI_PASSWORD_QUEUE_DEPTH", "48")
+	t.Setenv("AKARI_PASSWORD_QUEUE_TIMEOUT", "0")
+	if _, err := LoadServer(); err == nil {
+		t.Fatal("LoadServer accepted zero AKARI_PASSWORD_QUEUE_TIMEOUT")
 	}
 }

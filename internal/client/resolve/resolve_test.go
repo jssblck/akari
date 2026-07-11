@@ -78,6 +78,42 @@ func TestPeekHeaderFallsBackToFilename(t *testing.T) {
 	}
 }
 
+// TestOpenSameFileRejectsMismatchedIdentity proves the SameFile plumbing PeekHeader
+// relies on to close its read-time TOCTOU window (see PeekHeader's doc comment),
+// without needing an actual race: it hands openSameFile a real Lstat of a
+// different file than the one at path, which is exactly what a caller sees when
+// the path was swapped between its own Lstat and this Open. This runs on every
+// platform, unlike the symlink-swap scenario in peek_special_unix_test.go, which
+// needs symlinks to simulate realistically.
+func TestOpenSameFileRejectsMismatchedIdentity(t *testing.T) {
+	dir := t.TempDir()
+	a := writeFile(t, dir, "a.jsonl", "a\n")
+	b := writeFile(t, dir, "b.jsonl", "b\n")
+
+	lstA, err := os.Lstat(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lstB, err := os.Lstat(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Matching identity: opening a against its own Lstat succeeds.
+	f, err := openSameFile(a, lstA)
+	if err != nil {
+		t.Fatalf("openSameFile with matching identity: %v", err)
+	}
+	f.Close()
+
+	// Mismatched identity: opening a against b's Lstat is exactly what a caller
+	// would see if a had been swapped for a different file in between, and must
+	// be rejected rather than silently returning a's content under b's identity.
+	if _, err := openSameFile(a, lstB); err == nil {
+		t.Fatal("openSameFile accepted a file that does not match the given Lstat")
+	}
+}
+
 // TestPeekHeaderRejectsNonSession is the positive-detection guard: a parseable
 // *.jsonl that is not a session for its agent (a tool-output log, an event feed
 // under a custom extra_root) must return errNotSession rather than a header, even

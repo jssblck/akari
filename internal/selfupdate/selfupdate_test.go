@@ -11,12 +11,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAssetName(t *testing.T) {
@@ -67,13 +69,55 @@ func TestLatestTag(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := &Client{Repo: "grace/hopper", HTTP: ts.Client(), APIBaseURL: ts.URL}
+	c := newClient("grace/hopper", ts.URL, "", testTimeouts())
 	tag, err := c.LatestTag(context.Background())
 	if err != nil {
 		t.Fatalf("LatestTag: %v", err)
 	}
 	if tag != "v1.2.3" {
 		t.Errorf("LatestTag = %q, want v1.2.3", tag)
+	}
+}
+
+func TestLatestTagTimesOutWhenMetadataStalls(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	t.Cleanup(server.Close)
+
+	timeouts := testTimeouts()
+	timeouts.metadataTotal = 100 * time.Millisecond
+	client := newClient("grace/hopper", server.URL, "", timeouts)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	started := time.Now()
+	_, err := client.LatestTag(ctx)
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("LatestTag stalled metadata error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		t.Fatalf("LatestTag stalled for %s, want the metadata timeout to fail promptly", elapsed)
+	}
+}
+
+func TestLatestTagTotalTimeoutIncludesMetadataBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"tag_name":"v1`)
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	t.Cleanup(server.Close)
+
+	timeouts := testTimeouts()
+	timeouts.metadataTotal = 100 * time.Millisecond
+	client := newClient("grace/hopper", server.URL, "", timeouts)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err := client.LatestTag(ctx)
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("LatestTag stalled body error = %v, want deadline exceeded", err)
 	}
 }
 
@@ -144,6 +188,153 @@ func TestDownloadToFileRejectsOversizeAndRemovesPartialArchive(t *testing.T) {
 	if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
 		t.Fatalf("oversized partial archive remains after failure: %v", statErr)
 	}
+}
+
+func TestDownloadToFileTimesOutWaitingForResponseHeaders(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	t.Cleanup(server.Close)
+
+	timeouts := testTimeouts()
+	timeouts.responseHeader = 100 * time.Millisecond
+	client := newClient("grace/hopper", "", server.URL, timeouts)
+	dest := filepath.Join(t.TempDir(), "release.tar.gz")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	started := time.Now()
+	err := client.downloadToFileLimit(ctx, server.URL, dest, 64)
+	if err == nil || !strings.Contains(err.Error(), "timeout awaiting response headers") {
+		t.Fatalf("download response-header stall error = %v, want response-header timeout", err)
+	}
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		t.Fatalf("response-header stall lasted %s, want the phase timeout to fail promptly", elapsed)
+	}
+	assertNotExist(t, dest)
+}
+
+func TestDownloadToFileTimesOutStalledTLSHandshake(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr == nil {
+			accepted <- conn
+		}
+	}()
+	t.Cleanup(func() {
+		select {
+		case conn := <-accepted:
+			_ = conn.Close()
+		default:
+		}
+	})
+
+	timeouts := testTimeouts()
+	timeouts.tlsHandshake = 100 * time.Millisecond
+	client := newClient("grace/hopper", "", "", timeouts)
+	dest := filepath.Join(t.TempDir(), "release.tar.gz")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	err = client.downloadToFileLimit(ctx, "https://"+listener.Addr().String(), dest, 64)
+	if err == nil || !strings.Contains(err.Error(), "TLS handshake timeout") {
+		t.Fatalf("download TLS stall error = %v, want TLS handshake timeout", err)
+	}
+	assertNotExist(t, dest)
+}
+
+func TestDownloadToFileAllowsSlowContinuousProgress(t *testing.T) {
+	payload := []byte("slow but moving")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		flusher := w.(http.Flusher)
+		for i, b := range payload {
+			_, _ = w.Write([]byte{b})
+			flusher.Flush()
+			if i == len(payload)-1 {
+				return
+			}
+			timer := time.NewTimer(50 * time.Millisecond)
+			select {
+			case <-timer.C:
+			case <-r.Context().Done():
+				timer.Stop()
+				return
+			}
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	timeouts := testTimeouts()
+	timeouts.archiveIdleProgress = 200 * time.Millisecond
+	client := newClient("grace/hopper", "", server.URL, timeouts)
+	dest := filepath.Join(t.TempDir(), "release.tar.gz")
+	if err := client.downloadToFileLimit(context.Background(), server.URL, dest, 64); err != nil {
+		t.Fatalf("download with continuous progress: %v", err)
+	}
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("downloaded body = %q, want %q", got, payload)
+	}
+}
+
+func TestDownloadToFileTimesOutStalledBodyAndRemovesPartialArchive(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "partial")
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	t.Cleanup(server.Close)
+
+	timeouts := testTimeouts()
+	timeouts.archiveIdleProgress = 100 * time.Millisecond
+	client := newClient("grace/hopper", "", server.URL, timeouts)
+	dest := filepath.Join(t.TempDir(), "release.tar.gz")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	err := client.downloadToFileLimit(ctx, server.URL, dest, 64)
+	if err == nil || !strings.Contains(err.Error(), "made no progress") {
+		t.Fatalf("download body stall error = %v, want idle-progress timeout", err)
+	}
+	assertNotExist(t, dest)
+}
+
+func TestDownloadToFilePreservesCallerCancellationAndRemovesPartialArchive(t *testing.T) {
+	bodyStarted := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "partial")
+		w.(http.Flusher).Flush()
+		close(bodyStarted)
+		<-r.Context().Done()
+	}))
+	t.Cleanup(server.Close)
+
+	timeouts := testTimeouts()
+	timeouts.archiveIdleProgress = 5 * time.Second
+	client := newClient("grace/hopper", "", server.URL, timeouts)
+	dest := filepath.Join(t.TempDir(), "release.tar.gz")
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- client.downloadToFileLimit(ctx, server.URL, dest, 64)
+	}()
+
+	<-bodyStarted
+	cancel()
+	err := <-result
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("download cancellation error = %v, want context canceled", err)
+	}
+	assertNotExist(t, dest)
 }
 
 func TestExtractRejectsNonRegularBinaryEntries(t *testing.T) {
@@ -260,11 +451,13 @@ func TestFetchChecksumMismatch(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := &Client{Repo: "grace/hopper", HTTP: ts.Client(), DownloadBaseURL: ts.URL}
-	err := c.Fetch(context.Background(), "akari", "v1.2.3", "linux", "amd64", filepath.Join(t.TempDir(), "akari"))
+	c := newClient("grace/hopper", "", ts.URL, testTimeouts())
+	dest := filepath.Join(t.TempDir(), "akari")
+	err := c.Fetch(context.Background(), "akari", "v1.2.3", "linux", "amd64", dest)
 	if err == nil {
 		t.Fatal("Fetch succeeded on a checksum mismatch, want error")
 	}
+	assertNotExist(t, dest)
 }
 
 func TestReplace(t *testing.T) {
@@ -307,7 +500,22 @@ func fetchTestClient(t *testing.T, asset string, archive []byte) *Client {
 		}
 	}))
 	t.Cleanup(ts.Close)
-	return &Client{Repo: "grace/hopper", HTTP: ts.Client(), DownloadBaseURL: ts.URL}
+	return newClient("grace/hopper", "", ts.URL, testTimeouts())
+}
+
+func testTimeouts() requestTimeouts {
+	timeouts := defaultRequestTimeouts()
+	timeouts.metadataTotal = 2 * time.Second
+	timeouts.responseHeader = 2 * time.Second
+	timeouts.archiveIdleProgress = 2 * time.Second
+	return timeouts
+}
+
+func assertNotExist(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("partial artifact %s remains after failure: %v", path, err)
+	}
 }
 
 func makeTarGz(t *testing.T, name string, content []byte) []byte {

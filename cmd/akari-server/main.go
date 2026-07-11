@@ -25,46 +25,50 @@ import (
 )
 
 func main() {
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "version", "--version", "-v":
-			fmt.Println(version.String())
-			return
-		case "update":
-			if err := runUpdate(os.Args[2:]); err != nil {
-				log.Fatalf("akari-server update: %v", err)
-			}
-			return
-		}
-	}
-	if len(os.Args) > 1 && os.Args[1] == "reparse" {
-		if err := runReparse(os.Args[2:]); err != nil {
-			log.Fatalf("akari-server reparse: %v", err)
-		}
-		return
-	}
-	if len(os.Args) > 1 && os.Args[1] == "sweep" {
-		if err := runSweep(os.Args[2:]); err != nil {
-			log.Fatalf("akari-server sweep: %v", err)
-		}
-		return
-	}
-	if len(os.Args) > 1 && os.Args[1] == "settle" {
-		if err := runSettle(os.Args[2:]); err != nil {
-			log.Fatalf("akari-server settle: %v", err)
-		}
-		return
-	}
-	if len(os.Args) > 1 && os.Args[1] == "dev-seed" {
-		if err := runDevSeed(os.Args[2:]); err != nil {
-			log.Fatalf("akari-server dev-seed: %v", err)
-		}
-		return
-	}
-	if err := run(); err != nil {
+	if err := runCommand(os.Args[1:]); err != nil {
 		log.Fatalf("akari-server: %v", err)
 	}
 }
+
+func runCommand(args []string) error {
+	if len(args) == 0 {
+		return run()
+	}
+
+	switch args[0] {
+	case "version", "--version", "-v":
+		fmt.Println(version.String())
+		return nil
+	case "help", "--help", "-h":
+		fmt.Fprint(os.Stdout, serverUsage)
+		return nil
+	case "reparse":
+		return runReparse(args[1:])
+	case "sweep":
+		return runSweep(args[1:])
+	case "settle":
+		return runSettle(args[1:])
+	case "dev-seed":
+		return runDevSeed(args[1:])
+	default:
+		return fmt.Errorf("unknown command %q\n\n%s", args[0], serverUsage)
+	}
+}
+
+const serverUsage = `akari-server - ingest, parse, and serve agent sessions
+
+Usage:
+  akari-server              run the HTTP server
+  akari-server reparse      rebuild stored session projections
+  akari-server sweep        reclaim orphaned content-addressed blobs
+  akari-server settle       compute signals for settled sessions
+  akari-server dev-seed     fill a development server with example data
+  akari-server version      print the build version and exit
+
+Upgrade the server by deploying a versioned container image or package, or by
+replacing the managed binary and restarting its service supervisor. See the
+self-hosting guide for commands and deployment notes.
+`
 
 func run() error {
 	log.Printf("akari-server %s starting", version.String())
@@ -95,6 +99,17 @@ func run() error {
 		return err
 	}
 	log.Printf("migrations applied")
+
+	// Catch up any message rows a schema migration added a hashed-reference
+	// column for but deliberately left unbackfilled (see migration 0049 and
+	// runMessageHashBackfill), so an upgrade never blocks startup on a
+	// full-table pass. hashBackfillDone lets shutdown wait for an in-flight
+	// batch to finish committing before the pool closes.
+	hashBackfillDone := make(chan struct{})
+	go func() {
+		defer close(hashBackfillDone)
+		runMessageHashBackfill(rootCtx, st)
+	}()
 
 	// The parse worker owns every projection write: it rebuilds a session from its
 	// raw bytes whenever the session is due (bytes ahead of the last rebuild, or a
@@ -164,6 +179,7 @@ func run() error {
 		<-ogDone
 		<-insightsDone
 		<-workerDone
+		<-hashBackfillDone
 	}()
 
 	srv := &http.Server{
@@ -196,6 +212,7 @@ func run() error {
 		<-ogDone
 		<-insightsDone
 		<-workerDone
+		<-hashBackfillDone
 		close(idleClosed)
 	}()
 

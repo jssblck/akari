@@ -30,16 +30,19 @@ const (
 // metric label or an accidentally smaller weight.
 type WorkClass uint8
 
+// Password work is deliberately absent: request-triggered Argon2 hashing is
+// bounded by its own fixed worker pool (see httpapi's passwordWork), and a
+// second gate here would let budget pressure produce a login response that
+// differs from the uniform invalid-credentials path.
 const (
-	Password WorkClass = iota + 1
 	// MCPSpool reserves approximately the 100 MiB request ceiling owned by #134.
 	// Applying it to MCP POSTs now also bounds the SDK's current request buffering.
-	MCPSpool
+	MCPSpool WorkClass = iota + 1
 	PublicAnalytics
 	OAuthRegistration
 )
 
-var allClasses = [...]WorkClass{Password, MCPSpool, PublicAnalytics, OAuthRegistration}
+var allClasses = [...]WorkClass{MCPSpool, PublicAnalytics, OAuthRegistration}
 
 // MinCapacity is the smallest useful capacity because the heaviest class must be
 // able to run once. Smaller values would leave MCP POSTs queued until timeout.
@@ -157,8 +160,6 @@ func (b *Budget) Acquire(ctx context.Context, class WorkClass) (func(), error) {
 
 func (c WorkClass) spec() (string, int64, bool) {
 	switch c {
-	case Password:
-		return "password", 8, true
 	case MCPSpool:
 		return "mcp_spool", 12, true
 	case PublicAnalytics:

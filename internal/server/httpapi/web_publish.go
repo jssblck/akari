@@ -262,60 +262,21 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, fmt.Sprintf("/projects/%d", d.ProjectID), http.StatusSeeOther)
 }
 
-// handlePublicSession serves a published session to logged-out viewers, reached
-// only through the unguessable public id. It never exposes the numeric id and
-// shows only subagents that are themselves public.
+// handlePublicSession serves a bounded tail of a published session to logged-out
+// viewers. The header and transcript window come from one projection snapshot.
 func (s *Server) handlePublicSession(w http.ResponseWriter, r *http.Request) {
 	pid := r.PathValue("public_id")
-	d, err := s.Store.SessionDetailByPublicID(r.Context(), pid)
+	snap, err := s.Store.PublicSessionByID(r.Context(), pid, nil)
 	if err != nil {
-		renderPublicError(w, r, http.StatusNotFound, "This session is not published, or the link has expired.")
-		return
-	}
-	msgs, err := s.Store.Messages(r.Context(), d.ID)
-	if err != nil {
-		renderPublicError(w, r, http.StatusInternalServerError, "Could not load session.")
-		return
-	}
-	tools, err := s.Store.ToolCalls(r.Context(), d.ID)
-	if err != nil {
-		renderPublicError(w, r, http.StatusInternalServerError, "Could not load session.")
-		return
-	}
-	atts, err := s.Store.Attachments(r.Context(), d.ID)
-	if err != nil {
-		renderPublicError(w, r, http.StatusInternalServerError, "Could not load session.")
-		return
-	}
-	subs, err := s.Store.Subagents(r.Context(), d.ID)
-	if err != nil {
-		renderPublicError(w, r, http.StatusInternalServerError, "Could not load session.")
-		return
-	}
-	// Only public subagents may appear on a public page; a public parent does not
-	// make its children public.
-	var publicSubs []store.SubagentRow
-	for _, sub := range subs {
-		if sub.Visibility == "public" && sub.PublicID != nil {
-			publicSubs = append(publicSubs, sub)
-		}
-	}
-	sig, err := s.Store.SessionSignalsByID(r.Context(), d.ID)
-	if err != nil {
-		renderPublicError(w, r, http.StatusInternalServerError, "Could not load session.")
-		return
-	}
-	// Only a session whose rollup counted a fallback pays for the capped list read;
-	// it feeds the header tile's tooltip and the transcript notices.
-	var fallbacks []store.ModelFallback
-	if d.ModelFallbackCount > 0 {
-		fallbacks, err = s.Store.SessionModelFallbacks(r.Context(), d.ID, store.ModelFallbackListCap)
-		if err != nil {
-			render(w, r, http.StatusInternalServerError, web.PublicErrorPage(http.StatusInternalServerError, "Could not load session."))
+		if errors.Is(err, store.ErrNotFound) {
+			renderPublicError(w, r, http.StatusNotFound, "This session is not published, or the link has expired.")
 			return
 		}
+		renderPublicError(w, r, http.StatusInternalServerError, "Could not load session.")
+		return
 	}
-	hs := sessionHeaderStats(d, sig, fallbacks)
+	v := publicSessionViewFrom(snap)
+	d := v.Detail
 	// A published session's public id is non-nil (visibility gates on it), so the card
 	// URL and canonical URL both resolve. Unlike the overview and project cards the
 	// session card has no range, so it is advertised unconditionally: there is one card
@@ -328,5 +289,67 @@ func (s *Server) handlePublicSession(w http.ResponseWriter, r *http.Request) {
 		URL:         s.baseURL(r) + web.PublicPath(*d.PublicID),
 		Image:       s.baseURL(r) + web.PublicSessionOGPath(*d.PublicID),
 	}
-	render(w, r, http.StatusOK, web.PublicSessionPage(d, msgs, web.ToolsByOrdinal(tools), web.AttachmentsByOrdinal(atts), publicSubs, hs, og))
+	render(w, r, http.StatusOK, web.PublicSessionPage(v, og))
+}
+
+// handlePublicSessionBody pages backward through a public transcript. The browser
+// carries the projection revision from the page it already holds. A mismatch means
+// a rebuild replaced the ordinal space, so the response replaces the complete
+// bounded body instead of appending rows from a different projection.
+func (s *Server) handlePublicSessionBody(w http.ResponseWriter, r *http.Request) {
+	before, err := strconv.Atoi(r.URL.Query().Get("before"))
+	if err != nil || before < 0 {
+		http.Error(w, "bad before cursor", http.StatusBadRequest)
+		return
+	}
+	revision, err := strconv.ParseInt(r.URL.Query().Get("revision"), 10, 64)
+	if err != nil || revision < 0 {
+		http.Error(w, "bad projection revision", http.StatusBadRequest)
+		return
+	}
+	snap, err := s.Store.PublicSessionByID(r.Context(), r.PathValue("public_id"), &before)
+	if err != nil {
+		fragmentPublicError(w, err)
+		return
+	}
+	if revision != snap.ProjectionRevision {
+		fresh, err := s.Store.PublicSessionByID(r.Context(), r.PathValue("public_id"), nil)
+		if err != nil {
+			fragmentPublicError(w, err)
+			return
+		}
+		w.Header().Set("HX-Retarget", "#session-body")
+		w.Header().Set("HX-Reswap", "innerHTML")
+		w.Header().Set("X-Akari-Projection-Changed", "1")
+		render(w, r, http.StatusOK, web.PublicSessionBody(publicSessionViewFrom(fresh)))
+		return
+	}
+	render(w, r, http.StatusOK, web.PublicTranscriptEarlier(publicSessionViewFrom(snap)))
+}
+
+func publicSessionViewFrom(snap store.PublicSessionSnapshot) web.SessionView {
+	v := web.SessionView{
+		Detail:             snap.Audit.Detail,
+		Header:             sessionHeaderStats(snap.Audit.Detail, snap.Audit.Signals, snap.Audit.Fallbacks),
+		Outline:            snap.Outline,
+		Tools:              web.ToolsByOrdinal(snap.Tools),
+		ProjectionRevision: snap.ProjectionRevision,
+	}
+	// Publishing a parent does not publish its children. Filter rows read in the
+	// same snapshot before handing the view to the public renderer.
+	for _, sub := range snap.Audit.Subagents {
+		if sub.Visibility == "public" && sub.PublicID != nil {
+			v.Subagents = append(v.Subagents, sub)
+		}
+	}
+	v.SetPage(snap.Page)
+	return v
+}
+
+func fragmentPublicError(w http.ResponseWriter, err error) {
+	if errors.Is(err, store.ErrNotFound) {
+		http.Error(w, "Session not found.", http.StatusNotFound)
+		return
+	}
+	http.Error(w, "Could not load session.", http.StatusInternalServerError)
 }

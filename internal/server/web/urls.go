@@ -435,6 +435,10 @@ func PublicProjectOGPath(id int64) string { return PublicProjectPath(id) + "/og.
 // one definition.
 func PublicSessionOGPath(publicID string) string { return PublicPath(publicID) + "/og.png" }
 
+// PublicSessionBodyPath is the revocable HTMX transcript fragment endpoint. It
+// stays under the public capability URL and never exposes the numeric session id.
+func PublicSessionBodyPath(publicID string) string { return PublicPath(publicID) + "/body" }
+
 // ProjectPublishPath and ProjectUnpublishPath are the POST targets for the project
 // page's publicity control, mirroring the account overview toggles. They are plain
 // strings the templ form actions wrap in templ.SafeURL.

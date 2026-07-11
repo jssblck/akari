@@ -78,7 +78,7 @@ func mcpSession(t *testing.T, srvURL, token string) *mcpsdk.ClientSession {
 	return sess
 }
 
-// callToolJSON calls a tool and unmarshals its text result into out.
+// callToolJSON calls a tool and unmarshals its structured result into out.
 func callToolJSON(t *testing.T, sess *mcpsdk.ClientSession, name string, args any, out any) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -90,16 +90,13 @@ func callToolJSON(t *testing.T, sess *mcpsdk.ClientSession, name string, args an
 	if res.IsError {
 		t.Fatalf("call %s returned tool error: %+v", name, res.Content)
 	}
-	if len(res.Content) == 0 {
-		t.Fatalf("call %s returned no content", name)
-	}
-	text, ok := res.Content[0].(*mcpsdk.TextContent)
-	if !ok {
-		t.Fatalf("call %s: first content is %T, want TextContent", name, res.Content[0])
-	}
 	if out != nil {
-		if err := json.Unmarshal([]byte(text.Text), out); err != nil {
-			t.Fatalf("call %s: unmarshal %q: %v", name, text.Text, err)
+		b, err := json.Marshal(res.StructuredContent)
+		if err != nil {
+			t.Fatalf("call %s: marshal structuredContent: %v", name, err)
+		}
+		if err := json.Unmarshal(b, out); err != nil {
+			t.Fatalf("call %s: unmarshal structuredContent: %v", name, err)
 		}
 	}
 }
@@ -154,7 +151,7 @@ func runOAuthFlow(t *testing.T, srvURL string, c *http.Client) map[string]any {
 	csrf := m[1]
 
 	// Approve consent; capture the redirect to the client without following it.
-	noFollow := &http.Client{Jar: c.Jar, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	noFollow := &http.Client{Jar: c.Jar, Transport: c.Transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	resp, err = noFollow.PostForm(srvURL+"/oauth/authorize", url.Values{
 		"client_id":      {clientID},
 		"redirect_uri":   {redirectURI},

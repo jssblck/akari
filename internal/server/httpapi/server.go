@@ -17,11 +17,13 @@ import (
 
 // Server holds the dependencies shared by all handlers.
 type Server struct {
-	Store  *store.Store
-	Cfg    config.Server
-	hub    *sseHub
-	worker *parse.Worker
-	budget *requestbudget.Budget
+	Store        *store.Store
+	Cfg          config.Server
+	passwords    *passwordWork
+	authAttempts *authAttemptLimiter
+	hub          *sseHub
+	worker       *parse.Worker
+	budget       *requestbudget.Budget
 	// mcp is the Streamable-HTTP handler for the remote MCP server, built once and
 	// shared across requests; handleMCP wraps it per request with the bearer check.
 	mcp http.Handler
@@ -65,7 +67,10 @@ func New(st *store.Store, cfg config.Server, worker *parse.Worker) *Server {
 	if cfg.OAuthRegistrationsPerHour == 0 {
 		cfg.OAuthRegistrationsPerHour = config.DefaultOAuthRegistrationsPerHour
 	}
-	s := &Server{Store: st, Cfg: cfg, hub: newSSEHub(), worker: worker, budget: budget}
+	s := &Server{
+		Store: st, Cfg: cfg, hub: newSSEHub(), worker: worker, budget: budget,
+		passwords: newPasswordWork(cfg), authAttempts: newAuthAttemptLimiter(),
+	}
 	s.insights = newInsightsRefresher(func(ctx context.Context) (map[string]store.Insights, error) {
 		return computeFleetInsights(ctx, st)
 	})
@@ -167,6 +172,7 @@ func (s *Server) Routes() http.Handler {
 	// parsed projection), so these are not behind the reparse gate.
 	mux.HandleFunc("GET /api/v1/session/{id}/blob/{sha256}", s.requireFull(s.handleSessionBlob))
 	mux.HandleFunc("GET /s/{public_id}/blob/{sha256}", s.handlePublicBlob)
+	mux.HandleFunc("GET /s/{public_id}/body", s.gatePublicParsed(s.handlePublicSessionBody))
 
 	// Reparse status and live progress. The status JSON is the poll fallback; the
 	// SSE stream pushes the same payload so a watching page updates its progress bar
@@ -180,11 +186,11 @@ func (s *Server) Routes() http.Handler {
 	// A user's published usage overview at /u/<username>: aggregate, scoped to that
 	// one account, and gated during a reparse like the public session view (it shows
 	// parsed data).
-	mux.HandleFunc("GET /u/{username}", s.gatePublicParsed(s.handlePublicOverview))
+	mux.HandleFunc("GET /u/{username}", s.admit(requestbudget.PublicAnalytics, s.gatePublicParsed(s.handlePublicOverview)))
 	// A project's published usage overview at /p/<id>: aggregate, scoped to that one
 	// project across every account, with no session list. Gated during a reparse like
 	// the other public parsed pages.
-	mux.HandleFunc("GET /p/{id}", s.gatePublicParsed(s.handlePublicProject))
+	mux.HandleFunc("GET /p/{id}", s.admit(requestbudget.PublicAnalytics, s.gatePublicParsed(s.handlePublicProject)))
 	// The Open Graph preview cards for the three per-entity public pages. Each serves
 	// PNG bytes rendered on demand and held in a TTL cache, so none is reparse-gated: the
 	// more specific /og.png pattern wins over the page pattern (/u/{username}, /p/{id},
@@ -242,7 +248,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /account/overview/publish", s.requireFull(s.handlePublishOverview))
 	mux.HandleFunc("POST /account/overview/unpublish", s.requireFull(s.handleUnpublishOverview))
 
-	return withStyledNotFound(mux, s.handleNotFound)
+	return s.withRouteCSRF(mux, withStyledNotFound(mux, s.handleNotFound))
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
