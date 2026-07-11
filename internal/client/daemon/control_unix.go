@@ -5,6 +5,7 @@ package daemon
 import (
 	"bufio"
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"net"
@@ -52,7 +53,7 @@ func (c *localControl) serve(token string, cancel context.CancelFunc) {
 		valid := false
 		_ = conn.SetDeadline(time.Now().Add(time.Second))
 		line, err := bufio.NewReader(conn).ReadString('\n')
-		if err == nil && strings.TrimSpace(line) == token {
+		if err == nil && subtle.ConstantTimeCompare([]byte(strings.TrimSpace(line)), []byte(token)) == 1 {
 			valid = true
 			_, _ = conn.Write([]byte("ok\n"))
 		}

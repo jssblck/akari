@@ -1250,7 +1250,9 @@ A timeout leaves the watcher running and returns an error. `--force` explicitly
 permits escalation after the graceful path fails; immediately before terminating
 the process, the command verifies that the lock is still held and the pidfile
 still contains the instance it originally contacted. A changed identity fails
-closed so PID reuse or a replacement watcher cannot redirect the escalation.
+closed, so this recheck shrinks the window for PID reuse or a replacement
+watcher to redirect the escalation down to the instant between validation and
+signal delivery, which is as tight as portable APIs allow.
 
 ### Client config
 
