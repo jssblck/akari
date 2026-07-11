@@ -1234,15 +1234,23 @@ finish on a detached context. A second Ctrl-C exits the process outright.
 ### Daemon management
 
 `akari watch` is the foreground loop. `akari daemon {start|stop|status}` manages
-it as a background process per OS:
+the same loop as a detached per-user process. A single advisory file lock ensures
+only one client instance runs per machine. Its pidfile records both the PID and a
+random per-run token; the token authenticates local control and distinguishes a
+replacement process that reused the same PID.
 
-- Linux: a systemd user unit (generated and enabled), or a detached process with
-  a pidfile when systemd is absent.
-- macOS: a launchd LaunchAgent plist.
-- Windows: a detached background process (no console window), optionally
-  registered with Task Scheduler for start-at-login.
+`daemon stop` requests graceful shutdown over a user-only Unix-domain socket on
+Unix or a random per-run named event on Windows. The watcher cancels its normal
+run context, completes cleanup, and releases the advisory lock. The command does
+not report success until it observes that release, so a successful stop is also
+proof that another watcher can acquire the lock. Both the graceful wait and the
+post-termination confirmation wait are bounded (10 seconds by default).
 
-A single advisory file lock ensures only one client instance runs per machine.
+A timeout leaves the watcher running and returns an error. `--force` explicitly
+permits escalation after the graceful path fails; immediately before terminating
+the process, the command verifies that the lock is still held and the pidfile
+still contains the instance it originally contacted. A changed identity fails
+closed so PID reuse or a replacement watcher cannot redirect the escalation.
 
 ### Client config
 

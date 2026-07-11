@@ -93,14 +93,35 @@ ingesting any backlog on startup.
 ```sh
 akari daemon start     # launch watch in the background; prints its PID and log path
 akari daemon status    # report whether it is running, and its PID
-akari daemon stop      # stop the running watcher
+akari daemon stop      # request shutdown; wait up to 10s for cleanup and lock release
+akari daemon stop --timeout 30s   # allow longer for in-flight uploads
+akari daemon stop --force         # escalate only if graceful shutdown fails
 ```
 
 `daemon` runs the same `watch` loop as a detached, per-user background process (it
 is not a system service). It writes a pidfile and a log file under your config
 directory; `start` confirms the child took the single-instance lock before
-returning, and `stop` verifies a live instance holds it before signaling. This is
-the steady state on a workstation: run `akari daemon start` once.
+returning. `stop` sends an authenticated local shutdown request, then waits until
+the watcher exits and releases that lock. A zero exit status therefore means a
+new watcher can start immediately. Unix uses a user-only Unix-domain socket for
+the request; Windows uses a random per-run named event, so it follows the same
+cleanup path instead of being killed.
+
+The default timeout is 10 seconds. If cleanup does not finish, `stop` exits
+non-zero and leaves the watcher running. `--timeout <duration>` changes the bound.
+`--force` keeps the graceful request as the first step, then terminates the
+recorded process after the timeout and waits again for lock release. Before that
+escalation, `stop` re-reads the per-run identity in the locked pidfile; if another
+watcher has replaced it, the command fails instead of targeting the new process.
+A forced, confirmed stop exits zero and prints `akari watch force-stopped`, which
+distinguishes it from ordinary cleanup and from a timeout.
+
+The pidfile now contains a JSON process identity instead of a bare PID. A client
+upgraded while an older daemon is still running cannot safely authenticate or
+escalate against that old process. Stop the daemon with the old client before
+upgrading, or end that process through the operating system once; the next
+`daemon start` writes the new identity format. This is the steady state on a
+workstation: run `akari daemon start` once.
 
 ### update and version
 

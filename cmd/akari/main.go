@@ -59,7 +59,8 @@ func usage() {
 Usage:
   akari sync [--config PATH] [--dry-run] [--time-limit DUR] [--concurrency N] [--finalize] discover and upload new session bytes, then exit
   akari watch [--config PATH]                             watch continuously and upload changes (foreground)
-  akari daemon {start|stop|status} [--config PATH]        manage the watch loop as a background process
+  akari daemon {start|status} [--config PATH]             manage the watch loop as a background process
+  akari daemon stop [--timeout DUR] [--force]             stop it and confirm shutdown
   akari login --server URL --token TOKEN [--config PATH]  write the client config
   akari update [--check]                                  update to the latest release in place
   akari version                                           print the build version and exit

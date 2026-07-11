@@ -23,9 +23,10 @@ func spawnDetached(self string, args []string, log *os.File) (*os.Process, error
 	return cmd.Process, nil
 }
 
-// terminate asks the process to shut down cleanly so it can release its lock.
-func terminate(p *os.Process) error {
-	return p.Signal(syscall.SIGTERM)
+// forceTerminate is used only after local graceful control has failed and the
+// caller has explicitly permitted escalation.
+func forceTerminate(p *os.Process) error {
+	return p.Signal(syscall.SIGKILL)
 }
 
 // lockFile takes a non-blocking exclusive advisory lock on the open file. flock

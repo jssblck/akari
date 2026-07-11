@@ -11,14 +11,28 @@ import (
 // runDaemon manages the watch loop as a background process: start, stop, status.
 func runDaemon(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: akari daemon {start|stop|status} [--config PATH]")
+		return fmt.Errorf("usage: akari daemon {start|status} [--config PATH] | akari daemon stop [--timeout DUR] [--force]")
 	}
 	sub := args[0]
 
 	fs := flag.NewFlagSet("daemon", flag.ContinueOnError)
 	configPath := fs.String("config", "", "config file path (passed to the watch process)")
+	force := fs.Bool("force", false, "terminate the daemon if graceful shutdown does not complete")
+	timeout := fs.Duration("timeout", daemon.DefaultStopTimeout, "maximum wait for each shutdown phase")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
+	}
+	stopOptionSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "force" || f.Name == "timeout" {
+			stopOptionSet = true
+		}
+	})
+	if sub != "stop" && stopOptionSet {
+		return fmt.Errorf("--force and --timeout are valid only for daemon stop")
+	}
+	if sub == "stop" && *timeout <= 0 {
+		return fmt.Errorf("--timeout must be positive")
 	}
 
 	paths, err := daemon.DefaultPaths()
@@ -50,10 +64,15 @@ func runDaemon(args []string) error {
 		return fmt.Errorf("background watch did not acquire its daemon lock")
 
 	case "stop":
-		if err := daemon.Stop(paths); err != nil {
+		result, err := daemon.Stop(paths, daemon.StopOptions{Timeout: *timeout, Force: *force})
+		if err != nil {
 			return err
 		}
-		fmt.Println("akari watch stopped")
+		if result == daemon.StoppedForcefully {
+			fmt.Println("akari watch force-stopped")
+		} else {
+			fmt.Println("akari watch stopped")
+		}
 		return nil
 
 	case "status":

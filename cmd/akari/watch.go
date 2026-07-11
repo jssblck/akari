@@ -41,6 +41,11 @@ func runWatch(ctx context.Context, args []string) error {
 		return err
 	}
 	defer lock.Release()
+	ctx, stopControl, err := lock.ShutdownContext(ctx)
+	if err != nil {
+		return err
+	}
+	defer stopControl()
 
 	home, err := os.UserHomeDir()
 	if err != nil {

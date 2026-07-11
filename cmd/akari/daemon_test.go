@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -26,5 +27,23 @@ func TestDaemonStatusCommandPropagatesProbeErrors(t *testing.T) {
 
 	if err := runDaemon([]string{"status"}); err == nil {
 		t.Fatal("daemon status command swallowed pidfile probe error")
+	}
+}
+
+func TestDaemonStopCommandRejectsInvalidTimeout(t *testing.T) {
+	configHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv("AppData", configHome)
+	t.Setenv("HOME", configHome)
+
+	err := runDaemon([]string{"stop", "--timeout=-1s"})
+	if err == nil || errors.Is(err, daemon.ErrNotRunning) {
+		t.Fatalf("daemon stop error = %v, want timeout validation", err)
+	}
+}
+
+func TestDaemonStartRejectsStopOnlyOptions(t *testing.T) {
+	if err := runDaemon([]string{"start", "--force"}); err == nil {
+		t.Fatal("daemon start accepted --force")
 	}
 }
