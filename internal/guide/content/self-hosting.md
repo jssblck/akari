@@ -213,23 +213,63 @@ akari-server reparse          # force a projection rebuild (see above)
 akari-server sweep            # reclaim orphaned content-addressed blobs now
 akari-server settle           # compute quality signals for every settled session now
 akari-server dev-seed         # fill a local server with example data (development)
-akari-server update           # update to the latest release in place
 akari-server version          # print the build version and exit
 ```
 
 `sweep` is the manual form of the periodic blob reclaim; it is safe to run any
 time, since blob liveness is computed rather than reference-counted. `settle` is
 the manual form of the periodic signals pass: it grades every settled session
-missing a current-version signals row, then exits. `update`
-downloads and swaps in the latest release (and reminds you to
-`systemctl restart akari-server` when a service is installed); inside a container,
-rebuild the image and redeploy rather than updating the binary in place.
+missing a current-version signals row, then exits.
 
 `dev-seed` is a development convenience: it creates a few demo accounts (sign in as
 `grace`, the admin, with password `akari-dev`) and ingests this machine's real
 agent sessions. It is idempotent (a no-op once the store holds sessions) and
 best-effort by default. Keep it away from
 any server holding real data.
+
+## Upgrading
+
+The server has no self-update command. The deployment mechanism that owns the
+server process also owns upgrades. Pin the replacement to a release tag so the
+running code and its reported version are reproducible.
+
+### Container deployment
+
+Check out the release tag, build a versioned image, and redeploy it through the
+same container orchestrator that runs the current image:
+
+```sh
+git checkout v0.1.0
+docker build --build-arg VERSION=v0.1.0 -t registry.example.com/akari-server:v0.1.0 .
+docker push registry.example.com/akari-server:v0.1.0
+```
+
+Update the deployment to that immutable image tag. Do not replace a binary
+inside a running container; the next container restart would restore the old
+image contents.
+
+### Package or managed binary
+
+When a package manager owns the server, install the selected package version and
+restart the service through that package's normal supervisor integration.
+
+For the systemd installation created by `install-server.sh`, run the installer
+from the release tag you intend to deploy and pass that same tag as
+`AKARI_VERSION`, then restart the service:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jssblck/akari/v0.1.0/scripts/install-server.sh \
+  | sudo AKARI_VERSION=v0.1.0 AKARI_INSTALL_DIR=/usr/local/bin sh
+sudo systemctl restart akari-server
+akari-server version
+```
+
+The installer verifies the release archive against its published checksum
+before replacing the binary. Existing `/etc/akari/server.env` configuration is
+unchanged, and the replacement server applies embedded database migrations when
+it starts. The same sequence works with another service supervisor: install a
+specific checksum-verified release archive, restart the managed process, and
+verify its reported version.
 
 ## Production
 

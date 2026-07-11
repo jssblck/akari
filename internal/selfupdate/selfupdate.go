@@ -1,12 +1,10 @@
-// Package selfupdate resolves and downloads akari release assets from GitHub so
-// the binaries can update themselves in place.
+// Package selfupdate resolves and downloads akari client releases from GitHub
+// so the client can update itself in place.
 //
 // It is the Go counterpart of the install scripts in scripts/: it resolves the
 // latest published release, downloads the archive that matches a target OS and
 // architecture, verifies it against the release SHA256SUMS, and extracts the
-// binary. The client uses it for a fully native update (no shell or curl); the
-// server uses only the latest-release resolution for its `update --check` and
-// shells out to the installer for the actual replacement.
+// binary. The client uses it for a fully native update with no shell or curl.
 package selfupdate
 
 import (
