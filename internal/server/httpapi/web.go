@@ -159,7 +159,12 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	selected := web.SelectedUserIDs(r.URL.Query()["user"], users)
-	filter := store.AnalyticsFilter{Since: web.RangeSince(rng, time.Now()), UserIDs: selected}
+	now := time.Now()
+	// Until excludes a future-dated event from the total exactly as the shared
+	// snapshot path does in computeAnalyticsSnapshot: both branches must bound the
+	// same way, or the same page disagrees with itself the moment a user filter
+	// toggles it from the snapshot branch to this one (or back).
+	filter := store.AnalyticsFilter{Since: web.RangeSince(rng, now), Until: ogimage.DefaultUntil(now), UserIDs: selected}
 	var analytics store.Analytics
 	if len(selected) == 1 {
 		started := time.Now()
@@ -483,7 +488,8 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 	// the two read the same range; the heatmap's selector and the filter form both
 	// carry it on ?range.
 	rng := web.ParseRange(r.URL.Query().Get("range"))
-	since := web.RangeSince(rng, time.Now())
+	now := time.Now()
+	since := web.RangeSince(rng, now)
 	filter := store.SessionFilter{
 		ProjectID: id,
 		Agent:     strings.TrimSpace(r.URL.Query().Get("agent")),
@@ -517,9 +523,12 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 	// The same filter values feed both live reads: the panel
 	// matches the username through the analytics base (an unknown name scopes to
 	// nothing, matching the empty table) rather than a separate lookup whose error
-	// would have to be invented away.
+	// would have to be invented away. Until matches the bound computeAnalyticsSnapshot
+	// applies on the shared-snapshot path below, excluding a future-dated event: without
+	// it the same page would disagree with itself the moment a user/agent/machine filter
+	// toggled it off the snapshot branch onto this live one.
 	af := store.AnalyticsFilter{
-		ProjectID: id, Since: since, Username: filter.Username, Agent: filter.Agent, Machine: filter.Machine,
+		ProjectID: id, Since: since, Until: ogimage.DefaultUntil(now), Username: filter.Username, Agent: filter.Agent, Machine: filter.Machine,
 	}
 	var analytics store.Analytics
 	var insights store.Insights

@@ -264,9 +264,14 @@ MCP POST parsing and spooling weigh 12 (the 100 MiB request ceiling owned by
 issue #134), public analytics snapshot refreshes weigh 4, and dynamic OAuth
 registration weighs 1.
 Snapshot hits need no admission; one singleflight refresh holds the weight for all
-waiters on that scope. A shared queue lets a
-mixed workload consume the same finite capacity instead of bypassing independent
-per-route concurrency limits.
+waiters on that scope. The publication gate check that runs before it, and a cache
+hit on the OG preview cards, sit outside the queue the same way: both are deliberately
+left unadmitted, so a flood of 404/gate traffic against an unpublished or unknown
+entity is bounded by the database connection pool rather than the weighted queue, a
+tradeoff accepted because that traffic is cheap and gated before it can reach the
+expensive path the budget exists to protect. A shared queue lets a mixed workload
+consume the same finite capacity instead of bypassing independent per-route
+concurrency limits.
 
 Admission waits for up to `AKARI_REQUEST_BUDGET_WAIT_TIMEOUT` (5 seconds by
 default). A request that cannot enter receives HTTP 503 with `Retry-After: 1`.
