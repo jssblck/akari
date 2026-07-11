@@ -1,12 +1,10 @@
-// Package selfupdate resolves and downloads akari release assets from GitHub so
-// the binaries can update themselves in place.
+// Package selfupdate resolves and downloads akari client releases from GitHub
+// so the client can update itself in place.
 //
 // It is the Go counterpart of the install scripts in scripts/: it resolves the
 // latest published release, downloads the archive that matches a target OS and
 // architecture, verifies it against the release SHA256SUMS, and extracts the
-// binary. The client uses it for a fully native update (no shell or curl); the
-// server uses only the latest-release resolution for its `update --check` and
-// shells out to the installer for the actual replacement.
+// binary. The client uses it for a fully native update with no shell or curl.
 package selfupdate
 
 import (
@@ -17,13 +15,16 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // DefaultRepo is the GitHub owner/repo releases are pulled from. AKARI_REPO
@@ -37,13 +38,29 @@ const (
 	maxArchive = 512 << 20 // 512 MiB
 )
 
+type requestTimeouts struct {
+	metadataTotal       time.Duration
+	dial                time.Duration
+	tlsHandshake        time.Duration
+	responseHeader      time.Duration
+	archiveIdleProgress time.Duration
+}
+
+func defaultRequestTimeouts() requestTimeouts {
+	return requestTimeouts{
+		metadataTotal:       15 * time.Second,
+		dial:                10 * time.Second,
+		tlsHandshake:        10 * time.Second,
+		responseHeader:      15 * time.Second,
+		archiveIdleProgress: 30 * time.Second,
+	}
+}
+
 // Client resolves and downloads release assets. The zero value is not usable;
 // construct one with New.
 type Client struct {
 	// Repo is the GitHub owner/repo to download from.
 	Repo string
-	// HTTP is the client used for all requests.
-	HTTP *http.Client
 	// APIBaseURL is the base for the GitHub API. Overridable for testing.
 	APIBaseURL string
 	// DownloadBaseURL, when non-empty, is the base URL holding the archive and
@@ -51,6 +68,10 @@ type Client struct {
 	// AKARI_BASE_URL the install scripts honor, and lets tests point at a local
 	// server.
 	DownloadBaseURL string
+
+	metadataHTTP *http.Client
+	archiveHTTP  *http.Client
+	timeouts     requestTimeouts
 }
 
 // New builds a Client with the default GitHub endpoints, honoring the AKARI_REPO
@@ -60,12 +81,34 @@ func New() *Client {
 	if repo == "" {
 		repo = DefaultRepo
 	}
+	return newClient(
+		repo,
+		"https://api.github.com",
+		os.Getenv("AKARI_BASE_URL"),
+		defaultRequestTimeouts(),
+	)
+}
+
+func newClient(repo, apiBaseURL, downloadBaseURL string, timeouts requestTimeouts) *Client {
 	return &Client{
 		Repo:            repo,
-		HTTP:            &http.Client{},
-		APIBaseURL:      "https://api.github.com",
-		DownloadBaseURL: os.Getenv("AKARI_BASE_URL"),
+		APIBaseURL:      apiBaseURL,
+		DownloadBaseURL: downloadBaseURL,
+		metadataHTTP:    newHTTPClient(timeouts),
+		archiveHTTP:     newHTTPClient(timeouts),
+		timeouts:        timeouts,
 	}
+}
+
+func newHTTPClient(timeouts requestTimeouts) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = (&net.Dialer{
+		Timeout:   timeouts.dial,
+		KeepAlive: 30 * time.Second,
+	}).DialContext
+	transport.TLSHandshakeTimeout = timeouts.tlsHandshake
+	transport.ResponseHeaderTimeout = timeouts.responseHeader
+	return &http.Client{Transport: transport}
 }
 
 // LatestTag returns the tag of the latest published release (the same release
@@ -158,6 +201,9 @@ func (c *Client) get(ctx context.Context, url, accept string) ([]byte, error) {
 }
 
 func (c *Client) getLimit(ctx context.Context, url, accept string, limit int64) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.timeouts.metadataTotal)
+	defer cancel()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -166,7 +212,7 @@ func (c *Client) getLimit(ctx context.Context, url, accept string, limit int64) 
 	if accept != "" {
 		req.Header.Set("Accept", accept)
 	}
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.metadataHTTP.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -188,13 +234,16 @@ func (c *Client) downloadToFile(ctx context.Context, url, dest string) error {
 	return c.downloadToFileLimit(ctx, url, dest, maxArchive)
 }
 
-func (c *Client) downloadToFileLimit(ctx context.Context, url, dest string, limit int64) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+func (c *Client) downloadToFileLimit(ctx context.Context, url, dest string, limit int64) (returnErr error) {
+	requestCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("User-Agent", "akari-selfupdate")
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.archiveHTTP.Do(req)
 	if err != nil {
 		return err
 	}
@@ -206,21 +255,120 @@ func (c *Client) downloadToFileLimit(ctx context.Context, url, dest string, limi
 	if err != nil {
 		return err
 	}
-	written, copyErr := io.Copy(f, io.LimitReader(resp.Body, limit+1))
+	removePartial := true
+	defer func() {
+		if !removePartial {
+			return
+		}
+		if err := os.Remove(dest); err != nil && !os.IsNotExist(err) {
+			returnErr = errors.Join(returnErr, fmt.Errorf("remove partial archive: %w", err))
+		}
+	}()
+
+	written, copyErr := copyWithIdleTimeout(
+		ctx,
+		f,
+		io.LimitReader(resp.Body, limit+1),
+		resp.Body,
+		c.timeouts.archiveIdleProgress,
+		cancel,
+	)
 	closeErr := f.Close()
 	if copyErr != nil {
-		os.Remove(dest)
 		return copyErr
 	}
 	if written > limit {
-		os.Remove(dest)
 		return fmt.Errorf("GET %s: response exceeds %d-byte limit", url, limit)
 	}
 	if closeErr != nil {
-		os.Remove(dest)
 		return closeErr
 	}
+	removePartial = false
 	return nil
+}
+
+type copyResult struct {
+	written int64
+	err     error
+}
+
+type progressReader struct {
+	r        io.Reader
+	progress chan<- struct{}
+}
+
+func (r progressReader) Read(p []byte) (int, error) {
+	n, err := r.r.Read(p)
+	if n > 0 {
+		select {
+		case r.progress <- struct{}{}:
+		default:
+		}
+	}
+	return n, err
+}
+
+// copyWithIdleTimeout cancels a body read only when no bytes arrive for the
+// idle window. It deliberately has no total deadline, so a slow peer that keeps
+// making progress can finish a large archive.
+func copyWithIdleTimeout(
+	ctx context.Context,
+	dst io.Writer,
+	src io.Reader,
+	body io.Closer,
+	idle time.Duration,
+	cancel context.CancelFunc,
+) (int64, error) {
+	progress := make(chan struct{}, 1)
+	done := make(chan copyResult, 1)
+	go func() {
+		written, err := io.Copy(dst, progressReader{r: src, progress: progress})
+		done <- copyResult{written: written, err: err}
+	}()
+
+	timer := time.NewTimer(idle)
+	defer timer.Stop()
+	for {
+		select {
+		case result := <-done:
+			return result.written, result.err
+		case <-progress:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(idle)
+		case <-timer.C:
+			select {
+			case result := <-done:
+				return result.written, result.err
+			default:
+			}
+			cancel()
+			closeErr := body.Close()
+			result := <-done
+			timeoutErr := fmt.Errorf("archive download made no progress for %s", idle)
+			if closeErr != nil {
+				timeoutErr = errors.Join(timeoutErr, fmt.Errorf("close response body: %w", closeErr))
+			}
+			return result.written, timeoutErr
+		case <-ctx.Done():
+			select {
+			case result := <-done:
+				return result.written, result.err
+			default:
+			}
+			cancel()
+			closeErr := body.Close()
+			result := <-done
+			if closeErr != nil {
+				return result.written, errors.Join(ctx.Err(), fmt.Errorf("close response body: %w", closeErr))
+			}
+			return result.written, ctx.Err()
+		}
+	}
 }
 
 // checksumFor returns the hex digest listed for asset in a SHA256SUMS body. The

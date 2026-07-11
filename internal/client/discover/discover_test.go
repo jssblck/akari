@@ -3,6 +3,7 @@ package discover
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/jssblck/akari/internal/config"
@@ -15,6 +16,87 @@ func write(t *testing.T, path string) {
 	}
 	if err := os.WriteFile(path, []byte("{}\n"), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDiscoverReportsRequiredMissingAndMalformedRoots(t *testing.T) {
+	dir := t.TempDir()
+	fileRoot := filepath.Join(dir, "not-a-directory")
+	write(t, fileRoot)
+
+	files, _, err := Discover([]Root{
+		{Agent: "claude", Dir: filepath.Join(dir, "missing-default"), Optional: true},
+		{Agent: "codex", Dir: filepath.Join(dir, "missing-override")},
+		{Agent: "pi", Dir: fileRoot},
+	}, Excluder{})
+	if len(files) != 0 {
+		t.Fatalf("discovered files from invalid roots: %+v", files)
+	}
+	if ErrorCount(err) != 2 {
+		t.Fatalf("ErrorCount = %d, want 2: %v", ErrorCount(err), err)
+	}
+	for _, want := range []string{"missing-override", "root is not a directory"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not contain %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "missing-default") {
+		t.Fatalf("missing optional built-in root was reported: %v", err)
+	}
+}
+
+func TestDiscoverRejectsRootAndSessionSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "root")
+	outside := filepath.Join(dir, "outside")
+	write(t, filepath.Join(root, "safe.jsonl"))
+	write(t, filepath.Join(root, "target.txt"))
+	write(t, filepath.Join(outside, "outside.jsonl"))
+
+	insideLink := filepath.Join(root, "inside.jsonl")
+	outsideLink := filepath.Join(root, "outside.jsonl")
+	rootLink := filepath.Join(dir, "root-link")
+	for link, target := range map[string]string{
+		insideLink:  filepath.Join(root, "target.txt"),
+		outsideLink: filepath.Join(outside, "outside.jsonl"),
+		rootLink:    root,
+	} {
+		if err := os.Symlink(target, link); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+	}
+
+	files, _, err := Discover([]Root{
+		{Agent: "claude", Dir: root},
+		{Agent: "claude", Dir: rootLink},
+	}, Excluder{})
+	if len(files) != 1 || files[0].Path != filepath.Join(root, "safe.jsonl") {
+		t.Fatalf("files = %+v, want only safe regular file", files)
+	}
+	if ErrorCount(err) != 3 {
+		t.Fatalf("ErrorCount = %d, want 3 rejected symlinks: %v", ErrorCount(err), err)
+	}
+	for _, path := range []string{insideLink, outsideLink, rootLink} {
+		if !strings.Contains(err.Error(), path) {
+			t.Errorf("error %q does not identify %s", err, path)
+		}
+	}
+}
+
+func TestDiscoverDoesNotFollowDirectorySymlinkLoop(t *testing.T) {
+	root := t.TempDir()
+	safe := filepath.Join(root, "project", "safe.jsonl")
+	write(t, safe)
+	if err := os.Symlink(root, filepath.Join(root, "project", "loop")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	files, _, err := Discover([]Root{{Agent: "claude", Dir: root}}, Excluder{})
+	if err != nil {
+		t.Fatalf("directory symlink should be ignored without traversal: %v", err)
+	}
+	if len(files) != 1 || files[0].Path != safe {
+		t.Fatalf("files = %+v, want only %s", files, safe)
 	}
 }
 
@@ -36,8 +118,13 @@ func TestDiscover(t *testing.T) {
 	// pi.
 	write(t, filepath.Join(piDir, "encoded-cwd", "sessX.jsonl"))
 
-	roots := []Root{{"claude", claudeDir}, {"codex", codexDir}, {"pi", piDir}, {"pi", filepath.Join(dir, "missing")}}
-	files, err := Discover(roots, Excluder{})
+	roots := []Root{
+		{Agent: "claude", Dir: claudeDir},
+		{Agent: "codex", Dir: codexDir},
+		{Agent: "pi", Dir: piDir},
+		{Agent: "pi", Dir: filepath.Join(dir, "missing"), Optional: true},
+	}
+	files, _, err := Discover(roots, Excluder{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,8 +221,8 @@ func TestDiscoverExcludes(t *testing.T) {
 	// The excluded segment is "dropme", not "tmp": t.TempDir() lives under /tmp on
 	// Linux, so a **/tmp/** pattern would match the fixtures' own path and exclude
 	// everything, masking what this test checks.
-	roots := []Root{{"claude", claudeDir}}
-	files, err := Discover(roots, NewExcluder([]string{"**/dropme/**", "*.private.jsonl", "**/private"}))
+	roots := []Root{{Agent: "claude", Dir: claudeDir}}
+	files, _, err := Discover(roots, NewExcluder([]string{"**/dropme/**", "*.private.jsonl", "**/private"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,16 +239,21 @@ func TestDiscoverExcludes(t *testing.T) {
 
 func TestRoots(t *testing.T) {
 	home := filepath.Join("/home", "grace")
-	cfg := config.Client{ExtraRoots: []config.ExtraRoot{{Agent: "pi", Path: "/extra/pi"}}}
+	cfg := config.Client{ExtraRoots: []config.ExtraRoot{
+		{Agent: "pi", Path: "/extra/pi"},
+		{Agent: "claude", Path: "/mnt/linked-claude", FollowRootLink: true},
+	}}
 
-	// No env overrides: standard roots plus the configured extra root.
+	// No env overrides: standard roots plus the configured extra roots. The
+	// second extra root's follow_root_link must carry through to Root.
 	roots := Roots(cfg, func(string) string { return "" }, home)
 	want := []Root{
-		{"claude", filepath.Join(home, ".claude", "projects")},
-		{"codex", filepath.Join(home, ".codex", "sessions")},
-		{"codex", filepath.Join(home, ".codex", "archived_sessions")},
-		{"pi", filepath.Join(home, ".pi", "agent", "sessions")},
-		{"pi", "/extra/pi"},
+		{Agent: "claude", Dir: filepath.Join(home, ".claude", "projects"), Optional: true},
+		{Agent: "codex", Dir: filepath.Join(home, ".codex", "sessions"), Optional: true},
+		{Agent: "codex", Dir: filepath.Join(home, ".codex", "archived_sessions"), Optional: true},
+		{Agent: "pi", Dir: filepath.Join(home, ".pi", "agent", "sessions"), Optional: true},
+		{Agent: "pi", Dir: "/extra/pi"},
+		{Agent: "claude", Dir: "/mnt/linked-claude", FollowRootLink: true},
 	}
 	if len(roots) != len(want) {
 		t.Fatalf("roots = %v, want %v", roots, want)
@@ -179,14 +271,14 @@ func TestRoots(t *testing.T) {
 		"PI_DIR":              "/custom/pihome",
 	}
 	roots = Roots(config.Client{}, func(k string) string { return env[k] }, home)
-	if roots[0] != (Root{"claude", "/custom/claude"}) {
+	if roots[0] != (Root{Agent: "claude", Dir: "/custom/claude"}) {
 		t.Errorf("claude override = %v", roots[0])
 	}
-	if roots[1] != (Root{"codex", "/custom/codex"}) {
+	if roots[1] != (Root{Agent: "codex", Dir: "/custom/codex"}) {
 		t.Errorf("codex override = %v", roots[1])
 	}
 	// PI_DIR points at the pi home; sessions live under agent/sessions.
-	if roots[2] != (Root{"pi", filepath.Join("/custom/pihome", "agent", "sessions")}) {
+	if roots[2] != (Root{Agent: "pi", Dir: filepath.Join("/custom/pihome", "agent", "sessions")}) {
 		t.Errorf("pi override = %v", roots[2])
 	}
 }

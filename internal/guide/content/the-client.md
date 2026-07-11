@@ -93,14 +93,45 @@ ingesting any backlog on startup.
 ```sh
 akari daemon start     # launch watch in the background; prints its PID and log path
 akari daemon status    # report whether it is running, and its PID
-akari daemon stop      # stop the running watcher
+akari daemon stop      # request shutdown; wait up to 10s for cleanup and lock release
+akari daemon stop --timeout 30s   # allow longer for in-flight uploads
+akari daemon stop --force         # escalate only if graceful shutdown fails
 ```
 
 `daemon` runs the same `watch` loop as a detached, per-user background process (it
-is not a system service). It writes a pidfile and a log file under your config
+is not a system service). It writes a pidfile and `akari.log` under your config
 directory; `start` confirms the child took the single-instance lock before
-returning, and `stop` verifies a live instance holds it before signaling. This is
-the steady state on a workstation: run `akari daemon start` once.
+returning. `stop` sends an authenticated local shutdown request, then waits until
+the watcher exits and releases that lock. A zero exit status therefore means a
+new watcher can start immediately. Unix uses a user-only Unix-domain socket for
+the request; Windows uses a random per-run named event, so it follows the same
+cleanup path instead of being killed.
+
+The default timeout is 10 seconds. If cleanup does not finish, `stop` exits
+non-zero and leaves the watcher running. `--timeout <duration>` changes the bound.
+`--force` keeps the graceful request as the first step, then terminates the
+recorded process after the timeout and waits again for lock release. Before that
+escalation, `stop` re-reads the per-run identity in the locked pidfile; if another
+watcher has replaced it, the command fails instead of targeting the new process.
+A forced, confirmed stop exits zero and prints `akari watch force-stopped`, which
+distinguishes it from ordinary cleanup and from a timeout.
+
+The pidfile now contains a JSON process identity instead of a bare PID. A client
+upgraded while an older daemon is still running cannot safely authenticate or
+escalate against that old process. Stop the daemon with the old client before
+upgrading, or end that process through the operating system once; the next
+`daemon start` writes the new identity format.
+
+The log rotates while the daemon runs: each file is capped at 5 MiB, three rotated files
+(`akari.log.1` through `akari.log.3`) are retained, and the whole set is bounded
+at 20 MiB. The active and rotated files remain owner-only. This is the steady
+state on a workstation: run `akari daemon start` once.
+
+| Platform | Daemon log |
+| --- | --- |
+| macOS | `~/Library/Application Support/akari/akari.log` |
+| Linux | `~/.config/akari/akari.log` |
+| Windows | `%AppData%\akari\akari.log` |
 
 ### update and version
 
@@ -142,6 +173,13 @@ machine = "sandbox-pool"
 agent = "claude"
 path  = "/mnt/shared/claude-sessions"
 
+# A root that is itself a symlink or (on Windows) a directory junction is
+# rejected unless you opt in with follow_root_link.
+[[extra_roots]]
+agent            = "claude"
+path             = "D:\\claude-sessions-link"
+follow_root_link = true
+
 # Skip paths matching these globs during discovery, for sync and watch alike.
 excludes = ["**/scratch/**", "*.private.jsonl"]
 ```
@@ -159,8 +197,11 @@ The keys:
   filter does not fill with thousands of single-use hostnames. `AKARI_MACHINE`
   overrides it per run.
 - **`extra_roots`** (optional): additional discovery roots, each an
-  `{ agent, path }` pair where `agent` is `claude`, `codex`, or `pi`. Use these
-  when your sessions live somewhere other than the standard location.
+  `{ agent, path, follow_root_link }` entry where `agent` is `claude`, `codex`,
+  or `pi` and `follow_root_link` (optional, default `false`) opts the root into
+  resolving a symlink or, on Windows, a directory junction at `path` itself
+  before walking it; see [Discovery](#discovery) below for why that is opt-in.
+  Use these when your sessions live somewhere other than the standard location.
 - **`excludes`** (optional): glob patterns of paths to skip, applied to both
   `sync` and `watch`. Patterns match the full path with `/` separators;
   `**/scratch/**` ignores any path with a `scratch` segment, `*.private.jsonl`
@@ -202,12 +243,37 @@ plus any `extra_roots` you configured:
 | Codex | `~/.codex/sessions` and `~/.codex/archived_sessions` | `CODEX_SESSIONS_DIR` |
 | pi | `~/.pi/agent/sessions` | `PI_DIR` (sessions at `$PI_DIR/agent/sessions`) |
 
-Missing roots and excluded paths are skipped without error. For each candidate
-file, the client peeks the first line to read the working directory and session
-id, then resolves that directory's git `origin` remote to a project key. A file
-whose header cannot be read is skipped entirely; a directory with no usable remote
-produces a standalone or orphaned project rather than being dropped
-([Glossary](./glossary.md#projects)).
+Missing built-in roots are skipped without error because an unused agent normally
+has no session directory. A missing path supplied through an agent override or
+`extra_roots` is an error, as are permission failures and incomplete directory
+walks. `sync` and `--dry-run` process files found in complete portions of the scan,
+report the number of discovery errors in the final summary, and exit nonzero.
+`watch` reports the same failures in its log, deduped so a standing failure logs
+once (and at most once an hour after that) rather than every rescan, and retries
+on later rescans.
+
+Discovery never follows a symlink or, on Windows, a directory junction (`mklink
+/J`) found *inside* a root: a matching session file behind one is a discovery
+error, and a linked directory is silently skipped rather than descended into,
+which closes loops and keeps `excludes` and the configured root from being
+bypassed. A root that is *itself* a symlink or junction is rejected the same way
+by default, with one exception: a linked built-in default root (the standard
+per-agent locations above, not `extra_roots`) is skipped with a quiet notice
+instead of an error, so relocating your agent's session directory with a
+junction does not turn into a failing sync. If you do want a linked root
+followed, set `follow_root_link = true` on that `extra_roots` entry; the closed
+policy still applies to everything the walk finds underneath it, only the root
+path itself is resolved. This is also why the client's read-time hardening
+matters: even inside a closed root, a session file's content is only trusted if
+it is still the same file the walk approved at the moment it is opened, closing
+the gap a symlink swapped in between discovery and reading would otherwise
+leave.
+
+For each candidate file, the client peeks the first line to read the working
+directory and session id, then resolves that directory's git `origin` remote to a
+project key. A file whose header cannot be read is skipped entirely; a directory
+with no usable remote produces a standalone or orphaned project rather than being
+dropped ([Glossary](./glossary.md#projects)).
 
 ## How the upload works
 

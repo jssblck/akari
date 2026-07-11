@@ -2,16 +2,18 @@
 // single running instance per machine. The lock is a real OS advisory file lock
 // (flock on unix, LockFileEx on Windows) held for the process lifetime, so it is
 // released automatically if the process dies and is immune to pid reuse. The
-// file's contents are the holder's pid, kept only as metadata for stop/status.
+// file's contents are the holder's pid and a random per-run token, kept as
+// metadata for stop/status and rechecked before forceful termination.
 package daemon
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 )
 
 // ErrAlreadyRunning reports lock contention from another daemon instance.
@@ -19,8 +21,14 @@ var ErrAlreadyRunning = errors.New("another akari instance is already running")
 
 // Lock is a held single-instance lock.
 type Lock struct {
-	f    *os.File
-	path string
+	f        *os.File
+	path     string
+	instance instance
+}
+
+type instance struct {
+	PID   int    `json:"pid"`
+	Token string `json:"token"`
 }
 
 // Acquire takes the lock. It returns ErrAlreadyRunning when another live
@@ -47,28 +55,48 @@ func Acquire(path string) (*Lock, error) {
 	}
 	// We hold the lock: record our pid (truncate first in case a stale, unlocked
 	// file from a hard-killed predecessor remains). A write failure is fatal,
-	// since Stop relies on this pid.
-	if err := writePid(f); err != nil {
-		writeErr := fmt.Errorf("write pidfile %s: %w", path, err)
-		if unlockErr := unlockFile(f); unlockErr != nil {
-			writeErr = errors.Join(writeErr, fmt.Errorf("unlock pidfile %s: %w", path, unlockErr))
-		}
-		if closeErr := f.Close(); closeErr != nil {
-			writeErr = errors.Join(writeErr, fmt.Errorf("close pidfile %s: %w", path, closeErr))
-		}
-		return nil, writeErr
+	// since Stop relies on this identity.
+	inst, err := newInstance()
+	if err != nil {
+		return nil, releaseAfterAcquireFailure(f, path, fmt.Errorf("create daemon identity: %w", err))
 	}
-	return &Lock{f: f, path: path}, nil
+	if err := writeInstance(f, inst); err != nil {
+		writeErr := fmt.Errorf("write pidfile %s: %w", path, err)
+		return nil, releaseAfterAcquireFailure(f, path, writeErr)
+	}
+	return &Lock{f: f, path: path, instance: inst}, nil
 }
 
-func writePid(f *os.File) error {
+func newInstance() (instance, error) {
+	var token [16]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		return instance{}, err
+	}
+	return instance{PID: os.Getpid(), Token: hex.EncodeToString(token[:])}, nil
+}
+
+func releaseAfterAcquireFailure(f *os.File, path string, cause error) error {
+	if unlockErr := unlockFile(f); unlockErr != nil {
+		cause = errors.Join(cause, fmt.Errorf("unlock pidfile %s: %w", path, unlockErr))
+	}
+	if closeErr := f.Close(); closeErr != nil {
+		cause = errors.Join(cause, fmt.Errorf("close pidfile %s: %w", path, closeErr))
+	}
+	return cause
+}
+
+func writeInstance(f *os.File, inst instance) error {
+	data, err := json.Marshal(inst)
+	if err != nil {
+		return err
+	}
 	if err := f.Truncate(0); err != nil {
 		return err
 	}
 	if _, err := f.Seek(0, 0); err != nil {
 		return err
 	}
-	if _, err := f.WriteString(strconv.Itoa(os.Getpid())); err != nil {
+	if _, err := f.Write(append(data, '\n')); err != nil {
 		return err
 	}
 	return f.Sync()
@@ -138,16 +166,27 @@ func IsRunning(path string) (bool, error) {
 }
 
 func readPid(path string) (int, error) {
+	inst, err := readInstance(path)
+	if err != nil {
+		return 0, err
+	}
+	return inst.PID, nil
+}
+
+func readInstance(path string) (instance, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return 0, fmt.Errorf("read pidfile %s: %w", path, err)
+		return instance{}, fmt.Errorf("read pidfile %s: %w", path, err)
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
-		return 0, fmt.Errorf("parse pidfile %s: %w", path, err)
+	var inst instance
+	if err := json.Unmarshal(data, &inst); err != nil {
+		return instance{}, fmt.Errorf("parse pidfile %s: %w", path, err)
 	}
-	if pid <= 0 {
-		return 0, fmt.Errorf("pidfile %s does not contain a valid pid", path)
+	if inst.PID <= 0 || len(inst.Token) != 32 {
+		return instance{}, fmt.Errorf("pidfile %s does not contain a valid daemon identity", path)
 	}
-	return pid, nil
+	if _, err := hex.DecodeString(inst.Token); err != nil {
+		return instance{}, fmt.Errorf("pidfile %s does not contain a valid daemon identity", path)
+	}
+	return inst, nil
 }

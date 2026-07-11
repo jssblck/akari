@@ -121,7 +121,6 @@ func TestExpensiveRoutesPublishClassMetrics(t *testing.T) {
 		path   string
 		body   string
 	}{
-		{http.MethodPost, "/api/v1/auth/register", `{"username":"grace","password":"hopper-1906"}`},
 		{http.MethodPost, "/oauth/register", validOAuthRegistration},
 		{http.MethodPost, "/mcp", `{}`},
 		{http.MethodGet, "/p/999999", ""},
@@ -150,7 +149,7 @@ func TestExpensiveRoutesPublishClassMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, class := range []string{"password", "oauth_registration", "mcp_spool", "public_analytics"} {
+	for _, class := range []string{"oauth_registration", "mcp_spool", "public_analytics"} {
 		want := `akari_request_budget_acquired_total{class="` + class + `"} 1`
 		if !strings.Contains(string(body), want) {
 			t.Errorf("metrics missing %q\n%s", want, body)

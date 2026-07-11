@@ -17,11 +17,13 @@ import (
 
 // Server holds the dependencies shared by all handlers.
 type Server struct {
-	Store  *store.Store
-	Cfg    config.Server
-	hub    *sseHub
-	worker *parse.Worker
-	budget *requestbudget.Budget
+	Store        *store.Store
+	Cfg          config.Server
+	passwords    *passwordWork
+	authAttempts *authAttemptLimiter
+	hub          *sseHub
+	worker       *parse.Worker
+	budget       *requestbudget.Budget
 	// mcp is the Streamable-HTTP handler for the remote MCP server, built once and
 	// shared across requests; handleMCP wraps it per request with the bearer check.
 	mcp http.Handler
@@ -62,7 +64,10 @@ func New(st *store.Store, cfg config.Server, worker *parse.Worker) *Server {
 	if cfg.OAuthRegistrationsPerHour == 0 {
 		cfg.OAuthRegistrationsPerHour = config.DefaultOAuthRegistrationsPerHour
 	}
-	s := &Server{Store: st, Cfg: cfg, hub: newSSEHub(), worker: worker, budget: budget}
+	s := &Server{
+		Store: st, Cfg: cfg, hub: newSSEHub(), worker: worker, budget: budget,
+		passwords: newPasswordWork(cfg), authAttempts: newAuthAttemptLimiter(),
+	}
 	s.insights = newInsightsRefresher(func(ctx context.Context) (map[string]store.Insights, error) {
 		return computeFleetInsights(ctx, st)
 	})
@@ -157,6 +162,7 @@ func (s *Server) Routes() http.Handler {
 	// parsed projection), so these are not behind the reparse gate.
 	mux.HandleFunc("GET /api/v1/session/{id}/blob/{sha256}", s.requireFull(s.handleSessionBlob))
 	mux.HandleFunc("GET /s/{public_id}/blob/{sha256}", s.handlePublicBlob)
+	mux.HandleFunc("GET /s/{public_id}/body", s.gatePublicParsed(s.handlePublicSessionBody))
 
 	// Reparse status and live progress. The status JSON is the poll fallback; the
 	// SSE stream pushes the same payload so a watching page updates its progress bar
@@ -232,7 +238,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /account/overview/publish", s.requireFull(s.handlePublishOverview))
 	mux.HandleFunc("POST /account/overview/unpublish", s.requireFull(s.handleUnpublishOverview))
 
-	return withStyledNotFound(mux, s.handleNotFound)
+	return s.withRouteCSRF(mux, withStyledNotFound(mux, s.handleNotFound))
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {

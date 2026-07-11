@@ -69,7 +69,24 @@ func newClient(t *testing.T) *http.Client {
 	if err != nil {
 		t.Fatalf("cookiejar: %v", err)
 	}
-	return &http.Client{Jar: jar}
+	return &http.Client{Jar: jar, Transport: browserRoundTripper{base: http.DefaultTransport}}
+}
+
+// browserRoundTripper supplies the forbidden request headers Go's HTTP client
+// does not synthesize. Tests using newClient model a modern same-origin browser;
+// CSRF-specific tests construct requests directly to exercise hostile metadata.
+type browserRoundTripper struct {
+	base http.RoundTripper
+}
+
+func (b browserRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	if isSafeMethod(r.Method) {
+		return b.base.RoundTrip(r)
+	}
+	r = r.Clone(r.Context())
+	r.Header.Set("Origin", r.URL.Scheme+"://"+r.URL.Host)
+	r.Header.Set("Sec-Fetch-Site", "same-origin")
+	return b.base.RoundTrip(r)
 }
 
 // stubReducer satisfies store.SessionReducer with a canned whole-session delta,

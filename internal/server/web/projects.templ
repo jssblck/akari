@@ -218,11 +218,13 @@ templ projectPublicity(proj store.ProjectSummary) {
 			<span class="publicity">
 				@publicTag(PublicProjectHref(proj.ID))
 				<form method="post" action={ templ.SafeURL(ProjectUnpublishPath(proj.ID)) } class="inline">
+					@csrfField()
 					<button class="secondary small" type="submit" title="Hide the public page. The URL is the project id, so making it public again brings the same link back.">Make private</button>
 				</form>
 			</span>
 		} else {
 			<form method="post" action={ templ.SafeURL(ProjectPublishPath(proj.ID)) } class="inline">
+				@csrfField()
 				<button class="secondary small" type="submit" title="Anyone can read this project's usage overview while it is public. Sessions stay private.">Make overview public</button>
 			</form>
 		}

@@ -7,10 +7,18 @@ package config
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+)
+
+const (
+	DefaultPasswordWorkers      = 2
+	DefaultPasswordQueueDepth   = 32
+	DefaultPasswordQueueTimeout = 3 * time.Second
 )
 
 // Server holds the akari-server runtime configuration.
@@ -32,6 +40,9 @@ type Server struct {
 	// and Host header, which is correct for a single-origin deployment behind a
 	// well-behaved proxy.
 	PublicURL string
+	// MCPResponseBudgetBytes caps the encoded CallToolResult body
+	// (AKARI_MCP_RESPONSE_BUDGET_BYTES). The default is 8 MiB.
+	MCPResponseBudgetBytes int
 	// SweepInterval is how often the server reclaims orphaned CAS blobs
 	// (AKARI_SWEEP_INTERVAL, a Go duration like "1h"). Defaults to 1h; set "0" to
 	// disable the background sweep (for example to run it only via the subcommand).
@@ -100,6 +111,16 @@ type Server struct {
 	// dynamic client registrations (AKARI_OAUTH_REGISTRATIONS_PER_HOUR). It applies
 	// across every server replica and defaults to the abuse-only threshold 1000.
 	OAuthRegistrationsPerHour int
+	// PasswordWorkers is the maximum number of request-triggered Argon2 hashes or
+	// verifications that may run at once (AKARI_PASSWORD_WORKERS).
+	PasswordWorkers int
+	// PasswordQueueDepth bounds password requests waiting behind active workers
+	// (AKARI_PASSWORD_QUEUE_DEPTH). A full queue fails closed without allocating
+	// another waiter.
+	PasswordQueueDepth int
+	// PasswordQueueTimeout bounds how long admitted password work may wait for a
+	// worker (AKARI_PASSWORD_QUEUE_TIMEOUT).
+	PasswordQueueTimeout time.Duration
 }
 
 const (
@@ -129,11 +150,12 @@ const (
 // LoadServer reads server configuration from the environment, applying defaults
 // and validating required values.
 func LoadServer() (Server, error) {
+	publicURLValue, publicURLSource := publicURL()
 	s := Server{
 		DatabaseURL:           os.Getenv("AKARI_DATABASE_URL"),
 		Listen:                listenAddr(),
 		CookieSecure:          !truthy(os.Getenv("AKARI_COOKIE_INSECURE")),
-		PublicURL:             publicURL(),
+		PublicURL:             publicURLValue,
 		ProxyAuthHeader:       strings.TrimSpace(os.Getenv("AKARI_PROXY_AUTH_HEADER")),
 		ProxyAuthSecret:       os.Getenv("AKARI_PROXY_AUTH_SECRET"),
 		ProxyAuthSecretHeader: proxyAuthSecretHeader(),
@@ -141,6 +163,21 @@ func LoadServer() (Server, error) {
 	if s.DatabaseURL == "" {
 		return Server{}, fmt.Errorf("AKARI_DATABASE_URL is required")
 	}
+	if s.PublicURL != "" {
+		origin, err := NormalizePublicOrigin(s.PublicURL)
+		if err != nil {
+			return Server{}, fmt.Errorf("%s: %w", publicURLSource, err)
+		}
+		s.PublicURL = origin
+	}
+	mcpBudget, err := parsePositiveInt(os.Getenv("AKARI_MCP_RESPONSE_BUDGET_BYTES"), 8<<20)
+	if err != nil {
+		return Server{}, fmt.Errorf("AKARI_MCP_RESPONSE_BUDGET_BYTES: %w", err)
+	}
+	if mcpBudget < 8<<20 || mcpBudget > 16<<20 {
+		return Server{}, fmt.Errorf("AKARI_MCP_RESPONSE_BUDGET_BYTES must be between 8388608 and 16777216")
+	}
+	s.MCPResponseBudgetBytes = mcpBudget
 	interval, err := parseDuration(os.Getenv("AKARI_SWEEP_INTERVAL"), time.Hour)
 	if err != nil {
 		return Server{}, fmt.Errorf("AKARI_SWEEP_INTERVAL: %w", err)
@@ -195,6 +232,24 @@ func LoadServer() (Server, error) {
 		return Server{}, fmt.Errorf("AKARI_OAUTH_REGISTRATIONS_PER_HOUR: %w", err)
 	}
 	s.OAuthRegistrationsPerHour = registrations
+	passwordWorkers, err := parsePositiveInt(os.Getenv("AKARI_PASSWORD_WORKERS"), DefaultPasswordWorkers)
+	if err != nil {
+		return Server{}, fmt.Errorf("AKARI_PASSWORD_WORKERS: %w", err)
+	}
+	s.PasswordWorkers = passwordWorkers
+	passwordQueueDepth, err := parsePositiveInt(os.Getenv("AKARI_PASSWORD_QUEUE_DEPTH"), DefaultPasswordQueueDepth)
+	if err != nil {
+		return Server{}, fmt.Errorf("AKARI_PASSWORD_QUEUE_DEPTH: %w", err)
+	}
+	s.PasswordQueueDepth = passwordQueueDepth
+	passwordQueueTimeout, err := parseDuration(os.Getenv("AKARI_PASSWORD_QUEUE_TIMEOUT"), DefaultPasswordQueueTimeout)
+	if err != nil {
+		return Server{}, fmt.Errorf("AKARI_PASSWORD_QUEUE_TIMEOUT: %w", err)
+	}
+	if passwordQueueTimeout <= 0 {
+		return Server{}, fmt.Errorf("AKARI_PASSWORD_QUEUE_TIMEOUT must be positive")
+	}
+	s.PasswordQueueTimeout = passwordQueueTimeout
 	return s, nil
 }
 
@@ -245,18 +300,56 @@ func listenAddr() string {
 	return ":8080"
 }
 
-// publicURL resolves the server's externally reachable base URL. AKARI_PUBLIC_URL
-// wins; failing that it honors AKARI_URL, the variable eph exports pointing at the
-// running dev server, so the OAuth flow works out of the box under eph. The result
-// is trimmed of any trailing slash so callers can join paths with a leading slash
-// without doubling it. An empty result tells the OAuth handlers to derive the base
-// from the request instead.
-func publicURL() string {
-	v := strings.TrimSpace(os.Getenv("AKARI_PUBLIC_URL"))
+// publicURL resolves the server's externally reachable base URL and reports
+// which environment variable supplied it, so a validation failure can name the
+// variable the operator actually set rather than always blaming
+// AKARI_PUBLIC_URL. AKARI_PUBLIC_URL wins; failing that it honors AKARI_URL,
+// the variable eph exports pointing at the running dev server, so the OAuth
+// flow works out of the box under eph. The value is trimmed of any trailing
+// slash so callers can join paths with a leading slash without doubling it.
+// An empty result tells the OAuth handlers to derive the base from the
+// request instead.
+func publicURL() (value, source string) {
+	source = "AKARI_PUBLIC_URL"
+	v := strings.TrimSpace(os.Getenv(source))
 	if v == "" {
-		v = strings.TrimSpace(os.Getenv("AKARI_URL"))
+		source = "AKARI_URL"
+		v = strings.TrimSpace(os.Getenv(source))
 	}
-	return strings.TrimRight(v, "/")
+	return strings.TrimRight(v, "/"), source
+}
+
+// NormalizePublicOrigin turns an external URL into the exact origin browsers
+// send in Origin. HTTP handlers use the same normalization for request headers,
+// so default ports and host casing cannot create false mismatches.
+// Rejecting paths and other URL components keeps the value usable as both the
+// OAuth issuer and the CSRF trust boundary.
+func NormalizePublicOrigin(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", err
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if (scheme != "http" && scheme != "https") || u.Host == "" || u.User != nil ||
+		u.Opaque != "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return "", fmt.Errorf("must be an http(s) origin without a path, query, fragment, or user info")
+	}
+	hostname := strings.ToLower(u.Hostname())
+	if hostname == "" {
+		return "", fmt.Errorf("must include a host")
+	}
+	port := u.Port()
+	if (scheme == "http" && port == "80") || (scheme == "https" && port == "443") {
+		port = ""
+	}
+	host := hostname
+	if strings.Contains(hostname, ":") {
+		host = "[" + hostname + "]"
+	}
+	if port != "" {
+		host = net.JoinHostPort(hostname, port)
+	}
+	return scheme + "://" + host, nil
 }
 
 // proxyAuthSecretHeader resolves the header the proxy echoes the shared secret in,

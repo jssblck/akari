@@ -11,7 +11,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func TestFileForAcceptsOnlyRegularTargets(t *testing.T) {
+func TestFileForRejectsSymlinksAndNonRegularFiles(t *testing.T) {
 	root := t.TempDir()
 	w := New([]discover.Root{{Agent: "claude", Dir: root}}, nil, Options{})
 
@@ -23,8 +23,8 @@ func TestFileForAcceptsOnlyRegularTargets(t *testing.T) {
 	if err := os.Symlink(target, linkedRegular); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := w.fileFor(linkedRegular); !ok {
-		t.Fatal("symlink to a regular session was rejected")
+	if _, ok := w.fileFor(linkedRegular); ok {
+		t.Fatal("symlink to a regular session was accepted")
 	}
 
 	fifo := filepath.Join(root, "pipe.jsonl")

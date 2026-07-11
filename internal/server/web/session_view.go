@@ -31,6 +31,9 @@ type SessionView struct {
 	Subagents         []store.SubagentRow
 	Header            HeaderStats
 	DupIDs            int
+	// ProjectionRevision is the public pagination snapshot token. Private session
+	// pagination reconciles through its live append cursor and leaves this zero.
+	ProjectionRevision int64
 }
 
 // SetPage installs a transcript window on the view and groups the page's

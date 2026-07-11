@@ -16,7 +16,7 @@ func TestBudgetBoundsMixedConcurrentWork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	classes := []WorkClass{Password, PublicAnalytics, OAuthRegistration, OAuthRegistration}
+	classes := []WorkClass{PublicAnalytics, PublicAnalytics, OAuthRegistration, OAuthRegistration}
 
 	start := make(chan struct{})
 	finish := make(chan struct{})
@@ -60,13 +60,13 @@ func TestBudgetBoundsMixedConcurrentWork(t *testing.T) {
 	}
 	close(finish)
 	wg.Wait()
-	if peak != 14 {
-		t.Fatalf("peak weight = %d, want 14 from the admitted mixed load", peak)
+	if peak != 10 {
+		t.Fatalf("peak weight = %d, want 10 from the admitted mixed load", peak)
 	}
 }
 
 func TestBudgetLoadBoundsWorkClassConcurrency(t *testing.T) {
-	for _, class := range []WorkClass{Password, MCPSpool, PublicAnalytics, OAuthRegistration} {
+	for _, class := range []WorkClass{MCPSpool, PublicAnalytics, OAuthRegistration} {
 		class := class
 		name, weight, _ := class.spec()
 		t.Run(name, func(t *testing.T) {
@@ -195,7 +195,7 @@ func TestBudgetMetricsExposeQueueWaitRejectionAndUtilization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := b.Acquire(context.Background(), Password); !errors.Is(err, ErrWaitTimeout) {
+	if _, err := b.Acquire(context.Background(), PublicAnalytics); !errors.Is(err, ErrWaitTimeout) {
 		t.Fatalf("Acquire = %v, want timeout", err)
 	}
 
@@ -203,11 +203,11 @@ func TestBudgetMetricsExposeQueueWaitRejectionAndUtilization(t *testing.T) {
 	b.ServeHTTP(rr, httptest.NewRequest("GET", "/metrics", nil))
 	body := rr.Body.String()
 	for _, want := range []string{
-		`akari_request_budget_queue_depth{class="password"} 0`,
+		`akari_request_budget_queue_depth{class="public_analytics"} 0`,
 		`akari_request_budget_in_use_weight{class="mcp_spool"} 12`,
 		`akari_request_budget_utilization_ratio{class="mcp_spool"} 1`,
-		`akari_request_budget_rejected_total{class="password",reason="timeout"} 1`,
-		`akari_request_budget_wait_seconds_count{class="password"} 1`,
+		`akari_request_budget_rejected_total{class="public_analytics",reason="timeout"} 1`,
+		`akari_request_budget_wait_seconds_count{class="public_analytics"} 1`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("metrics missing %q\n%s", want, body)
