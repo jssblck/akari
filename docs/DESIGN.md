@@ -815,6 +815,8 @@ CREATE TABLE messages (
   has_thinking   BOOLEAN NOT NULL DEFAULT FALSE,
   has_tool_use   BOOLEAN NOT NULL DEFAULT FALSE,
   content_length INT GENERATED ALWAYS AS (octet_length(content)) STORED,
+  content_sha256 CHAR(64) NOT NULL,       -- trigger-maintained MCP reference binding
+  thinking_text_sha256 CHAR(64) NOT NULL, -- trigger-maintained MCP reference binding
   -- A row is one semantic turn (Claude's split content-block lines fold by API
   -- message id). Rows are only ever written by a whole-session rebuild, so there
   -- is no "still accumulating" state to track.
@@ -1106,7 +1108,17 @@ so coding agents can read the corpus without the UI. Two decisions shape it:
   its own query logic and stays decoupled from internal renames. The raw underlying
   data the UI fetches on demand is exposed too: tool-call bodies from the CAS
   (gated by a session that references the hash, the same gate the UI enforces) and
-  a session's lossless ingested bytes, both size-capped.
+  a session's lossless ingested bytes, both size-capped. Every tool result is
+  measured after JSON encoding and capped by `AKARI_MCP_RESPONSE_BUDGET_BYTES`
+  (8 MiB by default). Eight MiB leaves transport and proxy framing below a 16 MiB
+  response limit, even when JSON escaping expands text. Transcript reads apply a
+  conservative cumulative bound in PostgreSQL before fetching message text, then
+  verify the exact `CallToolResult` size in Go. A field that cannot fit is returned
+  as a preview plus a SHA-256-bound `resource_link`; `resources/read` resolves it
+  from the message projection through the same bearer check. Token revocation,
+  message deletion, or changed field content invalidates future reads. Structured
+  output carries the DTO and text content carries only a paging summary, avoiding
+  a second full JSON copy.
 - **akari is its own OAuth 2.1 authorization server**, so connecting an agent
   reuses the browser session rather than asking the user to mint and paste a token.
   The server publishes the protected-resource (RFC 9728) and authorization-server

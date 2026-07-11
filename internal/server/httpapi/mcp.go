@@ -41,7 +41,7 @@ const mcpSessionTimeout = 30 * time.Minute
 // bearer token nor bound to a name an attacker controls, so turning it off is the
 // documented choice for a proxied deployment and costs no real protection.
 func newMCPHandler(s *Server) http.Handler {
-	srv := mcpserver.New(s.Store)
+	srv := mcpserver.New(s.Store, mcpserver.Options{ResponseBudgetBytes: s.Cfg.MCPResponseBudgetBytes})
 	return mcpsdk.NewStreamableHTTPHandler(
 		func(*http.Request) *mcpsdk.Server { return srv },
 		&mcpsdk.StreamableHTTPOptions{
