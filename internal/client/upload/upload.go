@@ -92,6 +92,12 @@ type Client struct {
 	baseURL string
 	token   string
 
+	// Streaming requests have no total deadline. These two bounds distinguish a
+	// healthy long upload from a connection that has stopped moving, while short
+	// metadata calls retain their former wall-clock cap.
+	idleProgressTimeout time.Duration
+	apiRequestTimeout   time.Duration
+
 	// enc encodes each tool body into the bytes the CAS stores (small bodies
 	// verbatim, large bodies zstd) and names its key. It is the single source of the
 	// stored-byte encoding for both the upload and the cold-cache prefix digest, so
@@ -195,15 +201,17 @@ type fileSync struct {
 // New builds a Client. baseURL is the server root (trailing slash optional).
 func New(httpClient *http.Client, baseURL, token string) *Client {
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = NewHTTPClient()
 	}
 	return &Client{
-		http:    httpClient,
-		baseURL: strings.TrimRight(baseURL, "/"),
-		token:   token,
-		enc:     casenc.NewLimited(runtime.NumCPU()),
-		uploads: uploadLimiterOrFallback(newAdaptiveUploadLimiter),
-		files:   map[string]*fileSync{},
+		http:                httpClient,
+		baseURL:             strings.TrimRight(baseURL, "/"),
+		token:               token,
+		idleProgressTimeout: defaultIdleProgressTimeout,
+		apiRequestTimeout:   defaultAPIRequestTimeout,
+		enc:                 casenc.NewLimited(runtime.NumCPU()),
+		uploads:             uploadLimiterOrFallback(newAdaptiveUploadLimiter),
+		files:               map[string]*fileSync{},
 	}
 }
 
@@ -881,12 +889,15 @@ func (c *Client) chunk(ctx context.Context, sessionID, offset int64, data []byte
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Content-Type", "application/octet-stream")
 
-	resp, err := c.http.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return chunkResult{}, err
 	}
 	defer resp.Body.Close()
-	payload, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	payload, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return chunkResult{}, fmt.Errorf("read chunk response: %w", err)
+	}
 
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -954,12 +965,15 @@ func (c *Client) putBody(ctx context.Context, enc *casenc.Encoder, sha, contentT
 		req.ContentLength = int64(len(ref.stored))
 	}
 
-	resp, err := c.http.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	payload, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	payload, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return fmt.Errorf("read upload response: %w", err)
+	}
 	if resp.StatusCode != http.StatusOK {
 		// Return a typed status error so the upload limiter can tell a server shedding
 		// load (429/5xx) from a client-side fault and retune accordingly.
@@ -983,6 +997,11 @@ func (e *httpStatusError) Error() string {
 
 // doJSON performs a JSON request, optionally decoding a JSON response into out.
 func (c *Client) doJSON(ctx context.Context, method, path string, body, out any) error {
+	if c.apiRequestTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.apiRequestTimeout)
+		defer cancel()
+	}
 	var reader io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -999,12 +1018,15 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body, out any)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := c.http.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	payload, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	payload, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return fmt.Errorf("read %s response: %w", path, err)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("%s %s: server returned %d: %s", method, path, resp.StatusCode, strings.TrimSpace(string(payload)))
 	}

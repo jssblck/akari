@@ -43,6 +43,7 @@ func TestIsLoadShed(t *testing.T) {
 		&httpStatusError{code: http.StatusBadGateway},
 		&httpStatusError{code: http.StatusGatewayTimeout},
 		context.DeadlineExceeded,
+		&idleProgressError{phase: "request body", timeout: time.Second},
 	}
 	for _, err := range shed {
 		if !isLoadShed(err) {
@@ -60,6 +61,18 @@ func TestIsLoadShed(t *testing.T) {
 		if isLoadShed(err) {
 			t.Errorf("isLoadShed(%v) = true, want false", err)
 		}
+	}
+}
+
+// TestIsLoadShedClassifiesIdleProgressStall is a targeted regression test for the
+// idleProgressError/isLoadShed gap: idleProgressError's doc comment has always
+// claimed the limiter treats a stalled upload as transient, but until
+// idleProgressError implemented Is, errors.Is(err, context.DeadlineExceeded)
+// never matched it and the adaptive limiter never backed off on a stall.
+func TestIsLoadShedClassifiesIdleProgressStall(t *testing.T) {
+	err := &idleProgressError{phase: "response body", timeout: 30 * time.Second}
+	if !isLoadShed(err) {
+		t.Fatalf("isLoadShed(%v) = false, want true: idle-progress stalls must be treated as load-shed so the adaptive limiter backs off", err)
 	}
 }
 

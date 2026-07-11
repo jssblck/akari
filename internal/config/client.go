@@ -75,6 +75,16 @@ func ResolveMachine(cfg Client, env func(string) string, hostname func() (string
 type ExtraRoot struct {
 	Agent string `toml:"agent"` // claude | codex | pi
 	Path  string `toml:"path"`
+	// FollowRootLink opts this root into resolving a symlink or, on Windows, a
+	// directory junction at the root itself before walking, for when Path is
+	// only reachable through such a link (for example a Windows user who
+	// relocated their session directory with `mklink /J`). The default (false)
+	// rejects a linked root outright with a clear error: the same closed
+	// symlink policy that governs everything discovered inside the walk also
+	// governs the root, so following it is an explicit opt-in, not something a
+	// stray link should silently grant itself. This setting never weakens the
+	// no-follow policy applied to paths found inside the walk.
+	FollowRootLink bool `toml:"follow_root_link"`
 }
 
 // DefaultClientPath returns the platform-standard config file path:

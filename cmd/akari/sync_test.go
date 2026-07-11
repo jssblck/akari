@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -13,6 +14,7 @@ import (
 	"github.com/jssblck/akari/internal/client/resolve"
 	"github.com/jssblck/akari/internal/client/syncer"
 	"github.com/jssblck/akari/internal/client/upload"
+	"github.com/jssblck/akari/internal/config"
 )
 
 // TestSyncDeadlineCancelsAfterLimit verifies the time limit behaves like a
@@ -111,6 +113,74 @@ func TestSummaryFoldCounts(t *testing.T) {
 	}
 	if got := s.skipReasons["could not read header"]; got != 1 {
 		t.Fatalf("skipReasons[could not read header] = %d, want 1", got)
+	}
+}
+
+func TestSummaryHeadlineIncludesDiscoveryFailures(t *testing.T) {
+	s := &summary{
+		uploaded:        2,
+		upToDate:        3,
+		skipped:         1,
+		failed:          4,
+		discoveryFailed: 5,
+		uploadedBytes:   610,
+	}
+	for _, tc := range []struct {
+		name   string
+		dryRun bool
+		want   string
+	}{
+		{
+			name: "sync",
+			want: "9 file(s): 2 uploaded, 0 reset, 3 up to date, 1 skipped, 4 failed, 5 discovery error(s) (610 bytes sent)",
+		},
+		{
+			name:   "dry run",
+			dryRun: true,
+			want:   "9 file(s) discovered, 1 skipped, 4 failed, 5 discovery error(s) (dry run, nothing uploaded)",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := summaryHeadline(9, s, tc.dryRun); got != tc.want {
+				t.Fatalf("summaryHeadline = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRunSyncReturnsDiscoveryFailuresInSyncAndDryRun(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	missingExtra := filepath.Join(dir, "missing-extra")
+	if err := config.SaveClient(configPath, config.Client{
+		ServerURL:  "https://akari.invalid",
+		Token:      "test-token",
+		ExtraRoots: []config.ExtraRoot{{Agent: "claude", Path: missingExtra}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_PROJECTS_DIR", filepath.Join(dir, "missing-claude"))
+	t.Setenv("CODEX_SESSIONS_DIR", filepath.Join(dir, "missing-codex"))
+	t.Setenv("PI_DIR", filepath.Join(dir, "missing-pi"))
+
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "sync", args: []string{"--config", configPath}},
+		{name: "dry run", args: []string{"--config", configPath, "--dry-run"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := runSync(context.Background(), tc.args)
+			if err == nil {
+				t.Fatal("runSync succeeded with four missing required roots")
+			}
+			for _, want := range []string{"discover sessions", "missing-claude", "missing-codex", "missing-pi", "missing-extra"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not contain %q", err, want)
+				}
+			}
+		})
 	}
 }
 

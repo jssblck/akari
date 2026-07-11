@@ -77,3 +77,18 @@ jobs:
         # parallelism with no clobbering. -race needs CGO, which the ubuntu runner
         # has.
         run: go test -race ./...
+
+  daemon-windows:
+    name: Test daemon logging (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test Windows daemon behavior
+        run: go test -race ./internal/client/daemon ./cmd/akari

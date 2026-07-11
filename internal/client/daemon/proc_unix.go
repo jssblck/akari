@@ -11,11 +11,11 @@ import (
 
 // spawnDetached starts the watch process in its own session so it survives the
 // parent exiting and the controlling terminal closing.
-func spawnDetached(self string, args []string, log *os.File) (*os.Process, error) {
+func spawnDetached(self string, args []string) (*os.Process, error) {
 	cmd := exec.Command(self, args...)
 	cmd.Stdin = nil
-	cmd.Stdout = log
-	cmd.Stderr = log
+	cmd.Stdout = nil
+	cmd.Stderr = nil
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
 		return nil, err
@@ -23,9 +23,10 @@ func spawnDetached(self string, args []string, log *os.File) (*os.Process, error
 	return cmd.Process, nil
 }
 
-// terminate asks the process to shut down cleanly so it can release its lock.
-func terminate(p *os.Process) error {
-	return p.Signal(syscall.SIGTERM)
+// forceTerminate is used only after local graceful control has failed and the
+// caller has explicitly permitted escalation.
+func forceTerminate(p *os.Process) error {
+	return p.Signal(syscall.SIGKILL)
 }
 
 // lockFile takes a non-blocking exclusive advisory lock on the open file. flock

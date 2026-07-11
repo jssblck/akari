@@ -16,7 +16,6 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
-	"net/http"
 	"os"
 	"sync"
 	"time"
@@ -245,7 +244,7 @@ func ingest(ctx context.Context, opts Options, token string) (ingestStats, error
 	}
 	machine := config.ResolveMachine(config.Client{}, os.Getenv, os.Hostname)
 
-	files, err := discover.Discover(discover.Roots(config.Client{}, os.Getenv, home), discover.Excluder{})
+	files, _, err := discover.Discover(discover.Roots(config.Client{}, os.Getenv, home), discover.Excluder{})
 	if err != nil {
 		return stats, fmt.Errorf("discover sessions: %w", err)
 	}
@@ -255,7 +254,7 @@ func ingest(ctx context.Context, opts Options, token string) (ingestStats, error
 	}
 
 	resolver := resolve.New()
-	client := upload.New(&http.Client{Timeout: 60 * time.Second}, opts.ServerURL, token)
+	client := upload.New(upload.NewHTTPClient(), opts.ServerURL, token)
 	sy := syncer.New(resolver, client, machine, false)
 
 	runCtx := ctx
