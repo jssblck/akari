@@ -35,14 +35,14 @@ func TestResolverCacheEvictsLeastRecentlyUsedDirectory(t *testing.T) {
 	r.cacheLimit = 2
 
 	for _, dir := range dirs[:2] {
-		if key, _, reason := r.project(context.Background(), dir); key == "" || reason != "" {
+		if key, _, reason, err := r.project(context.Background(), dir); key == "" || reason != "" || err != nil {
 			t.Fatalf("resolve %s = key %q, reason %q", dir, key, reason)
 		}
 	}
-	if key, _, _ := r.project(context.Background(), dirs[0]); key == "" {
+	if key, _, _, _ := r.project(context.Background(), dirs[0]); key == "" {
 		t.Fatal("cached first directory lost its key")
 	}
-	if key, _, _ := r.project(context.Background(), dirs[2]); key == "" {
+	if key, _, _, _ := r.project(context.Background(), dirs[2]); key == "" {
 		t.Fatal("third directory did not resolve")
 	}
 
@@ -82,17 +82,17 @@ func TestResolverCacheInvalidatesWhenGitConfigChanges(t *testing.T) {
 	}
 	r := NewWith(git, nil)
 
-	if key, _, _ := r.project(context.Background(), cwd); key != "example.com/owner/first" {
+	if key, _, _, _ := r.project(context.Background(), cwd); key != "example.com/owner/first" {
 		t.Fatalf("first key = %q", key)
 	}
-	if key, _, _ := r.project(context.Background(), cwd); key != "example.com/owner/first" || calls != 3 {
+	if key, _, _, _ := r.project(context.Background(), cwd); key != "example.com/owner/first" || calls != 3 {
 		t.Fatalf("unchanged config key = %q after %d git calls, want cached result", key, calls)
 	}
 	remote = "git@example.com:owner/second.git"
 	if err := os.WriteFile(configPath, []byte("second-config"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if key, _, _ := r.project(context.Background(), cwd); key != "example.com/owner/second" {
+	if key, _, _, _ := r.project(context.Background(), cwd); key != "example.com/owner/second" {
 		t.Fatalf("changed config key = %q, want refreshed remote", key)
 	}
 	if calls != 6 {
@@ -126,12 +126,12 @@ func TestResolverCacheExpiresSuccessfulFingerprint(t *testing.T) {
 	r.now = func() time.Time { return now }
 	r.cacheFallbackTTL = time.Minute
 
-	if key, _, _ := r.project(context.Background(), cwd); key != "example.com/owner/first" {
+	if key, _, _, _ := r.project(context.Background(), cwd); key != "example.com/owner/first" {
 		t.Fatalf("first key = %q", key)
 	}
 	remote = "git@example.com:owner/second.git"
 	now = now.Add(30 * time.Second)
-	if key, _, _ := r.project(context.Background(), cwd); key != "example.com/owner/first" {
+	if key, _, _, _ := r.project(context.Background(), cwd); key != "example.com/owner/first" {
 		t.Fatalf("unexpired key = %q, want cached first remote", key)
 	}
 	if remoteCalls != 1 {
@@ -139,7 +139,7 @@ func TestResolverCacheExpiresSuccessfulFingerprint(t *testing.T) {
 	}
 
 	now = now.Add(31 * time.Second)
-	if key, _, _ := r.project(context.Background(), cwd); key != "example.com/owner/second" {
+	if key, _, _, _ := r.project(context.Background(), cwd); key != "example.com/owner/second" {
 		t.Fatalf("expired key = %q, want refreshed remote", key)
 	}
 	if remoteCalls != 2 {
@@ -147,7 +147,7 @@ func TestResolverCacheExpiresSuccessfulFingerprint(t *testing.T) {
 	}
 }
 
-func TestResolverCacheRetriesTransientRemoteFailureAfterTTL(t *testing.T) {
+func TestResolverDoesNotCacheExhaustedTransientRemoteFailure(t *testing.T) {
 	cwd := t.TempDir()
 	configPath := filepath.Join(cwd, "git-config")
 	if err := os.WriteFile(configPath, []byte("config"), 0o600); err != nil {
@@ -174,28 +174,17 @@ func TestResolverCacheRetriesTransientRemoteFailureAfterTTL(t *testing.T) {
 		}
 	}
 	r := NewWith(git, nil)
-	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
-	r.now = func() time.Time { return now }
-	r.cacheFallbackTTL = time.Minute
+	r.retryDelay = func(int) time.Duration { return 0 }
 
-	if key, _, reason := r.project(context.Background(), cwd); key != "" || reason == "" {
-		t.Fatalf("failed remote resolve = key %q, reason %q", key, reason)
+	if key, _, reason, err := r.project(context.Background(), cwd); key != "" || reason != "" || err == nil {
+		t.Fatalf("failed remote resolve = key %q, reason %q, err %v", key, reason, err)
 	}
 	remoteHealthy = true
-	now = now.Add(30 * time.Second)
-	if key, _, reason := r.project(context.Background(), cwd); key != "" || reason == "" {
-		t.Fatalf("unexpired failed resolve = key %q, reason %q", key, reason)
+	if key, _, reason, err := r.project(context.Background(), cwd); key != "example.com/owner/recovered" || reason != "" || err != nil {
+		t.Fatalf("next lookup = key %q, reason %q, err %v", key, reason, err)
 	}
-	if remoteCalls != 1 {
-		t.Fatalf("unexpired failure made %d remote calls, want 1", remoteCalls)
-	}
-
-	now = now.Add(31 * time.Second)
-	if key, _, reason := r.project(context.Background(), cwd); key != "example.com/owner/recovered" || reason != "" {
-		t.Fatalf("retried remote resolve = key %q, reason %q", key, reason)
-	}
-	if remoteCalls != 2 {
-		t.Fatalf("expired failure made %d remote calls, want 2", remoteCalls)
+	if remoteCalls != gitMaxAttempts+1 {
+		t.Fatalf("remote calls = %d, want %d", remoteCalls, gitMaxAttempts+1)
 	}
 }
 
@@ -225,7 +214,7 @@ func TestResolverCacheFingerprintFailureIsFailOpenForBoundedTTL(t *testing.T) {
 	r.now = func() time.Time { return now }
 	r.cacheFallbackTTL = time.Minute
 
-	if key, _, _ := r.project(context.Background(), cwd); key != "example.com/owner/first" {
+	if key, _, _, _ := r.project(context.Background(), cwd); key != "example.com/owner/first" {
 		t.Fatalf("first key = %q", key)
 	}
 	if err := os.Remove(configPath); err != nil {
@@ -233,7 +222,7 @@ func TestResolverCacheFingerprintFailureIsFailOpenForBoundedTTL(t *testing.T) {
 	}
 	remote = "git@example.com:owner/second.git"
 	now = now.Add(30 * time.Second)
-	if key, _, _ := r.project(context.Background(), cwd); key != "example.com/owner/first" {
+	if key, _, _, _ := r.project(context.Background(), cwd); key != "example.com/owner/first" {
 		t.Fatalf("transient fingerprint failure discarded cached key: %q", key)
 	}
 	if calls != 3 {
@@ -241,7 +230,7 @@ func TestResolverCacheFingerprintFailureIsFailOpenForBoundedTTL(t *testing.T) {
 	}
 
 	now = now.Add(61 * time.Second)
-	if key, _, _ := r.project(context.Background(), cwd); key != "example.com/owner/second" {
+	if key, _, _, _ := r.project(context.Background(), cwd); key != "example.com/owner/second" {
 		t.Fatalf("expired fallback key = %q, want refreshed remote", key)
 	}
 	if calls != 6 {
@@ -274,14 +263,14 @@ func TestResolverCacheRefreshesNoOriginAfterGitConfigChanges(t *testing.T) {
 	}
 	r := NewWith(git, nil)
 
-	if key, _, reason := r.project(context.Background(), cwd); key != "" || reason == "" {
+	if key, _, reason, err := r.project(context.Background(), cwd); key != "" || reason == "" || err != nil {
 		t.Fatalf("no-origin resolve = key %q, reason %q", key, reason)
 	}
 	hasOrigin = true
 	if err := os.WriteFile(configPath, []byte("origin added with a different size"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if key, _, reason := r.project(context.Background(), cwd); key != "example.com/owner/repo" || reason != "" {
+	if key, _, reason, err := r.project(context.Background(), cwd); key != "example.com/owner/repo" || reason != "" || err != nil {
 		t.Fatalf("post-origin resolve = key %q, reason %q", key, reason)
 	}
 }
