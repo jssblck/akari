@@ -4,7 +4,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"net/http"
 	"os"
 	"runtime"
 	"sort"
@@ -116,7 +115,7 @@ func runSync(ctx context.Context, args []string) error {
 	}
 
 	resolver := resolve.New()
-	client := upload.New(&http.Client{Timeout: 60 * time.Second}, cfg.ServerURL, cfg.Token)
+	client := upload.New(upload.NewHTTPClient(), cfg.ServerURL, cfg.Token)
 	sync := syncer.New(resolver, client, machine, opts.finalize)
 
 	// A time limit is a self-inflicted graceful shutdown: deadline wraps the
