@@ -35,6 +35,35 @@ func TestNewHTTPClientBoundsSetupWithoutTotalTimeout(t *testing.T) {
 	if transport.ResponseHeaderTimeout != defaultResponseHeaderTimeout {
 		t.Fatalf("response header timeout = %s, want %s", transport.ResponseHeaderTimeout, defaultResponseHeaderTimeout)
 	}
+	if c.CheckRedirect == nil {
+		t.Fatal("CheckRedirect is not configured, want redirects refused")
+	}
+}
+
+// TestNewHTTPClientRefusesRedirects guards the assumption behind progressBody:
+// req.Clone shares GetBody by reference, so a transport-driven redirect replay
+// would read a request body directly rather than through progressBody, losing
+// idle-progress protection on a request that has no other wall-clock timeout.
+// Ingest endpoints never redirect, so the client must refuse to follow one.
+func TestNewHTTPClientRefusesRedirects(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "should not be reached")
+	}))
+	t.Cleanup(target.Close)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewHTTPClient()
+	resp, err := c.Get(srv.URL)
+	if err == nil {
+		resp.Body.Close()
+		t.Fatal("GET through a redirecting server succeeded, want the redirect refused")
+	}
+	if !errors.Is(err, errIngestRedirectRefused) {
+		t.Fatalf("error = %v, want errIngestRedirectRefused", err)
+	}
 }
 
 type pacedReader struct {
@@ -297,6 +326,73 @@ func TestRetryResumesAfterCommittedChunkResponseStalls(t *testing.T) {
 	}
 	if out.StoredBytes != int64(len(gotStored)) {
 		t.Fatalf("resumed cursor = %d, want %d", out.StoredBytes, len(gotStored))
+	}
+}
+
+// TestProgressDeadlineNoSpuriousCancelWhileProgressContinues is a regression test
+// for the Reset race in progressDeadline: once the runtime has dispatched a
+// *time.Timer's callback, Reset cannot retract it, so a naive stopped bool cannot
+// tell "reset before expiry" apart from "reset racing an already-dispatched
+// callback". Here progress lands just shy of the window's expiry, over and over,
+// so each call's Reset repeatedly races the timer's own dispatch; a correct
+// implementation must never treat steady progress like this as a stall.
+func TestProgressDeadlineNoSpuriousCancelWhileProgressContinues(t *testing.T) {
+	const window = 60 * time.Millisecond
+	const margin = 8 * time.Millisecond
+	const iterations = 15
+
+	var mu sync.Mutex
+	var cancelErr error
+	cancel := context.CancelCauseFunc(func(cause error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if cancelErr == nil {
+			cancelErr = cause
+		}
+	})
+
+	d := newProgressDeadline(window, cancel, "test")
+	defer d.stop()
+
+	for i := 0; i < iterations; i++ {
+		time.Sleep(window - margin)
+		d.progress(window)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if cancelErr != nil {
+		t.Fatalf("progress landed every %s against a %s window, but the deadline still fired: %v", window-margin, window, cancelErr)
+	}
+}
+
+// TestProgressDeadlineFiresWhenProgressStops complements the no-spurious-cancel
+// test above: once progress genuinely stops arriving, the deadline must still
+// fire promptly with an *idleProgressError for the configured phase.
+func TestProgressDeadlineFiresWhenProgressStops(t *testing.T) {
+	const window = 30 * time.Millisecond
+
+	done := make(chan error, 1)
+	cancel := context.CancelCauseFunc(func(cause error) { done <- cause })
+
+	d := newProgressDeadline(window, cancel, "test phase")
+	defer d.stop()
+
+	d.progress(window)
+	time.Sleep(window / 2)
+	d.progress(window) // one more heartbeat, then progress genuinely stops
+
+	select {
+	case err := <-done:
+		var idle *idleProgressError
+		if !errors.As(err, &idle) {
+			t.Fatalf("cancel cause = %v, want *idleProgressError", err)
+		}
+		if idle.phase != "test phase" {
+			t.Fatalf("idle phase = %q, want %q", idle.phase, "test phase")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("deadline did not fire after progress genuinely stopped")
 	}
 }
 
