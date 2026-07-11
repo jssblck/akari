@@ -3,6 +3,7 @@ package httpapi
 import (
 	"container/list"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/jssblck/akari/internal/config"
 	"github.com/jssblck/akari/internal/server/ogimage"
+	"github.com/jssblck/akari/internal/server/requestbudget"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/web"
 )
@@ -258,6 +260,12 @@ func (c *analyticsSnapshotCache) invalidateAll() {
 }
 
 func (s *Server) computeAnalyticsSnapshot(ctx context.Context, key analyticsSnapshotKey, now time.Time) (analyticsPageSnapshot, error) {
+	release, err := s.budget.Acquire(ctx, requestbudget.PublicAnalytics)
+	if err != nil {
+		return analyticsPageSnapshot{}, err
+	}
+	defer release()
+
 	filter := store.AnalyticsFilter{
 		Since: web.RangeSince(key.rangeKey, now),
 		Until: ogimage.DefaultUntil(now),
@@ -281,6 +289,17 @@ func (s *Server) computeAnalyticsSnapshot(ctx context.Context, key analyticsSnap
 	default:
 		return analyticsPageSnapshot{}, fmt.Errorf("unknown analytics scope kind %d", key.scope.kind)
 	}
+}
+
+func analyticsSnapshotErrorStatus(w http.ResponseWriter, r *http.Request, err error) (int, bool) {
+	if r.Context().Err() != nil {
+		return 0, false
+	}
+	if errors.Is(err, requestbudget.ErrWaitTimeout) {
+		w.Header().Set("Retry-After", requestBudgetRetryAfter)
+		return http.StatusServiceUnavailable, true
+	}
+	return http.StatusInternalServerError, true
 }
 
 func observeAnalyticsSnapshot(w http.ResponseWriter, started time.Time, meta analyticsSnapshotMeta, freshFor, staleFor time.Duration) {

@@ -167,7 +167,10 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 			scope: analyticsScope{kind: analyticsUserScope, id: selected[0]}, rangeKey: rng,
 		})
 		if snapshotErr != nil {
-			s.renderErrorNav(w, r, http.StatusInternalServerError, "overview", "Could not load analytics.")
+			status, respond := analyticsSnapshotErrorStatus(w, r, snapshotErr)
+			if respond {
+				s.renderErrorNav(w, r, status, "overview", "Could not load analytics.")
+			}
 			return
 		}
 		analytics = snapshot.analytics
@@ -527,7 +530,10 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 			scope: analyticsScope{kind: analyticsProjectScope, id: id}, rangeKey: rng,
 		})
 		if snapshotErr != nil {
-			s.renderError(w, r, http.StatusInternalServerError, "Could not load analytics.")
+			status, respond := analyticsSnapshotErrorStatus(w, r, snapshotErr)
+			if respond {
+				s.renderError(w, r, status, "Could not load analytics.")
+			}
 			return
 		}
 		analytics, insights = snapshot.analytics, snapshot.insights

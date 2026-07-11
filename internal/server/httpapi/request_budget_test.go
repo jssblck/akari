@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -85,6 +86,24 @@ func TestAdmissionTimeoutIsRetryable(t *testing.T) {
 	}
 }
 
+func TestUnpublishedAnalyticsChecksAccessBeforeAdmission(t *testing.T) {
+	api, srv := newBudgetTestServer(t, 10*time.Millisecond)
+	hold, err := api.budget.Acquire(context.Background(), requestbudget.MCPSpool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hold()
+
+	resp, err := http.Get(srv.URL + "/p/999999")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("unpublished analytics under exhausted budget = %d, want gate-first 404", resp.StatusCode)
+	}
+}
+
 func TestOAuthRegistrationGrowthCeilingIsRetryable(t *testing.T) {
 	api, srv := newBudgetTestServer(t, time.Second)
 	api.Cfg.OAuthRegistrationsPerHour = 1
@@ -109,7 +128,14 @@ func TestOAuthRegistrationGrowthCeilingIsRetryable(t *testing.T) {
 }
 
 func TestExpensiveRoutesPublishClassMetrics(t *testing.T) {
-	_, srv := newBudgetTestServer(t, time.Second)
+	api, srv := newBudgetTestServer(t, time.Second)
+	projectID, err := api.Store.UpsertProject(context.Background(), "github.com/ada/notes", "github.com", "ada", "notes", "notes", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	if err := api.Store.PublishProjectOverview(context.Background(), projectID); err != nil {
+		t.Fatalf("publish project: %v", err)
+	}
 	requests := []struct {
 		method string
 		path   string
@@ -118,7 +144,7 @@ func TestExpensiveRoutesPublishClassMetrics(t *testing.T) {
 		{http.MethodPost, "/api/v1/auth/register", `{"username":"grace","password":"hopper-1906"}`},
 		{http.MethodPost, "/oauth/register", validOAuthRegistration},
 		{http.MethodPost, "/mcp", `{}`},
-		{http.MethodGet, "/p/999999", ""},
+		{http.MethodGet, fmt.Sprintf("/p/%d", projectID), ""},
 	}
 	for _, req := range requests {
 		r, err := http.NewRequest(req.method, srv.URL+req.path, strings.NewReader(req.body))

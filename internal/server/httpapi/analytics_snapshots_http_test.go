@@ -13,6 +13,7 @@ import (
 
 	"github.com/jssblck/akari/internal/config"
 	"github.com/jssblck/akari/internal/server/parse"
+	"github.com/jssblck/akari/internal/server/requestbudget"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/storetest"
 	"github.com/jssblck/akari/internal/server/web"
@@ -146,5 +147,58 @@ func TestPublicAndAuthenticatedProjectShareSnapshot(t *testing.T) {
 	resp.Body.Close()
 	if got := computes.Load(); got != 1 {
 		t.Fatalf("public then authenticated project ran %d computes, want 1 shared generation", got)
+	}
+}
+
+func TestAnalyticsBudgetAppliesOnlyToCoalescedRefresh(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	worker := parse.NewWorker(st, 1, 0)
+	api := New(st, config.Server{
+		RequestBudgetCapacity:      int(requestbudget.MinCapacity),
+		RequestBudgetWaitTimeout:   10 * time.Millisecond,
+		AnalyticsSnapshotFreshness: time.Hour,
+		AnalyticsSnapshotLimit:     8,
+	}, worker)
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	api.analyticsSnapshots.now = func() time.Time { return now }
+	srv := httptest.NewServer(api.Routes())
+	t.Cleanup(srv.Close)
+
+	projectID, err := st.UpsertProject(context.Background(), "github.com/ada/notes", "github.com", "ada", "notes", "notes", "remote")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	if err := st.PublishProjectOverview(context.Background(), projectID); err != nil {
+		t.Fatalf("publish project: %v", err)
+	}
+	path := srv.URL + web.PublicProjectPath(projectID)
+	resp := mustGet(t, http.DefaultClient, path)
+	if resp.StatusCode != http.StatusOK || !strings.HasPrefix(resp.Header.Get("X-Akari-Analytics-Snapshot"), "state=miss;") {
+		resp.Body.Close()
+		t.Fatalf("cold request = (status %d, snapshot %q), want (200, miss)", resp.StatusCode, resp.Header.Get("X-Akari-Analytics-Snapshot"))
+	}
+	resp.Body.Close()
+
+	hold, err := api.budget.Acquire(context.Background(), requestbudget.MCPSpool)
+	if err != nil {
+		t.Fatalf("hold budget: %v", err)
+	}
+	defer hold()
+	resp = mustGet(t, http.DefaultClient, path)
+	if resp.StatusCode != http.StatusOK || !strings.HasPrefix(resp.Header.Get("X-Akari-Analytics-Snapshot"), "state=hit;") {
+		resp.Body.Close()
+		t.Fatalf("warm request under exhausted budget = (status %d, snapshot %q), want (200, hit)", resp.StatusCode, resp.Header.Get("X-Akari-Analytics-Snapshot"))
+	}
+	resp.Body.Close()
+
+	now = now.Add(2 * time.Hour)
+	resp = mustGet(t, http.DefaultClient, path)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expired request under exhausted budget = %d, want 503", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Retry-After"); got != requestBudgetRetryAfter {
+		t.Fatalf("Retry-After = %q, want %q", got, requestBudgetRetryAfter)
 	}
 }

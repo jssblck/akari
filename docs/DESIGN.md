@@ -261,13 +261,17 @@ or temporary-disk cost is meaningful. The default capacity is 16 units, where a
 unit represents approximately 8 MiB of bounded memory or an equivalent database
 work share. Password hashing and verification weigh 8 (Argon2 allocates 64 MiB),
 MCP POST parsing and spooling weigh 12 (the 100 MiB request ceiling owned by
-issue #134), public
-analytics weigh 4, and dynamic OAuth registration weighs 1. A shared queue lets a
+issue #134), public analytics snapshot refreshes weigh 4, and dynamic OAuth
+registration weighs 1.
+Snapshot hits need no admission; one singleflight refresh holds the weight for all
+waiters on that scope. A shared queue lets a
 mixed workload consume the same finite capacity instead of bypassing independent
 per-route concurrency limits.
 
 Admission waits for up to `AKARI_REQUEST_BUDGET_WAIT_TIMEOUT` (5 seconds by
 default). A request that cannot enter receives HTTP 503 with `Retry-After: 1`.
+An analytics refresh may serve a still-eligible stale generation instead, as
+documented in [public-analytics-snapshots.md](./public-analytics-snapshots.md).
 Disconnecting cancels its wait, and every admitted handler releases its weight on
 all exits. `/metrics` exposes queue depth, wait histograms, timeout and cancellation
 counts, acquisitions, in-use weight, and per-class utilization in Prometheus text

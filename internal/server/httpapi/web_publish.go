@@ -144,7 +144,10 @@ func (s *Server) handlePublicProject(w http.ResponseWriter, r *http.Request) {
 		scope: analyticsScope{kind: analyticsProjectScope, id: id}, rangeKey: rng,
 	})
 	if err != nil {
-		renderPublicError(w, r, http.StatusInternalServerError, "Could not load project overview.")
+		status, respond := analyticsSnapshotErrorStatus(w, r, err)
+		if respond {
+			renderPublicError(w, r, status, "Could not load project overview.")
+		}
 		return
 	}
 	observeAnalyticsSnapshot(w, started, meta, s.analyticsSnapshots.freshFor, s.analyticsSnapshots.staleFor)
@@ -189,7 +192,10 @@ func (s *Server) handlePublicOverview(w http.ResponseWriter, r *http.Request) {
 		scope: analyticsScope{kind: analyticsUserScope, id: u.ID}, rangeKey: rng,
 	})
 	if err != nil {
-		renderPublicError(w, r, http.StatusInternalServerError, "Could not load overview.")
+		status, respond := analyticsSnapshotErrorStatus(w, r, err)
+		if respond {
+			renderPublicError(w, r, status, "Could not load overview.")
+		}
 		return
 	}
 	observeAnalyticsSnapshot(w, started, meta, s.analyticsSnapshots.freshFor, s.analyticsSnapshots.staleFor)

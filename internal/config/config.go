@@ -14,9 +14,15 @@ import (
 )
 
 const (
+	// DefaultAnalyticsSnapshotFreshness keeps programmatic Server construction
+	// aligned with LoadServer.
 	DefaultAnalyticsSnapshotFreshness = time.Minute
-	DefaultAnalyticsSnapshotStaleFor  = 15 * time.Minute
-	DefaultAnalyticsSnapshotLimit     = 256
+	// DefaultAnalyticsSnapshotStaleFor keeps programmatic Server construction
+	// aligned with LoadServer.
+	DefaultAnalyticsSnapshotStaleFor = 15 * time.Minute
+	// DefaultAnalyticsSnapshotLimit keeps programmatic Server construction aligned
+	// with LoadServer.
+	DefaultAnalyticsSnapshotLimit = 256
 )
 
 // Server holds the akari-server runtime configuration.
