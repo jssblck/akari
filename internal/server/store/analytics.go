@@ -123,9 +123,9 @@ type AnalyticsFilter struct {
 	// OmitUsers skips the by-owning-user cost split in Analytics (analyticsByUser,
 	// leaving Analytics.Users nil) when the caller renders no by-user breakdown. The
 	// split groups every matching row by user and materializes one aggregate per
-	// distinct user, so its size grows with the scope's user count; the public project
-	// overview (whose panel passes showUsers false) and the OG card set this so those
-	// reads do not build an aggregate they throw away. Insights ignores it: its
+	// distinct user, so its size grows with the scope's user count. Standalone callers
+	// such as the project OG card set this when no authenticated view shares their
+	// result. Insights ignores it: its
 	// optional instrument groups are named per call via InsightsPanels instead.
 	OmitUsers bool
 	// Bucket, when non-empty ("day" or "week"), asks Insights to also compute the trend
@@ -233,8 +233,8 @@ func (s *Store) analyticsFrom(ctx context.Context, q querier, f AnalyticsFilter)
 	a.Agents = agents
 
 	// The by-user split is skipped when the caller will not render it (OmitUsers), so a
-	// public project overview does not build a per-user aggregate proportional to the
-	// project's user count only to discard it. It sits outside the headline arithmetic
+	// callers that need no user rows do not build an aggregate proportional to the
+	// scope's user count only to discard it. It sits outside the headline arithmetic
 	// below (that sums the by-agent split), so leaving Users nil changes no total.
 	if !f.OmitUsers {
 		users, err := s.analyticsByUser(ctx, q, f)

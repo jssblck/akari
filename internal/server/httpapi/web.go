@@ -160,10 +160,24 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	}
 	selected := web.SelectedUserIDs(r.URL.Query()["user"], users)
 	filter := store.AnalyticsFilter{Since: web.RangeSince(rng, time.Now()), UserIDs: selected}
-	analytics, err := s.Store.Analytics(r.Context(), filter)
-	if err != nil {
-		s.renderErrorNav(w, r, http.StatusInternalServerError, "overview", "Could not load analytics.")
-		return
+	var analytics store.Analytics
+	if len(selected) == 1 {
+		started := time.Now()
+		snapshot, meta, snapshotErr := s.analyticsSnapshots.get(r.Context(), analyticsSnapshotKey{
+			scope: analyticsScope{kind: analyticsUserScope, id: selected[0]}, rangeKey: rng,
+		})
+		if snapshotErr != nil {
+			s.renderErrorNav(w, r, http.StatusInternalServerError, "overview", "Could not load analytics.")
+			return
+		}
+		analytics = snapshot.analytics
+		observeAnalyticsSnapshot(w, started, meta, s.analyticsSnapshots.freshFor, s.analyticsSnapshots.staleFor)
+	} else {
+		analytics, err = s.Store.Analytics(r.Context(), filter)
+		if err != nil {
+			s.renderErrorNav(w, r, http.StatusInternalServerError, "overview", "Could not load analytics.")
+			return
+		}
 	}
 	setDashboardCache(w)
 	render(w, r, http.StatusOK, web.OverviewPage(s.pageForNav(r, "Overview", "overview"), analytics, rng, users, selected))
@@ -480,9 +494,10 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 	}
 	// The table draws from the same windowed usage base as the panel (WindowSessionPage,
 	// not the lifetime-rollup ListSessions), so each row's tokens and cost are its
-	// in-window share and the visible rows sum to the panel headline rather than
-	// overcounting sessions whose usage predates the window. Past the row cap the page
-	// carries a remainder aggregate so the table still reconciles with the headline.
+	// in-window share. On an unfiltered page the aggregate panel may be up to the shared
+	// snapshot freshness target behind these live rows; both use the same scope and
+	// reconcile at the snapshot instant. Past the row cap the page carries a remainder
+	// aggregate so the table remains complete.
 	page, err := s.Store.WindowSessionPage(r.Context(), filter)
 	if err != nil {
 		s.renderError(w, r, http.StatusInternalServerError, "Could not load sessions.")
@@ -494,24 +509,40 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 		s.renderError(w, r, http.StatusInternalServerError, "Could not load filters.")
 		return
 	}
-	// The usage panel scopes to the same agent/user/machine the session table does, so
-	// the headline and the rows reconcile under a filter rather than the panel staying
-	// project-wide while the rows narrow. The same filter values feed both: the panel
+	// The usage panel scopes to the same agent/user/machine the session table does. A
+	// filtered view reads live, while the unfiltered shape reuses the public snapshot.
+	// The same filter values feed both live reads: the panel
 	// matches the username through the analytics base (an unknown name scopes to
 	// nothing, matching the empty table) rather than a separate lookup whose error
 	// would have to be invented away.
 	af := store.AnalyticsFilter{
 		ProjectID: id, Since: since, Username: filter.Username, Agent: filter.Agent, Machine: filter.Machine,
 	}
-	analytics, err := s.Store.Analytics(r.Context(), af)
-	if err != nil {
-		s.renderError(w, r, http.StatusInternalServerError, "Could not load analytics.")
-		return
+	var analytics store.Analytics
+	var insights store.Insights
+	sharedSnapshot := filter.Username == "" && filter.Agent == "" && filter.Machine == ""
+	if sharedSnapshot {
+		started := time.Now()
+		snapshot, meta, snapshotErr := s.analyticsSnapshots.get(r.Context(), analyticsSnapshotKey{
+			scope: analyticsScope{kind: analyticsProjectScope, id: id}, rangeKey: rng,
+		})
+		if snapshotErr != nil {
+			s.renderError(w, r, http.StatusInternalServerError, "Could not load analytics.")
+			return
+		}
+		analytics, insights = snapshot.analytics, snapshot.insights
+		observeAnalyticsSnapshot(w, started, meta, s.analyticsSnapshots.freshFor, s.analyticsSnapshots.staleFor)
+	} else {
+		analytics, err = s.Store.Analytics(r.Context(), af)
+		if err != nil {
+			s.renderError(w, r, http.StatusInternalServerError, "Could not load analytics.")
+			return
+		}
 	}
 	// The quality band draws from the same scope as the usage panel and the table (the same
-	// project, window, and any active user/agent/machine narrowing), so the grades, outcomes,
-	// tools, and churn describe exactly the sessions the rows below list rather than a
-	// project-wide read that would drift from the filtered table. It names a trend Bucket so
+	// project, window, and any active user/agent/machine narrowing). Unfiltered analytics
+	// and quality come from one immutable database generation; filtered views read both
+	// live. It names a trend Bucket so
 	// Insights computes the time-bucketed grid the band's charts draw: the project page renders
 	// the same client-side instruments /insights does, scoped here, rather than the old
 	// server-drawn distribution bars. The bucket also tightens the window to the charted span,
@@ -529,15 +560,17 @@ func (s *Server) handleProjectPage(w http.ResponseWriter, r *http.Request) {
 	// The band renders only the signal series and the Tools instrument, so the read asks
 	// for exactly that (QualityBandPanels): the gallery, velocity, economics, rhythm, and
 	// subagent scans the fleet page pays for are skipped here, where nothing mounts them.
-	insStart := time.Now()
-	insights, err := s.Store.Insights(r.Context(), insAf, store.QualityBandPanels)
-	if err != nil {
-		s.renderError(w, r, http.StatusInternalServerError, "Could not load quality signals.")
-		return
+	if !sharedSnapshot {
+		insStart := time.Now()
+		insights, err = s.Store.Insights(r.Context(), insAf, store.QualityBandPanels)
+		if err != nil {
+			s.renderError(w, r, http.StatusInternalServerError, "Could not load quality signals.")
+			return
+		}
+		// The same load-time readout /insights carries, so a regression in the project page's
+		// store reads shows in devtools the same way.
+		w.Header().Set("Server-Timing", fmt.Sprintf("insights;dur=%.1f", float64(time.Since(insStart).Microseconds())/1000))
 	}
-	// The same load-time readout /insights carries, so a regression in the project page's
-	// store reads shows in devtools the same way.
-	w.Header().Set("Server-Timing", fmt.Sprintf("insights;dur=%.1f", float64(time.Since(insStart).Microseconds())/1000))
 	wf := web.Facets{Agents: facets.Agents, Machines: facets.Machines, Users: facets.Users}
 	render(w, r, http.StatusOK, web.ProjectPage(s.pageForNav(r, proj.RemoteKey, "projects"), proj, page.Sessions, page.Remainder, wf, filter, analytics, insights, rng))
 }

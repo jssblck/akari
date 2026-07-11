@@ -40,6 +40,9 @@ type Server struct {
 	// so the range views always describe one corpus state and every load is a map
 	// lookup. See insights_refresh.go.
 	insights *insightsRefresher
+	// analyticsSnapshots bounds and shares user/project aggregate generations across
+	// public pages and the authenticated views with the same data shape.
+	analyticsSnapshots *analyticsSnapshotCache
 }
 
 // New builds a Server. The parse worker is shared with the server main loop; here
@@ -66,6 +69,12 @@ func New(st *store.Store, cfg config.Server, worker *parse.Worker) *Server {
 	s.insights = newInsightsRefresher(func(ctx context.Context) (map[string]store.Insights, error) {
 		return computeFleetInsights(ctx, st)
 	})
+	s.analyticsSnapshots = newAnalyticsSnapshotCache(
+		cfg.AnalyticsSnapshotFreshness,
+		cfg.AnalyticsSnapshotStaleFor,
+		cfg.AnalyticsSnapshotLimit,
+		s.computeAnalyticsSnapshot,
+	)
 	s.mcp = newMCPHandler(s)
 	// Fan fleet-rebuild progress out to any browser watching the status stream. The
 	// hub carries the status JSON as the payload, so a watcher updates its progress
@@ -78,6 +87,7 @@ func New(st *store.Store, cfg config.Server, worker *parse.Worker) *Server {
 		// recompute now rather than serving pre-reparse figures until the next tick.
 		if !status.InProgress {
 			s.insights.kickRefresh()
+			s.analyticsSnapshots.invalidateAll()
 		}
 	})
 	// Wake the browsers watching a session when its rebuild commits, so the live

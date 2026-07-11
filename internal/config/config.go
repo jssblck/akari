@@ -13,6 +13,12 @@ import (
 	"time"
 )
 
+const (
+	DefaultAnalyticsSnapshotFreshness = time.Minute
+	DefaultAnalyticsSnapshotStaleFor  = 15 * time.Minute
+	DefaultAnalyticsSnapshotLimit     = 256
+)
+
 // Server holds the akari-server runtime configuration.
 type Server struct {
 	// DatabaseURL is the Postgres connection string (AKARI_DATABASE_URL).
@@ -100,6 +106,18 @@ type Server struct {
 	// dynamic client registrations (AKARI_OAUTH_REGISTRATIONS_PER_HOUR). It applies
 	// across every server replica and defaults to the abuse-only threshold 1000.
 	OAuthRegistrationsPerHour int
+	// AnalyticsSnapshotFreshness is how long a completed user or project analytics
+	// snapshot is considered fresh (AKARI_ANALYTICS_SNAPSHOT_FRESHNESS). Requests
+	// after this interval coalesce behind one refresh. Defaults to 1m.
+	AnalyticsSnapshotFreshness time.Duration
+	// AnalyticsSnapshotStaleFor is the additional interval an expired analytics
+	// snapshot may be served when its refresh fails
+	// (AKARI_ANALYTICS_SNAPSHOT_STALE_FOR). Defaults to 15m.
+	AnalyticsSnapshotStaleFor time.Duration
+	// AnalyticsSnapshotLimit bounds the process-local analytics snapshot cache
+	// (AKARI_ANALYTICS_SNAPSHOT_LIMIT). Least-recently-used entries are evicted.
+	// Defaults to 256.
+	AnalyticsSnapshotLimit int
 }
 
 const (
@@ -179,6 +197,24 @@ func LoadServer() (Server, error) {
 		return Server{}, fmt.Errorf("AKARI_OAUTH_REGISTRATIONS_PER_HOUR: %w", err)
 	}
 	s.OAuthRegistrationsPerHour = registrations
+	freshness, err := parseDuration(os.Getenv("AKARI_ANALYTICS_SNAPSHOT_FRESHNESS"), DefaultAnalyticsSnapshotFreshness)
+	if err != nil {
+		return Server{}, fmt.Errorf("AKARI_ANALYTICS_SNAPSHOT_FRESHNESS: %w", err)
+	}
+	if freshness <= 0 {
+		return Server{}, fmt.Errorf("AKARI_ANALYTICS_SNAPSHOT_FRESHNESS must be positive")
+	}
+	s.AnalyticsSnapshotFreshness = freshness
+	staleFor, err := parseDuration(os.Getenv("AKARI_ANALYTICS_SNAPSHOT_STALE_FOR"), DefaultAnalyticsSnapshotStaleFor)
+	if err != nil {
+		return Server{}, fmt.Errorf("AKARI_ANALYTICS_SNAPSHOT_STALE_FOR: %w", err)
+	}
+	s.AnalyticsSnapshotStaleFor = staleFor
+	limit, err := parsePositiveInt(os.Getenv("AKARI_ANALYTICS_SNAPSHOT_LIMIT"), DefaultAnalyticsSnapshotLimit)
+	if err != nil {
+		return Server{}, fmt.Errorf("AKARI_ANALYTICS_SNAPSHOT_LIMIT: %w", err)
+	}
+	s.AnalyticsSnapshotLimit = limit
 	return s, nil
 }
 

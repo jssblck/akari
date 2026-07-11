@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/jssblck/akari/internal/server/auth"
-	"github.com/jssblck/akari/internal/server/ogimage"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/web"
 )
@@ -47,6 +46,7 @@ func (s *Server) handlePublishOverview(w http.ResponseWriter, r *http.Request) {
 		s.renderError(w, r, http.StatusInternalServerError, "Could not publish overview.")
 		return
 	}
+	s.analyticsSnapshots.invalidate(analyticsScope{kind: analyticsUserScope, id: p.UserID})
 	s.setNotice(w, "Overview published")
 	http.Redirect(w, r, "/account", http.StatusSeeOther)
 }
@@ -59,6 +59,7 @@ func (s *Server) handleUnpublishOverview(w http.ResponseWriter, r *http.Request)
 		s.renderError(w, r, http.StatusInternalServerError, "Could not update overview.")
 		return
 	}
+	s.analyticsSnapshots.invalidate(analyticsScope{kind: analyticsUserScope, id: p.UserID})
 	s.setNotice(w, "Overview unpublished")
 	http.Redirect(w, r, "/account", http.StatusSeeOther)
 }
@@ -84,6 +85,7 @@ func (s *Server) handlePublishProjectOverview(w http.ResponseWriter, r *http.Req
 		s.renderError(w, r, http.StatusInternalServerError, "Could not publish overview.")
 		return
 	}
+	s.analyticsSnapshots.invalidate(analyticsScope{kind: analyticsProjectScope, id: id})
 	s.setNotice(w, "Overview published")
 	http.Redirect(w, r, fmt.Sprintf("/projects/%d", id), http.StatusSeeOther)
 }
@@ -106,6 +108,7 @@ func (s *Server) handleUnpublishProjectOverview(w http.ResponseWriter, r *http.R
 		s.renderError(w, r, http.StatusInternalServerError, "Could not update overview.")
 		return
 	}
+	s.analyticsSnapshots.invalidate(analyticsScope{kind: analyticsProjectScope, id: id})
 	s.setNotice(w, "Overview unpublished")
 	http.Redirect(w, r, fmt.Sprintf("/projects/%d", id), http.StatusSeeOther)
 }
@@ -123,13 +126,9 @@ func (s *Server) handlePublicProject(w http.ResponseWriter, r *http.Request) {
 		renderPublicError(w, r, http.StatusNotFound, "This project overview is not published, or the link has expired.")
 		return
 	}
-	// The public gate and the aggregate reads below are deliberately not one atomic
-	// transaction. This matches handlePublicOverview: a concurrent unpublish landing
-	// between the gate read and the aggregate reads at worst serves one more
-	// already-in-flight aggregate page (no session, no secret, just usage totals the
-	// owner made public moments ago) before the next request 404s. The atomic
-	// gate-and-read fold is reserved for the cached OG card (PublicOverviewCard), where
-	// a stale read would persist in a TTL cache rather than vanishing on the next load.
+	// Resolve the publication gate before consulting the shared snapshot. The cached
+	// generation contains aggregate data only, but it can never authorize its own use:
+	// every request must still prove that the project is public.
 	proj, err := s.Store.PublicProjectOverview(r.Context(), id)
 	if errors.Is(err, store.ErrNotFound) {
 		renderPublicError(w, r, http.StatusNotFound, "This project overview is not published, or the link has expired.")
@@ -139,43 +138,17 @@ func (s *Server) handlePublicProject(w http.ResponseWriter, r *http.Request) {
 		renderPublicError(w, r, http.StatusInternalServerError, "Could not load project overview.")
 		return
 	}
-	// The window bounds both the usage panel and the quality band, exactly as the
-	// signed-in project page pairs them; the public page carries no filter toolbar, so
-	// the scope is the whole project (no agent/user/machine narrowing).
 	rng := web.ParseRange(r.URL.Query().Get("range"))
-	now := time.Now()
-	since := web.RangeSince(rng, now)
-	// One filter scopes both projections the public page renders (the usage panel and the
-	// quality band), so they cannot drift on the same page: same project, same window, same
-	// end-of-today upper bound, same OmitUsers. The upper bound (matching the public user
-	// overview) makes the usage headline cover exactly the days the trailing-year heatmap
-	// draws (the grid stops at today), and applying it to the quality band too keeps the two
-	// on one window rather than letting a future-started session count in the band while its
-	// future usage is excluded from the panel. OmitUsers skips the by-user cost split the
-	// public page never renders, so the read does not build a per-user result proportional
-	// to the project's user count only to discard it.
-	//
-	// This shared upper bound is the one intentional gap from the signed-in project page,
-	// which leaves both projections unbounded above so its usage panel reconciles with its
-	// live session table (windowed on the same unbounded dated-usage base). The two surfaces
-	// therefore agree for all real, past-dated data and can differ only by a future-dated
-	// event, a malformed-transcript case that does not occur in practice (occurred_at and
-	// started_at are stamped from the transcript's own turns). See
-	// TestPublicAndAuthedProjectAnalyticsReconcile, which pins that gap.
-	af := store.AnalyticsFilter{ProjectID: id, Since: since, Until: ogimage.DefaultUntil(now), OmitUsers: true}
-	analytics, err := s.Store.Analytics(r.Context(), af)
+	started := time.Now()
+	snapshot, meta, err := s.analyticsSnapshots.get(r.Context(), analyticsSnapshotKey{
+		scope: analyticsScope{kind: analyticsProjectScope, id: id}, rangeKey: rng,
+	})
 	if err != nil {
 		renderPublicError(w, r, http.StatusInternalServerError, "Could not load project overview.")
 		return
 	}
-	// The public band renders the bar panels only (grades, outcomes, archetypes, tools,
-	// churn), so the read asks for the quality-band set; with no Bucket named it computes
-	// no trend series either.
-	insights, err := s.Store.Insights(r.Context(), af, store.QualityBandPanels)
-	if err != nil {
-		renderPublicError(w, r, http.StatusInternalServerError, "Could not load project overview.")
-		return
-	}
+	observeAnalyticsSnapshot(w, started, meta, s.analyticsSnapshots.freshFor, s.analyticsSnapshots.staleFor)
+	analytics, insights := snapshot.analytics, snapshot.insights
 	og := web.OGMeta{
 		Title:       web.ProjectTitle(proj) + " · usage overview",
 		Description: "A snapshot of AI coding-agent usage on " + web.ProjectTitle(proj) + " on akari.",
@@ -211,20 +184,16 @@ func (s *Server) handlePublicOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rng := web.ParseRange(r.URL.Query().Get("range"))
-	// The upper bound matches the card's (ogimage.DefaultUntil): the end of today, so
-	// the page's headline totals cover exactly the days its heatmap draws (the grid
-	// stops at today) rather than folding in a future-dated event no cell shows, and
-	// the card advertised beside the default-range page reads the identical scope.
-	now := time.Now()
-	analytics, err := s.Store.Analytics(r.Context(), store.AnalyticsFilter{
-		Since:   web.RangeSince(rng, now),
-		Until:   ogimage.DefaultUntil(now),
-		UserIDs: []int64{u.ID},
+	started := time.Now()
+	snapshot, meta, err := s.analyticsSnapshots.get(r.Context(), analyticsSnapshotKey{
+		scope: analyticsScope{kind: analyticsUserScope, id: u.ID}, rangeKey: rng,
 	})
 	if err != nil {
 		renderPublicError(w, r, http.StatusInternalServerError, "Could not load overview.")
 		return
 	}
+	observeAnalyticsSnapshot(w, started, meta, s.analyticsSnapshots.freshFor, s.analyticsSnapshots.staleFor)
+	analytics := snapshot.analytics
 	og := web.OGMeta{
 		Title:       u.Username + " · usage overview",
 		Description: "A snapshot of " + u.Username + "'s AI coding-agent usage on akari.",
