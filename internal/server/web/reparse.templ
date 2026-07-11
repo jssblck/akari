@@ -27,6 +27,7 @@ templ accountReparse(rp ReparseView) {
 			</div>
 		}
 		<form method="post" action="/account/reparse" class="reparse-form">
+			@csrfField()
 			<button type="submit" disabled?={ rp.InProgress }>Reparse now</button>
 		</form>
 	</section>

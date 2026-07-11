@@ -8,6 +8,7 @@ templ LoginPage(p Page, next, errMsg string) {
 				<div class="error">{ errMsg }</div>
 			}
 			<form method="post" action="/login">
+				@csrfField()
 				<input type="hidden" name="next" value={ next }/>
 				// aria-label gives each field a persistent accessible name (the placeholder
 				// vanishes on input and is not a label), and autocomplete lets a password
@@ -29,6 +30,7 @@ templ RegisterPage(p Page, errMsg string) {
 				<div class="error">{ errMsg }</div>
 			}
 			<form method="post" action="/register">
+				@csrfField()
 				<input name="username" placeholder="username" aria-label="Username" autocomplete="username" autofocus/>
 				<input name="password" type="password" placeholder="password" aria-label="Password" autocomplete="new-password"/>
 				<input name="invite_token" placeholder="invite token" aria-label="Invite token" autocomplete="off"/>

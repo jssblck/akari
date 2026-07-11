@@ -1,0 +1,8 @@
+package web
+
+// csrfField is the token fallback for form submissions whose path strips both
+// Origin and Fetch Metadata. Modern browsers pass on those headers; the server
+// only consults this value when neither header is present.
+templ csrfField() {
+	<input type="hidden" name="_csrf" value={ CSRFToken(ctx) }/>
+}

@@ -33,6 +33,7 @@ templ ConsentPage(p Page, c ConsentParams) {
 				page.
 			</p>
 			<form method="post" action="/oauth/authorize">
+				@csrfField()
 				<input type="hidden" name="client_id" value={ c.ClientID }/>
 				<input type="hidden" name="redirect_uri" value={ c.RedirectURI }/>
 				<input type="hidden" name="state" value={ c.State }/>

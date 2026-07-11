@@ -65,7 +65,7 @@ Only the database URL is required.
 | --- | --- | --- |
 | `AKARI_DATABASE_URL` | (required) | Postgres connection string, for example `postgres://akari:akari@localhost:5432/akari?sslmode=disable`. |
 | `AKARI_LISTEN` | `:8080` | Address the HTTP server binds. Falls back to `PORT` when unset. |
-| `AKARI_PUBLIC_URL` | (derived) | The externally reachable base URL (`https://akari.example.com`), used as the OAuth issuer and the base of the URLs the [MCP](./agent-access.md) authorization flow advertises. Falls back to `AKARI_URL`; when neither is set the server derives the origin per request, which is correct for a single-origin deployment behind a proxy that forwards the host. |
+| `AKARI_PUBLIC_URL` | (derived) | The externally reachable origin (`https://akari.example.com`). It is the OAuth issuer, the base of the URLs the [MCP](./agent-access.md) authorization flow advertises, and the trusted origin for browser writes. It must contain only an HTTP or HTTPS scheme and host, with no path, query, fragment, or user information. Falls back to `AKARI_URL`; when neither is set the server derives the origin per request. Set it explicitly in production. |
 | `AKARI_COOKIE_INSECURE` | unset | Set truthy to drop the `Secure` flag on session cookies, for plain-HTTP local development. Leave unset in production so cookies are HTTPS-only. |
 | `AKARI_PROXY_AUTH_HEADER` | unset | Enables reverse-proxy single sign-on. The request header a trusted proxy in front sets to the authenticated username (for example `X-Auth-Request-Preferred-Username`). When set, akari trusts that header as the signed-in user and provisions the account on first sight. Leave unset for a direct, locally-authenticated deployment. See [Single sign-on behind a trusted proxy](#single-sign-on-behind-a-trusted-proxy). |
 | `AKARI_PROXY_AUTH_SECRET` | unset | Optional shared secret the proxy must echo (in `AKARI_PROXY_AUTH_SECRET_HEADER`) for the identity header to be trusted. Defense in depth for when network isolation alone is not enough. Only consulted when `AKARI_PROXY_AUTH_HEADER` is set. |
@@ -75,6 +75,36 @@ Only the database URL is required.
 | `AKARI_OG_CLEANUP_INTERVAL` | `24h` | How often the server prunes expired preview cards (older than `AKARI_OG_CACHE_TTL`) from the cache. A Go duration; `0` disables the sweep. |
 | `AKARI_INSIGHTS_REFRESH_INTERVAL` | `1h` | How often the fleet Insights snapshot recomputes in the background. Every trailing window recomputes together in one pass, so the range views cannot drift apart; the page notes the snapshot's age beside its range selector. A Go duration; `0` disables the background loop (the snapshot then computes on first request and when a reparse completes). |
 | `AKARI_SIGNALS_SETTLE_INTERVAL` | `5m` | How often the server computes per-session quality signals (outcome, grade, prompt hygiene, context health) for sessions that have settled: a session is graded once it has been idle past the abandoned threshold (30 minutes), off the ingest path, so a live session is never graded with a verdict that would drift. A session an ephemeral host declared terminal (`akari sync --finalize`) is graded immediately instead, both by this pass and by the finalize call the client makes at the end of the sync, so the grade lands before the host is torn down. A Go duration; `0` disables the background pass (signals then land only on reparse, the finalize call, or `akari-server settle`). |
+
+### Browser origin and reverse proxies
+
+akari rejects unsafe browser requests unless they come from its public origin.
+This applies to login and registration as well as signed-in account, publication,
+OAuth consent, and other mutations. `Origin`, when present, must exactly match the
+configured origin. `Sec-Fetch-Site`, when present, must be `same-origin`; a
+`same-site` sibling is rejected. A malformed or conflicting header is always
+rejected.
+
+The built-in forms also send a double-submit token. It is the fallback when a
+client or proxy path omits both browser headers. A non-browser client that must
+use a session cookie can first load a form page, retain the `akari_csrf` cookie,
+then echo its value in `X-Akari-CSRF-Token` on the write. API clients should use
+Bearer tokens instead. Bearer-authenticated ingest and MCP requests do not use
+the cookie CSRF gate, and neither do the public OAuth registration and token
+protocol endpoints.
+
+Set `AKARI_PUBLIC_URL` to the browser-visible origin in production, especially
+when TLS terminates at a reverse proxy:
+
+```sh
+AKARI_PUBLIC_URL=https://akari.example.com
+```
+
+With that setting, akari compares browser requests to the configured value and
+does not use the internal upstream address. If it is unset, akari derives the
+origin from the request's TLS state or `X-Forwarded-Proto`, plus `Host`. A reverse
+proxy using derived mode must overwrite both headers with the values it received
+on its public listener. Do not append to client-supplied forwarding headers.
 
 ## The database
 

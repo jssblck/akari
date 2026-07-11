@@ -209,7 +209,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /account/overview/publish", s.requireFull(s.handlePublishOverview))
 	mux.HandleFunc("POST /account/overview/unpublish", s.requireFull(s.handleUnpublishOverview))
 
-	return withStyledNotFound(mux, s.handleNotFound)
+	return s.withRouteCSRF(mux, withStyledNotFound(mux, s.handleNotFound))
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {

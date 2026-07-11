@@ -7,6 +7,8 @@ package config
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -104,6 +106,13 @@ func LoadServer() (Server, error) {
 	if s.DatabaseURL == "" {
 		return Server{}, fmt.Errorf("AKARI_DATABASE_URL is required")
 	}
+	if s.PublicURL != "" {
+		origin, err := NormalizePublicOrigin(s.PublicURL)
+		if err != nil {
+			return Server{}, fmt.Errorf("AKARI_PUBLIC_URL: %w", err)
+		}
+		s.PublicURL = origin
+	}
 	interval, err := parseDuration(os.Getenv("AKARI_SWEEP_INTERVAL"), time.Hour)
 	if err != nil {
 		return Server{}, fmt.Errorf("AKARI_SWEEP_INTERVAL: %w", err)
@@ -199,6 +208,39 @@ func publicURL() string {
 		v = strings.TrimSpace(os.Getenv("AKARI_URL"))
 	}
 	return strings.TrimRight(v, "/")
+}
+
+// NormalizePublicOrigin turns an external URL into the exact origin browsers
+// send in Origin. HTTP handlers use the same normalization for request headers,
+// so default ports and host casing cannot create false mismatches.
+// Rejecting paths and other URL components keeps the value usable as both the
+// OAuth issuer and the CSRF trust boundary.
+func NormalizePublicOrigin(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", err
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if (scheme != "http" && scheme != "https") || u.Host == "" || u.User != nil ||
+		u.Opaque != "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return "", fmt.Errorf("must be an http(s) origin without a path, query, fragment, or user info")
+	}
+	hostname := strings.ToLower(u.Hostname())
+	if hostname == "" {
+		return "", fmt.Errorf("must include a host")
+	}
+	port := u.Port()
+	if (scheme == "http" && port == "80") || (scheme == "https" && port == "443") {
+		port = ""
+	}
+	host := hostname
+	if strings.Contains(hostname, ":") {
+		host = "[" + hostname + "]"
+	}
+	if port != "" {
+		host = net.JoinHostPort(hostname, port)
+	}
+	return scheme + "://" + host, nil
 }
 
 // proxyAuthSecretHeader resolves the header the proxy echoes the shared secret in,
