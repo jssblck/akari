@@ -29,6 +29,15 @@ type Store struct {
 	// windowSessionRowsReadHook is a deterministic concurrency seam used by the
 	// snapshot regression test. Production stores leave it nil.
 	windowSessionRowsReadHook func()
+
+	// sweepBatchCommittedHook observes each sweep batch after its commit is
+	// acknowledged, receiving the batch's removal count. It is the deterministic
+	// seam for the sweep-cancellation test: polling the table for a batch's
+	// effect races the server-side commit against the client-side
+	// acknowledgment, so a cancel timed off the poll can still abort the Commit
+	// call and drop a durable batch from the reported count. Production stores
+	// leave it nil.
+	sweepBatchCommittedHook func(batchRemoved int)
 }
 
 // SetParserEpoch records the running binary's parser epoch for the

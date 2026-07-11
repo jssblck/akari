@@ -2,41 +2,56 @@ package store_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
+	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/storetest"
 )
 
-// TestSweepBlobsKeepsCommittedBatchProgress cancels a sweep while its second
-// batch is blocked. The first batch must remain committed and be included in
-// the returned count, leaving only the interrupted row for a later pass.
+// TestSweepBlobsKeepsCommittedBatchProgress cancels a sweep between its first
+// batch's commit and its second batch's, and asserts the first batch stays
+// committed and counted, leaving only the interrupted row for a later pass.
+//
+// The cancel is gated on the store's batch-commit hook, not on polling the
+// table: a poll can observe the batch's deletes as soon as the server commits,
+// which is before the sweeping client has its commit acknowledgment, and a
+// cancel landing in that window aborts the Commit call and drops the durable
+// batch from the reported count. The hook fires only after the acknowledgment,
+// so cancelling from it is deterministic. The second batch cannot commit
+// meanwhile because its delete blocks on an advisory lock the test holds.
 func TestSweepBlobsKeepsCommittedBatchProgress(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
 	ctx := context.Background()
 
+	// One full batch plus a single blocked row in the batch after it. The shas
+	// are fixed-width hex, so sha order is numeric order and the blocked row
+	// (the highest value) is always the second batch's only member.
+	total := store.SweepBlobBatchSize + 1
 	if _, err := st.Pool.Exec(ctx, `
 		INSERT INTO blobs (sha256, lo_oid, byte_len, media_type, content_type)
 		SELECT lpad(to_hex(i), 64, '0'),
 		       lo_from_bytea(0, convert_to(i::text, 'UTF8')),
 		       octet_length(convert_to(i::text, 'UTF8')),
 		       'application/octet-stream', 'application/octet-stream'
-		  FROM generate_series(1, 257) AS generated(i)`); err != nil {
+		  FROM generate_series(1, $1) AS generated(i)`, total); err != nil {
 		t.Fatalf("seed orphan blobs: %v", err)
 	}
 
 	const lockKey int64 = 781394652
-	if _, err := st.Pool.Exec(ctx, `
+	blockedSHA := fmt.Sprintf("%064x", total)
+	if _, err := st.Pool.Exec(ctx, fmt.Sprintf(`
 		CREATE FUNCTION block_last_blob_delete() RETURNS trigger
 		LANGUAGE plpgsql AS $$
 		BEGIN
-		  IF OLD.sha256 = lpad(to_hex(257), 64, '0') THEN
-		    PERFORM pg_advisory_xact_lock(781394652);
+		  IF OLD.sha256 = '%s' THEN
+		    PERFORM pg_advisory_xact_lock(%d);
 		  END IF;
 		  RETURN OLD;
 		END
-		$$`); err != nil {
+		$$`, blockedSHA, lockKey)); err != nil {
 		t.Fatalf("create blocking delete function: %v", err)
 	}
 	if _, err := st.Pool.Exec(ctx, `
@@ -55,6 +70,13 @@ func TestSweepBlobsKeepsCommittedBatchProgress(t *testing.T) {
 		t.Fatalf("hold delete blocker: %v", err)
 	}
 
+	// Buffered past the two commits this test can produce (the full first batch
+	// and the final one-row pass) so the hook never blocks the sweep.
+	batchCommitted := make(chan int, 4)
+	st.SetSweepBatchCommittedHookForTest(func(batchRemoved int) {
+		batchCommitted <- batchRemoved
+	})
+
 	type sweepResult struct {
 		removed int
 		err     error
@@ -67,40 +89,29 @@ func TestSweepBlobsKeepsCommittedBatchProgress(t *testing.T) {
 		done <- sweepResult{removed: removed, err: err}
 	}()
 
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-	timeout := time.NewTimer(10 * time.Second)
-	defer timeout.Stop()
-	for {
-		select {
-		case early := <-done:
-			t.Fatalf("sweep returned before second batch was cancelled: removed=%d err=%v", early.removed, early.err)
-		case <-timeout.C:
-			t.Fatal("first sweep batch did not commit")
-		case <-ticker.C:
-			var remaining int
-			if err := st.Pool.QueryRow(ctx, "SELECT count(*) FROM blobs").Scan(&remaining); err != nil {
-				t.Fatalf("count remaining blobs: %v", err)
-			}
-			if remaining == 1 {
-				cancelSweep()
-				goto cancelled
-			}
+	select {
+	case n := <-batchCommitted:
+		if n != store.SweepBlobBatchSize {
+			t.Fatalf("first sweep batch committed %d removals, want %d", n, store.SweepBlobBatchSize)
 		}
+	case early := <-done:
+		t.Fatalf("sweep returned before its first batch committed: removed=%d err=%v", early.removed, early.err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("first sweep batch did not commit")
 	}
+	cancelSweep()
 
-cancelled:
 	var result sweepResult
 	select {
 	case result = <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("cancelled sweep did not return")
 	}
 	if result.err == nil {
 		t.Fatal("cancelled sweep returned no error")
 	}
-	if result.removed != 256 {
-		t.Fatalf("cancelled sweep reported %d committed removals, want 256", result.removed)
+	if result.removed != store.SweepBlobBatchSize {
+		t.Fatalf("cancelled sweep reported %d committed removals, want %d", result.removed, store.SweepBlobBatchSize)
 	}
 
 	if err := lockTx.Rollback(ctx); err != nil {
