@@ -272,9 +272,13 @@ func TestReassignSessionsRejectsNoUsers(t *testing.T) {
 func isolateDiscoveryRoots(t *testing.T) string {
 	t.Helper()
 	claude := t.TempDir()
+	piHome := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(piHome, "agent", "sessions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("CLAUDE_PROJECTS_DIR", claude)
 	t.Setenv("CODEX_SESSIONS_DIR", t.TempDir())
-	t.Setenv("PI_DIR", t.TempDir())
+	t.Setenv("PI_DIR", piHome)
 	return claude
 }
 

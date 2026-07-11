@@ -108,10 +108,13 @@ Or run the same loop in the background and manage it as a per-user daemon:
 ```sh
 akari daemon start         # launch watch in the background; prints its PID and log path
 akari daemon status        # is it running?
-akari daemon stop          # stop it
+akari daemon stop          # stop it and confirm the single-instance lock is free
 ```
 
 Run `akari daemon start` once and the watcher keeps uploading in the background.
+`daemon stop` waits up to 10 seconds for graceful cleanup. If it times out, it
+leaves the watcher running and exits non-zero; use `--timeout <duration>` to wait
+longer or `--force` to permit termination after the graceful attempt.
 
 ## 5. Read what you pushed
 

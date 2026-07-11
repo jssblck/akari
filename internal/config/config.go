@@ -32,6 +32,9 @@ type Server struct {
 	// and Host header, which is correct for a single-origin deployment behind a
 	// well-behaved proxy.
 	PublicURL string
+	// MCPResponseBudgetBytes caps the encoded CallToolResult body
+	// (AKARI_MCP_RESPONSE_BUDGET_BYTES). The default is 8 MiB.
+	MCPResponseBudgetBytes int
 	// SweepInterval is how often the server reclaims orphaned CAS blobs
 	// (AKARI_SWEEP_INTERVAL, a Go duration like "1h"). Defaults to 1h; set "0" to
 	// disable the background sweep (for example to run it only via the subcommand).
@@ -104,6 +107,14 @@ func LoadServer() (Server, error) {
 	if s.DatabaseURL == "" {
 		return Server{}, fmt.Errorf("AKARI_DATABASE_URL is required")
 	}
+	mcpBudget, err := parsePositiveInt(os.Getenv("AKARI_MCP_RESPONSE_BUDGET_BYTES"), 8<<20)
+	if err != nil {
+		return Server{}, fmt.Errorf("AKARI_MCP_RESPONSE_BUDGET_BYTES: %w", err)
+	}
+	if mcpBudget < 8<<20 || mcpBudget > 16<<20 {
+		return Server{}, fmt.Errorf("AKARI_MCP_RESPONSE_BUDGET_BYTES must be between 8388608 and 16777216")
+	}
+	s.MCPResponseBudgetBytes = mcpBudget
 	interval, err := parseDuration(os.Getenv("AKARI_SWEEP_INTERVAL"), time.Hour)
 	if err != nil {
 		return Server{}, fmt.Errorf("AKARI_SWEEP_INTERVAL: %w", err)

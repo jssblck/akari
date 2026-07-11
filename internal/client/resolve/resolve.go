@@ -1,9 +1,10 @@
 // Package resolve turns a discovered session file into the project it belongs to.
 // It peeks the file header for the working directory, then resolves that
-// directory's git origin remote to a canonical project key. Either hop can fail;
-// rather than dropping the session, a failure classifies it: a folder with no
-// usable git remote is standalone, a folder that no longer exists on disk is
-// orphaned. A file is skipped only when it cannot be read at all or when its
+// directory's git origin remote to a canonical project key. A folder with no
+// usable git remote is standalone, and a folder that no longer exists on disk is
+// orphaned. Operational Git failures are retried briefly and returned as errors
+// if they persist, so they cannot be mistaken for definitive repository state or
+// retained in the project cache. A file is skipped only when its
 // header carries no recognizable session signature, so an arbitrary *.jsonl that
 // merely shares the suffix (a tool-output log, an event feed) under a custom
 // extra_root is rejected rather than ingested as a junk session.
@@ -15,7 +16,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -109,6 +109,7 @@ type Resolver struct {
 	cacheVersion     uint64
 	cacheLimit       int
 	cacheFallbackTTL time.Duration
+	retryDelay       func(int) time.Duration
 	lookups          singleflight.Group
 }
 
@@ -168,14 +169,16 @@ func newResolver(git GitRunner, aliases map[string]string) *Resolver {
 		cache:            map[string]cacheEntry{},
 		cacheLimit:       defaultCacheLimit,
 		cacheFallbackTTL: defaultCacheFallbackTTL,
+		retryDelay:       defaultGitRetryDelay,
 	}
 }
 
 // Resolve peeks the file header and classifies the session. A session with a
 // resolvable git remote is KindRemote; one whose folder exists but has no usable
 // remote is KindStandalone; one whose folder is unknown or gone is KindOrphaned.
-// All three are returned ready to upload. Only a file whose header cannot be read
-// is Skipped, since without a header there is nothing to identify or send.
+// All three are returned ready to upload. Header I/O failures and exhausted
+// transient Git failures are returned in Result.Err; a readable non-session is
+// the only skipped result.
 func (r *Resolver) Resolve(ctx context.Context, f discover.File) Result {
 	h, err := PeekHeader(f)
 	if err != nil {
@@ -195,7 +198,11 @@ func (r *Resolver) Resolve(ctx context.Context, f discover.File) Result {
 		return res
 	}
 
-	key, root, reason := r.project(ctx, h.Cwd)
+	key, root, reason, err := r.project(ctx, h.Cwd)
+	if err != nil {
+		res.Err = err
+		return res
+	}
 	if reason != "" {
 		res.Kind, res.Reason, res.LocalRoot = KindStandalone, reason, root
 		return res
@@ -204,28 +211,29 @@ func (r *Resolver) Resolve(ctx context.Context, f discover.File) Result {
 	return res
 }
 
-// project resolves a working directory to a canonical project key, caching both
-// successes and skips. The returned reason is non-empty exactly when the key is
-// empty; root is the local project root for a no-remote worktree (empty
-// otherwise).
-func (r *Resolver) project(ctx context.Context, cwd string) (key, root, reason string) {
+// project resolves a working directory to a canonical project key, caching
+// successes and definitive standalone results. Transient failures return an
+// error and never enter the cache. The returned reason is non-empty exactly when
+// the key is empty and the result is definitive; root is the local project root
+// for a no-remote worktree (empty otherwise).
+func (r *Resolver) project(ctx context.Context, cwd string) (key, root, reason string, err error) {
 	if cached, ok := r.cachedProject(cwd, r.now()); ok {
-		return cached.key, cached.root, cached.reason
+		return cached.key, cached.root, cached.reason, nil
 	}
 
 	result := r.lookupProject(ctx, cwd)
 	select {
 	case <-ctx.Done():
-		return "", "", cwd + " project lookup canceled: " + ctx.Err().Error()
+		return "", "", "", fmt.Errorf("%s project lookup canceled: %w", cwd, ctx.Err())
 	case completed := <-result:
 		if completed.Err != nil {
-			return "", "", cwd + " project lookup failed: " + completed.Err.Error()
+			return "", "", "", fmt.Errorf("%s project lookup failed: %w", cwd, completed.Err)
 		}
 		resolved, ok := completed.Val.(projectResult)
 		if !ok {
-			return "", "", cwd + " project lookup returned an invalid result"
+			return "", "", "", fmt.Errorf("%s project lookup returned an invalid result", cwd)
 		}
-		return resolved.key, resolved.root, resolved.reason
+		return resolved.key, resolved.root, resolved.reason, nil
 	}
 }
 
@@ -244,7 +252,10 @@ func (r *Resolver) lookupProject(ctx context.Context, cwd string) <-chan singlef
 		lookupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.timeout)
 		defer cancel()
 
-		key, root, reason, config := r.resolveGit(lookupCtx, cwd)
+		key, root, reason, config, err := r.resolveGit(lookupCtx, cwd)
+		if err != nil {
+			return nil, err
+		}
 		resolved := projectResult{key: key, root: root, reason: reason}
 		return r.storeProject(cwd, resolved, config, lookupStarted), nil
 	})
@@ -334,7 +345,7 @@ func (r *Resolver) storeProject(cwd string, resolved projectResult, config confi
 func (r *Resolver) checkCacheEntry(e cacheEntry, now time.Time) cacheEntryCheck {
 	// Git may read included, worktree, global, or command-scoped config that the
 	// repository config fingerprint cannot observe. The maximum age bounds stale
-	// results from those sources and retries transient Git failures.
+	// definitive results from those sources.
 	if !now.Before(e.cachedAt.Add(r.cacheFallbackTTL)) {
 		return cacheEntryExpired
 	}
@@ -366,34 +377,37 @@ func (r *Resolver) evictLeastRecentlyUsed() {
 	}
 }
 
-func (r *Resolver) resolveGit(ctx context.Context, cwd string) (key, root, reason string, config configFingerprint) {
-	ctx, cancel := context.WithTimeout(ctx, r.timeout)
-	defer cancel()
-
-	if _, err := r.git(ctx, cwd, "rev-parse", "--is-inside-work-tree"); err != nil {
-		return "", "", cwd + " is not a git repository", configFingerprint{}
+func (r *Resolver) resolveGit(ctx context.Context, cwd string) (key, root, reason string, config configFingerprint, err error) {
+	if _, err := r.runGit(ctx, cwd, "rev-parse", "--is-inside-work-tree"); err != nil {
+		if definitiveGitFailure([]string{"rev-parse", "--is-inside-work-tree"}, err) == gitResultNotRepository {
+			return "", "", cwd + " is not a git repository", configFingerprint{}, nil
+		}
+		return "", "", "", configFingerprint{}, fmt.Errorf("inspect repository: %w", err)
 	}
 	config = r.gitConfigFingerprint(ctx, cwd)
-	out, err := r.git(ctx, cwd, "remote", "get-url", "--all", "origin")
+	out, err := r.runGit(ctx, cwd, "remote", "get-url", "--all", "origin")
 	if err != nil {
-		return "", r.localRoot(ctx, cwd), cwd + " has no origin remote", config
+		if definitiveGitFailure([]string{"remote", "get-url", "--all", "origin"}, err) == gitResultNoRemote {
+			return "", r.localRoot(ctx, cwd), cwd + " has no origin remote", config, nil
+		}
+		return "", "", "", config, fmt.Errorf("read origin remote: %w", err)
 	}
 	urls := nonEmptyLines(out)
 	switch {
 	case len(urls) == 0:
-		return "", r.localRoot(ctx, cwd), cwd + " has no origin remote", config
+		return "", r.localRoot(ctx, cwd), cwd + " has no origin remote", config, nil
 	case len(urls) > 1:
-		return "", r.localRoot(ctx, cwd), cwd + " origin has multiple URLs", config
+		return "", r.localRoot(ctx, cwd), cwd + " origin has multiple URLs", config, nil
 	}
 	remote, err := gitremote.Canonicalize(urls[0], r.aliases)
 	if err != nil {
-		return "", r.localRoot(ctx, cwd), cwd + " origin URL is unrecognized: " + err.Error(), config
+		return "", r.localRoot(ctx, cwd), cwd + " origin URL is unrecognized: " + err.Error(), config, nil
 	}
-	return remote.Key, "", "", config
+	return remote.Key, "", "", config, nil
 }
 
 func (r *Resolver) gitConfigFingerprint(ctx context.Context, cwd string) configFingerprint {
-	path, err := r.git(ctx, cwd, "rev-parse", "--git-path", "config")
+	path, err := r.runGit(ctx, cwd, "rev-parse", "--git-path", "config")
 	path = strings.TrimSpace(path)
 	if err != nil || path == "" {
 		return configFingerprint{}
@@ -420,7 +434,7 @@ func (r *Resolver) gitConfigFingerprint(ctx context.Context, cwd string) configF
 // per-session cwd. The lookup runs only on the no-remote path, so a remote
 // session never pays for it.
 func (r *Resolver) localRoot(ctx context.Context, cwd string) string {
-	out, err := r.git(ctx, cwd, "rev-parse", "--git-common-dir")
+	out, err := r.runGit(ctx, cwd, "rev-parse", "--git-common-dir")
 	if err != nil {
 		return ""
 	}
@@ -458,15 +472,30 @@ func (r *Resolver) localRoot(ctx context.Context, cwd string) string {
 // *.jsonl that never does (a tool-output log, an event feed under a custom
 // extra_root) returns errNotSession so Resolve can skip it with a clear reason
 // rather than upload it as a junk standalone/orphaned session.
+//
+// Reading is Lstat-then-Open-then-verify rather than the simpler Stat-then-Open:
+// discover.Discover already rejected a symlink at f.Path when it found the file,
+// but a stat-and-open a moment later reopens a time-of-check-to-time-of-use
+// window, since both Stat and Open follow a symlink. If f.Path was swapped for
+// one in between (deliberately, or by an ordinary rename-based file replace
+// racing the walk), a plain Stat+Open would silently read through it and upload
+// whatever it points to. Lstat here rejects a symlink outright before ever
+// opening it, and comparing the Lstat and the opened file's own Stat with
+// os.SameFile closes the remaining gap: if the path was swapped for a different
+// file of any kind between the two calls, the file identity no longer matches
+// and the read is refused rather than silently served from the wrong file.
 func PeekHeader(f discover.File) (Header, error) {
-	info, err := os.Stat(f.Path)
+	lst, err := os.Lstat(f.Path)
 	if err != nil {
 		return Header{}, err
 	}
-	if !info.Mode().IsRegular() {
+	if lst.Mode()&os.ModeSymlink != 0 {
+		return Header{}, fmt.Errorf("session path %s is a symlink", f.Path)
+	}
+	if !lst.Mode().IsRegular() {
 		return Header{}, fmt.Errorf("session path %s is not a regular file", f.Path)
 	}
-	file, err := os.Open(f.Path)
+	file, err := openSameFile(f.Path, lst)
 	if err != nil {
 		return Header{}, err
 	}
@@ -503,6 +532,33 @@ func PeekHeader(f discover.File) (Header, error) {
 
 	h.SourceID = sourceID(f, h.sessionID)
 	return h, nil
+}
+
+// openSameFile opens path and verifies the opened file is the same filesystem
+// object lst (an earlier Lstat of the same path) already inspected, closing the
+// time-of-check-to-time-of-use window between that Lstat and this Open: if path
+// was swapped for a different file (of any kind, including a symlink) in
+// between, the file this returns would silently differ from the one the caller
+// approved. os.SameFile compares device and file index, which stays stable
+// across an ordinary in-place write (the normal case: an agent still appending
+// to its own session file) but changes the moment the path names a different
+// filesystem object, so this only ever rejects an actual identity change, never
+// an ordinary write in progress.
+func openSameFile(path string, lst os.FileInfo) (*os.File, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	fst, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, err
+	}
+	if !os.SameFile(lst, fst) {
+		file.Close()
+		return nil, fmt.Errorf("session path %s changed between inspection and read", path)
+	}
+	return file, nil
 }
 
 // sessionSignature reports whether one parsed line looks like a genuine session
@@ -634,16 +690,4 @@ func nonEmptyLines(s string) []string {
 		}
 	}
 	return out
-}
-
-// systemGit runs the real git binary with the context's deadline. A non-zero
-// exit (for example "not a git repository" or a missing origin) surfaces as an
-// error, which the caller maps to a specific skip reason.
-func systemGit(ctx context.Context, dir string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
-	out, err := cmd.Output()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(out)), nil
 }

@@ -36,7 +36,7 @@ const bodyCeiling = 8 << 20 // 8 MiB
 const defaultBodyMax = 1 << 20 // 1 MiB
 
 // registerTools wires every read tool onto s, each closing over the store.
-func registerTools(s *mcp.Server, st *store.Store) {
+func registerTools(s *mcp.Server, st *store.Store, response responder) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "whoami",
 		Description: "Return the akari account the current credential authenticates as: user id, username, and whether it is an admin.",
@@ -49,7 +49,8 @@ func registerTools(s *mcp.Server, st *store.Store) {
 		if err != nil {
 			return nil, whoamiDTO{}, mapNotFound(err, "user")
 		}
-		return jsonResult(whoamiDTO{UserID: u.ID, Username: u.Username, IsAdmin: u.IsAdmin})
+		out := whoamiDTO{UserID: u.ID, Username: u.Username, IsAdmin: u.IsAdmin}
+		return jsonResult(response, "whoami: authenticated as "+u.Username+". Full data is in structuredContent.", out, nil)
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -65,7 +66,7 @@ func registerTools(s *mcp.Server, st *store.Store) {
 			return nil, overviewDTO{}, err
 		}
 		out := overviewDTO{Window: windowLabel(in.Days), Analytics: analyticsToDTO(a), Users: usersToRefs(users)}
-		return jsonResult(out)
+		return jsonResult(response, "overview: fleet usage loaded. Full data is in structuredContent.", out, nil)
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -80,7 +81,7 @@ func registerTools(s *mcp.Server, st *store.Store) {
 		for _, p := range ps {
 			out.Projects = append(out.Projects, projectToDTO(p))
 		}
-		return jsonResult(out)
+		return jsonResult(response, fmt.Sprintf("list_projects: %d projects returned. Full data is in structuredContent.", len(out.Projects)), out, nil)
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -108,7 +109,7 @@ func registerTools(s *mcp.Server, st *store.Store) {
 			Analytics: analyticsToDTO(a),
 			Facets:    facetValuesDTO{Agents: f.Agents, Machines: f.Machines, Users: f.Users},
 		}
-		return jsonResult(out)
+		return jsonResult(response, "get_project: project details loaded. Full data is in structuredContent.", out, nil)
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -142,12 +143,16 @@ func registerTools(s *mcp.Server, st *store.Store) {
 		for _, r := range rows {
 			out.Sessions = append(out.Sessions, sessionRowToDTO(r))
 		}
-		return jsonResult(out)
+		out, err = fitSessionsToBudget(response, out)
+		if err != nil {
+			return nil, sessionsDTO{}, err
+		}
+		return jsonResult(response, sessionsSummary(out), out, nil)
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "get_session",
-		Description: "One session: its header (project, agent, user, machine, branch, working directory, token and cost totals, timing) and subagents, plus, unless include_transcript is false, a bounded window of the transcript (messages with thinking and model, the tool-call metadata and attachments hanging on them). A session that fell back from a Claude Fable model to a lower one (model_fallback_count above zero) also carries a model_fallbacks list on the first view (a header-only call or the first transcript window), capped at the first 100 occurrences; later transcript pages omit the list but keep the count. Tool bodies live in the CAS; fetch them with read_tool_body. The window is up to transcript_limit messages; page by passing the prior window's transcript.next_after as transcript_after until transcript.has_more is false.",
+		Description: "One session: its header (project, agent, user, machine, branch, working directory, token and cost totals, timing) and subagents, plus, unless include_transcript is false, a byte-bounded window of the transcript (messages with thinking and model, the tool-call metadata and attachments hanging on them). A session that fell back from a Claude Fable model to a lower one (model_fallback_count above zero) also carries a model_fallbacks list on the first view (a header-only call or the first transcript window), capped at the first 100 occurrences; later transcript pages omit the list but keep the count. Tool bodies live in the CAS; fetch them with read_tool_body. The window stops at transcript_limit messages or before the encoded response budget. Page by passing transcript.next_after as transcript_after while transcript.has_more is true. byte_budget_truncated distinguishes a byte boundary from a message-count boundary. An oversized content or thinking field is a preview with its byte length and an authenticated resource link for the full text.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in getSessionInput) (*mcp.CallToolResult, sessionDetailDTO, error) {
 		d, err := st.SessionDetailByID(ctx, in.SessionID)
 		if err != nil {
@@ -201,18 +206,19 @@ func registerTools(s *mcp.Server, st *store.Store) {
 		}
 
 		if includeTranscript {
-			tr, err := loadTranscript(ctx, st, in.SessionID, in.TranscriptAfter, in.TranscriptLimit, d.MessageCount)
+			tr, err := loadTranscript(ctx, st, in.SessionID, in.TranscriptAfter, in.TranscriptLimit, d.MessageCount, response.budget)
 			if err != nil {
 				return nil, sessionDetailDTO{}, err
 			}
 			out.Transcript = tr
 		}
-		return jsonResult(out)
+		out, links := fitSessionToBudget(response, out)
+		return jsonResult(response, sessionSummary(out), out, links)
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "read_tool_body",
-		Description: "Fetch a tool call's input or result body from the content-addressed store by its sha256, as it appears on a tool call from get_session. The session must reference the hash (the same gate the web UI enforces). Text bodies return as text; binary bodies return base64-encoded. Capped by max_bytes (default 1 MiB, ceiling 8 MiB).",
+		Description: "Fetch a tool call's input or result body from the content-addressed store by its sha256, as it appears on a tool call from get_session. The session must reference the hash (the same gate the web UI enforces). Text bodies return as text; binary bodies return base64-encoded. Capped by max_bytes (default 1 MiB, ceiling 8 MiB) and the encoded MCP response budget.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in readBodyInput) (*mcp.CallToolResult, bodyDTO, error) {
 		if in.SHA256 == "" {
 			return nil, bodyDTO{}, errors.New("sha256 is required")
@@ -224,7 +230,7 @@ func registerTools(s *mcp.Server, st *store.Store) {
 		if !ok {
 			return nil, bodyDTO{}, errors.New("session does not reference that body, or it does not exist")
 		}
-		limit := clampMax(in.MaxBytes)
+		limit := response.bodyReadLimit(in.MaxBytes)
 		// Read the stored size first, then pull at most `limit` bytes of the body. The
 		// large-object reader transfers only the prefix it copies, so a capped preview of a
 		// bulky CAS body costs O(limit), not O(blob), and truncation is the stored length
@@ -245,14 +251,14 @@ func registerTools(s *mcp.Server, st *store.Store) {
 			Truncated: meta.ByteLen > limit,
 		}
 		out.Encoding, out.Content = encodeBytes(buf.Bytes())
-		return jsonResult(out)
+		return jsonResult(response, fmt.Sprintf("read_tool_body: %d of %d bytes returned. Full data is in structuredContent.", len(buf.Bytes()), meta.ByteLen), out, nil)
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "get_session_raw",
-		Description: "The raw, lossless bytes a session was ingested from (the agent's own JSONL log), the source every parsed projection is rebuilt from. Use this to inspect exactly what was uploaded, behind the parsed transcript. Capped by max_bytes (default 1 MiB, ceiling 8 MiB); total_bytes reports the full size so you know whether the read was truncated.",
+		Description: "The raw, lossless bytes a session was ingested from (the agent's own JSONL log), the source every parsed projection is rebuilt from. Use this to inspect exactly what was uploaded, behind the parsed transcript. Capped by max_bytes (default 1 MiB, ceiling 8 MiB) and the encoded MCP response budget; total_bytes reports the full size so you know whether the read was truncated.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in rawInput) (*mcp.CallToolResult, rawDTO, error) {
-		limit := clampMax(in.MaxBytes)
+		limit := response.bodyReadLimit(in.MaxBytes)
 		var buf bytes.Buffer
 		written, truncated, total, err := st.SessionRawTo(ctx, &buf, in.SessionID, limit)
 		if err != nil {
@@ -260,72 +266,8 @@ func registerTools(s *mcp.Server, st *store.Store) {
 		}
 		out := rawDTO{TotalBytes: total, BytesReturned: written, Truncated: truncated}
 		out.Encoding, out.Content = encodeBytes(buf.Bytes())
-		return jsonResult(out)
+		return jsonResult(response, fmt.Sprintf("get_session_raw: %d of %d bytes returned. Full data is in structuredContent.", written, total), out, nil)
 	})
-}
-
-// loadTranscript reads one bounded window of a session's transcript: the messages
-// whose ordinal is greater than after (nil for the first window), and exactly the
-// tool calls and attachments hanging on those messages. It pages by keyset on
-// ordinal, so peak memory stays proportional to the window and reading a whole
-// session window by window is linear, not quadratic. total is the session's full
-// message count, reported for context. has_more is exact: the read peeks one row past
-// the window rather than counting.
-func loadTranscript(ctx context.Context, st *store.Store, sessionID int64, after *int, limit, total int) (*transcriptDTO, error) {
-	if limit <= 0 {
-		limit = defaultTranscriptLimit
-	}
-	if limit > maxTranscriptWindow {
-		limit = maxTranscriptWindow
-	}
-	// Fetch one extra row to learn whether a further window exists without a count.
-	msgs, err := st.MessagesAfter(ctx, sessionID, after, limit+1)
-	if err != nil {
-		return nil, err
-	}
-	hasMore := len(msgs) > limit
-	if hasMore {
-		msgs = msgs[:limit]
-	}
-	tr := &transcriptDTO{
-		Limit:         limit,
-		Returned:      len(msgs),
-		TotalMessages: total,
-		HasMore:       hasMore,
-		Messages:      make([]messageDTO, 0, len(msgs)),
-		ToolCalls:     []toolCallDTO{},
-		Attachments:   []attachmentDTO{},
-	}
-	for _, m := range msgs {
-		tr.Messages = append(tr.Messages, messageToDTO(m))
-	}
-	if len(msgs) == 0 {
-		return tr, nil
-	}
-
-	// The returned messages are ordered by ordinal, so their span is the closed
-	// range [first, last]; fetch only the calls and attachments inside it.
-	minOrd, maxOrd := msgs[0].Ordinal, msgs[len(msgs)-1].Ordinal
-	if hasMore {
-		// The next window resumes strictly after the last ordinal in this one.
-		next := maxOrd
-		tr.NextAfter = &next
-	}
-	calls, err := st.ToolCallsInRange(ctx, sessionID, minOrd, maxOrd)
-	if err != nil {
-		return nil, err
-	}
-	for _, c := range calls {
-		tr.ToolCalls = append(tr.ToolCalls, toolCallToDTO(c))
-	}
-	atts, err := st.AttachmentsInRange(ctx, sessionID, minOrd, maxOrd)
-	if err != nil {
-		return nil, err
-	}
-	for _, a := range atts {
-		tr.Attachments = append(tr.Attachments, attachmentToDTO(a))
-	}
-	return tr, nil
 }
 
 // encodeCursor renders a feed cursor as an opaque, URL-safe token. nil (the last
