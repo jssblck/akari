@@ -111,7 +111,10 @@ func runSync(ctx context.Context, args []string) error {
 	}
 	machine := config.ResolveMachine(cfg, os.Getenv, os.Hostname)
 
-	files, discoveryErr := discover.Discover(discover.Roots(cfg, os.Getenv, home), discover.NewExcluder(cfg.Excludes))
+	files, discoveryNotices, discoveryErr := discover.Discover(discover.Roots(cfg, os.Getenv, home), discover.NewExcluder(cfg.Excludes))
+	for _, n := range discoveryNotices {
+		fmt.Fprintln(os.Stderr, "notice: "+n)
+	}
 
 	resolver := resolve.New()
 	client := upload.New(&http.Client{Timeout: 60 * time.Second}, cfg.ServerURL, cfg.Token)

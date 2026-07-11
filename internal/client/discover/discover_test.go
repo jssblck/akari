@@ -24,7 +24,7 @@ func TestDiscoverReportsRequiredMissingAndMalformedRoots(t *testing.T) {
 	fileRoot := filepath.Join(dir, "not-a-directory")
 	write(t, fileRoot)
 
-	files, err := Discover([]Root{
+	files, _, err := Discover([]Root{
 		{Agent: "claude", Dir: filepath.Join(dir, "missing-default"), Optional: true},
 		{Agent: "codex", Dir: filepath.Join(dir, "missing-override")},
 		{Agent: "pi", Dir: fileRoot},
@@ -66,7 +66,7 @@ func TestDiscoverRejectsRootAndSessionSymlinks(t *testing.T) {
 		}
 	}
 
-	files, err := Discover([]Root{
+	files, _, err := Discover([]Root{
 		{Agent: "claude", Dir: root},
 		{Agent: "claude", Dir: rootLink},
 	}, Excluder{})
@@ -91,7 +91,7 @@ func TestDiscoverDoesNotFollowDirectorySymlinkLoop(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 
-	files, err := Discover([]Root{{Agent: "claude", Dir: root}}, Excluder{})
+	files, _, err := Discover([]Root{{Agent: "claude", Dir: root}}, Excluder{})
 	if err != nil {
 		t.Fatalf("directory symlink should be ignored without traversal: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestDiscover(t *testing.T) {
 		{Agent: "pi", Dir: piDir},
 		{Agent: "pi", Dir: filepath.Join(dir, "missing"), Optional: true},
 	}
-	files, err := Discover(roots, Excluder{})
+	files, _, err := Discover(roots, Excluder{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +222,7 @@ func TestDiscoverExcludes(t *testing.T) {
 	// Linux, so a **/tmp/** pattern would match the fixtures' own path and exclude
 	// everything, masking what this test checks.
 	roots := []Root{{Agent: "claude", Dir: claudeDir}}
-	files, err := Discover(roots, NewExcluder([]string{"**/dropme/**", "*.private.jsonl", "**/private"}))
+	files, _, err := Discover(roots, NewExcluder([]string{"**/dropme/**", "*.private.jsonl", "**/private"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,9 +239,13 @@ func TestDiscoverExcludes(t *testing.T) {
 
 func TestRoots(t *testing.T) {
 	home := filepath.Join("/home", "grace")
-	cfg := config.Client{ExtraRoots: []config.ExtraRoot{{Agent: "pi", Path: "/extra/pi"}}}
+	cfg := config.Client{ExtraRoots: []config.ExtraRoot{
+		{Agent: "pi", Path: "/extra/pi"},
+		{Agent: "claude", Path: "/mnt/linked-claude", FollowRootLink: true},
+	}}
 
-	// No env overrides: standard roots plus the configured extra root.
+	// No env overrides: standard roots plus the configured extra roots. The
+	// second extra root's follow_root_link must carry through to Root.
 	roots := Roots(cfg, func(string) string { return "" }, home)
 	want := []Root{
 		{Agent: "claude", Dir: filepath.Join(home, ".claude", "projects"), Optional: true},
@@ -249,6 +253,7 @@ func TestRoots(t *testing.T) {
 		{Agent: "codex", Dir: filepath.Join(home, ".codex", "archived_sessions"), Optional: true},
 		{Agent: "pi", Dir: filepath.Join(home, ".pi", "agent", "sessions"), Optional: true},
 		{Agent: "pi", Dir: "/extra/pi"},
+		{Agent: "claude", Dir: "/mnt/linked-claude", FollowRootLink: true},
 	}
 	if len(roots) != len(want) {
 		t.Fatalf("roots = %v, want %v", roots, want)

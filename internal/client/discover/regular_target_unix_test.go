@@ -37,7 +37,7 @@ func TestDiscoverRejectsSymlinksAndNonRegularFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	files, err := Discover([]Root{{Agent: "claude", Dir: root}}, Excluder{})
+	files, _, err := Discover([]Root{{Agent: "claude", Dir: root}}, Excluder{})
 	if ErrorCount(err) != 3 {
 		t.Fatalf("ErrorCount = %d, want 3 symlink errors: %v", ErrorCount(err), err)
 	}

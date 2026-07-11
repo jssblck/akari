@@ -49,7 +49,12 @@ func TestPeekHeaderRejectsFIFOWithoutBlocking(t *testing.T) {
 	}
 }
 
-func TestPeekHeaderFollowsSymlinkToRegularFile(t *testing.T) {
+// TestPeekHeaderRejectsSymlinkTarget guards the closed symlink policy at read
+// time: discover.Discover already refuses to hand PeekHeader a symlink path in
+// the ordinary flow, but PeekHeader must not silently follow one if it is ever
+// called directly on one (a caller error, or a path that was swapped for a
+// symlink after discovery approved it; see TestPeekHeaderRejectsSwappedSymlink).
+func TestPeekHeaderRejectsSymlinkTarget(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "target.jsonl")
 	line := `{"type":"user","cwd":"/home/ada/project","message":{"content":"hi"}}` + "\n"
@@ -61,11 +66,41 @@ func TestPeekHeaderFollowsSymlinkToRegularFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	header, err := PeekHeader(discover.File{Agent: "claude", Root: dir, Path: link})
-	if err != nil {
+	_, err := PeekHeader(discover.File{Agent: "claude", Root: dir, Path: link})
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("PeekHeader(symlink) err = %v, want a symlink rejection", err)
+	}
+}
+
+// TestPeekHeaderRejectsSwappedSymlink simulates the realistic time-of-check to
+// time-of-use race the closed policy has to close: discover.Discover Lstats a
+// path and finds an ordinary regular file, but before resolve.PeekHeader gets to
+// read it, the path is replaced with a symlink to a file outside the discovered
+// root. A plain Stat-then-Open would follow that symlink and upload the outside
+// file's content under the discovered session's identity; PeekHeader's own
+// Lstat-first check must reject it instead.
+func TestPeekHeaderRejectsSwappedSymlink(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.jsonl")
+	if err := os.WriteFile(outside, []byte(`{"type":"user","cwd":"/somewhere/else","message":{"content":"hi"}}`+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if header.Cwd != "/home/ada/project" {
-		t.Fatalf("cwd = %q, want /home/ada/project", header.Cwd)
+	path := filepath.Join(dir, "session.jsonl")
+	if err := os.WriteFile(path, []byte(`{"type":"user","cwd":"/home/ada/project","message":{"content":"hi"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// The swap: discovery would have already approved `path` as a regular file;
+	// this replaces it with a symlink to `outside` before PeekHeader reads it.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, path); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := PeekHeader(discover.File{Agent: "claude", Root: dir, Path: path})
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("PeekHeader(swapped symlink) err = %v, want a symlink rejection", err)
 	}
 }

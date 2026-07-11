@@ -1149,14 +1149,36 @@ agent. Agent-provided overrides and configured extra roots are required: a
 missing, malformed, inaccessible, or partially traversed required root is a
 discovery error. A scan may return files from portions it completed, but the
 one-shot command reports the incomplete scan and exits nonzero. Watch mode logs
-the same error and retries on later discovery passes.
+the same error, deduped so a standing failure logs once (and at most once an
+hour thereafter) rather than every discovery pass, and retries on later
+discovery passes.
 
-Discovery uses a closed symlink policy on every operating system. Root symlinks
-and matching session-file symlinks are errors and are never followed, even when
-their targets are regular files inside the root. Directory symlinks below a root
-are ignored. This prevents loops, escape from the configured root, and bypass of
-path-based exclusions. Initial discovery, polling metadata checks, filesystem
-events, and watch rescans all use the same no-follow test.
+Discovery uses a closed symlink policy on every operating system. A matching
+session-file symlink below a root is an error and is never followed, even when
+its target is a regular file inside the root, and a plain directory symlink
+below a root is ignored rather than descended into. A root itself that is a
+symlink, or on Windows a directory junction (`mklink /J`; Go's `Lstat` does not
+report a junction as a symlink, so it needs its own check, see
+`discover.ClassifyRoot`), is rejected the same way by default, with one
+exception: a linked built-in default root is skipped with a non-fatal notice
+instead of an error, since those roots are already optional and a user who
+junctioned their agent directory should not see sync start failing over it. Any
+root, built-in or configured, can opt into following its own link with the
+`follow_root_link` setting on an `extra_roots` entry; the no-follow policy still
+governs everything found inside the walk regardless. Initial discovery, polling
+metadata checks, filesystem events, and watch rescans all resolve a root through
+the identical function, so they can never disagree about whether it is usable.
+
+The closed root policy stops a link from redirecting discovery to an
+unconfigured location, but it cannot by itself stop a *file* the walk already
+approved from being swapped for a symlink in the moment between discovery and
+the client actually reading it. Resolution's header peek closes that gap at
+read time: it re-`Lstat`s the path immediately before opening it and rejects
+anything but a regular file, then compares the opened file's own `Stat` against
+that `Lstat` with `os.SameFile` before reading a single line, refusing to read
+if the path was swapped for anything else in between. Discovery's closed policy
+and this read-time identity check together are what keep a session's content
+inside the location it was discovered under.
 
 ### Project resolution and classification
 

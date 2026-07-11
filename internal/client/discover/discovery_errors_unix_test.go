@@ -22,7 +22,7 @@ func TestDiscoverReportsInaccessibleRoot(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(root, 0o700) })
 
-	files, err := Discover([]Root{{Agent: "claude", Dir: root}}, Excluder{})
+	files, _, err := Discover([]Root{{Agent: "claude", Dir: root}}, Excluder{})
 	if len(files) != 0 {
 		t.Fatalf("discovered files in inaccessible root: %+v", files)
 	}
@@ -45,7 +45,7 @@ func TestDiscoverReturnsPartialFilesWithMidWalkError(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(blocked, 0o700) })
 
-	files, err := Discover([]Root{{Agent: "claude", Dir: root}}, Excluder{})
+	files, _, err := Discover([]Root{{Agent: "claude", Dir: root}}, Excluder{})
 	if len(files) != 1 || files[0].Path != safe {
 		t.Fatalf("partial files = %+v, want safe file", files)
 	}

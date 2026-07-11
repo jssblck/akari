@@ -71,6 +71,74 @@ func TestWatchReportsIncompleteDiscoveryAndSyncsSafeFiles(t *testing.T) {
 	}
 }
 
+// TestWatchDedupsRepeatedDiscoveryFailure guards against the log spam a standing
+// discovery failure used to cause: with the discover ticker firing every 15ms,
+// an unchanging failure must still log only once, not once per tick, and fixing
+// the failure must log the recovery exactly once too rather than trailing off
+// silently or double-logging.
+func TestWatchDedupsRepeatedDiscoveryFailure(t *testing.T) {
+	root := t.TempDir()
+	missing := filepath.Join(root, "does-not-exist")
+
+	fn, _ := recorder()
+	logs := make(chan string, 256)
+	opt := Options{
+		Debounce: 10 * time.Millisecond,
+		Poll:     time.Hour,
+		Discover: 15 * time.Millisecond,
+		Rescan:   time.Hour,
+		Logf: func(format string, args ...any) {
+			logs <- fmt.Sprintf(format, args...)
+		},
+	}
+	// A required (non-Optional) missing root is a discovery error on every pass
+	// until it exists, the portable way to hold a failure's text perfectly
+	// constant across ticks without relying on symlinks or permission fixtures.
+	w := New([]discover.Root{{Agent: "claude", Dir: missing}}, fn, opt)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	// Several discover ticks elapse with the identical failure standing. The
+	// initial pass at startup also logs once via addRecursive's own separate
+	// "watch root ..." line (a different, one-time message, not the repeating
+	// discover-tick spam this test guards against), so only count the
+	// "discovery incomplete" line the discover ticker's w.discover() calls emit.
+	time.Sleep(200 * time.Millisecond)
+	if n := drainLogCountMatching(logs, "discovery incomplete"); n != 1 {
+		t.Fatalf("logged the standing discovery failure %d time(s), want exactly 1", n)
+	}
+
+	// Fixing the root changes discovery from failing to healthy: that must log
+	// the recovery exactly once, even though several more healthy ticks follow.
+	if err := os.MkdirAll(missing, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if n := drainLogCountMatching(logs, "discovery recovered"); n != 1 {
+		t.Fatalf("logged the recovery %d time(s), want exactly 1", n)
+	}
+}
+
+func drainLogCountMatching(ch chan string, substr string) int {
+	n := 0
+	for {
+		select {
+		case line := <-ch:
+			if strings.Contains(line, substr) {
+				n++
+			}
+		default:
+			return n
+		}
+	}
+}
+
 func writeSession(t *testing.T, path string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

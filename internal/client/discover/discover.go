@@ -82,6 +82,14 @@ type Root struct {
 	Agent    string
 	Dir      string
 	Optional bool // a missing built-in default is expected when its agent is unused
+	// FollowRootLink opts a root into resolving a symlink or (on Windows) a
+	// directory junction at the root itself before walking, when the directory an
+	// agent's sessions actually live under is only reachable through such a link
+	// (for example a Windows user who relocated their session directory with
+	// `mklink /J`). The default (false) rejects a linked root: see ResolveRoot.
+	// The no-follow policy still applies to everything found inside the walk
+	// regardless of this setting; it only ever affects the root path itself.
+	FollowRootLink bool
 }
 
 // Roots builds the directories to scan for each agent. It honors each agent's own
@@ -113,7 +121,7 @@ func Roots(cfg config.Client, env func(string) string, home string) []Root {
 	}
 
 	for _, r := range cfg.ExtraRoots {
-		roots = append(roots, Root{Agent: r.Agent, Dir: r.Path})
+		roots = append(roots, Root{Agent: r.Agent, Dir: r.Path, FollowRootLink: r.FollowRootLink})
 	}
 	return roots
 }
@@ -165,9 +173,12 @@ func Matches(agent, name string) bool {
 // by path and sorted for stable output. A missing optional built-in root is quiet;
 // missing configured roots and every other incomplete traversal are returned as
 // errors alongside files found in complete portions of the scan. Symlink roots and
-// matching session-file symlinks are errors and are never followed. ex drops paths
-// the user configured to exclude (pass the zero Excluder to keep everything).
-func Discover(roots []Root, ex Excluder) ([]File, error) {
+// matching session-file symlinks are errors and are never followed (see
+// ResolveRoot for the one exception: a linked Optional built-in root is skipped
+// with a notice rather than an error). notices carries those non-fatal skips so a
+// caller can report them without counting them as failures. ex drops paths the
+// user configured to exclude (pass the zero Excluder to keep everything).
+func Discover(roots []Root, ex Excluder) (files []File, notices []string, err error) {
 	seen := map[string]bool{}
 	var out []File
 	var problems []error
@@ -178,30 +189,26 @@ func Discover(roots []Root, ex Excluder) ([]File, error) {
 			}
 			continue
 		}
-		info, err := os.Lstat(root.Dir)
-		if err != nil {
-			if root.Optional && errors.Is(err, fs.ErrNotExist) {
+		walkDir, notice, rerr := ResolveRoot(root)
+		if rerr != nil {
+			if root.Optional && errors.Is(rerr, fs.ErrNotExist) {
 				continue
 			}
-			problems = append(problems, fmt.Errorf("inspect %s root %s: %w", root.Agent, root.Dir, err))
+			problems = append(problems, fmt.Errorf("inspect %s root %s: %w", root.Agent, root.Dir, rerr))
 			continue
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			problems = append(problems, fmt.Errorf("inspect %s root %s: symlink roots are not allowed", root.Agent, root.Dir))
+		if notice != "" {
+			notices = append(notices, notice)
 			continue
 		}
-		if !info.IsDir() {
-			problems = append(problems, fmt.Errorf("inspect %s root %s: root is not a directory", root.Agent, root.Dir))
-			continue
-		}
-		err = filepath.WalkDir(root.Dir, func(path string, d fs.DirEntry, err error) error {
+		werr := filepath.WalkDir(walkDir, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
 			if d.IsDir() {
 				// Prune an excluded directory so its whole subtree is skipped rather
 				// than walked and filtered file by file.
-				if path != root.Dir && ex.ExcludedDir(path) {
+				if path != walkDir && ex.ExcludedDir(path) {
 					return filepath.SkipDir
 				}
 				return nil
@@ -229,16 +236,134 @@ func Discover(roots []Root, ex Excluder) ([]File, error) {
 				return nil
 			}
 			seen[path] = true
-			out = append(out, File{Agent: root.Agent, Root: root.Dir, Path: path})
+			out = append(out, File{Agent: root.Agent, Root: walkDir, Path: path})
 			return nil
 		})
-		if err != nil {
-			problems = append(problems, fmt.Errorf("walk %s root %s: %w", root.Agent, root.Dir, err))
+		if werr != nil {
+			problems = append(problems, fmt.Errorf("walk %s root %s: %w", root.Agent, root.Dir, werr))
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	if len(problems) > 0 {
-		return out, &Error{problems: problems}
+		return out, notices, &Error{problems: problems}
 	}
-	return out, nil
+	return out, notices, nil
+}
+
+// ResolveRoot applies the closed root-link policy to one candidate root and
+// reports what discovery should do with it. discover.Discover and
+// watch.Watcher's addRecursive both call this so the two traversal paths cannot
+// drift: a root that discovery would reject or skip is rejected or skipped
+// identically when watch (re)adds its filesystem watches.
+//
+// A root that is a plain directory (the common case) resolves normally: dir is
+// root.Dir. A root that is a symlink or, on Windows, a directory junction (see
+// isWindowsReparsePoint) is a link standing in for the root, and is rejected by
+// default: the closed policy that stops a link inside a walked root from being
+// followed applies to the root itself for the same reason, escaping the
+// configured location undetected. There is one exception, for the built-in
+// per-agent default directories only (root.Optional): a linked Optional root is
+// skipped with a non-fatal notice instead of an error, because those roots are
+// opportunistic already (a missing one is silently skipped) and a user who
+// junctioned their agent directory must opt in explicitly, but their sync must
+// not start failing over it. Setting root.FollowRootLink resolves the link (any
+// depth) to its target directory and walks that instead; the no-follow policy
+// still applies to every path found inside the walk.
+//
+// The returned err is nil whenever dir or notice is set; it is non-nil only when
+// the root cannot be used at all (missing, not a directory, or a rejected link).
+func ResolveRoot(root Root) (dir string, notice string, err error) {
+	class, err := classifyRoot(root.Dir)
+	if err != nil {
+		return "", "", err
+	}
+	if !class.linked {
+		if !class.isDir {
+			return "", "", errors.New("root is not a directory")
+		}
+		return root.Dir, "", nil
+	}
+	if !root.FollowRootLink {
+		if root.Optional {
+			return "", fmt.Sprintf("%s root %s is a %s; skipped (set follow_root_link on this root in the config to traverse it)", root.Agent, root.Dir, class.kind), nil
+		}
+		return "", "", fmt.Errorf("root is a %s (point the root at the real path, or set follow_root_link on this root to traverse it)", class.kind)
+	}
+	if !class.isDir {
+		return "", "", fmt.Errorf("root is a %s whose target is not a directory", class.kind)
+	}
+	resolved, rerr := resolveRootLink(root.Dir)
+	if rerr != nil {
+		return "", "", fmt.Errorf("resolve %s target: %w", class.kind, rerr)
+	}
+	return resolved, "", nil
+}
+
+// rootClass is the result of inspecting one root candidate's Lstat.
+type rootClass struct {
+	linked bool   // the root itself is a symlink or a Windows directory junction
+	kind   string // "symlink" or "directory junction", set when linked
+	isDir  bool   // true when the root (or its link target, if linked) is a directory
+}
+
+// classifyRoot inspects dir and reports how it should be treated. It exists
+// because Go's Lstat does not set ModeSymlink for a Windows directory junction
+// (IO_REPARSE_TAG_MOUNT_POINT), only for a true NTFS symlink: a junction surfaces
+// as ModeIrregular, so checking ModeSymlink alone misreports a junction root as
+// "not a directory" rather than recognizing it as a link. isWindowsReparsePoint
+// (platform-specific, see root_windows.go and root_other.go) closes that gap by
+// reading the raw Windows file attributes; on every other OS it always reports
+// false, since only NTFS has directory junctions.
+func classifyRoot(dir string) (rootClass, error) {
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return rootClass{}, err
+	}
+	switch {
+	case info.Mode()&os.ModeSymlink != 0:
+		return rootClass{linked: true, kind: "symlink", isDir: statIsDir(dir)}, nil
+	case isWindowsReparsePoint(info):
+		return rootClass{linked: true, kind: "directory junction", isDir: statIsDir(dir)}, nil
+	default:
+		return rootClass{isDir: info.IsDir()}, nil
+	}
+}
+
+// statIsDir reports whether path resolves (following any link) to a directory.
+func statIsDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+// maxRootLinkDepth bounds resolveRootLink's walk so a link cycle fails cleanly
+// instead of looping forever.
+const maxRootLinkDepth = 32
+
+// resolveRootLink follows a root's link chain to the real directory it names,
+// used only once root.FollowRootLink has accepted a linked root. It does not use
+// filepath.EvalSymlinks: that function only walks a path segment whose Mode
+// reports ModeSymlink, which (as in classifyRoot) a Windows junction's
+// IO_REPARSE_TAG_MOUNT_POINT does not set, so it silently returns a junction
+// unresolved rather than following it. os.Readlink, which the standard library
+// supports for both a true symlink and a junction, does not have that gap.
+func resolveRootLink(dir string) (string, error) {
+	cur := dir
+	for range maxRootLinkDepth {
+		info, err := os.Lstat(cur)
+		if err != nil {
+			return "", err
+		}
+		if info.Mode()&os.ModeSymlink == 0 && !isWindowsReparsePoint(info) {
+			return cur, nil
+		}
+		target, err := os.Readlink(cur)
+		if err != nil {
+			return "", err
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(cur), target)
+		}
+		cur = filepath.Clean(target)
+	}
+	return "", fmt.Errorf("too many levels of links resolving root %s", dir)
 }

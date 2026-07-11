@@ -142,6 +142,13 @@ machine = "sandbox-pool"
 agent = "claude"
 path  = "/mnt/shared/claude-sessions"
 
+# A root that is itself a symlink or (on Windows) a directory junction is
+# rejected unless you opt in with follow_root_link.
+[[extra_roots]]
+agent            = "claude"
+path             = "D:\\claude-sessions-link"
+follow_root_link = true
+
 # Skip paths matching these globs during discovery, for sync and watch alike.
 excludes = ["**/scratch/**", "*.private.jsonl"]
 ```
@@ -159,8 +166,11 @@ The keys:
   filter does not fill with thousands of single-use hostnames. `AKARI_MACHINE`
   overrides it per run.
 - **`extra_roots`** (optional): additional discovery roots, each an
-  `{ agent, path }` pair where `agent` is `claude`, `codex`, or `pi`. Use these
-  when your sessions live somewhere other than the standard location.
+  `{ agent, path, follow_root_link }` entry where `agent` is `claude`, `codex`,
+  or `pi` and `follow_root_link` (optional, default `false`) opts the root into
+  resolving a symlink or, on Windows, a directory junction at `path` itself
+  before walking it; see [Discovery](#discovery) below for why that is opt-in.
+  Use these when your sessions live somewhere other than the standard location.
 - **`excludes`** (optional): glob patterns of paths to skip, applied to both
   `sync` and `watch`. Patterns match the full path with `/` separators;
   `**/scratch/**` ignores any path with a `scratch` segment, `*.private.jsonl`
@@ -207,13 +217,26 @@ has no session directory. A missing path supplied through an agent override or
 `extra_roots` is an error, as are permission failures and incomplete directory
 walks. `sync` and `--dry-run` process files found in complete portions of the scan,
 report the number of discovery errors in the final summary, and exit nonzero.
-`watch` reports the same failures in its log and retries on later rescans.
+`watch` reports the same failures in its log, deduped so a standing failure logs
+once (and at most once an hour after that) rather than every rescan, and retries
+on later rescans.
 
-Discovery never follows symlinks. A symlink used as a root or as a matching
-session file is reported as a discovery error, including links whose target is a
-regular file inside the root. Directory symlinks below a root are ignored, which
-also closes loops and prevents a link from bypassing `excludes` or reaching files
-outside the configured root.
+Discovery never follows a symlink or, on Windows, a directory junction (`mklink
+/J`) found *inside* a root: a matching session file behind one is a discovery
+error, and a linked directory is silently skipped rather than descended into,
+which closes loops and keeps `excludes` and the configured root from being
+bypassed. A root that is *itself* a symlink or junction is rejected the same way
+by default, with one exception: a linked built-in default root (the standard
+per-agent locations above, not `extra_roots`) is skipped with a quiet notice
+instead of an error, so relocating your agent's session directory with a
+junction does not turn into a failing sync. If you do want a linked root
+followed, set `follow_root_link = true` on that `extra_roots` entry; the closed
+policy still applies to everything the walk finds underneath it, only the root
+path itself is resolved. This is also why the client's read-time hardening
+matters: even inside a closed root, a session file's content is only trusted if
+it is still the same file the walk approved at the moment it is opened, closing
+the gap a symlink swapped in between discovery and reading would otherwise
+leave.
 
 For each candidate file, the client peeks the first line to read the working
 directory and session id, then resolves that directory's git `origin` remote to a
