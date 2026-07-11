@@ -81,6 +81,8 @@ func newMCPBodySpoolerAt(next http.Handler, dir string, maxSpools int) (*mcpBody
 }
 
 func secureSpoolDir(dir string) error {
+	// 0700 is a POSIX owner-only mode; on Windows it has no effect and the
+	// directory keeps its default ACLs instead. Production servers are Linux.
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create MCP spool directory: %w", err)
 	}
@@ -100,60 +102,88 @@ func secureSpoolDir(dir string) error {
 // removeAbandoned reclaims files whose advisory lock disappeared with a dead
 // process. A rolling restart can share the directory safely: files still owned
 // by the old process remain locked and are left alone.
+//
+// A single leftover file that cannot be locked, stat'd, or removed (a stale
+// NFS handle, a permission hiccup, another process racing the same sweep) is
+// logged and skipped instead of aborting the sweep. One uncooperative file no
+// longer holds the whole MCP endpoint at 507 until someone cleans it up by
+// hand. Spooler construction still fails if the spool directory itself is
+// unusable; that is checked separately by secureSpoolDir.
 func (s *mcpBodySpooler) removeAbandoned() error {
 	paths, err := filepath.Glob(filepath.Join(s.dir, mcpSpoolFilePattern))
 	if err != nil {
 		return fmt.Errorf("list abandoned MCP spools: %w", err)
 	}
 	for _, path := range paths {
-		lockPath := spoolLockPath(path)
-		lock := flock.New(lockPath)
-		locked, err := lock.TryLock()
-		if err != nil {
-			_ = lock.Close()
-			return fmt.Errorf("lock abandoned MCP spool: %w", err)
+		if err := removeAbandonedBody(path); err != nil {
+			slog.Warn("skip abandoned MCP spool", "path", path, "error", err)
 		}
-		if !locked {
-			_ = lock.Close()
-			continue
-		}
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			_ = lock.Unlock()
-			_ = lock.Close()
-			return fmt.Errorf("remove abandoned MCP spool: %w", err)
-		}
-		if err := lock.Unlock(); err != nil {
-			_ = lock.Close()
-			return fmt.Errorf("unlock abandoned MCP spool: %w", err)
-		}
-		if err := lock.Close(); err != nil {
-			return fmt.Errorf("close abandoned MCP spool lock: %w", err)
-		}
-		_ = os.Remove(lockPath)
 	}
 	lockPaths, err := filepath.Glob(filepath.Join(s.dir, mcpSpoolLockPattern))
 	if err != nil {
 		return fmt.Errorf("list abandoned MCP spool locks: %w", err)
 	}
 	for _, lockPath := range lockPaths {
-		bodyPath := spoolBodyPath(lockPath)
-		if _, err := os.Stat(bodyPath); err == nil || !errors.Is(err, os.ErrNotExist) {
-			continue
+		if err := removeAbandonedLock(lockPath); err != nil {
+			slog.Warn("skip abandoned MCP spool lock", "path", lockPath, "error", err)
 		}
-		lock := flock.New(lockPath)
-		locked, err := lock.TryLock()
-		if err != nil {
-			_ = lock.Close()
-			return fmt.Errorf("lock abandoned MCP spool marker: %w", err)
-		}
-		if !locked {
-			_ = lock.Close()
-			continue
-		}
+	}
+	return nil
+}
+
+// removeAbandonedBody removes a single spool body left behind by a dead
+// process, provided its lock is free. A locked file belongs to a live
+// request and is left alone (not an error).
+func removeAbandonedBody(path string) error {
+	lockPath := spoolLockPath(path)
+	lock := flock.New(lockPath)
+	locked, err := lock.TryLock()
+	if err != nil {
+		_ = lock.Close()
+		return fmt.Errorf("lock abandoned MCP spool: %w", err)
+	}
+	if !locked {
+		_ = lock.Close()
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		_ = lock.Unlock()
 		_ = lock.Close()
-		_ = os.Remove(lockPath)
+		return fmt.Errorf("remove abandoned MCP spool: %w", err)
 	}
+	if err := lock.Unlock(); err != nil {
+		_ = lock.Close()
+		return fmt.Errorf("unlock abandoned MCP spool: %w", err)
+	}
+	if err := lock.Close(); err != nil {
+		return fmt.Errorf("close abandoned MCP spool lock: %w", err)
+	}
+	_ = os.Remove(lockPath)
+	return nil
+}
+
+// removeAbandonedLock removes a lock-file placeholder (see the invariant
+// documented on mcpSpoolSink.spill) whose body never showed up, provided the
+// lock is free. A body that already exists, or a lock still held, is left
+// alone (not an error).
+func removeAbandonedLock(lockPath string) error {
+	bodyPath := spoolBodyPath(lockPath)
+	if _, err := os.Stat(bodyPath); err == nil || !errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	lock := flock.New(lockPath)
+	locked, err := lock.TryLock()
+	if err != nil {
+		_ = lock.Close()
+		return fmt.Errorf("lock abandoned MCP spool marker: %w", err)
+	}
+	if !locked {
+		_ = lock.Close()
+		return nil
+	}
+	_ = lock.Unlock()
+	_ = lock.Close()
+	_ = os.Remove(lockPath)
 	return nil
 }
 
@@ -178,14 +208,25 @@ func (s *mcpBodySpooler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body, cleanup, err := s.prepareBody(r.Context(), r.Body)
 	if err != nil {
 		closeMCPRequestBody(r.Body)
+		var storageErr *spoolStorageError
 		switch {
 		case errors.Is(err, errMCPRequestTooLarge):
 			rejectOversizedMCPRequest(w, r)
 		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 			return
-		default:
+		case errors.As(err, &storageErr):
+			// Our own storage failed: temp/lock file creation, a spool write, or
+			// the rewind before handoff. Log it at error, since fixing it is on us.
 			slog.Error("spool MCP request", "error", err)
 			http.Error(w, "MCP request storage unavailable", http.StatusInsufficientStorage)
+		default:
+			// io.CopyBuffer folds source-read and sink-write errors into one
+			// return value; anything that is not a recognized storage failure is
+			// an ordinary client-side read failure (connection reset, broken pipe
+			// mid-upload), routine for large bodies. The client is usually gone
+			// already, so a best-effort 400 is fine.
+			slog.Warn("client body read failed", "error", err)
+			http.Error(w, "MCP request body could not be read", http.StatusBadRequest)
 		}
 		return
 	}
@@ -207,6 +248,26 @@ func isJSONBody(contentType string) bool {
 }
 
 var errMCPRequestTooLarge = errors.New("MCP request body exceeds 100 MiB")
+
+// spoolStorageError marks a failure writing to the spooler's own storage (a
+// temp/lock file, a spool file write, or the rewind before handoff) as
+// distinct from an ordinary failure reading the client's body. io.CopyBuffer
+// in prepareBody folds source-read and sink-write errors into a single
+// return value; ServeHTTP unwraps this marker to tell which side is at
+// fault and answer 507 (ours) or 400 (the client's) accordingly.
+type spoolStorageError struct {
+	err error
+}
+
+func (e *spoolStorageError) Error() string { return e.err.Error() }
+func (e *spoolStorageError) Unwrap() error { return e.err }
+
+func wrapSpoolStorageError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &spoolStorageError{err: err}
+}
 
 func rejectOversizedMCPRequest(w http.ResponseWriter, r *http.Request) {
 	// Do not let net/http drain an attacker-controlled remainder for connection
@@ -267,7 +328,11 @@ type mcpSpoolSink struct {
 
 func (s *mcpSpoolSink) Write(p []byte) (int, error) {
 	if s.file != nil {
-		return s.file.Write(p)
+		n, err := s.file.Write(p)
+		if err != nil {
+			return n, wrapSpoolStorageError(fmt.Errorf("write MCP spool: %w", err))
+		}
+		return n, nil
 	}
 	if int64(s.memory.Len()+len(p)) <= s.owner.memoryBytes {
 		return s.memory.Write(p)
@@ -275,37 +340,51 @@ func (s *mcpSpoolSink) Write(p []byte) (int, error) {
 	if err := s.spill(); err != nil {
 		return 0, err
 	}
-	return s.file.Write(p)
+	n, err := s.file.Write(p)
+	if err != nil {
+		return n, wrapSpoolStorageError(fmt.Errorf("write MCP spool: %w", err))
+	}
+	return n, nil
 }
 
 func (s *mcpSpoolSink) spill() error {
 	lockFile, err := os.CreateTemp(s.owner.dir, mcpSpoolLockPattern)
 	if err != nil {
-		return fmt.Errorf("create MCP spool lock: %w", err)
+		return wrapSpoolStorageError(fmt.Errorf("create MCP spool lock: %w", err))
 	}
 	s.lockPath = lockFile.Name()
 	if err := lockFile.Close(); err != nil {
-		return fmt.Errorf("close MCP spool lock file: %w", err)
+		return wrapSpoolStorageError(fmt.Errorf("close MCP spool lock file: %w", err))
 	}
+	// Between the Close above and the TryLock below, this lock file exists on
+	// disk but nothing holds it yet. If another process's startup sweep
+	// (removeAbandoned) runs in that gap, it sees an unlocked lock file with
+	// no matching body and will happily remove it as an orphan. Correctness
+	// here rests on flock.New opening the lock path with os.O_CREATE, so the
+	// TryLock below silently recreates the file if the sweep won the race. A
+	// future flock upgrade that drops O_CREATE from its default open flags
+	// would quietly reintroduce this race.
 	s.lock = flock.New(s.lockPath)
 	locked, err := s.lock.TryLock()
 	if err != nil {
-		return fmt.Errorf("lock MCP spool: %w", err)
+		return wrapSpoolStorageError(fmt.Errorf("lock MCP spool: %w", err))
 	}
 	if !locked {
-		return fmt.Errorf("lock MCP spool: lock unavailable")
+		return wrapSpoolStorageError(fmt.Errorf("lock MCP spool: lock unavailable"))
 	}
 	bodyPath := spoolBodyPath(s.lockPath)
+	// 0600 is a POSIX owner-only mode; on Windows it has no effect and the
+	// file keeps its default ACLs instead. Production servers are Linux.
 	file, err := os.OpenFile(bodyPath, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
 	if err != nil {
-		return fmt.Errorf("create MCP spool: %w", err)
+		return wrapSpoolStorageError(fmt.Errorf("create MCP spool: %w", err))
 	}
 	s.file = file
 	if err := file.Chmod(0o600); err != nil {
-		return fmt.Errorf("protect MCP spool: %w", err)
+		return wrapSpoolStorageError(fmt.Errorf("protect MCP spool: %w", err))
 	}
 	if _, err := file.Write(s.memory.Bytes()); err != nil {
-		return fmt.Errorf("write MCP spool: %w", err)
+		return wrapSpoolStorageError(fmt.Errorf("write MCP spool: %w", err))
 	}
 	s.memory = bytes.Buffer{}
 	return nil
@@ -318,7 +397,7 @@ func (s *mcpSpoolSink) body() (io.ReadCloser, error) {
 		return io.NopCloser(bytes.NewReader(s.memory.Bytes())), nil
 	}
 	if _, err := s.file.Seek(0, io.SeekStart); err != nil {
-		return nil, fmt.Errorf("rewind MCP spool: %w", err)
+		return nil, wrapSpoolStorageError(fmt.Errorf("rewind MCP spool: %w", err))
 	}
 	return s.file, nil
 }

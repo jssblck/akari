@@ -3,7 +3,9 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -324,6 +326,101 @@ func TestMCPBodySpoolerReportsDiskFailureAndReleasesSlot(t *testing.T) {
 	}
 }
 
+// failAfterReader emulates a client connection that dies partway through an
+// upload (a reset or a broken pipe): it yields n bytes and then fails every
+// subsequent read with err, never touching the spooler's storage.
+type failAfterReader struct {
+	n   int
+	err error
+}
+
+func (r *failAfterReader) Read(p []byte) (int, error) {
+	if r.n <= 0 {
+		return 0, r.err
+	}
+	n := min(len(p), r.n)
+	for i := range p[:n] {
+		p[i] = 'x'
+	}
+	r.n -= n
+	return n, nil
+}
+
+// recordingLogHandler captures emitted records so a test can assert on the
+// level and message the code chose, without depending on slog's text output.
+type recordingLogHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *recordingLogHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *recordingLogHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, r)
+	return nil
+}
+
+func (h *recordingLogHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *recordingLogHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *recordingLogHandler) hasLevelAndMessage(level slog.Level, msg string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, r := range h.records {
+		if r.Level == level && r.Message == msg {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *recordingLogHandler) errorRecords() []slog.Record {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var errs []slog.Record
+	for _, r := range h.records {
+		if r.Level == slog.LevelError {
+			errs = append(errs, r)
+		}
+	}
+	return errs
+}
+
+func TestMCPBodySpoolerTreatsClientReadFailureAsBadRequestNotStorageFailure(t *testing.T) {
+	handler := &recordingLogHandler{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(handler))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	reached := false
+	spooler := newTestMCPSpooler(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		reached = true
+	}), 4096, 32, 1)
+
+	req := mcpPost(&failAfterReader{n: 8, err: errors.New("connection reset by peer")})
+	w := httptest.NewRecorder()
+	spooler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if reached {
+		t.Fatal("client read failure reached downstream handler")
+	}
+	assertNoMCPSpools(t, spooler.dir)
+	if got := len(spooler.slots); got != 0 {
+		t.Fatalf("occupied slots = %d, want 0", got)
+	}
+	if !handler.hasLevelAndMessage(slog.LevelWarn, "client body read failed") {
+		t.Fatal(`expected a warn-level "client body read failed" log`)
+	}
+	if errs := handler.errorRecords(); len(errs) != 0 {
+		t.Fatalf("client read failure logged at error level: %v", errs)
+	}
+}
+
 func TestUnavailableMCPBodySpoolerRejectsOnlyJSONPosts(t *testing.T) {
 	var reached atomic.Int64
 	handler := unavailableMCPBodySpooler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -437,6 +534,49 @@ func TestMCPBodySpoolerRecoversAbandonedFilesWithoutTouchingLiveOnes(t *testing.
 	}
 	if _, err := os.Stat(live); err != nil {
 		t.Fatalf("live spool was removed: %v", err)
+	}
+}
+
+func TestMCPBodySpoolerSkipsUnprocessableAbandonedFileAndStillStarts(t *testing.T) {
+	dir := t.TempDir()
+
+	// A non-empty directory masquerading as a spool body: os.Remove on it
+	// during the sweep fails with "directory not empty" on every platform,
+	// simulating a leftover file the sweep cannot process (a stale NFS
+	// handle, a permission hiccup, and so on).
+	stuck := filepath.Join(dir, "request-stuck.body")
+	if err := os.Mkdir(stuck, 0o700); err != nil {
+		t.Fatalf("seed unprocessable spool: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(stuck, "child"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("seed nested file: %v", err)
+	}
+
+	// An ordinary abandoned spool sitting alongside it must still be swept.
+	ordinary := filepath.Join(dir, "request-ordinary.body")
+	if err := os.WriteFile(ordinary, []byte("partial"), 0o600); err != nil {
+		t.Fatalf("seed ordinary spool: %v", err)
+	}
+
+	reached := false
+	spooler, err := newMCPBodySpoolerAt(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		reached = true
+	}), dir, 1)
+	if err != nil {
+		t.Fatalf("new spooler: %v", err)
+	}
+
+	if _, err := os.Stat(stuck); err != nil {
+		t.Fatalf("unprocessable spool vanished: %v", err)
+	}
+	if _, err := os.Stat(ordinary); !os.IsNotExist(err) {
+		t.Fatalf("sibling abandoned spool was not swept: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	spooler.ServeHTTP(w, mcpPost(bytes.NewReader([]byte(`{"jsonrpc":"2.0"}`))))
+	if !reached {
+		t.Fatal("spooler did not serve a request after skipping an unprocessable leftover")
 	}
 }
 
