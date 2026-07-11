@@ -472,15 +472,30 @@ func (r *Resolver) localRoot(ctx context.Context, cwd string) string {
 // *.jsonl that never does (a tool-output log, an event feed under a custom
 // extra_root) returns errNotSession so Resolve can skip it with a clear reason
 // rather than upload it as a junk standalone/orphaned session.
+//
+// Reading is Lstat-then-Open-then-verify rather than the simpler Stat-then-Open:
+// discover.Discover already rejected a symlink at f.Path when it found the file,
+// but a stat-and-open a moment later reopens a time-of-check-to-time-of-use
+// window, since both Stat and Open follow a symlink. If f.Path was swapped for
+// one in between (deliberately, or by an ordinary rename-based file replace
+// racing the walk), a plain Stat+Open would silently read through it and upload
+// whatever it points to. Lstat here rejects a symlink outright before ever
+// opening it, and comparing the Lstat and the opened file's own Stat with
+// os.SameFile closes the remaining gap: if the path was swapped for a different
+// file of any kind between the two calls, the file identity no longer matches
+// and the read is refused rather than silently served from the wrong file.
 func PeekHeader(f discover.File) (Header, error) {
-	info, err := os.Stat(f.Path)
+	lst, err := os.Lstat(f.Path)
 	if err != nil {
 		return Header{}, err
 	}
-	if !info.Mode().IsRegular() {
+	if lst.Mode()&os.ModeSymlink != 0 {
+		return Header{}, fmt.Errorf("session path %s is a symlink", f.Path)
+	}
+	if !lst.Mode().IsRegular() {
 		return Header{}, fmt.Errorf("session path %s is not a regular file", f.Path)
 	}
-	file, err := os.Open(f.Path)
+	file, err := openSameFile(f.Path, lst)
 	if err != nil {
 		return Header{}, err
 	}
@@ -517,6 +532,33 @@ func PeekHeader(f discover.File) (Header, error) {
 
 	h.SourceID = sourceID(f, h.sessionID)
 	return h, nil
+}
+
+// openSameFile opens path and verifies the opened file is the same filesystem
+// object lst (an earlier Lstat of the same path) already inspected, closing the
+// time-of-check-to-time-of-use window between that Lstat and this Open: if path
+// was swapped for a different file (of any kind, including a symlink) in
+// between, the file this returns would silently differ from the one the caller
+// approved. os.SameFile compares device and file index, which stays stable
+// across an ordinary in-place write (the normal case: an agent still appending
+// to its own session file) but changes the moment the path names a different
+// filesystem object, so this only ever rejects an actual identity change, never
+// an ordinary write in progress.
+func openSameFile(path string, lst os.FileInfo) (*os.File, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	fst, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, err
+	}
+	if !os.SameFile(lst, fst) {
+		file.Close()
+		return nil, fmt.Errorf("session path %s changed between inspection and read", path)
+	}
+	return file, nil
 }
 
 // sessionSignature reports whether one parsed line looks like a genuine session

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -109,9 +110,9 @@ func runSync(ctx context.Context, args []string) error {
 	}
 	machine := config.ResolveMachine(cfg, os.Getenv, os.Hostname)
 
-	files, err := discover.Discover(discover.Roots(cfg, os.Getenv, home), discover.NewExcluder(cfg.Excludes))
-	if err != nil {
-		return fmt.Errorf("discover sessions: %w", err)
+	files, discoveryNotices, discoveryErr := discover.Discover(discover.Roots(cfg, os.Getenv, home), discover.NewExcluder(cfg.Excludes))
+	for _, n := range discoveryNotices {
+		fmt.Fprintln(os.Stderr, "notice: "+n)
 	}
 
 	resolver := resolve.New()
@@ -144,6 +145,7 @@ func runSync(ctx context.Context, args []string) error {
 	}
 
 	sum, interrupted := syncAll(work, deadline, files, opts.concurrency, run)
+	sum.discoveryFailed = discover.ErrorCount(discoveryErr)
 
 	printSummary(len(files), sum, opts.dryRun)
 	if interrupted {
@@ -155,10 +157,14 @@ func runSync(ctx context.Context, args []string) error {
 			fmt.Fprintf(os.Stderr, "time limit reached: stopped before processing every file\n")
 		}
 	}
+	var uploadErr error
 	if sum.failed > 0 {
-		return fmt.Errorf("%d file(s) failed to upload", sum.failed)
+		uploadErr = fmt.Errorf("%d file(s) failed to upload", sum.failed)
 	}
-	return nil
+	if discoveryErr != nil {
+		discoveryErr = fmt.Errorf("discover sessions: %w", discoveryErr)
+	}
+	return errors.Join(discoveryErr, uploadErr)
 }
 
 // outcome carries one file's finished work from a sync goroutine to the single
@@ -175,6 +181,7 @@ type outcome struct {
 // the counts and the printed lines stay consistent without any locking.
 type summary struct {
 	uploaded, upToDate, reset, skipped, failed int
+	discoveryFailed                            int
 	standalone, orphaned                       int
 	uploadedBytes                              int64
 	skipReasons                                map[string]int
@@ -337,12 +344,7 @@ func syncAll(work, deadline context.Context, files []discover.File, concurrency 
 }
 
 func printSummary(total int, s *summary, dryRun bool) {
-	if dryRun {
-		fmt.Printf("\n%d file(s) discovered, %d skipped (dry run, nothing uploaded)\n", total, s.skipped)
-	} else {
-		fmt.Printf("\n%d file(s): %d uploaded, %d reset, %d up to date, %d skipped, %d failed (%d bytes sent)\n",
-			total, s.uploaded, s.reset, s.upToDate, s.skipped, s.failed, s.uploadedBytes)
-	}
+	fmt.Printf("\n%s\n", summaryHeadline(total, s, dryRun))
 	if s.standalone > 0 || s.orphaned > 0 {
 		fmt.Printf("of which %d standalone, %d orphaned (backed up, no git remote)\n", s.standalone, s.orphaned)
 	}
@@ -357,4 +359,13 @@ func printSummary(total int, s *summary, dryRun bool) {
 			fmt.Printf("  %3d  %s\n", s.skipReasons[k], k)
 		}
 	}
+}
+
+func summaryHeadline(total int, s *summary, dryRun bool) string {
+	if dryRun {
+		return fmt.Sprintf("%d file(s) discovered, %d skipped, %d failed, %d discovery error(s) (dry run, nothing uploaded)",
+			total, s.skipped, s.failed, s.discoveryFailed)
+	}
+	return fmt.Sprintf("%d file(s): %d uploaded, %d reset, %d up to date, %d skipped, %d failed, %d discovery error(s) (%d bytes sent)",
+		total, s.uploaded, s.reset, s.upToDate, s.skipped, s.failed, s.discoveryFailed, s.uploadedBytes)
 }

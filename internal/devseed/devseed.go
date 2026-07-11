@@ -244,7 +244,7 @@ func ingest(ctx context.Context, opts Options, token string) (ingestStats, error
 	}
 	machine := config.ResolveMachine(config.Client{}, os.Getenv, os.Hostname)
 
-	files, err := discover.Discover(discover.Roots(config.Client{}, os.Getenv, home), discover.Excluder{})
+	files, _, err := discover.Discover(discover.Roots(config.Client{}, os.Getenv, home), discover.Excluder{})
 	if err != nil {
 		return stats, fmt.Errorf("discover sessions: %w", err)
 	}

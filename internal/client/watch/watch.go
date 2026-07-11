@@ -7,6 +7,7 @@ package watch
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -62,6 +63,10 @@ type Watcher struct {
 	sync  SyncFunc
 	opt   Options
 	ex    discover.Excluder
+
+	// discoveryLog dedupes the log line w.discover() emits; see logDiscoveryStatus.
+	// It is only ever touched from run()'s single goroutine.
+	discoveryLog discoveryLogState
 }
 
 // New builds a Watcher.
@@ -89,7 +94,9 @@ func (w *Watcher) run(ctx context.Context, fsw *fsnotify.Watcher) error {
 	defer fsw.Close()
 
 	for _, r := range w.roots {
-		w.addRecursive(fsw, r.Dir)
+		if err := w.addRecursive(fsw, r); err != nil {
+			w.opt.Logf("watch root %s: %v", r.Dir, err)
+		}
 	}
 
 	rs := &runState{
@@ -194,7 +201,9 @@ func (w *Watcher) run(ctx context.Context, fsw *fsnotify.Watcher) error {
 		case <-rescan.C:
 			// Safety net: re-add any new directories and re-sync everything.
 			for _, r := range w.roots {
-				w.addRecursive(fsw, r.Dir)
+				if err := w.addRecursive(fsw, r); err != nil {
+					w.opt.Logf("watch root %s: %v", r.Dir, err)
+				}
 			}
 			for _, f := range w.discover() {
 				if m, ok := statMeta(f.Path); ok {
@@ -290,8 +299,10 @@ func (w *Watcher) handleEvent(fsw *fsnotify.Watcher, ev fsnotify.Event, known ma
 	if ev.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Rename) == 0 {
 		return
 	}
-	if info, err := os.Stat(ev.Name); err == nil && info.IsDir() {
-		w.addRecursive(fsw, ev.Name)
+	if info, err := os.Lstat(ev.Name); err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+		if err := w.addRecursive(fsw, discover.Root{Dir: ev.Name}); err != nil {
+			w.opt.Logf("watch directory %s: %v", ev.Name, err)
+		}
 		return
 	}
 	if f, ok := w.fileFor(ev.Name); ok {
@@ -306,6 +317,16 @@ func (w *Watcher) handleEvent(fsw *fsnotify.Watcher, ev fsnotify.Event, known ma
 
 // fileFor classifies an event path: the root whose directory contains it gives
 // the agent, and the agent's filename pattern confirms it is a session file.
+//
+// It resolves each root through discover.ResolveRoot rather than comparing
+// against r.Dir directly, because a root accepted via FollowRootLink is watched
+// (by addRecursive) and discovered (by discover.Discover) under its resolved
+// target directory, not under the link path in the config. Comparing against
+// r.Dir there would silently fail to match every live event under a followed
+// root, falling back to the slower discover ticker for every one of its files
+// instead of the prompt fsnotify path. A root that is unusable or was skipped
+// with a notice never matches, the same as it never contributes any files to
+// discover.Discover.
 func (w *Watcher) fileFor(path string) (discover.File, bool) {
 	if w.ex.Excluded(path) {
 		return discover.File{}, false
@@ -315,31 +336,111 @@ func (w *Watcher) fileFor(path string) (discover.File, bool) {
 	}
 	base := filepath.Base(path)
 	for _, r := range w.roots {
-		if within(r.Dir, path) && discover.Matches(r.Agent, base) {
-			return discover.File{Agent: r.Agent, Root: r.Dir, Path: path}, true
+		dir, notice, err := discover.ResolveRoot(r)
+		if err != nil || notice != "" {
+			continue
+		}
+		if within(dir, path) && discover.Matches(r.Agent, base) {
+			return discover.File{Agent: r.Agent, Root: dir, Path: path}, true
 		}
 	}
 	return discover.File{}, false
 }
 
 func (w *Watcher) discover() []discover.File {
-	files, err := discover.Discover(w.roots, w.ex)
-	if err != nil {
-		w.opt.Logf("discover: %v", err)
-	}
+	files, notices, err := discover.Discover(w.roots, w.ex)
+	w.logDiscoveryStatus(notices, err)
 	return files
 }
 
-// addRecursive adds dir and all of its subdirectories to the watcher, skipping any
-// excluded subtree so the watch never spends an fsnotify slot on a directory whose
-// files would be filtered out anyway.
-func (w *Watcher) addRecursive(fsw *fsnotify.Watcher, dir string) {
-	if dir == "" {
+// discoveryLogState dedupes the log line w.discover() emits. Without it, a
+// standing discovery failure (a permanently blocked root, for example) would
+// re-log an unchanged line every discover tick (30s by default) forever. It logs
+// immediately the first time a notice or error appears and whenever the
+// aggregated text changes (a new problem, an old one clearing, or the set of
+// affected roots shifting); otherwise it stays quiet except for one reminder
+// per discoveryLogReminder, so a standing problem never fully vanishes from the
+// log either.
+type discoveryLogState struct {
+	lastSignature string
+	lastLoggedAt  time.Time
+}
+
+// discoveryLogReminder bounds how rarely an unchanged, still-broken discovery
+// status re-logs once it has already been reported.
+const discoveryLogReminder = time.Hour
+
+// logDiscoveryStatus logs discover()'s notices and error, deduped via
+// discoveryLogState (see its doc comment for the policy).
+func (w *Watcher) logDiscoveryStatus(notices []string, err error) {
+	signature := discoveryStatusSignature(notices, err)
+	if signature == "" {
+		if w.discoveryLog.lastSignature != "" {
+			w.opt.Logf("discovery recovered")
+		}
+		w.discoveryLog = discoveryLogState{}
 		return
 	}
-	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
+	now := time.Now()
+	changed := signature != w.discoveryLog.lastSignature
+	due := !w.discoveryLog.lastLoggedAt.IsZero() && now.Sub(w.discoveryLog.lastLoggedAt) >= discoveryLogReminder
+	if !changed && !due {
+		return
+	}
+	for _, n := range notices {
+		w.opt.Logf("%s", n)
+	}
+	if err != nil {
+		w.opt.Logf("discovery incomplete (%d error(s)): %v", discover.ErrorCount(err), err)
+	}
+	w.discoveryLog = discoveryLogState{lastSignature: signature, lastLoggedAt: now}
+}
+
+// discoveryStatusSignature reduces one discover() outcome to a single string a
+// later call can compare against, so logDiscoveryStatus can tell "still the same
+// problem" from "something changed" with a plain string comparison. Empty means
+// healthy: no notices and no error.
+func discoveryStatusSignature(notices []string, err error) string {
+	if err == nil && len(notices) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, n := range notices {
+		b.WriteString(n)
+		b.WriteByte('\n')
+	}
+	if err != nil {
+		b.WriteString(err.Error())
+	}
+	return b.String()
+}
+
+// addRecursive adds root's directory and all of its subdirectories to the
+// watcher, skipping any excluded subtree so the watch never spends an fsnotify
+// slot on a directory whose files would be filtered out anyway. It applies the
+// closed root-link policy through discover.ResolveRoot, the same function
+// discover.Discover uses, so a root that discovery would reject or skip is
+// rejected or skipped identically here: initial pass, rescan, and a future
+// discovery pass can never disagree about whether a given root is usable.
+func (w *Watcher) addRecursive(fsw *fsnotify.Watcher, root discover.Root) error {
+	if root.Dir == "" {
+		return errors.New("path is empty")
+	}
+	dir, notice, err := discover.ResolveRoot(root)
+	if err != nil {
+		if root.Optional && errors.Is(err, fs.ErrNotExist) {
 			return nil
+		}
+		return err
+	}
+	if notice != "" {
+		w.opt.Logf("%s", notice)
+		return nil
+	}
+	var problems []error
+	err = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
 		if !d.IsDir() {
 			return nil
@@ -350,15 +451,19 @@ func (w *Watcher) addRecursive(fsw *fsnotify.Watcher, dir string) {
 		// fsnotify.Add is idempotent. Calling it for every live directory lets a
 		// recreated path regain the watch that the OS removed with its predecessor.
 		if addErr := fsw.Add(p); addErr != nil {
-			w.opt.Logf("watch directory %s: %v", p, addErr)
+			problems = append(problems, fmt.Errorf("add %s: %w", p, addErr))
 		}
 		return nil
 	})
+	if err != nil {
+		problems = append(problems, err)
+	}
+	return errors.Join(problems...)
 }
 
 func statMeta(path string) (fileMeta, bool) {
-	info, err := os.Stat(path)
-	if err != nil || !info.Mode().IsRegular() {
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return fileMeta{}, false
 	}
 	return fileMeta{mod: info.ModTime(), size: info.Size()}, true

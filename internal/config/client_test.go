@@ -37,6 +37,36 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSaveLoadPreservesFollowRootLink(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	in := Client{
+		ServerURL:  "https://akari.example",
+		Token:      "secret-token",
+		ExtraRoots: []ExtraRoot{{Agent: "claude", Path: "/mnt/linked-claude", FollowRootLink: true}},
+	}
+	if err := SaveClient(path, in); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadClient(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.ExtraRoots) != 1 || got.ExtraRoots[0] != in.ExtraRoots[0] {
+		t.Fatalf("extra root with follow_root_link not preserved: %+v", got.ExtraRoots)
+	}
+	if !got.ExtraRoots[0].FollowRootLink {
+		t.Error("follow_root_link round-tripped as false")
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "follow_root_link = true") {
+		t.Errorf("config file does not spell out follow_root_link: %s", raw)
+	}
+}
+
 func TestResolveMachine(t *testing.T) {
 	const hostname = "host-from-os"
 	okHost := func() (string, error) { return hostname, nil }
