@@ -34,7 +34,11 @@ func (s *Server) gateParsed(next http.HandlerFunc) http.HandlerFunc {
 
 // gatePublicParsed is gateParsed for the logged-out public session view, which has
 // no app shell. The public progress page reloads on a timer (it has no credential
-// to watch the status stream), so a finished rebuild brings the real page back.
+// to watch the status stream), so a finished rebuild brings the real page back. Like
+// gateParsed, an HX-Request gets the small banner fragment instead of the full page:
+// the public transcript's "Show earlier" button fetches /s/{public_id}/body with
+// hx-swap="outerHTML", so a full document there would swap an entire page into the
+// button's DOM slot rather than replacing the button.
 func (s *Server) gatePublicParsed(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// These URLs are capabilities the owner can revoke at any moment. Apply the
@@ -45,6 +49,10 @@ func (s *Server) gatePublicParsed(next http.HandlerFunc) http.HandlerFunc {
 		st := s.worker.FleetStatus(r.Context())
 		if !st.InProgress {
 			next(w, r)
+			return
+		}
+		if r.Header.Get("HX-Request") == "true" {
+			render(w, r, http.StatusOK, web.ReparseBanner(st.Done, st.Total, st.Failed))
 			return
 		}
 		render(w, r, http.StatusOK, web.PublicReparsePage(st.Done, st.Total, st.Failed))
