@@ -75,6 +75,9 @@ Only the database URL is required.
 | `AKARI_OG_CLEANUP_INTERVAL` | `24h` | How often the server prunes expired preview cards (older than `AKARI_OG_CACHE_TTL`) from the cache. A Go duration; `0` disables the sweep. |
 | `AKARI_INSIGHTS_REFRESH_INTERVAL` | `1h` | How often the fleet Insights snapshot recomputes in the background. Every trailing window recomputes together in one pass, so the range views cannot drift apart; the page notes the snapshot's age beside its range selector. A Go duration; `0` disables the background loop (the snapshot then computes on first request and when a reparse completes). |
 | `AKARI_SIGNALS_SETTLE_INTERVAL` | `5m` | How often the server computes per-session quality signals (outcome, grade, prompt hygiene, context health) for sessions that have settled: a session is graded once it has been idle past the abandoned threshold (30 minutes), off the ingest path, so a live session is never graded with a verdict that would drift. A session an ephemeral host declared terminal (`akari sync --finalize`) is graded immediately instead, both by this pass and by the finalize call the client makes at the end of the sync, so the grade lands before the host is torn down. A Go duration; `0` disables the background pass (signals then land only on reparse, the finalize call, or `akari-server settle`). |
+| `AKARI_REQUEST_BUDGET_CAPACITY` | `16` | Process-wide weighted capacity for expensive public work. Must be at least `12`, the weight of one maximum-sized MCP POST under the 100 MiB ceiling tracked by issue #134. Password work weighs `8`, public analytics `4`, MCP POST parsing and spooling `12`, and dynamic OAuth registration `1`. |
+| `AKARI_REQUEST_BUDGET_WAIT_TIMEOUT` | `5s` | Maximum time expensive work waits for capacity. A timed-out request receives HTTP 503 with `Retry-After: 1`. Must be a positive Go duration. |
+| `AKARI_OAUTH_REGISTRATIONS_PER_HOUR` | `1000` | Abuse ceiling for successful dynamic OAuth client registrations in a rolling hour. Postgres coordinates this limit across all server replicas. Excess registrations receive HTTP 429 with `Retry-After: 3600`. |
 
 ## The database
 
@@ -245,6 +248,9 @@ A short checklist for a real deployment:
   and back it up on your normal schedule.
 - **Capture logs** through your container runtime or systemd; the server logs to
   standard output and error.
+- **Scrape `/metrics`** for request-budget queue depth, wait time, rejection
+  counts, and per-class utilization. The Prometheus text response contains no
+  user or request identifiers.
 - **If you use reverse-proxy single sign-on**, make sure the server is reachable
   only through the proxy that sets the identity header (see
   [Single sign-on behind a trusted proxy](#single-sign-on-behind-a-trusted-proxy)).
@@ -252,6 +258,11 @@ A short checklist for a real deployment:
 The server shuts down gracefully on interrupt: it drains in-flight requests and
 lets background work (sweep, card refresh, any reparse) wind down before the
 connection pool closes.
+
+The weighted request budget is process-local. Each replica protects its own CPU,
+memory, temporary disk, and database concurrency, so aggregate admission capacity
+scales with the replica count. The dynamic OAuth registration ceiling is
+serialized in Postgres and remains deployment-wide.
 
 ---
 

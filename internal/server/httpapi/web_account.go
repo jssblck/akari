@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/jssblck/akari/internal/server/auth"
+	"github.com/jssblck/akari/internal/server/requestbudget"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/web"
 )
@@ -77,7 +78,14 @@ func (s *Server) handleLoginForm(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusUnauthorized, web.LoginPage(web.Page{Title: "Log in"}, next, "Invalid credentials."))
 		return
 	}
-	ok, err := auth.VerifyPassword(password, u.PasswordHash)
+	var ok bool
+	var verifyErr error
+	if !s.runAdmitted(w, r, requestbudget.Password, func() {
+		ok, verifyErr = auth.VerifyPassword(password, u.PasswordHash)
+	}) {
+		return
+	}
+	err = verifyErr
 	if err != nil || !ok {
 		render(w, r, http.StatusUnauthorized, web.LoginPage(web.Page{Title: "Log in"}, next, "Invalid credentials."))
 		return
@@ -118,7 +126,14 @@ func (s *Server) handleRegisterForm(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.RegisterPage(web.Page{Title: "Register"}, "Could not create account."))
 		return
 	}
-	hash, err := auth.HashPassword(password)
+	var hash string
+	var hashErr error
+	if !s.runAdmitted(w, r, requestbudget.Password, func() {
+		hash, hashErr = auth.HashPassword(password)
+	}) {
+		return
+	}
+	err := hashErr
 	if err != nil {
 		render(w, r, http.StatusInternalServerError, web.RegisterPage(web.Page{Title: "Register"}, "Could not create account."))
 		return

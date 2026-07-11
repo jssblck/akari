@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jssblck/akari/internal/server/auth"
+	"github.com/jssblck/akari/internal/server/requestbudget"
 	"github.com/jssblck/akari/internal/server/store"
 )
 
@@ -243,7 +244,14 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "check invite token")
 		return
 	}
-	hash, err := auth.HashPassword(req.Password)
+	var hash string
+	var hashErr error
+	if !s.runAdmitted(w, r, requestbudget.Password, func() {
+		hash, hashErr = auth.HashPassword(req.Password)
+	}) {
+		return
+	}
+	err := hashErr
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "hash password")
 		return
@@ -293,7 +301,14 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
-	ok, err := auth.VerifyPassword(req.Password, u.PasswordHash)
+	var ok bool
+	var verifyErr error
+	if !s.runAdmitted(w, r, requestbudget.Password, func() {
+		ok, verifyErr = auth.VerifyPassword(req.Password, u.PasswordHash)
+	}) {
+		return
+	}
+	err = verifyErr
 	if err != nil || !ok {
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return

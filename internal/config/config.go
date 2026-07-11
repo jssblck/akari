@@ -87,7 +87,28 @@ type Server struct {
 	// snapshot computes once on first request and then only when a fleet reparse
 	// completes.
 	InsightsRefreshInterval time.Duration
+	// RequestBudgetCapacity is the process-wide weighted capacity shared by
+	// expensive public request classes (AKARI_REQUEST_BUDGET_CAPACITY). One unit is
+	// approximately 8 MiB of bounded memory or an equivalent database work share.
+	// Defaults to 16 and must be at least 12 so the heaviest class can run once.
+	RequestBudgetCapacity int
+	// RequestBudgetWaitTimeout bounds how long expensive work waits for admission
+	// (AKARI_REQUEST_BUDGET_WAIT_TIMEOUT). Defaults to 5s. Requests that exceed it
+	// receive a retryable 503 response.
+	RequestBudgetWaitTimeout time.Duration
+	// OAuthRegistrationsPerHour is the database-coordinated ceiling for successful
+	// dynamic client registrations (AKARI_OAUTH_REGISTRATIONS_PER_HOUR). It applies
+	// across every server replica and defaults to the abuse-only threshold 1000.
+	OAuthRegistrationsPerHour int
 }
+
+const (
+	defaultRequestBudgetCapacity = 16
+	minimumRequestBudgetCapacity = 12
+	// DefaultOAuthRegistrationsPerHour is exported for programmatic Server
+	// construction, which otherwise bypasses LoadServer's environment defaults.
+	DefaultOAuthRegistrationsPerHour = 1000
+)
 
 // LoadServer reads server configuration from the environment, applying defaults
 // and validating required values.
@@ -137,6 +158,27 @@ func LoadServer() (Server, error) {
 		return Server{}, fmt.Errorf("AKARI_INSIGHTS_REFRESH_INTERVAL: %w", err)
 	}
 	s.InsightsRefreshInterval = insights
+	capacity, err := parsePositiveInt(os.Getenv("AKARI_REQUEST_BUDGET_CAPACITY"), defaultRequestBudgetCapacity)
+	if err != nil {
+		return Server{}, fmt.Errorf("AKARI_REQUEST_BUDGET_CAPACITY: %w", err)
+	}
+	if capacity < minimumRequestBudgetCapacity {
+		return Server{}, fmt.Errorf("AKARI_REQUEST_BUDGET_CAPACITY must be at least %d", minimumRequestBudgetCapacity)
+	}
+	s.RequestBudgetCapacity = capacity
+	waitTimeout, err := parseDuration(os.Getenv("AKARI_REQUEST_BUDGET_WAIT_TIMEOUT"), 5*time.Second)
+	if err != nil {
+		return Server{}, fmt.Errorf("AKARI_REQUEST_BUDGET_WAIT_TIMEOUT: %w", err)
+	}
+	if waitTimeout <= 0 {
+		return Server{}, fmt.Errorf("AKARI_REQUEST_BUDGET_WAIT_TIMEOUT must be positive")
+	}
+	s.RequestBudgetWaitTimeout = waitTimeout
+	registrations, err := parsePositiveInt(os.Getenv("AKARI_OAUTH_REGISTRATIONS_PER_HOUR"), DefaultOAuthRegistrationsPerHour)
+	if err != nil {
+		return Server{}, fmt.Errorf("AKARI_OAUTH_REGISTRATIONS_PER_HOUR: %w", err)
+	}
+	s.OAuthRegistrationsPerHour = registrations
 	return s, nil
 }
 

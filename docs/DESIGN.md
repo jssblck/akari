@@ -254,6 +254,34 @@ rebuild them from the stored raw bytes whenever the parser improves.
 6. Serve a server-rendered web UI and a small read API.
 7. Authenticate users and tokens; enforce the internal/public boundary.
 
+### Expensive request admission
+
+One process-wide weighted queue admits request work whose CPU, memory, database,
+or temporary-disk cost is meaningful. The default capacity is 16 units, where a
+unit represents approximately 8 MiB of bounded memory or an equivalent database
+work share. Password hashing and verification weigh 8 (Argon2 allocates 64 MiB),
+MCP POST parsing and spooling weigh 12 (the 100 MiB request ceiling owned by
+issue #134), public
+analytics weigh 4, and dynamic OAuth registration weighs 1. A shared queue lets a
+mixed workload consume the same finite capacity instead of bypassing independent
+per-route concurrency limits.
+
+Admission waits for up to `AKARI_REQUEST_BUDGET_WAIT_TIMEOUT` (5 seconds by
+default). A request that cannot enter receives HTTP 503 with `Retry-After: 1`.
+Disconnecting cancels its wait, and every admitted handler releases its weight on
+all exits. `/metrics` exposes queue depth, wait histograms, timeout and cancellation
+counts, acquisitions, in-use weight, and per-class utilization in Prometheus text
+format.
+
+The budget is intentionally process-local. CPU, heap, temporary disk, and database
+connections are consumed by the replica doing the work, so each replica needs its
+own bound and total admitted work scales with the replica count. Durable OAuth
+client growth is different: every replica writes the same table. Registration uses
+a Postgres advisory lock and a rolling one-hour count, enforcing
+`AKARI_OAUTH_REGISTRATIONS_PER_HOUR` across the deployment. The default ceiling is
+1,000 successful registrations per hour; excess registrations receive HTTP 429
+with `Retry-After: 3600`.
+
 ### Ingest protocol
 
 All ingest endpoints require `Authorization: Bearer <token>`. The unit of upload
