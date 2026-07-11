@@ -1078,6 +1078,13 @@ partials, not JSON, to keep the rendering in one place.
   random salt at set time; the salt and the cost parameters are stored inside the
   PHC-encoded `password_hash` string (no separate plaintext or shared salt), so
   two users with the same password produce different hashes.
+- Request-triggered Argon2 work shares a process-wide worker pool with a bounded
+  queue and wait deadline. Login uses a real dummy hash for unknown and federated
+  accounts after admission, so every ordinary credential failure runs the same
+  broad verification path and returns the same response. High abuse-only token
+  buckets limit sustained attempts per normalized username and direct network
+  peer without consuming unbounded tracking memory. Registration hashing uses the
+  same admission pool.
 - Browser sessions: opaque cookie id backed by `web_sessions`, rotated on login,
   cleared on logout.
 - API tokens: a long random string shown once at creation; only its sha256 is

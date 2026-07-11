@@ -131,3 +131,51 @@ func TestParseDuration(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadServerPasswordWorkDefaultsAndValidation(t *testing.T) {
+	t.Setenv("AKARI_DATABASE_URL", "postgres://x/y")
+	t.Setenv("AKARI_PASSWORD_WORKERS", "")
+	t.Setenv("AKARI_PASSWORD_QUEUE_DEPTH", "")
+	t.Setenv("AKARI_PASSWORD_QUEUE_TIMEOUT", "")
+	s, err := LoadServer()
+	if err != nil {
+		t.Fatalf("LoadServer: %v", err)
+	}
+	if s.PasswordWorkers != DefaultPasswordWorkers ||
+		s.PasswordQueueDepth != DefaultPasswordQueueDepth ||
+		s.PasswordQueueTimeout != DefaultPasswordQueueTimeout {
+		t.Fatalf("password work defaults = (%d, %d, %v), want (%d, %d, %v)",
+			s.PasswordWorkers, s.PasswordQueueDepth, s.PasswordQueueTimeout,
+			DefaultPasswordWorkers, DefaultPasswordQueueDepth, DefaultPasswordQueueTimeout)
+	}
+
+	t.Setenv("AKARI_PASSWORD_WORKERS", "4")
+	t.Setenv("AKARI_PASSWORD_QUEUE_DEPTH", "48")
+	t.Setenv("AKARI_PASSWORD_QUEUE_TIMEOUT", "1500ms")
+	s, err = LoadServer()
+	if err != nil {
+		t.Fatalf("LoadServer configured password work: %v", err)
+	}
+	if s.PasswordWorkers != 4 || s.PasswordQueueDepth != 48 || s.PasswordQueueTimeout != 1500*time.Millisecond {
+		t.Fatalf("configured password work = (%d, %d, %v)", s.PasswordWorkers, s.PasswordQueueDepth, s.PasswordQueueTimeout)
+	}
+
+	for name, variable := range map[string]string{
+		"workers": "AKARI_PASSWORD_WORKERS", "queue depth": "AKARI_PASSWORD_QUEUE_DEPTH",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("AKARI_PASSWORD_WORKERS", "4")
+			t.Setenv("AKARI_PASSWORD_QUEUE_DEPTH", "48")
+			t.Setenv(variable, "0")
+			if _, err := LoadServer(); err == nil {
+				t.Fatalf("LoadServer accepted zero %s", variable)
+			}
+		})
+	}
+	t.Setenv("AKARI_PASSWORD_WORKERS", "4")
+	t.Setenv("AKARI_PASSWORD_QUEUE_DEPTH", "48")
+	t.Setenv("AKARI_PASSWORD_QUEUE_TIMEOUT", "0")
+	if _, err := LoadServer(); err == nil {
+		t.Fatal("LoadServer accepted zero AKARI_PASSWORD_QUEUE_TIMEOUT")
+	}
+}

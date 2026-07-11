@@ -13,6 +13,12 @@ import (
 	"time"
 )
 
+const (
+	DefaultPasswordWorkers      = 2
+	DefaultPasswordQueueDepth   = 32
+	DefaultPasswordQueueTimeout = 3 * time.Second
+)
+
 // Server holds the akari-server runtime configuration.
 type Server struct {
 	// DatabaseURL is the Postgres connection string (AKARI_DATABASE_URL).
@@ -87,6 +93,16 @@ type Server struct {
 	// snapshot computes once on first request and then only when a fleet reparse
 	// completes.
 	InsightsRefreshInterval time.Duration
+	// PasswordWorkers is the maximum number of request-triggered Argon2 hashes or
+	// verifications that may run at once (AKARI_PASSWORD_WORKERS).
+	PasswordWorkers int
+	// PasswordQueueDepth bounds password requests waiting behind active workers
+	// (AKARI_PASSWORD_QUEUE_DEPTH). A full queue fails closed without allocating
+	// another waiter.
+	PasswordQueueDepth int
+	// PasswordQueueTimeout bounds how long admitted password work may wait for a
+	// worker (AKARI_PASSWORD_QUEUE_TIMEOUT).
+	PasswordQueueTimeout time.Duration
 }
 
 // LoadServer reads server configuration from the environment, applying defaults
@@ -137,6 +153,24 @@ func LoadServer() (Server, error) {
 		return Server{}, fmt.Errorf("AKARI_INSIGHTS_REFRESH_INTERVAL: %w", err)
 	}
 	s.InsightsRefreshInterval = insights
+	passwordWorkers, err := parsePositiveInt(os.Getenv("AKARI_PASSWORD_WORKERS"), DefaultPasswordWorkers)
+	if err != nil {
+		return Server{}, fmt.Errorf("AKARI_PASSWORD_WORKERS: %w", err)
+	}
+	s.PasswordWorkers = passwordWorkers
+	passwordQueueDepth, err := parsePositiveInt(os.Getenv("AKARI_PASSWORD_QUEUE_DEPTH"), DefaultPasswordQueueDepth)
+	if err != nil {
+		return Server{}, fmt.Errorf("AKARI_PASSWORD_QUEUE_DEPTH: %w", err)
+	}
+	s.PasswordQueueDepth = passwordQueueDepth
+	passwordQueueTimeout, err := parseDuration(os.Getenv("AKARI_PASSWORD_QUEUE_TIMEOUT"), DefaultPasswordQueueTimeout)
+	if err != nil {
+		return Server{}, fmt.Errorf("AKARI_PASSWORD_QUEUE_TIMEOUT: %w", err)
+	}
+	if passwordQueueTimeout <= 0 {
+		return Server{}, fmt.Errorf("AKARI_PASSWORD_QUEUE_TIMEOUT must be positive")
+	}
+	s.PasswordQueueTimeout = passwordQueueTimeout
 	return s, nil
 }
 

@@ -26,6 +26,13 @@ running in plain-HTTP development mode). Only a hash of the session secret is
 stored, the same discipline as tokens and invites. Logging out deletes the session
 and clears the cookie.
 
+Password hashing and verification use a bounded process-wide worker pool. Invalid
+logins follow the same response and Argon2 path whether the username is unknown,
+federated, or paired with the wrong password. A full worker queue or an expired
+queue wait also fails as invalid credentials. Registration uses the same worker
+pool and returns a retryable unavailable response when it cannot admit password
+work.
+
 ## API tokens
 
 Beyond the browser session, akari issues **API tokens**: bearer credentials for
