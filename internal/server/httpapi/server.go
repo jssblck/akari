@@ -178,10 +178,15 @@ func (s *Server) Routes() http.Handler {
 	// The Open Graph preview cards for the three per-entity public pages. Each serves
 	// PNG bytes rendered on demand and held in a TTL cache, so none is reparse-gated: the
 	// more specific /og.png pattern wins over the page pattern (/u/{username}, /p/{id},
-	// /s/{public_id}) for these exact paths.
-	mux.HandleFunc("GET /u/{username}/og.png", s.admit(requestbudget.PublicAnalytics, s.handlePublicOverviewOGImage))
-	mux.HandleFunc("GET /p/{id}/og.png", s.admit(requestbudget.PublicAnalytics, s.handlePublicProjectOGImage))
-	mux.HandleFunc("GET /s/{public_id}/og.png", s.admit(requestbudget.PublicAnalytics, s.handlePublicSessionOGImage))
+	// /s/{public_id}) for these exact paths. Unlike the page routes above, these are not
+	// wrapped in s.admit: a cache hit or a 404 costs no admission, and a cache miss is
+	// charged exactly once per coalesced render by the singleflight leader inside
+	// renderCoalesced, not once per request. Wrapping the whole handler here would charge
+	// admission for every concurrent unfurl of the same card and for every cache hit, the
+	// opposite of what the budget is for.
+	mux.HandleFunc("GET /u/{username}/og.png", s.handlePublicOverviewOGImage)
+	mux.HandleFunc("GET /p/{id}/og.png", s.handlePublicProjectOGImage)
+	mux.HandleFunc("GET /s/{public_id}/og.png", s.handlePublicSessionOGImage)
 	// The Open Graph preview card for the instance root ("/"). It serves static PNG
 	// bytes memoized per binary (see handleLandingOGImage), so like the overview
 	// card route it needs no auth and no reparse gate.

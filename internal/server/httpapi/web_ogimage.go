@@ -9,7 +9,10 @@ import (
 	"strconv"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/jssblck/akari/internal/server/ogimage"
+	"github.com/jssblck/akari/internal/server/requestbudget"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/web"
 )
@@ -112,24 +115,15 @@ func (s *Server) handlePublicProjectOGImage(w http.ResponseWriter, r *http.Reque
 
 // renderProjectOGImage renders and caches one project's preview card through the
 // per-project singleflight group, so concurrent misses for the same overview share a
-// single render. It mirrors renderOGImage: the shared render runs under a bounded
-// context detached from any single caller (so one dropped crawler connection cannot
-// cancel it for the others), while each caller still waits on its own request context.
+// single render (and a single admission charge; see renderCoalesced). It mirrors
+// renderOGImage: the shared render runs under a bounded context detached from any
+// single caller (so one dropped crawler connection cannot cancel it for the others),
+// while each caller still waits on its own request context.
 func (s *Server) renderProjectOGImage(ctx context.Context, projectID int64, heading string, now time.Time) ([]byte, error) {
-	ch := s.ogProjectRender.DoChan(strconv.FormatInt(projectID, 10), func() (any, error) {
-		renderCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ogRenderTimeout)
-		defer cancel()
-		return ogimage.GenerateProject(renderCtx, s.Store, projectID, heading, now)
-	})
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case res := <-ch:
-		if res.Err != nil {
-			return nil, res.Err
-		}
-		return res.Val.([]byte), nil
-	}
+	return s.renderCoalesced(ctx, &s.ogProjectRender, strconv.FormatInt(projectID, 10), requestbudget.PublicAnalytics,
+		func(renderCtx context.Context) ([]byte, error) {
+			return ogimage.GenerateProject(renderCtx, s.Store, projectID, heading, now)
+		})
 }
 
 // handlePublicSessionOGImage serves the Open Graph preview card for a published session
@@ -194,29 +188,20 @@ func (s *Server) handlePublicSessionOGImage(w http.ResponseWriter, r *http.Reque
 }
 
 // renderSessionOGImage renders and caches one session's preview card through the
-// per-session singleflight group. GenerateSession reads every card input in one store
-// snapshot inside the coalesced render, so a crawler burst on a cold cache runs one
+// per-session singleflight group (and a single admission charge; see
+// renderCoalesced). GenerateSession reads every card input in one store snapshot
+// inside the coalesced render, so a crawler burst on a cold cache runs one
 // read-and-render rather than one per request. The heading closure turns the card's project
 // identity into the label the page's heading shows, kept here so the ogimage package stays
 // free of the web view layer.
 func (s *Server) renderSessionOGImage(ctx context.Context, sessionID int64, now time.Time) ([]byte, error) {
-	ch := s.ogSessionRender.DoChan(strconv.FormatInt(sessionID, 10), func() (any, error) {
-		renderCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ogRenderTimeout)
-		defer cancel()
-		heading := func(c store.SessionCard) string {
-			return web.ProjectLabel(c.ProjectKind, c.ProjectName, c.ProjectKey)
-		}
-		return ogimage.GenerateSession(renderCtx, s.Store, sessionID, heading, now)
-	})
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case res := <-ch:
-		if res.Err != nil {
-			return nil, res.Err
-		}
-		return res.Val.([]byte), nil
-	}
+	return s.renderCoalesced(ctx, &s.ogSessionRender, strconv.FormatInt(sessionID, 10), requestbudget.PublicAnalytics,
+		func(renderCtx context.Context) ([]byte, error) {
+			heading := func(c store.SessionCard) string {
+				return web.ProjectLabel(c.ProjectKind, c.ProjectName, c.ProjectKey)
+			}
+			return ogimage.GenerateSession(renderCtx, s.Store, sessionID, heading, now)
+		})
 }
 
 // serveOGCard runs the render-recheck-serve tail the three public OG card handlers share.
@@ -243,6 +228,15 @@ func (s *Server) renderSessionOGImage(ctx context.Context, sessionID int64, now 
 // front instead), so it treats every render error as a real failure: logged, stale-or-500.
 // Passing reparseAware=false routes ErrReparseInProgress through the default branch, keeping
 // the session handler's exact behavior.
+//
+// A render that could not get admitted within the budget's wait bound (see
+// renderCoalesced) surfaces requestbudget.ErrWaitTimeout as genErr. That is backpressure,
+// not a broken render, so it is handled before the generic failure branch: serve the last
+// good card if the gated re-read still holds one (that beats a 503 to a crawler, exactly
+// like the generic failure path), otherwise answer the same retryable
+// 503-with-Retry-After the removed route-level s.admit wrapper used to produce, so a cold
+// render under load still degrades the same way it did before admission moved inside the
+// singleflight leader.
 func (s *Server) serveOGCard(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -288,6 +282,15 @@ func (s *Server) serveOGCard(
 			return
 		}
 		http.NotFound(w, r)
+	case errors.Is(genErr, requestbudget.ErrWaitTimeout):
+		// The render never got to run: the budget was full. Not a broken render, so no log
+		// line. Serve the last good card if we hold one, else the standard retryable 503.
+		if stalePNG != nil {
+			s.writeOGImage(w, stalePNG)
+			return
+		}
+		w.Header().Set("Retry-After", requestBudgetRetryAfter)
+		http.Error(w, "server busy", http.StatusServiceUnavailable)
 	default:
 		// A real render failure. Log it regardless of whether a stale card saves the
 		// response: serving stale masks the failure from the crawler, but the refresh still
@@ -350,10 +353,39 @@ const ogRenderTimeout = 30 * time.Second
 // request context: a crawler that drops its connection returns promptly with that
 // context's error while the detached render continues for whoever remains.
 func (s *Server) renderOGImage(ctx context.Context, u store.User, now time.Time) ([]byte, error) {
-	ch := s.ogRender.DoChan(strconv.FormatInt(u.ID, 10), func() (any, error) {
+	return s.renderCoalesced(ctx, &s.ogRender, strconv.FormatInt(u.ID, 10), requestbudget.PublicAnalytics,
+		func(renderCtx context.Context) ([]byte, error) { return ogimage.Generate(renderCtx, s.Store, u, now) })
+}
+
+// renderCoalesced is the shared shape behind renderOGImage, renderProjectOGImage, and
+// renderSessionOGImage: it runs render through sf keyed by key, charging class exactly
+// once per coalesced execution rather than once per request. DoChan collapses every
+// concurrent caller sharing key onto a single call of the closure passed to it, so
+// admitting the budget inside that closure (rather than around each caller, as the
+// removed route-level s.admit wrapper did) means N concurrent misses for the same
+// entity pay for one admission, charged by whichever caller becomes the singleflight
+// leader; a caller that only ever hits the TTL cache or a 404 never reaches this at
+// all and pays nothing.
+//
+// The shared render runs under a bounded context detached from any single caller
+// (context.WithoutCancel plus ogRenderTimeout), so one request disconnecting does not
+// cancel it for the others, yet it cannot run unbounded. Each caller still waits on its
+// own request context: one that gives up returns promptly with that context's error
+// while the detached, admitted render continues for whoever remains. A render that
+// cannot get admitted in time returns requestbudget.ErrWaitTimeout like any other
+// budgeted path; serveOGCard maps that to the same retryable 503 the route-level
+// wrapper used to produce.
+func (s *Server) renderCoalesced(
+	ctx context.Context,
+	sf *singleflight.Group,
+	key string,
+	class requestbudget.WorkClass,
+	render func(renderCtx context.Context) ([]byte, error),
+) ([]byte, error) {
+	ch := sf.DoChan(key, func() (any, error) {
 		renderCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ogRenderTimeout)
 		defer cancel()
-		return ogimage.Generate(renderCtx, s.Store, u, now)
+		return s.admitWork(renderCtx, class, func() ([]byte, error) { return render(renderCtx) })
 	})
 	select {
 	case <-ctx.Done():

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"net/http"
 
@@ -31,6 +32,21 @@ func (s *Server) admitMCP(next http.Handler) http.Handler {
 		}
 		s.admit(requestbudget.MCPSpool, next.ServeHTTP)(w, r)
 	})
+}
+
+// admitWork is runAdmitted's counterpart for work that is not a whole HTTP
+// handler, such as a singleflight-coalesced render leader. It holds class
+// capacity only while work runs, releasing it on every return path, and hands
+// back the class's raw error (ErrWaitTimeout or a context error) rather than
+// writing a response: the caller folds that into its own result and decides
+// how to answer the request from there.
+func (s *Server) admitWork(ctx context.Context, class requestbudget.WorkClass, work func() ([]byte, error)) ([]byte, error) {
+	release, err := s.budget.Acquire(ctx, class)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return work()
 }
 
 // runAdmitted holds class capacity only while work runs and releases it on every
