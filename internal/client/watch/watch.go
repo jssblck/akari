@@ -7,6 +7,7 @@ package watch
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -89,7 +90,9 @@ func (w *Watcher) run(ctx context.Context, fsw *fsnotify.Watcher) error {
 	defer fsw.Close()
 
 	for _, r := range w.roots {
-		w.addRecursive(fsw, r.Dir)
+		if err := w.addRecursive(fsw, r.Dir, r.Optional); err != nil {
+			w.opt.Logf("watch root %s: %v", r.Dir, err)
+		}
 	}
 
 	rs := &runState{
@@ -194,7 +197,9 @@ func (w *Watcher) run(ctx context.Context, fsw *fsnotify.Watcher) error {
 		case <-rescan.C:
 			// Safety net: re-add any new directories and re-sync everything.
 			for _, r := range w.roots {
-				w.addRecursive(fsw, r.Dir)
+				if err := w.addRecursive(fsw, r.Dir, r.Optional); err != nil {
+					w.opt.Logf("watch root %s: %v", r.Dir, err)
+				}
 			}
 			for _, f := range w.discover() {
 				if m, ok := statMeta(f.Path); ok {
@@ -290,8 +295,10 @@ func (w *Watcher) handleEvent(fsw *fsnotify.Watcher, ev fsnotify.Event, known ma
 	if ev.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Rename) == 0 {
 		return
 	}
-	if info, err := os.Stat(ev.Name); err == nil && info.IsDir() {
-		w.addRecursive(fsw, ev.Name)
+	if info, err := os.Lstat(ev.Name); err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+		if err := w.addRecursive(fsw, ev.Name, false); err != nil {
+			w.opt.Logf("watch directory %s: %v", ev.Name, err)
+		}
 		return
 	}
 	if f, ok := w.fileFor(ev.Name); ok {
@@ -325,7 +332,7 @@ func (w *Watcher) fileFor(path string) (discover.File, bool) {
 func (w *Watcher) discover() []discover.File {
 	files, err := discover.Discover(w.roots, w.ex)
 	if err != nil {
-		w.opt.Logf("discover: %v", err)
+		w.opt.Logf("discovery incomplete (%d error(s)): %v", discover.ErrorCount(err), err)
 	}
 	return files
 }
@@ -333,13 +340,27 @@ func (w *Watcher) discover() []discover.File {
 // addRecursive adds dir and all of its subdirectories to the watcher, skipping any
 // excluded subtree so the watch never spends an fsnotify slot on a directory whose
 // files would be filtered out anyway.
-func (w *Watcher) addRecursive(fsw *fsnotify.Watcher, dir string) {
+func (w *Watcher) addRecursive(fsw *fsnotify.Watcher, dir string, optional bool) error {
 	if dir == "" {
-		return
+		return errors.New("path is empty")
 	}
-	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
+	info, err := os.Lstat(dir)
+	if err != nil {
+		if optional && errors.Is(err, fs.ErrNotExist) {
 			return nil
+		}
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("symlink roots are not allowed")
+	}
+	if !info.IsDir() {
+		return errors.New("root is not a directory")
+	}
+	var problems []error
+	err = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
 		if !d.IsDir() {
 			return nil
@@ -350,15 +371,19 @@ func (w *Watcher) addRecursive(fsw *fsnotify.Watcher, dir string) {
 		// fsnotify.Add is idempotent. Calling it for every live directory lets a
 		// recreated path regain the watch that the OS removed with its predecessor.
 		if addErr := fsw.Add(p); addErr != nil {
-			w.opt.Logf("watch directory %s: %v", p, addErr)
+			problems = append(problems, fmt.Errorf("add %s: %w", p, addErr))
 		}
 		return nil
 	})
+	if err != nil {
+		problems = append(problems, err)
+	}
+	return errors.Join(problems...)
 }
 
 func statMeta(path string) (fileMeta, bool) {
-	info, err := os.Stat(path)
-	if err != nil || !info.Mode().IsRegular() {
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return fileMeta{}, false
 	}
 	return fileMeta{mod: info.ModTime(), size: info.Size()}, true

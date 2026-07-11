@@ -1144,6 +1144,20 @@ variables of its own (see Config):
 Extra or non-standard roots are added through the config file, not through new
 environment variables.
 
+Built-in roots are optional because most machines do not run every supported
+agent. Agent-provided overrides and configured extra roots are required: a
+missing, malformed, inaccessible, or partially traversed required root is a
+discovery error. A scan may return files from portions it completed, but the
+one-shot command reports the incomplete scan and exits nonzero. Watch mode logs
+the same error and retries on later discovery passes.
+
+Discovery uses a closed symlink policy on every operating system. Root symlinks
+and matching session-file symlinks are errors and are never followed, even when
+their targets are regular files inside the root. Directory symlinks below a root
+are ignored. This prevents loops, escape from the configured root, and bypass of
+path-based exclusions. Initial discovery, polling metadata checks, filesystem
+events, and watch rescans all use the same no-follow test.
+
 ### Project resolution and classification
 
 For each discovered file, the client peeks the header: it reads from the top only
@@ -1213,12 +1227,17 @@ rebuild the cache; divergence is always decided by the server's `prefix_sha256`.
   cover (resource exhaustion such as too many watches, or network filesystems),
   and a slow full rescan on a long timer (for example every 15 minutes) as a
   safety net.
+- Log incomplete discovery passes with their error count. Files from complete
+  portions still sync, and the next discovery pass retries failed roots or
+  subtrees.
 
 ### One-shot mode
 
 `akari sync` does a single discovery pass, uploads everything new since the
 server's `stored_bytes` per file, prints a summary (uploaded, skipped with
-reasons), and exits. This is the catch-up / cron-friendly mode.
+reasons, and discovery errors), and exits. Any discovery error makes the exit
+nonzero after safe files have been processed. This is the catch-up /
+cron-friendly mode.
 
 Discovered files sync in parallel, bounded by `--concurrency` (default
 `min(NumCPU, 8)`). The cap stays modest on purpose: each file already fans its

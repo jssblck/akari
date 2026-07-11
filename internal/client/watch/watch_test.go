@@ -2,8 +2,10 @@ package watch
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,6 +24,51 @@ func recorder() (SyncFunc, chan string) {
 		return syncer.Result{File: f}
 	}
 	return fn, ch
+}
+
+func TestWatchReportsIncompleteDiscoveryAndSyncsSafeFiles(t *testing.T) {
+	root := t.TempDir()
+	safe := filepath.Join(root, "safe.jsonl")
+	target := filepath.Join(root, "target.txt")
+	linked := filepath.Join(root, "linked.jsonl")
+	writeSession(t, safe)
+	writeSession(t, target)
+	if err := os.Symlink(target, linked); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	fn, synced := recorder()
+	logs := make(chan string, 8)
+	opt := fastOptions()
+	opt.Discover = time.Hour
+	opt.Logf = func(format string, args ...any) {
+		logs <- fmt.Sprintf(format, args...)
+	}
+	w := New([]discover.Root{{Agent: "claude", Dir: root}}, fn, opt)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	waitFor(t, synced, safe)
+	select {
+	case got := <-synced:
+		if got == linked {
+			t.Fatalf("watch synced symlink %s", got)
+		}
+	default:
+	}
+	select {
+	case logLine := <-logs:
+		if !strings.Contains(logLine, "discovery incomplete (1 error(s))") || !strings.Contains(logLine, linked) {
+			t.Fatalf("watch log = %q", logLine)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("watch did not report the discovery error")
+	}
 }
 
 func writeSession(t *testing.T, path string) {

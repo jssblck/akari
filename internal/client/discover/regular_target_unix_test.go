@@ -10,7 +10,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func TestDiscoverAcceptsOnlyRegularTargets(t *testing.T) {
+func TestDiscoverRejectsSymlinksAndNonRegularFiles(t *testing.T) {
 	root := t.TempDir()
 	regular := filepath.Join(root, "regular.jsonl")
 	if err := os.WriteFile(regular, []byte("regular\n"), 0o600); err != nil {
@@ -38,16 +38,10 @@ func TestDiscoverAcceptsOnlyRegularTargets(t *testing.T) {
 	}
 
 	files, err := Discover([]Root{{Agent: "claude", Dir: root}}, Excluder{})
-	if err != nil {
-		t.Fatal(err)
+	if ErrorCount(err) != 3 {
+		t.Fatalf("ErrorCount = %d, want 3 symlink errors: %v", ErrorCount(err), err)
 	}
-	want := map[string]bool{regular: true, linkedRegular: true}
-	if len(files) != len(want) {
-		t.Fatalf("discovered %d files, want %d regular targets: %+v", len(files), len(want), files)
-	}
-	for _, file := range files {
-		if !want[file.Path] {
-			t.Fatalf("discovered non-regular target %s", file.Path)
-		}
+	if len(files) != 1 || files[0].Path != regular {
+		t.Fatalf("files = %+v, want only regular file", files)
 	}
 }

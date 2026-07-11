@@ -4,6 +4,8 @@
 package discover
 
 import (
+	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -77,8 +79,9 @@ type File struct {
 
 // Root is a directory to scan for one agent's sessions.
 type Root struct {
-	Agent string
-	Dir   string
+	Agent    string
+	Dir      string
+	Optional bool // a missing built-in default is expected when its agent is unused
 }
 
 // Roots builds the directories to scan for each agent. It honors each agent's own
@@ -89,30 +92,58 @@ func Roots(cfg config.Client, env func(string) string, home string) []Root {
 	var roots []Root
 
 	if dir := env("CLAUDE_PROJECTS_DIR"); dir != "" {
-		roots = append(roots, Root{"claude", dir})
+		roots = append(roots, Root{Agent: "claude", Dir: dir})
 	} else {
-		roots = append(roots, Root{"claude", filepath.Join(home, ".claude", "projects")})
+		roots = append(roots, Root{Agent: "claude", Dir: filepath.Join(home, ".claude", "projects"), Optional: true})
 	}
 
 	if dir := env("CODEX_SESSIONS_DIR"); dir != "" {
-		roots = append(roots, Root{"codex", dir})
+		roots = append(roots, Root{Agent: "codex", Dir: dir})
 	} else {
 		roots = append(roots,
-			Root{"codex", filepath.Join(home, ".codex", "sessions")},
-			Root{"codex", filepath.Join(home, ".codex", "archived_sessions")},
+			Root{Agent: "codex", Dir: filepath.Join(home, ".codex", "sessions"), Optional: true},
+			Root{Agent: "codex", Dir: filepath.Join(home, ".codex", "archived_sessions"), Optional: true},
 		)
 	}
 
 	if dir := env("PI_DIR"); dir != "" {
-		roots = append(roots, Root{"pi", filepath.Join(dir, "agent", "sessions")})
+		roots = append(roots, Root{Agent: "pi", Dir: filepath.Join(dir, "agent", "sessions")})
 	} else {
-		roots = append(roots, Root{"pi", filepath.Join(home, ".pi", "agent", "sessions")})
+		roots = append(roots, Root{Agent: "pi", Dir: filepath.Join(home, ".pi", "agent", "sessions"), Optional: true})
 	}
 
 	for _, r := range cfg.ExtraRoots {
-		roots = append(roots, Root{r.Agent, r.Path})
+		roots = append(roots, Root{Agent: r.Agent, Dir: r.Path})
 	}
 	return roots
+}
+
+// Error reports every root or entry that could not be traversed safely. Discover
+// still returns files from the complete portions of the scan so callers can make
+// progress, but they must surface this error and finish unsuccessfully.
+type Error struct {
+	problems []error
+}
+
+func (e *Error) Error() string {
+	return errors.Join(e.problems...).Error()
+}
+
+func (e *Error) Unwrap() []error {
+	return e.problems
+}
+
+// ErrorCount returns the number of independent discovery failures represented
+// by err. Non-discovery errors count as one so callers can use it at boundaries.
+func ErrorCount(err error) int {
+	if err == nil {
+		return 0
+	}
+	var discoveryErr *Error
+	if errors.As(err, &discoveryErr) {
+		return len(discoveryErr.problems)
+	}
+	return 1
 }
 
 // Matches reports whether a filename is a session file for the given agent.
@@ -131,24 +162,41 @@ func Matches(agent, name string) bool {
 }
 
 // Discover walks every root and returns the session files it finds, de-duplicated
-// by path and sorted for stable output. A missing root is not an error: agents a
-// user does not run simply contribute nothing. ex drops paths the user configured
-// to exclude (pass the zero Excluder to keep everything): an excluded directory is
-// pruned from the walk, and an excluded file is skipped, so an ignored location is
-// never discovered, watched, or uploaded.
+// by path and sorted for stable output. A missing optional built-in root is quiet;
+// missing configured roots and every other incomplete traversal are returned as
+// errors alongside files found in complete portions of the scan. Symlink roots and
+// matching session-file symlinks are errors and are never followed. ex drops paths
+// the user configured to exclude (pass the zero Excluder to keep everything).
 func Discover(roots []Root, ex Excluder) ([]File, error) {
 	seen := map[string]bool{}
 	var out []File
+	var problems []error
 	for _, root := range roots {
 		if root.Dir == "" {
+			if !root.Optional {
+				problems = append(problems, fmt.Errorf("discover %s root: path is empty", root.Agent))
+			}
 			continue
 		}
-		if info, err := os.Stat(root.Dir); err != nil || !info.IsDir() {
+		info, err := os.Lstat(root.Dir)
+		if err != nil {
+			if root.Optional && errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			problems = append(problems, fmt.Errorf("inspect %s root %s: %w", root.Agent, root.Dir, err))
 			continue
 		}
-		err := filepath.WalkDir(root.Dir, func(path string, d fs.DirEntry, err error) error {
+		if info.Mode()&os.ModeSymlink != 0 {
+			problems = append(problems, fmt.Errorf("inspect %s root %s: symlink roots are not allowed", root.Agent, root.Dir))
+			continue
+		}
+		if !info.IsDir() {
+			problems = append(problems, fmt.Errorf("inspect %s root %s: root is not a directory", root.Agent, root.Dir))
+			continue
+		}
+		err = filepath.WalkDir(root.Dir, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
-				return nil // skip unreadable entries rather than aborting the walk
+				return err
 			}
 			if d.IsDir() {
 				// Prune an excluded directory so its whole subtree is skipped rather
@@ -164,11 +212,17 @@ func Discover(roots []Root, ex Excluder) ([]File, error) {
 			if ex.Excluded(path) {
 				return nil
 			}
+			info, err := os.Lstat(path)
+			if err != nil {
+				return err
+			}
+			if info.Mode()&os.ModeSymlink != 0 {
+				problems = append(problems, fmt.Errorf("inspect session file %s: symlinks are not allowed", path))
+				return nil
+			}
 			// Session readers use ordinary blocking file opens. Refuse pipes, devices,
-			// sockets, and symlinks to them before they can stall a whole sync. Stat
-			// follows symlinks, so a symlink to a regular session remains supported.
-			info, err := os.Stat(path)
-			if err != nil || !info.Mode().IsRegular() {
+			// and sockets before they can stall a whole sync.
+			if !info.Mode().IsRegular() {
 				return nil
 			}
 			if seen[path] {
@@ -179,9 +233,12 @@ func Discover(roots []Root, ex Excluder) ([]File, error) {
 			return nil
 		})
 		if err != nil {
-			return nil, err
+			problems = append(problems, fmt.Errorf("walk %s root %s: %w", root.Agent, root.Dir, err))
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	if len(problems) > 0 {
+		return out, &Error{problems: problems}
+	}
 	return out, nil
 }

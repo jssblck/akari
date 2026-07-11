@@ -202,12 +202,24 @@ plus any `extra_roots` you configured:
 | Codex | `~/.codex/sessions` and `~/.codex/archived_sessions` | `CODEX_SESSIONS_DIR` |
 | pi | `~/.pi/agent/sessions` | `PI_DIR` (sessions at `$PI_DIR/agent/sessions`) |
 
-Missing roots and excluded paths are skipped without error. For each candidate
-file, the client peeks the first line to read the working directory and session
-id, then resolves that directory's git `origin` remote to a project key. A file
-whose header cannot be read is skipped entirely; a directory with no usable remote
-produces a standalone or orphaned project rather than being dropped
-([Glossary](./glossary.md#projects)).
+Missing built-in roots are skipped without error because an unused agent normally
+has no session directory. A missing path supplied through an agent override or
+`extra_roots` is an error, as are permission failures and incomplete directory
+walks. `sync` and `--dry-run` process files found in complete portions of the scan,
+report the number of discovery errors in the final summary, and exit nonzero.
+`watch` reports the same failures in its log and retries on later rescans.
+
+Discovery never follows symlinks. A symlink used as a root or as a matching
+session file is reported as a discovery error, including links whose target is a
+regular file inside the root. Directory symlinks below a root are ignored, which
+also closes loops and prevents a link from bypassing `excludes` or reaching files
+outside the configured root.
+
+For each candidate file, the client peeks the first line to read the working
+directory and session id, then resolves that directory's git `origin` remote to a
+project key. A file whose header cannot be read is skipped entirely; a directory
+with no usable remote produces a standalone or orphaned project rather than being
+dropped ([Glossary](./glossary.md#projects)).
 
 ## How the upload works
 
