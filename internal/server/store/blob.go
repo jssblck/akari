@@ -593,29 +593,71 @@ func (s *Store) SessionReferencesBlob(ctx context.Context, sessionID int64, sha2
 // pin the refresher is about to commit) away. A refresh touches only expires_at, not
 // the FK column, so it takes no FOR KEY SHARE on the blobs row to stop the sweep on
 // its own.
+const sweepBlobBatchSize = 256
+
 func (s *Store) SweepBlobs(ctx context.Context) (int, error) {
-	var removed int
-	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-		// Reap expired pins through a SKIP LOCKED subquery rather than a bare
-		// DELETE. A pin row locked right now is mid-refresh (an upsert extending
-		// its expiry), so it will be unexpired the moment that writer commits:
-		// skipping it is the correct outcome, and waiting for it was a deadlock
-		// vector, since the bare DELETE took pin rows in heap order while every
-		// pinner locks them in sha order.
-		if _, err := tx.Exec(ctx,
-			`DELETE FROM blob_pins p
-			  USING (SELECT sha256 FROM blob_pins WHERE expires_at <= now()
-			          FOR UPDATE SKIP LOCKED) expired
-			  WHERE p.sha256 = expired.sha256`); err != nil {
-			return fmt.Errorf("clear expired blob pins: %w", err)
+	if err := s.reapExpiredBlobPins(ctx); err != nil {
+		return 0, err
+	}
+
+	removed := 0
+	for {
+		n, err := s.sweepBlobBatch(ctx)
+		if err != nil {
+			// n is added only after its transaction commits. A cancellation or
+			// database error therefore returns the exact durable progress from the
+			// earlier batches instead of reporting work that rolled back.
+			return removed, err
 		}
-		// FOR UPDATE conflicts with the FOR KEY SHARE a live writer holds on a blob
-		// it is about to reference; SKIP LOCKED makes the sweep pass over those
-		// rather than block on (or delete) a blob mid-write. The orphan predicate is
-		// re-evaluated against committed state as each row is locked. The blob_pins
-		// arm keys on existence, not expires_at: after the reap above, a surviving
-		// pin row is either live or held by a mid-refresh upsert, and both must keep
-		// the blob (see the reap comment).
+		removed += n
+		if n < sweepBlobBatchSize {
+			return removed, nil
+		}
+	}
+}
+
+// reapExpiredBlobPins removes old pins in committed, deterministic batches.
+// A locked row is being refreshed and is skipped; a short batch means every
+// currently available expired pin has been handled.
+func (s *Store) reapExpiredBlobPins(ctx context.Context) error {
+	for {
+		var reaped int64
+		err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+			tag, err := tx.Exec(ctx,
+				`DELETE FROM blob_pins p
+				  USING (
+				    SELECT sha256 FROM blob_pins
+				     WHERE expires_at <= now()
+				     ORDER BY sha256
+				     LIMIT $1
+				     FOR UPDATE SKIP LOCKED
+				  ) expired
+				  WHERE p.sha256 = expired.sha256`, sweepBlobBatchSize)
+			if err != nil {
+				return fmt.Errorf("clear expired blob pins: %w", err)
+			}
+			reaped = tag.RowsAffected()
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		if reaped < sweepBlobBatchSize {
+			return nil
+		}
+	}
+}
+
+// sweepBlobBatch locks and removes one sha-ordered orphan page. The large
+// objects and their rows commit together, so a later batch failure cannot undo
+// progress already reported by SweepBlobs.
+func (s *Store) sweepBlobBatch(ctx context.Context) (int, error) {
+	removed := 0
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		// FOR UPDATE conflicts with the FOR KEY SHARE a live writer holds on a
+		// blob it is about to reference. SKIP LOCKED passes over those rows. A pin
+		// is live by existence here: an expired pin skipped by the reap is locked
+		// by a refresher and must still protect its blob.
 		rows, err := tx.Query(ctx,
 			`SELECT sha256, lo_oid FROM blobs b
 			  WHERE NOT EXISTS (
@@ -625,7 +667,9 @@ func (s *Store) SweepBlobs(ctx context.Context) (int, error) {
 			          SELECT 1 FROM attachments a WHERE a.sha256 = b.sha256)
 			    AND NOT EXISTS (
 			          SELECT 1 FROM blob_pins p WHERE p.sha256 = b.sha256)
-			  FOR UPDATE SKIP LOCKED`)
+			  ORDER BY b.sha256
+			  LIMIT $1
+			  FOR UPDATE SKIP LOCKED`, sweepBlobBatchSize)
 		if err != nil {
 			return err
 		}
@@ -633,7 +677,7 @@ func (s *Store) SweepBlobs(ctx context.Context) (int, error) {
 			sha string
 			oid uint32
 		}
-		var orphans []orphan
+		orphans := make([]orphan, 0, sweepBlobBatchSize)
 		for rows.Next() {
 			var o orphan
 			if err := rows.Scan(&o.sha, &o.oid); err != nil {
@@ -652,12 +696,16 @@ func (s *Store) SweepBlobs(ctx context.Context) (int, error) {
 			if err := los.Unlink(ctx, o.oid); err != nil {
 				return err
 			}
-			if _, err := tx.Exec(ctx, "DELETE FROM blobs WHERE sha256 = $1", o.sha); err != nil {
+			tag, err := tx.Exec(ctx, "DELETE FROM blobs WHERE sha256 = $1", o.sha)
+			if err != nil {
 				return err
 			}
-			removed++
+			removed += int(tag.RowsAffected())
 		}
 		return nil
 	})
-	return removed, err
+	if err != nil {
+		return 0, err
+	}
+	return removed, nil
 }

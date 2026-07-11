@@ -26,19 +26,23 @@ func (s *Server) handleSessionBlob(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	s.serveBlobForSession(w, r, id, r.PathValue("sha256"))
+	s.serveBlobForSession(w, r, id, r.PathValue("sha256"), "private, max-age=31536000, immutable")
 }
 
 // handlePublicBlob streams a CAS blob to a logged-out viewer, reached only
 // through a published session's public id and only for a hash that session
 // references.
 func (s *Server) handlePublicBlob(w http.ResponseWriter, r *http.Request) {
+	// The public-id capability can be revoked. Do not let a browser satisfy a
+	// later request from its immutable cache after the owner makes the session
+	// private; every access must re-check publication and blob reference state.
+	w.Header().Set("Cache-Control", "no-store")
 	d, err := s.Store.SessionDetailByPublicID(r.Context(), r.PathValue("public_id"))
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
-	s.serveBlobForSession(w, r, d.ID, r.PathValue("sha256"))
+	s.serveBlobForSession(w, r, d.ID, r.PathValue("sha256"), "no-store")
 }
 
 // serveBlobForSession verifies the session references the hash, then streams the
@@ -47,7 +51,7 @@ func (s *Server) handlePublicBlob(w http.ResponseWriter, r *http.Request) {
 // Content-Encoding tells the client (browser or API consumer) to decompress
 // transparently, which it does without the server ever touching the bytes. nosniff
 // keeps a browser from reinterpreting a stored body as a richer type than it is.
-func (s *Server) serveBlobForSession(w http.ResponseWriter, r *http.Request, sessionID int64, sha string) {
+func (s *Server) serveBlobForSession(w http.ResponseWriter, r *http.Request, sessionID int64, sha, cacheControl string) {
 	sha = strings.ToLower(sha)
 	if !isHexSHA256(sha) {
 		http.NotFound(w, r)
@@ -79,18 +83,23 @@ func (s *Server) serveBlobForSession(w http.ResponseWriter, r *http.Request, ses
 	}
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Disposition", "inline")
+	w.Header().Set("Content-Length", strconv.FormatInt(meta.ByteLen, 10))
 	// The URL is content-addressed by sha256, so the bytes behind it can never
-	// change: the sha is a free, perfect strong validator. Serve it immutable with
-	// a far-future max-age and offer the sha as an ETag so a client that already
-	// holds the body revalidates with a 304 instead of re-transferring it (the
-	// large lifted images on a transcript reload are the case that matters). The
-	// gating above is per-session, so the cache stays private: a shared cache must
-	// not serve one session's body to a viewer who never referenced the hash.
+	// change: the sha is a free, perfect strong validator. Authenticated routes
+	// serve it immutable with a far-future max-age, while the revocable public
+	// route preselects no-store above. The ETag still lets an explicit revalidation
+	// avoid retransferring a large lifted image after access is checked. The
+	// authenticated cache stays private because gating is per-session: a shared
+	// cache must not serve one session's body to a viewer who never referenced it.
 	etag := `"` + sha + `"`
 	w.Header().Set("ETag", etag)
-	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
+	w.Header().Set("Cache-Control", cacheControl)
 	if ifNoneMatchHas(r.Header.Get("If-None-Match"), etag) {
 		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusOK)
 		return
 	}
 	// Refresh the write deadline as the body streams so a large blob to a slow

@@ -540,10 +540,10 @@ func TestSyncUploadsCompressedBigBody(t *testing.T) {
 	}
 }
 
-// TestVerifyPrefixUsesCachedDigest proves the fast path compares the cached digest
-// instead of re-transforming the prefix: the on-disk bytes differ from what the
-// cache claims, yet verification follows the cache.
-func TestVerifyPrefixUsesCachedDigest(t *testing.T) {
+// TestVerifyPrefixReDerivesWarmState proves a cached digest cannot hide an
+// in-place rewrite. Verification follows the current file even when the cached
+// cursor and size still line up with the server.
+func TestVerifyPrefixReDerivesWarmState(t *testing.T) {
 	c, _ := newTestClient(t)
 	f, err := os.Open(tempFile(t, "AAA\n"))
 	if err != nil {
@@ -551,21 +551,95 @@ func TestVerifyPrefixUsesCachedDigest(t *testing.T) {
 	}
 	defer f.Close()
 
-	fs := &fileSync{base: 3, prefixSize: 4, prefixHasher: sha256.New()}
-	fs.prefixHasher.Write([]byte("BBB")) // cache claims the first 3 transformed bytes were "BBB"
+	fs := &fileSync{base: 4, origBase: 4, prefixSize: 4, prefixHasher: sha256.New()}
+	fs.prefixHasher.Write([]byte("BBB\n"))
 
-	ok, err := c.verifyPrefix(context.Background(), f, fs, "claude", 3, 4, hexSHA("BBB"))
-	if err != nil || !ok {
-		t.Fatalf("fast path against cached digest: ok=%v err=%v", ok, err)
-	}
-	// The same call must reject a hash that matches the on-disk "AAA", because the
-	// fast path never looks at the file.
-	ok, err = c.verifyPrefix(context.Background(), f, fs, "claude", 3, 4, hexSHA("AAA"))
+	ok, err := c.verifyPrefix(context.Background(), f, fs, "claude", 4, 4, hexSHA("BBB\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if ok {
-		t.Fatal("fast path should compare the cached digest, not re-read the file")
+		t.Fatal("verification trusted a cached digest that differs from the file")
+	}
+	ok, err = c.verifyPrefix(context.Background(), f, fs, "claude", 4, 4, hexSHA("AAA\n"))
+	if err != nil || !ok {
+		t.Fatalf("verification against current file: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestSyncWarmSameLengthRewriteResets(t *testing.T) {
+	c, fs := newTestClient(t)
+	path := tempFile(t, "old\n")
+	if _, err := c.SyncFile(context.Background(), target(path)); err != nil {
+		t.Fatalf("initial sync: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := c.SyncFile(context.Background(), target(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Action != ActionReset {
+		t.Fatalf("action = %s, want reset", out.Action)
+	}
+	if got := string(fs.buf); got != "new\n" {
+		t.Fatalf("server buf = %q, want rewritten file", got)
+	}
+}
+
+func TestSyncInvalidatesPendingTurnAfterSameInodeRewrite(t *testing.T) {
+	c, server := newTestClient(t)
+	path := tempFile(t, codexAsst("old"))
+	target := Target{Agent: "codex", Path: path, SourceID: "s1", ProjectKey: "github.com/o/r", Machine: "m"}
+
+	if _, err := c.SyncFile(context.Background(), target); err != nil {
+		t.Fatalf("cache open turn: %v", err)
+	}
+	if got := string(server.buf); got != "" {
+		t.Fatalf("unsettled open turn uploaded early: %q", got)
+	}
+
+	// Truncate and rewrite the same filesystem object without changing its size.
+	// The cached transformed turn must not survive merely because the inode and
+	// length still match.
+	want := codexAsst("new")
+	if err := os.WriteFile(path, []byte(want), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target.Finalize = true
+	if _, err := c.SyncFile(context.Background(), target); err != nil {
+		t.Fatalf("finalize rewritten turn: %v", err)
+	}
+	if got := string(server.buf); got != want {
+		t.Fatalf("server buf = %q, want current on-disk turn %q", got, want)
+	}
+}
+
+func TestSyncInvalidatesPartialLineSearchAfterEarlierNewline(t *testing.T) {
+	c, server := newTestClient(t)
+	path := tempFile(t, "base\nfirst")
+	target := target(path)
+
+	if _, err := c.SyncFile(context.Background(), target); err != nil {
+		t.Fatalf("cache partial line search: %v", err)
+	}
+	if got, want := string(server.buf), "base\n"; got != want {
+		t.Fatalf("initial server buf = %q, want complete prefix %q", got, want)
+	}
+
+	// Insert a newline before the old search cursor while retaining the old bytes.
+	// Resuming blindly from the cached offset skips the newly completed first line.
+	if err := os.WriteFile(path, []byte("base\nx\nfirst"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target.Finalize = true
+	if _, err := c.SyncFile(context.Background(), target); err != nil {
+		t.Fatalf("sync rewritten partial line: %v", err)
+	}
+	if got, want := string(server.buf), "base\nx\n"; got != want {
+		t.Fatalf("server buf = %q, want newly completed line %q", got, want)
 	}
 }
 
@@ -637,6 +711,189 @@ func TestConcurrentSyncSamePathSerializes(t *testing.T) {
 	}
 }
 
+func TestSyncFileOpensAfterLockWait(t *testing.T) {
+	c, fs := newTestClient(t)
+	path := tempFile(t, "old\n")
+
+	state := &fileSync{lock: make(chan struct{}, 1)}
+	state.lock <- struct{}{}
+	c.files[path] = state
+
+	type result struct {
+		out Outcome
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		out, err := c.SyncFile(context.Background(), target(path))
+		done <- result{out: out, err: err}
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c.mu.Lock()
+		refs := state.refs
+		c.mu.Unlock()
+		if refs > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("sync did not reach the file-state lock")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	replacement := filepath.Join(filepath.Dir(path), "replacement.jsonl")
+	if err := os.WriteFile(replacement, []byte("new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatal(err)
+	}
+	<-state.lock
+
+	res := <-done
+	if res.err != nil {
+		t.Fatal(res.err)
+	}
+	if got := string(fs.buf); got != "new\n" {
+		t.Fatalf("server buf = %q, want replacement file", got)
+	}
+}
+
+func TestSyncFileInvalidatesPendingTurnOnIdentityChange(t *testing.T) {
+	tests := []struct {
+		name    string
+		replace bool
+		newID   string
+	}{
+		{name: "logical session", newID: "s2"},
+		{name: "filesystem object", replace: true, newID: "s1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, fs := newTestClient(t)
+			path := tempFile(t, codexAsst("old"))
+			first := Target{Agent: "codex", Path: path, SourceID: "s1", ProjectKey: "github.com/o/r", Machine: "m"}
+			if _, err := c.SyncFile(context.Background(), first); err != nil {
+				t.Fatalf("initial open turn: %v", err)
+			}
+			if len(fs.buf) != 0 {
+				t.Fatalf("open turn uploaded early: %q", fs.buf)
+			}
+
+			content := codexAsst("new")
+			if tt.replace {
+				replacement := filepath.Join(filepath.Dir(path), "replacement.jsonl")
+				if err := os.WriteFile(replacement, []byte(content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(replacement, path); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			next := first
+			next.SourceID = tt.newID
+			next.Finalize = true
+			if _, err := c.SyncFile(context.Background(), next); err != nil {
+				t.Fatal(err)
+			}
+			if got := string(fs.buf); got != content {
+				t.Fatalf("server buf = %q, want only replacement turn %q", got, content)
+			}
+		})
+	}
+}
+
+func TestFileStateCacheEvictsOnlyIdleEntries(t *testing.T) {
+	oldCap := fileStateCacheCap
+	fileStateCacheCap = 2
+	t.Cleanup(func() { fileStateCacheCap = oldCap })
+
+	c, _ := newTestClient(t)
+	ctx := context.Background()
+	held, err := c.acquireFileState(ctx, "held")
+	if err != nil {
+		t.Fatal(err)
+	}
+	idle, err := c.acquireFileState(ctx, "idle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.releaseFileState(idle)
+	newest, err := c.acquireFileState(ctx, "newest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.releaseFileState(newest)
+
+	c.mu.Lock()
+	_, heldPresent := c.files["held"]
+	_, idlePresent := c.files["idle"]
+	size := len(c.files)
+	c.mu.Unlock()
+	if !heldPresent {
+		t.Fatal("evicted an in-use file state")
+	}
+	if idlePresent {
+		t.Fatal("least-recently-used idle state was not evicted")
+	}
+	if size > fileStateCacheCap {
+		t.Fatalf("cache size = %d, cap = %d", size, fileStateCacheCap)
+	}
+	c.releaseFileState(held)
+}
+
+func TestEvictedFileStateRebuildsFromServerPrefix(t *testing.T) {
+	oldCap := fileStateCacheCap
+	fileStateCacheCap = 1
+	t.Cleanup(func() { fileStateCacheCap = oldCap })
+
+	c, fs := newTestClient(t)
+	path := tempFile(t, "first\n")
+	if _, err := c.SyncFile(context.Background(), target(path)); err != nil {
+		t.Fatalf("initial sync: %v", err)
+	}
+	other, err := c.acquireFileState(context.Background(), "other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.releaseFileState(other)
+	c.mu.Lock()
+	_, retained := c.files[path]
+	c.mu.Unlock()
+	if retained {
+		t.Fatal("least-recently-used state was not evicted")
+	}
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("second\n"); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.SyncFile(context.Background(), target(path)); err != nil {
+		t.Fatalf("cold sync after eviction: %v", err)
+	}
+	if got, want := string(fs.buf), "first\nsecond\n"; got != want {
+		t.Fatalf("server buf = %q, want %q", got, want)
+	}
+}
+
 // TestSyncFileLockWaitIsCancellable proves the per-file single-flight wait honors
 // the context: while one holder has the lock, a caller whose context is already
 // canceled returns promptly instead of blocking behind the in-flight sync.
@@ -645,7 +902,8 @@ func TestSyncFileLockWaitIsCancellable(t *testing.T) {
 	path := tempFile(t, "l1\n")
 
 	// Take the per-file lock and keep it, so the SyncFile below must wait for it.
-	state := c.fileState(path)
+	state := &fileSync{lock: make(chan struct{}, 1)}
+	c.files[path] = state
 	state.lock <- struct{}{}
 	defer func() { <-state.lock }()
 

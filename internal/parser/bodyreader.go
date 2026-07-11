@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"unicode/utf8"
 )
 
 // BodyKind selects how the raw located value is canonicalized into the bytes the
@@ -182,6 +183,13 @@ func (r *jsonStringReader) Read(p []byte) (int, error) {
 			return 0, r.err
 		}
 		if r.pos >= r.end {
+			// A trailing unpaired high surrogate has no following byte to trigger
+			// flushSurrogate. Emit its replacement rune before surfacing EOF so
+			// the streaming path stays byte-for-byte aligned with gjson.String().
+			r.flushSurrogate()
+			if len(r.out) != r.off {
+				break
+			}
 			// All content bytes consumed; the only thing left is to surface EOF.
 			r.err = io.EOF
 			return 0, io.EOF
@@ -284,8 +292,8 @@ func (r *jsonStringReader) emitU(cp rune) {
 			r.out = appendRune4(r.out, combined)
 			return
 		}
-		// A high surrogate not followed by a low one: emit it as-is, then handle
-		// the current code point afresh.
+		// A high surrogate not followed by a low one: emit its replacement, then
+		// handle the current code point afresh.
 		r.out = appendRune4(r.out, r.highSurrogate)
 		r.highSurrogate = 0
 	}
@@ -307,26 +315,14 @@ func (r *jsonStringReader) flushSurrogate() {
 }
 
 // appendRune4 appends the UTF-8 encoding of r, covering the full range including
-// astral-plane code points (four-byte sequences) that combined surrogate pairs
-// produce. It is deliberately not utf8.AppendRune: callers pass lone surrogates
-// (an unpaired \uD800 in lenient JSON), which this encodes as their raw three-byte
-// form, WTF-8 style, where the stdlib would substitute U+FFFD and lose the byte
-// sequence gjson-compatible passthrough preserves.
+// astral-plane code points produced by combined surrogate pairs. JSON decoders
+// replace an unpaired surrogate with U+FFFD; doing the same here keeps streamed
+// bodies aligned with the gjson projection path.
 func appendRune4(out []byte, r rune) []byte {
-	switch {
-	case r < 0x80:
-		return append(out, byte(r))
-	case r < 0x800:
-		return append(out, byte(0xC0|r>>6), byte(0x80|r&0x3F))
-	case r < 0x10000:
-		return append(out, byte(0xE0|r>>12), byte(0x80|(r>>6)&0x3F), byte(0x80|r&0x3F))
-	default:
-		return append(out,
-			byte(0xF0|r>>18),
-			byte(0x80|(r>>12)&0x3F),
-			byte(0x80|(r>>6)&0x3F),
-			byte(0x80|r&0x3F))
+	if !utf8.ValidRune(r) {
+		r = utf8.RuneError
 	}
+	return utf8.AppendRune(out, r)
 }
 
 // dataURIBase64Marker is the literal that separates a data URI's media/parameters

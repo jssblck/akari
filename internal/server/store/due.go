@@ -2,7 +2,11 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // DueSession is one session the parse worker should rebuild: its projection is
@@ -179,6 +183,40 @@ func (s *Store) EpochStaleExists(ctx context.Context, epoch int) (bool, error) {
 		return false, fmt.Errorf("check epoch-stale sessions: %w", err)
 	}
 	return stale, nil
+}
+
+// NextRebuildRetryDelay returns the delay until the earliest parked operational
+// retry this parser epoch can act on. The eligibility predicates mirror the
+// retry arm of DueSessions: during a rolling deploy, an older worker must ignore
+// a retry on a projection already stamped by a newer binary. Otherwise an
+// elapsed, ineligible row would repeatedly arm a zero-delay timer while every
+// drain correctly left it untouched.
+//
+// PostgreSQL computes the delay against its own clock because it also writes
+// parse_retry_at; application/database clock skew must not stretch or collapse
+// the backoff. The boolean is false when no eligible rebuild is parked.
+func (s *Store) NextRebuildRetryDelay(ctx context.Context, epoch int) (time.Duration, bool, error) {
+	var seconds float64
+	err := s.Pool.QueryRow(ctx,
+		`SELECT GREATEST(
+		          EXTRACT(EPOCH FROM (parse_retry_at - clock_timestamp())),
+		          0
+		        )::double precision
+		   FROM session_raw
+		  WHERE parse_retry_at IS NOT NULL
+		    AND parser_epoch <= $1
+		    AND (parse_error = ''
+		         OR parse_error_byte_len <> byte_len
+		         OR parse_error_epoch < $1)
+		  ORDER BY parse_retry_at
+		  LIMIT 1`, epoch).Scan(&seconds)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("select next rebuild retry: %w", err)
+	}
+	return time.Duration(seconds * float64(time.Second)), true, nil
 }
 
 // RecordRebuildBackoff defers a session's next rebuild attempt after an

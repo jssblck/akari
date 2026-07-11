@@ -30,8 +30,12 @@ func DefaultPaths() (Paths, error) {
 // output goes to the log file. The child acquires the lock itself; Start waits
 // briefly to confirm an instance is holding it.
 func Start(self string, watchArgs []string, p Paths) error {
-	if IsRunning(p.Pidfile) {
-		return fmt.Errorf("already running")
+	running, err := IsRunning(p.Pidfile)
+	if err != nil {
+		return fmt.Errorf("check daemon status: %w", err)
+	}
+	if running {
+		return ErrAlreadyRunning
 	}
 	if err := os.MkdirAll(filepath.Dir(p.Pidfile), 0o700); err != nil {
 		return err
@@ -55,7 +59,7 @@ func Start(self string, watchArgs []string, p Paths) error {
 	// child's own Acquire fail. If the child exits first, it failed to start.
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if pid, ok := readPid(p.Pidfile); ok && pid == childPid {
+		if pid, err := readPid(p.Pidfile); err == nil && pid == childPid {
 			return nil
 		}
 		if !alive(childPid) {
@@ -72,12 +76,16 @@ func Start(self string, watchArgs []string, p Paths) error {
 // own lock on exit (or, on a hard Windows kill, leaves an unlocked file that the
 // next start reclaims).
 func Stop(p Paths) error {
-	if !IsRunning(p.Pidfile) {
+	running, err := IsRunning(p.Pidfile)
+	if err != nil {
+		return fmt.Errorf("check daemon status: %w", err)
+	}
+	if !running {
 		return fmt.Errorf("not running")
 	}
-	pid, ok := readPid(p.Pidfile)
-	if !ok {
-		return fmt.Errorf("running but pidfile is unreadable")
+	pid, err := readPid(p.Pidfile)
+	if err != nil {
+		return fmt.Errorf("read running daemon pid: %w", err)
 	}
 	proc, err := os.FindProcess(pid)
 	if err != nil {
@@ -89,11 +97,16 @@ func Stop(p Paths) error {
 	return nil
 }
 
-// Status reports whether the watch process is running and its pid.
-func Status(p Paths) (running bool, pid int) {
-	if !IsRunning(p.Pidfile) {
-		return false, 0
+// Status reports whether the watch process is running and its pid. Probe and
+// pidfile read failures are returned to the caller.
+func Status(p Paths) (running bool, pid int, err error) {
+	running, err = IsRunning(p.Pidfile)
+	if err != nil || !running {
+		return running, 0, err
 	}
-	id, _ := readPid(p.Pidfile)
-	return true, id
+	pid, err = readPid(p.Pidfile)
+	if err != nil {
+		return true, 0, fmt.Errorf("read running daemon pid: %w", err)
+	}
+	return true, pid, nil
 }

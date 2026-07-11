@@ -377,14 +377,14 @@ func (s *Server) ogCacheTTL() time.Duration {
 	return time.Hour
 }
 
-// writeOGImage serves the card bytes as a PNG. The Cache-Control window mirrors the
-// server-side TTL, so a crawler's repeat unfurls stay off the render path for about
-// as long as the cached card is considered fresh, without pinning a stale card
-// longer.
+// writeOGImage serves a per-entity card as a PNG. These routes can disappear as
+// soon as their owner unpublishes them, so clients must not reuse a cached public
+// response after access has been withdrawn. The server-side render cache still
+// absorbs repeat rendering while each request rechecks publication state.
 func (s *Server) writeOGImage(w http.ResponseWriter, png []byte) {
 	w.Header().Set("Content-Type", "image/png")
 	w.Header().Set("Content-Length", strconv.Itoa(len(png)))
-	w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", int(s.ogCacheTTL().Seconds())))
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(png)
 }

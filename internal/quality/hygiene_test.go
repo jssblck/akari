@@ -99,10 +99,6 @@ func TestHygieneHandlesLargePrompt(t *testing.T) {
 	if got := ClassifyPrompt("refactor internal/server/store/read.go " + big); got.Short || got.NoCodeContext || got.BareGreeting {
 		t.Errorf("large anchored change request = %+v, want no per-prompt flags", got)
 	}
-	// The streaming digest is deterministic and never builds a normalized copy of the body.
-	if normalizedDigest(big) != normalizedDigest(big) {
-		t.Error("the digest should be deterministic for one input")
-	}
 	// A huge opener of only pleasantries is still a bare greeting; the scan runs to the end without
 	// short-circuiting and matches every token.
 	if !isBareGreeting("hello there " + strings.Repeat("please ", 20_000)) {

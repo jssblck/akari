@@ -17,11 +17,28 @@ func (f fakeResolver) Resolve(context.Context, discover.File) resolve.Result { r
 
 // recordingUploader captures the Target SyncOne hands it, so a test can assert the
 // syncer built it from the right inputs, and never touches a server.
-type recordingUploader struct{ last upload.Target }
+type recordingUploader struct {
+	last  upload.Target
+	calls int
+}
 
 func (u *recordingUploader) SyncFile(_ context.Context, t upload.Target) (upload.Outcome, error) {
+	u.calls++
 	u.last = t
 	return upload.Outcome{Action: upload.ActionUpToDate}, nil
+}
+
+func TestSyncOnePropagatesResolverFailure(t *testing.T) {
+	want := context.DeadlineExceeded
+	up := &recordingUploader{}
+	s := New(fakeResolver{res: resolve.Result{Err: want}}, up, "m", false)
+	got := s.SyncOne(context.Background(), discover.File{Agent: "claude", Path: "ada.jsonl"})
+	if got.Err != want {
+		t.Fatalf("SyncOne error = %v, want %v", got.Err, want)
+	}
+	if up.calls != 0 {
+		t.Fatalf("uploader called %d times after resolution failed", up.calls)
+	}
 }
 
 // TestSyncOneCarriesFinalize proves the finalize argument threaded into New reaches

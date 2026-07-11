@@ -1,6 +1,7 @@
 package upload
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"io"
@@ -11,6 +12,72 @@ import (
 	"github.com/jssblck/akari/internal/casenc"
 	"github.com/jssblck/akari/internal/parser"
 )
+
+func TestChunkAssemblerNeverExceedsProtocolCap(t *testing.T) {
+	oldHardCap, oldChunkTarget := hardCap, chunkTarget
+	t.Cleanup(func() {
+		hardCap = oldHardCap
+		chunkTarget = oldChunkTarget
+	})
+
+	drain := func(t *testing.T, a *chunkAssembler) [][]byte {
+		t.Helper()
+		var chunks [][]byte
+		for {
+			data, origLen, ok := a.takeReady(false)
+			if !ok {
+				return chunks
+			}
+			if int64(len(data)) > hardCap {
+				t.Fatalf("emitted %d-byte chunk above %d-byte cap", len(data), hardCap)
+			}
+			chunks = append(chunks, append([]byte(nil), data...))
+			a.commit(origLen)
+		}
+	}
+
+	t.Run("boundary before hard-cap line", func(t *testing.T) {
+		hardCap = 32
+		chunkTarget = 16
+		first := bytes.Repeat([]byte("a"), 15)
+		second := bytes.Repeat([]byte("b"), int(hardCap))
+		a := newChunkAssembler("claude", "session.jsonl", 0)
+		a.add(first, 0, int64(len(first)))
+		if _, _, ok := a.takeReady(false); ok {
+			t.Fatal("sub-target prefix emitted early")
+		}
+		a.add(second, int64(len(first)), int64(len(second)))
+
+		chunks := drain(t, a)
+		if len(chunks) != 2 || !bytes.Equal(chunks[0], first) || !bytes.Equal(chunks[1], second) {
+			t.Fatalf("chunks = %q, want whole lines %q then %q", chunks, first, second)
+		}
+	})
+
+	t.Run("codex boundary run", func(t *testing.T) {
+		open := []byte(codexAsst("old"))
+		closeLine := []byte(codexUser(strings.Repeat("x", len(open))))
+		hardCap = int64(len(closeLine))
+		chunkTarget = 1
+		if int64(len(open)) >= hardCap {
+			t.Fatalf("test setup: open line %d must be below cap %d", len(open), hardCap)
+		}
+		a := newChunkAssembler("codex", "session.jsonl", 0)
+		a.add(open, 0, int64(len(open)))
+		a.add(closeLine, int64(len(open)), int64(len(closeLine)))
+
+		chunks := drain(t, a)
+		if len(chunks) != 2 || !bytes.Equal(chunks[0], open) || !bytes.Equal(chunks[1], closeLine) {
+			t.Fatalf("chunks did not preserve whole Codex lines: lengths %v", func() []int {
+				out := make([]int, len(chunks))
+				for i := range chunks {
+					out[i] = len(chunks[i])
+				}
+				return out
+			}())
+		}
+	})
+}
 
 // openTemp writes content to a temp file and returns it open with its size.
 func openTemp(t *testing.T, content string) (*os.File, int64) {
@@ -576,6 +643,44 @@ func TestTransformOversizedOpenTurnBackstop(t *testing.T) {
 	}
 	if sink.chunkNum == 0 {
 		t.Fatal("expected at least one forced partial chunk")
+	}
+}
+
+func TestTransformOversizedOpenTurnBackstopAfterClosedPrefix(t *testing.T) {
+	oldMaxTurnBytes, oldChunkTarget := maxTurnBytes, chunkTarget
+	maxTurnBytes = 4 << 10
+	chunkTarget = 1 << 20
+	t.Cleanup(func() {
+		maxTurnBytes = oldMaxTurnBytes
+		chunkTarget = oldChunkTarget
+	})
+
+	// Keep a small closed turn below chunkTarget, then grow the following open
+	// turn past maxTurnBytes. Exercise the assembler after every line, as the
+	// transformer does, so this pins the peak rather than the eventual EOF flush.
+	a := newChunkAssembler("codex", "session.jsonl", 0)
+	closed := []byte(codexUser("a"))
+	a.add(closed, 0, int64(len(closed)))
+	origOff := int64(len(closed))
+	var chunks [][]byte
+	for i := 0; i < 200; i++ {
+		line := []byte(codexAsst(strings.Repeat("z", 64)))
+		a.add(line, origOff, int64(len(line)))
+		origOff += int64(len(line))
+		for {
+			data, origLen, ok := a.takeReady(false)
+			if !ok {
+				break
+			}
+			chunks = append(chunks, append([]byte(nil), data...))
+			a.commit(origLen)
+		}
+	}
+	if len(chunks) < 2 {
+		t.Fatalf("emitted %d chunks while the open suffix grew, want the closed prefix and a forced partial chunk", len(chunks))
+	}
+	if got := len(chunks[0]); got != len(closed) {
+		t.Fatalf("first forced chunk length = %d, want closed prefix length %d", got, len(closed))
 	}
 }
 

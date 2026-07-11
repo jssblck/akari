@@ -127,6 +127,19 @@ func windowSessionConds(f SessionFilter) ([]string, []any) {
 // over the hidden sessions, carrying its own per-class sums, cost, and bool_or flag.
 // The remainder query runs only when the cap actually engaged.
 func (s *Store) WindowSessionPage(ctx context.Context, f SessionFilter) (SessionPage, error) {
+	var page SessionPage
+	err := s.snapshotTx(ctx, func(tx pgx.Tx) error {
+		var err error
+		page, err = s.windowSessionPage(ctx, tx, f)
+		return err
+	})
+	if err != nil {
+		return SessionPage{}, err
+	}
+	return page, nil
+}
+
+func (s *Store) windowSessionPage(ctx context.Context, query querier, f SessionFilter) (SessionPage, error) {
 	conds, args := windowSessionConds(f)
 	where := "ue.occurred_at IS NOT NULL"
 	if len(conds) > 0 {
@@ -154,7 +167,7 @@ func (s *Store) WindowSessionPage(ctx context.Context, f SessionFilter) (Session
 		 LIMIT $` + itoa(len(args)+1)
 	rowArgs := append(append([]any{}, args...), windowSessionLimit)
 
-	rows, err := s.Pool.Query(ctx, q, rowArgs...)
+	rows, err := query.Query(ctx, q, rowArgs...)
 	if err != nil {
 		return SessionPage{}, fmt.Errorf("query window sessions: %w", err)
 	}
@@ -173,14 +186,19 @@ func (s *Store) WindowSessionPage(ctx context.Context, f SessionFilter) (Session
 		out = append(out, sm)
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		return SessionPage{}, fmt.Errorf("iterate window sessions: %w", err)
 	}
+	rows.Close()
 
 	page := SessionPage{Sessions: out}
 	// The remainder exists only when the table filled to its cap; below it, every
 	// windowed session already shows and the footer would be empty.
 	if len(out) == windowSessionLimit {
-		rem, err := s.windowSessionRemainder(ctx, where, args)
+		if s.windowSessionRowsReadHook != nil {
+			s.windowSessionRowsReadHook()
+		}
+		rem, err := s.windowSessionRemainder(ctx, query, where, args)
 		if err != nil {
 			return SessionPage{}, err
 		}
@@ -194,7 +212,7 @@ func (s *Store) WindowSessionPage(ctx context.Context, f SessionFilter) (Session
 // shows, orders it identically, skips the rows already shown (OFFSET the cap), and
 // sums what is left: per-class tokens, cost, the count, and a bool_or over those
 // sessions' own incompleteness so the marker reflects the hidden tail, not the panel.
-func (s *Store) windowSessionRemainder(ctx context.Context, where string, args []any) (SessionRemainder, error) {
+func (s *Store) windowSessionRemainder(ctx context.Context, query querier, where string, args []any) (SessionRemainder, error) {
 	q := `
 		SELECT coalesce(count(*), 0),
 		       coalesce(sum(t.input), 0), coalesce(sum(t.output), 0),
@@ -217,7 +235,7 @@ func (s *Store) windowSessionRemainder(ctx context.Context, where string, args [
 		  ) t`
 	remArgs := append(append([]any{}, args...), windowSessionLimit)
 	var r SessionRemainder
-	if err := s.Pool.QueryRow(ctx, q, remArgs...).Scan(
+	if err := query.QueryRow(ctx, q, remArgs...).Scan(
 		&r.Sessions, &r.Input, &r.Output, &r.CacheRead, &r.CacheWrite, &r.CostUSD, &r.CostIncomplete,
 	); err != nil {
 		return SessionRemainder{}, fmt.Errorf("aggregate window session remainder: %w", err)

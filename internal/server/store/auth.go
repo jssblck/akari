@@ -51,6 +51,30 @@ type APIToken struct {
 	RevokedAt  *time.Time
 }
 
+// CheckRegistrationInvite cheaply rejects a registration that cannot possibly
+// pass the invite gate before the caller performs expensive password hashing.
+// It is intentionally only a preflight: Register repeats the decision while
+// holding its registration lock and atomically consumes the invite, so a first
+// user, expiry, redemption, or concurrent registration racing this read cannot
+// weaken the actual account-creation gate.
+func (s *Store) CheckRegistrationInvite(ctx context.Context, inviteHash string) error {
+	var allowed bool
+	if err := s.Pool.QueryRow(ctx,
+		`SELECT NOT EXISTS (SELECT 1 FROM users)
+		        OR EXISTS (
+		          SELECT 1 FROM invite_tokens
+		           WHERE token_hash = $1
+		             AND redeemed_at IS NULL
+		             AND (expires_at IS NULL OR expires_at > now())
+		        )`, inviteHash).Scan(&allowed); err != nil {
+		return fmt.Errorf("check registration invite: %w", err)
+	}
+	if !allowed {
+		return ErrInvalidInvite
+	}
+	return nil
+}
+
 // Register creates a user. The first account ever created becomes admin and
 // needs no invite; every later account must present an unredeemed, unexpired
 // invite token (by its hash), which is redeemed atomically with the insert.

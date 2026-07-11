@@ -105,19 +105,25 @@ type Client struct {
 	// the cap is a whole-client budget, not per file.
 	uploads uploadLimiter
 
-	// files caches per-path incremental sync state so that re-syncing a growing
-	// session does work proportional to the newly appended bytes, not to the whole
-	// file. It is guarded by mu; a given path is synced single-flight, so the
-	// *fileSync it returns is only ever touched by one sync at a time.
-	mu    sync.Mutex
-	files map[string]*fileSync
+	// files caches the transformed-to-original cursor mapping and open trailing
+	// turns. It is guarded by mu; a given path is synced single-flight, so the
+	// *fileSync it returns is only ever touched by one sync at a time. Idle entries
+	// are evicted by least-recent use so a long-running watcher does not retain every
+	// session path it has ever observed.
+	mu      sync.Mutex
+	files   map[string]*fileSync
+	fileUse uint64
 }
 
-// fileSync is the per-file state that keeps repeated syncs of an append-only
-// session O(newly appended bytes). It is a cache only: dropping it (a restart, a
-// fresh Client) costs a one-time full re-hash and re-transform, never
-// correctness, and any sign the file diverged from what it describes forces that
-// full path.
+// fileStateCacheCap bounds the number of idle incremental states retained by a
+// long-running Client. Active holders and lock waiters are never evicted, so the
+// map may exceed the cap temporarily when more than this many paths are syncing at
+// once. It is a variable so tests can exercise eviction with a small cache.
+var fileStateCacheCap = 1024
+
+// fileSync maps the server's transformed cursor back to the original file and
+// caches an open trailing turn across syncs. It is a cache only: dropping it costs
+// a cold prefix reconstruction, never correctness.
 //
 // Under the client-CAS protocol the bytes the server stores are the TRANSFORMED
 // transcript (tool bodies lifted to the CAS, replaced by sentinels), so the
@@ -137,14 +143,25 @@ type fileSync struct {
 	// shutdown. A nil channel (a fileSync built directly in a test) means no locking.
 	lock chan struct{}
 
+	// refs and lastUse are protected by Client.mu. refs includes both the current
+	// lock holder and callers waiting for the lock; an entry is eligible for cache
+	// eviction only at zero.
+	refs    int
+	lastUse uint64
+
+	// The incremental projection belongs to one logical session in one filesystem
+	// object. A path can be reused for a different session or atomically replaced;
+	// either change invalidates every cached cursor and pending turn below.
+	agent    string
+	sourceID string
+	fileInfo os.FileInfo
+
 	// Verified prefix, over the transformed stream. The server holds transformed
 	// bytes [0, base); prefixHasher has consumed exactly those bytes, so the next
-	// verification compares the cached digest (an append) instead of re-transforming
-	// from zero. origBase is the original-file offset that produced base transformed
+	// verification re-derives the prefix from disk and replaces the hasher before an
+	// append. origBase is the original-file offset that produced base transformed
 	// bytes, so the next transform pass reads original [origBase, size). prefixSize
-	// is the original file size observed at the last verification; a file shorter
-	// than that has been truncated, so the cheap path is abandoned for a full
-	// re-transform.
+	// is the original file size observed at the last verification.
 	base         int64
 	origBase     int64
 	prefixHasher hash.Hash
@@ -164,6 +181,15 @@ type fileSync struct {
 	// appends from costing quadratic newline-search work. Zero when no partial line is
 	// pending. Also a cache: dropping it costs one redundant rescan.
 	partialSearch int64
+
+	// tailProof authenticates the original bytes represented by pending and
+	// partialSearch. File identity and length cannot prove append-only growth: a
+	// writer may truncate or rewrite the same inode, including to a larger size.
+	// Reusing either cursor is safe only after the covered bytes are re-hashed.
+	tailProofStart int64
+	tailProofEnd   int64
+	tailProofSHA   [sha256.Size]byte
+	haveTailProof  bool
 }
 
 // New builds a Client. baseURL is the server root (trailing slash optional).
@@ -193,9 +219,9 @@ func uploadLimiterOrFallback(make func() (uploadLimiter, error)) uploadLimiter {
 	return newFixedUploadLimiter(uploadInitialConcurrency)
 }
 
-// fileState returns the cached sync state for a path, creating an empty one (cold
-// cache: base 0, no hasher) on first use.
-func (c *Client) fileState(path string) *fileSync {
+// retainFileState returns the cached sync state for a path and pins it against
+// eviction. The caller must eventually call releaseFileStateRef.
+func (c *Client) retainFileState(path string) *fileSync {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	fs := c.files[path]
@@ -203,7 +229,100 @@ func (c *Client) fileState(path string) *fileSync {
 		fs = &fileSync{lock: make(chan struct{}, 1)}
 		c.files[path] = fs
 	}
+	fs.refs++
+	c.fileUse++
+	fs.lastUse = c.fileUse
+	c.evictFileStatesLocked()
 	return fs
+}
+
+// releaseFileStateRef unpins a state after a completed lock hold or an abandoned
+// lock wait, then trims the idle cache back to its bound.
+func (c *Client) releaseFileStateRef(fs *fileSync) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	fs.refs--
+	c.fileUse++
+	fs.lastUse = c.fileUse
+	c.evictFileStatesLocked()
+}
+
+// evictFileStatesLocked drops the least-recently-used idle entries until the
+// cache is within its bound. It deliberately leaves the map oversized when every
+// candidate is active; the next release trims it.
+func (c *Client) evictFileStatesLocked() {
+	for len(c.files) > fileStateCacheCap {
+		var oldestPath string
+		var oldest *fileSync
+		for path, fs := range c.files {
+			if fs.refs != 0 || (oldest != nil && fs.lastUse >= oldest.lastUse) {
+				continue
+			}
+			oldestPath, oldest = path, fs
+		}
+		if oldest == nil {
+			return
+		}
+		delete(c.files, oldestPath)
+	}
+}
+
+// acquireFileState pins and locks one path's state. Pinning happens before the
+// wait so an entry with queued callers cannot be evicted and replaced by a second
+// lock for the same path.
+func (c *Client) acquireFileState(ctx context.Context, path string) (*fileSync, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	fs := c.retainFileState(path)
+	select {
+	case fs.lock <- struct{}{}:
+		// A cancellation can race with the available slot. Hand the slot back rather
+		// than starting filesystem or network work after cancellation.
+		if err := ctx.Err(); err != nil {
+			<-fs.lock
+			c.releaseFileStateRef(fs)
+			return nil, err
+		}
+		return fs, nil
+	case <-ctx.Done():
+		c.releaseFileStateRef(fs)
+		return nil, ctx.Err()
+	}
+}
+
+func (c *Client) releaseFileState(fs *fileSync) {
+	<-fs.lock
+	c.releaseFileStateRef(fs)
+}
+
+// bind invalidates derived state when a path now names another logical session
+// or filesystem object. The cold state can still resume against a matching server
+// prefix; it simply has to prove that prefix from disk again.
+func (fs *fileSync) bind(t Target, info os.FileInfo) {
+	if fs.fileInfo != nil && (fs.agent != t.Agent || fs.sourceID != t.SourceID || !os.SameFile(fs.fileInfo, info)) {
+		fs.clearDerived()
+	}
+	fs.agent = t.Agent
+	fs.sourceID = t.SourceID
+	fs.fileInfo = info
+}
+
+func (fs *fileSync) clearDerived() {
+	fs.base = 0
+	fs.origBase = 0
+	fs.prefixHasher = nil
+	fs.prefixSize = 0
+	fs.dropTailCache()
+}
+
+func (fs *fileSync) dropTailCache() {
+	fs.pending = nil
+	fs.partialSearch = 0
+	fs.tailProofStart = 0
+	fs.tailProofEnd = 0
+	fs.tailProofSHA = [sha256.Size]byte{}
+	fs.haveTailProof = false
 }
 
 // rewind sets the verified prefix back to empty: the server holds nothing, so the
@@ -211,14 +330,9 @@ func (c *Client) fileState(path string) *fileSync {
 // cursor and the original cursor reset, since with nothing accepted there is no
 // verified original prefix to resume from.
 func (fs *fileSync) rewind(size int64) {
-	fs.base = 0
-	fs.origBase = 0
+	fs.clearDerived()
 	fs.prefixHasher = sha256.New()
 	fs.prefixSize = size
-	// A reset re-transforms from zero, so any cached open turn or partial-line search
-	// offset is stale.
-	fs.pending = nil
-	fs.partialSearch = 0
 }
 
 // maxConflictRetries bounds how many times a single SyncFile re-announces after
@@ -235,23 +349,26 @@ const maxConflictRetries = 5
 // prefix), SyncFile re-announces and re-verifies the prefix from scratch, up to
 // maxConflictRetries times.
 func (c *Client) SyncFile(ctx context.Context, t Target) (Outcome, error) {
+	// Take the per-path lock before opening. A waiter must observe the path as it
+	// exists after the previous holder finishes; opening first would pin an old inode
+	// across an atomic replacement while the caller waited.
+	fs, err := c.acquireFileState(ctx, t.Path)
+	if err != nil {
+		return Outcome{}, err
+	}
+	defer c.releaseFileState(fs)
+
 	f, err := os.Open(t.Path)
 	if err != nil {
 		return Outcome{}, err
 	}
 	defer f.Close()
 
-	// Hold the per-file lock for the whole sync so concurrent SyncFile calls for the
-	// same path serialize instead of racing on the shared cursor and hasher. The
-	// acquire is cancellable: a caller whose context is canceled (a shutdown) stops
-	// waiting instead of blocking behind an in-flight sync that may be stuck on I/O.
-	fs := c.fileState(t.Path)
-	select {
-	case fs.lock <- struct{}{}:
-		defer func() { <-fs.lock }()
-	case <-ctx.Done():
-		return Outcome{}, ctx.Err()
+	info, err := f.Stat()
+	if err != nil {
+		return Outcome{}, err
 	}
+	fs.bind(t, info)
 
 	var totalUploaded int64
 	sawReset := false
@@ -318,10 +435,14 @@ func (c *Client) syncOnce(ctx context.Context, t Target, fs *fileSync, f *os.Fil
 		// whose first turn is still open keeps the server at zero every tick (the turn
 		// is withheld), so a plain rewind here would discard the cached open turn and
 		// re-transform from offset zero each tick, quadratic over the growing turn.
-		// Preserve the pending open-turn cache when the file only grew and the cache is
-		// still consistent with it; the cursors are already zero, so nothing else needs
-		// resetting. Any sign the file shrank or diverged falls back to a full rewind.
-		if fs.pending != nil && size >= fs.prefixSize && fs.pending.scanEnd <= size {
+		// Preserve a pending turn or partial-line search only after proving that every
+		// original byte it represents is unchanged. Size and inode checks alone miss a
+		// truncate-and-rewrite of the same path.
+		tailOK, err := fs.tailCacheMatches(ctx, f, 0, size)
+		if err != nil {
+			return Outcome{}, false, err
+		}
+		if tailOK {
 			fs.base = 0
 			fs.origBase = 0
 			fs.prefixHasher = sha256.New()
@@ -342,6 +463,14 @@ func (c *Client) syncOnce(ctx context.Context, t Target, fs *fileSync, f *os.Fil
 			}
 			fs.rewind(size)
 			action = ActionReset
+		} else {
+			tailOK, err := fs.tailCacheMatches(ctx, f, fs.origBase, size)
+			if err != nil {
+				return Outcome{}, false, err
+			}
+			if !tailOK {
+				fs.dropTailCache()
+			}
 		}
 	}
 
@@ -363,8 +492,7 @@ func (c *Client) syncOnce(ctx context.Context, t Target, fs *fileSync, f *os.Fil
 	if conflicted {
 		// The server cursor moved; the cached open turn may no longer line up, so drop
 		// it and let the re-announce rebuild from the verified prefix.
-		fs.pending = nil
-		fs.partialSearch = 0
+		fs.dropTailCache()
 		return out, true, nil
 	}
 	// Upload any tool bodies lifted from a withheld trailing turn whose transcript chunk
@@ -381,12 +509,97 @@ func (c *Client) syncOnce(ctx context.Context, t Target, fs *fileSync, f *os.Fil
 	// Carry how far an incomplete trailing line was searched, so the next tick resumes
 	// the newline search at the appended tail rather than from the line start.
 	fs.partialSearch = tr.partialSearchedTo()
+	if err := fs.rememberTailProof(ctx, f, size); err != nil {
+		fs.dropTailCache()
+		return out, false, err
+	}
 
 	if out.UploadedBytes == 0 && action != ActionReset {
 		action = ActionUpToDate
 	}
 	out.Action = action
 	return out, false, nil
+}
+
+// tailCacheMatches reports whether pending and partialSearch still describe the
+// current file at original offset origBase. It hashes only the unaccepted range;
+// verifyPrefix separately authenticates the accepted transformed prefix.
+func (fs *fileSync) tailCacheMatches(ctx context.Context, f *os.File, origBase, size int64) (bool, error) {
+	if fs.pending == nil && fs.partialSearch == 0 {
+		return false, nil
+	}
+	end := fs.tailCacheEnd()
+	if !fs.haveTailProof || fs.tailProofStart != origBase || fs.tailProofEnd != end || end > size {
+		return false, nil
+	}
+	got, err := hashFileRange(ctx, f, fs.tailProofStart, fs.tailProofEnd)
+	if err != nil {
+		return false, err
+	}
+	return got == fs.tailProofSHA, nil
+}
+
+func (fs *fileSync) tailCacheEnd() int64 {
+	end := fs.partialSearch
+	if fs.pending != nil && fs.pending.scanEnd > end {
+		end = fs.pending.scanEnd
+	}
+	return end
+}
+
+// rememberTailProof records the current original bytes covered by the incremental
+// tail caches. A later sync must reproduce this digest before it can skip those
+// bytes. This preserves append-only incremental work without trusting mutable file
+// metadata as a content guarantee.
+func (fs *fileSync) rememberTailProof(ctx context.Context, f *os.File, size int64) error {
+	end := fs.tailCacheEnd()
+	if end <= fs.origBase {
+		fs.tailProofStart = 0
+		fs.tailProofEnd = 0
+		fs.tailProofSHA = [sha256.Size]byte{}
+		fs.haveTailProof = false
+		return nil
+	}
+	if end > size {
+		return fmt.Errorf("cache session tail [%d,%d): file size is %d", fs.origBase, end, size)
+	}
+	sum, err := hashFileRange(ctx, f, fs.origBase, end)
+	if err != nil {
+		return err
+	}
+	fs.tailProofStart = fs.origBase
+	fs.tailProofEnd = end
+	fs.tailProofSHA = sum
+	fs.haveTailProof = true
+	return nil
+}
+
+// hashFileRange hashes a fixed file range through a bounded buffer and checks
+// cancellation between reads. The caller supplies offsets from a prior bounded
+// scan; a concurrent truncation is therefore a hard error, not a partial proof.
+func hashFileRange(ctx context.Context, f *os.File, start, end int64) ([sha256.Size]byte, error) {
+	if start < 0 || end < start {
+		return [sha256.Size]byte{}, fmt.Errorf("hash session file range [%d,%d): invalid range", start, end)
+	}
+	h := sha256.New()
+	buf := make([]byte, 256<<10)
+	for off := start; off < end; {
+		if err := ctx.Err(); err != nil {
+			return [sha256.Size]byte{}, err
+		}
+		n := end - off
+		if n > int64(len(buf)) {
+			n = int64(len(buf))
+		}
+		if err := readAt(f, buf[:n], off); err != nil {
+			return [sha256.Size]byte{}, err
+		}
+		_, _ = h.Write(buf[:n])
+		off += n
+	}
+	var sum [sha256.Size]byte
+	copy(sum[:], h.Sum(nil))
+	return sum, nil
 }
 
 // syncSink wires the streaming transform to the client's CAS and chunk endpoints
@@ -593,31 +806,12 @@ func lastCodexTurnEnd(buf []byte) int {
 // verification. The server holds transformed bytes (tool bodies lifted to the
 // CAS), so the comparison is against the transformed prefix, not the raw file.
 //
-// The fast path is the common one: an append-only file whose transformed prefix
-// the cache already covers exactly (fs.base == serverBytes) is confirmed by
-// comparing the cached digest with no I/O. Otherwise (a cold cache after a
-// restart, a server rewind, a concurrent writer that advanced the cursor, or a
-// truncation) the client re-transforms the original file from zero until the
-// transformed output reaches serverBytes, hashing as it goes and recovering the
-// origBase mapping. That cold pass re-reads and re-hashes the bodies in the prefix
-// once, the documented cost of a dropped cache, but never re-uploads them.
+// Prefix verification always re-derives the transformed bytes from the current
+// file. A cached digest proves only what a previous read saw; trusting it would
+// miss an in-place rewrite whose size did not shrink and append new bytes to a
+// stale server prefix. The pass streams from disk without a prefix-sized
+// allocation.
 func (c *Client) verifyPrefix(ctx context.Context, f *os.File, fs *fileSync, agent string, serverBytes, size int64, want string) (bool, error) {
-	// serverBytes counts TRANSFORMED bytes and size counts ORIGINAL file bytes, so
-	// they are not directly comparable: a sentinel can be larger or smaller than the
-	// body it replaces. The fast path's guard is on the original coordinate: the
-	// file must still hold at least the original bytes the cache already consumed
-	// (origBase). A file shorter than that was truncated and drops to the cold path.
-	if fs.prefixHasher != nil && fs.base == serverBytes && size >= fs.origBase && size >= fs.prefixSize {
-		// Append-only growth with the transformed prefix already hashed: compare the
-		// cached digest.
-		fs.prefixSize = size
-		return hex.EncodeToString(fs.prefixHasher.Sum(nil)) == want, nil
-	}
-
-	// Cold path: re-transform the original file from zero until the transformed
-	// output reaches serverBytes, computing both the digest and the original offset
-	// that maps to it. The transform is deterministic, so the recomputed prefix is
-	// byte identical to what was uploaded.
 	h, origBase, ok, err := transformPrefixDigest(ctx, f, agent, size, serverBytes, c.enc)
 	if err != nil {
 		return false, err

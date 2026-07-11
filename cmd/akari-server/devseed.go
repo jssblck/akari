@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -13,7 +12,6 @@ import (
 	"github.com/jssblck/akari/internal/devseed"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/shutdown"
-	"github.com/jssblck/akari/migrations"
 )
 
 // runDevSeed fills a local server with example data for development. It is meant
@@ -62,9 +60,7 @@ func runDevSeed(args []string) error {
 	}
 	defer st.Close()
 
-	migrateCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-	if err := st.Migrate(migrateCtx, migrations.FS); err != nil {
+	if err := migrateStore(ctx, st); err != nil {
 		return finishDevSeed(err, *strict)
 	}
 

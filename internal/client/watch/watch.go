@@ -6,6 +6,7 @@ package watch
 
 import (
 	"context"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -17,6 +18,8 @@ import (
 	"github.com/jssblck/akari/internal/client/discover"
 	"github.com/jssblck/akari/internal/client/syncer"
 )
+
+var errWatcherClosed = errors.New("filesystem watcher stopped unexpectedly")
 
 // SyncFunc syncs one file. watch depends on this rather than the concrete syncer
 // so it can be tested without a server.
@@ -79,11 +82,14 @@ func (w *Watcher) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	return w.run(ctx, fsw)
+}
+
+func (w *Watcher) run(ctx context.Context, fsw *fsnotify.Watcher) error {
 	defer fsw.Close()
 
-	watched := map[string]bool{}
 	for _, r := range w.roots {
-		w.addRecursive(fsw, watched, r.Dir)
+		w.addRecursive(fsw, r.Dir)
 	}
 
 	rs := &runState{
@@ -91,10 +97,15 @@ func (w *Watcher) Run(ctx context.Context) error {
 		dirty: map[discover.File]struct{}{},
 		wake:  make(chan struct{}, 1),
 	}
+	workerCtx, cancelWorker := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
-		rs.worker(ctx)
+		rs.worker(workerCtx)
 		close(done)
+	}()
+	defer func() {
+		cancelWorker()
+		<-done
 	}()
 
 	// Initial pass: discover everything, seed the poll baseline, and sync all. The
@@ -121,17 +132,19 @@ func (w *Watcher) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			<-done // let the worker finish the file it is on, then exit
 			return ctx.Err()
 
 		case ev, ok := <-fsw.Events:
 			if !ok {
-				continue
+				return errWatcherClosed
 			}
-			w.handleEvent(fsw, watched, ev, known, pending)
+			w.handleEvent(fsw, ev, known, pending)
 
 		case err, ok := <-fsw.Errors:
-			if ok && err != nil {
+			if !ok {
+				return errWatcherClosed
+			}
+			if err != nil {
 				w.opt.Logf("watch error: %v", err)
 			}
 
@@ -181,7 +194,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 		case <-rescan.C:
 			// Safety net: re-add any new directories and re-sync everything.
 			for _, r := range w.roots {
-				w.addRecursive(fsw, watched, r.Dir)
+				w.addRecursive(fsw, r.Dir)
 			}
 			for _, f := range w.discover() {
 				if m, ok := statMeta(f.Path); ok {
@@ -214,10 +227,14 @@ func (r *runState) mark(f discover.File) {
 	}
 }
 
-// pop removes and returns one dirty file, or ok=false when the set is empty.
-func (r *runState) pop() (discover.File, bool) {
+// pop removes and returns one dirty file unless shutdown began while the worker
+// was waiting for the dirty-set lock.
+func (r *runState) pop(ctx context.Context) (discover.File, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if ctx.Err() != nil {
+		return discover.File{}, false
+	}
 	for f := range r.dirty {
 		delete(r.dirty, f)
 		return f, true
@@ -241,9 +258,12 @@ func (r *runState) worker(ctx context.Context) {
 		case <-r.wake:
 		}
 		for {
-			f, ok := r.pop()
+			f, ok := r.pop(ctx)
 			if !ok {
 				break
+			}
+			if ctx.Err() != nil {
+				return
 			}
 			res := r.w.sync(work, f)
 			switch {
@@ -266,12 +286,12 @@ func (r *runState) worker(ctx context.Context) {
 // accepted file also enters the poll's known set, so the fast poll covers a Write
 // the OS watcher may later miss on that file rather than leaving it uncovered until
 // the slower discover ticker folds it in.
-func (w *Watcher) handleEvent(fsw *fsnotify.Watcher, watched map[string]bool, ev fsnotify.Event, known map[discover.File]fileMeta, pending map[discover.File]time.Time) {
+func (w *Watcher) handleEvent(fsw *fsnotify.Watcher, ev fsnotify.Event, known map[discover.File]fileMeta, pending map[discover.File]time.Time) {
 	if ev.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Rename) == 0 {
 		return
 	}
 	if info, err := os.Stat(ev.Name); err == nil && info.IsDir() {
-		w.addRecursive(fsw, watched, ev.Name)
+		w.addRecursive(fsw, ev.Name)
 		return
 	}
 	if f, ok := w.fileFor(ev.Name); ok {
@@ -288,6 +308,9 @@ func (w *Watcher) handleEvent(fsw *fsnotify.Watcher, watched map[string]bool, ev
 // the agent, and the agent's filename pattern confirms it is a session file.
 func (w *Watcher) fileFor(path string) (discover.File, bool) {
 	if w.ex.Excluded(path) {
+		return discover.File{}, false
+	}
+	if _, ok := statMeta(path); !ok {
 		return discover.File{}, false
 	}
 	base := filepath.Base(path)
@@ -310,7 +333,7 @@ func (w *Watcher) discover() []discover.File {
 // addRecursive adds dir and all of its subdirectories to the watcher, skipping any
 // excluded subtree so the watch never spends an fsnotify slot on a directory whose
 // files would be filtered out anyway.
-func (w *Watcher) addRecursive(fsw *fsnotify.Watcher, watched map[string]bool, dir string) {
+func (w *Watcher) addRecursive(fsw *fsnotify.Watcher, dir string) {
 	if dir == "" {
 		return
 	}
@@ -324,10 +347,10 @@ func (w *Watcher) addRecursive(fsw *fsnotify.Watcher, watched map[string]bool, d
 		if p != dir && w.ex.ExcludedDir(p) {
 			return filepath.SkipDir
 		}
-		if !watched[p] {
-			if addErr := fsw.Add(p); addErr == nil {
-				watched[p] = true
-			}
+		// fsnotify.Add is idempotent. Calling it for every live directory lets a
+		// recreated path regain the watch that the OS removed with its predecessor.
+		if addErr := fsw.Add(p); addErr != nil {
+			w.opt.Logf("watch directory %s: %v", p, addErr)
 		}
 		return nil
 	})
@@ -335,7 +358,7 @@ func (w *Watcher) addRecursive(fsw *fsnotify.Watcher, watched map[string]bool, d
 
 func statMeta(path string) (fileMeta, bool) {
 	info, err := os.Stat(path)
-	if err != nil || info.IsDir() {
+	if err != nil || !info.Mode().IsRegular() {
 		return fileMeta{}, false
 	}
 	return fileMeta{mod: info.ModTime(), size: info.Size()}, true

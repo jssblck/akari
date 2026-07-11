@@ -46,8 +46,9 @@ func runUpdate(ctx context.Context, args []string) error {
 		return fmt.Errorf("locate the running binary: %w", err)
 	}
 	// Replace the real file, not a symlink that points at it.
-	if resolved, err := filepath.EvalSymlinks(target); err == nil {
-		target = resolved
+	target, err = resolveUpdateTarget(target)
+	if err != nil {
+		return err
 	}
 
 	// Clear any leftover from a previous Windows update before staging the next.
@@ -68,6 +69,14 @@ func runUpdate(ctx context.Context, args []string) error {
 	fmt.Printf("akari updated from %s to %s.\n", current, latest)
 	fmt.Println("Restart any running akari watch or daemon to use the new version.")
 	return nil
+}
+
+func resolveUpdateTarget(target string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		return "", fmt.Errorf("resolve running binary %s: %w", target, err)
+	}
+	return resolved, nil
 }
 
 // printUpdateStatus reports the result of an update check for binName.

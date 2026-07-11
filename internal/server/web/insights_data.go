@@ -418,7 +418,7 @@ func churnRows(tree []store.ChurnNode) []map[string]any {
 // root the treemap opens on.
 func churnProjects(tree []store.ChurnNode) []string {
 	seen := map[string]bool{}
-	var out []string
+	out := make([]string, 0, len(tree))
 	for _, node := range tree {
 		if !seen[node.Project] {
 			seen[node.Project] = true

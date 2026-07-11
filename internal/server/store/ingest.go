@@ -207,23 +207,28 @@ func keepRemoteAttributionTx(ctx context.Context, tx pgx.Tx, p AnnounceParams) (
 	}
 	var existingID int64
 	var existingKind string
+	var priorCwd string
 	err := tx.QueryRow(ctx,
-		`SELECT s.id, pr.kind
+		`SELECT s.id, pr.kind, COALESCE(s.cwd, '')
 		   FROM sessions s JOIN projects pr ON pr.id = s.project_id
 		  WHERE s.user_id = $1 AND s.agent = $2 AND s.source_session_id = $3`,
-		p.UserID, p.Agent, p.SourceSessionID).Scan(&existingID, &existingKind)
+		p.UserID, p.Agent, p.SourceSessionID).Scan(&existingID, &existingKind, &priorCwd)
 	switch {
 	case err == nil && existingKind == "remote":
 		r.SessionID = existingID
-		// This guard bypasses announceIntoProjectTx, so persist the terminal flag here too:
-		// a --finalize sync of a session whose checkout lost its remote must still mark it
-		// terminal so the finalize refresh (and the settle pass) grade it immediately. It is
-		// sticky, set only when the client asserts terminal, never cleared.
-		if p.Terminal {
-			if _, err := tx.Exec(ctx,
-				`UPDATE sessions SET terminal = true WHERE id = $1`, existingID); err != nil {
-				return AnnounceResult{}, false, fmt.Errorf("mark kept remote session %d terminal: %w", existingID, err)
-			}
+		// Keep only the remote project attribution. Mutable announce metadata still
+		// follows the latest client observation, and terminal remains sticky.
+		if _, err := tx.Exec(ctx,
+			`UPDATE sessions
+			    SET machine = $2, cwd = $3, git_branch = $4,
+			        terminal = sessions.terminal OR $5,
+			        updated_at = now()
+			  WHERE id = $1`,
+			existingID, p.Machine, p.Cwd, p.GitBranch, p.Terminal); err != nil {
+			return AnnounceResult{}, false, fmt.Errorf("update kept remote session %d metadata: %w", existingID, err)
+		}
+		if err := refreshCwdDerivedStateTx(ctx, tx, existingID, priorCwd, p.Cwd); err != nil {
+			return AnnounceResult{}, false, err
 		}
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO session_raw (session_id) VALUES ($1) ON CONFLICT DO NOTHING`, existingID); err != nil {
@@ -278,16 +283,8 @@ func announceIntoProjectTx(ctx context.Context, tx pgx.Tx, p AnnounceParams) (An
 	// are bounded (it is one session's edits, pushed to the CAS, not whole-session bytes), and a
 	// cwd change is rare (a re-announce from a different checkout), so this is a rare, bounded write
 	// rather than hot-path work.
-	if priorCwd != p.Cwd {
-		if err := recomputeToolCallRelPathsTx(ctx, tx, r.SessionID, p.Cwd); err != nil {
-			return AnnounceResult{}, err
-		}
-		// session_file_churn keys on the rel paths just rewritten, so it re-derives in the
-		// same transaction; a cwd-only announce triggers no rebuild, which is otherwise the
-		// only writer (see deriveSessionFileChurnTx).
-		if err := deriveSessionFileChurnTx(ctx, tx, r.SessionID); err != nil {
-			return AnnounceResult{}, err
-		}
+	if err := refreshCwdDerivedStateTx(ctx, tx, r.SessionID, priorCwd, p.Cwd); err != nil {
+		return AnnounceResult{}, err
 	}
 	if err := linkSubagentParentTx(ctx, tx, p, r.SessionID); err != nil {
 		return AnnounceResult{}, err
@@ -299,6 +296,23 @@ func announceIntoProjectTx(ctx context.Context, tx pgx.Tx, p AnnounceParams) (An
 	return r, tx.QueryRow(ctx,
 		`SELECT byte_len, content_sha256 FROM session_raw WHERE session_id = $1`, r.SessionID).
 		Scan(&r.StoredBytes, &r.PrefixSHA256)
+}
+
+// refreshCwdDerivedStateTx updates the two projections that depend on a
+// session's cwd. Announce can change that anchor without appending raw bytes, so
+// no parse rebuild will arrive later to repair stale relative paths or churn
+// keys.
+func refreshCwdDerivedStateTx(ctx context.Context, tx pgx.Tx, sessionID int64, priorCwd, cwd string) error {
+	if priorCwd == cwd {
+		return nil
+	}
+	if err := recomputeToolCallRelPathsTx(ctx, tx, sessionID, cwd); err != nil {
+		return err
+	}
+	if err := deriveSessionFileChurnTx(ctx, tx, sessionID); err != nil {
+		return err
+	}
+	return nil
 }
 
 // relPathRecomputeBatch is how many tool-call rows recomputeToolCallRelPathsTx reads and writes per

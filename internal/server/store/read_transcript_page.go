@@ -62,9 +62,9 @@ type TranscriptPage struct {
 }
 
 // snapshotTx runs fn inside a repeatable-read, read-only transaction, so the several
-// reads behind one page (a transcript window with its tools and attachments, or the
-// audit header's cost-bearing rows) describe one MVCC snapshot even if the parse
-// worker commits a rebuild mid-request.
+// reads behind one page (a transcript window with its tools and attachments, the
+// audit header's cost-bearing rows, or a capped session list and its remainder)
+// describe one MVCC snapshot even if the parse worker commits a rebuild mid-request.
 func (s *Store) snapshotTx(ctx context.Context, fn func(tx pgx.Tx) error) error {
 	return pgx.BeginTxFunc(ctx, s.Pool,
 		pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, fn)

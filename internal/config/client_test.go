@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -138,6 +139,26 @@ func TestReadClientCorrupt(t *testing.T) {
 	}
 }
 
+func TestReadClientRejectsUnknownKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	raw := `server_url = "https://akari.example"
+token = "secret"
+exclude = ["**/private/**"]
+
+[[extra_roots]]
+agent = "claude"
+path = "/sessions"
+typo = true
+`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ReadClient(path); err == nil ||
+		!strings.Contains(err.Error(), "exclude") || !strings.Contains(err.Error(), "extra_roots.typo") {
+		t.Fatalf("ReadClient unknown keys error = %v, want both key names", err)
+	}
+}
+
 func TestLoadClientValidation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	if err := os.WriteFile(path, []byte(`server_url = "https://x"`+"\n"), 0o600); err != nil {
@@ -145,6 +166,23 @@ func TestLoadClientValidation(t *testing.T) {
 	}
 	if _, err := LoadClient(path); err == nil {
 		t.Fatal("config without a token should fail validation")
+	}
+}
+
+func TestLoadClientRejectsUnknownAgent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	raw := `server_url = "https://akari.example"
+token = "secret"
+
+[[extra_roots]]
+agent = "cursor"
+path = "/sessions"
+`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadClient(path); err == nil || !strings.Contains(err.Error(), "must be claude, codex, or pi") {
+		t.Fatalf("LoadClient invalid agent error = %v", err)
 	}
 }
 

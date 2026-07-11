@@ -79,17 +79,15 @@ func (s *Store) CreateAuthCode(ctx context.Context, codeHash string, c AuthCode,
 	return err
 }
 
-// ConsumeAuthCode redeems an authorization code exactly once. It marks the code
-// consumed and returns its bound data only if it was unconsumed and unexpired;
-// otherwise it returns ErrInvalidGrant. The UPDATE ... RETURNING is the atomic
-// single-use gate: a replayed code finds consumed_at already set and matches no
-// row, so two token requests racing on the same code cannot both succeed.
-func (s *Store) ConsumeAuthCode(ctx context.Context, codeHash string) (AuthCode, error) {
+// AuthCodeForExchange loads an authorization code for endpoint validation without
+// consuming it. The token endpoint checks the client, redirect, and PKCE binding
+// before RedeemAuthCode atomically consumes the code and stores its token pair.
+func (s *Store) AuthCodeForExchange(ctx context.Context, codeHash string) (AuthCode, error) {
 	var c AuthCode
 	err := s.Pool.QueryRow(ctx,
-		`UPDATE oauth_auth_codes SET consumed_at = now()
-		   WHERE code_hash = $1 AND consumed_at IS NULL AND expires_at > now()
-		 RETURNING client_id, user_id, redirect_uri, code_challenge, scope, resource`,
+		`SELECT client_id, user_id, redirect_uri, code_challenge, scope, resource
+		   FROM oauth_auth_codes
+		  WHERE code_hash = $1 AND consumed_at IS NULL AND expires_at > now()`,
 		codeHash).Scan(&c.ClientID, &c.UserID, &c.RedirectURI, &c.CodeChallenge, &c.Scope, &c.Resource)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AuthCode{}, ErrInvalidGrant
@@ -109,20 +107,61 @@ type OAuthTokenParams struct {
 	RefreshExpiresAt *time.Time
 }
 
+const insertOAuthTokenSQL = `INSERT INTO oauth_tokens
+	   (access_token_hash, refresh_token_hash, client_id, user_id, scope, resource,
+	    access_expires_at, refresh_expires_at)
+	 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
+
 // CreateOAuthToken stores an issued access/refresh token pair.
 func (s *Store) CreateOAuthToken(ctx context.Context, p OAuthTokenParams) error {
 	var refresh *string
 	if p.RefreshHash != "" {
 		refresh = &p.RefreshHash
 	}
-	_, err := s.Pool.Exec(ctx,
-		`INSERT INTO oauth_tokens
-		   (access_token_hash, refresh_token_hash, client_id, user_id, scope, resource,
-		    access_expires_at, refresh_expires_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+	_, err := s.Pool.Exec(ctx, insertOAuthTokenSQL,
 		p.AccessHash, refresh, p.ClientID, p.UserID, p.Scope, p.Resource,
 		p.AccessExpiresAt, p.RefreshExpiresAt)
 	return err
+}
+
+// RedeemAuthCode consumes a valid authorization code and stores the token pair in
+// one transaction. A token insert failure rolls the code consumption back, while
+// the conditional update remains the single-use gate for concurrent exchanges.
+func (s *Store) RedeemAuthCode(ctx context.Context, codeHash string, p OAuthTokenParams) error {
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		// A canceled request context is a common reason an exchange fails. Give
+		// rollback its own short lifetime so the pool connection is still released.
+		rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_ = tx.Rollback(rollbackCtx)
+	}()
+
+	tag, err := tx.Exec(ctx,
+		`UPDATE oauth_auth_codes SET consumed_at = now()
+		   WHERE code_hash = $1 AND consumed_at IS NULL AND expires_at > now()
+		     AND client_id = $2 AND user_id = $3 AND scope = $4 AND resource = $5`,
+		codeHash, p.ClientID, p.UserID, p.Scope, p.Resource)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrInvalidGrant
+	}
+
+	var refresh *string
+	if p.RefreshHash != "" {
+		refresh = &p.RefreshHash
+	}
+	if _, err := tx.Exec(ctx, insertOAuthTokenSQL,
+		p.AccessHash, refresh, p.ClientID, p.UserID, p.Scope, p.Resource,
+		p.AccessExpiresAt, p.RefreshExpiresAt); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // OAuthAccessAuth resolves a presented access-token hash to its owner, scope, and

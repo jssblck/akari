@@ -315,10 +315,13 @@ func TestSyncAllCancellingLastFileReportsInterrupted(t *testing.T) {
 // concurrent driver: a regression in routing outcome.resolve to the dry-run fold
 // path would be caught here, not just in the direct foldResolve test.
 func TestSyncAllRoutesDryRunOutcomes(t *testing.T) {
-	files := []discover.File{{Path: "lovelace"}, {Path: "clarke"}}
+	files := []discover.File{{Path: "lovelace"}, {Path: "clarke"}, {Path: "easley"}}
 	run := func(_ context.Context, f discover.File) outcome {
-		if f.Path == "clarke" {
+		switch f.Path {
+		case "clarke":
 			return outcome{resolve: &resolve.Result{File: f, Skipped: true, Reason: "could not read header"}}
+		case "easley":
+			return outcome{resolve: &resolve.Result{File: f, Err: fmt.Errorf("permission denied")}}
 		}
 		return outcome{resolve: &resolve.Result{File: f, Kind: resolve.KindStandalone, Header: resolve.Header{Cwd: "/home/ada"}}}
 	}
@@ -327,8 +330,8 @@ func TestSyncAllRoutesDryRunOutcomes(t *testing.T) {
 	if interrupted {
 		t.Fatal("syncAll reported interrupted with a live deadline")
 	}
-	if sum.skipped != 1 || sum.standalone != 1 {
-		t.Fatalf("dry-run routing: skipped=%d standalone=%d, want 1 and 1", sum.skipped, sum.standalone)
+	if sum.skipped != 1 || sum.failed != 1 || sum.standalone != 1 {
+		t.Fatalf("dry-run routing: skipped=%d failed=%d standalone=%d, want 1, 1, and 1", sum.skipped, sum.failed, sum.standalone)
 	}
 	if sum.uploaded != 0 {
 		t.Fatalf("a dry run uploads nothing, but uploaded=%d", sum.uploaded)
@@ -340,6 +343,17 @@ func TestSyncAllRoutesDryRunOutcomes(t *testing.T) {
 // real run would have uploaded to, on stdout.
 func TestFoldResolve(t *testing.T) {
 	file := func(name string) discover.File { return discover.File{Path: name} }
+
+	t.Run("error", func(t *testing.T) {
+		s := newSummary()
+		line, stderr := s.foldResolve(resolve.Result{File: file("easley"), Err: fmt.Errorf("permission denied")})
+		if !stderr || line != "error easley: permission denied" {
+			t.Fatalf("line = %q, stderr = %v", line, stderr)
+		}
+		if s.failed != 1 || s.skipped != 0 {
+			t.Fatalf("failed=%d skipped=%d, want 1 and 0", s.failed, s.skipped)
+		}
+	})
 
 	t.Run("skipped", func(t *testing.T) {
 		s := newSummary()

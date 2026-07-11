@@ -157,6 +157,7 @@ func (s *Server) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 // unregistered redirect) render an HTML error instead of bouncing to an
 // attacker-chosen URL.
 func (s *Server) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
+	setPrivateNoStore(w)
 	q := r.URL.Query()
 	clientID := q.Get("client_id")
 	redirectURI := q.Get("redirect_uri")
@@ -223,6 +224,7 @@ func (s *Server) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
 // client and redirect (never trusting the posted values past what the cookie-bound
 // session and the registration allow) and checks the double-submit CSRF token.
 func (s *Server) handleOAuthDecision(w http.ResponseWriter, r *http.Request) {
+	setPrivateNoStore(w)
 	p, ok := s.resolve(r)
 	if !ok || p.Scope != scopeFull {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
@@ -307,7 +309,8 @@ func (s *Server) tokenFromCode(w http.ResponseWriter, r *http.Request) {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "code is required")
 		return
 	}
-	ac, err := s.Store.ConsumeAuthCode(r.Context(), auth.HashToken(code))
+	codeHash := auth.HashToken(code)
+	ac, err := s.Store.AuthCodeForExchange(r.Context(), codeHash)
 	if errors.Is(err, store.ErrInvalidGrant) {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "authorization code is invalid, expired, or already used")
 		return
@@ -328,10 +331,17 @@ func (s *Server) tokenFromCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	access, refresh, err := s.issueTokens(r, store.OAuthTokenParams{
+	access, refresh, token, err := newOAuthToken(store.OAuthTokenParams{
 		ClientID: ac.ClientID, UserID: ac.UserID, Scope: ac.Scope, Resource: ac.Resource,
 	})
 	if err != nil {
+		writeOAuthError(w, http.StatusInternalServerError, "server_error", "could not issue tokens")
+		return
+	}
+	if err := s.Store.RedeemAuthCode(r.Context(), codeHash, token); errors.Is(err, store.ErrInvalidGrant) {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "authorization code is invalid, expired, or already used")
+		return
+	} else if err != nil {
 		writeOAuthError(w, http.StatusInternalServerError, "server_error", "could not issue tokens")
 		return
 	}
@@ -371,26 +381,24 @@ func (s *Server) tokenFromRefresh(w http.ResponseWriter, r *http.Request) {
 	writeTokenResponse(w, access, refresh, scope)
 }
 
-// issueTokens mints and stores a fresh access/refresh pair for a grant, returning
-// the plaintext secrets (the only time they exist outside the client).
-func (s *Server) issueTokens(r *http.Request, p store.OAuthTokenParams) (access, refresh string, err error) {
+// newOAuthToken mints a fresh access/refresh pair and prepares the hashes that are
+// persisted by the caller. Keeping minting separate lets authorization-code
+// redemption store the pair in the same transaction that consumes the code.
+func newOAuthToken(p store.OAuthTokenParams) (access, refresh string, token store.OAuthTokenParams, err error) {
 	access, err = auth.NewToken()
 	if err != nil {
-		return "", "", err
+		return "", "", store.OAuthTokenParams{}, err
 	}
 	refresh, err = auth.NewToken()
 	if err != nil {
-		return "", "", err
+		return "", "", store.OAuthTokenParams{}, err
 	}
 	refreshExpiry := time.Now().Add(oauthRefreshTTL)
 	p.AccessHash = auth.HashToken(access)
 	p.RefreshHash = auth.HashToken(refresh)
 	p.AccessExpiresAt = time.Now().Add(oauthAccessTTL)
 	p.RefreshExpiresAt = &refreshExpiry
-	if err := s.Store.CreateOAuthToken(r.Context(), p); err != nil {
-		return "", "", err
-	}
-	return access, refresh, nil
+	return access, refresh, p, nil
 }
 
 func writeTokenResponse(w http.ResponseWriter, access, refresh, scope string) {

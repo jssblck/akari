@@ -210,6 +210,10 @@ func (s *summary) fold(o outcome) (line string, stderr bool) {
 // foldResolve folds a dry-run resolution: it never uploads, so it only tallies
 // skips and per-kind counts and reports what a real run would have sent.
 func (s *summary) foldResolve(res resolve.Result) (line string, stderr bool) {
+	if res.Err != nil {
+		s.failed++
+		return fmt.Sprintf("error %s: %v", res.File.Path, res.Err), true
+	}
 	if res.Skipped {
 		s.skipped++
 		s.skipReasons[res.Reason]++

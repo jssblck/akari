@@ -24,6 +24,7 @@ import (
 // error.
 func (s *Server) requireReadHTML(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		setPrivateNoStore(w)
 		p, ok := s.resolve(r)
 		if !ok || p.Scope != scopeFull {
 			http.Redirect(w, r, "/login?next="+url.QueryEscape(r.URL.RequestURI()), http.StatusSeeOther)
@@ -139,6 +140,7 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	// matching requireReadHTML's gate on the rest of the UI.
 	var viewer web.Page
 	if p, ok := s.resolve(r); ok && p.Scope == scopeFull {
+		setPrivateNoStore(w)
 		viewer = s.pageFor(s.withPrincipal(r, p), "akari")
 	}
 	render(w, r, http.StatusOK, web.LandingPage(og, viewer))
@@ -214,6 +216,7 @@ func setDashboardCache(w http.ResponseWriter) {
 // logged-out visitor should get the public 404 rather than a login bounce.
 func (s *Server) handleNotFound(w http.ResponseWriter, r *http.Request) {
 	if p, ok := s.resolve(r); ok && p.Scope == scopeFull {
+		setPrivateNoStore(w)
 		render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(s.withPrincipal(r, p), "Not found"), http.StatusNotFound, "That page does not exist."))
 		return
 	}
@@ -762,11 +765,11 @@ func (s *Server) handleSessionEvents(w http.ResponseWriter, r *http.Request) {
 
 	ch := s.hub.subscribe(id)
 	defer s.hub.unsubscribe(id, ch)
-	serveSSE(w, r, ch, func(struct{}) string { return "event: update\ndata: 1\n\n" }, nil)
+	serveSSE(w, r, ch, func(struct{}) string { return "event: update\ndata: 1\n\n" }, func(write func(string) bool) bool {
+		return write("event: update\ndata: 1\n\n")
+	})
 }
 
-// safeNext bounds a post-login redirect target to a local path, so a crafted
-// next= cannot bounce the user to another origin.
 // overviewPath is the app's home surface: where a fresh sign-in lands and the
 // fallback for a login with no saved destination. The root "/" is the public
 // homepage now, so post-auth flows aim here rather than dropping the user back on
@@ -779,6 +782,14 @@ const overviewPath = "/overview"
 // root, so a bare visit to /login still lands in the app after signing in.
 func safeNext(next string) string {
 	if next == "" || !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") {
+		return overviewPath
+	}
+	u, err := url.Parse(next)
+	if err != nil || u.IsAbs() || u.Host != "" || u.Opaque != "" {
+		return overviewPath
+	}
+	path, err := url.PathUnescape(u.EscapedPath())
+	if err != nil || strings.Contains(path, `\`) || strings.HasPrefix(path, "//") {
 		return overviewPath
 	}
 	return next

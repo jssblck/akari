@@ -27,16 +27,6 @@ func signalsEnv(t *testing.T) (*store.Store, context.Context, int64, int64) {
 	return st, ctx, u.ID, pid
 }
 
-// setUserMessageCount overrides the user-turn rollup a rebuild derives from the delta's
-// user-role messages, so a test can isolate the outcome classifier from the fold: it hands
-// the classifier a count that deliberately does not match the rows fed to rebuildWith.
-func setUserMessageCount(t *testing.T, st *store.Store, ctx context.Context, sid int64, n int) {
-	t.Helper()
-	if _, err := st.Pool.Exec(ctx, "UPDATE sessions SET user_message_count = $2 WHERE id = $1", sid, n); err != nil {
-		t.Fatalf("set user_message_count: %v", err)
-	}
-}
-
 // markSignalsFresh clears signals_stale on a session, the flag the read gate keys on. A test
 // that seeds a session_signals row directly is standing in for a settled, graded session, whose
 // flag the settle pass would have cleared, so the aggregates and the header must read the seeded

@@ -6,6 +6,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,34 +14,49 @@ import (
 	"strings"
 )
 
+// ErrAlreadyRunning reports lock contention from another daemon instance.
+var ErrAlreadyRunning = errors.New("another akari instance is already running")
+
 // Lock is a held single-instance lock.
 type Lock struct {
 	f    *os.File
 	path string
 }
 
-// Acquire takes the lock, returning an error if another live instance holds it.
+// Acquire takes the lock. It returns ErrAlreadyRunning when another live
+// instance holds it; other filesystem and lock failures preserve their causes.
 // The OS releases the lock automatically when this process exits, so there is no
 // stale-lock reclaim logic and no TOCTOU window.
 func Acquire(path string) (*Lock, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create pidfile directory: %w", err)
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("open pidfile %s: %w", path, err)
 	}
 	if err := lockFile(f); err != nil {
-		f.Close()
-		return nil, fmt.Errorf("another akari instance is already running")
+		lockErr := fmt.Errorf("lock pidfile %s: %w", path, err)
+		if isLockContention(err) {
+			lockErr = fmt.Errorf("%w: %s", ErrAlreadyRunning, path)
+		}
+		if closeErr := f.Close(); closeErr != nil {
+			lockErr = errors.Join(lockErr, fmt.Errorf("close pidfile %s: %w", path, closeErr))
+		}
+		return nil, lockErr
 	}
 	// We hold the lock: record our pid (truncate first in case a stale, unlocked
 	// file from a hard-killed predecessor remains). A write failure is fatal,
 	// since Stop relies on this pid.
 	if err := writePid(f); err != nil {
-		unlockFile(f)
-		f.Close()
-		return nil, fmt.Errorf("write pidfile %s: %w", path, err)
+		writeErr := fmt.Errorf("write pidfile %s: %w", path, err)
+		if unlockErr := unlockFile(f); unlockErr != nil {
+			writeErr = errors.Join(writeErr, fmt.Errorf("unlock pidfile %s: %w", path, unlockErr))
+		}
+		if closeErr := f.Close(); closeErr != nil {
+			writeErr = errors.Join(writeErr, fmt.Errorf("close pidfile %s: %w", path, closeErr))
+		}
+		return nil, writeErr
 	}
 	return &Lock{f: f, path: path}, nil
 }
@@ -71,34 +87,67 @@ func (l *Lock) Release() error {
 	cerr := l.f.Close()
 	l.f = nil
 	if err != nil {
-		return err
+		err = fmt.Errorf("unlock pidfile %s: %w", l.path, err)
+	}
+	if cerr != nil {
+		cerr = fmt.Errorf("close pidfile %s: %w", l.path, cerr)
+	}
+	if err != nil {
+		return errors.Join(err, cerr)
 	}
 	return cerr
 }
 
-// IsRunning reports whether an instance currently holds the lock. It probes by
-// attempting to acquire: success (no one holds it) is released immediately. This
-// is authoritative regardless of pid reuse, because it tests the live OS lock
-// rather than trusting the recorded pid.
-func IsRunning(path string) bool {
-	l, err := Acquire(path)
-	if err != nil {
-		return true // the lock is held by a live instance
+// IsRunning reports whether an instance currently holds the lock without
+// creating the pidfile or changing its contents. Only lock contention means
+// running; permission, filesystem, lock, and close failures remain visible.
+func IsRunning(path string) (bool, error) {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
 	}
-	// We grabbed it, so nobody was running. Release without deleting a file that
-	// a real holder might own: there is no holder, so removing our own is fine.
-	l.Release()
-	return false
+	if err != nil {
+		return false, fmt.Errorf("open pidfile %s: %w", path, err)
+	}
+	if err := lockFile(f); err != nil {
+		if isLockContention(err) {
+			if closeErr := f.Close(); closeErr != nil {
+				return false, fmt.Errorf("close pidfile %s: %w", path, closeErr)
+			}
+			return true, nil
+		}
+		lockErr := fmt.Errorf("probe pidfile lock %s: %w", path, err)
+		if closeErr := f.Close(); closeErr != nil {
+			lockErr = errors.Join(lockErr, fmt.Errorf("close pidfile %s: %w", path, closeErr))
+		}
+		return false, lockErr
+	}
+	unlockErr := unlockFile(f)
+	closeErr := f.Close()
+	if unlockErr != nil {
+		err := fmt.Errorf("unlock pidfile %s: %w", path, unlockErr)
+		if closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close pidfile %s: %w", path, closeErr))
+		}
+		return false, err
+	}
+	if closeErr != nil {
+		return false, fmt.Errorf("close pidfile %s: %w", path, closeErr)
+	}
+	return false, nil
 }
 
-func readPid(path string) (int, bool) {
+func readPid(path string) (int, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return 0, false
+		return 0, fmt.Errorf("read pidfile %s: %w", path, err)
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 0 {
-		return 0, false
+	if err != nil {
+		return 0, fmt.Errorf("parse pidfile %s: %w", path, err)
 	}
-	return pid, true
+	if pid <= 0 {
+		return 0, fmt.Errorf("pidfile %s does not contain a valid pid", path)
+	}
+	return pid, nil
 }

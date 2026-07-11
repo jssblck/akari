@@ -55,8 +55,9 @@ func runUpdate(args []string) error {
 	if err != nil {
 		return fmt.Errorf("locate the running binary: %w", err)
 	}
-	if resolved, err := filepath.EvalSymlinks(target); err == nil {
-		target = resolved
+	target, err = resolveExecutableTarget(target)
+	if err != nil {
+		return err
 	}
 	dir := filepath.Dir(target)
 

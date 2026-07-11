@@ -33,7 +33,7 @@ const DefaultRepo = "jssblck/akari"
 const (
 	// maxMetadata caps the API and SHA256SUMS reads; both are small.
 	maxMetadata = 4 << 20 // 4 MiB
-	// maxArchive caps a downloaded release archive as a sanity bound.
+	// maxArchive caps both a downloaded release archive and its extracted binary.
 	maxArchive = 512 << 20 // 512 MiB
 )
 
@@ -154,6 +154,10 @@ func (c *Client) downloadBase(tag string) string {
 }
 
 func (c *Client) get(ctx context.Context, url, accept string) ([]byte, error) {
+	return c.getLimit(ctx, url, accept, maxMetadata)
+}
+
+func (c *Client) getLimit(ctx context.Context, url, accept string, limit int64) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -170,10 +174,21 @@ func (c *Client) get(ctx context.Context, url, accept string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("GET %s: %s", url, resp.Status)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, maxMetadata))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > limit {
+		return nil, fmt.Errorf("GET %s: response exceeds %d-byte limit", url, limit)
+	}
+	return body, nil
 }
 
 func (c *Client) downloadToFile(ctx context.Context, url, dest string) error {
+	return c.downloadToFileLimit(ctx, url, dest, maxArchive)
+}
+
+func (c *Client) downloadToFileLimit(ctx context.Context, url, dest string, limit int64) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
@@ -191,11 +206,21 @@ func (c *Client) downloadToFile(ctx context.Context, url, dest string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(f, io.LimitReader(resp.Body, maxArchive)); err != nil {
-		f.Close()
-		return err
+	written, copyErr := io.Copy(f, io.LimitReader(resp.Body, limit+1))
+	closeErr := f.Close()
+	if copyErr != nil {
+		os.Remove(dest)
+		return copyErr
 	}
-	return f.Close()
+	if written > limit {
+		os.Remove(dest)
+		return fmt.Errorf("GET %s: response exceeds %d-byte limit", url, limit)
+	}
+	if closeErr != nil {
+		os.Remove(dest)
+		return closeErr
+	}
+	return nil
 }
 
 // checksumFor returns the hex digest listed for asset in a SHA256SUMS body. The
@@ -245,6 +270,12 @@ func extractTarGz(archivePath, entry, dest string) error {
 			return err
 		}
 		if path.Base(hdr.Name) == entry {
+			if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != 0 {
+				return fmt.Errorf("archive entry %s is not a regular file", entry)
+			}
+			if hdr.Size > maxArchive {
+				return fmt.Errorf("archive entry %s exceeds %d-byte limit", entry, maxArchive)
+			}
 			return writeBinary(dest, tr)
 		}
 	}
@@ -259,6 +290,12 @@ func extractZip(archivePath, entry, dest string) error {
 	defer zr.Close()
 	for _, zf := range zr.File {
 		if path.Base(zf.Name) == entry {
+			if !zf.FileInfo().Mode().IsRegular() {
+				return fmt.Errorf("archive entry %s is not a regular file", entry)
+			}
+			if zf.UncompressedSize64 > maxArchive {
+				return fmt.Errorf("archive entry %s exceeds %d-byte limit", entry, maxArchive)
+			}
 			rc, err := zf.Open()
 			if err != nil {
 				return err
@@ -274,14 +311,24 @@ func extractZip(archivePath, entry, dest string) error {
 // dest. dest should sit in the same directory as the binary it will replace so
 // the follow-up rename in Replace stays on one filesystem.
 func writeBinary(dest string, r io.Reader) error {
+	return writeBinaryLimit(dest, r, maxArchive)
+}
+
+func writeBinaryLimit(dest string, r io.Reader, limit int64) error {
 	f, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
 	if err != nil {
 		return fmt.Errorf("create %s: %w", filepath.Base(dest), err)
 	}
-	if _, err := io.Copy(f, io.LimitReader(r, maxArchive)); err != nil {
+	written, err := io.Copy(f, io.LimitReader(r, limit+1))
+	if err != nil {
 		f.Close()
 		os.Remove(dest)
 		return err
+	}
+	if written > limit {
+		f.Close()
+		os.Remove(dest)
+		return fmt.Errorf("archive entry exceeds %d-byte limit", limit)
 	}
 	if err := f.Close(); err != nil {
 		os.Remove(dest)

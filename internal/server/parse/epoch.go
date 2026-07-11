@@ -194,4 +194,14 @@ package parse
 // fixture uses a GPT-5.6 model, so the projection delta for the fixtures is
 // byte-for-byte identical and the golden snapshots do not move; the bump is the
 // reprice signal and stands on its own.
-const Epoch = 16
+//
+// Epoch 16 -> 17: decode unpaired JSON UTF-16 surrogates in client-streamed
+// tool bodies as U+FFFD, matching gjson's canonical string projection. The
+// prior decoder emitted invalid WTF-8 for a lone surrogate and dropped a
+// trailing high surrogate entirely. This is a parser output correction and
+// therefore carries the required epoch marker, but a server rebuild cannot
+// recover body bytes already replaced by the old CAS sentinel. An upgraded
+// client's next sync detects the transformed-prefix mismatch, resets, and
+// reuploads the corrected transcript; a session never synced again retains its
+// old body. The golden fixtures contain no unpaired surrogates and stay fixed.
+const Epoch = 17

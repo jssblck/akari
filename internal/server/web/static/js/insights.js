@@ -141,11 +141,73 @@
   function fmtPct(n, d) { return n.toFixed(d == null ? 0 : d) + '%'; }
   function fmtS(n) { return Math.round(n) + 's'; }
 
+  function escapeHTML(value) {
+    return String(value).replace(/[&<>"']/g, (char) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    })[char]);
+  }
+
+  function appendFigure(parent, value, key) {
+    const item = document.createElement('div');
+    const figure = document.createElement('div');
+    figure.className = 'figure';
+    figure.textContent = String(value);
+    const label = document.createElement('div');
+    label.className = 'figure-key';
+    label.textContent = String(key);
+    item.append(figure, label);
+    parent.appendChild(item);
+  }
+
+  function appendLegendChip(parent, color, label) {
+    const item = document.createElement('li');
+    item.className = 'legend-chip';
+    const swatch = document.createElement('span');
+    swatch.className = 'legend-swatch';
+    swatch.style.background = color;
+    item.append(swatch, document.createTextNode(String(label)));
+    parent.appendChild(item);
+  }
+
+  function appendCaption(parent, title, value) {
+    const caption = document.createElement('div');
+    caption.className = 'chart-caption';
+    const heading = document.createElement('span');
+    heading.className = 'chart-title';
+    heading.textContent = String(title);
+    const measurement = document.createElement('span');
+    measurement.className = 'chart-value mono';
+    measurement.textContent = String(value);
+    caption.append(heading, measurement);
+    parent.appendChild(caption);
+  }
+
   /* ---------- tooltip ---------- */
+  // Tooltip structure is fixed here, but its labels come from stored session
+  // data. Parse in an inert template and keep only the markup the tooltip uses.
+  function setTooltipHTML(tooltipEl, html) {
+    const template = document.createElement('template');
+    template.innerHTML = html;
+    Array.from(template.content.querySelectorAll('*')).forEach((el) => {
+      if (el.tagName !== 'DIV' && el.tagName !== 'B') {
+        el.replaceWith(document.createTextNode(el.textContent || ''));
+        return;
+      }
+      Array.from(el.attributes).forEach((attr) => {
+        const validClass = attr.name === 'class' && el.tagName === 'DIV' &&
+          (attr.value === 'tt-title' || attr.value === 'tt-row');
+        const validColor = attr.name === 'style' && el.tagName === 'DIV' &&
+          /^color:\s*var\(--[a-z0-9-]+\)\s*;?$/i.test(attr.value);
+        if (!validClass && !validColor) el.removeAttribute(attr.name);
+      });
+    });
+    tooltipEl.replaceChildren(template.content);
+  }
+
   function showTooltip(x, y, html) {
     const tooltipEl = document.getElementById('tooltip');
     if (!tooltipEl) return;
-    tooltipEl.innerHTML = html;
+    setTooltipHTML(tooltipEl, html);
     tooltipEl.style.display = 'block';
     const pad = 14;
     let left = x + pad, top = y + pad;
@@ -221,6 +283,7 @@
     pathLine, pathArea, pathBand, pathStep,
     axisTicksY, axisBaseline, bucketAxis, attachHoverBucket,
     fmtInt, fmtK, fmtPct, fmtS,
+    escapeHTML, appendFigure, appendLegendChip, appendCaption,
     showTooltip, hideTooltip,
     resolveLabelCollisions,
   };
@@ -286,9 +349,9 @@
     });
 
     A.attachHoverBucket(svg, w, h, pL, pR, pT, pB, xScale, (i) => {
-      let html = '<div class="tt-title">' + D.bucketLabels[i] + '</div>';
+      let html = '<div class="tt-title">' + A.escapeHTML(D.bucketLabels[i]) + '</div>';
       M.order.forEach((key) => {
-        html += '<div class="tt-row" style="color:' + M.colors[key] + '">' + M.labels[key] + ' <b>' + M.rows[i][key].toFixed(1) + '%</b></div>';
+        html += '<div class="tt-row" style="color:' + M.colors[key] + '">' + A.escapeHTML(M.labels[key]) + ' <b>' + M.rows[i][key].toFixed(1) + '%</b></div>';
       });
       return html;
     });
@@ -318,11 +381,7 @@
     if (M.newestArrivalLabel) {
       figs.push({ v: M.newestArrivalLabel, k: 'newest arrival' + (M.newestArrivalDate ? ' · first seen ' + M.newestArrivalDate : '') });
     }
-    figs.forEach((f) => {
-      const d = document.createElement('div');
-      d.innerHTML = '<div class="figure">' + f.v + '</div><div class="figure-key">' + f.k + '</div>';
-      el.appendChild(d);
-    });
+    figs.forEach((f) => A.appendFigure(el, f.v, f.k));
   }
 
   function renderLegend() {
@@ -331,10 +390,7 @@
     if (!el) return;
     el.innerHTML = '';
     D.fleetMix.order.forEach((key) => {
-      const li = document.createElement('li');
-      li.className = 'legend-chip';
-      li.innerHTML = '<span class="legend-swatch" style="background:' + D.fleetMix.colors[key] + '"></span>' + D.fleetMix.labels[key];
-      el.appendChild(li);
+      A.appendLegendChip(el, D.fleetMix.colors[key], D.fleetMix.labels[key]);
     });
   }
 
@@ -413,11 +469,11 @@
       });
       dotsLayer.appendChild(dot);
       dot.addEventListener('mousemove', (e) => {
-        const html = '<div class="tt-title">' + ARCH_LABEL[p.arch] + '</div>' +
+        const html = '<div class="tt-title">' + A.escapeHTML(ARCH_LABEL[p.arch] || p.arch) + '</div>' +
           '<div class="tt-row">duration <b>' + fmtDuration(p.durationS) + '</b></div>' +
           '<div class="tt-row">cost <b>' + fmtCost(p.costUsd, p.costIncomplete) + '</b></div>' +
-          '<div class="tt-row">grade <b>' + p.grade + '</b></div>' +
-          '<div class="tt-row">outcome <b>' + p.outcome + '</b></div>';
+          '<div class="tt-row">grade <b>' + A.escapeHTML(p.grade) + '</b></div>' +
+          '<div class="tt-row">outcome <b>' + A.escapeHTML(p.outcome) + '</b></div>';
         A.showTooltip(e.clientX, e.clientY, html);
       });
       dot.addEventListener('mouseleave', A.hideTooltip);
@@ -456,11 +512,7 @@
       { v: fmtCost(G.medianCostUsd, G.costIncomplete), k: 'median cost' },
       { v: fmtCost(G.priciest.costUsd, G.costIncomplete), k: 'priciest session · ' + fmtDuration(G.priciest.durationS) },
     ];
-    figs.forEach((f) => {
-      const d = document.createElement('div');
-      d.innerHTML = '<div class="figure">' + f.v + '</div><div class="figure-key">' + f.k + '</div>';
-      el.appendChild(d);
-    });
+    figs.forEach((f) => A.appendFigure(el, f.v, f.k));
   }
 
   // The scatter caps at the most recent maxGalleryPoints, but the figures above read the full
@@ -482,10 +534,7 @@
     if (!el) return;
     el.innerHTML = '';
     Object.keys(ARCH_LABEL).forEach((key) => {
-      const li = document.createElement('li');
-      li.className = 'legend-chip';
-      li.innerHTML = '<span class="legend-swatch" style="background:' + D.sessionGallery.archColor[key] + '"></span>' + ARCH_LABEL[key];
-      el.appendChild(li);
+      A.appendLegendChip(el, D.sessionGallery.archColor[key], ARCH_LABEL[key]);
     });
   }
 
@@ -551,7 +600,7 @@
     A.axisBaseline(svg, pL, w - pR, h - pB);
 
     if (!mini) A.attachHoverBucket(svg, w, h, pL, pR, pT, pB, xScale, (i) => {
-      return '<div class="tt-title">' + D.bucketLabels[i] + '</div>' +
+      return '<div class="tt-title">' + A.escapeHTML(D.bucketLabels[i]) + '</div>' +
         '<div class="tt-row" style="color:var(--viz-8)">active h <b>' + H_.active[i].toFixed(1) + '</b></div>' +
         '<div class="tt-row" style="color:var(--muted)">wall-clock span h <b>' + H_.wallSpan[i].toFixed(1) + '</b></div>';
     });
@@ -597,7 +646,7 @@
     A.axisBaseline(svg, pL, w - pR, h - pB);
 
     if (!mini) A.attachHoverBucket(svg, w, h, pL, pR, pT, pB, xScale, (i) => {
-      return '<div class="tt-title">' + D.bucketLabels[i] + '</div>' +
+      return '<div class="tt-title">' + A.escapeHTML(D.bucketLabels[i]) + '</div>' +
         '<div class="tt-row" style="color:var(--viz-2)">p50 <b>' + A.fmtS(D.responseTime.p50[i]) + '</b></div>' +
         '<div class="tt-row" style="color:var(--muted)">p90 <b>' + A.fmtS(D.responseTime.p90[i]) + '</b></div>' +
         '<div class="tt-row" style="color:var(--warn)">p99 <b>' + A.fmtS(D.responseTime.p99[i]) + '</b></div>';
@@ -647,9 +696,9 @@
     A.axisBaseline(svg, pL, w - pR, h - pB);
 
     if (!mini) A.attachHoverBucket(svg, w, h, pL, pR, pT, pB, xScale, (i) => {
-      let html = '<div class="tt-title">' + D.bucketLabels[i] + '</div>';
+      let html = '<div class="tt-title">' + A.escapeHTML(D.bucketLabels[i]) + '</div>';
       series.forEach((s) => {
-        html += '<div class="tt-row" style="color:' + s.color + '">' + s.label + ' <b>' + T[s.key][i].toFixed(1) + '</b></div>';
+        html += '<div class="tt-row" style="color:' + s.color + '">' + A.escapeHTML(s.label) + ' <b>' + T[s.key][i].toFixed(1) + '</b></div>';
       });
       return html;
     });
@@ -732,10 +781,7 @@
     const el = document.getElementById(id);
     if (!el) return;
     el.innerHTML = '';
-    const head = document.createElement('div');
-    head.className = 'chart-caption';
-    head.innerHTML = '<span class="chart-title">' + title + '</span><span class="chart-value mono">' + valueText + '</span>';
-    el.appendChild(head);
+    A.appendCaption(el, title, valueText);
     el.appendChild(chartFn(true));
   }
 
@@ -750,11 +796,7 @@
       { v: D.concurrency.peakConcurrent, k: 'peak concurrent sessions' },
       { v: D.concurrency.avgConcurrent.toFixed(1), k: 'avg concurrent sessions' },
     ];
-    figs.forEach((f) => {
-      const d = document.createElement('div');
-      d.innerHTML = '<div class="figure">' + f.v + '</div><div class="figure-key">' + f.k + '</div>';
-      el.appendChild(d);
-    });
+    figs.forEach((f) => A.appendFigure(el, f.v, f.k));
   }
 
   function renderThroughputFigures() {
@@ -769,11 +811,7 @@
       { v: (T.msgsPerMinAvg || 0).toFixed(1), k: 'avg msgs/active min' },
       { v: (T.toolsPerMinAvg || 0).toFixed(1), k: 'avg tools/active min' },
     ];
-    figs.forEach((f) => {
-      const d = document.createElement('div');
-      d.innerHTML = '<div class="figure">' + f.v + '</div><div class="figure-key">' + f.k + '</div>';
-      el.appendChild(d);
-    });
+    figs.forEach((f) => A.appendFigure(el, f.v, f.k));
   }
 
   function renderVelocity() {
@@ -862,7 +900,7 @@
       dotsLayer.appendChild(dot);
       if (!mini) {
         dot.addEventListener('mousemove', (e) => {
-          const html = '<div class="tt-title">' + tool.name + '</div>' +
+          const html = '<div class="tt-title">' + A.escapeHTML(tool.name) + '</div>' +
             '<div class="tt-row">calls <b>' + A.fmtInt(tool.calls) + '</b></div>' +
             '<div class="tt-row">err <b>' + tool.err.toFixed(1) + '%</b></div>' +
             '<div class="tt-row">sessions <b>' + A.fmtInt(tool.sessions) + '</b></div>';
@@ -887,10 +925,7 @@
     if (!el) return;
     el.innerHTML = '';
     Object.keys(CAT_LABEL).forEach((cat) => {
-      const li = document.createElement('li');
-      li.className = 'legend-chip';
-      li.innerHTML = '<span class="legend-swatch" style="background:' + CAT_COLOR[cat] + '"></span>' + CAT_LABEL[cat];
-      el.appendChild(li);
+      A.appendLegendChip(el, CAT_COLOR[cat], CAT_LABEL[cat]);
     });
   }
 
@@ -919,8 +954,8 @@
     A.axisBaseline(svg, pL, w - pR, h - pB);
 
     if (!mini) A.attachHoverBucket(svg, w, h, pL, pR, pT, pB, xScale, (i) => {
-      let html = '<div class="tt-title">' + D.bucketLabels[i] + '</div>';
-      M.order.forEach((key) => { html += '<div class="tt-row" style="color:' + M.colors[key] + '">' + M.labels[key] + ' <b>' + M.rows[i][key].toFixed(1) + '%</b></div>'; });
+      let html = '<div class="tt-title">' + A.escapeHTML(D.bucketLabels[i]) + '</div>';
+      M.order.forEach((key) => { html += '<div class="tt-row" style="color:' + M.colors[key] + '">' + A.escapeHTML(M.labels[key]) + ' <b>' + M.rows[i][key].toFixed(1) + '%</b></div>'; });
       return html;
     });
 
@@ -933,10 +968,7 @@
     if (!el) return;
     el.innerHTML = '';
     D.toolMix.order.forEach((cat) => {
-      const li = document.createElement('li');
-      li.className = 'legend-chip';
-      li.innerHTML = '<span class="legend-swatch" style="background:' + D.toolMix.colors[cat] + '"></span>' + D.toolMix.labels[cat];
-      el.appendChild(li);
+      A.appendLegendChip(el, D.toolMix.colors[cat], D.toolMix.labels[cat]);
     });
   }
 
@@ -982,8 +1014,8 @@
     A.axisBaseline(svg, pL, w - pR, h - pB);
 
     if (!mini) A.attachHoverBucket(svg, w, h, pL, pR, pT, pB, xScale, (i) => {
-      let html = '<div class="tt-title">' + D.bucketLabels[i] + '</div>';
-      series.forEach((s) => { html += '<div class="tt-row" style="color:' + s.color + '">' + s.label + ' <b>' + s.rate[i].toFixed(1) + '%</b></div>'; });
+      let html = '<div class="tt-title">' + A.escapeHTML(D.bucketLabels[i]) + '</div>';
+      series.forEach((s) => { html += '<div class="tt-row" style="color:' + s.color + '">' + A.escapeHTML(s.label) + ' <b>' + s.rate[i].toFixed(1) + '%</b></div>'; });
       return html;
     });
 
@@ -1014,7 +1046,7 @@
     A.axisBaseline(svg, pL, w - pR, h - pB);
 
     if (!mini) A.attachHoverBucket(svg, w, h, pL, pR, pT, pB, xScale, (i) => {
-      return '<div class="tt-title">' + D.bucketLabels[i] + '</div>' +
+      return '<div class="tt-title">' + A.escapeHTML(D.bucketLabels[i]) + '</div>' +
         '<div class="tt-row" style="color:var(--viz-3)">re-edits <b>' + T.reedits[i] + '</b></div>' +
         '<div class="tt-row" style="color:var(--muted)">hot files <b>' + T.hotFiles[i] + '</b></div>';
     });
@@ -1031,10 +1063,7 @@
     const el = document.getElementById(id);
     if (!el) return;
     el.innerHTML = '';
-    const head = document.createElement('div');
-    head.className = 'chart-caption';
-    head.innerHTML = '<span class="chart-title">' + title + '</span><span class="chart-value mono">' + valueText + '</span>';
-    el.appendChild(head);
+    A.appendCaption(el, title, valueText);
     el.appendChild(chartFn(true));
   }
 
@@ -1043,17 +1072,15 @@
     const el = document.getElementById('churn-figures');
     if (!el) return;
     el.innerHTML = '';
-    const busiest = D.churn.slice().sort((a, b) => b.edits - a.edits)[0];
     const figs = [
       { v: A.fmtInt(D.churnTrend.totalReedits), k: 'total re-edits' },
       { v: A.fmtInt(D.churnTrend.totalHotFiles), k: 'hot files' },
-      { v: busiest.path.split('/').pop(), k: 'busiest file · ' + busiest.edits + ' edits' },
     ];
-    figs.forEach((f) => {
-      const d = document.createElement('div');
-      d.innerHTML = '<div class="figure">' + f.v + '</div><div class="figure-key">' + f.k + '</div>';
-      el.appendChild(d);
-    });
+    if (D.churn.length > 0) {
+      const busiest = D.churn.slice().sort((a, b) => b.edits - a.edits)[0];
+      figs.push({ v: busiest.path.split('/').pop(), k: 'busiest file · ' + busiest.edits + ' edits' });
+    }
+    figs.forEach((f) => A.appendFigure(el, f.v, f.k));
     // The totals count every hot file in the window, but the treemap caps at the busiest
     // maxChurnTreeFiles. When files were clipped, note the tail so the headline count does not
     // read as more files than the tree draws.
@@ -1144,17 +1171,14 @@
     legend.className = 'legend';
     legend.style.marginTop = '10px';
     order.forEach((key) => {
-      const li = document.createElement('li');
-      li.className = 'legend-chip';
-      li.innerHTML = '<span class="legend-swatch" style="background:' + colors[key] + '"></span>' + labels[key];
-      legend.appendChild(li);
+      A.appendLegendChip(legend, colors[key], labels[key]);
     });
     wrap.appendChild(legend);
 
     A.attachHoverBucket(svg, w, h, pL, pR, pT, pB, xScale, (i) => {
       const row = D.grades[i];
-      let html = '<div class="tt-title">' + D.bucketLabels[i] + '</div>';
-      order.forEach((key) => { html += '<div class="tt-row" style="color:' + colors[key] + '">' + labels[key] + ' <b>' + row[key].toFixed(1) + '%</b></div>'; });
+      let html = '<div class="tt-title">' + A.escapeHTML(D.bucketLabels[i]) + '</div>';
+      order.forEach((key) => { html += '<div class="tt-row" style="color:' + colors[key] + '">' + A.escapeHTML(labels[key]) + ' <b>' + row[key].toFixed(1) + '%</b></div>'; });
       html += '<div class="tt-row">GPA <b>' + row.gpa.toFixed(2) + '</b></div>';
       return html;
     });
@@ -1197,16 +1221,13 @@
     legend.className = 'legend';
     legend.style.marginTop = '10px';
     M.order.forEach((key) => {
-      const li = document.createElement('li');
-      li.className = 'legend-chip';
-      li.innerHTML = '<span class="legend-swatch" style="background:' + M.colors[key] + '"></span>' + M.labels[key];
-      legend.appendChild(li);
+      A.appendLegendChip(legend, M.colors[key], M.labels[key]);
     });
     wrap.appendChild(legend);
 
     A.attachHoverBucket(svg, w, h, pL, pR, pT, pB, xScale, (i) => {
-      let html = '<div class="tt-title">' + D.bucketLabels[i] + '</div>';
-      M.order.forEach((key) => { html += '<div class="tt-row" style="color:' + M.colors[key] + '">' + M.labels[key] + ' <b>' + (M.rows[i][key] || 0).toFixed(1) + '%</b></div>'; });
+      let html = '<div class="tt-title">' + A.escapeHTML(D.bucketLabels[i]) + '</div>';
+      M.order.forEach((key) => { html += '<div class="tt-row" style="color:' + M.colors[key] + '">' + A.escapeHTML(M.labels[key]) + ' <b>' + (M.rows[i][key] || 0).toFixed(1) + '%</b></div>'; });
       return html;
     });
 
@@ -1266,7 +1287,7 @@
     A.attachHoverBucket(svg, w, h, pL, pR, pT, pB, xScale, (i) => {
       const r = D.outcomes[i];
       const other = Math.max(0, r.total - r.completed - r.abandoned);
-      return '<div class="tt-title">' + D.bucketLabels[i] + '</div>' +
+      return '<div class="tt-title">' + A.escapeHTML(D.bucketLabels[i]) + '</div>' +
         '<div class="tt-row" style="color:var(--ok)">completed <b>' + r.completedRate.toFixed(1) + '%</b></div>' +
         '<div class="tt-row" style="color:var(--warn)">abandoned <b>' + r.abandonedRate.toFixed(1) + '%</b></div>' +
         '<div class="tt-row" style="color:var(--muted)">other <b>' + other + '</b></div>' +
@@ -1307,8 +1328,8 @@
     A.axisBaseline(svg, pL, w - pR, h - pB);
 
     A.attachHoverBucket(svg, w, h, pL, pR, pT, pB, xScale, (i) => {
-      let html = '<div class="tt-title">' + D.bucketLabels[i] + '</div>';
-      series.forEach((s) => { html += '<div class="tt-row" style="color:' + s.color + '">' + s.label + ' <b>' + D.hygiene[s.key][i].toFixed(1) + '%</b></div>'; });
+      let html = '<div class="tt-title">' + A.escapeHTML(D.bucketLabels[i]) + '</div>';
+      series.forEach((s) => { html += '<div class="tt-row" style="color:' + s.color + '">' + A.escapeHTML(s.label) + ' <b>' + D.hygiene[s.key][i].toFixed(1) + '%</b></div>'; });
       return html;
     });
 
@@ -1326,10 +1347,7 @@
       { label: 'Unstructured start', color: 'var(--viz-8)' },
     ];
     items.forEach((it) => {
-      const li = document.createElement('li');
-      li.className = 'legend-chip';
-      li.innerHTML = '<span class="legend-swatch" style="background:' + it.color + '"></span>' + it.label;
-      el.appendChild(li);
+      A.appendLegendChip(el, it.color, it.label);
     });
   }
 
@@ -1400,10 +1418,7 @@
     const CS = D.contextSummary || {};
 
     const top = document.createElement('div');
-    const tHead = document.createElement('div');
-    tHead.className = 'chart-caption';
-    tHead.innerHTML = '<span class="chart-title">Peak context per session</span><span class="chart-value mono">' + (CS.p50Label || '') + '</span>';
-    top.appendChild(tHead);
+    A.appendCaption(top, 'Peak context per session', CS.p50Label || '');
     const topWrap = document.createElement('div');
     topWrap.className = 'overflow-x';
     const inner = document.createElement('div');
@@ -1414,10 +1429,7 @@
 
     const bottom = document.createElement('div');
     bottom.style.marginTop = '20px';
-    const bHead = document.createElement('div');
-    bHead.className = 'chart-caption';
-    bHead.innerHTML = '<span class="chart-title">Weekly context resets</span><span class="chart-value mono">' + D.contextResets.reduce((a, b) => a + b, 0) + ' total</span>';
-    bottom.appendChild(bHead);
+    A.appendCaption(bottom, 'Weekly context resets', D.contextResets.reduce((a, b) => a + b, 0) + ' total');
     const bottomWrap = document.createElement('div');
     bottomWrap.className = 'overflow-x';
     const inner2 = document.createElement('div');
@@ -1443,10 +1455,7 @@
     const el = document.getElementById(id);
     if (!el) return;
     el.innerHTML = '';
-    const head = document.createElement('div');
-    head.className = 'chart-caption';
-    head.innerHTML = '<span class="chart-title">' + title + '</span><span class="chart-value mono">' + valueText + '</span>';
-    el.appendChild(head);
+    A.appendCaption(el, title, valueText);
     el.appendChild(chartFn());
   }
 
@@ -1650,7 +1659,7 @@
     const D = window.AK_DATA;
     const byProject = {};
     D.churn.forEach((row) => { (byProject[row.project] = byProject[row.project] || []).push(row); });
-    return D.projects.map((p) => {
+    return (D.projects || []).map((p) => {
       const rows = byProject[p] || [];
       return {
         value: rows.reduce((s, r) => s + r.edits, 0),
@@ -1840,11 +1849,8 @@
     // The legend maps each project to its hue; with a single project every cell shares one hue,
     // so the one-chip legend is noise. Sole-project scopes (the project page) skip it.
     if (soleProject()) return;
-    D.projects.forEach((p) => {
-      const li = document.createElement('li');
-      li.className = 'legend-chip';
-      li.innerHTML = '<span class="legend-swatch" style="background:' + D.projectViz[p] + '"></span>' + p;
-      el.appendChild(li);
+    (D.projects || []).forEach((p) => {
+      A.appendLegendChip(el, D.projectViz[p], p);
     });
   }
 
@@ -1894,7 +1900,7 @@
 
     if (!mini) A.attachHoverBucket(svg, w, h, pL, pR, pT, pB, xScale, (i) => {
       const r = rows[i];
-      return '<div class="tt-title">' + D.bucketLabels[i] + '</div>' +
+      return '<div class="tt-title">' + A.escapeHTML(D.bucketLabels[i]) + '</div>' +
         '<div class="tt-row" style="color:var(--ok)">completed <b>$' + r.completed.toFixed(0) + '</b></div>' +
         '<div class="tt-row" style="color:var(--warn)">abandoned <b>$' + r.abandoned.toFixed(0) + '</b></div>' +
         ((r.other || 0) > 0 ? '<div class="tt-row" style="color:var(--muted)">other <b>$' + r.other.toFixed(0) + '</b></div>' : '');
@@ -1909,10 +1915,7 @@
     el.innerHTML = '';
     const items = [{ label: 'Completed sessions', color: 'var(--ok)' }, { label: 'Abandoned sessions', color: 'var(--warn)' }, { label: 'Other outcomes', color: 'var(--muted)' }];
     items.forEach((it) => {
-      const li = document.createElement('li');
-      li.className = 'legend-chip';
-      li.innerHTML = '<span class="legend-swatch" style="background:' + it.color + '"></span>' + it.label;
-      el.appendChild(li);
+      A.appendLegendChip(el, it.color, it.label);
     });
   }
 
@@ -1931,11 +1934,7 @@
       { v: '$' + A.fmtInt(CQ.totalAbandoned) + spendMark + ' sunk', k: CQ.abandonedSharePct.toFixed(0) + '% of spend' },
       { v: '$' + CQ.medianPerCompletedSession.toFixed(2) + (CQ.medianCostIncomplete ? '+' : ''), k: 'median $ per completed session' },
     ];
-    figs.forEach((f) => {
-      const d = document.createElement('div');
-      d.innerHTML = '<div class="figure">' + f.v + '</div><div class="figure-key">' + f.k + '</div>';
-      el.appendChild(d);
-    });
+    figs.forEach((f) => A.appendFigure(el, f.v, f.k));
   }
 
   function chartCache(mini) {
@@ -1983,7 +1982,7 @@
 
     if (!mini) A.attachHoverBucket(svg, w, h, pL, pR, pT, pB, xScale, (i) => {
       const measuredHit = !C.hitRateMeasured || C.hitRateMeasured[i];
-      return '<div class="tt-title">' + D.bucketLabels[i] + '</div>' +
+      return '<div class="tt-title">' + A.escapeHTML(D.bucketLabels[i]) + '</div>' +
         '<div class="tt-row" style="color:var(--viz-2)">savings <b>$' + C.savings[i].toFixed(0) + '</b></div>' +
         '<div class="tt-row" style="color:var(--viz-7)">hit rate <b>' + (measuredHit ? C.hitRate[i].toFixed(1) + '%' : 'n/a') + '</b></div>';
     });
@@ -2007,11 +2006,7 @@
       { v: D.cache.hitRateNow.toFixed(0) + '%', k: 'hit rate' },
       { v: '$' + savingsPerDollar.toFixed(2) + perDollarMark, k: 'savings per $1 spent' },
     ];
-    figs.forEach((f) => {
-      const d = document.createElement('div');
-      d.innerHTML = '<div class="figure">' + f.v + '</div><div class="figure-key">' + f.k + '</div>';
-      el.appendChild(d);
-    });
+    figs.forEach((f) => A.appendFigure(el, f.v, f.k));
   }
 
   function mount(id, node) {
@@ -2023,10 +2018,7 @@
     const el = document.getElementById(id);
     if (!el) return;
     el.innerHTML = '';
-    const head = document.createElement('div');
-    head.className = 'chart-caption';
-    head.innerHTML = '<span class="chart-title">' + title + '</span><span class="chart-value mono">' + valueText + '</span>';
-    el.appendChild(head);
+    A.appendCaption(el, title, valueText);
     el.appendChild(chartFn(true));
   }
 
@@ -2086,7 +2078,7 @@
 
     A.axisBaseline(svg, pL, w - pR, h - pB);
     A.attachHoverBucket(svg, w, h, pL, pR, pT, pB, xScale, (i) => {
-      return '<div class="tt-title">' + D.bucketLabels[i] + '</div>' +
+      return '<div class="tt-title">' + A.escapeHTML(D.bucketLabels[i]) + '</div>' +
         '<div class="tt-row" style="color:var(--accent)">root sessions delegating <b>' + S.delegateShare[i].toFixed(1) + '%</b></div>' +
         '<div class="tt-row" style="color:var(--muted)">cost via subagents <b>' + S.costShare[i].toFixed(1) + '%</b></div>';
     });
@@ -2108,11 +2100,7 @@
       { v: S.costRunThroughSubagentsPct + '%' + (S.costShareIncomplete ? ' partial' : ''), k: 'cost run through subagents' },
       { v: S.deepestTree, k: 'deepest tree (levels)' },
     ];
-    figs.forEach((f) => {
-      const d = document.createElement('div');
-      d.innerHTML = '<div class="figure">' + f.v + '</div><div class="figure-key">' + f.k + '</div>';
-      el.appendChild(d);
-    });
+    figs.forEach((f) => A.appendFigure(el, f.v, f.k));
   }
 
   function renderLegend() {
@@ -2121,10 +2109,7 @@
     el.innerHTML = '';
     const items = [{ label: 'Root sessions that delegate', color: 'var(--accent)' }, { label: 'Cost share via subagents', color: 'var(--muted)' }];
     items.forEach((it) => {
-      const li = document.createElement('li');
-      li.className = 'legend-chip';
-      li.innerHTML = '<span class="legend-swatch" style="background:' + it.color + '"></span>' + it.label;
-      el.appendChild(li);
+      A.appendLegendChip(el, it.color, it.label);
     });
   }
 
@@ -2160,9 +2145,9 @@
 
     A.attachHoverBucket(svg, w, h, pL, pR, pT, pB, xScale, (i) => {
       const row = S.fanoutRows[i];
-      let html = '<div class="tt-title">' + D.bucketLabels[i] + '</div>';
+      let html = '<div class="tt-title">' + A.escapeHTML(D.bucketLabels[i]) + '</div>';
       S.fanoutOrder.forEach((key) => {
-        html += '<div class="tt-row" style="color:' + S.fanoutColors[key] + '">' + S.fanoutLabels[key] + ' <b>' + row[key] + '</b></div>';
+        html += '<div class="tt-row" style="color:' + S.fanoutColors[key] + '">' + A.escapeHTML(S.fanoutLabels[key]) + ' <b>' + row[key] + '</b></div>';
       });
       return html;
     });
@@ -2177,10 +2162,7 @@
     el.innerHTML = '';
     const S = D.subagents;
     S.fanoutOrder.forEach((key) => {
-      const li = document.createElement('li');
-      li.className = 'legend-chip';
-      li.innerHTML = '<span class="legend-swatch" style="background:' + S.fanoutColors[key] + '"></span>' + S.fanoutLabels[key];
-      el.appendChild(li);
+      A.appendLegendChip(el, S.fanoutColors[key], S.fanoutLabels[key]);
     });
   }
 

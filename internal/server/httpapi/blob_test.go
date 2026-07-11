@@ -179,12 +179,18 @@ func TestBlobServingAccessControl(t *testing.T) {
 	if resp.StatusCode != http.StatusOK || body != string(pubBody) {
 		t.Fatalf("public blob A: status=%d body=%q", resp.StatusCode, body)
 	}
+	if got := resp.Header.Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("public blob Cache-Control = %q, want no-store", got)
+	}
 
 	// Anonymous: the secret body must not be reachable through the public session,
 	// even by hash.
 	resp, _ = get(anon, fmt.Sprintf("/s/%s/blob/%s", candidate, shaB))
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("public secret blob status=%d, want 404", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("public blob 404 Cache-Control = %q, want no-store", got)
 	}
 
 	// Anonymous: the authenticated blob route is closed to them entirely.
