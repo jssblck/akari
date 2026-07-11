@@ -108,6 +108,15 @@ network peer. Akari does not trust `X-Forwarded-For` for this purpose; deploymen
 with several replicas should enforce a fleet-wide source limit at the trusted
 edge as well.
 
+**Behind a reverse proxy, the per-source limit becomes a single shared bucket.**
+Every request the server sees arrives from the proxy's own address, so the
+per-source ceiling stops distinguishing one client from another and instead caps
+the whole instance's login and registration traffic together. A busy moment can
+then 401 legitimate logins with nothing to tell them apart from real credential
+attacks. The per-username limiter is unaffected and still protects individual
+accounts. If you need per-client source limits behind a proxy, enforce them there
+instead: the proxy sees the real client address, akari does not.
+
 ## Single sign-on behind a trusted proxy
 
 akari's built-in accounts are local: a username and password per person,

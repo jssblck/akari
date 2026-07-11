@@ -28,6 +28,9 @@ type passwordWork struct {
 	dummyHash  string
 }
 
+// Package-global memoization is correct only because one httpapi.Server exists
+// per process; a second Server in the same process would share this hash instead
+// of building its own.
 var (
 	dummyPasswordOnce sync.Once
 	dummyPasswordHash string
