@@ -147,7 +147,10 @@ func (s *Server) handleLogoutForm(w http.ResponseWriter, r *http.Request) {
 		deleteErr = s.Store.DeleteWebSession(r.Context(), auth.HashToken(c.Value))
 	}
 	s.clearSessionCookie(w)
-	if deleteErr != nil {
+	// Rotate the CSRF cookie too: the prior token must not outlive the session
+	// it was issued alongside.
+	rotateErr := s.rotateCSRFCookie(w)
+	if deleteErr != nil || rotateErr != nil {
 		renderPublicError(w, r, http.StatusInternalServerError, "Could not sign out.")
 		return
 	}

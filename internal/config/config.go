@@ -7,6 +7,8 @@ package config
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -111,17 +113,25 @@ type Server struct {
 // LoadServer reads server configuration from the environment, applying defaults
 // and validating required values.
 func LoadServer() (Server, error) {
+	publicURLValue, publicURLSource := publicURL()
 	s := Server{
 		DatabaseURL:           os.Getenv("AKARI_DATABASE_URL"),
 		Listen:                listenAddr(),
 		CookieSecure:          !truthy(os.Getenv("AKARI_COOKIE_INSECURE")),
-		PublicURL:             publicURL(),
+		PublicURL:             publicURLValue,
 		ProxyAuthHeader:       strings.TrimSpace(os.Getenv("AKARI_PROXY_AUTH_HEADER")),
 		ProxyAuthSecret:       os.Getenv("AKARI_PROXY_AUTH_SECRET"),
 		ProxyAuthSecretHeader: proxyAuthSecretHeader(),
 	}
 	if s.DatabaseURL == "" {
 		return Server{}, fmt.Errorf("AKARI_DATABASE_URL is required")
+	}
+	if s.PublicURL != "" {
+		origin, err := NormalizePublicOrigin(s.PublicURL)
+		if err != nil {
+			return Server{}, fmt.Errorf("%s: %w", publicURLSource, err)
+		}
+		s.PublicURL = origin
 	}
 	mcpBudget, err := parsePositiveInt(os.Getenv("AKARI_MCP_RESPONSE_BUDGET_BYTES"), 8<<20)
 	if err != nil {
@@ -232,18 +242,56 @@ func listenAddr() string {
 	return ":8080"
 }
 
-// publicURL resolves the server's externally reachable base URL. AKARI_PUBLIC_URL
-// wins; failing that it honors AKARI_URL, the variable eph exports pointing at the
-// running dev server, so the OAuth flow works out of the box under eph. The result
-// is trimmed of any trailing slash so callers can join paths with a leading slash
-// without doubling it. An empty result tells the OAuth handlers to derive the base
-// from the request instead.
-func publicURL() string {
-	v := strings.TrimSpace(os.Getenv("AKARI_PUBLIC_URL"))
+// publicURL resolves the server's externally reachable base URL and reports
+// which environment variable supplied it, so a validation failure can name the
+// variable the operator actually set rather than always blaming
+// AKARI_PUBLIC_URL. AKARI_PUBLIC_URL wins; failing that it honors AKARI_URL,
+// the variable eph exports pointing at the running dev server, so the OAuth
+// flow works out of the box under eph. The value is trimmed of any trailing
+// slash so callers can join paths with a leading slash without doubling it.
+// An empty result tells the OAuth handlers to derive the base from the
+// request instead.
+func publicURL() (value, source string) {
+	source = "AKARI_PUBLIC_URL"
+	v := strings.TrimSpace(os.Getenv(source))
 	if v == "" {
-		v = strings.TrimSpace(os.Getenv("AKARI_URL"))
+		source = "AKARI_URL"
+		v = strings.TrimSpace(os.Getenv(source))
 	}
-	return strings.TrimRight(v, "/")
+	return strings.TrimRight(v, "/"), source
+}
+
+// NormalizePublicOrigin turns an external URL into the exact origin browsers
+// send in Origin. HTTP handlers use the same normalization for request headers,
+// so default ports and host casing cannot create false mismatches.
+// Rejecting paths and other URL components keeps the value usable as both the
+// OAuth issuer and the CSRF trust boundary.
+func NormalizePublicOrigin(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", err
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if (scheme != "http" && scheme != "https") || u.Host == "" || u.User != nil ||
+		u.Opaque != "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return "", fmt.Errorf("must be an http(s) origin without a path, query, fragment, or user info")
+	}
+	hostname := strings.ToLower(u.Hostname())
+	if hostname == "" {
+		return "", fmt.Errorf("must include a host")
+	}
+	port := u.Port()
+	if (scheme == "http" && port == "80") || (scheme == "https" && port == "443") {
+		port = ""
+	}
+	host := hostname
+	if strings.Contains(hostname, ":") {
+		host = "[" + hostname + "]"
+	}
+	if port != "" {
+		host = net.JoinHostPort(hostname, port)
+	}
+	return scheme + "://" + host, nil
 }
 
 // proxyAuthSecretHeader resolves the header the proxy echoes the shared secret in,

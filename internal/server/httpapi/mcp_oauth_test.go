@@ -151,7 +151,7 @@ func runOAuthFlow(t *testing.T, srvURL string, c *http.Client) map[string]any {
 	csrf := m[1]
 
 	// Approve consent; capture the redirect to the client without following it.
-	noFollow := &http.Client{Jar: c.Jar, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	noFollow := &http.Client{Jar: c.Jar, Transport: c.Transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	resp, err = noFollow.PostForm(srvURL+"/oauth/authorize", url.Values{
 		"client_id":      {clientID},
 		"redirect_uri":   {redirectURI},

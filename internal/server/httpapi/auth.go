@@ -202,7 +202,9 @@ func (s *Server) clearSessionCookie(w http.ResponseWriter) {
 
 // startSession creates a web session row and sets the cookie. The cookie holds
 // the raw secret; only its hash is stored, so a database read cannot recover a
-// usable session (matching how API and invite tokens are handled).
+// usable session (matching how API and invite tokens are handled). It also
+// rotates the CSRF cookie: a token minted before this sign-in must not go on
+// authorizing requests as the newly authenticated user.
 func (s *Server) startSession(w http.ResponseWriter, r *http.Request, userID int64) error {
 	secret, err := auth.NewToken()
 	if err != nil {
@@ -212,7 +214,7 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request, userID int
 		return err
 	}
 	s.setSessionCookie(w, secret)
-	return nil
+	return s.rotateCSRFCookie(w)
 }
 
 type registerRequest struct {
@@ -338,7 +340,10 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		deleteErr = s.Store.DeleteWebSession(r.Context(), auth.HashToken(c.Value))
 	}
 	s.clearSessionCookie(w)
-	if deleteErr != nil {
+	// Rotate the CSRF cookie too: the prior token must not outlive the session
+	// it was issued alongside.
+	rotateErr := s.rotateCSRFCookie(w)
+	if deleteErr != nil || rotateErr != nil {
 		writeError(w, http.StatusInternalServerError, "delete session")
 		return
 	}

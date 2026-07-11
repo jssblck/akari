@@ -40,6 +40,14 @@ make that link stop working. A way to cross that boundary (reading internal
 sessions without auth, or guessing a public link) is a real vulnerability and
 worth reporting.
 
+Browser mutations also enforce the instance's public origin. Login,
+registration, session-cookie writes, and trusted-proxy-authenticated writes use
+`Origin` and Fetch Metadata, with a double-submit token fallback when those
+headers are absent. Bearer-authenticated API, ingest, and MCP calls remain
+separate from the browser CSRF mechanism. Operators should set
+`AKARI_PUBLIC_URL` and follow the reverse-proxy header rules in the self-hosting
+guide.
+
 akari does not attempt to defend a reviewer or server against malicious content
 inside the session logs it ingests: transcripts are treated as untrusted data to
 store and render safely (escaped, never executed), but the uploading client is

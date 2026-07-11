@@ -71,15 +71,18 @@ templ sessionActions(d store.SessionDetail, owner bool) {
 				<a class="share-link muted small" href={ PublicHref(*d.PublicID) } target="_blank" rel="noopener" title="Public share link">{ PublicPath(*d.PublicID) }</a>
 				@copyLink(PublicPath(*d.PublicID))
 				<form method="post" action={ templ.SafeURL(fmt.Sprintf("/sessions/%d/unpublish", d.ID)) } class="inline">
+					@csrfField()
 					<button class="secondary small" type="submit" title="Removes the public link. Publishing again mints a new link, so the old one stays dead.">Unpublish</button>
 				</form>
 			} else {
 				<form method="post" action={ templ.SafeURL(fmt.Sprintf("/sessions/%d/publish", d.ID)) } class="inline">
+					@csrfField()
 					<button class="secondary small" type="submit" title="Mint a public share link.">Publish</button>
 				</form>
 			}
 		}
 		<form method="post" action={ templ.SafeURL(fmt.Sprintf("/sessions/%d/delete", d.ID)) } class="inline" onsubmit="return confirm('Delete this session and its transcript permanently?')">
+			@csrfField()
 			<button class="danger small" type="submit" title="Deletes this session permanently.">Delete</button>
 		</form>
 	</div>

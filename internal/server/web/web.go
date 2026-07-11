@@ -74,6 +74,24 @@ func Notice(ctx context.Context) string {
 	return n
 }
 
+type csrfCtxKey struct{}
+
+// WithCSRFToken attaches the request's double-submit token at the render seam.
+// Forms include it so clients that legitimately lack Origin and Fetch Metadata
+// can still prove they loaded the form from this server.
+func WithCSRFToken(ctx context.Context, token string) context.Context {
+	if token == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, csrfCtxKey{}, token)
+}
+
+// CSRFToken returns the token for the current rendered request.
+func CSRFToken(ctx context.Context) string {
+	token, _ := ctx.Value(csrfCtxKey{}).(string)
+	return token
+}
+
 // Static holds the embedded static assets (htmx, stylesheet) served under
 // /static/.
 //
