@@ -99,7 +99,7 @@ akari daemon stop --force         # escalate only if graceful shutdown fails
 ```
 
 `daemon` runs the same `watch` loop as a detached, per-user background process (it
-is not a system service). It writes a pidfile and a log file under your config
+is not a system service). It writes a pidfile and `akari.log` under your config
 directory; `start` confirms the child took the single-instance lock before
 returning. `stop` sends an authenticated local shutdown request, then waits until
 the watcher exits and releases that lock. A zero exit status therefore means a
@@ -120,8 +120,18 @@ The pidfile now contains a JSON process identity instead of a bare PID. A client
 upgraded while an older daemon is still running cannot safely authenticate or
 escalate against that old process. Stop the daemon with the old client before
 upgrading, or end that process through the operating system once; the next
-`daemon start` writes the new identity format. This is the steady state on a
-workstation: run `akari daemon start` once.
+`daemon start` writes the new identity format.
+
+The log rotates while the daemon runs: each file is capped at 5 MiB, three rotated files
+(`akari.log.1` through `akari.log.3`) are retained, and the whole set is bounded
+at 20 MiB. The active and rotated files remain owner-only. This is the steady
+state on a workstation: run `akari daemon start` once.
+
+| Platform | Daemon log |
+| --- | --- |
+| macOS | `~/Library/Application Support/akari/akari.log` |
+| Linux | `~/.config/akari/akari.log` |
+| Windows | `%AppData%\akari\akari.log` |
 
 ### update and version
 

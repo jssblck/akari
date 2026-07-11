@@ -126,7 +126,7 @@ yourself. It reads `AKARI_DATABASE_URL` and the upload target from `AKARI_URL`
 ## Layout
 
 - `cmd/akari-server` is the server entry point, plus its maintenance
-  subcommands (`reparse`, `sweep`, `settle`, `dev-seed`, `update`).
+  subcommands (`reparse`, `sweep`, `settle`, `dev-seed`).
 - `cmd/akari` is the client CLI (`login`, `sync`, `watch`, `daemon`, `update`).
 - `internal/parser` holds the per-agent parsers and their fixtures.
 - `internal/pricing` is the compiled-in model rate table.

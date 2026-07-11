@@ -4,10 +4,9 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
-	"net/http"
 	"os"
-	"time"
 
 	"github.com/jssblck/akari/internal/client/daemon"
 	"github.com/jssblck/akari/internal/client/discover"
@@ -20,15 +19,11 @@ import (
 
 // runWatch runs the foreground watch loop until interrupted. It holds the
 // single-instance lock for its lifetime.
-func runWatch(ctx context.Context, args []string) error {
+func runWatch(ctx context.Context, args []string) (runErr error) {
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
 	configPath := fs.String("config", "", "config file path (default: platform config dir)")
+	daemonLogPath := fs.String("daemon-log", "", "internal: log file path used when watch is relaunched as a detached daemon process")
 	if err := fs.Parse(args); err != nil {
-		return err
-	}
-
-	cfg, err := config.LoadClient(*configPath)
-	if err != nil {
 		return err
 	}
 
@@ -47,6 +42,31 @@ func runWatch(ctx context.Context, args []string) error {
 	}
 	defer stopControl()
 
+	logf := log.Printf
+	if *daemonLogPath != "" {
+		output, err := daemon.OpenLog(*daemonLogPath)
+		if err != nil {
+			return err
+		}
+		logger := log.New(output, "", log.LstdFlags)
+		logf = logger.Printf
+		defer func() {
+			if runErr != nil {
+				if _, err := fmt.Fprintf(output, "akari: %v\n", runErr); err != nil {
+					runErr = errors.Join(runErr, fmt.Errorf("write daemon startup error: %w", err))
+				}
+			}
+			if err := output.Close(); err != nil {
+				runErr = errors.Join(runErr, err)
+			}
+		}()
+	}
+
+	cfg, err := config.LoadClient(*configPath)
+	if err != nil {
+		return err
+	}
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
@@ -55,17 +75,17 @@ func runWatch(ctx context.Context, args []string) error {
 
 	roots := discover.Roots(cfg, os.Getenv, home)
 	resolver := resolve.New()
-	client := upload.New(&http.Client{Timeout: 60 * time.Second}, cfg.ServerURL, cfg.Token)
+	client := upload.New(upload.NewHTTPClient(), cfg.ServerURL, cfg.Token)
 	// watch is a long-lived host: its idle ticks flush a Codex trailing turn once the
 	// settle window elapses, so it never finalizes eagerly.
 	sync := syncer.New(resolver, client, machine, false)
 
-	w := watch.New(roots, sync.SyncOne, watch.Options{Excludes: cfg.Excludes, Logf: log.Printf})
-	log.Printf("akari watch: watching %d root(s); press Ctrl-C to stop", len(roots))
+	w := watch.New(roots, sync.SyncOne, watch.Options{Excludes: cfg.Excludes, Logf: logf})
+	logf("akari watch: watching %d root(s); press Ctrl-C to stop", len(roots))
 
 	if err := w.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		return err
 	}
-	log.Printf("akari watch: stopped")
+	logf("akari watch: stopped")
 	return nil
 }
