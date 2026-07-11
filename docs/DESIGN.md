@@ -1194,6 +1194,16 @@ visited:
   message up to the cap), scanning only newly appended bytes for the next
   boundary, advancing on each ack.
 
+Streaming uploads have no total HTTP deadline because a healthy transfer of a
+large tool body can take longer than any fixed request budget. Connection setup
+remains bounded: dialing and the TLS handshake each have a 10-second timeout,
+and response headers have a 30-second timeout. Once a body starts, the client
+applies independent 60-second idle-progress windows to request writes and
+response reads. Each window refreshes when bytes move and cancels the request if
+the connection stalls. Caller cancellation still interrupts every phase. The
+small JSON control requests (announce, existence checks, reset, and finalize)
+keep a 60-second total deadline in addition to the idle window.
+
 The client persists nothing to disk; its per-file cursor and digest live only in
 memory. If the local file already matches the server (size equals `stored_bytes`,
 hashes agree), the announce is the only call and no bytes move. Restarts, crashes,

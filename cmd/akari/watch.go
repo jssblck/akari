@@ -5,9 +5,7 @@ import (
 	"errors"
 	"flag"
 	"log"
-	"net/http"
 	"os"
-	"time"
 
 	"github.com/jssblck/akari/internal/client/daemon"
 	"github.com/jssblck/akari/internal/client/discover"
@@ -50,7 +48,7 @@ func runWatch(ctx context.Context, args []string) error {
 
 	roots := discover.Roots(cfg, os.Getenv, home)
 	resolver := resolve.New()
-	client := upload.New(&http.Client{Timeout: 60 * time.Second}, cfg.ServerURL, cfg.Token)
+	client := upload.New(upload.NewHTTPClient(), cfg.ServerURL, cfg.Token)
 	// watch is a long-lived host: its idle ticks flush a Codex trailing turn once the
 	// settle window elapses, so it never finalizes eagerly.
 	sync := syncer.New(resolver, client, machine, false)
