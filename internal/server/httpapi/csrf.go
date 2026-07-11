@@ -19,8 +19,12 @@ const (
 )
 
 // withRouteCSRF lets ServeMux retain ownership of unknown paths and unsupported
-// methods. A request that cannot reach a mutation handler should keep its normal
-// 404 or 405 response instead of being masked by the CSRF gate.
+// methods. mux.Handler reports an empty pattern both when no route matches and
+// when a route matches but not this method; Go's ServeMux does not distinguish
+// the two through this call. Either way the request falls through to next, the
+// styled not-found handler, which does its own 404/405 split, so a request that
+// cannot reach a mutation handler keeps its normal response instead of being
+// masked by the CSRF gate.
 func (s *Server) withRouteCSRF(mux *http.ServeMux, next http.Handler) http.Handler {
 	protected := s.withCSRF(next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -132,10 +136,24 @@ func (s *Server) setCSRFCookie(w http.ResponseWriter, token string) {
 		Name:     csrfCookieName,
 		Value:    token,
 		Path:     "/",
+		HttpOnly: true,
 		Secure:   s.Cfg.CookieSecure,
 		SameSite: http.SameSiteStrictMode,
 		Expires:  time.Now().Add(sessionTTL),
 	})
+}
+
+// rotateCSRFCookie mints a fresh double-submit token and installs it in place
+// of whatever token predates the call. Login, registration, and logout use it
+// so a token issued before the privilege change cannot go on authorizing
+// requests under the new session state.
+func (s *Server) rotateCSRFCookie(w http.ResponseWriter) error {
+	token, err := auth.NewToken()
+	if err != nil {
+		return err
+	}
+	s.setCSRFCookie(w, token)
+	return nil
 }
 
 func csrfTokenFromRequest(r *http.Request) (string, bool) {

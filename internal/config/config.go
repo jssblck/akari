@@ -94,11 +94,12 @@ type Server struct {
 // LoadServer reads server configuration from the environment, applying defaults
 // and validating required values.
 func LoadServer() (Server, error) {
+	publicURLValue, publicURLSource := publicURL()
 	s := Server{
 		DatabaseURL:           os.Getenv("AKARI_DATABASE_URL"),
 		Listen:                listenAddr(),
 		CookieSecure:          !truthy(os.Getenv("AKARI_COOKIE_INSECURE")),
-		PublicURL:             publicURL(),
+		PublicURL:             publicURLValue,
 		ProxyAuthHeader:       strings.TrimSpace(os.Getenv("AKARI_PROXY_AUTH_HEADER")),
 		ProxyAuthSecret:       os.Getenv("AKARI_PROXY_AUTH_SECRET"),
 		ProxyAuthSecretHeader: proxyAuthSecretHeader(),
@@ -109,7 +110,7 @@ func LoadServer() (Server, error) {
 	if s.PublicURL != "" {
 		origin, err := NormalizePublicOrigin(s.PublicURL)
 		if err != nil {
-			return Server{}, fmt.Errorf("AKARI_PUBLIC_URL: %w", err)
+			return Server{}, fmt.Errorf("%s: %w", publicURLSource, err)
 		}
 		s.PublicURL = origin
 	}
@@ -196,18 +197,23 @@ func listenAddr() string {
 	return ":8080"
 }
 
-// publicURL resolves the server's externally reachable base URL. AKARI_PUBLIC_URL
-// wins; failing that it honors AKARI_URL, the variable eph exports pointing at the
-// running dev server, so the OAuth flow works out of the box under eph. The result
-// is trimmed of any trailing slash so callers can join paths with a leading slash
-// without doubling it. An empty result tells the OAuth handlers to derive the base
-// from the request instead.
-func publicURL() string {
-	v := strings.TrimSpace(os.Getenv("AKARI_PUBLIC_URL"))
+// publicURL resolves the server's externally reachable base URL and reports
+// which environment variable supplied it, so a validation failure can name the
+// variable the operator actually set rather than always blaming
+// AKARI_PUBLIC_URL. AKARI_PUBLIC_URL wins; failing that it honors AKARI_URL,
+// the variable eph exports pointing at the running dev server, so the OAuth
+// flow works out of the box under eph. The value is trimmed of any trailing
+// slash so callers can join paths with a leading slash without doubling it.
+// An empty result tells the OAuth handlers to derive the base from the
+// request instead.
+func publicURL() (value, source string) {
+	source = "AKARI_PUBLIC_URL"
+	v := strings.TrimSpace(os.Getenv(source))
 	if v == "" {
-		v = strings.TrimSpace(os.Getenv("AKARI_URL"))
+		source = "AKARI_URL"
+		v = strings.TrimSpace(os.Getenv(source))
 	}
-	return strings.TrimRight(v, "/")
+	return strings.TrimRight(v, "/"), source
 }
 
 // NormalizePublicOrigin turns an external URL into the exact origin browsers

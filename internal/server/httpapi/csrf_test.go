@@ -14,6 +14,24 @@ import (
 	"github.com/jssblck/akari/internal/server/web"
 )
 
+// cookieValue reads a named cookie's current value out of a client's jar for
+// the given URL, or "" if the jar holds none. Tests use it to observe the
+// CSRF cookie rotating underneath a browser session without parsing raw
+// Set-Cookie headers by hand.
+func cookieValue(t *testing.T, c *http.Client, rawURL, name string) string {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("parse url: %v", err)
+	}
+	for _, ck := range c.Jar.Cookies(u) {
+		if ck.Name == name {
+			return ck.Value
+		}
+	}
+	return ""
+}
+
 func TestCSRFOriginAndFetchMetadataPolicy(t *testing.T) {
 	t.Parallel()
 	s := &Server{Cfg: config.Server{PublicURL: "https://akari.example"}}
@@ -242,5 +260,114 @@ func TestCSRFRoutesRejectLoginAndCookieMutation(t *testing.T) {
 	}
 	if len(listed.Tokens) != 0 {
 		t.Fatalf("cross-site mutation created tokens: %+v", listed.Tokens)
+	}
+}
+
+// TestCSRFCookieRotatesOnLogin confirms a token minted before sign-in stops
+// working immediately after: an attacker who planted or observed that token
+// ahead of the victim logging in cannot go on using it once the privilege
+// change lands.
+func TestCSRFCookieRotatesOnLogin(t *testing.T) {
+	t.Parallel()
+	srv, _ := newTestServer(t)
+	browser := newClient(t)
+
+	mustGet(t, browser, srv.URL+"/login").Body.Close()
+	preLoginToken := cookieValue(t, browser, srv.URL, csrfCookieName)
+	if preLoginToken == "" {
+		t.Fatal("no CSRF cookie minted before login")
+	}
+
+	status, _ := postJSON(t, browser, srv.URL+"/api/v1/auth/register", `{"username":"grace","password":"hopper-1906"}`)
+	if status != http.StatusCreated {
+		t.Fatalf("register status = %d, want %d", status, http.StatusCreated)
+	}
+
+	postLoginToken := cookieValue(t, browser, srv.URL, csrfCookieName)
+	if postLoginToken == "" || postLoginToken == preLoginToken {
+		t.Fatalf("CSRF cookie did not rotate on login: pre=%q post=%q", preLoginToken, postLoginToken)
+	}
+
+	// Present the pre-login token via cookie and header with no Origin or
+	// Sec-Fetch-Site, so validation rests entirely on the double-submit
+	// match, the path a non-browser client (and a forging attacker) takes.
+	raw := &http.Client{Jar: browser.Jar}
+	stale, err := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/tokens", strings.NewReader(`{"name":"stolen"}`))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	stale.Header.Set("Content-Type", "application/json")
+	stale.Header.Set(csrfHeaderName, preLoginToken)
+	staleResp, err := raw.Do(stale)
+	if err != nil {
+		t.Fatalf("stale-token mutation: %v", err)
+	}
+	staleResp.Body.Close()
+	if staleResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("mutation with pre-login CSRF token = %d, want %d", staleResp.StatusCode, http.StatusForbidden)
+	}
+
+	// Sanity: the current token still authorizes the same request, so the
+	// rejection above is about staleness, not a broken double-submit check.
+	fresh, err := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/tokens", strings.NewReader(`{"name":"legitimate"}`))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	fresh.Header.Set("Content-Type", "application/json")
+	fresh.Header.Set(csrfHeaderName, postLoginToken)
+	freshResp, err := raw.Do(fresh)
+	if err != nil {
+		t.Fatalf("current-token mutation: %v", err)
+	}
+	freshResp.Body.Close()
+	if freshResp.StatusCode != http.StatusCreated {
+		t.Fatalf("mutation with current CSRF token = %d, want %d", freshResp.StatusCode, http.StatusCreated)
+	}
+}
+
+// TestCSRFCookieRotatesOnLogout confirms logout invalidates the session's
+// CSRF token the same way login does: a token captured before sign-out must
+// not go on authorizing requests once the session is gone.
+func TestCSRFCookieRotatesOnLogout(t *testing.T) {
+	t.Parallel()
+	srv, _ := newTestServer(t)
+	browser := newClient(t)
+
+	status, _ := postJSON(t, browser, srv.URL+"/api/v1/auth/register", `{"username":"grace","password":"hopper-1906"}`)
+	if status != http.StatusCreated {
+		t.Fatalf("register status = %d, want %d", status, http.StatusCreated)
+	}
+	preLogoutToken := cookieValue(t, browser, srv.URL, csrfCookieName)
+	if preLogoutToken == "" {
+		t.Fatal("no CSRF cookie after registration")
+	}
+
+	status, _ = postJSON(t, browser, srv.URL+"/api/v1/auth/logout", `{}`)
+	if status != http.StatusOK {
+		t.Fatalf("logout status = %d, want %d", status, http.StatusOK)
+	}
+
+	postLogoutToken := cookieValue(t, browser, srv.URL, csrfCookieName)
+	if postLogoutToken == "" || postLogoutToken == preLogoutToken {
+		t.Fatalf("CSRF cookie did not rotate on logout: pre=%q post=%q", preLogoutToken, postLogoutToken)
+	}
+
+	// The pre-logout token, presented via cookie and header with no Origin or
+	// Sec-Fetch-Site, must be rejected by the CSRF gate itself (403), not
+	// merely by the now-absent session (401).
+	raw := &http.Client{Jar: browser.Jar}
+	stale, err := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/tokens", strings.NewReader(`{"name":"stolen"}`))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	stale.Header.Set("Content-Type", "application/json")
+	stale.Header.Set(csrfHeaderName, preLogoutToken)
+	staleResp, err := raw.Do(stale)
+	if err != nil {
+		t.Fatalf("stale-token mutation: %v", err)
+	}
+	staleResp.Body.Close()
+	if staleResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("mutation with pre-logout CSRF token = %d, want %d", staleResp.StatusCode, http.StatusForbidden)
 	}
 }

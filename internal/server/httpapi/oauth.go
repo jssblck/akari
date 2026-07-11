@@ -522,6 +522,9 @@ func (s *Server) clearOAuthCSRFCookie(w http.ResponseWriter) {
 // checkOAuthCSRF validates the double-submit token: the consent form's hidden field
 // must match the cookie set when the form was rendered. Both ride the same
 // same-origin, SameSite=Lax session, so a cross-site forgery carries neither.
+// This is deliberately redundant with the generic CSRF gate (withRouteCSRF)
+// that already covers POST /oauth/authorize: the two checks are layered on
+// purpose, not either/or, because this one predates the generic gate.
 func (s *Server) checkOAuthCSRF(r *http.Request) bool {
 	c, err := r.Cookie(oauthCSRFCookie)
 	if err != nil || c.Value == "" {

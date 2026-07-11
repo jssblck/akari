@@ -48,6 +48,24 @@ func TestLoadServerPublicOrigin(t *testing.T) {
 	}
 }
 
+// TestLoadServerPublicOriginFallbackLabel confirms a validation failure names
+// whichever variable actually supplied the value. An operator who never set
+// AKARI_PUBLIC_URL, only the AKARI_URL eph exports, should see AKARI_URL
+// named in the error, not the unset variable.
+func TestLoadServerPublicOriginFallbackLabel(t *testing.T) {
+	t.Setenv("AKARI_DATABASE_URL", "postgres://x/y")
+	t.Setenv("AKARI_PUBLIC_URL", "")
+	t.Setenv("AKARI_URL", "akari.example")
+
+	_, err := LoadServer()
+	if err == nil || !strings.Contains(err.Error(), "AKARI_URL") {
+		t.Fatalf("LoadServer() error = %v, want AKARI_URL error", err)
+	}
+	if strings.Contains(err.Error(), "AKARI_PUBLIC_URL") {
+		t.Fatalf("LoadServer() error = %v, wrongly names AKARI_PUBLIC_URL for an AKARI_URL value", err)
+	}
+}
+
 func TestLoadServerOGCacheTTL(t *testing.T) {
 	t.Setenv("AKARI_DATABASE_URL", "postgres://x/y")
 	t.Setenv("AKARI_PUBLIC_URL", "")
