@@ -1107,6 +1107,23 @@ so coding agents can read the corpus without the UI. Two decisions shape it:
   data the UI fetches on demand is exposed too: tool-call bodies from the CAS
   (gated by a session that references the hash, the same gate the UI enforces) and
   a session's lossless ingested bytes, both size-capped.
+- **Streamable HTTP request bodies have a 100 MiB hard limit.** A declared
+  oversized body is rejected before its first byte is read; a chunked body is
+  rejected after the first byte beyond the limit. Bodies larger than 1 MiB spill
+  into owner-only temporary files, with at most four live spools (400 MiB of
+  reserved temporary storage). Advisory lock sidecars let a new process remove
+  files abandoned by a crash without touching a spool owned by an old process
+  during a rolling restart. The official Go SDK v1.6.1 has no streaming or
+  file-backed JSON-RPC parser hook and calls `io.ReadAll` itself, so it still
+  copies each accepted request into memory. The application limit bounds that
+  copy at 100 MiB. The pre-reader stops the socket at the ceiling, while the
+  disk layer owns cleanup on success, protocol error, cancellation, and restart.
+- **Oversized tool results need a client-resolvable resource.** MCP's
+  `resource_link` content is the compatible reference shape: akari can return an
+  authenticated HTTPS URI plus media type and size if a tool later needs an
+  artifact endpoint. A server-local file URI is never returned to a remote
+  client. Current tools instead page transcripts and cap raw or CAS body reads at
+  8 MiB, so no artifact endpoint is exposed today.
 - **akari is its own OAuth 2.1 authorization server**, so connecting an agent
   reuses the browser session rather than asking the user to mint and paste a token.
   The server publishes the protected-resource (RFC 9728) and authorization-server
