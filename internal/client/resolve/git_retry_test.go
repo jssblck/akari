@@ -237,6 +237,31 @@ func TestConcurrentProjectLookupsShareTransientRecovery(t *testing.T) {
 	}
 }
 
+func TestGitCommandEnvPinsMessageLocale(t *testing.T) {
+	t.Setenv("LANG", "fr_FR.UTF-8")
+	t.Setenv("LC_ALL", "fr_FR.UTF-8")
+	t.Setenv("LANGUAGE", "fr_FR")
+
+	env := gitCommandEnv()
+
+	want := map[string]string{"LC_ALL": "C", "LANGUAGE": "C", "LANG": "C"}
+	got := make(map[string]string, len(want))
+	for _, entry := range env {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		if _, tracked := want[key]; tracked {
+			got[key] = value
+		}
+	}
+	for key, value := range want {
+		if got[key] != value {
+			t.Fatalf("gitCommandEnv()[%s] = %q, want %q (definitiveGitFailure depends on untranslated Git output)", key, got[key], value)
+		}
+	}
+}
+
 func TestResolveReportsExhaustedGitFailure(t *testing.T) {
 	cwd := t.TempDir()
 	session := writeFile(t, cwd, "session.jsonl", claudeLine(cwd))

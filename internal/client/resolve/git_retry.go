@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -123,8 +124,16 @@ func containsGitArg(args []string, want string) bool {
 
 // systemGit keeps stderr attached to command failures so runGit can decide
 // whether an exit represents a stable repository state or a retryable failure.
+//
+// It pins the subprocess to the C locale because definitiveGitFailure matches
+// known-stable outcomes against the untranslated English text Git prints on
+// exit. Without a pinned locale, a machine with LANG or LC_ALL set to a
+// translated locale makes Git emit messages in that language, so an ordinary
+// "not a git repository" never matches and gets retried three times before
+// surfacing as an uncached transient failure instead of being classified.
 func systemGit(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = gitCommandEnv()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -132,4 +141,13 @@ func systemGit(ctx context.Context, dir string, args ...string) (string, error) 
 		return "", &gitCommandError{args: append([]string(nil), args...), stderr: stderr.String(), err: err}
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// gitCommandEnv returns the environment for the Git subprocess with its
+// message locale pinned to C. Entries appended after os.Environ() win over
+// any earlier duplicate keys (exec.Cmd keeps only the last value for each
+// key), so this reliably overrides an inherited LANG, LC_ALL, or LANGUAGE
+// regardless of the user's shell locale.
+func gitCommandEnv() []string {
+	return append(os.Environ(), "LC_ALL=C", "LANGUAGE=C", "LANG=C")
 }
