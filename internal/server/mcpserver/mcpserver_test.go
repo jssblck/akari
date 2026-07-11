@@ -92,7 +92,7 @@ func connect(t *testing.T, st *store.Store) *mcpsdk.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 	serverT, clientT := mcpsdk.NewInMemoryTransports()
-	srv := mcpserver.New(st)
+	srv := mcpserver.New(st, mcpserver.Options{})
 	if _, err := srv.Connect(ctx, serverT, nil); err != nil {
 		t.Fatalf("server connect: %v", err)
 	}
@@ -115,9 +115,8 @@ func callJSON(t *testing.T, sess *mcpsdk.ClientSession, name string, args any) m
 	return out
 }
 
-// rawToolResult returns a tool call's result as the literal JSON text the wire
-// carries, for a test that needs to pin an exact field spelling (a key name, a
-// value's quoting) rather than the decoded map callJSON produces.
+// rawToolResult returns structuredContent as JSON for assertions that pin field
+// spellings without depending on the compact human-readable text summary.
 func rawToolResult(t *testing.T, sess *mcpsdk.ClientSession, name string, args any) string {
 	t.Helper()
 	res, err := sess.CallTool(context.Background(), &mcpsdk.CallToolParams{Name: name, Arguments: args})
@@ -127,11 +126,14 @@ func rawToolResult(t *testing.T, sess *mcpsdk.ClientSession, name string, args a
 	if res.IsError {
 		t.Fatalf("call %s is error: %+v", name, res.Content)
 	}
-	text, ok := res.Content[0].(*mcpsdk.TextContent)
-	if !ok {
-		t.Fatalf("call %s: content %T not text", name, res.Content[0])
+	if res.StructuredContent == nil {
+		t.Fatalf("call %s returned no structuredContent", name)
 	}
-	return text.Text
+	b, err := json.Marshal(res.StructuredContent)
+	if err != nil {
+		t.Fatalf("call %s: marshal structuredContent: %v", name, err)
+	}
+	return string(b)
 }
 
 func TestToolsReturnSeededData(t *testing.T) {
@@ -174,7 +176,7 @@ func TestToolsReturnSeededData(t *testing.T) {
 	if calls[0].(map[string]any)["detail"] != "ls -1" {
 		t.Fatalf("transcript tool_calls missing detail: %+v", calls)
 	}
-	if raw := rawToolResult(t, sess, "get_session", map[string]any{"session_id": fx.sessionID}); !strings.Contains(raw, `"detail": "ls -1"`) {
+	if raw := rawToolResult(t, sess, "get_session", map[string]any{"session_id": fx.sessionID}); !strings.Contains(raw, `"detail":"ls -1"`) {
 		t.Fatalf("get_session transcript JSON missing literal detail field: %s", raw)
 	}
 

@@ -246,6 +246,11 @@ type sessionDTO struct {
 	// a judgement.
 	Outcome string `json:"outcome,omitempty"`
 	Grade   string `json:"grade,omitempty"`
+	// Truncated is set when fitSessionsToBudget had to shorten this row's own
+	// string fields (each left with a "...[truncated]" marker) to make a single
+	// oversized row fit the response budget, rather than dropping it from the
+	// page. Absent on every normal row.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 func sessionSummaryToDTO(s store.SessionSummary) sessionDTO {
@@ -397,14 +402,15 @@ func modelFallbackToDTO(f store.ModelFallback) modelFallbackDTO {
 // true, next_after is the ordinal to pass back as transcript_after for the next
 // window; paging stops when has_more is false.
 type transcriptDTO struct {
-	Limit         int             `json:"limit"`
-	Returned      int             `json:"returned"`
-	TotalMessages int             `json:"total_messages"`
-	HasMore       bool            `json:"has_more"`
-	NextAfter     *int            `json:"next_after,omitempty"`
-	Messages      []messageDTO    `json:"messages"`
-	ToolCalls     []toolCallDTO   `json:"tool_calls"`
-	Attachments   []attachmentDTO `json:"attachments"`
+	Limit               int             `json:"limit"`
+	Returned            int             `json:"returned"`
+	TotalMessages       int             `json:"total_messages"`
+	HasMore             bool            `json:"has_more"`
+	NextAfter           *int            `json:"next_after,omitempty"`
+	ByteBudgetTruncated bool            `json:"byte_budget_truncated"`
+	Messages            []messageDTO    `json:"messages"`
+	ToolCalls           []toolCallDTO   `json:"tool_calls"`
+	Attachments         []attachmentDTO `json:"attachments"`
 }
 
 func sessionDetailToDTO(d store.SessionDetail) sessionDetailDTO {
@@ -419,14 +425,24 @@ func sessionDetailToDTO(d store.SessionDetail) sessionDetailDTO {
 }
 
 type messageDTO struct {
-	Ordinal      int        `json:"ordinal"`
-	Role         string     `json:"role"`
-	Content      string     `json:"content"`
-	ThinkingText string     `json:"thinking_text,omitempty"`
-	Model        string     `json:"model,omitempty"`
-	HasThinking  bool       `json:"has_thinking"`
-	HasToolUse   bool       `json:"has_tool_use"`
-	Timestamp    *time.Time `json:"timestamp,omitempty"`
+	Ordinal               int                  `json:"ordinal"`
+	Role                  string               `json:"role"`
+	Content               string               `json:"content"`
+	ContentByteLen        *int64               `json:"content_byte_len,omitempty"`
+	ContentReference      *contentReferenceDTO `json:"content_reference,omitempty"`
+	ThinkingText          string               `json:"thinking_text,omitempty"`
+	ThinkingTextByteLen   *int64               `json:"thinking_text_byte_len,omitempty"`
+	ThinkingTextReference *contentReferenceDTO `json:"thinking_text_reference,omitempty"`
+	Model                 string               `json:"model,omitempty"`
+	HasThinking           bool                 `json:"has_thinking"`
+	HasToolUse            bool                 `json:"has_tool_use"`
+	Timestamp             *time.Time           `json:"timestamp,omitempty"`
+}
+
+type contentReferenceDTO struct {
+	URI       string `json:"uri"`
+	MediaType string `json:"media_type"`
+	ByteLen   int64  `json:"byte_len"`
 }
 
 func messageToDTO(m store.Message) messageDTO {

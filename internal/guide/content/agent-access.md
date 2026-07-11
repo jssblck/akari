@@ -78,15 +78,28 @@ Parameters that govern paging through a large history:
 - **Paging the feed.** `list_sessions` returns up to 500 rows and a `next_cursor`;
   pass it back as `cursor` to walk the whole feed. It also returns a facet rail
   (busiest agents, users, machines, projects) whose values are the exact strings
-  to pass back as filters.
+  to pass back as filters. A row with an outlier field (an unusually long
+  `git_branch`, say) that alone would blow the response budget is never dropped;
+  its string fields are shortened in place, each with a `...[truncated]` suffix,
+  and it carries `truncated: true`.
 - **Paging a transcript.** `get_session` returns a bounded window of messages
   (set `include_transcript: false` for just the header). When
   `transcript.has_more` is true, pass the window's `next_after` as
-  `transcript_after` to fetch the next page.
+  `transcript_after` to fetch the next page. `byte_budget_truncated` reports
+  that the encoded response limit ended the page before `transcript_limit`.
+  If one message field cannot fit, the message carries a preview, its stored
+  byte length, and an `akari://` resource link. Reading that resource returns
+  the full text through the same authenticated MCP connection. Revoking the
+  connection or API token also revokes access to previously returned links.
 - **Fetching bodies.** Tool bodies are not inlined in `get_session`; take the
   `input_sha256` or `result_sha256` off a tool call and pass it, with the
   `session_id` that references it, to `read_tool_body`. Text returns as text,
-  binary as base64, capped by `max_bytes`.
+  binary as base64, capped by `max_bytes` and the server's encoded response
+  budget.
+
+Tool results carry the complete DTO in `structuredContent`. The text content is
+a compact status and paging summary, so clients do not receive a second copy of
+the full JSON payload.
 
 ## What the MCP sees
 

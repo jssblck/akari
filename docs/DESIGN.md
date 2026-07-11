@@ -815,6 +815,8 @@ CREATE TABLE messages (
   has_thinking   BOOLEAN NOT NULL DEFAULT FALSE,
   has_tool_use   BOOLEAN NOT NULL DEFAULT FALSE,
   content_length INT GENERATED ALWAYS AS (octet_length(content)) STORED,
+  content_sha256 CHAR(64) NOT NULL DEFAULT '',       -- trigger-maintained; '' until the startup backfill reaches an old row
+  thinking_text_sha256 CHAR(64) NOT NULL DEFAULT '', -- trigger-maintained; '' until the startup backfill reaches an old row
   -- A row is one semantic turn (Claude's split content-block lines fold by API
   -- message id). Rows are only ever written by a whole-session rebuild, so there
   -- is no "still accumulating" state to track.
@@ -1106,7 +1108,41 @@ so coding agents can read the corpus without the UI. Two decisions shape it:
   its own query logic and stays decoupled from internal renames. The raw underlying
   data the UI fetches on demand is exposed too: tool-call bodies from the CAS
   (gated by a session that references the hash, the same gate the UI enforces) and
-  a session's lossless ingested bytes, both size-capped.
+  a session's lossless ingested bytes, both size-capped. Every tool result is
+  measured after JSON encoding and capped by `AKARI_MCP_RESPONSE_BUDGET_BYTES`
+  (8 MiB by default). Eight MiB leaves transport and proxy framing below a 16 MiB
+  response limit, even when JSON escaping expands text. Transcript reads apply a
+  conservative cumulative bound in PostgreSQL before fetching message text, then
+  verify the exact `CallToolResult` size in Go. A field that cannot fit is returned
+  as a preview plus a SHA-256-bound `resource_link`; `resources/read` resolves it
+  from the message projection through the same bearer check. Token revocation,
+  message deletion, or changed field content invalidates future reads. Structured
+  output carries the DTO and text content carries only a paging summary, avoiding
+  a second full JSON copy. When trimming a `list_sessions` page down to its last
+  candidate row still leaves that single row over budget (an outlier field like
+  `git_branch` alone exceeds it), the row is not dropped: its oversized string
+  fields are truncated in place, with a marker suffix, until it fits, so every
+  page always contains the row it advances the cursor past. A row that cannot fit
+  even fully truncated (unreachable at the 8 MiB configured floor) fails the call
+  loudly rather than returning a silently empty page. The message hash columns
+  (`content_sha256`, `thinking_text_sha256`, migration 0049) back the
+  resource-link scheme above; backfilling them onto an existing corpus is
+  deliberately not part of the migration, since a full-table `UPDATE` inside the
+  same transaction as the `ALTER TABLE` would hold the column add's
+  access-exclusive lock on `messages`, the hottest table, for as long as the
+  backfill took. The migration only adds the columns (defaulted to `''`) and the
+  trigger that stamps every insert and rewrite; `akari-server` then runs
+  `Store.BackfillMessageContentHashes` once at startup, after migrations, in
+  bounded primary-key-ordered batches with a short pause between them, so a large
+  corpus catches up in the background without blocking startup or contending
+  with live traffic. Until a row is backfilled its columns still read `''`, so
+  both the resource-link generator and its resolver tolerate the sentinel:
+  generation recomputes the digest from the live field text when the stored
+  column is empty, and resolution never trusts the stored column at all, instead
+  recomputing the digest from the row it locates by session and ordinal and
+  checking it against the hash in the URI (which also reproduces the original
+  invalidation semantics: a field whose content changed since the reference was
+  minted recomputes to a different digest and is refused).
 - **Streamable HTTP request bodies have a 100 MiB hard limit.** A declared
   oversized body is rejected before its first byte is read; a chunked body is
   rejected after the first byte beyond the limit. Bodies larger than 1 MiB spill

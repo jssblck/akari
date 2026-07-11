@@ -100,6 +100,17 @@ func run() error {
 	}
 	log.Printf("migrations applied")
 
+	// Catch up any message rows a schema migration added a hashed-reference
+	// column for but deliberately left unbackfilled (see migration 0049 and
+	// runMessageHashBackfill), so an upgrade never blocks startup on a
+	// full-table pass. hashBackfillDone lets shutdown wait for an in-flight
+	// batch to finish committing before the pool closes.
+	hashBackfillDone := make(chan struct{})
+	go func() {
+		defer close(hashBackfillDone)
+		runMessageHashBackfill(rootCtx, st)
+	}()
+
 	// The parse worker owns every projection write: it rebuilds a session from its
 	// raw bytes whenever the session is due (bytes ahead of the last rebuild, or a
 	// parser epoch behind the binary's). Parser behavior lives in the binary, so a
@@ -168,6 +179,7 @@ func run() error {
 		<-ogDone
 		<-insightsDone
 		<-workerDone
+		<-hashBackfillDone
 	}()
 
 	srv := &http.Server{
@@ -200,6 +212,7 @@ func run() error {
 		<-ogDone
 		<-insightsDone
 		<-workerDone
+		<-hashBackfillDone
 		close(idleClosed)
 	}()
 
