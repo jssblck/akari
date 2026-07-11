@@ -11,11 +11,11 @@ import (
 
 // spawnDetached starts the watch process in its own session so it survives the
 // parent exiting and the controlling terminal closing.
-func spawnDetached(self string, args []string, log *os.File) (*os.Process, error) {
+func spawnDetached(self string, args []string) (*os.Process, error) {
 	cmd := exec.Command(self, args...)
 	cmd.Stdin = nil
-	cmd.Stdout = log
-	cmd.Stderr = log
+	cmd.Stdout = nil
+	cmd.Stderr = nil
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
 		return nil, err

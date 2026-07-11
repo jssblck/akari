@@ -1243,6 +1243,10 @@ it as a background process per OS:
   registered with Task Scheduler for start-at-login.
 
 A single advisory file lock ensures only one client instance runs per machine.
+The detached client owns a size-rotating log writer rather than inheriting an
+open append handle from its launcher. It closes the active handle before each
+rename so rotation works on Windows, keeps the handoff serialized with writes,
+and retains three 5 MiB history files beside the 5 MiB active log.
 
 ### Client config
 

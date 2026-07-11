@@ -40,13 +40,8 @@ func Start(self string, watchArgs []string, p Paths) error {
 	if err := os.MkdirAll(filepath.Dir(p.Pidfile), 0o700); err != nil {
 		return err
 	}
-	logf, err := os.OpenFile(p.Logfile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return fmt.Errorf("open log %s: %w", p.Logfile, err)
-	}
-	defer logf.Close()
-
-	proc, err := spawnDetached(self, watchArgs, logf)
+	childArgs := append(append([]string(nil), watchArgs...), "--daemon-log", p.Logfile)
+	proc, err := spawnDetached(self, childArgs)
 	if err != nil {
 		return fmt.Errorf("start background process: %w", err)
 	}

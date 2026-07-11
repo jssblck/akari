@@ -22,11 +22,11 @@ const (
 
 // spawnDetached starts the watch process detached from the console so it keeps
 // running with no visible window after the launching shell exits.
-func spawnDetached(self string, args []string, log *os.File) (*os.Process, error) {
+func spawnDetached(self string, args []string) (*os.Process, error) {
 	cmd := exec.Command(self, args...)
 	cmd.Stdin = nil
-	cmd.Stdout = log
-	cmd.Stderr = log
+	cmd.Stdout = nil
+	cmd.Stderr = nil
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		CreationFlags: createNewProcessGroup | detachedProcess | createNoWindow,
 	}

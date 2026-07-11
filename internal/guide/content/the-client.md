@@ -97,10 +97,19 @@ akari daemon stop      # stop the running watcher
 ```
 
 `daemon` runs the same `watch` loop as a detached, per-user background process (it
-is not a system service). It writes a pidfile and a log file under your config
+is not a system service). It writes a pidfile and `akari.log` under your config
 directory; `start` confirms the child took the single-instance lock before
-returning, and `stop` verifies a live instance holds it before signaling. This is
-the steady state on a workstation: run `akari daemon start` once.
+returning, and `stop` verifies a live instance holds it before signaling. The log
+rotates while the daemon runs: each file is capped at 5 MiB, three rotated files
+(`akari.log.1` through `akari.log.3`) are retained, and the whole set is bounded
+at 20 MiB. The active and rotated files remain owner-only. This is the steady
+state on a workstation: run `akari daemon start` once.
+
+| Platform | Daemon log |
+| --- | --- |
+| macOS | `~/Library/Application Support/akari/akari.log` |
+| Linux | `~/.config/akari/akari.log` |
+| Windows | `%AppData%\akari\akari.log` |
 
 ### update and version
 
