@@ -50,7 +50,7 @@ func TestDaemonOperationsPropagateProbeErrors(t *testing.T) {
 	if err := Start("unused", nil, paths); err == nil {
 		t.Fatal("Start swallowed pidfile probe error")
 	}
-	if err := Stop(paths); err == nil {
+	if _, err := Stop(paths, StopOptions{}); err == nil {
 		t.Fatal("Stop swallowed pidfile probe error")
 	}
 	if _, _, err := Status(paths); err == nil {

@@ -36,6 +36,11 @@ func runWatch(ctx context.Context, args []string) (runErr error) {
 		return err
 	}
 	defer lock.Release()
+	ctx, stopControl, err := lock.ShutdownContext(ctx)
+	if err != nil {
+		return err
+	}
+	defer stopControl()
 
 	logf := log.Printf
 	if *daemonLogPath != "" {
