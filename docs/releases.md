@@ -86,14 +86,14 @@ resolve "latest" through the GitHub releases API; since the workflow publishes
 releases directly, a freshly tagged release is reachable as soon as the workflow
 finishes (GitHub's asset CDN can lag the publish by a few seconds).
 
-## Updating in place
+## Updating the client
 
-Both binaries can update themselves to the latest release: `akari update` and
-`akari-server update` (each with `--check` to report availability without
-installing, and `--force` to reinstall the latest even when current). The shared
+The client can update itself to the latest release with `akari update`.
+`akari update --check` reports availability without installing, and `--force`
+reinstalls the latest release even when the current version matches. The
 [`internal/selfupdate`](../internal/selfupdate) package resolves the latest
-release, downloads the matching archive, and verifies it against `SHA256SUMS`,
-the same assets the install scripts use.
+release, downloads the matching client archive, and verifies it against
+`SHA256SUMS`, the same assets the install scripts use.
 
 The client is a fully native updater (no shell or `curl`):
 
@@ -113,15 +113,25 @@ timeout or cancellation removes the temporary archive before the updater
 returns; checksum verification and the final atomic replacement still happen
 only after the complete archive has arrived.
 
-Version comparison is semver-aware (`golang.org/x/mod/semver`), so a build
+Version comparison is semver-aware (`golang.org/x/mod/semver`), so a client build
 already on or ahead of the latest release is left alone, and a development build
 (stamped with a commit SHA rather than a tag) is always treated as updatable.
 
-The server is Linux-only, so rather than reimplement the download it shells out
-to `install-server.sh` pinned to the resolved tag, then nudges a
-`systemctl restart akari-server` when the service is installed. It warns when run
-inside a container, where the right move is to rebuild the image and redeploy
-rather than update the binary in place.
+## Upgrading the server
+
+The server does not update itself. Upgrade it through the deployment mechanism
+that owns the process:
+
+- Build and deploy a container image from a version tag, with `VERSION` set to
+  the same tag so `akari-server version` reports the deployed release.
+- Upgrade the versioned package when a package manager owns the installation.
+- For a binary managed by systemd or another service supervisor, replace the
+  binary with the checksum-verified archive from a specific GitHub Release, then
+  restart the service.
+
+Pin every upgrade to a release tag. The server applies its embedded database
+migrations when the replacement process starts, so there is no separate
+migration command. See the self-hosting guide for concrete commands.
 
 ## Container image
 
