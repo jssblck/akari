@@ -186,11 +186,11 @@ func (s *Server) Routes() http.Handler {
 	// A user's published usage overview at /u/<username>: aggregate, scoped to that
 	// one account, and gated during a reparse like the public session view (it shows
 	// parsed data).
-	mux.HandleFunc("GET /u/{username}", s.admit(requestbudget.PublicAnalytics, s.gatePublicParsed(s.handlePublicOverview)))
+	mux.HandleFunc("GET /u/{username}", s.gatePublicParsed(s.handlePublicOverview))
 	// A project's published usage overview at /p/<id>: aggregate, scoped to that one
 	// project across every account, with no session list. Gated during a reparse like
 	// the other public parsed pages.
-	mux.HandleFunc("GET /p/{id}", s.admit(requestbudget.PublicAnalytics, s.gatePublicParsed(s.handlePublicProject)))
+	mux.HandleFunc("GET /p/{id}", s.gatePublicParsed(s.handlePublicProject))
 	// The Open Graph preview cards for the three per-entity public pages. Each serves
 	// PNG bytes rendered on demand and held in a TTL cache, so none is reparse-gated: the
 	// more specific /og.png pattern wins over the page pattern (/u/{username}, /p/{id},
