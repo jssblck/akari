@@ -105,6 +105,14 @@ The client is a fully native updater (no shell or `curl`):
   its place. The update therefore succeeds while akari is running; the `.old`
   file (still the running image) is removed on the next update.
 
+Release metadata has a 15-second total request deadline. Archive downloads cap
+the connection, TLS handshake, and response-header phases, then use a 30-second
+idle-progress timeout for the body. Each received body chunk resets that idle
+window, so an active slow download can continue without a total deadline. A
+timeout or cancellation removes the temporary archive before the updater
+returns; checksum verification and the final atomic replacement still happen
+only after the complete archive has arrived.
+
 Version comparison is semver-aware (`golang.org/x/mod/semver`), so a client build
 already on or ahead of the latest release is left alone, and a development build
 (stamped with a commit SHA rather than a tag) is always treated as updatable.
