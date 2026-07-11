@@ -24,6 +24,10 @@ func TestPeekHeaderRejectsFIFOWithoutBlocking(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// The direct FIFO fails the regular-file check; the symlinked FIFO is
+	// rejected one step earlier by the closed symlink policy, before its
+	// target's type is ever consulted. Both must fail without blocking.
+	wantErr := map[string]string{fifo: "not a regular file", fifoLink: "symlink"}
 	for _, path := range []string{fifo, fifoLink} {
 		t.Run(filepath.Base(path), func(t *testing.T) {
 			done := make(chan error, 1)
@@ -34,8 +38,8 @@ func TestPeekHeaderRejectsFIFOWithoutBlocking(t *testing.T) {
 
 			select {
 			case err := <-done:
-				if err == nil || !strings.Contains(err.Error(), "not a regular file") {
-					t.Fatalf("PeekHeader FIFO error = %v", err)
+				if err == nil || !strings.Contains(err.Error(), wantErr[path]) {
+					t.Fatalf("PeekHeader FIFO error = %v, want %q", err, wantErr[path])
 				}
 			case <-time.After(time.Second):
 				// This writer releases a reader stuck in an accidental blocking open,
