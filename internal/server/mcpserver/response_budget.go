@@ -60,8 +60,15 @@ func (r responder) encodedSize(res *mcp.CallToolResult, v any) (int, error) {
 
 func (r responder) bodyReadLimit(requested int) int64 {
 	limit := clampMax(requested)
-	// A JSON string can expand one input byte to six bytes (for example a control
-	// byte or '<' under encoding/json). Keep enough room for keys and the summary.
+	// A JSON string can expand one input byte to six bytes (a control byte
+	// becomes \u00XX). encoding/json's default marshaling would also escape
+	// '<', '>', and '&' to six bytes apiece, but the MCP SDK marshals with
+	// SetEscapeHTML(false), so those three bytes cost one byte apiece on the
+	// actual wire. Measuring with the plain, HTML-escaping json.Marshal is
+	// therefore deliberately conservative relative to what the SDK sends:
+	// it can only over-count '<'/'>'/'&', never under-count, so the computed
+	// limit stays a safe (if slightly pessimistic) bound. Control-character
+	// escaping, the six-byte case that actually matters, is measured exactly.
 	worstCase := int64((r.budget - 4096) / 6)
 	if worstCase < 1 {
 		worstCase = 1

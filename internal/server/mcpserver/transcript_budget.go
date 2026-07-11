@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/jssblck/akari/internal/server/store"
@@ -219,20 +220,66 @@ func sessionContent(out sessionDetailDTO, links []*mcp.ResourceLink) []mcp.Conte
 	return content
 }
 
-func fitSessionsToBudget(r responder, out sessionsDTO) sessionsDTO {
+// fitSessionsToBudget trims rows off the end of a list_sessions page until the
+// encoded result fits r.budget. Trimming stops at one row rather than zero: a
+// row that alone exceeds the budget (an outlier field like git_branch, not the
+// page size, is the problem) is degraded in place by truncateSessionFields
+// instead of being dropped, so the page always contains it and the returned
+// cursor always advances past it. Silently emptying the page here would drop
+// that session from list_sessions forever, since nothing else ever revisits a
+// cursor position once paged past.
+func fitSessionsToBudget(r responder, out sessionsDTO) (sessionsDTO, error) {
 	originalLen := len(out.Sessions)
-	for len(out.Sessions) > 0 {
+	fits := func() bool {
 		res := &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: sessionsSummary(out)}}}
 		size, err := r.encodedSize(res, out)
-		if err == nil && size <= r.budget {
-			break
-		}
+		return err == nil && size <= r.budget
+	}
+	for len(out.Sessions) > 1 && !fits() {
 		out.Sessions = out.Sessions[:len(out.Sessions)-1]
+	}
+	if len(out.Sessions) == 1 && !fits() {
+		if err := truncateSessionFields(&out.Sessions[0], r.budget, fits); err != nil {
+			return sessionsDTO{}, err
+		}
 	}
 	if len(out.Sessions) < originalLen && len(out.Sessions) > 0 {
 		out.NextCursor = encodeCursor(&store.SessionFeedCursor{ID: out.Sessions[len(out.Sessions)-1].ID})
 	}
-	return out
+	return out, nil
+}
+
+// truncationMarker flags a field truncateSessionFields shortened to make an
+// oversized row fit the response budget. It stays in the value itself so a
+// reader never mistakes the shortened text for the field's true content.
+const truncationMarker = "...[truncated]"
+
+// truncateSessionFields repeatedly halves the longest of a session's
+// degradable string fields (each stripped of any marker from a prior pass
+// before measuring, so the marker is never counted toward its own trigger and
+// never compounds) until fits reports the row fits, marking the row Truncated.
+// Every halving pass makes real progress, so this always terminates: either
+// fits eventually reports true, or every degradable field bottoms out at ""
+// and the row still does not fit, which the caller reports as an error rather
+// than a silently empty page (a floor no plain field truncation can cross:
+// see the loud error below).
+func truncateSessionFields(s *sessionDTO, budget int, fits func() bool) error {
+	fields := []*string{&s.GitBranch, &s.Machine, &s.Username, &s.ProjectKey, &s.ProjectName, &s.ProjectKind}
+	for !fits() {
+		longest, longestBody := -1, ""
+		for i, f := range fields {
+			body := strings.TrimSuffix(*f, truncationMarker)
+			if len(body) > len(longestBody) {
+				longest, longestBody = i, body
+			}
+		}
+		if longest == -1 || longestBody == "" {
+			return fmt.Errorf("session %d cannot fit within the %d-byte response budget even after truncating every degradable field", s.ID, budget)
+		}
+		*fields[longest] = utf8Prefix(longestBody, len(longestBody)/2) + truncationMarker
+		s.Truncated = true
+	}
+	return nil
 }
 
 func sessionsSummary(out sessionsDTO) string {

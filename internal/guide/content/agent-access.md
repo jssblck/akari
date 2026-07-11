@@ -78,7 +78,10 @@ Parameters that govern paging through a large history:
 - **Paging the feed.** `list_sessions` returns up to 500 rows and a `next_cursor`;
   pass it back as `cursor` to walk the whole feed. It also returns a facet rail
   (busiest agents, users, machines, projects) whose values are the exact strings
-  to pass back as filters.
+  to pass back as filters. A row with an outlier field (an unusually long
+  `git_branch`, say) that alone would blow the response budget is never dropped;
+  its string fields are shortened in place, each with a `...[truncated]` suffix,
+  and it carries `truncated: true`.
 - **Paging a transcript.** `get_session` returns a bounded window of messages
   (set `include_transcript: false` for just the header). When
   `transcript.has_more` is true, pass the window's `next_after` as

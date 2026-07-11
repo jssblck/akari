@@ -246,6 +246,11 @@ type sessionDTO struct {
 	// a judgement.
 	Outcome string `json:"outcome,omitempty"`
 	Grade   string `json:"grade,omitempty"`
+	// Truncated is set when fitSessionsToBudget had to shorten this row's own
+	// string fields (each left with a "...[truncated]" marker) to make a single
+	// oversized row fit the response budget, rather than dropping it from the
+	// page. Absent on every normal row.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 func sessionSummaryToDTO(s store.SessionSummary) sessionDTO {

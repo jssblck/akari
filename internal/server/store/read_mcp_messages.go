@@ -66,8 +66,18 @@ func (s *Store) MCPMessagesAfter(ctx context.Context, sessionID int64, after *in
 		       CASE WHEN s.worst_bytes > $5 THEN left(m.thinking_text, $6) ELSE m.thinking_text END,
 		       m.model, m.has_thinking, m.has_tool_use, m.timestamp,
 		       s.content_bytes, s.thinking_text_bytes,
-		       CASE WHEN s.worst_bytes > $5 AND s.content_bytes > 0 THEN m.content_sha256 ELSE '' END,
-		       CASE WHEN s.worst_bytes > $5 AND s.thinking_text_bytes > 0 THEN m.thinking_text_sha256 ELSE '' END,
+		       -- The stored hash column (migration 0049) may still carry its
+		       -- unbackfilled '' sentinel for a row the background backfill has not
+		       -- reached yet. Fall back to computing the digest here, over the same
+		       -- m.content this query already has in hand for the left() truncation
+		       -- above, so a reference link is always well-formed regardless of
+		       -- backfill progress; once backfilled this is just a column read.
+		       CASE WHEN s.worst_bytes > $5 AND s.content_bytes > 0
+		            THEN COALESCE(NULLIF(m.content_sha256, ''), encode(sha256(convert_to(m.content, 'UTF8')), 'hex'))
+		            ELSE '' END,
+		       CASE WHEN s.worst_bytes > $5 AND s.thinking_text_bytes > 0
+		            THEN COALESCE(NULLIF(m.thinking_text_sha256, ''), encode(sha256(convert_to(m.thinking_text, 'UTF8')), 'hex'))
+		            ELSE '' END,
 		       s.worst_bytes > $5 AND s.content_bytes > 0,
 		       s.worst_bytes > $5 AND s.thinking_text_bytes > 0,
 		       s.candidate_count
@@ -108,17 +118,28 @@ func (s *Store) MCPMessagesAfter(ctx context.Context, sessionID int64, after *in
 
 // MessageText reads one message field for an authenticated MCP resource. The
 // fixed field switch keeps the query static and rejects invented URI suffixes.
+// It locates the row by session and ordinal alone, then verifies the sha256 the
+// caller presents (baked into the resource URI when the reference was minted)
+// against the field's digest recomputed from the live column, rather than
+// filtering by the stored hash column: the column can still carry migration
+// 0049's unbackfilled sentinel value on an old row, and a stored-column match
+// would either reject a legitimate reference before the background backfill reaches
+// that row or, worse, never recompute at all. Recomputing here instead means
+// resolution works regardless of backfill progress and, as a side effect,
+// reproduces the original invalidation semantics exactly: a reference whose
+// field content changed since it was minted (a rebuild, an edit) recomputes to a
+// different digest and is correctly refused.
 func (s *Store) MessageText(ctx context.Context, sessionID int64, ordinal int, field, sha256 string) (string, error) {
 	query := ""
 	switch field {
 	case "content":
 		query = `SELECT content FROM messages
 			WHERE session_id = $1 AND ordinal = $2
-			  AND content_sha256 = $3`
+			  AND encode(sha256(convert_to(content, 'UTF8')), 'hex') = $3`
 	case "thinking":
 		query = `SELECT thinking_text FROM messages
 			WHERE session_id = $1 AND ordinal = $2
-			  AND thinking_text_sha256 = $3`
+			  AND encode(sha256(convert_to(thinking_text, 'UTF8')), 'hex') = $3`
 	default:
 		return "", ErrNotFound
 	}

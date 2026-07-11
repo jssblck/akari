@@ -143,7 +143,10 @@ func registerTools(s *mcp.Server, st *store.Store, response responder) {
 		for _, r := range rows {
 			out.Sessions = append(out.Sessions, sessionRowToDTO(r))
 		}
-		out = fitSessionsToBudget(response, out)
+		out, err = fitSessionsToBudget(response, out)
+		if err != nil {
+			return nil, sessionsDTO{}, err
+		}
 		return jsonResult(response, sessionsSummary(out), out, nil)
 	})
 
