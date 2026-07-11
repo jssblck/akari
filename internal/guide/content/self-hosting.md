@@ -66,10 +66,14 @@ Only the database URL is required.
 | `AKARI_DATABASE_URL` | (required) | Postgres connection string, for example `postgres://akari:akari@localhost:5432/akari?sslmode=disable`. |
 | `AKARI_LISTEN` | `:8080` | Address the HTTP server binds. Falls back to `PORT` when unset. |
 | `AKARI_PUBLIC_URL` | (derived) | The externally reachable origin (`https://akari.example.com`). It is the OAuth issuer, the base of the URLs the [MCP](./agent-access.md) authorization flow advertises, and the trusted origin for browser writes. It must contain only an HTTP or HTTPS scheme and host, with no path, query, fragment, or user information. Falls back to `AKARI_URL`; when neither is set the server derives the origin per request. Set it explicitly in production. |
+| `AKARI_MCP_RESPONSE_BUDGET_BYTES` | `8388608` | Maximum encoded MCP tool result in bytes. Transcript pages stop at a message boundary before this limit; oversized message fields become authenticated content references. Must be between 8388608 (8 MiB) and 16777216 (16 MiB). |
 | `AKARI_COOKIE_INSECURE` | unset | Set truthy to drop the `Secure` flag on session cookies, for plain-HTTP local development. Leave unset in production so cookies are HTTPS-only. |
 | `AKARI_PROXY_AUTH_HEADER` | unset | Enables reverse-proxy single sign-on. The request header a trusted proxy in front sets to the authenticated username (for example `X-Auth-Request-Preferred-Username`). When set, akari trusts that header as the signed-in user and provisions the account on first sight. Leave unset for a direct, locally-authenticated deployment. See [Single sign-on behind a trusted proxy](#single-sign-on-behind-a-trusted-proxy). |
 | `AKARI_PROXY_AUTH_SECRET` | unset | Optional shared secret the proxy must echo (in `AKARI_PROXY_AUTH_SECRET_HEADER`) for the identity header to be trusted. Defense in depth for when network isolation alone is not enough. Only consulted when `AKARI_PROXY_AUTH_HEADER` is set. |
 | `AKARI_PROXY_AUTH_SECRET_HEADER` | `X-Akari-Proxy-Secret` | The header carrying `AKARI_PROXY_AUTH_SECRET`. Only consulted when that secret is set. |
+| `AKARI_PASSWORD_WORKERS` | `2` | Maximum Argon2 password hashes and verifications running at once. Each worker can use 64 MiB, so size this from the memory available to the server. Must be positive. |
+| `AKARI_PASSWORD_QUEUE_DEPTH` | `32` | Maximum password operations waiting behind active workers. Requests beyond this bound fail closed. Must be positive. |
+| `AKARI_PASSWORD_QUEUE_TIMEOUT` | `3s` | Maximum time an admitted password operation waits for a worker. A Go duration; must be positive. |
 | `AKARI_SWEEP_INTERVAL` | `1h` | How often the server reclaims orphaned content-addressed blobs. A Go duration (`30m`, `2h`); `0` disables the background sweep. |
 | `AKARI_OG_CACHE_TTL` | `1h` | How long a rendered Open Graph preview card of a published overview is served from cache before the next request re-renders it. A Go duration; must be positive. |
 | `AKARI_OG_CLEANUP_INTERVAL` | `24h` | How often the server prunes expired preview cards (older than `AKARI_OG_CACHE_TTL`) from the cache. A Go duration; `0` disables the sweep. |
@@ -126,6 +130,23 @@ the server in a browser and register to claim it. That account can then mint
 invite tokens (Account page) for everyone
 else, who redeem them when they register. The full account and token model is
 [Accounts and sharing](./accounts-and-sharing.md).
+
+Login and registration share the password-work limits above. Unknown usernames
+run a dummy Argon2 verification after admission, so an invalid login does not
+expose whether the account exists through the ordinary fast path. Process-local
+abuse ceilings also bound sustained attempts per normalized username and direct
+network peer. Akari does not trust `X-Forwarded-For` for this purpose; deployments
+with several replicas should enforce a fleet-wide source limit at the trusted
+edge as well.
+
+**Behind a reverse proxy, the per-source limit becomes a single shared bucket.**
+Every request the server sees arrives from the proxy's own address, so the
+per-source ceiling stops distinguishing one client from another and instead caps
+the whole instance's login and registration traffic together. A busy moment can
+then 401 legitimate logins with nothing to tell them apart from real credential
+attacks. The per-username limiter is unaffected and still protects individual
+accounts. If you need per-client source limits behind a proxy, enforce them there
+instead: the proxy sees the real client address, akari does not.
 
 ## Single sign-on behind a trusted proxy
 
@@ -243,23 +264,63 @@ akari-server reparse          # force a projection rebuild (see above)
 akari-server sweep            # reclaim orphaned content-addressed blobs now
 akari-server settle           # compute quality signals for every settled session now
 akari-server dev-seed         # fill a local server with example data (development)
-akari-server update           # update to the latest release in place
 akari-server version          # print the build version and exit
 ```
 
 `sweep` is the manual form of the periodic blob reclaim; it is safe to run any
 time, since blob liveness is computed rather than reference-counted. `settle` is
 the manual form of the periodic signals pass: it grades every settled session
-missing a current-version signals row, then exits. `update`
-downloads and swaps in the latest release (and reminds you to
-`systemctl restart akari-server` when a service is installed); inside a container,
-rebuild the image and redeploy rather than updating the binary in place.
+missing a current-version signals row, then exits.
 
 `dev-seed` is a development convenience: it creates a few demo accounts (sign in as
 `grace`, the admin, with password `akari-dev`) and ingests this machine's real
 agent sessions. It is idempotent (a no-op once the store holds sessions) and
 best-effort by default. Keep it away from
 any server holding real data.
+
+## Upgrading
+
+The server has no self-update command. The deployment mechanism that owns the
+server process also owns upgrades. Pin the replacement to a release tag so the
+running code and its reported version are reproducible.
+
+### Container deployment
+
+Check out the release tag, build a versioned image, and redeploy it through the
+same container orchestrator that runs the current image:
+
+```sh
+git checkout v0.1.0
+docker build --build-arg VERSION=v0.1.0 -t registry.example.com/akari-server:v0.1.0 .
+docker push registry.example.com/akari-server:v0.1.0
+```
+
+Update the deployment to that immutable image tag. Do not replace a binary
+inside a running container; the next container restart would restore the old
+image contents.
+
+### Package or managed binary
+
+When a package manager owns the server, install the selected package version and
+restart the service through that package's normal supervisor integration.
+
+For the systemd installation created by `install-server.sh`, run the installer
+from the release tag you intend to deploy and pass that same tag as
+`AKARI_VERSION`, then restart the service:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jssblck/akari/v0.1.0/scripts/install-server.sh \
+  | sudo AKARI_VERSION=v0.1.0 AKARI_INSTALL_DIR=/usr/local/bin sh
+sudo systemctl restart akari-server
+akari-server version
+```
+
+The installer verifies the release archive against its published checksum
+before replacing the binary. Existing `/etc/akari/server.env` configuration is
+unchanged, and the replacement server applies embedded database migrations when
+it starts. The same sequence works with another service supervisor: install a
+specific checksum-verified release archive, restart the managed process, and
+verify its reported version.
 
 ## Production
 

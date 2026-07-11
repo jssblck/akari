@@ -22,11 +22,11 @@ const (
 
 // spawnDetached starts the watch process detached from the console so it keeps
 // running with no visible window after the launching shell exits.
-func spawnDetached(self string, args []string, log *os.File) (*os.Process, error) {
+func spawnDetached(self string, args []string) (*os.Process, error) {
 	cmd := exec.Command(self, args...)
 	cmd.Stdin = nil
-	cmd.Stdout = log
-	cmd.Stderr = log
+	cmd.Stdout = nil
+	cmd.Stderr = nil
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		CreationFlags: createNewProcessGroup | detachedProcess | createNoWindow,
 	}
@@ -61,10 +61,9 @@ func unlockFile(f *os.File) error {
 	return windows.UnlockFileEx(windows.Handle(f.Fd()), 0, 1, 0, lockRegion())
 }
 
-// terminate stops the process. Windows has no SIGTERM, so this is an immediate
-// kill; the killed process cannot release its lock, but Windows drops it when the
-// process exits and the next start reclaims the unlocked file.
-func terminate(p *os.Process) error {
+// forceTerminate is used only after the named-event graceful path has failed
+// and the caller has explicitly permitted escalation.
+func forceTerminate(p *os.Process) error {
 	return p.Kill()
 }
 

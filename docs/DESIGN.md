@@ -776,6 +776,7 @@ CREATE TABLE session_raw (
   sha256_state    BYTEA,                        -- resumable digest, so hashing is O(append)
   parsed_byte_len BIGINT NOT NULL DEFAULT 0,    -- raw length the last successful rebuild covered
   parser_epoch    INT NOT NULL DEFAULT 0,       -- parse.Epoch that rebuild ran at
+  projection_revision BIGINT NOT NULL DEFAULT 0, -- increments on every committed rebuild
   parse_error     TEXT NOT NULL DEFAULT '',     -- last deterministic parse failure, '' when clean
   parse_error_epoch    INT NOT NULL DEFAULT 0,     -- epoch that failure was attempted at
   parse_error_byte_len BIGINT NOT NULL DEFAULT 0,  -- raw length that failure covered
@@ -815,6 +816,8 @@ CREATE TABLE messages (
   has_thinking   BOOLEAN NOT NULL DEFAULT FALSE,
   has_tool_use   BOOLEAN NOT NULL DEFAULT FALSE,
   content_length INT GENERATED ALWAYS AS (octet_length(content)) STORED,
+  content_sha256 CHAR(64) NOT NULL DEFAULT '',       -- trigger-maintained; '' until the startup backfill reaches an old row
+  thinking_text_sha256 CHAR(64) NOT NULL DEFAULT '', -- trigger-maintained; '' until the startup backfill reaches an old row
   -- A row is one semantic turn (Claude's split content-block lines fold by API
   -- message id). Rows are only ever written by a whole-session rebuild, so there
   -- is no "still accumulating" state to track.
@@ -1038,10 +1041,19 @@ client) decompresses it transparently while the server spends no CPU decoding it
 ### Web UI (server-rendered)
 
 The UI is server-rendered Go using `templ` for templates and HTMX for
-interactivity (filtering, pagination). In-progress sessions update live over
-server-sent events: the session view subscribes to an SSE stream and swaps in new
-messages and stats as the server parses incoming bytes. No Node toolchain; the
-binary is self-contained.
+interactivity (filtering, pagination). In-progress authenticated sessions update
+live over server-sent events: the session view subscribes to an SSE stream and
+swaps in new messages and stats as the server parses incoming bytes. Public
+session pages render a bounded transcript tail and fetch earlier windows through
+the revocable public capability URL. Each earlier-page request carries the
+projection revision from the page it extends. If a rebuild changed that revision,
+the server replaces the bounded body from a fresh snapshot instead of appending
+rows whose ordinals may describe another projection. The revision increments on
+every successful rebuild even when its output is unchanged, so a rebuild that lands
+mid-pagination always forces this resync: a conservative choice, since telling a
+genuinely unchanged projection apart from a merely re-committed one would need
+comparing rendered output rather than a counter. No Node toolchain; the binary
+is self-contained.
 
 Pages:
 
@@ -1062,8 +1074,12 @@ Pages:
   step for that call. Any subagent sessions are shown nested under the call
   that spawned them. A publish/unpublish control for the owner.
 - **Public session view**: the same session view at `/s/{public_id}` (the
-  unguessable id minted on publish), served without auth. Unpublishing clears the
-  id and the link dies.
+  unguessable id minted on publish), served without auth. The initial transcript
+  and each earlier page are bounded, and the session header plus transcript window
+  come from one repeatable-read snapshot. Tool bodies and attachments remain
+  metadata until the reader explicitly fetches their public blob URL. Every page,
+  fragment, and blob response is `no-store` and rechecks publication, so
+  unpublishing clears the id and stops the link and its dependent fetches.
 - **Search**: trigram search across message content, scoped to a project or
   global, with the same user / agent / date filters available on results.
 - **Account**: manage API tokens (create with a scope, name, revoke); admins
@@ -1078,6 +1094,15 @@ partials, not JSON, to keep the rendering in one place.
   random salt at set time; the salt and the cost parameters are stored inside the
   PHC-encoded `password_hash` string (no separate plaintext or shared salt), so
   two users with the same password produce different hashes.
+- Request-triggered Argon2 work shares a process-wide worker pool with a bounded
+  queue and wait deadline. Login uses a real dummy hash for unknown and federated
+  accounts after admission, so every ordinary credential failure runs the same
+  broad verification path and returns the same response. High abuse-only token
+  buckets limit sustained attempts per normalized username and direct network
+  peer without consuming unbounded tracking memory. Behind a reverse proxy every
+  request shares the proxy's address, so the per-source bucket degrades to one
+  shared budget for the whole instance; the per-username bucket is unaffected.
+  Registration hashing uses the same admission pool.
 - Browser sessions: opaque cookie id backed by `web_sessions`, rotated on login,
   cleared on logout.
 - API tokens: a long random string shown once at creation; only its sha256 is
@@ -1106,7 +1131,58 @@ so coding agents can read the corpus without the UI. Two decisions shape it:
   its own query logic and stays decoupled from internal renames. The raw underlying
   data the UI fetches on demand is exposed too: tool-call bodies from the CAS
   (gated by a session that references the hash, the same gate the UI enforces) and
-  a session's lossless ingested bytes, both size-capped.
+  a session's lossless ingested bytes, both size-capped. Every tool result is
+  measured after JSON encoding and capped by `AKARI_MCP_RESPONSE_BUDGET_BYTES`
+  (8 MiB by default). Eight MiB leaves transport and proxy framing below a 16 MiB
+  response limit, even when JSON escaping expands text. Transcript reads apply a
+  conservative cumulative bound in PostgreSQL before fetching message text, then
+  verify the exact `CallToolResult` size in Go. A field that cannot fit is returned
+  as a preview plus a SHA-256-bound `resource_link`; `resources/read` resolves it
+  from the message projection through the same bearer check. Token revocation,
+  message deletion, or changed field content invalidates future reads. Structured
+  output carries the DTO and text content carries only a paging summary, avoiding
+  a second full JSON copy. When trimming a `list_sessions` page down to its last
+  candidate row still leaves that single row over budget (an outlier field like
+  `git_branch` alone exceeds it), the row is not dropped: its oversized string
+  fields are truncated in place, with a marker suffix, until it fits, so every
+  page always contains the row it advances the cursor past. A row that cannot fit
+  even fully truncated (unreachable at the 8 MiB configured floor) fails the call
+  loudly rather than returning a silently empty page. The message hash columns
+  (`content_sha256`, `thinking_text_sha256`, migration 0049) back the
+  resource-link scheme above; backfilling them onto an existing corpus is
+  deliberately not part of the migration, since a full-table `UPDATE` inside the
+  same transaction as the `ALTER TABLE` would hold the column add's
+  access-exclusive lock on `messages`, the hottest table, for as long as the
+  backfill took. The migration only adds the columns (defaulted to `''`) and the
+  trigger that stamps every insert and rewrite; `akari-server` then runs
+  `Store.BackfillMessageContentHashes` once at startup, after migrations, in
+  bounded primary-key-ordered batches with a short pause between them, so a large
+  corpus catches up in the background without blocking startup or contending
+  with live traffic. Until a row is backfilled its columns still read `''`, so
+  both the resource-link generator and its resolver tolerate the sentinel:
+  generation recomputes the digest from the live field text when the stored
+  column is empty, and resolution never trusts the stored column at all, instead
+  recomputing the digest from the row it locates by session and ordinal and
+  checking it against the hash in the URI (which also reproduces the original
+  invalidation semantics: a field whose content changed since the reference was
+  minted recomputes to a different digest and is refused).
+- **Streamable HTTP request bodies have a 100 MiB hard limit.** A declared
+  oversized body is rejected before its first byte is read; a chunked body is
+  rejected after the first byte beyond the limit. Bodies larger than 1 MiB spill
+  into owner-only temporary files, with at most four live spools (400 MiB of
+  reserved temporary storage). Advisory lock sidecars let a new process remove
+  files abandoned by a crash without touching a spool owned by an old process
+  during a rolling restart. The official Go SDK v1.6.1 has no streaming or
+  file-backed JSON-RPC parser hook and calls `io.ReadAll` itself, so it still
+  copies each accepted request into memory. The application limit bounds that
+  copy at 100 MiB. The pre-reader stops the socket at the ceiling, while the
+  disk layer owns cleanup on success, protocol error, cancellation, and restart.
+- **Oversized tool results need a client-resolvable resource.** MCP's
+  `resource_link` content is the compatible reference shape: akari can return an
+  authenticated HTTPS URI plus media type and size if a tool later needs an
+  artifact endpoint. A server-local file URI is never returned to a remote
+  client. Current tools instead page transcripts and cap raw or CAS body reads at
+  8 MiB, so no artifact endpoint is exposed today.
 - **akari is its own OAuth 2.1 authorization server**, so connecting an agent
   reuses the browser session rather than asking the user to mint and paste a token.
   The server publishes the protected-resource (RFC 9728) and authorization-server
@@ -1143,6 +1219,42 @@ variables of its own (see Config):
 
 Extra or non-standard roots are added through the config file, not through new
 environment variables.
+
+Built-in roots are optional because most machines do not run every supported
+agent. Agent-provided overrides and configured extra roots are required: a
+missing, malformed, inaccessible, or partially traversed required root is a
+discovery error. A scan may return files from portions it completed, but the
+one-shot command reports the incomplete scan and exits nonzero. Watch mode logs
+the same error, deduped so a standing failure logs once (and at most once an
+hour thereafter) rather than every discovery pass, and retries on later
+discovery passes.
+
+Discovery uses a closed symlink policy on every operating system. A matching
+session-file symlink below a root is an error and is never followed, even when
+its target is a regular file inside the root, and a plain directory symlink
+below a root is ignored rather than descended into. A root itself that is a
+symlink, or on Windows a directory junction (`mklink /J`; Go's `Lstat` does not
+report a junction as a symlink, so it needs its own check, see
+`discover.ClassifyRoot`), is rejected the same way by default, with one
+exception: a linked built-in default root is skipped with a non-fatal notice
+instead of an error, since those roots are already optional and a user who
+junctioned their agent directory should not see sync start failing over it. Any
+root, built-in or configured, can opt into following its own link with the
+`follow_root_link` setting on an `extra_roots` entry; the no-follow policy still
+governs everything found inside the walk regardless. Initial discovery, polling
+metadata checks, filesystem events, and watch rescans all resolve a root through
+the identical function, so they can never disagree about whether it is usable.
+
+The closed root policy stops a link from redirecting discovery to an
+unconfigured location, but it cannot by itself stop a *file* the walk already
+approved from being swapped for a symlink in the moment between discovery and
+the client actually reading it. Resolution's header peek closes that gap at
+read time: it re-`Lstat`s the path immediately before opening it and rejects
+anything but a regular file, then compares the opened file's own `Stat` against
+that `Lstat` with `os.SameFile` before reading a single line, refusing to read
+if the path was swapped for anything else in between. Discovery's closed policy
+and this read-time identity check together are what keep a session's content
+inside the location it was discovered under.
 
 ### Project resolution and classification
 
@@ -1194,6 +1306,16 @@ visited:
   message up to the cap), scanning only newly appended bytes for the next
   boundary, advancing on each ack.
 
+Streaming uploads have no total HTTP deadline because a healthy transfer of a
+large tool body can take longer than any fixed request budget. Connection setup
+remains bounded: dialing and the TLS handshake each have a 10-second timeout,
+and response headers have a 30-second timeout. Once a body starts, the client
+applies independent 60-second idle-progress windows to request writes and
+response reads. Each window refreshes when bytes move and cancels the request if
+the connection stalls. Caller cancellation still interrupts every phase. The
+small JSON control requests (announce, existence checks, reset, and finalize)
+keep a 60-second total deadline in addition to the idle window.
+
 The client persists nothing to disk; its per-file cursor and digest live only in
 memory. If the local file already matches the server (size equals `stored_bytes`,
 hashes agree), the announce is the only call and no bytes move. Restarts, crashes,
@@ -1213,12 +1335,17 @@ rebuild the cache; divergence is always decided by the server's `prefix_sha256`.
   cover (resource exhaustion such as too many watches, or network filesystems),
   and a slow full rescan on a long timer (for example every 15 minutes) as a
   safety net.
+- Log incomplete discovery passes with their error count. Files from complete
+  portions still sync, and the next discovery pass retries failed roots or
+  subtrees.
 
 ### One-shot mode
 
 `akari sync` does a single discovery pass, uploads everything new since the
 server's `stored_bytes` per file, prints a summary (uploaded, skipped with
-reasons), and exits. This is the catch-up / cron-friendly mode.
+reasons, and discovery errors), and exits. Any discovery error makes the exit
+nonzero after safe files have been processed. This is the catch-up /
+cron-friendly mode.
 
 Discovered files sync in parallel, bounded by `--concurrency` (default
 `min(NumCPU, 8)`). The cap stays modest on purpose: each file already fans its
@@ -1234,15 +1361,30 @@ finish on a detached context. A second Ctrl-C exits the process outright.
 ### Daemon management
 
 `akari watch` is the foreground loop. `akari daemon {start|stop|status}` manages
-it as a background process per OS:
+the same loop as a detached per-user process. A single advisory file lock ensures
+only one client instance runs per machine. Its pidfile records both the PID and a
+random per-run token; the token authenticates local control and distinguishes a
+replacement process that reused the same PID.
 
-- Linux: a systemd user unit (generated and enabled), or a detached process with
-  a pidfile when systemd is absent.
-- macOS: a launchd LaunchAgent plist.
-- Windows: a detached background process (no console window), optionally
-  registered with Task Scheduler for start-at-login.
+`daemon stop` requests graceful shutdown over a user-only Unix-domain socket on
+Unix or a random per-run named event on Windows. The watcher cancels its normal
+run context, completes cleanup, and releases the advisory lock. The command does
+not report success until it observes that release, so a successful stop is also
+proof that another watcher can acquire the lock. Both the graceful wait and the
+post-termination confirmation wait are bounded (10 seconds by default).
 
-A single advisory file lock ensures only one client instance runs per machine.
+A timeout leaves the watcher running and returns an error. `--force` explicitly
+permits escalation after the graceful path fails; immediately before terminating
+the process, the command verifies that the lock is still held and the pidfile
+still contains the instance it originally contacted. A changed identity fails
+closed, so this recheck shrinks the window for PID reuse or a replacement
+watcher to redirect the escalation down to the instant between validation and
+signal delivery, which is as tight as portable APIs allow.
+
+The detached client owns a size-rotating log writer rather than inheriting an
+open append handle from its launcher. It closes the active handle before each
+rename so rotation works on Windows, keeps the handoff serialized with writes,
+and retains three 5 MiB history files beside the 5 MiB active log.
 
 ### Client config
 

@@ -2,6 +2,7 @@ package resolve
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -131,10 +132,10 @@ func TestResolverCallerCancellationDoesNotCancelSharedLookup(t *testing.T) {
 	r := NewWith(git, nil)
 
 	callerCtx, cancelCaller := context.WithCancel(context.Background())
-	callerDone := make(chan projectResult, 1)
+	callerDone := make(chan error, 1)
 	go func() {
-		key, root, reason := r.project(callerCtx, cwd)
-		callerDone <- projectResult{key: key, root: root, reason: reason}
+		_, _, _, err := r.project(callerCtx, cwd)
+		callerDone <- err
 	}()
 	select {
 	case <-lookupStarted:
@@ -144,9 +145,9 @@ func TestResolverCallerCancellationDoesNotCancelSharedLookup(t *testing.T) {
 
 	cancelCaller()
 	select {
-	case result := <-callerDone:
-		if result.key != "" || !strings.Contains(result.reason, "project lookup canceled") {
-			t.Fatalf("canceled caller result = %+v", result)
+	case err := <-callerDone:
+		if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "project lookup canceled") {
+			t.Fatalf("canceled caller error = %v", err)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("canceled caller waited for the shared lookup")
@@ -177,7 +178,10 @@ func TestResolverCallerCancellationDoesNotCancelSharedLookup(t *testing.T) {
 		t.Fatal("shared lookup did not finish after release")
 	}
 
-	key, _, reason := r.project(context.Background(), cwd)
+	key, _, reason, err := r.project(context.Background(), cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if key != "example.com/owner/repo" || reason != "" {
 		t.Fatalf("cached result = key %q, reason %q", key, reason)
 	}
@@ -209,7 +213,7 @@ func TestResolverSlowConfigStatDoesNotBlockOtherRepositories(t *testing.T) {
 	}
 	r := NewWith(git, nil)
 	for _, dir := range dirs {
-		if key, _, reason := r.project(context.Background(), dir); key == "" || reason != "" {
+		if key, _, reason, err := r.project(context.Background(), dir); key == "" || reason != "" || err != nil {
 			t.Fatalf("seed %s = key %q, reason %q", dir, key, reason)
 		}
 	}
@@ -229,7 +233,7 @@ func TestResolverSlowConfigStatDoesNotBlockOtherRepositories(t *testing.T) {
 
 	firstDone := make(chan projectResult, 1)
 	go func() {
-		key, root, reason := r.project(context.Background(), dirs[0])
+		key, root, reason, _ := r.project(context.Background(), dirs[0])
 		firstDone <- projectResult{key: key, root: root, reason: reason}
 	}()
 	select {
@@ -240,7 +244,7 @@ func TestResolverSlowConfigStatDoesNotBlockOtherRepositories(t *testing.T) {
 
 	secondDone := make(chan projectResult, 1)
 	go func() {
-		key, root, reason := r.project(context.Background(), dirs[1])
+		key, root, reason, _ := r.project(context.Background(), dirs[1])
 		secondDone <- projectResult{key: key, root: root, reason: reason}
 	}()
 	select {
@@ -282,7 +286,7 @@ func TestResolverDelayedStatCannotOverwriteNewerCacheEntry(t *testing.T) {
 		}
 	}
 	r := NewWith(git, nil)
-	if key, _, reason := r.project(context.Background(), cwd); key != "example.com/owner/old" || reason != "" {
+	if key, _, reason, err := r.project(context.Background(), cwd); key != "example.com/owner/old" || reason != "" || err != nil {
 		t.Fatalf("seed = key %q, reason %q", key, reason)
 	}
 	info, err := os.Stat(configPath)

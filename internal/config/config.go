@@ -15,6 +15,12 @@ import (
 	"time"
 )
 
+const (
+	DefaultPasswordWorkers      = 2
+	DefaultPasswordQueueDepth   = 32
+	DefaultPasswordQueueTimeout = 3 * time.Second
+)
+
 // Server holds the akari-server runtime configuration.
 type Server struct {
 	// DatabaseURL is the Postgres connection string (AKARI_DATABASE_URL).
@@ -34,6 +40,9 @@ type Server struct {
 	// and Host header, which is correct for a single-origin deployment behind a
 	// well-behaved proxy.
 	PublicURL string
+	// MCPResponseBudgetBytes caps the encoded CallToolResult body
+	// (AKARI_MCP_RESPONSE_BUDGET_BYTES). The default is 8 MiB.
+	MCPResponseBudgetBytes int
 	// SweepInterval is how often the server reclaims orphaned CAS blobs
 	// (AKARI_SWEEP_INTERVAL, a Go duration like "1h"). Defaults to 1h; set "0" to
 	// disable the background sweep (for example to run it only via the subcommand).
@@ -89,6 +98,16 @@ type Server struct {
 	// snapshot computes once on first request and then only when a fleet reparse
 	// completes.
 	InsightsRefreshInterval time.Duration
+	// PasswordWorkers is the maximum number of request-triggered Argon2 hashes or
+	// verifications that may run at once (AKARI_PASSWORD_WORKERS).
+	PasswordWorkers int
+	// PasswordQueueDepth bounds password requests waiting behind active workers
+	// (AKARI_PASSWORD_QUEUE_DEPTH). A full queue fails closed without allocating
+	// another waiter.
+	PasswordQueueDepth int
+	// PasswordQueueTimeout bounds how long admitted password work may wait for a
+	// worker (AKARI_PASSWORD_QUEUE_TIMEOUT).
+	PasswordQueueTimeout time.Duration
 }
 
 // LoadServer reads server configuration from the environment, applying defaults
@@ -114,6 +133,14 @@ func LoadServer() (Server, error) {
 		}
 		s.PublicURL = origin
 	}
+	mcpBudget, err := parsePositiveInt(os.Getenv("AKARI_MCP_RESPONSE_BUDGET_BYTES"), 8<<20)
+	if err != nil {
+		return Server{}, fmt.Errorf("AKARI_MCP_RESPONSE_BUDGET_BYTES: %w", err)
+	}
+	if mcpBudget < 8<<20 || mcpBudget > 16<<20 {
+		return Server{}, fmt.Errorf("AKARI_MCP_RESPONSE_BUDGET_BYTES must be between 8388608 and 16777216")
+	}
+	s.MCPResponseBudgetBytes = mcpBudget
 	interval, err := parseDuration(os.Getenv("AKARI_SWEEP_INTERVAL"), time.Hour)
 	if err != nil {
 		return Server{}, fmt.Errorf("AKARI_SWEEP_INTERVAL: %w", err)
@@ -147,6 +174,24 @@ func LoadServer() (Server, error) {
 		return Server{}, fmt.Errorf("AKARI_INSIGHTS_REFRESH_INTERVAL: %w", err)
 	}
 	s.InsightsRefreshInterval = insights
+	passwordWorkers, err := parsePositiveInt(os.Getenv("AKARI_PASSWORD_WORKERS"), DefaultPasswordWorkers)
+	if err != nil {
+		return Server{}, fmt.Errorf("AKARI_PASSWORD_WORKERS: %w", err)
+	}
+	s.PasswordWorkers = passwordWorkers
+	passwordQueueDepth, err := parsePositiveInt(os.Getenv("AKARI_PASSWORD_QUEUE_DEPTH"), DefaultPasswordQueueDepth)
+	if err != nil {
+		return Server{}, fmt.Errorf("AKARI_PASSWORD_QUEUE_DEPTH: %w", err)
+	}
+	s.PasswordQueueDepth = passwordQueueDepth
+	passwordQueueTimeout, err := parseDuration(os.Getenv("AKARI_PASSWORD_QUEUE_TIMEOUT"), DefaultPasswordQueueTimeout)
+	if err != nil {
+		return Server{}, fmt.Errorf("AKARI_PASSWORD_QUEUE_TIMEOUT: %w", err)
+	}
+	if passwordQueueTimeout <= 0 {
+		return Server{}, fmt.Errorf("AKARI_PASSWORD_QUEUE_TIMEOUT must be positive")
+	}
+	s.PasswordQueueTimeout = passwordQueueTimeout
 	return s, nil
 }
 

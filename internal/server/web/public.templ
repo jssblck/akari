@@ -6,58 +6,97 @@ import (
 	"github.com/jssblck/akari/internal/server/store"
 )
 
-templ PublicSessionPage(d store.SessionDetail, msgs []store.Message, tools map[int][]store.ToolCallView, attachments map[int][]store.AttachmentView, publicSubs []store.SubagentRow, hs HeaderStats, og OGMeta) {
-	@publicLayout(SessionPageTitle(d), og, Page{}) {
+templ PublicSessionPage(v SessionView, og OGMeta) {
+	@publicLayout(SessionPageTitle(v.Detail), og, Page{}) {
 		<div class="session-page">
 			<div class="session-head">
 				<div class="session-title">
 					<h1>
-						<span>{ SessionProjectLabel(d) }</span>
+						<span>{ SessionProjectLabel(v.Detail) }</span>
 						<span class="sep">/</span>
 						<span class="muted">session</span>
 					</h1>
 					<div class="session-meta">
-						<span class="tag agent">{ d.Agent }</span>
-						@kindTag(d.ProjectKind)
+						<span class="tag agent">{ v.Detail.Agent }</span>
+						@kindTag(v.Detail.ProjectKind)
 						@publicTag("")
-						<span class="muted">Shared by { d.Username }</span>
+						<span class="muted">Shared by { v.Detail.Username }</span>
 					</div>
 				</div>
 			</div>
 			<div id="session-body">
-				<div class="session-grid">
-					<aside class="outline-rail" aria-label="Outline">
-						@Outline(msgs, tools, PublicBlobBase(*d.PublicID), false)
-					</aside>
-					<div class="session-main">
-						@sessionStats(d, hs)
-						if len(publicSubs) > 0 {
-							<h2>Subagents</h2>
-							<div class="subagents">
-								<div class="table-scroll">
-									<table class="grid">
-										<tbody>
-											for _, sub := range publicSubs {
-												if sub.PublicID != nil {
-													<tr data-row-href={ PublicPath(*sub.PublicID) }>
-														<td><a href={ PublicHref(*sub.PublicID) }>{ sub.Agent } subagent</a></td>
-														<td class="num">{ fmt.Sprintf("%d", sub.MessageCount) } messages</td>
-													</tr>
-												}
-											}
-										</tbody>
-									</table>
-								</div>
-							</div>
-						}
-						<h2>Transcript</h2>
-						@Transcript(msgs, d.Agent, tools, attachments, FallbacksByOrdinal(hs.Fallbacks), PublicBlobBase(*d.PublicID))
-					</div>
-				</div>
+				@PublicSessionBody(v)
 			</div>
 		</div>
 		@inspectorModal()
 	}
+}
+
+templ PublicSessionBody(v SessionView) {
+	<div class="session-grid">
+		<aside class="outline-rail" aria-label="Outline">
+			@Outline(v.Outline, v.Tools, PublicBlobBase(*v.Detail.PublicID), false)
+		</aside>
+		<div class="session-main">
+			@sessionStats(v.Detail, v.Header)
+			if len(v.Subagents) > 0 {
+				<h2>Subagents</h2>
+				<div class="subagents">
+					<div class="table-scroll">
+						<table class="grid">
+							<tbody>
+								for _, sub := range v.Subagents {
+									if sub.PublicID != nil {
+										<tr data-row-href={ PublicPath(*sub.PublicID) }>
+											<td><a href={ PublicHref(*sub.PublicID) }>{ sub.Agent } subagent</a></td>
+											<td class="num">{ fmt.Sprintf("%d", sub.MessageCount) } messages</td>
+										</tr>
+									}
+								}
+							</tbody>
+						</table>
+					</div>
+				</div>
+			}
+			<h2>Transcript</h2>
+			@publicTranscriptWindow(v)
+		</div>
+	</div>
+}
+
+templ publicTranscriptWindow(v SessionView) {
+	if len(v.Page.Msgs) == 0 {
+		<div class="empty">No messages parsed yet.</div>
+	} else {
+		<div class="transcript">
+			if v.Page.HasEarlier {
+				@publicEarlierBar(*v.Detail.PublicID, v.Page.Msgs[0].Ordinal, v.Page.EarlierCount, v.ProjectionRevision)
+			}
+			@TranscriptRows(v.Page.Seed, v.Page.Msgs, v.Detail.Agent, v.WindowTools, v.WindowAttachments, FallbacksByOrdinal(v.Page.Fallbacks), PublicBlobBase(*v.Detail.PublicID), false)
+		</div>
+	}
+}
+
+templ publicEarlierBar(publicID string, firstOrdinal, earlierCount int, revision int64) {
+	<button
+		type="button"
+		id="transcript-earlier"
+		class="transcript-earlier"
+		hx-get={ fmt.Sprintf("%s?before=%d&revision=%d", PublicSessionBodyPath(publicID), firstOrdinal, revision) }
+		hx-target="#transcript-earlier"
+		hx-swap="outerHTML"
+		hx-disabled-elt="this"
+	>
+		<span>Show earlier</span>
+		<span class="muted small">{ EarlierCountLabel(earlierCount) }</span>
+	</button>
+}
+
+templ PublicTranscriptEarlier(v SessionView) {
+	if v.Page.HasEarlier && len(v.Page.Msgs) > 0 {
+		@publicEarlierBar(*v.Detail.PublicID, v.Page.Msgs[0].Ordinal, v.Page.EarlierCount, v.ProjectionRevision)
+	}
+	@TranscriptRows(v.Page.Seed, v.Page.Msgs, v.Detail.Agent, v.WindowTools, v.WindowAttachments, FallbacksByOrdinal(v.Page.Fallbacks), PublicBlobBase(*v.Detail.PublicID), false)
 }
 
 // PublicOverviewPage is the logged-out view of one account's published usage

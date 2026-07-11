@@ -46,9 +46,10 @@ curl -fsSL https://raw.githubusercontent.com/jssblck/akari/main/scripts/install-
 
 Add `-s -- --systemd` to the server command to also install a managed systemd
 service, a dedicated `akari` user, and an environment file at
-`/etc/akari/server.env`. Both binaries update themselves in place later with
-`akari update` / `akari-server update`. See
-[docs/releases.md](docs/releases.md) for the asset list and the install options.
+`/etc/akari/server.env`. The client updates itself in place with `akari update`.
+Upgrade the server by deploying a versioned container image or package, or by
+replacing the managed binary and restarting its service supervisor. See
+[docs/releases.md](docs/releases.md) for the asset list and upgrade options.
 
 ## Quick start
 

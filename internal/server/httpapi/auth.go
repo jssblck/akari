@@ -234,6 +234,10 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "username and password are required")
 		return
 	}
+	if !s.authAttempts.Allow(req.Username, requestSource(r), time.Now()) {
+		writeRegistrationUnavailable(w)
+		return
+	}
 	inviteHash := ""
 	if req.InviteToken != "" {
 		inviteHash = auth.HashToken(req.InviteToken)
@@ -245,9 +249,9 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "check invite token")
 		return
 	}
-	hash, err := auth.HashPassword(req.Password)
+	hash, err := s.passwords.Hash(r.Context(), req.Password)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "hash password")
+		writeRegistrationUnavailable(w)
 		return
 	}
 	u, err := s.Store.Register(r.Context(), req.Username, hash, inviteHash)
@@ -282,21 +286,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	u, err := s.Store.UserByUsername(r.Context(), strings.TrimSpace(req.Username))
-	if err != nil {
-		// Do not distinguish unknown user from bad password.
-		writeError(w, http.StatusUnauthorized, "invalid credentials")
-		return
-	}
-	if !u.HasPassword() {
-		// A federated account has no local password: it signs in through its
-		// external source (the proxy header), never here. Refuse without revealing
-		// that the account exists, matching the unknown-user response.
-		writeError(w, http.StatusUnauthorized, "invalid credentials")
-		return
-	}
-	ok, err := auth.VerifyPassword(req.Password, u.PasswordHash)
-	if err != nil || !ok {
+	u, ok := s.authenticatePassword(r, strings.TrimSpace(req.Username), req.Password)
+	if !ok {
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
@@ -305,6 +296,41 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"username": u.Username, "is_admin": u.IsAdmin})
+}
+
+// authenticatePassword keeps every failed local login on one externally visible
+// path. Missing and federated accounts verify against a real dummy hash after
+// admission, while queue pressure, cancellation, malformed stored hashes, and
+// wrong passwords all produce the same false result for the handlers.
+func (s *Server) authenticatePassword(r *http.Request, username, password string) (store.User, bool) {
+	if !s.authAttempts.Allow(username, requestSource(r), time.Now()) {
+		return store.User{}, false
+	}
+	u, lookupErr := s.Store.UserByUsername(r.Context(), username)
+	if lookupErr != nil && !errors.Is(lookupErr, store.ErrNotFound) {
+		log.Printf("password login: look up account: %v", lookupErr)
+	}
+	encoded := s.passwords.dummyHash
+	localAccount := lookupErr == nil && u.HasPassword()
+	if localAccount {
+		encoded = u.PasswordHash
+	}
+	ok, verifyErr := s.passwords.Verify(r.Context(), password, encoded)
+	if verifyErr != nil {
+		if !errors.Is(verifyErr, errPasswordWorkUnavailable) && !errors.Is(verifyErr, context.Canceled) && !errors.Is(verifyErr, context.DeadlineExceeded) {
+			log.Printf("password login: verify account: %v", verifyErr)
+		}
+		return store.User{}, false
+	}
+	if !localAccount || !ok {
+		return store.User{}, false
+	}
+	return u, true
+}
+
+func writeRegistrationUnavailable(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", "1")
+	writeError(w, http.StatusServiceUnavailable, "registration temporarily unavailable")
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {

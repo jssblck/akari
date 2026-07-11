@@ -84,18 +84,31 @@ func (s *Store) SessionAppendByID(ctx context.Context, sessionID int64, after in
 // each other (a tick colored by another projection's tools points at the wrong turn)
 // as well as with the window beside them.
 func (s *Store) fillShape(ctx context.Context, tx pgx.Tx, sessionID int64, snap *SessionSnapshot) error {
-	outline, err := s.scanMessages(ctx, tx, sessionID, messagesOutlineQuery, sessionID)
+	outline, tools, err := s.wholeSessionShape(ctx, tx, sessionID)
 	if err != nil {
 		return err
 	}
 	snap.Outline = outline
-	tools, err := s.scanToolCalls(ctx, tx, toolCallsQuery, sessionID)
-	if err != nil {
-		return err
-	}
 	snap.Tools = tools
 	snap.DupIDs, err = s.duplicateCallUIDCount(ctx, tx, sessionID)
 	return err
+}
+
+// wholeSessionShape reads the outline rail's bounded-column rows and the full tool
+// metadata for one session, inside the caller's transaction, so both surfaces derive
+// from the same projection: the authenticated session page (via fillShape) and the
+// public session page share this read rather than each carrying their own copy of the
+// two queries.
+func (s *Store) wholeSessionShape(ctx context.Context, tx pgx.Tx, sessionID int64) ([]Message, []ToolCallView, error) {
+	outline, err := s.scanMessages(ctx, tx, sessionID, messagesOutlineQuery, sessionID)
+	if err != nil {
+		return nil, nil, err
+	}
+	tools, err := s.scanToolCalls(ctx, tx, toolCallsQuery, sessionID)
+	if err != nil {
+		return nil, nil, err
+	}
+	return outline, tools, nil
 }
 
 // SessionEarlierByID loads the "Show earlier" fragment's inputs from one snapshot: the
