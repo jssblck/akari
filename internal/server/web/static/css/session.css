@@ -41,22 +41,24 @@ main:has(> .session-page) { max-width: none; }
    prompts brighter and taller so the turn cadence segments the strip. Lilac stays
    reserved for active states, per the one-voice rule. */
 .flow {
-  display: flex; align-items: flex-end; gap: 2px;
+  display: flex; align-items: flex-end;
   padding: var(--sp-sm) var(--sp-sm) var(--sp-xs);
   border: 1px solid var(--border); border-radius: var(--r-md);
   background: var(--surface); margin-bottom: var(--sp-md);
   min-height: 26px;
 }
 .flow-tick {
-  flex: 1 1 3px; max-width: 8px; min-width: 2px; height: 12px;
-  border-radius: 1px; background: var(--surface-3);
+  --flow-tick-color: var(--surface-3);
+  flex: 1 1 5px; max-width: 10px; min-width: 0; height: 12px;
+  border-radius: 1px;
+  background: linear-gradient(to right, var(--flow-tick-color) 80%, transparent 80%);
   transition: transform var(--dur-fast) var(--ease-state);
 }
 .flow-tick:hover { transform: scaleY(1.35); }
-.flow-tick.ft-user { background: var(--faint); height: 16px; }
-.flow-tick.ft-edit { background: var(--ok); }
-.flow-tick.ft-run { background: var(--info); }
-.flow-tick.ft-fail { background: var(--err); height: 16px; }
+.flow-tick.ft-user { --flow-tick-color: var(--faint); height: 16px; }
+.flow-tick.ft-edit { --flow-tick-color: var(--ok); }
+.flow-tick.ft-run { --flow-tick-color: var(--info); }
+.flow-tick.ft-fail { --flow-tick-color: var(--err); height: 16px; }
 
 /* ---- Windowed transcript: the "Show earlier" bar (P-2) ---- */
 /* The transcript's top edge while earlier turns stay unrendered: a full-width, quiet
