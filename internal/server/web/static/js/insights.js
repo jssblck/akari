@@ -2278,25 +2278,27 @@
   'use strict';
 
   // loadData parses the JSON payload the server embeds in #insights-data
-  // into window.AK_DATA. Returns false (and leaves AK_DATA untouched) when
+  // into window.AK_DATA. Returns null (and leaves AK_DATA untouched) when
   // the element is missing or empty, so a page without the insights section
   // - or a fragment that failed to render it - is a quiet no-op rather than
   // a thrown error.
   function loadData() {
     const el = document.getElementById('insights-data');
-    if (!el || !el.textContent) return false;
+    if (!el || !el.textContent) return null;
     try {
       window.AK_DATA = JSON.parse(el.textContent);
     } catch (e) {
-      return false;
+      return null;
     }
-    return true;
+    return el;
   }
 
   let resizeBound = false;
+  const hydratedPayloads = new WeakSet();
 
   function runInsights() {
-    if (!loadData()) return;
+    const payload = loadData();
+    if (!payload || hydratedPayloads.has(payload)) return;
 
     // A fresh swap carries a new #insights-data but the treemap module's
     // drill path is closed over in its own IIFE scope, so it survives the
@@ -2323,6 +2325,7 @@
     if (has('quality')) window.AK_HEALTH.renderQuality();
     if (has('economics')) window.AK_ECONOMICS.renderEconomics();
     if (has('subagents')) window.AK_SUBAGENTS.renderSubagents();
+    hydratedPayloads.add(payload);
 
     // treemap is measured off its own bounding box; re-render on resize
     // (debounced) so the squarified layout tracks the actual column width.
@@ -2360,6 +2363,14 @@
     // script sits inside each swapped region.
     const live = document.getElementById(t.id);
     if (!live || !live.querySelector('#insights-data')) return;
+    runInsights();
+  });
+
+  // htmx:load runs on content after htmx inserts and processes it. It gives range
+  // swaps a second hydration path that does not depend on afterSwap's replacement
+  // target. The WeakSet keeps both hooks idempotent for each payload element.
+  document.addEventListener('htmx:load', () => {
+    if (!document.getElementById('insights-data')) return;
     runInsights();
   });
 })();

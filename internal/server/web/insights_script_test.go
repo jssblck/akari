@@ -46,3 +46,22 @@ func TestInsightsScriptHandlesEmptyFleetAndChurnPanels(t *testing.T) {
 		}
 	}
 }
+
+func TestInsightsScriptRegistersIdempotentSwapHydrationHooks(t *testing.T) {
+	raw, err := fs.ReadFile(Static, "static/js/insights.js")
+	if err != nil {
+		t.Fatalf("read insights script: %v", err)
+	}
+	source := string(raw)
+	for _, contract := range []string{
+		"const hydratedPayloads = new WeakSet()",
+		"hydratedPayloads.has(payload)",
+		"hydratedPayloads.add(payload)",
+		"document.addEventListener('htmx:afterSwap'",
+		"document.addEventListener('htmx:load'",
+	} {
+		if !strings.Contains(source, contract) {
+			t.Errorf("insights script is missing hydration contract %q", contract)
+		}
+	}
+}
