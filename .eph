@@ -57,17 +57,16 @@ healthcheck=pg_isready -U akari -d akari
 # The web UI is templ: the server imports internal/server/web/*_templ.go, which
 # `go generate` compiles from the .templ sources. That generated Go is gitignored
 # and absent on a fresh clone, so `go run` fails with `undefined: web.*` until it
-# exists. Regenerate it in a pre-start hook so the server always builds; a restart
-# (a full down + up) re-runs this hook, picking up template edits. It is
-# idempotent.
+# exists. Generate it in the run command so eph allocates the server port before
+# resolving the environment. The command runs again on every server start and
+# picks up template edits.
 #
 # .claude/launch.json deliberately runs plain `eph dev` with no --watch globs, so
 # the stack restarts only when the preview server restarts it. If you add watch
 # globs, exclude the generated output (`--watch "!**/*_templ.go"`): eph's watcher
-# does not honor .gitignore, so the *_templ.go this hook writes on each restart
+# does not honor .gitignore, so the *_templ.go generated on each restart
 # would match a broad `**/*.go` watch and trigger a second restart per edit.
-pre-start=go generate ./...
-run=go run ./cmd/akari-server
+run=go generate ./... && go run ./cmd/akari-server
 port=auto
 # Bind loopback only, not the wildcard `:${server.port}` (which is 0.0.0.0, every
 # interface). Local dev only reaches the server via localhost (AKARI_URL, the

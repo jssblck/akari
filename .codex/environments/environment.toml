@@ -1,0 +1,16 @@
+version = 1
+name = "akari"
+
+[setup]
+script = '''
+go generate ./...
+eph up postgres
+'''
+
+[cleanup]
+script = "eph clean"
+
+[[actions]]
+name = "serve"
+icon = "run"
+command = "eph dev server"
