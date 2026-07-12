@@ -211,11 +211,9 @@ func TestParseCodex(t *testing.T) {
 	}
 }
 
-// TestParseCodexContext pins that Codex's injected framing is classified as context,
-// not as a human prompt: the AGENTS.md-plus-environment turn Codex prepends, and the
-// environment block it re-injects mid-session after a compaction, both take
-// RoleContext, while the real prompts stay RoleUser. This is what keeps the framing
-// out of the session title, the user-message count, and prompt hygiene downstream.
+// TestParseCodexContext pins both ways Codex framing becomes context. Two opening
+// user turns make the first context even when a new injected block precedes the
+// known markers. Marker matching still catches framing re-injected after compaction.
 func TestParseCodexContext(t *testing.T) {
 	s, err := Parse(AgentCodex, loadFixture(t, "codex_context.jsonl"))
 	if err != nil {
@@ -228,11 +226,12 @@ func TestParseCodexContext(t *testing.T) {
 		t.Fatalf("messages = %d, want 5", len(s.Messages))
 	}
 
-	// The prepended AGENTS.md + environment_context turn is context, not the opening prompt.
+	// Codex can add new blocks before AGENTS.md. The consecutive opening user turns
+	// provide the durable signal that the first turn is framing.
 	if s.Messages[0].Role != RoleContext {
 		t.Errorf("message 0 role = %q, want context", s.Messages[0].Role)
 	}
-	if !strings.HasPrefix(s.Messages[0].Content, "# AGENTS.md instructions for ") {
+	if !strings.HasPrefix(s.Messages[0].Content, "<recommended_plugins>") {
 		t.Errorf("message 0 content = %q", s.Messages[0].Content)
 	}
 
@@ -265,29 +264,67 @@ func TestParseCodexContext(t *testing.T) {
 	}
 }
 
-// TestIsCodexContext pins the marker detection directly: each wrapper Codex uses for
-// injected framing (the AGENTS.md header, the environment_context tag, and the
-// user_instructions tag some builds wrap AGENTS.md in) reads as context, leading
-// whitespace and all, while an ordinary prompt that merely mentions those words does
-// not. The user_instructions arm has no fixture of its own, so this is its guard.
+func TestParseCodexOpeningUserPairPromotesFirstWithoutMarkers(t *testing.T) {
+	raw := []byte(
+		`{"type":"response_item","timestamp":"2024-02-01T09:00:00Z","payload":{"role":"user","content":[{"type":"input_text","text":"future injected framing with no known marker"}]}}` + "\n" +
+			`{"type":"response_item","timestamp":"2024-02-01T09:00:01Z","payload":{"role":"user","content":[{"type":"input_text","text":"Add rate limiting"}]}}` + "\n" +
+			`{"type":"response_item","timestamp":"2024-02-01T09:00:08Z","payload":{"role":"assistant","content":[{"type":"output_text","text":"On it."}]}}` + "\n",
+	)
+
+	s, err := Parse(AgentCodex, raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(s.Messages) != 3 {
+		t.Fatalf("messages = %d, want 3", len(s.Messages))
+	}
+	if s.Messages[0].Role != RoleContext {
+		t.Errorf("message 0 role = %q, want context", s.Messages[0].Role)
+	}
+	if s.Messages[1].Role != RoleUser || s.Messages[1].Content != "Add rate limiting" {
+		t.Errorf("message 1 = %+v", s.Messages[1])
+	}
+}
+
 func TestIsCodexContext(t *testing.T) {
-	cases := []struct {
+	tests := []struct {
 		name string
 		text string
 		want bool
 	}{
-		{"agents header", "# AGENTS.md instructions for /home/ada/akari\n\n<INSTRUCTIONS>\nx\n</INSTRUCTIONS>", true},
-		{"environment block", "<environment_context>\n  <cwd>/x</cwd>\n</environment_context>", true},
-		{"user_instructions block", "<user_instructions>\nRun the tests.\n</user_instructions>", true},
-		{"leading whitespace before marker", "\n  <environment_context>\n</environment_context>", true},
-		{"ordinary prompt", "Add rate limiting to the ingest endpoint", false},
-		{"prompt mentioning the file mid-sentence", "please update AGENTS.md instructions for the repo", false},
-		{"empty", "", false},
+		{
+			name: "new preamble before environment",
+			text: "prefix\n<recommended_plugins>plugins</recommended_plugins>\nsuffix\n<environment_context>cwd</environment_context>",
+			want: true,
+		},
+		{
+			name: "agents instructions after other text",
+			text: "unrecognized preamble\n# AGENTS.md instructions for /home/ada/project\n<environment_context>cwd</environment_context>",
+			want: true,
+		},
+		{
+			name: "legacy user instructions paired with preamble",
+			text: "<user_instructions>Run tests.</user_instructions>\n<recommended_plugins>plugins</recommended_plugins>",
+			want: true,
+		},
+		{
+			name: "one marker",
+			text: "please explain <environment_context> in this prompt",
+			want: false,
+		},
+		{
+			name: "same marker repeated",
+			text: "<environment_context>one</environment_context>\n<environment_context>two</environment_context>",
+			want: false,
+		},
+		{name: "ordinary prompt", text: "Add rate limiting to the ingest endpoint", want: false},
+		{name: "empty", text: "", want: false},
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := isCodexContext(c.text); got != c.want {
-				t.Errorf("isCodexContext(%q) = %v, want %v", c.text, got, c.want)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isCodexContext(tt.text); got != tt.want {
+				t.Errorf("isCodexContext() = %v, want %v", got, tt.want)
 			}
 		})
 	}

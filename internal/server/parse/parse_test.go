@@ -329,11 +329,11 @@ func TestCodexContextExcludedFromCounts(t *testing.T) {
 	}
 	sid := ann.SessionID
 
-	// session_meta, the developer instructions (dropped), the AGENTS.md + environment_context turn
-	// (context), the real prompt, and an assistant reply, all in one chunk.
+	// session_meta, dropped developer instructions, an injected turn with a new
+	// preamble before AGENTS.md, the real prompt, and an assistant reply.
 	chunk := `{"type":"session_meta","timestamp":"2024-01-01T10:00:00Z","payload":{"cwd":"/home/ada/akari","git":{"branch":"main"},"model":"gpt-5-codex"}}` + "\n" +
 		`{"type":"response_item","timestamp":"2024-01-01T10:00:00Z","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<permissions instructions>never</permissions instructions>"}]}}` + "\n" +
-		`{"type":"response_item","timestamp":"2024-01-01T10:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /home/ada/akari\n\n<INSTRUCTIONS>\nRun make build.\n</INSTRUCTIONS>"},{"type":"input_text","text":"<environment_context>\n  <cwd>/home/ada/akari</cwd>\n</environment_context>"}]}}` + "\n" +
+		`{"type":"response_item","timestamp":"2024-01-01T10:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<recommended_plugins>\nInstall useful plugins.\n</recommended_plugins>"},{"type":"input_text","text":"# AGENTS.md instructions for /home/ada/akari\n\n<INSTRUCTIONS>\nRun make build.\n</INSTRUCTIONS>"},{"type":"input_text","text":"<environment_context>\n  <cwd>/home/ada/akari</cwd>\n</environment_context>"}]}}` + "\n" +
 		`{"type":"response_item","timestamp":"2024-01-01T10:00:01Z","payload":{"role":"user","content":[{"type":"input_text","text":"Add rate limiting"}]}}` + "\n" +
 		`{"type":"response_item","timestamp":"2024-01-01T10:00:05Z","payload":{"role":"assistant","content":[{"type":"output_text","text":"On it."}]}}` + "\n"
 

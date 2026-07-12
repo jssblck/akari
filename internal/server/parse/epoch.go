@@ -204,4 +204,15 @@ package parse
 // client's next sync detects the transformed-prefix mismatch, resets, and
 // reuploads the corrected transcript; a session never synced again retains its
 // old body. The golden fixtures contain no unpaired surrogates and stay fixed.
-const Epoch = 17
+//
+// Epoch 17 -> 18: classify the first of two consecutive opening Codex user
+// turns as context. Codex now sometimes prepends blocks such as
+// <recommended_plugins> before AGENTS.md, so the earlier marker-prefix test
+// misses injected framing and stores it as a human prompt. The structural rule
+// restores the Context section, title, user-message count, and prompt-hygiene
+// inputs without coupling Akari to each new injected block. Marker matching now
+// recognizes recommended_plugins and requires two distinct known markers
+// anywhere in the turn, which also handles reordered framing without accepting
+// a prompt that quotes one marker. Rebuilding the corpus updates affected
+// message roles and their derived session data.
+const Epoch = 18
