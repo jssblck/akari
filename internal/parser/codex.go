@@ -107,14 +107,11 @@ func (r *reducer) reduceCodex(region []byte, base int64) error {
 			case p.Get("role").String() == "user":
 				// addUser/addContext close the open assistant turn themselves.
 				text := blockText(p.Get("content"))
+				r.promoteCodexOpeningContext()
 				if isCodexContext(text) {
-					// Codex prepends the project's AGENTS.md instructions and an
-					// environment_context block as a synthetic user turn before the real
-					// prompt (and re-injects the environment after a compaction). It is
-					// framing, not a human prompt, so record it as context: the session
-					// title, user_message_count, and prompt hygiene then read the real
-					// opening prompt instead of this block. Such a turn carries no pasted
-					// images, so there is nothing to attach.
+					// Injected framing is not a human prompt. Recording it as context
+					// keeps it out of the title, user count, and prompt hygiene. These
+					// turns carry no pasted images.
 					r.addContext(text, ts)
 					return nil
 				}
@@ -176,19 +173,45 @@ func (r *reducer) reduceCodex(region []byte, base int64) error {
 	})
 }
 
-// isCodexContext reports whether a Codex user turn is injected framing rather than a
-// human prompt. Codex wraps each piece it prepends in a stable marker: the project
-// memory as "# AGENTS.md instructions for <cwd>" (older builds wrap it in a
-// <user_instructions> tag) and the runtime facts in an <environment_context> block.
-// A turn whose text opens with one of those markers is context; a real prompt
-// effectively never begins with these exact tokens. Matching on content rather than
-// position also catches the environment_context Codex re-injects mid-session after a
-// compaction, not only the first turn.
+// promoteCodexOpeningContext handles injected framing without depending on its
+// contents. Codex writes framing and the human prompt as consecutive opening user
+// turns. When the second arrives, the first is the Context section. An open
+// assistant turn proves the user turns were separated by a response, so it blocks
+// the promotion. Marker matching remains responsible for framing later in a session.
+func (r *reducer) promoteCodexOpeningContext() {
+	if r.open != nil || len(r.d.Messages) != 1 {
+		return
+	}
+	first := &r.d.Messages[0]
+	if first.Ordinal == 0 && first.Role == RoleUser {
+		first.Role = RoleContext
+	}
+}
+
+var codexContextMarkers = [...]string{
+	"# AGENTS.md instructions for ",
+	"<environment_context>",
+	"<user_instructions>",
+	"<recommended_plugins>",
+}
+
+// isCodexContext reports whether a Codex user turn contains at least two distinct
+// framing markers. The markers can occur in any order because Codex adds new injected
+// blocks over time. Requiring two avoids treating a human prompt that quotes one marker
+// as context. Opening framing also has a structural fallback in
+// promoteCodexOpeningContext.
 func isCodexContext(text string) bool {
-	t := strings.TrimSpace(text)
-	return strings.HasPrefix(t, "# AGENTS.md instructions for ") ||
-		strings.HasPrefix(t, "<environment_context>") ||
-		strings.HasPrefix(t, "<user_instructions>")
+	found := 0
+	for _, marker := range codexContextMarkers {
+		if !strings.Contains(text, marker) {
+			continue
+		}
+		found++
+		if found == 2 {
+			return true
+		}
+	}
+	return false
 }
 
 // addCodexReasoning records one Codex reasoning item on the open turn. Codex ships
