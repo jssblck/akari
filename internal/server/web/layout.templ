@@ -13,16 +13,16 @@ templ layout(p Page) {
 			<title>{ p.Title } - akari</title>
 			@faviconLinks()
 			@tzCookieScript()
-			<link rel="preload" href="/static/fonts/Geist-Regular.woff2" as="font" type="font/woff2" crossorigin/>
-			<link rel="preload" href="/static/fonts/GeistMono-Regular.woff2" as="font" type="font/woff2" crossorigin/>
+			<link rel="preload" href={ StaticURL("fonts/Geist-Regular.woff2") } as="font" type="font/woff2" crossorigin/>
+			<link rel="preload" href={ StaticURL("fonts/GeistMono-Regular.woff2") } as="font" type="font/woff2" crossorigin/>
 			@stylesheets()
-			<script src="/static/htmx.min.js" defer></script>
-			<script src="/static/charts.js" defer></script>
-			<script src="/static/app.js" defer></script>
+			<script src={ StaticURL("htmx.min.js") } defer></script>
+			<script src={ StaticURL("charts.js") } defer></script>
+			<script src={ StaticURL("app.js") } defer></script>
 			// The insights chart engine self-guards on #insights-data, so it is a no-op on
 			// every page but /insights; loading it in the shared head keeps it warm for the
 			// htmx swaps the range control drives.
-			<script src="/static/js/insights.js" defer></script>
+			<script src={ StaticURL("js/insights.js") } defer></script>
 		</head>
 		<body>
 			if p.LoggedIn {
@@ -91,16 +91,16 @@ templ faviconLinks() {
 // set, since components are reused across pages; the split is organizational, not
 // a per-page subset.
 templ stylesheets() {
-	<link rel="stylesheet" href="/static/css/base.css"/>
-	<link rel="stylesheet" href="/static/css/layout.css"/>
-	<link rel="stylesheet" href="/static/css/auth.css"/>
-	<link rel="stylesheet" href="/static/css/landing.css"/>
-	<link rel="stylesheet" href="/static/css/overview.css"/>
-	<link rel="stylesheet" href="/static/css/insights.css"/>
-	<link rel="stylesheet" href="/static/css/projects.css"/>
-	<link rel="stylesheet" href="/static/css/sessions.css"/>
-	<link rel="stylesheet" href="/static/css/session.css"/>
-	<link rel="stylesheet" href="/static/css/account.css"/>
+	<link rel="stylesheet" href={ StaticURL("css/base.css") }/>
+	<link rel="stylesheet" href={ StaticURL("css/layout.css") }/>
+	<link rel="stylesheet" href={ StaticURL("css/auth.css") }/>
+	<link rel="stylesheet" href={ StaticURL("css/landing.css") }/>
+	<link rel="stylesheet" href={ StaticURL("css/overview.css") }/>
+	<link rel="stylesheet" href={ StaticURL("css/insights.css") }/>
+	<link rel="stylesheet" href={ StaticURL("css/projects.css") }/>
+	<link rel="stylesheet" href={ StaticURL("css/sessions.css") }/>
+	<link rel="stylesheet" href={ StaticURL("css/session.css") }/>
+	<link rel="stylesheet" href={ StaticURL("css/account.css") }/>
 }
 
 // noticeBanner is the slim one-shot confirmation strip rendered at the top of
@@ -247,16 +247,16 @@ templ publicLayout(title string, og OGMeta, viewer Page) {
 			@faviconLinks()
 			@tzCookieScript()
 			@ogTags(title, og)
-			<link rel="preload" href="/static/fonts/Geist-Regular.woff2" as="font" type="font/woff2" crossorigin/>
-			<link rel="preload" href="/static/fonts/GeistMono-Regular.woff2" as="font" type="font/woff2" crossorigin/>
+			<link rel="preload" href={ StaticURL("fonts/Geist-Regular.woff2") } as="font" type="font/woff2" crossorigin/>
+			<link rel="preload" href={ StaticURL("fonts/GeistMono-Regular.woff2") } as="font" type="font/woff2" crossorigin/>
 			@stylesheets()
 			// The public layout carries the same script set as the signed-in shell: the
 			// public overview hydrates its activity heatmap from charts.js and switches
 			// its window through htmx, so both must load here, not only on the authed
 			// pages. The public session view loads them too at a negligible cost.
-			<script src="/static/htmx.min.js" defer></script>
-			<script src="/static/charts.js" defer></script>
-			<script src="/static/app.js" defer></script>
+			<script src={ StaticURL("htmx.min.js") } defer></script>
+			<script src={ StaticURL("charts.js") } defer></script>
+			<script src={ StaticURL("app.js") } defer></script>
 		</head>
 		<body>
 			<header class="topbar">

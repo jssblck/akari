@@ -2,6 +2,7 @@ package web
 
 import (
 	"io/fs"
+	"net/url"
 	"regexp"
 	"strings"
 	"testing"
@@ -27,14 +28,22 @@ func TestStylesheetsLinkEmbeddedFiles(t *testing.T) {
 		if len(hrefs) == 0 {
 			t.Fatalf("%s: rendered no stylesheet links", tc.name)
 		}
-		if first := hrefs[0][1]; first != "/static/css/base.css" {
-			t.Errorf("%s: first stylesheet is %q, want /static/css/base.css (tokens and resets must cascade first)", tc.name, first)
+		if first, err := url.Parse(hrefs[0][1]); err != nil || first.Path != "/static/css/base.css" {
+			t.Errorf("%s: first stylesheet is %q, want /static/css/base.css (tokens and resets must cascade first)", tc.name, hrefs[0][1])
 		}
 		for _, h := range hrefs {
 			href := h[1]
-			embedPath := "static/" + strings.TrimPrefix(href, "/static/")
+			assetURL, err := url.Parse(href)
+			if err != nil {
+				t.Errorf("%s: parse stylesheet URL %q: %v", tc.name, href, err)
+				continue
+			}
+			embedPath := "static/" + strings.TrimPrefix(assetURL.Path, "/static/")
 			if _, err := fs.Stat(Static, embedPath); err != nil {
 				t.Errorf("%s: linked stylesheet %q is not in the embedded FS (%v)", tc.name, href, err)
+			}
+			if assetURL.Query().Get("v") == "" {
+				t.Errorf("%s: linked stylesheet %q has no content fingerprint", tc.name, href)
 			}
 		}
 	}
@@ -47,7 +56,11 @@ func TestEmbeddedStylesheetsAreLinked(t *testing.T) {
 	html := renderComponent(t, LoginPage(Page{Title: "Log in"}, "/", ""))
 	linked := map[string]bool{}
 	for _, h := range linkRe.FindAllStringSubmatch(html, -1) {
-		linked[strings.TrimPrefix(h[1], "/static/")] = true
+		assetURL, err := url.Parse(h[1])
+		if err != nil {
+			t.Fatalf("parse stylesheet URL %q: %v", h[1], err)
+		}
+		linked[strings.TrimPrefix(assetURL.Path, "/static/")] = true
 	}
 	entries, err := fs.ReadDir(Static, "static/css")
 	if err != nil {
