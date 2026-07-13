@@ -8,7 +8,6 @@ import (
 
 func TestLoadServerPublicOrigin(t *testing.T) {
 	t.Setenv("AKARI_DATABASE_URL", "postgres://x/y")
-	t.Setenv("AKARI_URL", "")
 
 	for _, tc := range []struct {
 		name string
@@ -48,28 +47,28 @@ func TestLoadServerPublicOrigin(t *testing.T) {
 	}
 }
 
-// TestLoadServerPublicOriginFallbackLabel confirms a validation failure names
-// whichever variable actually supplied the value. An operator who never set
-// AKARI_PUBLIC_URL, only the AKARI_URL eph exports, should see AKARI_URL
-// named in the error, not the unset variable.
-func TestLoadServerPublicOriginFallbackLabel(t *testing.T) {
+// TestLoadServerPublicOriginIgnoresAkariURL confirms the AKARI_URL eph exports
+// never becomes the public URL. It names the server's internal auto-assigned
+// port; adopting it would pin the CSRF trust boundary there and 403 browser
+// writes that arrive through a forwarded dev port (eph dev behind the Claude
+// preview gate).
+func TestLoadServerPublicOriginIgnoresAkariURL(t *testing.T) {
 	t.Setenv("AKARI_DATABASE_URL", "postgres://x/y")
 	t.Setenv("AKARI_PUBLIC_URL", "")
-	t.Setenv("AKARI_URL", "akari.example")
+	t.Setenv("AKARI_URL", "http://localhost:60663")
 
-	_, err := LoadServer()
-	if err == nil || !strings.Contains(err.Error(), "AKARI_URL") {
-		t.Fatalf("LoadServer() error = %v, want AKARI_URL error", err)
+	s, err := LoadServer()
+	if err != nil {
+		t.Fatalf("LoadServer: %v", err)
 	}
-	if strings.Contains(err.Error(), "AKARI_PUBLIC_URL") {
-		t.Fatalf("LoadServer() error = %v, wrongly names AKARI_PUBLIC_URL for an AKARI_URL value", err)
+	if s.PublicURL != "" {
+		t.Fatalf("PublicURL = %q, want empty: AKARI_URL must not pin the public origin", s.PublicURL)
 	}
 }
 
 func TestLoadServerOGCacheTTL(t *testing.T) {
 	t.Setenv("AKARI_DATABASE_URL", "postgres://x/y")
 	t.Setenv("AKARI_PUBLIC_URL", "")
-	t.Setenv("AKARI_URL", "")
 	// Isolate from any ambient value the harness may export.
 	t.Setenv("AKARI_OG_CACHE_TTL", "")
 
@@ -105,7 +104,6 @@ func TestLoadServerOGCacheTTL(t *testing.T) {
 func TestLoadServerOGCleanupInterval(t *testing.T) {
 	t.Setenv("AKARI_DATABASE_URL", "postgres://x/y")
 	t.Setenv("AKARI_PUBLIC_URL", "")
-	t.Setenv("AKARI_URL", "")
 	// Isolate from any ambient values the harness may export.
 	t.Setenv("AKARI_OG_CACHE_TTL", "")
 	t.Setenv("AKARI_OG_CLEANUP_INTERVAL", "")
@@ -141,7 +139,6 @@ func TestLoadServerOGCleanupInterval(t *testing.T) {
 func TestLoadServerInsightsRefreshInterval(t *testing.T) {
 	t.Setenv("AKARI_DATABASE_URL", "postgres://x/y")
 	t.Setenv("AKARI_PUBLIC_URL", "")
-	t.Setenv("AKARI_URL", "")
 	// Isolate from any ambient value the harness may export.
 	t.Setenv("AKARI_INSIGHTS_REFRESH_INTERVAL", "")
 

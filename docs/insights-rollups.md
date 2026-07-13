@@ -49,16 +49,17 @@ palliative:
   (`internal/server/httpapi/insights_cache.go`). Every cold key still pays the
   full compute, once a minute per range in the worst case.
 
-The project page is worse off on both counts: `handleProjectPage`
-(`internal/server/httpapi/web.go:508`) calls the same `Store.Insights` with
-`ProjectID` set and no cache at all, and because `Bucket` is always set, the
-store computes the full trend pipeline (gallery, velocity, economics, rhythm,
-subagents) even though the project template renders only the quality series and
-the tools instrument. Every project page load pays for five instruments nobody
-sees.
+The project page was worse off on both counts: its handler called the same
+`Store.Insights` with `ProjectID` set and no cache at all. Because `Bucket` was
+always set, the store computed the full trend pipeline (gallery, velocity,
+economics, rhythm, subagents) even though the page rendered only the quality
+series and tools instrument. The current JSON handler requests only
+`QualityBandPanels` (`internal/server/httpapi/app_api.go`), which avoids those
+unused instruments.
 
-The only timing instrumentation is the `Server-Timing: insights;dur=...` header
-on `/insights` (`web.go:198`). There is no benchmark or recorded baseline.
+The only timing instrumentation in the original implementation was the
+`Server-Timing: insights;dur=...` header on `/insights`. There was no benchmark
+or recorded baseline.
 
 ## Where the time goes
 

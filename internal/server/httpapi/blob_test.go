@@ -70,11 +70,7 @@ func TestDeleteSessionAuthz(t *testing.T) {
 		return c
 	}
 	del := func(c *http.Client, id int64) int {
-		resp, err := c.PostForm(srv.URL+fmt.Sprintf("/sessions/%d/delete", id), url.Values{})
-		if err != nil {
-			t.Fatalf("delete %d: %v", id, err)
-		}
-		resp.Body.Close()
+		resp, _ := doJSON(t, c, http.MethodDelete, srv.URL+fmt.Sprintf("/api/v1/app/sessions/%d", id), nil)
 		return resp.StatusCode
 	}
 	seed := func(owner int64, src string) int64 {
@@ -102,8 +98,8 @@ func TestDeleteSessionAuthz(t *testing.T) {
 
 	// The owner can delete their own session.
 	adaSession := seed(user.ID, "ada-1")
-	if code := del(adaClient, adaSession); code != http.StatusSeeOther {
-		t.Fatalf("owner delete status = %d, want 303", code)
+	if code := del(adaClient, adaSession); code != http.StatusOK {
+		t.Fatalf("owner delete status = %d, want 200", code)
 	}
 	if _, err := st.SessionDetailByID(ctx, adaSession); err == nil {
 		t.Fatal("owner-deleted session still present")
@@ -111,8 +107,8 @@ func TestDeleteSessionAuthz(t *testing.T) {
 
 	// An admin can delete another user's session.
 	adaSession2 := seed(user.ID, "ada-2")
-	if code := del(graceClient, adaSession2); code != http.StatusSeeOther {
-		t.Fatalf("admin delete status = %d, want 303", code)
+	if code := del(graceClient, adaSession2); code != http.StatusOK {
+		t.Fatalf("admin delete status = %d, want 200", code)
 	}
 	if _, err := st.SessionDetailByID(ctx, adaSession2); err == nil {
 		t.Fatal("admin-deleted session still present")

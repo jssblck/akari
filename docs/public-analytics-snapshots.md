@@ -50,7 +50,7 @@ identical:
   project views continue to read their narrower scope directly.
 
 The project generation includes the by-user and trend fields needed by the
-authenticated page. The public template does not render account names or session
+authenticated page. The public React view does not render account names or session
 links. On the authenticated page, its aggregate panel can trail the live session
 rows by the configured freshness interval.
 

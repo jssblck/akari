@@ -8,6 +8,9 @@
 *.out
 coverage.*
 
+# Frontend dependencies are restored from the committed Bun lockfile.
+/frontend/node_modules/
+
 # Go workspace file
 go.work
 go.work.sum

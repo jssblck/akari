@@ -100,7 +100,7 @@ func TestUnpublishedAnalyticsChecksAccessBeforeAdmission(t *testing.T) {
 	}
 	defer hold()
 
-	resp, err := http.Get(srv.URL + "/p/999999")
+	resp, err := http.Get(srv.URL + "/api/v1/app/public/projects/999999")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestExpensiveRoutesPublishClassMetrics(t *testing.T) {
 	}{
 		{http.MethodPost, "/oauth/register", validOAuthRegistration},
 		{http.MethodPost, "/mcp", `{}`},
-		{http.MethodGet, fmt.Sprintf("/p/%d", projectID), ""},
+		{http.MethodGet, fmt.Sprintf("/api/v1/app/public/projects/%d", projectID), ""},
 	}
 	for _, req := range requests {
 		r, err := http.NewRequest(req.method, srv.URL+req.path, strings.NewReader(req.body))

@@ -103,6 +103,15 @@ templ stylesheets() {
 	<link rel="stylesheet" href={ StaticURL("css/account.css") }/>
 }
 
+// landingStylesheets is the homepage's deliberately small static cascade. The
+// React application owns every other browser route, so the templated homepage no
+// longer ships the retired app shell or page-specific styles.
+templ landingStylesheets() {
+	<link rel="stylesheet" href={ StaticURL("css/base.css") }/>
+	<link rel="stylesheet" href={ StaticURL("css/layout.css") }/>
+	<link rel="stylesheet" href={ StaticURL("css/landing.css") }/>
+}
+
 // noticeBanner is the slim one-shot confirmation strip rendered at the top of
 // main when the previous POST set a notice cookie: "Published", "Session
 // deleted", and the like. It renders as a plain text node (templ escapes it
@@ -249,14 +258,7 @@ templ publicLayout(title string, og OGMeta, viewer Page) {
 			@ogTags(title, og)
 			<link rel="preload" href={ StaticURL("fonts/Geist-Regular.woff2") } as="font" type="font/woff2" crossorigin/>
 			<link rel="preload" href={ StaticURL("fonts/GeistMono-Regular.woff2") } as="font" type="font/woff2" crossorigin/>
-			@stylesheets()
-			// The public layout carries the same script set as the signed-in shell: the
-			// public overview hydrates its activity heatmap from charts.js and switches
-			// its window through htmx, so both must load here, not only on the authed
-			// pages. The public session view loads them too at a negligible cost.
-			<script src={ StaticURL("htmx.min.js") } defer></script>
-			<script src={ StaticURL("charts.js") } defer></script>
-			<script src={ StaticURL("app.js") } defer></script>
+			@landingStylesheets()
 		</head>
 		<body>
 			<header class="topbar">

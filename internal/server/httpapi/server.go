@@ -10,6 +10,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/jssblck/akari/internal/config"
+	"github.com/jssblck/akari/internal/server/frontend"
 	"github.com/jssblck/akari/internal/server/parse"
 	"github.com/jssblck/akari/internal/server/requestbudget"
 	"github.com/jssblck/akari/internal/server/store"
@@ -132,6 +133,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /oauth/register", s.admit(requestbudget.OAuthRegistration, s.handleOAuthRegister))
 	mux.HandleFunc("GET /oauth/authorize", s.handleOAuthAuthorize)
 	mux.HandleFunc("POST /oauth/authorize", s.handleOAuthDecision)
+	mux.HandleFunc("GET /api/v1/app/oauth/authorize", s.requireFull(s.handleAPIOAuthConsent))
 	mux.HandleFunc("POST /oauth/token", s.handleOAuthToken)
 	// The MCP transport multiplexes POST (messages), GET (the SSE stream), and
 	// DELETE (session teardown) on one path, so it registers without a method filter
@@ -151,8 +153,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/ingest/blobs/check", s.requireIngest(s.handleBlobCheck))
 	mux.HandleFunc("PUT /api/v1/ingest/blob/{sha256}", s.requireIngest(s.handleBlobUpload))
 
-	// Static assets.
+	// Static assets. /static remains the landing page's embedded stylesheet and
+	// imagery; /app-assets is the independently built React application.
 	mux.Handle("GET /static/", staticHandler())
+	mux.Handle("GET /app-assets/", http.StripPrefix("/app-assets/", frontend.Assets()))
 	// Browsers request /favicon.ico at the root unprompted; serve the embedded
 	// icon there so that automatic hit does not 404.
 	mux.HandleFunc("GET /favicon.ico", s.handleFaviconICO)
@@ -162,8 +166,8 @@ func (s *Server) Routes() http.Handler {
 	// content independent of the parsed projection, so it carries neither the auth
 	// gate nor the reparse gate. handleGuidePage splits the .md suffix itself, so
 	// /guide/<slug> and /guide/<slug>.md share one route.
-	mux.HandleFunc("GET /guide", s.handleGuideIndex)
-	mux.HandleFunc("GET /guide/{slug}", s.handleGuidePage)
+	mux.HandleFunc("GET /guide", s.handleAppShell)
+	mux.HandleFunc("GET /guide/{slug}", s.handleGuideRoute)
 	mux.HandleFunc("GET /llms.txt", s.handleLLMsTxt)
 	mux.HandleFunc("GET /llms-full.txt", s.handleLLMsFullTxt)
 
@@ -172,7 +176,6 @@ func (s *Server) Routes() http.Handler {
 	// parsed projection), so these are not behind the reparse gate.
 	mux.HandleFunc("GET /api/v1/session/{id}/blob/{sha256}", s.requireFull(s.handleSessionBlob))
 	mux.HandleFunc("GET /s/{public_id}/blob/{sha256}", s.handlePublicBlob)
-	mux.HandleFunc("GET /s/{public_id}/body", s.gatePublicParsed(s.handlePublicSessionBody))
 
 	// Reparse status and live progress. The status JSON is the poll fallback; the
 	// SSE stream pushes the same payload so a watching page updates its progress bar
@@ -180,17 +183,44 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/reparse/status", s.requireFull(s.handleReparseStatus))
 	mux.HandleFunc("GET /api/v1/reparse/events", s.requireFull(s.handleReparseEvents))
 
-	// Server-rendered UI: public, logged-out pages. The public session view shows
-	// parsed data, so it is gated while a reparse rebuilds the projection.
-	mux.HandleFunc("GET /s/{public_id}", s.gatePublicParsed(s.handlePublicSession))
+	// React application API. These endpoints are the browser's only source of
+	// application data; HTML routes below serve a route-neutral embedded shell.
+	mux.HandleFunc("GET /api/v1/app/bootstrap", s.handleAppBootstrap)
+	mux.HandleFunc("GET /api/v1/app/overview", s.requireFull(s.gateAPIParsed(s.handleAPIOverview)))
+	mux.HandleFunc("GET /api/v1/app/insights", s.requireFull(s.gateAPIParsed(s.handleAPIInsights)))
+	mux.HandleFunc("GET /api/v1/app/projects", s.requireFull(s.gateAPIParsed(s.handleAPIProjects)))
+	mux.HandleFunc("GET /api/v1/app/projects/{id}", s.requireFull(s.gateAPIParsed(s.handleAPIProject)))
+	mux.HandleFunc("GET /api/v1/app/sessions", s.requireFull(s.gateAPIParsed(s.handleAPISessions)))
+	mux.HandleFunc("GET /api/v1/app/sessions/{id}", s.requireFull(s.gateAPIParsed(s.handleAPISession)))
+	mux.HandleFunc("GET /api/v1/app/sessions/{id}/transcript", s.requireFull(s.gateAPIParsed(s.handleAPISessionEarlier)))
+	mux.HandleFunc("PUT /api/v1/app/sessions/{id}/publication", s.requireFull(s.handleAPISessionPublication))
+	mux.HandleFunc("DELETE /api/v1/app/sessions/{id}", s.requireFull(s.handleAPIDeleteSession))
+	mux.HandleFunc("PUT /api/v1/app/projects/{id}/publication", s.requireFull(s.handleAPIProjectPublication))
+	mux.HandleFunc("PUT /api/v1/app/account/overview-publication", s.requireFull(s.handleAPIOverviewPublication))
+	mux.HandleFunc("GET /api/v1/app/account", s.requireFull(s.handleAPIAccount))
+	mux.HandleFunc("DELETE /api/v1/app/account/connections/{client_id}", s.requireFull(s.handleAPIRevokeConnection))
+	mux.HandleFunc("DELETE /api/v1/app/account/invites/{id}", s.requireAdmin(s.handleAPIRevokeInvite))
+	mux.HandleFunc("POST /api/v1/app/reparse", s.requireAdmin(s.handleAPIReparse))
+	mux.HandleFunc("GET /api/v1/app/guide/{$}", s.handleAPIGuide)
+	mux.HandleFunc("GET /api/v1/app/guide/{slug}", s.handleAPIGuide)
+	mux.HandleFunc("GET /api/v1/app/public/users/{username}", s.handleAPIPublicOverview)
+	mux.HandleFunc("GET /api/v1/app/public/projects/{id}", s.handleAPIPublicProject)
+	mux.HandleFunc("GET /api/v1/app/public/sessions/{public_id}", s.handleAPIPublicSession)
+	mux.HandleFunc("GET /api/v1/app/public/sessions/{public_id}/transcript", s.handleAPIPublicSessionEarlier)
+	mux.HandleFunc("GET /api/openapi.json", s.handleOpenAPI)
+	mux.HandleFunc("GET /openapi.json", s.handleOpenAPI)
+
+	// Public React routes resolve their publication gate before returning the shell;
+	// the application API separately gates parsed data during a rebuild.
+	mux.HandleFunc("GET /s/{public_id}", s.handlePublicSessionShell)
 	// A user's published usage overview at /u/<username>: aggregate, scoped to that
 	// one account, and gated during a reparse like the public session view (it shows
 	// parsed data).
-	mux.HandleFunc("GET /u/{username}", s.gatePublicParsed(s.handlePublicOverview))
+	mux.HandleFunc("GET /u/{username}", s.handlePublicUserShell)
 	// A project's published usage overview at /p/<id>: aggregate, scoped to that one
 	// project across every account, with no session list. Gated during a reparse like
 	// the other public parsed pages.
-	mux.HandleFunc("GET /p/{id}", s.gatePublicParsed(s.handlePublicProject))
+	mux.HandleFunc("GET /p/{id}", s.handlePublicProjectShell)
 	// The Open Graph preview cards for the three per-entity public pages. Each serves
 	// PNG bytes rendered on demand and held in a TTL cache, so none is reparse-gated: the
 	// more specific /og.png pattern wins over the page pattern (/u/{username}, /p/{id},
@@ -207,46 +237,27 @@ func (s *Server) Routes() http.Handler {
 	// bytes memoized per binary (see handleLandingOGImage), so like the overview
 	// card route it needs no auth and no reparse gate.
 	mux.HandleFunc("GET /og.png", s.handleLandingOGImage)
-	mux.HandleFunc("GET /login", s.handleLoginPage)
+	mux.HandleFunc("GET /login", s.handleAppShell)
 	mux.HandleFunc("POST /login", s.handleLoginForm)
-	mux.HandleFunc("GET /register", s.handleRegisterPage)
+	mux.HandleFunc("GET /register", s.handleAppShell)
 	mux.HandleFunc("POST /register", s.handleRegisterForm)
 	mux.HandleFunc("POST /logout", s.handleLogoutForm)
+	mux.HandleFunc("GET /api/docs", s.handleAppShell)
 
-	// Server-rendered UI: read pages (require a full-scope credential). Pages that
-	// serve parsed/projected session data are wrapped in gateParsed, which renders a
-	// "reparse in progress" page (with a live progress bar) instead of stale or
-	// half-rebuilt rows while a reparse runs. The session events SSE stream stays
-	// ungated: gating it would write HTML into the event stream, and the gated
-	// session page does not open it anyway.
+	// Private React routes require a full-scope browser session. Parsed-data API
+	// requests return a retryable service-unavailable response during a rebuild.
 	mux.HandleFunc("GET /{$}", s.handleRoot)
-	mux.HandleFunc("GET /overview", s.requireReadHTML(s.gateParsed(s.handleOverview)))
-	mux.HandleFunc("GET /insights", s.requireReadHTML(s.gateParsed(s.handleInsights)))
-	mux.HandleFunc("GET /projects", s.requireReadHTML(s.gateParsed(s.handleProjectsIndex)))
-	mux.HandleFunc("GET /sessions", s.requireReadHTML(s.gateParsed(s.handleSessions)))
-	mux.HandleFunc("GET /projects/{id}", s.requireReadHTML(s.gateParsed(s.handleProjectPage)))
-	mux.HandleFunc("GET /sessions/{id}", s.requireReadHTML(s.gateParsed(s.handleSessionPage)))
-	mux.HandleFunc("GET /sessions/{id}/body", s.requireReadHTML(s.gateParsed(s.handleSessionBody)))
+	mux.HandleFunc("GET /overview", s.requireAppShell(s.handleAppShell))
+	mux.HandleFunc("GET /insights", s.requireAppShell(s.handleAppShell))
+	mux.HandleFunc("GET /projects", s.requireAppShell(s.handleAppShell))
+	mux.HandleFunc("GET /sessions", s.requireAppShell(s.handleAppShell))
+	mux.HandleFunc("GET /projects/{id}", s.requireAppShell(s.handleAppShell))
+	mux.HandleFunc("GET /sessions/{id}", s.requireAppShell(s.handleAppShell))
 	mux.HandleFunc("GET /sessions/{id}/events", s.requireReadHTML(s.handleSessionEvents))
-	mux.HandleFunc("POST /sessions/{id}/publish", s.requireFull(s.handlePublishSession))
-	mux.HandleFunc("POST /sessions/{id}/unpublish", s.requireFull(s.handleUnpublishSession))
-	mux.HandleFunc("POST /sessions/{id}/delete", s.requireFull(s.handleDeleteSession))
-	// A project's overview publicity toggle. Projects are fleet-global, so this needs
-	// only a full-scope credential (any signed-in user), not an owner check.
-	mux.HandleFunc("POST /projects/{id}/overview/publish", s.requireFull(s.handlePublishProjectOverview))
-	mux.HandleFunc("POST /projects/{id}/overview/unpublish", s.requireFull(s.handleUnpublishProjectOverview))
 
 	// Account stays fully available during a reparse: it is not parsed data, and it
 	// hosts the reparse status and the admin Reparse button.
-	mux.HandleFunc("GET /account", s.requireReadHTML(s.handleAccountPage))
-	mux.HandleFunc("POST /account/tokens", s.requireFull(s.handleCreateTokenForm))
-	mux.HandleFunc("POST /account/tokens/{id}/revoke", s.requireFull(s.handleRevokeTokenForm))
-	mux.HandleFunc("POST /account/connections/{client_id}/revoke", s.requireFull(s.handleRevokeConnectionForm))
-	mux.HandleFunc("POST /account/invites", s.requireAdmin(s.handleCreateInviteForm))
-	mux.HandleFunc("POST /account/invites/{id}/revoke", s.requireAdmin(s.handleRevokeInviteForm))
-	mux.HandleFunc("POST /account/reparse", s.requireAdmin(s.handleReparseForm))
-	mux.HandleFunc("POST /account/overview/publish", s.requireFull(s.handlePublishOverview))
-	mux.HandleFunc("POST /account/overview/unpublish", s.requireFull(s.handleUnpublishOverview))
+	mux.HandleFunc("GET /account", s.requireAppShell(s.handleAppShell))
 
 	return s.withRouteCSRF(mux, withStyledNotFound(mux, s.handleNotFound))
 }

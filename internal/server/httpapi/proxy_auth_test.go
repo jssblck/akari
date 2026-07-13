@@ -105,20 +105,20 @@ func TestProxyAuthProvisionsAndAuthenticates(t *testing.T) {
 	const header = "X-Auth-Request-User"
 	srv, st := newProxyAuthServer(t, config.Server{ProxyAuthHeader: header})
 
-	// A read page that redirects an anonymous visitor to login. With the trusted
-	// header set, the same request is authed and renders the account page.
-	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/account", nil)
+	// The application bootstrap resolves the trusted identity and returns the
+	// provisioned account to React.
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/app/bootstrap", nil)
 	req.Header.Set(header, "ada")
 	resp, err := (&http.Client{}).Do(req)
 	if err != nil {
-		t.Fatalf("GET /account with proxy header: %v", err)
+		t.Fatalf("GET bootstrap with proxy header: %v", err)
 	}
 	body := readBody(t, resp)
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("proxy-authed /account = %d, want 200; body:\n%s", resp.StatusCode, body)
+		t.Fatalf("proxy-authed bootstrap = %d, want 200; body:\n%s", resp.StatusCode, body)
 	}
-	if !strings.Contains(body, "ada") {
-		t.Fatalf("account page missing the proxy-provisioned username, got:\n%s", body)
+	if !strings.Contains(body, `"authenticated":true`) || !strings.Contains(body, `"username":"ada"`) {
+		t.Fatalf("bootstrap missing the proxy-provisioned viewer, got:\n%s", body)
 	}
 
 	// The account was provisioned exactly once, as a federated user: no local
@@ -139,7 +139,7 @@ func TestProxyAuthProvisionsAndAuthenticates(t *testing.T) {
 
 	// A second request under the same identity resolves the same account rather
 	// than minting a new one.
-	req2, _ := http.NewRequest(http.MethodGet, srv.URL+"/account", nil)
+	req2, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/app/bootstrap", nil)
 	req2.Header.Set(header, "ada")
 	resp2, err := (&http.Client{}).Do(req2)
 	if err != nil {

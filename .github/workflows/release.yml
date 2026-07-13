@@ -132,12 +132,9 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Generate templ
-        # Regenerate the gitignored *_templ.go before the build (the .templ files
-        # are the sole source of truth). This runs in its own step, before the
-        # matrix's GOOS/GOARCH env takes effect, so templ builds for the host
-        # rather than the cross-compile target. templ is pinned as a Go tool in
-        # go.mod, so `go generate ./...` runs the matching version.
+      - name: Generate homepage template
+        # The committed React artifact is already available to go:embed. Generate
+        # the remaining templ homepage on the host before cross-compilation.
         run: go generate ./...
 
       - name: Build and package

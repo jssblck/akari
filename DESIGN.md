@@ -392,13 +392,11 @@ carrying the full text on hover. The chip is the bench's calipers: small and
 exact, and it opens to show the measurement.
 
 ### Charts (signature direction)
-akari has no charts yet; this is the brief for adding them. Render time series
-(cost and tokens over time, per project and across the fleet) and breakdowns
-(model mix, agent mix) as first-class instruments.
-- **Engine:** a lightweight canvas time-series library loaded as a single static
-  asset (uPlot is the reference: tiny, fast, no build step, matches the templ and
-  htmx, no-Node posture). Small inline sparklines and bars in table cells may be
-  server-rendered SVG.
+Render time series (cost and tokens over time, per project and across the fleet)
+and breakdowns (model mix, agent mix) as first-class instruments.
+- **Engine:** Recharts owns application charts as React SVG components. Small
+  sparklines and bars use local React SVG so they update from the same API read
+  model as the surrounding figures.
 - **Ground and grid:** transparent on the Room; gridlines in Scribe Line at low
   alpha; axis ticks and labels in Geist Mono.
 - **Series:** the eight-step data ramp in order, Machined Lilac first. A single

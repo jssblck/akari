@@ -16,12 +16,17 @@ func TestAuthenticatedResponsesArePrivateNoStore(t *testing.T) {
 	srv, _ := newTestServer(t)
 	client := registerAdmin(t, srv.URL)
 
-	for _, path := range []string{"/", "/guide", "/account", "/api/v1/tokens"} {
+	for _, path := range []string{"/", "/account", "/api/v1/tokens"} {
 		resp := mustGet(t, client, srv.URL+path)
 		resp.Body.Close()
 		if got := resp.Header.Get("Cache-Control"); got != "private, no-store" {
 			t.Errorf("GET %s Cache-Control = %q, want private, no-store", path, got)
 		}
+	}
+	resp := mustGet(t, client, srv.URL+"/guide")
+	resp.Body.Close()
+	if got := resp.Header.Get("Cache-Control"); got != "no-cache" {
+		t.Errorf("GET /guide Cache-Control = %q, want no-cache public shell", got)
 	}
 }
 
@@ -32,8 +37,14 @@ func TestExplicitCachePoliciesOverrideAuthenticatedDefault(t *testing.T) {
 
 	resp := mustGet(t, client, srv.URL+"/overview")
 	resp.Body.Close()
+	if got := resp.Header.Get("Cache-Control"); got != "private, no-store" {
+		t.Fatalf("overview shell Cache-Control = %q, want private no-store", got)
+	}
+
+	resp = mustGet(t, client, srv.URL+"/api/v1/app/overview")
+	resp.Body.Close()
 	if got := resp.Header.Get("Cache-Control"); got != "private, max-age=30" {
-		t.Fatalf("overview Cache-Control = %q, want private dashboard cache", got)
+		t.Fatalf("overview API Cache-Control = %q, want private dashboard cache", got)
 	}
 
 	resp = mustGet(t, http.DefaultClient, srv.URL+"/og.png")

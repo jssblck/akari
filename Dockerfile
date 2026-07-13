@@ -4,10 +4,8 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-# Regenerate the gitignored templ output before compiling (the .templ files are
-# the sole source of truth). templ is pinned as a Go tool in go.mod, so
-# `go generate ./...` runs the matching version; its module deps came down with
-# `go mod download` above.
+# The committed React build is already present for go:embed. Generate the
+# remaining templ homepage before compiling.
 RUN go generate ./...
 # VERSION stamps the binary's reported version. Build with
 # `--build-arg VERSION=v1.2.3` (release CI passes the tag); it falls back to
