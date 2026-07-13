@@ -40,7 +40,11 @@ Do not edit a constant to mark a release, tag instead.
    earlier step fails). A bare `X.Y.Z` tag is published as the latest stable
    release; any other tag shape (for example a `-rc.1` pre-release suffix) is
    marked as a prerelease.
-4. The release is live as soon as the workflow finishes. Edit the generated notes
+4. After publishing the GitHub Release, the workflow builds the same tag into the
+   Fieldguide internal-services image repository and deploys it through the
+   private Akari Helm release. A failed deployment fails the release workflow but
+   does not retract the already-published GitHub Release.
+5. The release is live as soon as the workflow finishes. Edit the generated notes
    afterward if you want to expand them.
 
 ## Published assets
@@ -144,8 +148,9 @@ docker build --build-arg VERSION=v0.1.0 -t akari-server:v0.1.0 .
 
 Without the arg the image reports `dev` (the `.git` directory is excluded from
 the Docker build context, so there is no VCS stamp to fall back to). The release
-workflow does not publish a container image; only the binary archives above are
-attached to the GitHub Release.
+workflow publishes a versioned image to Fieldguide's private internal-services
+repository after the GitHub Release is complete; the public release still
+contains only the binary archives and checksums above.
 
 ## Dry run
 

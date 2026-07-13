@@ -23,6 +23,9 @@ name: Release
 # CGO_ENABLED=0 (akari is pure Go), so there is no per-OS build matrix of
 # runners. The reported --version is stamped into the binary with -ldflags -X,
 # the Go equivalent of a build-time version constant.
+#
+# After publishing a tagged release, the final job calls the private
+# internal-services deployment workflow with the same immutable tag.
 
 on:
   push:
@@ -303,3 +306,14 @@ jobs:
             cat dist/SHA256SUMS
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-internal-services:
+    name: Deploy internal services
+    needs: [prepare, release]
+    if: ${{ needs.prepare.outputs.dry_run == 'false' }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/deploy-internal-services.yml
+    with:
+      version: ${{ needs.prepare.outputs.tag }}

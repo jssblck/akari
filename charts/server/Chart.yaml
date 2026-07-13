@@ -1,0 +1,6 @@
+apiVersion: v2
+name: akari
+description: Private Akari server for Fieldguide internal services
+type: application
+version: 0.1.0
+appVersion: dev

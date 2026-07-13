@@ -1,0 +1,153 @@
+name: Deploy internal services
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Release tag to deploy
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Published release tag; leave empty to deploy the latest release
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-internal-services
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-west-2
+  EKS_CLUSTER: fg-internal
+  ECR_REPOSITORY: fg-akari-internal-services
+  HELM_RELEASE: fg-akari
+  KUBERNETES_NAMESPACE: akari
+  RUNTIME_SECRET: fg-akari-runtime
+  SSM_PREFIX: /akari/internal-services
+
+jobs:
+  deploy:
+    name: Deploy Akari
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve release version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$REQUESTED_VERSION"
+          if [[ -z "$version" ]]; then
+            version="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)"
+          fi
+          if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid release tag: $version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.version.outputs.version }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: arn:aws:iam::497197924891:role/cicd/akari-release-deploy
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and push release image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+          tags: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.version.outputs.version }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+
+      - name: Configure Kubernetes
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION"
+          kubectl version --client
+          helm version --short
+
+      - name: Project runtime parameters into Kubernetes
+        shell: bash
+        run: |
+          set -euo pipefail
+          secret_file="$(mktemp)"
+          trap 'rm -f "$secret_file"' EXIT
+          chmod 600 "$secret_file"
+
+          for name in \
+            AKARI_DATABASE_URL \
+            AKARI_LISTEN \
+            AKARI_PROXY_AUTH_HEADER \
+            AKARI_PROXY_AUTH_SECRET \
+            AKARI_PROXY_AUTH_SECRET_HEADER
+          do
+            value="$(aws ssm get-parameter \
+              --name "${SSM_PREFIX}/${name}" \
+              --with-decryption \
+              --query Parameter.Value \
+              --output text)"
+            if [[ -z "$value" || "$value" == "None" ]]; then
+              echo "Missing runtime parameter: ${SSM_PREFIX}/${name}" >&2
+              exit 1
+            fi
+            printf '%s=%s\n' "$name" "$value" >> "$secret_file"
+          done
+
+          kubectl --namespace "$KUBERNETES_NAMESPACE" create secret generic "$RUNTIME_SECRET" \
+            --from-env-file="$secret_file" \
+            --dry-run=client \
+            --output=yaml \
+            | kubectl --namespace "$KUBERNETES_NAMESPACE" apply -f -
+
+      - name: Deploy Helm release
+        env:
+          IMAGE_REPOSITORY: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          helm lint charts/server \
+            --set-string "image.repository=${IMAGE_REPOSITORY}" \
+            --set-string "image.tag=${IMAGE_TAG}"
+          helm upgrade --install "$HELM_RELEASE" charts/server \
+            --namespace "$KUBERNETES_NAMESPACE" \
+            --atomic \
+            --timeout 10m \
+            --set-string "image.repository=${IMAGE_REPOSITORY}" \
+            --set-string "image.tag=${IMAGE_TAG}"
+
+      - name: Verify deployed version
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl --namespace "$KUBERNETES_NAMESPACE" rollout status deployment/fg-akari --timeout=5m
+          deployed="$(kubectl --namespace "$KUBERNETES_NAMESPACE" exec deployment/fg-akari -- /akari-server version)"
+          test "$deployed" = "${{ steps.version.outputs.version }}"
+          echo "Deployed Akari $deployed"
