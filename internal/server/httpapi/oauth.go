@@ -162,64 +162,60 @@ func (s *Server) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 // attacker-chosen URL.
 func (s *Server) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
 	setPrivateNoStore(w)
-	q := r.URL.Query()
-	clientID := q.Get("client_id")
-	redirectURI := q.Get("redirect_uri")
-
-	client, err := s.Store.OAuthClient(r.Context(), clientID)
-	if errors.Is(err, store.ErrNotFound) {
-		s.renderOAuthErrorPage(w, r, http.StatusBadRequest, "Unknown OAuth client. Re-register and try connecting again.")
-		return
-	} else if err != nil {
-		s.renderOAuthErrorPage(w, r, http.StatusInternalServerError, "Could not load the OAuth client.")
-		return
-	}
-	if !redirectRegistered(client, redirectURI) {
-		s.renderOAuthErrorPage(w, r, http.StatusBadRequest, "The redirect URI is not registered for this client.")
-		return
-	}
-
-	state := q.Get("state")
-	if q.Get("response_type") != "code" {
-		redirectOAuthError(w, r, redirectURI, state, "unsupported_response_type", "only response_type=code is supported")
-		return
-	}
-	challenge := q.Get("code_challenge")
-	if challenge == "" || q.Get("code_challenge_method") != "S256" {
-		redirectOAuthError(w, r, redirectURI, state, "invalid_request", "PKCE with code_challenge_method=S256 is required")
-		return
-	}
-
-	// The browser must be signed in. resolve yields full scope for a session cookie;
-	// if it is absent, send the user through login and return to this exact URL.
 	p, ok := s.resolve(r)
 	if !ok || p.Scope != scopeFull {
 		http.Redirect(w, r, "/login?next="+url.QueryEscape(r.URL.RequestURI()), http.StatusSeeOther)
 		return
 	}
-	u, err := s.Store.UserByID(r.Context(), p.UserID)
-	if err != nil {
-		s.renderOAuthErrorPage(w, r, http.StatusInternalServerError, "Could not load your account.")
+	s.handleAppShell(w, s.withPrincipal(r, p))
+}
+
+func (s *Server) handleAPIOAuthConsent(w http.ResponseWriter, r *http.Request) {
+	setPrivateNoStore(w)
+	q := r.URL.Query()
+	clientID := q.Get("client_id")
+	redirectURI := q.Get("redirect_uri")
+	client, err := s.Store.OAuthClient(r.Context(), clientID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusBadRequest, "unknown OAuth client")
 		return
 	}
-
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "load OAuth client")
+		return
+	}
+	if !redirectRegistered(client, redirectURI) {
+		writeError(w, http.StatusBadRequest, "redirect URI is not registered for this client")
+		return
+	}
+	if q.Get("response_type") != "code" {
+		writeError(w, http.StatusBadRequest, "only response_type=code is supported")
+		return
+	}
+	challenge := q.Get("code_challenge")
+	if challenge == "" || q.Get("code_challenge_method") != "S256" {
+		writeError(w, http.StatusBadRequest, "PKCE with code_challenge_method=S256 is required")
+		return
+	}
+	p, _ := principalFrom(r.Context())
+	user, err := s.Store.UserByID(r.Context(), p.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "load account")
+		return
+	}
 	csrf, err := auth.NewToken()
 	if err != nil {
-		s.renderOAuthErrorPage(w, r, http.StatusInternalServerError, "Could not start the consent flow.")
+		writeError(w, http.StatusInternalServerError, "start consent flow")
 		return
 	}
 	s.setOAuthCSRFCookie(w, csrf)
-
-	render(w, r, http.StatusOK, web.ConsentPage(web.Page{Title: "Connect"}, web.ConsentParams{
-		ClientName:  clientDisplayName(client),
-		Username:    u.Username,
-		ClientID:    clientID,
-		RedirectURI: redirectURI,
-		State:       state,
-		Challenge:   challenge,
-		Resource:    q.Get("resource"),
-		CSRF:        csrf,
-	}))
+	appCSRF, _ := csrfTokenFromRequest(r)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"client_name": clientDisplayName(client), "username": user.Username,
+		"client_id": clientID, "redirect_uri": redirectURI, "state": q.Get("state"),
+		"code_challenge": challenge, "resource": q.Get("resource"),
+		"csrf": csrf, "app_csrf": appCSRF,
+	})
 }
 
 // handleOAuthDecision processes the consent form. On approval it mints a

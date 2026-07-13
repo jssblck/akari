@@ -49,13 +49,22 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Generate templ
-        # The web package's templ templates compile to Go through `templ
-        # generate`, and the generated *_templ.go files are gitignored (the
-        # .templ files are the sole source of truth). They must be regenerated
-        # before anything compiles, since gofmt, vet, and the tests all read
-        # them. templ is pinned as a Go tool in go.mod, so `go generate ./...`
-        # runs the matching version with no separate install step.
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.6
+
+      - name: Check and build React application
+        working-directory: frontend
+        run: |
+          bun install --frozen-lockfile
+          bun run check
+          bun run build
+
+      - name: Verify committed frontend artifact
+        run: git diff --exit-code -- internal/server/frontend/dist
+
+      - name: Generate homepage template
         run: go generate ./...
 
       - name: Check formatting

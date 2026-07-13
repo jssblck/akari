@@ -6,21 +6,25 @@ import (
 )
 
 func TestStaticURLFingerprintsEmbeddedAsset(t *testing.T) {
-	got := string(StaticURL("js/insights.js"))
-	if !strings.HasPrefix(got, "/static/js/insights.js?v=") {
-		t.Fatalf("StaticURL() = %q, want fingerprinted insights URL", got)
+	got := string(StaticURL("css/landing.css"))
+	if !strings.HasPrefix(got, "/static/css/landing.css?v=") {
+		t.Fatalf("StaticURL() = %q, want fingerprinted landing URL", got)
 	}
-	if got != string(StaticURL("/js/insights.js")) {
+	if got != string(StaticURL("/css/landing.css")) {
 		t.Fatal("StaticURL should accept an optional leading slash")
 	}
 }
 
-func TestLayoutUsesFingerprintedChartRuntime(t *testing.T) {
-	html := renderComponent(t, LoginPage(Page{Title: "Log in"}, "/", ""))
-	for _, asset := range []string{"htmx.min.js", "charts.js", "app.js", "js/insights.js"} {
-		want := `src="/static/` + asset + `?v=`
-		if !strings.Contains(html, want) {
-			t.Errorf("layout is missing fingerprinted runtime %q", asset)
+func TestLandingUsesOnlyFingerprintedStaticStyles(t *testing.T) {
+	html := renderComponent(t, LandingPage(OGMeta{}, Page{}))
+	for _, asset := range []string{"css/base.css", "css/layout.css", "css/landing.css"} {
+		if want := `href="/static/` + asset + `?v=`; !strings.Contains(html, want) {
+			t.Errorf("landing layout is missing %q", asset)
+		}
+	}
+	for _, retired := range []string{"htmx", "charts.js", "app.js", "insights.js"} {
+		if strings.Contains(html, retired) {
+			t.Errorf("landing layout still ships retired runtime %q", retired)
 		}
 	}
 }

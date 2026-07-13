@@ -93,8 +93,8 @@ func FmtTokens(n int64) string {
 // FmtTokensCompact renders a token count to a short magnitude (2.1B, 1.7M, 63.0k,
 // 412), for the feed's inline figure where the exact value lives in the hover
 // card. The thousands-separated FmtTokens stays the form for places that show the
-// full number. The buckets mirror fmtTok in static/charts.js, its client-side
-// counterpart, so a figure reads the same on either surface.
+// full number. Keep these buckets aligned with the React formatter so a figure
+// reads the same on either surface.
 func FmtTokensCompact(n int64) string {
 	switch {
 	case n >= 1_000_000_000:

@@ -19,6 +19,9 @@ guide in one request, and [`/llms.txt`](https://akari.jessica.black/llms.txt) fo
 the machine-readable index. The source lives in
 [`internal/guide/content`](internal/guide/content).
 
+The browser-facing JSON API is documented by the server at `/api/docs`; its
+OpenAPI 3.1 contract is available directly at `/api/openapi.json`.
+
 ## Install
 
 Prebuilt, checksum-verified binaries are published for each release. Each script

@@ -1,19 +1,18 @@
 # akari developer tasks.
 #
-# The web package's templ templates compile to Go through `templ generate`, and
-# the generated internal/server/web/*_templ.go files are gitignored: the .templ
-# files are the sole source of truth, regenerated on every build. So a fresh
-# clone will not compile until `templ generate` has run once. Every build/test
-# target here depends on `generate` so a clone is one `make build` from a binary.
-#
-# templ is pinned as a Go tool in go.mod (the `tool` directive), so it needs no
-# separate install: `go generate ./...` runs `go tool templ generate` at the
-# version the module pins.
+# The React production build is committed because go:embed must see it at compile
+# time and release cross-compiles should need only Go. Development targets rebuild
+# it from frontend/ before generating the remaining templ homepage.
 
-.PHONY: generate build test vet fmt clean
+.PHONY: frontend frontend-check generate build test vet fmt clean
 
-# Regenerate the templ output. Run after editing any internal/server/web/*.templ.
-generate:
+frontend:
+	cd frontend && bun install --frozen-lockfile && bun run build
+
+frontend-check:
+	cd frontend && bun install --frozen-lockfile && bun run check
+
+generate: frontend
 	go generate ./...
 
 # Compile every package (regenerating templ output first).
@@ -28,7 +27,7 @@ build: generate
 # locks keyed to the target Postgres), so the suite's peak connections are bounded
 # at maxLiveStores x poolMaxConns no matter how many package binaries run at once.
 # See the budget note in internal/server/storetest/gate.go.
-test: generate
+test: frontend-check generate
 	go test -race ./...
 
 # Vet every package (regenerating templ output first).

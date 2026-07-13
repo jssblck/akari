@@ -64,10 +64,10 @@ does not assume the reader has seen any other tool.
                                    ┌──────────────────┐        ┌────────────┐
                                    │   akari-server   │◀──────▶│  Postgres  │
                                    │  ingest + parse  │        │  + large   │
-                                   │  + web UI (SSR)  │        │  objects   │
+                                   │  + JSON API      │        │  objects   │
                                    └──────────────────┘        └────────────┘
                                            ▲
-                                  browser (templ + HTMX)
+                              browser (embedded React)
 ```
 
 The client resolves the git remote locally because the git repository only
@@ -251,7 +251,8 @@ rebuild them from the stored raw bytes whenever the parser improves.
 4. Compute token stats and cost.
 5. Accept content-addressed uploads of tool input/result bodies (and store binary
    attachments) in the large-object store, deduped by hash.
-6. Serve a server-rendered web UI and a small read API.
+6. Serve the embedded React application, its JSON/OpenAPI surface, and the
+   templated root homepage.
 7. Authenticate users and tokens; enforce the internal/public boundary.
 
 ### Expensive request admission
@@ -1077,22 +1078,18 @@ stored bytes untouched: `Content-Type` is the body's semantic `media_type`, and 
 zstd-stored blob is served with `Content-Encoding: zstd` so the browser (or any
 client) decompresses it transparently while the server spends no CPU decoding it.
 
-### Web UI (server-rendered)
+### Web UI and application API
 
-The UI is server-rendered Go using `templ` for templates and HTMX for
-interactivity (filtering, pagination). In-progress authenticated sessions update
-live over server-sent events: the session view subscribes to an SSE stream and
-swaps in new messages and stats as the server parses incoming bytes. Public
-session pages render a bounded transcript tail and fetch earlier windows through
-the revocable public capability URL. Each earlier-page request carries the
-projection revision from the page it extends. If a rebuild changed that revision,
-the server replaces the bounded body from a fresh snapshot instead of appending
-rows whose ordinals may describe another projection. The revision increments on
-every successful rebuild even when its output is unchanged, so a rebuild that lands
-mid-pagination always forces this resync: a conservative choice, since telling a
-genuinely unchanged projection apart from a merely re-committed one would need
-comparing rendered output rather than a counter. No Node toolchain; the binary
-is self-contained.
+Every browser route except `/` is an embedded React application backed by JSON
+under `/api/v1/app`. Recharts renders charts as React-owned SVG. In-progress
+sessions update through the existing SSE stream, then refetch a projection
+snapshot. Public transcript pagination uses the same bounded snapshot reads and
+revocable capability URLs as the authenticated view. The root homepage stays a
+static templ render with no application JavaScript. Vite's production output is
+committed under `internal/server/frontend/dist` and embedded with `go:embed`, so
+the distributed server remains one self-contained binary. The OpenAPI 3.1
+contract is available at `/api/openapi.json`, with embedded Swagger UI at
+`/api/docs`.
 
 Pages:
 
@@ -1124,8 +1121,9 @@ Pages:
 - **Account**: manage API tokens (create with a scope, name, revoke); admins
   also issue and revoke invite tokens here.
 
-Read endpoints backing HTMX fragments live under `/api/v1/...` and return HTML
-partials, not JSON, to keep the rendering in one place.
+Application reads live under `/api/v1/app/...` and return JSON. The complete
+browser-facing contract is published as OpenAPI at `/api/openapi.json` and has
+an embedded Swagger UI at `/api/docs`.
 
 ### Auth specifics
 
@@ -1559,7 +1557,8 @@ internal/
     httpapi/        # ingest + read handlers, OAuth, SSE
     mcpserver/      # MCP tools over the read surface
     ogimage/        # Open Graph preview card rendering
-    web/            # templ templates, HTMX fragments, static assets
+    frontend/       # embedded React production artifact
+    web/            # templated root homepage and its static assets
     store/          # postgres queries, CAS (large objects), migration runner
     storetest/      # per-test database provisioning
     auth/           # password, tokens, cookies
@@ -1575,12 +1574,14 @@ internal/
 migrations/         # forward-only SQL, embedded into the server
 docker-compose.yml
 Dockerfile
+frontend/            # React, Recharts, and Vite source
 ```
 
 ## Tooling
 
 - Go (current toolchain pinned in `go.mod`).
-- `templ` for templates, `htmx` served as a static asset.
+- React and Recharts for the application; templ for the root homepage.
+- OpenAPI 3.1 with embedded Swagger UI.
 - `pgx` for Postgres (large-object support, batching).
 - `fsnotify` for file watching. The client keeps no on-disk state.
 - Tests: per-agent parser fixtures (recorded raw session files), git

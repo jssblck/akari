@@ -4,20 +4,24 @@ Short orientation for coding agents. The full story lives in
 [docs/development.md](docs/development.md) and [DESIGN.md](DESIGN.md); this file
 just front-loads the three things that bite if you skip them.
 
-## Generate templ before you build
+## Build both frontend layers
 
-The web UI is templ. The `.templ` files under `internal/server/web/` are the
-source of truth; the `*_templ.go` they compile to are gitignored and not present
-on a fresh clone. A bare `go build ./...` or `go test ./...` fails with
-`undefined: web.*` until the generated code exists. Run the generate step first:
+The application UI lives in `frontend/` and builds into
+`internal/server/frontend/dist/`, which Go embeds in the server binary. The root
+homepage remains templated under `internal/server/web/`. Rebuild both layers
+through the Makefile so the committed React artifact and generated Go stay in
+step:
 
 ```sh
-make build          # go generate ./... then go build ./...
-make test           # go generate ./... then go test -race ./...
-go generate ./...   # just regenerate after editing a *.templ
+make build          # build React, generate templ, then compile Go
+make test           # check React, rebuild it, then run Go tests under -race
+make frontend-check # Biome and TypeScript only
+go generate ./...   # regenerate the templated homepage only
 ```
 
-Re-run `go generate ./...` (or `make generate`) after editing any `*.templ`.
+The production frontend artifact is committed so release cross-compilation and
+downstream source builds still require only Go. Run `make frontend` after any
+file under `frontend/` and commit the resulting `dist/` changes.
 
 ## Integration tests gate on a database
 

@@ -1,0 +1,190 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "akari API",
+    "version": "1.0.0",
+    "description": "HTTP API for the akari React application, session ingest clients, and account automation. Browser requests authenticate with the akari_session cookie. Non-browser clients use a bearer token with the scope required by each operation."
+  },
+  "servers": [{ "url": "/", "description": "This akari instance" }],
+  "tags": [
+    { "name": "Application", "description": "Read models consumed by the embedded React application." },
+    { "name": "Account", "description": "Authentication, tokens, invitations, and account controls." },
+    { "name": "Ingest", "description": "Session and content-addressed blob upload protocol." },
+    { "name": "Public", "description": "Published read-only views that require no credential." },
+    { "name": "Operations", "description": "Health and projection rebuild state." }
+  ],
+  "components": {
+    "securitySchemes": {
+      "sessionCookie": { "type": "apiKey", "in": "cookie", "name": "akari_session" },
+      "bearerToken": { "type": "http", "scheme": "bearer", "bearerFormat": "akari token" }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "required": ["error"],
+        "properties": { "error": { "type": "string" } }
+      },
+      "Publication": {
+        "type": "object",
+        "required": ["published"],
+        "properties": { "published": { "type": "boolean" } }
+      },
+      "Login": {
+        "type": "object",
+        "required": ["username", "password"],
+        "properties": { "username": { "type": "string" }, "password": { "type": "string", "format": "password" } }
+      },
+      "Register": {
+        "type": "object",
+        "required": ["username", "password"],
+        "properties": {
+          "username": { "type": "string" },
+          "password": { "type": "string", "format": "password" },
+          "invite_token": { "type": "string" }
+        }
+      },
+      "CreateToken": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": { "type": "string" },
+          "scope": { "type": "string", "enum": ["ingest", "read", "full"], "default": "ingest" }
+        }
+      },
+      "CreateInvite": {
+        "type": "object",
+        "properties": {
+          "note": { "type": "string" },
+          "expires_hours": { "type": "integer", "minimum": 0 }
+        }
+      },
+      "AnnounceSession": { "type": "object", "additionalProperties": true },
+      "AppPayload": { "type": "object", "additionalProperties": true }
+    },
+    "responses": {
+      "BadRequest": { "description": "The request is invalid.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "Unauthorized": { "description": "Authentication is required.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "Forbidden": { "description": "The credential does not have the required scope.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "NotFound": { "description": "The requested resource does not exist or is not visible.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+    }
+  },
+  "security": [{ "sessionCookie": [] }, { "bearerToken": [] }],
+  "paths": {
+    "/healthz": {
+      "get": { "tags": ["Operations"], "summary": "Check database connectivity", "security": [], "responses": { "200": { "description": "Healthy" }, "503": { "description": "Database unavailable" } } }
+    },
+    "/api/v1/auth/login": {
+      "post": { "tags": ["Account"], "summary": "Create a browser session", "security": [], "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Login" } } } }, "responses": { "200": { "description": "Signed in" }, "401": { "$ref": "#/components/responses/Unauthorized" } } }
+    },
+    "/api/v1/auth/register": {
+      "post": { "tags": ["Account"], "summary": "Register an account and create a browser session", "security": [], "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Register" } } } }, "responses": { "201": { "description": "Account created" }, "400": { "$ref": "#/components/responses/BadRequest" }, "403": { "$ref": "#/components/responses/Forbidden" } } }
+    },
+    "/api/v1/auth/logout": {
+      "post": { "tags": ["Account"], "summary": "Delete the current browser session", "responses": { "200": { "description": "Signed out" } } }
+    },
+    "/api/v1/app/bootstrap": {
+      "get": { "tags": ["Application"], "summary": "Resolve the current application viewer", "security": [], "responses": { "200": { "description": "Viewer state", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AppPayload" } } } } } }
+    },
+    "/api/v1/app/oauth/authorize": {
+      "get": { "tags": ["Account"], "summary": "Resolve an OAuth consent request for the signed-in user", "parameters": [{ "name": "client_id", "in": "query", "required": true, "schema": { "type": "string" } }, { "name": "redirect_uri", "in": "query", "required": true, "schema": { "type": "string", "format": "uri" } }, { "name": "state", "in": "query", "required": true, "schema": { "type": "string" } }, { "name": "code_challenge", "in": "query", "required": true, "schema": { "type": "string" } }, { "name": "resource", "in": "query", "schema": { "type": "string", "format": "uri" } }], "responses": { "200": { "description": "Consent read model" }, "400": { "$ref": "#/components/responses/BadRequest" }, "404": { "$ref": "#/components/responses/NotFound" } } }
+    },
+    "/api/v1/app/overview": {
+      "get": { "tags": ["Application"], "summary": "Read fleet usage analytics", "parameters": [{ "name": "range", "in": "query", "schema": { "type": "string", "enum": ["7d", "30d", "90d", "year", "all"] } }, { "name": "user", "in": "query", "schema": { "type": "array", "items": { "type": "integer", "format": "int64" } } }], "responses": { "200": { "description": "Overview read model" }, "401": { "$ref": "#/components/responses/Unauthorized" } } }
+    },
+    "/api/v1/app/insights": {
+      "get": { "tags": ["Application"], "summary": "Read quality and workflow insights", "parameters": [{ "name": "range", "in": "query", "schema": { "type": "string", "enum": ["7d", "30d", "90d", "year", "all"] } }], "responses": { "200": { "description": "Insights read model" } } }
+    },
+    "/api/v1/app/projects": {
+      "get": { "tags": ["Application"], "summary": "List projects with lifetime rollups", "responses": { "200": { "description": "Project collection" } } }
+    },
+    "/api/v1/app/projects/{id}": {
+      "get": { "tags": ["Application"], "summary": "Read one project with windowed sessions and analytics", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }, { "name": "range", "in": "query", "schema": { "type": "string" } }, { "name": "agent", "in": "query", "schema": { "type": "string" } }, { "name": "machine", "in": "query", "schema": { "type": "string" } }, { "name": "user", "in": "query", "schema": { "type": "string" } }], "responses": { "200": { "description": "Project read model" }, "404": { "$ref": "#/components/responses/NotFound" } } }
+    },
+    "/api/v1/app/projects/{id}/publication": {
+      "put": { "tags": ["Application"], "summary": "Publish or unpublish a project overview", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Publication" } } } }, "responses": { "200": { "description": "Publication updated" }, "404": { "$ref": "#/components/responses/NotFound" } } }
+    },
+    "/api/v1/app/sessions": {
+      "get": { "tags": ["Application"], "summary": "Search and filter sessions", "parameters": [{ "name": "q", "in": "query", "schema": { "type": "string", "maxLength": 200 } }, { "name": "project", "in": "query", "schema": { "type": "integer", "format": "int64" } }, { "name": "agent", "in": "query", "schema": { "type": "string" } }, { "name": "machine", "in": "query", "schema": { "type": "string" } }, { "name": "user", "in": "query", "schema": { "type": "string" } }, { "name": "grade", "in": "query", "schema": { "type": "string" } }, { "name": "outcome", "in": "query", "schema": { "type": "string" } }, { "name": "after", "in": "query", "schema": { "type": "integer", "format": "int64" } }], "responses": { "200": { "description": "Session collection and facets" }, "400": { "$ref": "#/components/responses/BadRequest" } } }
+    },
+    "/api/v1/app/sessions/{id}": {
+      "get": { "tags": ["Application"], "summary": "Read a session audit and transcript tail", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }], "responses": { "200": { "description": "Session snapshot" }, "404": { "$ref": "#/components/responses/NotFound" } } },
+      "delete": { "tags": ["Application"], "summary": "Delete a session", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }], "responses": { "200": { "description": "Deleted" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" } } }
+    },
+    "/api/v1/app/sessions/{id}/transcript": {
+      "get": { "tags": ["Application"], "summary": "Read an earlier transcript window", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }, { "name": "before", "in": "query", "required": true, "schema": { "type": "integer", "minimum": 0 } }], "responses": { "200": { "description": "Transcript page" } } }
+    },
+    "/api/v1/app/sessions/{id}/publication": {
+      "put": { "tags": ["Application"], "summary": "Publish or unpublish an owned session", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Publication" } } } }, "responses": { "200": { "description": "Publication updated" }, "404": { "$ref": "#/components/responses/NotFound" } } }
+    },
+    "/api/v1/app/account": {
+      "get": { "tags": ["Account"], "summary": "Read account tokens, connections, invites, and rebuild state", "responses": { "200": { "description": "Account read model" } } }
+    },
+    "/api/v1/app/account/connections/{client_id}": {
+      "delete": { "tags": ["Account"], "summary": "Revoke an OAuth client connection", "parameters": [{ "name": "client_id", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Connection revoked" }, "404": { "$ref": "#/components/responses/NotFound" } } }
+    },
+    "/api/v1/app/account/invites/{id}": {
+      "delete": { "tags": ["Account"], "summary": "Revoke a registration invitation", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }], "responses": { "200": { "description": "Invite revoked" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" } } }
+    },
+    "/api/v1/tokens": {
+      "get": { "tags": ["Account"], "summary": "List API tokens", "responses": { "200": { "description": "Token collection" } } },
+      "post": { "tags": ["Account"], "summary": "Create an API token", "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateToken" } } } }, "responses": { "201": { "description": "Token created; the plaintext secret is returned once" } } }
+    },
+    "/api/v1/tokens/{id}/revoke": {
+      "post": { "tags": ["Account"], "summary": "Revoke an API token", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }], "responses": { "200": { "description": "Revoked" } } }
+    },
+    "/api/v1/invites": {
+      "post": { "tags": ["Account"], "summary": "Create a registration invitation", "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateInvite" } } } }, "responses": { "201": { "description": "Invite created; the plaintext secret is returned once" }, "403": { "$ref": "#/components/responses/Forbidden" } } }
+    },
+    "/api/v1/app/account/overview-publication": {
+      "put": { "tags": ["Account"], "summary": "Publish or unpublish the current user's overview", "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Publication" } } } }, "responses": { "200": { "description": "Publication updated" } } }
+    },
+    "/api/v1/app/reparse": {
+      "post": { "tags": ["Operations"], "summary": "Queue a full projection rebuild", "responses": { "202": { "description": "Rebuild queued" }, "403": { "$ref": "#/components/responses/Forbidden" } } }
+    },
+    "/api/v1/reparse/status": {
+      "get": { "tags": ["Operations"], "summary": "Read projection rebuild progress", "responses": { "200": { "description": "Rebuild status" } } }
+    },
+    "/api/v1/reparse/events": {
+      "get": { "tags": ["Operations"], "summary": "Stream projection rebuild progress", "responses": { "200": { "description": "Server-sent rebuild events", "content": { "text/event-stream": { "schema": { "type": "string" } } } } } }
+    },
+    "/api/v1/session/{id}/blob/{sha256}": {
+      "get": { "tags": ["Application"], "summary": "Download a content-addressed tool body referenced by a visible session", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }, { "name": "sha256", "in": "path", "required": true, "schema": { "type": "string", "pattern": "^[a-f0-9]{64}$" } }], "responses": { "200": { "description": "Blob bytes" }, "404": { "$ref": "#/components/responses/NotFound" } } }
+    },
+    "/api/v1/ingest/session": {
+      "post": { "tags": ["Ingest"], "summary": "Announce or reconcile a session upload", "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AnnounceSession" } } } }, "responses": { "200": { "description": "Upload state" }, "201": { "description": "Session created" }, "403": { "$ref": "#/components/responses/Forbidden" } } }
+    },
+    "/api/v1/ingest/session/{id}/chunk": {
+      "post": { "tags": ["Ingest"], "summary": "Append raw session bytes", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }], "requestBody": { "required": true, "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary" } } } }, "responses": { "200": { "description": "Chunk accepted" } } }
+    },
+    "/api/v1/ingest/session/{id}/finalize": {
+      "post": { "tags": ["Ingest"], "summary": "Declare a session terminal and grade it", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }], "responses": { "200": { "description": "Finalized" } } }
+    },
+    "/api/v1/ingest/session/{id}/reset": {
+      "post": { "tags": ["Ingest"], "summary": "Reset a session upload", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }], "responses": { "200": { "description": "Reset" } } }
+    },
+    "/api/v1/ingest/blobs/check": {
+      "post": { "tags": ["Ingest"], "summary": "Check which content-addressed blobs are missing", "responses": { "200": { "description": "Missing blob hashes" } } }
+    },
+    "/api/v1/ingest/blob/{sha256}": {
+      "put": { "tags": ["Ingest"], "summary": "Upload a content-addressed blob", "parameters": [{ "name": "sha256", "in": "path", "required": true, "schema": { "type": "string", "pattern": "^[a-f0-9]{64}$" } }], "requestBody": { "required": true, "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary" } } } }, "responses": { "201": { "description": "Stored" }, "204": { "description": "Already present" } } }
+    },
+    "/api/v1/app/public/users/{username}": {
+      "get": { "tags": ["Public"], "summary": "Read a published user overview", "security": [], "parameters": [{ "name": "username", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Published overview" }, "404": { "$ref": "#/components/responses/NotFound" } } }
+    },
+    "/api/v1/app/public/projects/{id}": {
+      "get": { "tags": ["Public"], "summary": "Read a published project overview", "security": [], "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }], "responses": { "200": { "description": "Published project overview" }, "404": { "$ref": "#/components/responses/NotFound" } } }
+    },
+    "/api/v1/app/public/sessions/{public_id}": {
+      "get": { "tags": ["Public"], "summary": "Read a published session", "security": [], "parameters": [{ "name": "public_id", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Published session snapshot" }, "404": { "$ref": "#/components/responses/NotFound" } } }
+    },
+    "/api/v1/app/public/sessions/{public_id}/transcript": {
+      "get": { "tags": ["Public"], "summary": "Read an earlier published transcript window", "security": [], "parameters": [{ "name": "public_id", "in": "path", "required": true, "schema": { "type": "string" } }, { "name": "before", "in": "query", "required": true, "schema": { "type": "integer", "minimum": 0 } }], "responses": { "200": { "description": "Published transcript page" }, "404": { "$ref": "#/components/responses/NotFound" } } }
+    },
+    "/api/v1/app/guide/": {
+      "get": { "tags": ["Public"], "summary": "Read the user guide index", "security": [], "responses": { "200": { "description": "Guide chapter and chapter index" } } }
+    },
+    "/api/v1/app/guide/{slug}": {
+      "get": { "tags": ["Public"], "summary": "Read a user guide chapter", "security": [], "parameters": [{ "name": "slug", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Guide chapter and chapter index" }, "404": { "$ref": "#/components/responses/NotFound" } } }
+    }
+  }
+}

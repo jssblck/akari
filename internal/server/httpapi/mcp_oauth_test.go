@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -101,8 +100,6 @@ func callToolJSON(t *testing.T, sess *mcpsdk.ClientSession, name string, args an
 	}
 }
 
-var csrfRe = regexp.MustCompile(`name="csrf" value="([^"]+)"`)
-
 // runOAuthFlow drives the full browser consent dance and returns the issued token
 // response. It registers a client, authorizes with PKCE as the signed-in user,
 // approves consent, and exchanges the code.
@@ -128,8 +125,8 @@ func runOAuthFlow(t *testing.T, srvURL string, c *http.Client) map[string]any {
 	sum := sha256.Sum256([]byte(verifier))
 	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
 
-	// Authorize: signed-in browser lands on the consent page.
-	authzURL := srvURL + "/oauth/authorize?" + url.Values{
+	// Authorize: React loads the consent read model for the signed-in browser.
+	authzQuery := url.Values{
 		"response_type":         {"code"},
 		"client_id":             {clientID},
 		"redirect_uri":          {redirectURI},
@@ -139,16 +136,16 @@ func runOAuthFlow(t *testing.T, srvURL string, c *http.Client) map[string]any {
 		"scope":                 {"read"},
 		"resource":              {srvURL + "/mcp"},
 	}.Encode()
-	resp, err = c.Get(authzURL)
+	resp, err = c.Get(srvURL + "/api/v1/app/oauth/authorize?" + authzQuery)
 	if err != nil {
-		t.Fatalf("authorize GET: %v", err)
+		t.Fatalf("authorize API GET: %v", err)
 	}
-	page := readBody(t, resp)
-	m := csrfRe.FindStringSubmatch(page)
-	if m == nil {
-		t.Fatalf("consent page missing csrf field:\n%s", page)
+	var consent map[string]any
+	decodeBody(t, resp, &consent)
+	csrf, _ := consent["csrf"].(string)
+	if csrf == "" {
+		t.Fatalf("consent API returned no csrf token: %v", consent)
 	}
-	csrf := m[1]
 
 	// Approve consent; capture the redirect to the client without following it.
 	noFollow := &http.Client{Jar: c.Jar, Transport: c.Transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}

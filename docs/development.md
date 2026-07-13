@@ -1,34 +1,34 @@
 # Development
 
-This page is the day-to-day development loop for akari: generating the templ
-output, the Makefile and plain-Go workflows, the integration-test database
-setup, running the stack under eph, and seeding example data. For a quick
+This page is the day-to-day development loop for akari: building the React app
+and templated homepage, running integration tests, working under eph, and
+seeding example data. For a quick
 orientation aimed at coding agents, read [AGENTS.md](../AGENTS.md) first.
 
-The web UI is server-rendered with [templ](https://templ.guide). The `.templ`
-files under `internal/server/web/` are the source of truth; the Go they compile
-to (`*_templ.go`) is gitignored and regenerated on every build rather than
-committed, so editing one page no longer collides with another on a regenerated
-file. templ is pinned as a Go tool in `go.mod`, so no separate install is needed:
-`go generate ./...` runs the right version.
+The application UI is React under `frontend/`. Vite writes its production build
+to `internal/server/frontend/dist/`, and Go embeds that directory in the server
+binary. The build artifact is committed so release cross-compilation and source
+builds need only Go. The root homepage remains server-rendered with
+[templ](https://templ.guide); its generated `*_templ.go` files are gitignored.
 
-A `Makefile` wraps the common tasks and regenerates the templ output first, so a
-fresh clone is one command from a binary:
+Development builds require Bun. The Makefile keeps source, embedded assets, and
+the homepage generator in step:
 
 ```sh
-make build        # go generate ./... then go build ./...
-make test         # go generate ./... then go test -race ./...
-make generate     # regenerate templ output after editing a *.templ
+make build          # build React, generate templ, and build Go
+make test           # check React and run Go tests under -race
+make frontend       # rebuild the committed embedded React artifact
+make frontend-check # run Biome and TypeScript
 make vet
-make fmt          # report files that are not gofmt-clean
+make fmt
 ```
 
-Without `make`, regenerate once after cloning (or after editing a template) and
-then use the Go tools directly:
+The equivalent commands are:
 
 ```sh
-go generate ./...   # regenerate internal/server/web/*_templ.go (gitignored)
-go build ./...      # compile everything
+cd frontend && bun install --frozen-lockfile && bun run check && bun run build
+go generate ./...
+go build ./...
 go vet ./...
 go test ./...       # unit tests
 ```

@@ -59,6 +59,25 @@ func (s *Server) gatePublicParsed(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// gateAPIParsed prevents a cross-session JSON read from mixing projection
+// generations while a fleet rebuild is draining. A single session rebuild is
+// atomic, but aggregate and feed responses can otherwise combine sessions from
+// opposite sides of the epoch boundary.
+func (s *Server) gateAPIParsed(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		status := s.worker.FleetStatus(r.Context())
+		if !status.InProgress {
+			next(w, r)
+			return
+		}
+		w.Header().Set("Retry-After", "2")
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"error":   "projection rebuild in progress",
+			"reparse": status,
+		})
+	}
+}
+
 // handleReparseStatus returns the current fleet-rebuild status as JSON, the
 // poll-fallback source for the progress UI when the SSE stream is unavailable. It
 // reports fleet status, so an instance that is only observing another's rebuild
