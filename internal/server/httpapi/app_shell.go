@@ -39,7 +39,7 @@ func (s *Server) handlePublicUserShell(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	user, err := s.Store.PublicOverviewUser(r.Context(), r.PathValue("username"))
 	if err != nil {
-		handlePublicShellLookupError(w, err)
+		s.handlePublicShellLookupError(w, err)
 		return
 	}
 	title := user.Username + " usage overview"
@@ -54,12 +54,12 @@ func (s *Server) handlePublicProjectShell(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Cache-Control", "no-store")
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil || id < 1 {
-		http.NotFound(w, r)
+		s.handlePublicShellLookupError(w, store.ErrNotFound)
 		return
 	}
 	project, err := s.Store.PublicProjectOverview(r.Context(), id)
 	if err != nil {
-		handlePublicShellLookupError(w, err)
+		s.handlePublicShellLookupError(w, err)
 		return
 	}
 	name := web.ProjectTitle(project)
@@ -73,7 +73,7 @@ func (s *Server) handlePublicSessionShell(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Cache-Control", "no-store")
 	detail, err := s.Store.SessionDetailByPublicID(r.Context(), r.PathValue("public_id"))
 	if err != nil {
-		handlePublicShellLookupError(w, err)
+		s.handlePublicShellLookupError(w, err)
 		return
 	}
 	publicID := r.PathValue("public_id")
@@ -93,12 +93,24 @@ func (s *Server) handleAppShellMetadata(w http.ResponseWriter, meta frontend.Met
 	_, _ = w.Write(index)
 }
 
-func handlePublicShellLookupError(w http.ResponseWriter, err error) {
+// handlePublicShellLookupError serves the React entry document with an error
+// status instead of a bare text page, so a dead or revoked public link still
+// renders the app's styled "Not found" state with a way back home (the old
+// templ UI's PublicErrorPage did the same server-side). The status code stays
+// honest for crawlers and link unfurlers; only browsers run the shell.
+func (s *Server) handlePublicShellLookupError(w http.ResponseWriter, err error) {
+	status := http.StatusInternalServerError
 	if errors.Is(err, store.ErrNotFound) {
-		http.Error(w, "Not found", http.StatusNotFound)
+		status = http.StatusNotFound
+	}
+	index, docErr := frontend.Index()
+	if docErr != nil {
+		writeError(w, http.StatusInternalServerError, "load embedded frontend")
 		return
 	}
-	http.Error(w, "Could not load published view", http.StatusInternalServerError)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = w.Write(index)
 }
 
 // requireAppShell redirects browser navigation to login while API requests keep the

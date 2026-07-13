@@ -47,6 +47,18 @@
   --err: #ef9aa9;
   --warn: #f0c592;
   --info: #92cfd4;
+  --faint: #6f6987;
+  --accent: var(--lilac);
+  --accent-strong: var(--lilac-strong);
+  /* Categorical ramp for multi-series charts; series take slots in order. */
+  --viz-1: #c6a8f2;
+  --viz-2: #88cfce;
+  --viz-3: #f0bf92;
+  --viz-4: #ec98b0;
+  --viz-5: #a6d29e;
+  --viz-6: #95c0ef;
+  --viz-7: #ddc885;
+  --viz-8: #a98ad4;
   --sidebar: 224px;
   font-family: Geist, Inter, system-ui, sans-serif;
   font-synthesis: none;
@@ -411,6 +423,115 @@ code {
   align-items: center;
   min-height: 80px;
   color: var(--muted);
+}
+
+/* Calendar activity heatmap: one cell per day over a trailing year. The grid
+   pans horizontally when cells hit their minimum legible size (phones), so the
+   tooltip positions against the pannable content, not the scrollport. */
+.heatmap {
+  position: relative;
+}
+.heatmap svg {
+  display: block;
+  max-width: 100%;
+}
+.heatmap.hm-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.heatmap.hm-scroll svg {
+  width: auto;
+  max-width: none;
+}
+.heatmap .hm-cell:hover {
+  stroke: var(--text);
+  stroke-width: 1;
+}
+.heatmap .lvl-0 {
+  fill: var(--surface-3);
+}
+.heatmap .lvl-1 {
+  fill: rgba(198, 168, 242, 0.28);
+}
+.heatmap .lvl-2 {
+  fill: rgba(198, 168, 242, 0.5);
+}
+.heatmap .lvl-3 {
+  fill: rgba(198, 168, 242, 0.74);
+}
+.heatmap .lvl-4 {
+  fill: var(--lilac);
+}
+.heatmap .hm-month {
+  fill: var(--muted);
+  font:
+    400 10px "Geist Mono",
+    monospace;
+}
+.heatmap-tooltip {
+  position: absolute;
+  z-index: 5;
+  min-width: 150px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(2px);
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease;
+}
+.heatmap-tooltip.on {
+  opacity: 1;
+  transform: none;
+}
+.heatmap-tooltip .tt-day {
+  color: var(--lilac);
+  font:
+    500 0.75rem "Geist Mono",
+    monospace;
+  margin-bottom: 4px;
+}
+.heatmap-tooltip .tt-total {
+  color: var(--text);
+  font:
+    450 0.8125rem "Geist Mono",
+    monospace;
+  font-variant-numeric: tabular-nums;
+}
+.heatmap-tooltip .tt-empty {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.heatmap-tooltip .tt-grid {
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 1px 10px;
+  margin: 5px 0 0;
+  font:
+    450 0.75rem / 1.5 "Geist Mono",
+    monospace;
+}
+.heatmap-tooltip .tt-grid dt {
+  color: var(--muted);
+}
+.heatmap-tooltip .tt-grid dd {
+  margin: 0;
+  color: var(--subtext);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.heatmap-tooltip .tt-cost {
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px solid var(--border);
+  color: var(--subtext);
+  font:
+    450 0.75rem "Geist Mono",
+    monospace;
+  font-variant-numeric: tabular-nums;
 }
 .split-panels {
   display: grid;
@@ -1503,4 +1624,133 @@ select:focus {
     animation-iteration-count: 1;
     transition-duration: 0.01ms;
   }
+}
+
+/* Shared hover/focus tooltip card: token breakdowns on stat tiles, breakdown
+   rows, and feed rows all reveal the same card shape. */
+.hover-tip {
+  position: relative;
+  display: inline-flex;
+  cursor: default;
+}
+.hover-tip .tip-card {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%) translateY(2px);
+  z-index: 6;
+  min-width: 170px;
+  padding: 8px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease;
+}
+.hover-tip:hover .tip-card,
+.hover-tip:focus-visible .tip-card,
+.hover-tip:focus-within .tip-card {
+  opacity: 1;
+  transform: translateX(-50%);
+}
+.tip-card .tt-grid {
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 1px 10px;
+  margin: 0;
+  font:
+    450 0.75rem / 1.5 "Geist Mono",
+    monospace;
+}
+.tip-card .tt-grid dt {
+  color: var(--muted);
+}
+.tip-card .tt-grid dd {
+  margin: 0;
+  color: var(--subtext);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.tip-card .tt-cost {
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px solid var(--border);
+  color: var(--subtext);
+  font:
+    450 0.75rem "Geist Mono",
+    monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Notice stack: transient confirmations and sticky errors for mutations. */
+.notice-stack {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: min(420px, calc(100vw - 36px));
+}
+.notice {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--ok);
+  border-radius: 4px;
+  font-size: 13px;
+}
+.notice.err {
+  border-left-color: var(--err);
+}
+.notice button {
+  margin-left: auto;
+  padding: 0 2px;
+  color: var(--muted);
+  background: none;
+  border: 0;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+.notice button:hover {
+  color: var(--text);
+}
+
+.brandver {
+  margin-left: 2px;
+  color: var(--muted);
+  font:
+    400 10px "Geist Mono",
+    monospace;
+}
+
+.tag-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease;
+}
+.tag-link .ext-glyph {
+  flex: none;
+  opacity: 0.65;
+  transition: opacity 120ms ease;
+}
+.tag-link:hover {
+  background: var(--surface-3);
+}
+.tag-link:hover .ext-glyph {
+  opacity: 1;
+}
+.tag.public.tag-link:hover {
+  border-color: rgba(159, 214, 166, 0.7);
 }

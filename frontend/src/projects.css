@@ -1,0 +1,25 @@
+/* Projects index and project detail: whole-row navigation on the ledger, and
+   spacing between the Repositories and Local folders sections. Page-specific
+   rules only; the shared table/instrument/tag shapes live in styles.css. */
+
+.proj-section + .proj-section {
+  margin-top: 24px;
+}
+
+/* The whole row is a click target (see ProjectRow's guarded onClick), but the
+   project name stays a real anchor so a modifier-click or middle-click still
+   opens it the native way instead of being swallowed by the row handler. */
+.row-link {
+  cursor: pointer;
+}
+
+/* The session table's remainder footer reads as a summary line, not another
+   row of data, so it recedes a step from the rows above it. */
+.remainder td {
+  color: var(--muted);
+  font-style: italic;
+}
+.remainder .tok-cell,
+.remainder .num {
+  font-style: normal;
+}

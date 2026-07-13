@@ -1,0 +1,1 @@
+.tag-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:8px}.tag.standalone{color:var(--warn);cursor:help}.tag.orphaned{color:var(--err);cursor:help}

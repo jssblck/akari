@@ -1,33 +1,29 @@
-import {
-  ArrowSquareOutIcon,
-  CaretDownIcon,
-  TrashIcon,
-} from "@phosphor-icons/react";
+// The cross-project sessions feed: search, filter, and browse every session
+// without first picking a project. Ported from sessions.templ / feed.go. The
+// session detail page and the shared Transcript component live in their own
+// files (pages/session-detail.tsx, components/transcript.tsx); this file
+// re-exports them so main.tsx and public.tsx keep importing from one module.
 import { useEffect, useMemo, useState } from "react";
-import {
-  Link,
-  useNavigate,
-  useParams,
-  useSearchParams,
-} from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 
 import { request, useAPI } from "../api";
 import { AsyncView } from "../components/async-view";
-import { Stat, StatStrip } from "../components/stat-strip";
+import { stripPromptPreamble } from "../components/session-quality";
 import {
-  formatCost,
-  formatCount,
-  formatTime,
-  relativeTime,
-  sessionTokens,
-} from "../format";
-import type {
-  Message,
-  SessionRow,
-  SessionSnapshot,
-  ToolCall,
-  TranscriptPage,
-} from "../types";
+  FallbackTag,
+  FanoutTag,
+  GradeTag,
+  KindTag,
+  OutcomeTag,
+  SessionPublicTag,
+} from "../components/session-tags";
+import { HoverTip, TokenCard } from "../components/token-card";
+import { formatCount, formatTokens, relativeTime } from "../format";
+import "../sessions.css";
+import type { SessionRow } from "../types";
+
+export { Transcript } from "../components/transcript";
+export { SessionPage } from "./session-detail";
 
 type FacetCount = { Value: string; Count: number };
 type ProjectFacet = {
@@ -48,6 +44,29 @@ type SessionsResponse = {
   };
 };
 
+const SORT_OPTIONS = [
+  { key: "updated", label: "Recent" },
+  { key: "tokens", label: "Most tokens" },
+  { key: "messages", label: "Most messages" },
+  { key: "cost", label: "Most expensive" },
+];
+
+const GRADE_LABELS: Record<string, string> = {
+  A: "A",
+  B: "B",
+  C: "C",
+  D: "D",
+  F: "F",
+  unscored: "Unscored",
+};
+
+const OUTCOME_LABELS: Record<string, string> = {
+  completed: "Completed",
+  errored: "Errored",
+  abandoned: "Abandoned",
+  unknown: "Unknown",
+};
+
 function setQuery(
   params: URLSearchParams,
   key: string,
@@ -56,19 +75,199 @@ function setQuery(
   const next = new URLSearchParams(params);
   if (value) next.set(key, value);
   else next.delete(key);
-  if (key !== "after") {
-    next.delete("after");
-    next.delete("after_value");
-  }
   return next;
+}
+
+function isLocalKind(kind: string): boolean {
+  return kind === "standalone" || kind === "orphaned";
+}
+
+function projectFacetLabel(pf: ProjectFacet): string {
+  return isLocalKind(pf.Kind) ? pf.Name : pf.Key;
+}
+
+function sessionRowProject(row: SessionRow): string {
+  return isLocalKind(row.ProjectKind) ? row.ProjectName : row.ProjectKey;
+}
+
+// keysetCursorValue mirrors web.keysetCursorValue: the exact, round-trippable
+// text of the sort column's last visible value, carried into "Show more" so the
+// next page resumes from what the reader already saw rather than a boundary
+// that can drift under it (activity bumps last_active_at, a rebuild moves a
+// count or cost).
+function keysetCursorValue(sort: string, row: SessionRow): string {
+  switch (sort) {
+    case "tokens":
+      return String(
+        row.TotalInput +
+          row.TotalOutput +
+          row.TotalCacheRead +
+          row.TotalCacheWrite,
+      );
+    case "messages":
+      return String(row.MessageCount);
+    case "cost":
+      return String(row.TotalCostUSD);
+    default:
+      return row.LastActiveAt ?? "";
+  }
+}
+
+// dayBucket mirrors web.dayBucket: a stable grouping key (the viewer's local
+// calendar date) and a relative display label, so the feed groups by day the
+// same way the day-grouped server render did.
+function dayBucket(
+  now: Date,
+  t: string | null,
+): { key: string; label: string } {
+  if (!t) return { key: "", label: "Undated" };
+  const stamp = new Date(t);
+  const nd = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const td = new Date(stamp.getFullYear(), stamp.getMonth(), stamp.getDate());
+  const key = td.toISOString().slice(0, 10);
+  const days = Math.round((nd.getTime() - td.getTime()) / 86_400_000);
+  if (days <= 0) return { key, label: "Today" };
+  if (days === 1) return { key, label: "Yesterday" };
+  if (days < 7)
+    return {
+      key,
+      label: stamp.toLocaleDateString(undefined, { weekday: "long" }),
+    };
+  if (nd.getFullYear() === td.getFullYear())
+    return {
+      key,
+      label: stamp.toLocaleDateString(undefined, {
+        month: "short",
+        day: "numeric",
+      }),
+    };
+  return {
+    key,
+    label: stamp.toLocaleDateString(undefined, {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    }),
+  };
+}
+
+// tokenPct mirrors web.tokenPct: a square-root scale so mid-range sessions
+// differentiate on the bar rather than every row but the outlier pegging to a
+// sliver.
+function tokenPct(tok: number, max: number): number {
+  if (max <= 0 || tok <= 0) return 0;
+  const pct = Math.round(Math.sqrt(tok / max) * 100);
+  return Math.min(100, Math.max(pct > 0 ? Math.max(pct, 3) : 0, 0));
+}
+
+function rowTokens(row: SessionRow): number {
+  return (
+    row.TotalInput + row.TotalOutput + row.TotalCacheRead + row.TotalCacheWrite
+  );
+}
+
+type DayGroup = {
+  label: string;
+  rows: Array<{ row: SessionRow; fadeProject: boolean; tokenPct: number }>;
+};
+
+function buildFeed(
+  rows: SessionRow[],
+  grouped: boolean,
+  maxTok: number,
+): DayGroup[] {
+  if (rows.length === 0) return [];
+  const now = new Date();
+  const groups: DayGroup[] = [];
+  let curKey: string | null = null;
+  let prevProj = "";
+  for (const row of rows) {
+    if (grouped) {
+      const { key, label } = dayBucket(now, row.LastActiveAt);
+      if (curKey === null || key !== curKey) {
+        groups.push({ label, rows: [] });
+        curKey = key;
+        prevProj = "";
+      }
+    } else if (groups.length === 0) {
+      groups.push({ label: "", rows: [] });
+    }
+    const proj = sessionRowProject(row);
+    const group = groups[groups.length - 1];
+    if (!group) continue;
+    group.rows.push({
+      row,
+      fadeProject: proj === prevProj,
+      tokenPct: tokenPct(rowTokens(row), maxTok),
+    });
+    prevProj = proj;
+  }
+  return groups;
 }
 
 export function SessionsPage() {
   const [params, setParams] = useSearchParams();
   const [search, setSearch] = useState(params.get("q") ?? "");
-  const state = useAPI<SessionsResponse>(
-    `/api/v1/app/sessions?${params.toString()}`,
+  const filterKey = params.toString();
+  const state = useAPI<SessionsResponse>(`/api/v1/app/sessions?${filterKey}`);
+
+  const [morePages, setMorePages] = useState<SessionRow[]>([]);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset keys off the filter query alone; params is a fresh object every render.
+  useEffect(() => {
+    setMorePages([]);
+    setSearch(params.get("q") ?? "");
+  }, [filterKey]);
+  useEffect(() => {
+    if (state.kind === "ready") setHasMore(state.data.has_more);
+  }, [state]);
+
+  const sort = params.get("sort") || "updated";
+  const grouped = sort === "updated";
+
+  const rows = useMemo(
+    () => [
+      ...(state.kind === "ready" ? (state.data.sessions ?? []) : []),
+      ...morePages,
+    ],
+    [state, morePages],
   );
+  // The token bar's denominator is fixed at the first page's maximum (see
+  // web.FeedMaxTokens): recomputing it per appended page would make a bar's
+  // width incomparable across a "Show more" boundary.
+  const maxTok = useMemo(
+    () =>
+      state.kind === "ready"
+        ? Math.max(0, ...(state.data.sessions ?? []).map(rowTokens))
+        : 0,
+    [state],
+  );
+  const groups = useMemo(
+    () => buildFeed(rows, grouped, maxTok),
+    [rows, grouped, maxTok],
+  );
+
+  async function loadMore() {
+    const last = rows[rows.length - 1];
+    if (!last) return;
+    setLoadingMore(true);
+    try {
+      const next = setQuery(
+        setQuery(params, "after", String(last.ID)),
+        "after_value",
+        keysetCursorValue(sort, last),
+      );
+      const result = await request<SessionsResponse>(
+        `/api/v1/app/sessions?${next.toString()}`,
+      );
+      setMorePages((cur) => [...cur, ...(result.sessions ?? [])]);
+      setHasMore(result.has_more);
+    } finally {
+      setLoadingMore(false);
+    }
+  }
+
   return (
     <div className="page sessions-page">
       <header className="page-head">
@@ -84,7 +283,9 @@ export function SessionsPage() {
         className="search-bar"
         onSubmit={(event) => {
           event.preventDefault();
-          setParams(setQuery(params, "q", search.trim()));
+          setParams(
+            setQuery(setQuery(params, "q", search.trim()), "after", ""),
+          );
         }}
       >
         <input
@@ -105,12 +306,14 @@ export function SessionsPage() {
                 title="Projects"
                 rows={(data.facets.Projects ?? []).map((item) => ({
                   value: String(item.ID),
-                  label: item.Name || item.Key,
+                  label: projectFacetLabel(item),
                   count: item.Count,
                 }))}
                 active={params.get("project") ?? ""}
                 onSelect={(value) =>
-                  setParams(setQuery(params, "project", value))
+                  setParams(
+                    setQuery(setQuery(params, "project", value), "after", ""),
+                  )
                 }
               />
               <FacetGroup
@@ -122,19 +325,65 @@ export function SessionsPage() {
                 }))}
                 active={params.get("agent") ?? ""}
                 onSelect={(value) =>
-                  setParams(setQuery(params, "agent", value))
+                  setParams(
+                    setQuery(setQuery(params, "agent", value), "after", ""),
+                  )
                 }
               />
-              <FacetGroup
-                title="Accounts"
-                rows={(data.facets.Users ?? []).map((item) => ({
-                  value: item.Value,
-                  label: item.Value,
-                  count: item.Count,
-                }))}
-                active={params.get("user") ?? ""}
-                onSelect={(value) => setParams(setQuery(params, "user", value))}
-              />
+              {(data.facets.Machines ?? []).length > 1 ? (
+                <FacetGroup
+                  title="Machines"
+                  rows={(data.facets.Machines ?? []).map((item) => ({
+                    value: item.Value,
+                    label: item.Value,
+                    count: item.Count,
+                  }))}
+                  active={params.get("machine") ?? ""}
+                  onSelect={(value) =>
+                    setParams(
+                      setQuery(setQuery(params, "machine", value), "after", ""),
+                    )
+                  }
+                />
+              ) : null}
+              {(data.facets.Users ?? []).length > 1 ? (
+                <FacetGroup
+                  title="Accounts"
+                  rows={(data.facets.Users ?? []).map((item) => ({
+                    value: item.Value,
+                    label: item.Value,
+                    count: item.Count,
+                  }))}
+                  active={params.get("user") ?? ""}
+                  onSelect={(value) =>
+                    setParams(
+                      setQuery(setQuery(params, "user", value), "after", ""),
+                    )
+                  }
+                />
+              ) : null}
+              <section className="facet">
+                <h2 className="label">Sort</h2>
+                <select
+                  aria-label="Sort"
+                  value={sort}
+                  onChange={(event) =>
+                    setParams(
+                      setQuery(
+                        setQuery(params, "sort", event.target.value),
+                        "after",
+                        "",
+                      ),
+                    )
+                  }
+                >
+                  {SORT_OPTIONS.map((opt) => (
+                    <option key={opt.key} value={opt.key}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </section>
               <label className="check-row">
                 <input
                   type="checkbox"
@@ -142,9 +391,13 @@ export function SessionsPage() {
                   onChange={(event) =>
                     setParams(
                       setQuery(
-                        params,
-                        "subagents",
-                        event.target.checked ? "1" : "",
+                        setQuery(
+                          params,
+                          "subagents",
+                          event.target.checked ? "1" : "",
+                        ),
+                        "after",
+                        "",
                       ),
                     )
                   }
@@ -158,9 +411,13 @@ export function SessionsPage() {
                   onChange={(event) =>
                     setParams(
                       setQuery(
-                        params,
-                        "empty",
-                        event.target.checked ? "1" : "",
+                        setQuery(
+                          params,
+                          "empty",
+                          event.target.checked ? "1" : "",
+                        ),
+                        "after",
+                        "",
                       ),
                     )
                   }
@@ -169,30 +426,56 @@ export function SessionsPage() {
               </label>
             </aside>
             <section className="feed">
-              {(data.sessions ?? []).length === 0 ? (
+              <ActiveFilterChips
+                params={params}
+                projects={data.facets.Projects ?? []}
+                setParams={setParams}
+              />
+              {(rows ?? []).length === 0 ? (
                 <div className="empty-state">
                   <h2>No matching sessions</h2>
                   <p>Clear a filter or search for a different phrase.</p>
                 </div>
               ) : (
-                (data.sessions ?? []).map((session) => (
-                  <SessionFeedRow key={session.ID} session={session} />
+                groups.map((group, gi) => (
+                  // biome-ignore lint/suspicious/noArrayIndexKey: groups are rebuilt from the accumulated rows every render; the label alone is not unique (two undated groups never occur, but a stable index is simpler than deriving one).
+                  <div key={gi}>
+                    {group.label ? (
+                      <div className="day-head">
+                        <span className="day-label label">{group.label}</span>
+                        <span className="day-rule" />
+                      </div>
+                    ) : null}
+                    {group.rows.map((fr) => (
+                      <SessionFeedRow
+                        key={fr.row.ID}
+                        session={fr.row}
+                        fadeProject={fr.fadeProject}
+                        tokenPct={fr.tokenPct}
+                      />
+                    ))}
+                  </div>
                 ))
               )}
-              {data.has_more && (data.sessions ?? []).length > 0 ? (
-                <button
-                  type="button"
-                  className="button secondary load-more"
-                  onClick={() => {
-                    const rows = data.sessions ?? [];
-                    const last = rows[rows.length - 1];
-                    if (last)
-                      setParams(setQuery(params, "after", String(last.ID)));
-                  }}
-                >
-                  Load next page
-                </button>
-              ) : null}
+              <div className="feed-footer">
+                <span className="feed-count mono small">
+                  {hasMore
+                    ? `Showing ${rows.length}`
+                    : rows.length === 1
+                      ? "1 session"
+                      : `${rows.length} sessions`}
+                </span>
+                {hasMore ? (
+                  <button
+                    type="button"
+                    className="small showmore"
+                    disabled={loadingMore}
+                    onClick={loadMore}
+                  >
+                    {loadingMore ? "Loading…" : "Show more"}
+                  </button>
+                ) : null}
+              </div>
             </section>
           </div>
         )}
@@ -241,376 +524,165 @@ function FacetGroup({
   );
 }
 
-function SessionFeedRow({ session }: { session: SessionRow }) {
-  const summary = session.Search.Text || session.Title || "Untitled session";
-  return (
-    <Link to={`/sessions/${session.ID}`} className="feed-row">
-      <div className="feed-main">
-        <span className="feed-project">
-          {session.ProjectName || session.ProjectKey}
-        </span>
-        <strong>{summary}</strong>
-        <span className="feed-meta">
-          {session.Username} on {session.Machine || "unknown machine"}
-          {session.GitBranch ? ` · ${session.GitBranch}` : ""}
-        </span>
-      </div>
-      <div className="feed-signals">
-        <span className="tag agent">{session.Agent}</span>
-        {session.Grade ? (
-          <span className={`tag grade grade-${session.Grade.toLowerCase()}`}>
-            {session.Grade}
-          </span>
-        ) : null}
-        {session.Outcome ? (
-          <span className={`status ${session.Outcome}`}>{session.Outcome}</span>
-        ) : null}
-      </div>
-      <div className="feed-numbers">
-        <strong>
-          {formatCost(session.TotalCostUSD, session.CostIncomplete)}
-        </strong>
-        <span>{formatCount(sessionTokens(session))} tokens</span>
-        <span>{relativeTime(session.LastActiveAt)}</span>
-      </div>
-    </Link>
-  );
-}
+// ActiveFilterChips reads every filter the URL may carry (including grade,
+// outcome, and range, which arrive only from an Insights drill-through link;
+// the toolbar has no picker for them, but a reader who followed a link here
+// still needs to see and clear what narrowed the feed).
+function ActiveFilterChips({
+  params,
+  projects,
+  setParams,
+}: {
+  params: URLSearchParams;
+  projects: ProjectFacet[];
+  setParams: (params: URLSearchParams) => void;
+}) {
+  const chips: Array<{ key: string; label: string; value: string }> = [];
+  const agent = params.get("agent");
+  if (agent) chips.push({ key: "agent", label: "agent", value: agent });
+  const machine = params.get("machine");
+  if (machine) chips.push({ key: "machine", label: "machine", value: machine });
+  const user = params.get("user");
+  if (user) chips.push({ key: "user", label: "user", value: user });
+  const projectID = params.get("project");
+  if (projectID) {
+    const match = projects.find((p) => String(p.ID) === projectID);
+    chips.push({
+      key: "project",
+      label: "project",
+      value: match ? projectFacetLabel(match) : projectID,
+    });
+  }
+  const q = params.get("q");
+  if (q) chips.push({ key: "q", label: "search", value: q });
+  const grade = params.get("grade");
+  if (grade)
+    chips.push({
+      key: "grade",
+      label: "grade",
+      value: GRADE_LABELS[grade] ?? grade,
+    });
+  const outcome = params.get("outcome");
+  if (outcome)
+    chips.push({
+      key: "outcome",
+      label: "outcome",
+      value: OUTCOME_LABELS[outcome] ?? outcome,
+    });
+  const range = params.get("range");
+  if (range) chips.push({ key: "range", label: "range", value: range });
 
-type SessionResponse = {
-  snapshot: SessionSnapshot;
-  owner: boolean;
-  can_delete: boolean;
-};
-
-export function SessionPage() {
-  const { id = "" } = useParams();
-  const navigate = useNavigate();
-  const [nonce, setNonce] = useState(0);
-  const state = useAPI<SessionResponse>(
-    `/api/v1/app/sessions/${encodeURIComponent(id)}?revision=${nonce}`,
-  );
-  useEffect(() => {
-    const events = new EventSource(
-      `/sessions/${encodeURIComponent(id)}/events`,
-    );
-    events.addEventListener("update", () => setNonce((value) => value + 1));
-    return () => events.close();
-  }, [id]);
+  if (chips.length === 0) return null;
   return (
-    <div className="page session-page">
-      <AsyncView state={state}>
-        {(data) => {
-          const detail = data.snapshot.Audit.Detail;
-          return (
-            <>
-              <header className="page-head session-head">
-                <div>
-                  <span className="crumb">
-                    <Link to={`/projects/${detail.ProjectID}`}>
-                      {detail.ProjectName || detail.ProjectKey}
-                    </Link>{" "}
-                    / session {detail.ID}
-                  </span>
-                  <h1>{detail.Title || `${detail.Agent} session`}</h1>
-                  <p>
-                    {detail.Username} · {detail.Machine || "unknown machine"} ·{" "}
-                    {detail.GitBranch || "no branch"}
-                  </p>
-                </div>
-                <div className="head-actions">
-                  {data.owner ? (
-                    <button
-                      type="button"
-                      className="button secondary"
-                      onClick={async () => {
-                        await request(
-                          `/api/v1/app/sessions/${detail.ID}/publication`,
-                          {
-                            method: "PUT",
-                            body: JSON.stringify({
-                              published: detail.Visibility !== "public",
-                            }),
-                          },
-                        );
-                        setNonce((value) => value + 1);
-                      }}
-                    >
-                      {detail.Visibility === "public" ? "Unpublish" : "Publish"}
-                    </button>
-                  ) : null}
-                  {detail.PublicID ? (
-                    <a
-                      className="icon-link"
-                      href={`/s/${detail.PublicID}`}
-                      target="_blank"
-                      rel="noreferrer"
-                      aria-label="Open published session"
-                    >
-                      <ArrowSquareOutIcon />
-                    </a>
-                  ) : null}
-                  {data.can_delete ? (
-                    <button
-                      type="button"
-                      className="icon-link danger"
-                      aria-label="Delete session"
-                      onClick={async () => {
-                        if (
-                          !window.confirm(
-                            "Delete this session and its parsed projection?",
-                          )
-                        )
-                          return;
-                        const result = await request<{ project_id: number }>(
-                          `/api/v1/app/sessions/${detail.ID}`,
-                          { method: "DELETE" },
-                        );
-                        navigate(`/projects/${result.project_id}`);
-                      }}
-                    >
-                      <TrashIcon />
-                    </button>
-                  ) : null}
-                </div>
-              </header>
-              <SessionInstruments snapshot={data.snapshot} />
-              <Transcript
-                initial={data.snapshot.Page}
-                blobBase={`/api/v1/session/${detail.ID}/blob`}
-                loadEarlier={async (before) =>
-                  (
-                    await request<{ page: TranscriptPage }>(
-                      `/api/v1/app/sessions/${detail.ID}/transcript?before=${before}`,
-                    )
-                  ).page
-                }
-              />
-            </>
-          );
-        }}
-      </AsyncView>
+    <div className="active-filters">
+      {chips.map((chip) => (
+        <button
+          type="button"
+          key={chip.key}
+          className="fchip"
+          onClick={() =>
+            setParams(setQuery(setQuery(params, chip.key, ""), "after", ""))
+          }
+        >
+          <span className="fchip-k">{chip.label}</span>
+          <span>{chip.value}</span>
+          <span className="fchip-x">&times;</span>
+        </button>
+      ))}
+      <button
+        type="button"
+        className="small clear"
+        onClick={() => setParams(new URLSearchParams())}
+      >
+        Clear all
+      </button>
     </div>
   );
 }
 
-function SessionInstruments({ snapshot }: { snapshot: SessionSnapshot }) {
-  const detail = snapshot.Audit.Detail;
-  const duration =
-    detail.StartedAt && detail.EndedAt
-      ? Math.max(
-          0,
-          new Date(detail.EndedAt).getTime() -
-            new Date(detail.StartedAt).getTime(),
-        )
-      : 0;
-  return (
-    <StatStrip>
-      <Stat label="Messages" value={formatCount(detail.MessageCount)} />
-      <Stat label="Tokens" value={formatCount(sessionTokens(detail))} />
-      <Stat
-        label="Cost"
-        value={formatCost(detail.TotalCostUSD, detail.CostIncomplete)}
-      />
-      <Stat
-        label="Duration"
-        value={duration ? formatDuration(duration) : "live"}
-      />
-      <Stat
-        label="Tool calls"
-        value={formatCount(snapshot.Tools?.length ?? 0)}
-      />
-      <Stat label="Started" value={relativeTime(detail.StartedAt)} />
-    </StatStrip>
-  );
-}
-
-function formatDuration(ms: number): string {
-  const minutes = Math.floor(ms / 60_000);
-  if (minutes < 1) return `${Math.floor(ms / 1_000)}s`;
-  if (minutes < 60) return `${minutes}m`;
-  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
-}
-
-function Transcript({
-  initial,
-  blobBase,
-  loadEarlier,
+function SessionFeedRow({
+  session,
+  fadeProject,
+  tokenPct: pct,
 }: {
-  initial: TranscriptPage;
-  blobBase: string;
-  loadEarlier?: (before: number) => Promise<TranscriptPage>;
+  session: SessionRow;
+  fadeProject: boolean;
+  tokenPct: number;
 }) {
-  const [page, setPage] = useState(initial);
-  const [loading, setLoading] = useState(false);
-  useEffect(() => setPage(initial), [initial]);
-  const tools = useMemo(() => groupTools(page.Tools ?? []), [page.Tools]);
+  const tokens = rowTokens(session);
+  const title = stripPromptPreamble(session.Title);
   return (
-    <section className="transcript">
-      <div className="section-head">
-        <div>
-          <h2>Transcript</h2>
-          <p>
-            {formatCount(page.Msgs?.length ?? 0)} messages in the current
-            window.
-          </p>
-        </div>
-      </div>
-      {loadEarlier && page.HasEarlier && page.Msgs?.[0] ? (
-        <button
-          type="button"
-          className="earlier"
-          disabled={loading}
-          onClick={async () => {
-            setLoading(true);
-            try {
-              const earlier = await loadEarlier(page.Msgs?.[0]?.Ordinal ?? 0);
-              setPage((current) => ({
-                ...current,
-                Msgs: [...(earlier.Msgs ?? []), ...(current.Msgs ?? [])],
-                Tools: [...(earlier.Tools ?? []), ...(current.Tools ?? [])],
-                Attachments: [
-                  ...(earlier.Attachments ?? []),
-                  ...(current.Attachments ?? []),
-                ],
-                HasEarlier: earlier.HasEarlier,
-                EarlierCount: earlier.EarlierCount,
-              }));
-            } finally {
-              setLoading(false);
-            }
-          }}
-        >
-          {loading
-            ? "Loading..."
-            : `Show ${formatCount(page.EarlierCount)} earlier messages`}
-        </button>
-      ) : null}
-      <div className="message-list">
-        {(page.Msgs ?? []).map((message) => (
-          <MessageRow
-            key={message.Ordinal}
-            message={message}
-            tools={tools.get(message.Ordinal) ?? []}
-            blobBase={blobBase}
+    <Link to={`/sessions/${session.ID}`} className="srow">
+      <span className="srow-agent mono small">{session.Agent}</span>
+      <div className="srow-main">
+        <div className="srow-line">
+          <span className={fadeProject ? "srow-proj faded" : "srow-proj"}>
+            {sessionRowProject(session)}
+          </span>
+          {session.GitBranch ? (
+            <span className="srow-branch mono">{session.GitBranch}</span>
+          ) : null}
+          <KindTag kind={session.ProjectKind} />
+          <GradeTag grade={session.Grade} />
+          <OutcomeTag outcome={session.Outcome} />
+          <SessionPublicTag
+            visibility={session.Visibility}
+            publicID={session.PublicID}
+            linked={false}
           />
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function groupTools(tools: ToolCall[]): Map<number, ToolCall[]> {
-  const grouped = new Map<number, ToolCall[]>();
-  for (const tool of tools)
-    grouped.set(tool.MessageOrdinal, [
-      ...(grouped.get(tool.MessageOrdinal) ?? []),
-      tool,
-    ]);
-  return grouped;
-}
-
-function MessageRow({
-  message,
-  tools,
-  blobBase,
-}: {
-  message: Message;
-  tools: ToolCall[];
-  blobBase: string;
-}) {
-  return (
-    <article
-      className={`message role-${message.Role}`}
-      id={`message-${message.Ordinal}`}
-    >
-      <header>
-        <span className="message-role">{message.Role}</span>
-        <span className="message-model">{message.Model}</span>
-        <time>{formatTime(message.Timestamp)}</time>
-        {message.Usage ? (
-          <span className="message-usage">
-            {formatCount(
-              message.Usage.Input +
-                message.Usage.Output +
-                message.Usage.CacheRead +
-                message.Usage.CacheWrite,
-            )}{" "}
-            tokens ·{" "}
-            {formatCost(message.Usage.CostUSD, message.Usage.CostIncomplete)}
-          </span>
-        ) : null}
-      </header>
-      {message.DuplicatePrompt ? (
-        <span className="tag warn">repeated prompt</span>
-      ) : null}
-      {message.ThinkingText ? (
-        <details className="thinking">
-          <summary>
-            <CaretDownIcon size={13} /> Thinking
-          </summary>
-          <pre>{message.ThinkingText}</pre>
-        </details>
-      ) : null}
-      {message.Content ? (
-        <div className="message-content">{message.Content}</div>
-      ) : null}
-      {tools.length > 0 ? (
-        <div className="tool-list">
-          {tools.map((tool) => (
-            <ToolCallRow
-              key={`${tool.CallIndex}-${tool.ToolName}`}
-              tool={tool}
-              blobBase={blobBase}
-            />
-          ))}
+          <FallbackTag count={session.ModelFallbackCount} />
+          <FanoutTag
+            subagentCount={session.Tree.SubagentCount}
+            costUSD={session.Tree.TotalCostUSD}
+            costIncomplete={session.Tree.CostIncomplete}
+          />
         </div>
-      ) : null}
-    </article>
-  );
-}
-
-function ToolCallRow({ tool, blobBase }: { tool: ToolCall; blobBase: string }) {
-  const path = tool.FileRelPath || tool.FilePath || tool.Detail;
-  return (
-    <details
-      className={`tool-call ${tool.ResultStatus === "error" ? "error" : ""}`}
-    >
-      <summary>
-        <span className="tool-name">{tool.ToolName}</span>
-        <span className="tool-detail">{path}</span>
-        {tool.ResultStatus ? (
-          <span className={`status ${tool.ResultStatus}`}>
-            {tool.ResultStatus}
-          </span>
-        ) : null}
-        <CaretDownIcon size={13} />
-      </summary>
-      <div className="tool-body-links">
-        {tool.InputSHA ? (
-          <a
-            href={`${blobBase}/${tool.InputSHA}`}
-            target="_blank"
-            rel="noreferrer"
-          >
-            Open input ({formatCount(tool.InputBytes)} B)
-          </a>
-        ) : null}
-        {tool.ResultSHA ? (
-          <a
-            href={`${blobBase}/${tool.ResultSHA}`}
-            target="_blank"
-            rel="noreferrer"
-          >
-            Open result ({formatCount(tool.ResultBytes)} B)
-          </a>
-        ) : null}
-        {!tool.InputSHA && !tool.ResultSHA ? (
-          <span className="muted">No captured body.</span>
+        {session.Search.Text ? (
+          <div className="srow-sub srow-snippet" title={session.Search.Text}>
+            {session.Search.Text.slice(0, session.Search.MatchStart)}
+            <mark>
+              {session.Search.Text.slice(
+                session.Search.MatchStart,
+                session.Search.MatchEnd,
+              )}
+            </mark>
+            {session.Search.Text.slice(session.Search.MatchEnd)}
+          </div>
+        ) : title ? (
+          <div className="srow-sub" title={title}>
+            {title}
+          </div>
         ) : null}
       </div>
-    </details>
+      <span className="srow-msgs mono small" title="messages">
+        {session.MessageCount}
+      </span>
+      <HoverTip
+        className="srow-tok"
+        summary={
+          <>
+            <span className="tokbar">
+              <span className="tokbar-fill" style={{ width: `${pct}%` }} />
+            </span>
+            <span className="tok-total mono">{formatTokens(tokens)}</span>
+          </>
+        }
+      >
+        <TokenCard
+          input={session.TotalInput}
+          output={session.TotalOutput}
+          cacheRead={session.TotalCacheRead}
+          cacheWrite={session.TotalCacheWrite}
+          costUSD={session.TotalCostUSD}
+          costIncomplete={session.CostIncomplete}
+        />
+      </HoverTip>
+      <span
+        className="srow-time mono small"
+        title={session.LastActiveAt ?? undefined}
+      >
+        {relativeTime(session.LastActiveAt)}
+      </span>
+    </Link>
   );
 }
-
-export { Transcript };

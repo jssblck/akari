@@ -1,10 +1,17 @@
-import { CopyIcon, PlugsConnectedIcon, TrashIcon } from "@phosphor-icons/react";
-import { useState } from "react";
+import {
+  CheckIcon,
+  CopyIcon,
+  PlugsConnectedIcon,
+  TrashIcon,
+} from "@phosphor-icons/react";
+import { useEffect, useRef, useState } from "react";
 
-import { request, useAPI } from "../api";
+import { type FleetStatus, RequestError, request, useAPI } from "../api";
 import { AsyncView } from "../components/async-view";
+import { attempt, notify } from "../components/notices";
 import { formatTime } from "../format";
 import type { Viewer } from "../types";
+import "./account.css";
 
 type Token = {
   ID: number;
@@ -30,18 +37,12 @@ type Invite = {
   RedeemedBy: string | null;
   RedeemedAt: string | null;
 };
-type Reparse = {
-  InProgress: boolean;
-  Done: number;
-  Total: number;
-  Failed: number;
-};
 type AccountResponse = {
   user: Viewer;
   tokens: Token[] | null;
   connections: Connection[] | null;
   invites: Invite[] | null;
-  reparse: Reparse;
+  reparse: FleetStatus;
 };
 
 export function AccountPage() {
@@ -104,17 +105,31 @@ function TokenSection({
           className="inline-form"
           onSubmit={async (event) => {
             event.preventDefault();
-            const form = new FormData(event.currentTarget);
-            const result = await request<{ token: string }>("/api/v1/tokens", {
-              method: "POST",
-              body: JSON.stringify({
-                name: form.get("name"),
-                scope: form.get("scope"),
-              }),
-            });
-            setSecret(result.token);
-            event.currentTarget.reset();
-            refresh();
+            const form = event.currentTarget;
+            const data = new FormData(form);
+            try {
+              const result = await request<{ token: string }>(
+                "/api/v1/tokens",
+                {
+                  method: "POST",
+                  body: JSON.stringify({
+                    name: data.get("name"),
+                    scope: data.get("scope"),
+                  }),
+                },
+              );
+              setSecret(result.token);
+              form.reset();
+              notify("Token created", "ok");
+              refresh();
+            } catch (error) {
+              notify(
+                error instanceof RequestError
+                  ? error.message
+                  : "Could not create the token.",
+                "err",
+              );
+            }
           }}
         >
           <input name="name" required placeholder="Token name" />
@@ -163,10 +178,15 @@ function TokenSection({
                   className="icon-link danger"
                   aria-label={`Revoke ${token.Name}`}
                   onClick={async () => {
-                    await request(`/api/v1/tokens/${token.ID}/revoke`, {
-                      method: "POST",
-                    });
-                    refresh();
+                    if (
+                      await attempt(
+                        request(`/api/v1/tokens/${token.ID}/revoke`, {
+                          method: "POST",
+                        }),
+                        "Token revoked",
+                      )
+                    )
+                      refresh();
                   }}
                 >
                   <TrashIcon />
@@ -187,6 +207,8 @@ function PublicationSection({
   user: Viewer;
   refresh: () => void;
 }) {
+  const [copied, setCopied] = useState(false);
+  const publicURL = `${window.location.origin}/u/${user.username}`;
   return (
     <section className="settings-section">
       <div className="settings-copy">
@@ -200,9 +222,29 @@ function PublicationSection({
           <div>
             <strong>{user.overview_public ? "Published" : "Private"}</strong>
             {user.overview_public ? (
-              <a href={`/u/${user.username}`} target="_blank" rel="noreferrer">
-                /u/{user.username}
-              </a>
+              <span className="share-link-row">
+                <a
+                  className="share-link"
+                  href={publicURL}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {publicURL}
+                </a>
+                <button
+                  type="button"
+                  className="icon-link"
+                  aria-label="Copy public link"
+                  title="Copy link"
+                  onClick={async () => {
+                    await navigator.clipboard.writeText(publicURL);
+                    setCopied(true);
+                    setTimeout(() => setCopied(false), 1200);
+                  }}
+                >
+                  {copied ? <CheckIcon /> : <CopyIcon />}
+                </button>
+              </span>
             ) : (
               <span>No public overview.</span>
             )}
@@ -211,11 +253,18 @@ function PublicationSection({
             className="button secondary"
             type="button"
             onClick={async () => {
-              await request("/api/v1/app/account/overview-publication", {
-                method: "PUT",
-                body: JSON.stringify({ published: !user.overview_public }),
-              });
-              refresh();
+              if (
+                await attempt(
+                  request("/api/v1/app/account/overview-publication", {
+                    method: "PUT",
+                    body: JSON.stringify({ published: !user.overview_public }),
+                  }),
+                  user.overview_public
+                    ? "Overview made private"
+                    : "Overview published",
+                )
+              )
+                refresh();
             }}
           >
             {user.overview_public ? "Make private" : "Publish"}
@@ -258,11 +307,16 @@ function ConnectionSection({
                 type="button"
                 className="button secondary"
                 onClick={async () => {
-                  await request(
-                    `/api/v1/app/account/connections/${encodeURIComponent(connection.ClientID)}`,
-                    { method: "DELETE" },
-                  );
-                  refresh();
+                  if (
+                    await attempt(
+                      request(
+                        `/api/v1/app/account/connections/${encodeURIComponent(connection.ClientID)}`,
+                        { method: "DELETE" },
+                      ),
+                      "App disconnected",
+                    )
+                  )
+                    refresh();
                 }}
               >
                 Disconnect
@@ -275,6 +329,29 @@ function ConnectionSection({
   );
 }
 
+// classifyInvite mirrors the server's classifyInvite (account.templ): the
+// same three states, keyed on the same field (RedeemedAt) so the label and
+// the presence of the Revoke button never disagree. An invite past its
+// expiry is dead the same way a redeemed one is, so it gets a status label
+// instead of a button that would 404.
+function classifyInvite(
+  invite: Invite,
+  now: Date,
+): { status: string; revocable: boolean } {
+  if (invite.RedeemedAt) {
+    return {
+      status: invite.RedeemedBy
+        ? `redeemed by ${invite.RedeemedBy}`
+        : "redeemed",
+      revocable: false,
+    };
+  }
+  if (invite.ExpiresAt && new Date(invite.ExpiresAt) <= now) {
+    return { status: "expired", revocable: false };
+  }
+  return { status: "unused", revocable: true };
+}
+
 function InviteSection({
   invites,
   refresh,
@@ -283,6 +360,7 @@ function InviteSection({
   refresh: () => void;
 }) {
   const [secret, setSecret] = useState("");
+  const now = new Date();
   return (
     <section className="settings-section">
       <div className="settings-copy">
@@ -294,20 +372,31 @@ function InviteSection({
           className="inline-form"
           onSubmit={async (event) => {
             event.preventDefault();
-            const form = new FormData(event.currentTarget);
-            const result = await request<{ invite_token: string }>(
-              "/api/v1/invites",
-              {
-                method: "POST",
-                body: JSON.stringify({
-                  note: form.get("note"),
-                  expires_hours: Number(form.get("expires_hours")),
-                }),
-              },
-            );
-            setSecret(result.invite_token);
-            event.currentTarget.reset();
-            refresh();
+            const form = event.currentTarget;
+            const data = new FormData(form);
+            try {
+              const result = await request<{ invite_token: string }>(
+                "/api/v1/invites",
+                {
+                  method: "POST",
+                  body: JSON.stringify({
+                    note: data.get("note"),
+                    expires_hours: Number(data.get("expires_hours")),
+                  }),
+                },
+              );
+              setSecret(result.invite_token);
+              form.reset();
+              notify("Invite created", "ok");
+              refresh();
+            } catch (error) {
+              notify(
+                error instanceof RequestError
+                  ? error.message
+                  : "Could not create the invite.",
+                "err",
+              );
+            }
           }}
         >
           <input name="note" placeholder="For Grace Hopper" />
@@ -337,35 +426,42 @@ function InviteSection({
           </div>
         ) : null}
         <div className="settings-list">
-          {invites.map((invite) => (
-            <div className="settings-row" key={invite.ID}>
-              <div>
-                <strong>{invite.Note || `Invite ${invite.ID}`}</strong>
-                <span>
-                  {invite.RedeemedAt
-                    ? `redeemed by ${invite.RedeemedBy}`
-                    : `created by ${invite.CreatedBy} · ${formatTime(invite.CreatedAt)}`}
-                </span>
+          {invites.map((invite) => {
+            const { status, revocable } = classifyInvite(invite, now);
+            return (
+              <div className="settings-row" key={invite.ID}>
+                <div>
+                  <strong>{invite.Note || `Invite ${invite.ID}`}</strong>
+                  <span>
+                    created by {invite.CreatedBy} ·{" "}
+                    {formatTime(invite.CreatedAt)}
+                  </span>
+                </div>
+                {revocable ? (
+                  <button
+                    type="button"
+                    className="icon-link danger"
+                    aria-label="Revoke invite"
+                    onClick={async () => {
+                      if (
+                        await attempt(
+                          request(`/api/v1/app/account/invites/${invite.ID}`, {
+                            method: "DELETE",
+                          }),
+                          "Invite revoked",
+                        )
+                      )
+                        refresh();
+                    }}
+                  >
+                    <TrashIcon />
+                  </button>
+                ) : (
+                  <span className="tag">{status}</span>
+                )}
               </div>
-              {invite.RedeemedAt ? (
-                <span className="tag">used</span>
-              ) : (
-                <button
-                  type="button"
-                  className="icon-link danger"
-                  aria-label="Revoke invite"
-                  onClick={async () => {
-                    await request(`/api/v1/app/account/invites/${invite.ID}`, {
-                      method: "DELETE",
-                    });
-                    refresh();
-                  }}
-                >
-                  <TrashIcon />
-                </button>
-              )}
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
     </section>
@@ -376,9 +472,33 @@ function ReparseSection({
   status,
   refresh,
 }: {
-  status: Reparse;
+  status: FleetStatus;
   refresh: () => void;
 }) {
+  const [live, setLive] = useState(status);
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+
+  // The account payload's reparse figure is a point-in-time snapshot; adopt
+  // a fresh one whenever the page reloads it (a manual refresh, or the
+  // revision bump after triggering a rebuild).
+  useEffect(() => setLive(status), [status]);
+
+  useEffect(() => {
+    if (!live.in_progress) return;
+    const source = new EventSource("/api/v1/reparse/events");
+    const onStatus = (event: MessageEvent<string>) => {
+      const next = JSON.parse(event.data) as FleetStatus;
+      setLive(next);
+      if (!next.in_progress) {
+        source.close();
+        refreshRef.current();
+      }
+    };
+    source.addEventListener("status", onStatus as EventListener);
+    return () => source.close();
+  }, [live.in_progress]);
+
   return (
     <section className="settings-section">
       <div className="settings-copy">
@@ -389,24 +509,29 @@ function ReparseSection({
         <div className="reparse-status">
           <div>
             <strong>
-              {status.InProgress
+              {live.in_progress
                 ? "Rebuild in progress"
                 : "Projection is current"}
             </strong>
             <span>
-              {status.Done} / {status.Total} complete
-              {status.Failed ? ` · ${status.Failed} failed` : ""}
+              {live.done} / {live.total} complete
+              {live.failed ? ` · ${live.failed} failed` : ""}
             </span>
           </div>
-          {status.InProgress ? (
-            <progress max={Math.max(status.Total, 1)} value={status.Done} />
+          {live.in_progress ? (
+            <progress max={Math.max(live.total, 1)} value={live.done} />
           ) : (
             <button
               className="button secondary"
               type="button"
               onClick={async () => {
-                await request("/api/v1/app/reparse", { method: "POST" });
-                refresh();
+                if (
+                  await attempt(
+                    request("/api/v1/app/reparse", { method: "POST" }),
+                    "Rebuild started",
+                  )
+                )
+                  refresh();
               }}
             >
               Rebuild all

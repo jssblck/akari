@@ -1,8 +1,10 @@
 import {
+  BookOpenTextIcon,
   ChartLineUpIcon,
   CirclesThreePlusIcon,
   FolderOpenIcon,
   GaugeIcon,
+  GithubLogoIcon,
   ListMagnifyingGlassIcon,
   SignOutIcon,
   UserCircleIcon,
@@ -12,6 +14,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 
 import { request, setCSRFToken, useAPI } from "./api";
 import { AsyncView } from "./components/async-view";
+import { NoticeHost } from "./components/notices";
 import type { Viewer } from "./types";
 
 const nav = [
@@ -19,6 +22,7 @@ const nav = [
   { to: "/sessions", label: "Sessions", icon: ListMagnifyingGlassIcon },
   { to: "/projects", label: "Projects", icon: FolderOpenIcon },
   { to: "/insights", label: "Insights", icon: ChartLineUpIcon },
+  { to: "/guide", label: "Guide", icon: BookOpenTextIcon },
 ];
 
 export function AppShell() {
@@ -46,6 +50,9 @@ export function AppShell() {
               <a href="/" className="brand" aria-label="Akari homepage">
                 <span className="brand-mark" aria-hidden="true" />
                 <span>akari</span>
+                {user.version ? (
+                  <span className="brandver">{user.version}</span>
+                ) : null}
               </a>
               <nav aria-label="Primary navigation">
                 {nav.map((item) => (
@@ -60,6 +67,13 @@ export function AppShell() {
                 ))}
               </nav>
               <div className="sidebar-foot">
+                <a
+                  href="https://github.com/jssblck/akari"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  <GithubLogoIcon size={17} /> GitHub
+                </a>
                 <NavLink to="/api/docs">
                   <CirclesThreePlusIcon size={17} /> API
                 </NavLink>
@@ -81,6 +95,7 @@ export function AppShell() {
             <main className="app-main">
               <Outlet context={user} />
             </main>
+            <NoticeHost />
           </div>
         ) : null
       }

@@ -1,6 +1,20 @@
 export function formatCost(value: number, incomplete = false): string {
+  // Sub-cent costs keep four decimals so a cheap session reads as $0.0042
+  // rather than rounding to a meaningless $0.00, mirroring the server's
+  // FmtCost so every cost figure reads identically at any magnitude.
+  if (value > 0 && value < 0.01)
+    return `$${value.toFixed(4)}${incomplete ? "+" : ""}`;
   const digits = value < 10 ? 2 : value < 100 ? 1 : 0;
   return `${new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", minimumFractionDigits: digits, maximumFractionDigits: digits }).format(value)}${incomplete ? "+" : ""}`;
+}
+
+// formatTokens mirrors the server's FmtTokens (B/M/k suffixes, one decimal) so
+// token figures read identically wherever they appear.
+export function formatTokens(value: number): string {
+  if (value >= 1e9) return `${(value / 1e9).toFixed(1)}B`;
+  if (value >= 1e6) return `${(value / 1e6).toFixed(1)}M`;
+  if (value >= 1e3) return `${(value / 1e3).toFixed(1)}k`;
+  return String(value);
 }
 
 export function formatCount(value: number): string {

@@ -1,17 +1,31 @@
-import { useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
-import { RequestError, request } from "../api";
+import { RequestError, request, useAPI } from "../api";
 import { PublicShell } from "../components/public-shell";
+import type { Viewer } from "../types";
 
 export function AuthPage({ mode }: { mode: "login" | "register" }) {
   const [params] = useSearchParams();
+  const navigate = useNavigate();
+  const viewer = useAPI<Viewer>("/api/v1/app/bootstrap");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [invite, setInvite] = useState(params.get("invite") ?? "");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const next = safeNext(params.get("next"));
+
+  // A signed-in visitor has nothing to do here: bounce straight to the app,
+  // the same redirect the server-rendered login page used to issue.
+  useEffect(() => {
+    if (viewer.kind === "ready" && viewer.data.authenticated) {
+      navigate("/overview", { replace: true });
+    }
+  }, [viewer, navigate]);
+
+  if (viewer.kind === "ready" && viewer.data.authenticated) return null;
+
   return (
     <PublicShell compact>
       <div className="auth-wrap">
@@ -106,7 +120,31 @@ export function AuthPage({ mode }: { mode: "login" | "register" }) {
   );
 }
 
+// safeNext mirrors the server's safeNext (web.go): reject anything that is
+// not a same-origin absolute path, so a crafted next cannot bounce a
+// signed-in user off-site. Browsers treat a backslash as a path separator
+// equivalent to "/" when resolving a URL (the WHATWG URL spec's "special
+// scheme" handling), so a value like "/\evil.com" would otherwise parse as
+// same-origin here while still redirecting off-site; the explicit backslash
+// check closes that gap the same way the server's does.
 function safeNext(value: string | null): string {
-  if (!value?.startsWith("/") || value.startsWith("//")) return "/overview";
+  const fallback = "/overview";
+  if (!value?.startsWith("/") || value.startsWith("//")) return fallback;
+  if (value.includes("\\")) return fallback;
+  let parsed: URL;
+  try {
+    parsed = new URL(value, window.location.origin);
+  } catch {
+    return fallback;
+  }
+  if (parsed.origin !== window.location.origin) return fallback;
+  let decodedPath: string;
+  try {
+    decodedPath = decodeURIComponent(parsed.pathname);
+  } catch {
+    return fallback;
+  }
+  if (decodedPath.includes("\\") || decodedPath.startsWith("//"))
+    return fallback;
   return value;
 }
