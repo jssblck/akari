@@ -1,18 +1,18 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { DayPoint } from "../types";
 import { ActivityHeatmap } from "./activity-heatmap";
 
 const DAY_MS = 86400000;
 
-// Mirrors the component's own "today" construction (local calendar day,
-// stamped as a UTC instant) so a fixture keyed by offset from today lands on
-// the exact grid cell the component expects, regardless of the host
-// machine's timezone or the date the suite happens to run on.
+// The current UTC calendar day, computed independently of the component (from
+// UTC date parts, matching the server's UTC-truncated buckets) so these tests
+// would catch the component drifting back to local date parts, which lag a
+// UTC day behind for negative-offset hosts.
 function todayUTC(): number {
   const now = new Date();
-  return Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+  return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
 }
 
 function dayKey(offsetFromToday: number): string {
@@ -106,6 +106,36 @@ describe("ActivityHeatmap", () => {
     expect(byCost.container.querySelectorAll("rect.hm-cell.lvl-1").length).toBe(
       1,
     );
+  });
+
+  it("keys the grid to the UTC calendar day, not the host's local day", () => {
+    // Pin the clock just past UTC midnight. On any west-of-UTC host the local
+    // calendar day is still yesterday, so a component that built "today" from
+    // local date parts would drop this point; keying by UTC keeps it.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-02T00:30:00Z"));
+    try {
+      const { container } = render(
+        <ActivityHeatmap
+          series={[
+            {
+              Day: "2026-07-02",
+              CostUSD: 0,
+              Input: 500,
+              Output: 0,
+              CacheRead: 0,
+              CacheWrite: 0,
+            },
+          ]}
+          metric="tokens"
+        />,
+      );
+      expect(
+        container.querySelectorAll("rect.hm-cell.lvl-4").length,
+      ).toBeGreaterThanOrEqual(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("renders month labels along the axis", () => {

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jssblck/akari/internal/server/parse"
 	"github.com/jssblck/akari/internal/server/store"
@@ -151,6 +152,74 @@ func TestApplicationAPIFlow(t *testing.T) {
 	response, public := doJSON(t, http.DefaultClient, http.MethodGet, server.URL+"/api/v1/app/public/sessions/"+publicID, nil)
 	if response.StatusCode != http.StatusOK || public["snapshot"] == nil {
 		t.Fatalf("public session API: status=%d body=%v", response.StatusCode, public)
+	}
+}
+
+// The public project API publishes aggregate usage only. The by-user cost
+// split names the accounts that ran in a repo and how much each spent, so it
+// must never reach an anonymous caller even though the client would not
+// render it; the signed-in project API keeps the breakdown.
+func TestPublicProjectAPIOmitsUserBreakdown(t *testing.T) {
+	t.Parallel()
+	server, st := newTestServer(t)
+	client := registerAdmin(t, server.URL)
+	ctx := context.Background()
+
+	user, err := st.UserByUsername(ctx, "grace")
+	if err != nil {
+		t.Fatalf("load registered user: %v", err)
+	}
+	projectID, err := st.UpsertProject(ctx, "github.com/grace/akari", "github.com", "grace", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	announced, err := st.Announce(ctx, store.AnnounceParams{
+		UserID: user.ID, Agent: "claude", SourceSessionID: "public-users-split",
+		ProjectID: projectID, Cwd: "/home/grace/akari", Machine: "hopper",
+	})
+	if err != nil {
+		t.Fatalf("announce session: %v", err)
+	}
+	cost := 1.25
+	ordinal := 1
+	rebuildWith(t, st, announced.SessionID, store.ProjectionDelta{
+		Messages: []store.MessageDelta{
+			{Ordinal: 0, Role: "user", Content: "chart the fleet"},
+			{Ordinal: 1, Role: "assistant", Content: "Charted."},
+		},
+		Usage: []store.ProjUsage{{
+			MessageOrdinal: &ordinal, Model: "claude-fable-5",
+			Input: 100, Output: 50, CostUSD: &cost,
+			OccurredAt: time.Now().UTC(), DedupKey: "public-users-split-0",
+		}},
+	})
+	if err := st.PublishProjectOverview(ctx, projectID); err != nil {
+		t.Fatalf("publish project: %v", err)
+	}
+
+	usersOf := func(body map[string]any) []any {
+		analytics, ok := body["analytics"].(map[string]any)
+		if !ok {
+			t.Fatalf("response has no analytics object: %v", body)
+		}
+		users, _ := analytics["Users"].([]any)
+		return users
+	}
+
+	response, private := doJSON(t, client, http.MethodGet, server.URL+"/api/v1/app/projects/"+strconvFormat(projectID), nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("signed-in project API: status=%d body=%v", response.StatusCode, private)
+	}
+	if len(usersOf(private)) == 0 {
+		t.Fatal("signed-in project API lost the by-user breakdown; the fixture should produce one row")
+	}
+
+	response, public := doJSON(t, http.DefaultClient, http.MethodGet, server.URL+"/api/v1/app/public/projects/"+strconvFormat(projectID), nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("public project API: status=%d body=%v", response.StatusCode, public)
+	}
+	if users := usersOf(public); len(users) != 0 {
+		t.Fatalf("public project API leaked the by-user breakdown: %v", users)
 	}
 }
 

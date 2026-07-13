@@ -11,5 +11,10 @@ export default defineConfig({
     globals: true,
     setupFiles: ["./src/test/setup.ts"],
     css: false,
+    // Pin the suite to a west-of-UTC zone so local-vs-UTC date bugs (the
+    // heatmap's "today" boundary) fail everywhere, not only on hosts whose
+    // local calendar day happens to trail UTC. A UTC runner would otherwise
+    // compute identical dates under both the correct and the buggy code.
+    env: { TZ: "America/Anchorage" },
   },
 });

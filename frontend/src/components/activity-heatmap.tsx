@@ -110,8 +110,15 @@ export function ActivityHeatmap({
 
   // The grid ends on the current week and spans WEEKS columns back to a Sunday.
   const { start, end } = useMemo(() => {
+    // Today must be the current UTC calendar day, matching the server's
+    // UTC-truncated buckets; local date parts would lag a day behind for
+    // negative-offset viewers and drop today's cell.
     const now = new Date();
-    const end = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+    const end = Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      now.getUTCDate(),
+    );
     const endDow = new Date(end).getUTCDay();
     return { start: end - endDow * DAY_MS - (WEEKS - 1) * 7 * DAY_MS, end };
   }, []);

@@ -281,6 +281,12 @@ func (s *Server) computeAnalyticsSnapshot(ctx context.Context, key analyticsSnap
 	case analyticsProjectScope:
 		filter.ProjectID = key.scope.id
 		filter.Bucket = web.TrendBucket(key.rangeKey)
+		// The project snapshot only feeds public surfaces (the anonymous
+		// project API and OG card), so the by-user cost split must never be
+		// computed into it: the accounts that ran in a repo stay private even
+		// though the project's aggregate usage is published. The signed-in
+		// project API reads live analytics and keeps its Users breakdown.
+		filter.OmitUsers = true
 		analytics, insights, err := s.Store.ProjectOverviewSnapshot(ctx, filter)
 		if err != nil {
 			return analyticsPageSnapshot{}, err
