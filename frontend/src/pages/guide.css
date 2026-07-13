@@ -1,0 +1,66 @@
+/* Mobile chapter drawer. Above the breakpoint the chapter rail already
+   renders as the sticky column from styles.css; below it, the toggle and
+   scrim below turn the same <aside> into an off-canvas panel instead of the
+   default horizontal scroll strip. */
+.guide-menu,
+.guide-scrim {
+  display: none;
+}
+
+.guide-toc a.active {
+  color: var(--lilac);
+}
+
+@media (max-width: 780px) {
+  .guide-menu {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 34px;
+    margin: 14px 0 0 16px;
+    color: var(--text);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .guide-scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    display: block;
+    background: rgba(0, 0, 0, 0.5);
+    border: 0;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.15s ease;
+  }
+  .guide-shell.nav-open .guide-scrim {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .guide-shell .guide-layout .guide-nav {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 41;
+    width: min(78vw, 300px);
+    overflow-x: hidden;
+    overflow-y: auto;
+    padding: 20px 16px;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    transform: translateX(-100%);
+    transition: transform 0.18s ease;
+  }
+  .guide-shell.nav-open .guide-layout .guide-nav {
+    transform: translateX(0);
+  }
+  .guide-shell .guide-layout .guide-nav nav {
+    display: grid;
+  }
+  .guide-shell .guide-layout .guide-nav a {
+    min-width: 0;
+  }
+}

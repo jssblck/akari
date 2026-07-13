@@ -1,0 +1,10 @@
+/* The reparse-gated wait state: calmer than the skeleton shimmer it sits
+   beside, since a fleet rebuild can take a while and the view is not stuck,
+   just waiting on useAPI's poll to see the corpus catch up. */
+.gated-note {
+  margin: 0;
+  padding: 18px;
+  color: var(--muted);
+  text-align: center;
+  font-size: 13px;
+}

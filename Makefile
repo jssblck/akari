@@ -10,7 +10,7 @@ frontend:
 	cd frontend && bun install --frozen-lockfile && bun run build
 
 frontend-check:
-	cd frontend && bun install --frozen-lockfile && bun run check
+	cd frontend && bun install --frozen-lockfile && bun run check && bun run test
 
 generate: frontend
 	go generate ./...

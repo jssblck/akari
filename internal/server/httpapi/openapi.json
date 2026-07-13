@@ -113,6 +113,9 @@
     "/api/v1/app/sessions/{id}/transcript": {
       "get": { "tags": ["Application"], "summary": "Read an earlier transcript window", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }, { "name": "before", "in": "query", "required": true, "schema": { "type": "integer", "minimum": 0 } }], "responses": { "200": { "description": "Transcript page" } } }
     },
+    "/api/v1/app/sessions/{id}/append": {
+      "get": { "tags": ["Application"], "summary": "Read a session's turns past a rendered ordinal", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }, { "name": "after", "in": "query", "required": true, "schema": { "type": "integer", "minimum": 0 } }], "responses": { "200": { "description": "Session snapshot fragment" }, "400": { "$ref": "#/components/responses/BadRequest" }, "404": { "$ref": "#/components/responses/NotFound" } } }
+    },
     "/api/v1/app/sessions/{id}/publication": {
       "put": { "tags": ["Application"], "summary": "Publish or unpublish an owned session", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Publication" } } } }, "responses": { "200": { "description": "Publication updated" }, "404": { "$ref": "#/components/responses/NotFound" } } }
     },

@@ -14,6 +14,7 @@ import (
 	"github.com/jssblck/akari/internal/server/ogimage"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/web"
+	"github.com/jssblck/akari/internal/version"
 )
 
 type appViewer struct {
@@ -23,11 +24,14 @@ type appViewer struct {
 	IsAdmin        bool   `json:"is_admin"`
 	OverviewPublic bool   `json:"overview_public"`
 	CSRFToken      string `json:"csrf_token,omitempty"`
+	// Version rides the bootstrap payload so the shell can show the running
+	// server version the way the old templated sidebar did.
+	Version string `json:"version"`
 }
 
 func (s *Server) handleAppBootstrap(w http.ResponseWriter, r *http.Request) {
 	setPrivateNoStore(w)
-	viewer := appViewer{}
+	viewer := appViewer{Version: version.String()}
 	if token, ok := csrfTokenFromRequest(r); ok {
 		viewer.CSRFToken = token
 	}

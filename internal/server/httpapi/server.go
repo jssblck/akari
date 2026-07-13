@@ -193,6 +193,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/app/sessions", s.requireFull(s.gateAPIParsed(s.handleAPISessions)))
 	mux.HandleFunc("GET /api/v1/app/sessions/{id}", s.requireFull(s.gateAPIParsed(s.handleAPISession)))
 	mux.HandleFunc("GET /api/v1/app/sessions/{id}/transcript", s.requireFull(s.gateAPIParsed(s.handleAPISessionEarlier)))
+	mux.HandleFunc("GET /api/v1/app/sessions/{id}/append", s.requireFull(s.gateAPIParsed(s.handleAPISessionAppend)))
 	mux.HandleFunc("PUT /api/v1/app/sessions/{id}/publication", s.requireFull(s.handleAPISessionPublication))
 	mux.HandleFunc("DELETE /api/v1/app/sessions/{id}", s.requireFull(s.handleAPIDeleteSession))
 	mux.HandleFunc("PUT /api/v1/app/projects/{id}/publication", s.requireFull(s.handleAPIProjectPublication))

@@ -1,7 +1,8 @@
 import { PlugsConnectedIcon } from "@phosphor-icons/react";
-import { useLocation } from "react-router-dom";
+import { useEffect } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 
-import { useAPI } from "../api";
+import { RequestError, useAPI } from "../api";
 import { AsyncView } from "../components/async-view";
 import { PublicShell } from "../components/public-shell";
 
@@ -19,9 +20,28 @@ type Consent = {
 
 export function OAuthConsentPage() {
   const location = useLocation();
+  const navigate = useNavigate();
   const state = useAPI<Consent>(
     `/api/v1/app/oauth/authorize${location.search}`,
   );
+  const loggedOut =
+    state.kind === "error" &&
+    state.error instanceof RequestError &&
+    state.error.status === 401;
+
+  // A logged-out visitor gets bounced through login rather than a generic
+  // error card; next carries the full authorize URL (path plus every OAuth
+  // query param) so approving lands back on this exact consent request.
+  useEffect(() => {
+    if (!loggedOut) return;
+    const authorizeURL = location.pathname + location.search;
+    navigate(`/login?next=${encodeURIComponent(authorizeURL)}`, {
+      replace: true,
+    });
+  }, [loggedOut, location.pathname, location.search, navigate]);
+
+  if (loggedOut) return null;
+
   return (
     <PublicShell compact>
       <div className="auth-wrap">

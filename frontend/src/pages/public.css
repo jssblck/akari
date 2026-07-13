@@ -1,0 +1,20 @@
+.tag-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+/* Project state chips (components/session-tags.tsx's KindTag, itself ported
+   from web.kindTag): standalone reads as a caution (no git remote to
+   compare against), orphaned as an error (its working directory is gone
+   entirely). Global rather than page-scoped since KindTag renders on the
+   session detail page too. */
+.tag.standalone {
+  color: var(--warn);
+  cursor: help;
+}
+.tag.orphaned {
+  color: var(--err);
+  cursor: help;
+}
