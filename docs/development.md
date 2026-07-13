@@ -91,6 +91,14 @@ restarts fast and stays seeded. Pass `--clean` (`runtimeArgs: ["dev", "--clean"]
 to reset the volume on every launch instead. It is meant for the launch config;
 the `eph up` loop above remains the way to drive the stack by hand.
 
+Under this launch the browser reaches the server through the forwarded launcher
+port while the server itself listens on its own auto-assigned port. That works
+because dev leaves `AKARI_PUBLIC_URL` unset, so the server derives its origin
+(the CSRF trust boundary and OAuth issuer) from each request's Host header and
+accepts both ports. The `AKARI_URL` eph exports is a client-side convenience
+and must never become the server's public URL; pinning it there would 403 every
+browser login arriving through the forward.
+
 ## Example data for development
 
 The `.eph` server service runs `akari-server dev-seed` as a post-start hook, so

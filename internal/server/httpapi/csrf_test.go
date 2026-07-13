@@ -168,6 +168,35 @@ func TestCSRFDynamicOriginHonorsForwardedScheme(t *testing.T) {
 	}
 }
 
+// TestCSRFDerivedOriginThroughPortForward covers the dev loop where the
+// browser reaches the server through a TCP port forward (eph dev behind the
+// Claude preview gate): the forwarded request carries the gate port in both
+// Origin and Host. With no public URL configured the trust boundary is the
+// request's own host, so that login succeeds, while the server's internal
+// auto-assigned port stays a foreign origin even though both are loopback.
+func TestCSRFDerivedOriginThroughPortForward(t *testing.T) {
+	t.Parallel()
+	s := &Server{}
+
+	request := func(origin string) int {
+		req := httptest.NewRequest(http.MethodPost, "http://localhost:8080/api/v1/auth/login", nil)
+		req.Host = "localhost:8080"
+		req.Header.Set("Origin", origin)
+		rec := httptest.NewRecorder()
+		s.withCSRF(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		})).ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	if got := request("http://localhost:8080"); got != http.StatusNoContent {
+		t.Fatalf("forwarded-port login = %d, want %d", got, http.StatusNoContent)
+	}
+	if got := request("http://localhost:60663"); got != http.StatusForbidden {
+		t.Fatalf("cross-port loopback origin = %d, want %d", got, http.StatusForbidden)
+	}
+}
+
 func TestCSRFExemptsBearerAndNonCookieProtocolEndpoints(t *testing.T) {
 	t.Parallel()
 	s := &Server{Cfg: config.Server{PublicURL: "https://akari.example"}}

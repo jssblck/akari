@@ -41,13 +41,14 @@ type Server struct {
 	CookieSecure bool
 	// PublicURL is the externally reachable base URL of the server (scheme and
 	// host, no trailing slash), e.g. "https://akari.example.com". It is the OAuth
-	// issuer and the base of every absolute URL the MCP authorization flow
+	// issuer, the base of every absolute URL the MCP authorization flow
 	// advertises (the discovery documents, the authorize and token endpoints, the
-	// MCP resource identifier). Read from AKARI_PUBLIC_URL, falling back to
-	// AKARI_URL (which eph already exports for the dev stack). When neither is set,
-	// it is empty and the OAuth handlers derive the base from each request's scheme
-	// and Host header, which is correct for a single-origin deployment behind a
-	// well-behaved proxy.
+	// MCP resource identifier), and the trusted origin for browser writes. Read
+	// from AKARI_PUBLIC_URL only. When unset it is empty and the handlers derive
+	// the base from each request's scheme and Host header, which is correct both
+	// for a single-origin deployment behind a well-behaved proxy and for local
+	// dev, where the same server is legitimately reached on more than one
+	// loopback origin (its own port and a forwarded preview port).
 	PublicURL string
 	// MCPResponseBudgetBytes caps the encoded CallToolResult body
 	// (AKARI_MCP_RESPONSE_BUDGET_BYTES). The default is 8 MiB.
@@ -171,12 +172,11 @@ const (
 // LoadServer reads server configuration from the environment, applying defaults
 // and validating required values.
 func LoadServer() (Server, error) {
-	publicURLValue, publicURLSource := publicURL()
 	s := Server{
 		DatabaseURL:           os.Getenv("AKARI_DATABASE_URL"),
 		Listen:                listenAddr(),
 		CookieSecure:          !truthy(os.Getenv("AKARI_COOKIE_INSECURE")),
-		PublicURL:             publicURLValue,
+		PublicURL:             publicURL(),
 		ProxyAuthHeader:       strings.TrimSpace(os.Getenv("AKARI_PROXY_AUTH_HEADER")),
 		ProxyAuthSecret:       os.Getenv("AKARI_PROXY_AUTH_SECRET"),
 		ProxyAuthSecretHeader: proxyAuthSecretHeader(),
@@ -187,7 +187,7 @@ func LoadServer() (Server, error) {
 	if s.PublicURL != "" {
 		origin, err := NormalizePublicOrigin(s.PublicURL)
 		if err != nil {
-			return Server{}, fmt.Errorf("%s: %w", publicURLSource, err)
+			return Server{}, fmt.Errorf("AKARI_PUBLIC_URL: %w", err)
 		}
 		s.PublicURL = origin
 	}
@@ -339,23 +339,19 @@ func listenAddr() string {
 	return ":8080"
 }
 
-// publicURL resolves the server's externally reachable base URL and reports
-// which environment variable supplied it, so a validation failure can name the
-// variable the operator actually set rather than always blaming
-// AKARI_PUBLIC_URL. AKARI_PUBLIC_URL wins; failing that it honors AKARI_URL,
-// the variable eph exports pointing at the running dev server, so the OAuth
-// flow works out of the box under eph. The value is trimmed of any trailing
-// slash so callers can join paths with a leading slash without doubling it.
-// An empty result tells the OAuth handlers to derive the base from the
-// request instead.
-func publicURL() (value, source string) {
-	source = "AKARI_PUBLIC_URL"
-	v := strings.TrimSpace(os.Getenv(source))
-	if v == "" {
-		source = "AKARI_URL"
-		v = strings.TrimSpace(os.Getenv(source))
-	}
-	return strings.TrimRight(v, "/"), source
+// publicURL reads AKARI_PUBLIC_URL, trimmed of any trailing slash so callers
+// can join paths with a leading slash without doubling it. An empty result
+// tells the handlers to derive the base from each request instead.
+//
+// Deliberately no fallback to the AKARI_URL eph exports: that variable names
+// the server's own auto-assigned port, while local dev often reaches the
+// server through a forwarded port (eph dev behind the Claude preview gate)
+// whose origin differs. Adopting it would pin the CSRF trust boundary and the
+// OAuth issuer to the internal port and 403 every browser write arriving
+// through the forward, whereas the per-request derivation is correct on both
+// origins.
+func publicURL() string {
+	return strings.TrimRight(strings.TrimSpace(os.Getenv("AKARI_PUBLIC_URL")), "/")
 }
 
 // NormalizePublicOrigin turns an external URL into the exact origin browsers
