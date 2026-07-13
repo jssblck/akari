@@ -25,10 +25,11 @@ AKARI_DATABASE_URL=postgres://akari:akari@localhost:${postgres.port}/akari?sslmo
 AKARI_TEST_DATABASE_URL=postgres://akari:akari@localhost:${postgres.port}/akari_test?sslmode=disable
 # Local dev is plain HTTP; do not mark session cookies Secure.
 AKARI_COOKIE_INSECURE=1
-# Convenience: the server's base URL on its assigned host port. Read by the
-# akari client and dev-seed only, never by the server: with AKARI_PUBLIC_URL
-# unset the server derives its origin from each request, so browser logins
-# work both on this port and through a forwarded preview port (eph dev).
+# Convenience: the server's base URL on its assigned host port. Read by
+# dev-seed (to pick its upload target) and handy for pointing the akari client
+# at the stack by hand, never by the server itself: with AKARI_PUBLIC_URL unset
+# the server derives its origin from each request, so browser logins work both
+# on this port and through a forwarded preview port (eph dev).
 AKARI_URL=http://localhost:${server.port}
 
 # =============================================================================

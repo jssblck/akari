@@ -170,17 +170,20 @@ func TestCSRFDynamicOriginHonorsForwardedScheme(t *testing.T) {
 
 // TestCSRFDerivedOriginThroughPortForward covers the dev loop where the
 // browser reaches the server through a TCP port forward (eph dev behind the
-// Claude preview gate): the forwarded request carries the gate port in both
-// Origin and Host. With no public URL configured the trust boundary is the
-// request's own host, so that login succeeds, while the server's internal
-// auto-assigned port stays a foreign origin even though both are loopback.
+// Claude preview gate). With no public URL configured the trust boundary is
+// the request's own Host, so the gate follows whichever forwarded port the
+// browser actually reached the server on: a request whose Host and Origin
+// agree on that port succeeds regardless of which port it is, while the
+// server's internal auto-assigned port stays a foreign origin even though both
+// are loopback. Removing the AKARI_URL fallback is what makes PublicURL empty
+// here; this asserts the resulting per-request derivation is what runs.
 func TestCSRFDerivedOriginThroughPortForward(t *testing.T) {
 	t.Parallel()
 	s := &Server{}
 
-	request := func(origin string) int {
-		req := httptest.NewRequest(http.MethodPost, "http://localhost:8080/api/v1/auth/login", nil)
-		req.Host = "localhost:8080"
+	request := func(host, origin string) int {
+		req := httptest.NewRequest(http.MethodPost, "http://"+host+"/api/v1/auth/login", nil)
+		req.Host = host
 		req.Header.Set("Origin", origin)
 		rec := httptest.NewRecorder()
 		s.withCSRF(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -189,11 +192,18 @@ func TestCSRFDerivedOriginThroughPortForward(t *testing.T) {
 		return rec.Code
 	}
 
-	if got := request("http://localhost:8080"); got != http.StatusNoContent {
-		t.Fatalf("forwarded-port login = %d, want %d", got, http.StatusNoContent)
+	// The same server accepts a login on whatever forwarded port it is reached
+	// on, because the boundary tracks Host rather than a pinned public origin.
+	for _, port := range []string{"8080", "13750"} {
+		host := "localhost:" + port
+		if got := request(host, "http://"+host); got != http.StatusNoContent {
+			t.Fatalf("forwarded-port login on %s = %d, want %d", host, got, http.StatusNoContent)
+		}
 	}
-	if got := request("http://localhost:60663"); got != http.StatusForbidden {
-		t.Fatalf("cross-port loopback origin = %d, want %d", got, http.StatusForbidden)
+	// An Origin naming the server's internal auto-assigned port is still a
+	// cross-origin write against the forwarded host and is rejected.
+	if got := request("localhost:8080", "http://localhost:60663"); got != http.StatusForbidden {
+		t.Fatalf("internal-port origin against forwarded host = %d, want %d", got, http.StatusForbidden)
 	}
 }
 
