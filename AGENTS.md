@@ -15,13 +15,22 @@ step:
 ```sh
 make build          # build React, generate templ, then compile Go
 make test           # check React, rebuild it, then run Go tests under -race
-make frontend-check # Biome and TypeScript only
+make frontend-check # OpenAPI contract, Biome, and TypeScript
 go generate ./...   # regenerate the templated homepage only
 ```
 
 The production frontend artifact is committed so release cross-compilation and
 downstream source builds still require only Go. Run `make frontend` after any
 file under `frontend/` and commit the resulting `dist/` changes.
+
+## Keep the browser API contract synchronized
+
+OpenAPI is authoritative for the browser API. When a browser endpoint's route,
+status, request, or response changes, update its named Go boundary DTO and
+`internal/server/httpapi/openapi.json` in the same change, then regenerate
+`frontend/src/api.generated.ts`. Do not edit the generated TypeScript by hand.
+`make frontend-check` rejects invalid OpenAPI and stale generated types, while
+the Go HTTP API contract tests reject route and response-schema drift.
 
 ## Integration tests gate on a database
 

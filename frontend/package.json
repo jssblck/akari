@@ -4,10 +4,11 @@
   "type": "module",
   "scripts": {
     "build": "bun run generate:api && vite build",
-    "check": "bun run check:api && biome check . && tsc --noEmit",
+    "check": "bun run lint:api && bun run check:api && biome check . && tsc --noEmit",
     "check:api": "openapi-typescript ../internal/server/httpapi/openapi.json -o src/api.generated.ts --check",
     "dev": "vite --host 127.0.0.1",
     "generate:api": "openapi-typescript ../internal/server/httpapi/openapi.json -o src/api.generated.ts",
+    "lint:api": "redocly lint ../internal/server/httpapi/openapi.json --extends=spec",
     "test": "vitest run"
   },
   "dependencies": {
@@ -22,6 +23,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.2.4",
+    "@redocly/cli": "2.39.0",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
