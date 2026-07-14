@@ -12,8 +12,11 @@ import (
 )
 
 func (s *Server) handleGuideRoute(w http.ResponseWriter, r *http.Request) {
-	if strings.HasSuffix(r.PathValue("slug"), ".md") {
-		s.handleGuidePage(w, r)
+	// The .md suffix is split here rather than routed separately, since both the
+	// HTML chapter (the React shell) and its raw Markdown live under the one
+	// {slug} path segment.
+	if raw := strings.TrimSuffix(r.PathValue("slug"), ".md"); raw != r.PathValue("slug") {
+		s.serveGuideRaw(w, r, raw)
 		return
 	}
 	s.handleAppShell(w, r)

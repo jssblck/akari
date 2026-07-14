@@ -1,19 +1,14 @@
 package web
 
-import "github.com/jssblck/akari/internal/server/store"
-
-// tokenCard is the hover/focus breakdown shared by every inline token figure: the
+// tokenCard is the hover/focus breakdown behind an inline token figure: the
 // four-class split (in, out, cache read, cache write), an optional reasoning line, and the
 // cost line. The caller supplies the surrounding .tok-cell wrapper and the visible headline
-// figure; this renders only the card. Routing every figure through one component
-// is what makes a token total read identically across the overview breakdowns,
-// the sessions feed, and the projects index, and guarantees the hover card is
-// never missing from one of them.
+// figure; this renders only the card. The landing page's demo panel is its remaining
+// server-rendered call site; the app's own token figures render in the React frontend.
 //
 // reasoning is the model's hidden-deliberation class, shown only when a slice carries it
 // (codex and pi report it; Claude and the session/project rollups do not, and pass 0), so
-// the line appears on the overview breakdowns that have the figure and stays absent
-// everywhere it would read a hardcoded zero.
+// the line appears only where a real figure exists rather than reading a hardcoded zero.
 templ tokenCard(total, in, out, cacheRead, cacheWrite, reasoning int64, cost float64, incomplete bool) {
 	<span class="tok-tip" role="tooltip">
 		<span class="tt-total">{ FmtTokens(total) } tokens</span>
@@ -32,36 +27,5 @@ templ tokenCard(total, in, out, cacheRead, cacheWrite, reasoning int64, cost flo
 			}
 		</dl>
 		<span class="tt-cost">{ FmtCost(cost, incomplete) }</span>
-	</span>
-}
-
-// turnCard is the breakdown card behind one transcript turn's inline "ctx" stamp: the four token
-// classes (in, out, cache read, cache write), a reasoning line when the turn carries it, the
-// context-occupancy total (input plus cache read plus cache write, output excluded, the figure the
-// visible stamp shows), and the turn's cost or "unpriced". It reuses the shared .tok-tip markup and
-// CSS, so a per-turn token figure carries the same breakdown every other token figure in the UI
-// does rather than standing alone. The four-class tt-total is the genuine spend total; the context
-// line is called out separately under its own label so a reader sees both the spend and the
-// occupancy the stamp names, and why the two differ (output is spend but not occupancy).
-templ turnCard(u store.TurnUsage) {
-	<span class="tok-tip" role="tooltip">
-		<span class="tt-total">{ FmtTokens(TurnTokenTotal(u)) } tokens</span>
-		<dl class="tt-grid">
-			<dt>In</dt>
-			<dd>{ FmtTokens(u.Input) }</dd>
-			<dt>Out</dt>
-			<dd>{ FmtTokens(u.Output) }</dd>
-			<dt>Cache read</dt>
-			<dd>{ FmtTokens(u.CacheRead) }</dd>
-			<dt>Cache write</dt>
-			<dd>{ FmtTokens(u.CacheWrite) }</dd>
-			if u.Reasoning > 0 {
-				<dt>Reasoning</dt>
-				<dd>{ FmtTokens(u.Reasoning) }</dd>
-			}
-			<dt>Context</dt>
-			<dd>{ FmtTokens(u.ContextTokens) }</dd>
-		</dl>
-		<span class="tt-cost">{ TurnCostLabel(u) }</span>
 	</span>
 }

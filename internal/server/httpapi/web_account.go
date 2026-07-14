@@ -3,7 +3,6 @@ package httpapi
 import (
 	"errors"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -12,50 +11,8 @@ import (
 	"github.com/jssblck/akari/internal/server/web"
 )
 
-func (s *Server) handleAccountPage(w http.ResponseWriter, r *http.Request) {
-	p, _ := principalFrom(r.Context())
-	tokens, err := s.Store.ListAPITokens(r.Context(), p.UserID)
-	if err != nil {
-		s.renderError(w, r, http.StatusInternalServerError, "Could not load tokens.")
-		return
-	}
-	grants, err := s.Store.ListOAuthGrants(r.Context(), p.UserID)
-	if err != nil {
-		s.renderError(w, r, http.StatusInternalServerError, "Could not load connected apps.")
-		return
-	}
-	page := s.pageForNav(r, "Account", "account")
-	// Invites are admin-only machinery: skip the query entirely for a non-admin
-	// viewer rather than loading a list the page never renders.
-	var invites []store.Invite
-	if page.IsAdmin {
-		invites, err = s.Store.ListInvites(r.Context())
-		if err != nil {
-			s.renderError(w, r, http.StatusInternalServerError, "Could not load invites.")
-			return
-		}
-	}
-	// Freshly minted secrets are passed once via short-lived flash cookies, then
-	// cleared, so a page reload does not keep showing them.
-	newToken := s.readFlash(w, r, "akari_new_token")
-	newInvite := s.readFlash(w, r, "akari_new_invite")
-	st := s.worker.FleetStatus(r.Context())
-	rp := web.ReparseView{InProgress: st.InProgress, Done: st.Done, Total: st.Total, Failed: st.Failed}
-	render(w, r, http.StatusOK, web.AccountPage(page, tokens, grants, invites, newToken, newInvite, rp))
-}
-
 // Login and register, form (HTML) variants. These mirror the JSON handlers but
 // set the session cookie and redirect instead of returning JSON.
-
-func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
-	setPrivateNoStore(w)
-	if p, ok := s.resolve(r); ok && p.Scope == scopeFull {
-		http.Redirect(w, r, s.href(r, overviewPath), http.StatusSeeOther)
-		return
-	}
-	next := s.safeNext(r, r.URL.Query().Get("next"))
-	render(w, r, http.StatusOK, web.LoginPage(web.Page{Title: "Log in"}, next, ""))
-}
 
 func (s *Server) handleLoginForm(w http.ResponseWriter, r *http.Request) {
 	setPrivateNoStore(w)
@@ -76,11 +33,6 @@ func (s *Server) handleLoginForm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, next, http.StatusSeeOther)
-}
-
-func (s *Server) handleRegisterPage(w http.ResponseWriter, r *http.Request) {
-	setPrivateNoStore(w)
-	render(w, r, http.StatusOK, web.RegisterPage(web.Page{Title: "Register"}, ""))
 }
 
 func (s *Server) handleRegisterForm(w http.ResponseWriter, r *http.Request) {
@@ -155,106 +107,4 @@ func (s *Server) handleLogoutForm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, s.href(r, "/login"), http.StatusSeeOther)
-}
-
-// Account form actions: create/revoke tokens and create invites, then redirect
-// back to the account page (passing freshly minted secrets via flash cookies).
-
-func (s *Server) handleCreateTokenForm(w http.ResponseWriter, r *http.Request) {
-	p, _ := principalFrom(r.Context())
-	if err := r.ParseForm(); err != nil {
-		http.Redirect(w, r, s.href(r, "/account"), http.StatusSeeOther)
-		return
-	}
-	name := strings.TrimSpace(r.PostFormValue("name"))
-	scope := r.PostFormValue("scope")
-	if !isValidScope(scope) {
-		scope = scopeIngest
-	}
-	if name == "" {
-		name = "token"
-	}
-	token, err := auth.NewToken()
-	if err != nil {
-		http.Redirect(w, r, s.href(r, "/account"), http.StatusSeeOther)
-		return
-	}
-	if _, err := s.Store.CreateAPIToken(r.Context(), p.UserID, name, scope, auth.HashToken(token)); err != nil {
-		http.Redirect(w, r, s.href(r, "/account"), http.StatusSeeOther)
-		return
-	}
-	s.setFlash(w, r, "akari_new_token", token)
-	http.Redirect(w, r, s.href(r, "/account"), http.StatusSeeOther)
-}
-
-func (s *Server) handleRevokeTokenForm(w http.ResponseWriter, r *http.Request) {
-	p, _ := principalFrom(r.Context())
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
-		http.Redirect(w, r, s.href(r, "/account"), http.StatusSeeOther)
-		return
-	}
-	// Surface a revocation failure instead of redirecting as if it worked: a silent
-	// redirect would tell the user the token is gone while it stays live, matching the
-	// connection- and invite-revoke handlers.
-	if err := s.Store.RevokeAPIToken(r.Context(), p.UserID, id); err != nil {
-		s.renderError(w, r, http.StatusInternalServerError, "Could not revoke the token. Try again.")
-		return
-	}
-	s.setNotice(w, r, "Token revoked")
-	http.Redirect(w, r, s.href(r, "/account"), http.StatusSeeOther)
-}
-
-// handleRevokeConnectionForm disconnects an OAuth client from the account, revoking
-// every token the grant holds. It is scoped to the signed-in user, so it can only
-// disconnect the user's own connections.
-func (s *Server) handleRevokeConnectionForm(w http.ResponseWriter, r *http.Request) {
-	p, _ := principalFrom(r.Context())
-	clientID := r.PathValue("client_id")
-	if clientID != "" {
-		// Surface a revocation failure instead of redirecting as if it worked: a
-		// silent redirect would tell the user the app is disconnected while its
-		// tokens stay live.
-		if err := s.Store.RevokeOAuthGrant(r.Context(), p.UserID, clientID); err != nil {
-			s.renderError(w, r, http.StatusInternalServerError, "Could not disconnect the app. Try again.")
-			return
-		}
-	}
-	http.Redirect(w, r, s.href(r, "/account"), http.StatusSeeOther)
-}
-
-func (s *Server) handleCreateInviteForm(w http.ResponseWriter, r *http.Request) {
-	p, _ := principalFrom(r.Context())
-	token, err := auth.NewToken()
-	if err != nil {
-		http.Redirect(w, r, s.href(r, "/account"), http.StatusSeeOther)
-		return
-	}
-	if _, err := s.Store.CreateInvite(r.Context(), auth.HashToken(token), p.UserID, "", nil); err != nil {
-		http.Redirect(w, r, s.href(r, "/account"), http.StatusSeeOther)
-		return
-	}
-	s.setFlash(w, r, "akari_new_invite", token)
-	http.Redirect(w, r, s.href(r, "/account"), http.StatusSeeOther)
-}
-
-// handleRevokeInviteForm deletes an invite token by id. Deletion (not a revoked
-// flag, unlike API tokens) is correct here: an invite carries no history worth
-// keeping once it will never be redeemed, and ListInvites has nothing left to
-// join against it for.
-func (s *Server) handleRevokeInviteForm(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
-		http.Redirect(w, r, s.href(r, "/account"), http.StatusSeeOther)
-		return
-	}
-	// Surface a deletion failure instead of redirecting as if it worked: a silent
-	// redirect would tell the admin the invite is gone while it stays redeemable,
-	// matching the connection-revoke handler's ErrorPage on failure.
-	if err := s.Store.RevokeInvite(r.Context(), id); err != nil {
-		s.renderError(w, r, http.StatusInternalServerError, "Could not revoke the invite. Try again.")
-		return
-	}
-	s.setNotice(w, r, "Invite revoked")
-	http.Redirect(w, r, s.href(r, "/account"), http.StatusSeeOther)
 }

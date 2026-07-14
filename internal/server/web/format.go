@@ -5,21 +5,7 @@ package web
 
 import (
 	"fmt"
-
-	"github.com/jssblck/akari/internal/server/store"
 )
-
-// FmtBytes renders a byte count compactly (the tool-body metadata chips).
-func FmtBytes(n int64) string {
-	switch {
-	case n >= 1<<20:
-		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
-	case n >= 1<<10:
-		return fmt.Sprintf("%.1f KB", float64(n)/(1<<10))
-	default:
-		return fmt.Sprintf("%d B", n)
-	}
-}
 
 // FmtCost renders a USD cost. Sub-cent costs still show enough precision to be
 // meaningful.
@@ -51,27 +37,6 @@ func FmtPercent(f float64) string {
 		return "1%"
 	}
 	return fmt.Sprintf("%.0f%%", p)
-}
-
-// FmtSavings renders a cache saving for the Cache tile. A non-negative saving reads as
-// "saved $X"; the rare negative, where cache was written but never re-read enough to
-// repay the creation premium, reads as "cost $X" on its magnitude, so the figure stays
-// honest without printing a minus sign into a "saved" label.
-//
-// An incomplete saving reads "... partial", NOT the "$X+" lower-bound marker the cost
-// figures use. A saving omitted for an unpriced model can be negative (a Claude cache
-// write is priced above input), so the true figure could be lower OR higher than shown:
-// "partial" says it is incomplete without implying a direction the data cannot support.
-func FmtSavings(usd float64, incomplete bool) string {
-	verb := "saved "
-	if usd < 0 {
-		verb, usd = "cost ", -usd
-	}
-	s := verb + FmtCost(usd, false)
-	if incomplete {
-		s += " partial"
-	}
-	return s
 }
 
 // FmtTokens renders a token count with thousands separators.
@@ -106,11 +71,4 @@ func FmtTokensCompact(n int64) string {
 	default:
 		return fmt.Sprintf("%d", n)
 	}
-}
-
-// RowTokens is a session's total token volume across all four classes (input,
-// output, cache read, cache write), matching the overview heatmap's notion of a
-// day's "total tokens" so the figure and its breakdown agree across views.
-func RowTokens(s store.SessionSummary) int64 {
-	return s.TotalInput + s.TotalOutput + s.TotalCacheRead + s.TotalCacheWrite
 }
