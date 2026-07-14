@@ -39,17 +39,44 @@ type Server struct {
 	// CookieSecure marks session cookies Secure. Defaults true; set
 	// AKARI_COOKIE_INSECURE=1 for plain-HTTP local development.
 	CookieSecure bool
-	// PublicURL is the externally reachable base URL of the server (scheme and
+	// PublicURL is the externally reachable origin of the server (scheme and
 	// host, no trailing slash), e.g. "https://akari.example.com". It is the OAuth
-	// issuer, the base of every absolute URL the MCP authorization flow
+	// issuer's origin, the base of every absolute URL the MCP authorization flow
 	// advertises (the discovery documents, the authorize and token endpoints, the
 	// MCP resource identifier), and the trusted origin for browser writes. Read
-	// from AKARI_PUBLIC_URL only. When unset it is empty and the handlers derive
+	// from AKARI_PUBLIC_URL. When unset it is empty and the handlers derive
 	// the base from each request's scheme and Host header, which is correct both
 	// for a single-origin deployment behind a well-behaved proxy and for local
 	// dev, where the same server is legitimately reached on more than one
 	// loopback origin (its own port and a forwarded preview port).
+	//
+	// AKARI_PUBLIC_URL may carry a path, e.g.
+	// "https://some-service.example.com/proxy/akari", for a deployment whose
+	// reverse proxy serves akari under a path prefix rather than at the origin
+	// root. LoadServer splits the value: the origin lands here and the path
+	// lands in PathPrefix.
 	PublicURL string
+	// PathPrefix is the external path akari is served under, normalized to a
+	// leading slash and no trailing slash (e.g. "/proxy/akari"), or empty for a
+	// root deployment. Every path the server generates (redirects, cookie
+	// scopes, asset and API URLs in served HTML, discovery documents) is
+	// prefixed with it, and incoming request paths that still carry it are
+	// stripped before routing, so the proxy in front may forward paths either
+	// stripped or unstripped. It comes from the path component of
+	// AKARI_PUBLIC_URL; a PrefixHeader value, when present and valid, overrides
+	// it per request.
+	PathPrefix string
+	// PrefixHeader is the request header a trusted reverse proxy sets to the
+	// external path prefix it serves akari under (AKARI_PREFIX_HEADER, e.g.
+	// "X-Forwarded-Prefix"). Setting it lets one akari instance be served under
+	// any path the proxy chooses, per request, without restarting. It is empty
+	// (disabled) by default for the same reason ProxyAuthHeader is: trusting a
+	// header is only safe when akari is reachable ONLY through the proxy that
+	// sets it. When ProxyAuthSecret is configured, the prefix header is honored
+	// only on requests whose secret header matches, the same defense in depth
+	// the identity header gets. A missing or invalid header value falls back to
+	// PathPrefix.
+	PrefixHeader string
 	// MCPResponseBudgetBytes caps the encoded CallToolResult body
 	// (AKARI_MCP_RESPONSE_BUDGET_BYTES). The default is 8 MiB.
 	MCPResponseBudgetBytes int
@@ -177,6 +204,7 @@ func LoadServer() (Server, error) {
 		Listen:                listenAddr(),
 		CookieSecure:          !truthy(os.Getenv("AKARI_COOKIE_INSECURE")),
 		PublicURL:             publicURL(),
+		PrefixHeader:          strings.TrimSpace(os.Getenv("AKARI_PREFIX_HEADER")),
 		ProxyAuthHeader:       strings.TrimSpace(os.Getenv("AKARI_PROXY_AUTH_HEADER")),
 		ProxyAuthSecret:       os.Getenv("AKARI_PROXY_AUTH_SECRET"),
 		ProxyAuthSecretHeader: proxyAuthSecretHeader(),
@@ -185,11 +213,12 @@ func LoadServer() (Server, error) {
 		return Server{}, fmt.Errorf("AKARI_DATABASE_URL is required")
 	}
 	if s.PublicURL != "" {
-		origin, err := NormalizePublicOrigin(s.PublicURL)
+		origin, prefix, err := NormalizePublicBase(s.PublicURL)
 		if err != nil {
 			return Server{}, fmt.Errorf("AKARI_PUBLIC_URL: %w", err)
 		}
 		s.PublicURL = origin
+		s.PathPrefix = prefix
 	}
 	mcpBudget, err := parsePositiveInt(os.Getenv("AKARI_MCP_RESPONSE_BUDGET_BYTES"), 8<<20)
 	if err != nil {
@@ -360,18 +389,41 @@ func publicURL() string {
 // Rejecting paths and other URL components keeps the value usable as both the
 // OAuth issuer and the CSRF trust boundary.
 func NormalizePublicOrigin(raw string) (string, error) {
-	u, err := url.Parse(raw)
+	origin, prefix, err := NormalizePublicBase(raw)
 	if err != nil {
 		return "", err
 	}
+	if prefix != "" {
+		return "", fmt.Errorf("must be an http(s) origin without a path, query, fragment, or user info")
+	}
+	return origin, nil
+}
+
+// NormalizePublicBase splits an external base URL into the normalized origin
+// and the normalized path prefix akari is served under. A bare origin returns
+// an empty prefix; a value like "https://host/proxy/akari/" returns
+// ("https://host", "/proxy/akari"). The origin normalization matches what
+// browsers send in Origin, so default ports and host casing cannot create
+// false mismatches in the CSRF check.
+func NormalizePublicBase(raw string) (origin, prefix string, err error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", "", err
+	}
 	scheme := strings.ToLower(u.Scheme)
 	if (scheme != "http" && scheme != "https") || u.Host == "" || u.User != nil ||
-		u.Opaque != "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
-		return "", fmt.Errorf("must be an http(s) origin without a path, query, fragment, or user info")
+		u.Opaque != "" || u.RawQuery != "" || u.Fragment != "" {
+		return "", "", fmt.Errorf("must be an http(s) URL without a query, fragment, or user info")
+	}
+	if u.Path != "" && u.Path != "/" {
+		prefix, err = NormalizePathPrefix(u.Path)
+		if err != nil {
+			return "", "", err
+		}
 	}
 	hostname := strings.ToLower(u.Hostname())
 	if hostname == "" {
-		return "", fmt.Errorf("must include a host")
+		return "", "", fmt.Errorf("must include a host")
 	}
 	port := u.Port()
 	if (scheme == "http" && port == "80") || (scheme == "https" && port == "443") {
@@ -384,7 +436,50 @@ func NormalizePublicOrigin(raw string) (string, error) {
 	if port != "" {
 		host = net.JoinHostPort(hostname, port)
 	}
-	return scheme + "://" + host, nil
+	return scheme + "://" + host, prefix, nil
+}
+
+// NormalizePathPrefix validates and canonicalizes an external path prefix: a
+// leading slash, no trailing slash, no dot segments, no empty segments, and no
+// characters that could smuggle a second URL component into generated markup
+// or headers. "/" and "" normalize to the empty prefix (a root deployment).
+// The same validation gates both the AKARI_PUBLIC_URL path at startup and a
+// PrefixHeader value on each request, so a proxy cannot assert a prefix an
+// operator could not configure.
+func NormalizePathPrefix(raw string) (string, error) {
+	p := strings.TrimSpace(raw)
+	if p == "" || p == "/" {
+		return "", nil
+	}
+	if !strings.HasPrefix(p, "/") {
+		return "", fmt.Errorf("path prefix must start with '/'")
+	}
+	p = strings.TrimRight(p, "/")
+	for _, r := range p {
+		// The allowlist is the RFC 3986 path grammar minus the delimiters and
+		// escape machinery a generated URL or Set-Cookie header must never
+		// receive raw: '%' (encoded octets a proxy and akari could decode
+		// differently), '?', '#', ';', control bytes, spaces, quotes, '<', '>',
+		// and '\'. Prefixes are operator-chosen mount points, not user data, so
+		// rejecting the exotic tail of the grammar costs nothing.
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			continue
+		}
+		switch r {
+		case '/', '-', '_', '.', '~', '@', '+', ':':
+			continue
+		}
+		return "", fmt.Errorf("path prefix contains an unsupported character %q", r)
+	}
+	for _, seg := range strings.Split(p[1:], "/") {
+		if seg == "" {
+			return "", fmt.Errorf("path prefix must not contain empty segments")
+		}
+		if seg == "." || seg == ".." {
+			return "", fmt.Errorf("path prefix must not contain dot segments")
+		}
+	}
+	return p, nil
 }
 
 // proxyAuthSecretHeader resolves the header the proxy echoes the shared secret in,

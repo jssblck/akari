@@ -1,17 +1,27 @@
 package web
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
 
 func TestStaticURLFingerprintsEmbeddedAsset(t *testing.T) {
-	got := string(StaticURL("css/landing.css"))
+	ctx := context.Background()
+	got := string(StaticURL(ctx, "css/landing.css"))
 	if !strings.HasPrefix(got, "/static/css/landing.css?v=") {
 		t.Fatalf("StaticURL() = %q, want fingerprinted landing URL", got)
 	}
-	if got != string(StaticURL("/css/landing.css")) {
+	if got != string(StaticURL(ctx, "/css/landing.css")) {
 		t.Fatal("StaticURL should accept an optional leading slash")
+	}
+}
+
+func TestStaticURLCarriesBasePath(t *testing.T) {
+	ctx := WithBasePath(context.Background(), "/proxy/akari")
+	got := string(StaticURL(ctx, "css/landing.css"))
+	if !strings.HasPrefix(got, "/proxy/akari/static/css/landing.css?v=") {
+		t.Fatalf("StaticURL() = %q, want prefixed fingerprinted URL", got)
 	}
 }
 
@@ -35,5 +45,5 @@ func TestStaticURLRejectsMissingAsset(t *testing.T) {
 			t.Fatal("StaticURL should panic for an asset that cannot be served")
 		}
 	}()
-	StaticURL("js/missing.js")
+	StaticURL(context.Background(), "js/missing.js")
 }

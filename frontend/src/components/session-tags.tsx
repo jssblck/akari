@@ -4,6 +4,7 @@
 // web.sessionPublicTag, and the feed row's inline chips (sessions.templ).
 import { ArrowSquareOutIcon } from "@phosphor-icons/react";
 
+import { withBase } from "../base";
 import { formatCost } from "../format";
 import {
   fallbackBadgeLabel,
@@ -57,7 +58,7 @@ export function SessionPublicTag({
   return (
     <a
       className="tag public tag-link"
-      href={`/s/${publicID}`}
+      href={withBase(`/s/${publicID}`)}
       target="_blank"
       rel="noreferrer"
       title="Open the public page in a new tab"

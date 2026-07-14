@@ -37,8 +37,8 @@ func (s *Server) handleAccountPage(w http.ResponseWriter, r *http.Request) {
 	}
 	// Freshly minted secrets are passed once via short-lived flash cookies, then
 	// cleared, so a page reload does not keep showing them.
-	newToken := readFlash(w, r, "akari_new_token")
-	newInvite := readFlash(w, r, "akari_new_invite")
+	newToken := s.readFlash(w, r, "akari_new_token")
+	newInvite := s.readFlash(w, r, "akari_new_invite")
 	st := s.worker.FleetStatus(r.Context())
 	rp := web.ReparseView{InProgress: st.InProgress, Done: st.Done, Total: st.Total, Failed: st.Failed}
 	render(w, r, http.StatusOK, web.AccountPage(page, tokens, grants, invites, newToken, newInvite, rp))
@@ -50,20 +50,20 @@ func (s *Server) handleAccountPage(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	setPrivateNoStore(w)
 	if p, ok := s.resolve(r); ok && p.Scope == scopeFull {
-		http.Redirect(w, r, overviewPath, http.StatusSeeOther)
+		http.Redirect(w, r, s.href(r, overviewPath), http.StatusSeeOther)
 		return
 	}
-	next := safeNext(r.URL.Query().Get("next"))
+	next := s.safeNext(r, r.URL.Query().Get("next"))
 	render(w, r, http.StatusOK, web.LoginPage(web.Page{Title: "Log in"}, next, ""))
 }
 
 func (s *Server) handleLoginForm(w http.ResponseWriter, r *http.Request) {
 	setPrivateNoStore(w)
 	if err := r.ParseForm(); err != nil {
-		render(w, r, http.StatusBadRequest, web.LoginPage(web.Page{Title: "Log in"}, "/", "Invalid form."))
+		render(w, r, http.StatusBadRequest, web.LoginPage(web.Page{Title: "Log in"}, s.safeNext(r, ""), "Invalid form."))
 		return
 	}
-	next := safeNext(r.PostFormValue("next"))
+	next := s.safeNext(r, r.PostFormValue("next"))
 	username := strings.TrimSpace(r.PostFormValue("username"))
 	password := r.PostFormValue("password")
 	u, ok := s.authenticatePassword(r, username, password)
@@ -132,7 +132,7 @@ func (s *Server) handleRegisterForm(w http.ResponseWriter, r *http.Request) {
 		render(w, r, http.StatusInternalServerError, web.RegisterPage(web.Page{Title: "Register"}, "Could not start session."))
 		return
 	}
-	http.Redirect(w, r, overviewPath, http.StatusSeeOther)
+	http.Redirect(w, r, s.href(r, overviewPath), http.StatusSeeOther)
 }
 
 func renderRegistrationUnavailable(w http.ResponseWriter, r *http.Request) {
@@ -146,15 +146,15 @@ func (s *Server) handleLogoutForm(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(cookieName); err == nil {
 		deleteErr = s.Store.DeleteWebSession(r.Context(), auth.HashToken(c.Value))
 	}
-	s.clearSessionCookie(w)
+	s.clearSessionCookie(w, r)
 	// Rotate the CSRF cookie too: the prior token must not outlive the session
 	// it was issued alongside.
-	rotateErr := s.rotateCSRFCookie(w)
+	rotateErr := s.rotateCSRFCookie(w, r)
 	if deleteErr != nil || rotateErr != nil {
 		renderPublicError(w, r, http.StatusInternalServerError, "Could not sign out.")
 		return
 	}
-	http.Redirect(w, r, "/login", http.StatusSeeOther)
+	http.Redirect(w, r, s.href(r, "/login"), http.StatusSeeOther)
 }
 
 // Account form actions: create/revoke tokens and create invites, then redirect
@@ -163,7 +163,7 @@ func (s *Server) handleLogoutForm(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCreateTokenForm(w http.ResponseWriter, r *http.Request) {
 	p, _ := principalFrom(r.Context())
 	if err := r.ParseForm(); err != nil {
-		http.Redirect(w, r, "/account", http.StatusSeeOther)
+		http.Redirect(w, r, s.href(r, "/account"), http.StatusSeeOther)
 		return
 	}
 	name := strings.TrimSpace(r.PostFormValue("name"))
@@ -176,22 +176,22 @@ func (s *Server) handleCreateTokenForm(w http.ResponseWriter, r *http.Request) {
 	}
 	token, err := auth.NewToken()
 	if err != nil {
-		http.Redirect(w, r, "/account", http.StatusSeeOther)
+		http.Redirect(w, r, s.href(r, "/account"), http.StatusSeeOther)
 		return
 	}
 	if _, err := s.Store.CreateAPIToken(r.Context(), p.UserID, name, scope, auth.HashToken(token)); err != nil {
-		http.Redirect(w, r, "/account", http.StatusSeeOther)
+		http.Redirect(w, r, s.href(r, "/account"), http.StatusSeeOther)
 		return
 	}
-	s.setFlash(w, "akari_new_token", token)
-	http.Redirect(w, r, "/account", http.StatusSeeOther)
+	s.setFlash(w, r, "akari_new_token", token)
+	http.Redirect(w, r, s.href(r, "/account"), http.StatusSeeOther)
 }
 
 func (s *Server) handleRevokeTokenForm(w http.ResponseWriter, r *http.Request) {
 	p, _ := principalFrom(r.Context())
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		http.Redirect(w, r, "/account", http.StatusSeeOther)
+		http.Redirect(w, r, s.href(r, "/account"), http.StatusSeeOther)
 		return
 	}
 	// Surface a revocation failure instead of redirecting as if it worked: a silent
@@ -201,8 +201,8 @@ func (s *Server) handleRevokeTokenForm(w http.ResponseWriter, r *http.Request) {
 		s.renderError(w, r, http.StatusInternalServerError, "Could not revoke the token. Try again.")
 		return
 	}
-	s.setNotice(w, "Token revoked")
-	http.Redirect(w, r, "/account", http.StatusSeeOther)
+	s.setNotice(w, r, "Token revoked")
+	http.Redirect(w, r, s.href(r, "/account"), http.StatusSeeOther)
 }
 
 // handleRevokeConnectionForm disconnects an OAuth client from the account, revoking
@@ -220,22 +220,22 @@ func (s *Server) handleRevokeConnectionForm(w http.ResponseWriter, r *http.Reque
 			return
 		}
 	}
-	http.Redirect(w, r, "/account", http.StatusSeeOther)
+	http.Redirect(w, r, s.href(r, "/account"), http.StatusSeeOther)
 }
 
 func (s *Server) handleCreateInviteForm(w http.ResponseWriter, r *http.Request) {
 	p, _ := principalFrom(r.Context())
 	token, err := auth.NewToken()
 	if err != nil {
-		http.Redirect(w, r, "/account", http.StatusSeeOther)
+		http.Redirect(w, r, s.href(r, "/account"), http.StatusSeeOther)
 		return
 	}
 	if _, err := s.Store.CreateInvite(r.Context(), auth.HashToken(token), p.UserID, "", nil); err != nil {
-		http.Redirect(w, r, "/account", http.StatusSeeOther)
+		http.Redirect(w, r, s.href(r, "/account"), http.StatusSeeOther)
 		return
 	}
-	s.setFlash(w, "akari_new_invite", token)
-	http.Redirect(w, r, "/account", http.StatusSeeOther)
+	s.setFlash(w, r, "akari_new_invite", token)
+	http.Redirect(w, r, s.href(r, "/account"), http.StatusSeeOther)
 }
 
 // handleRevokeInviteForm deletes an invite token by id. Deletion (not a revoked
@@ -245,7 +245,7 @@ func (s *Server) handleCreateInviteForm(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleRevokeInviteForm(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		http.Redirect(w, r, "/account", http.StatusSeeOther)
+		http.Redirect(w, r, s.href(r, "/account"), http.StatusSeeOther)
 		return
 	}
 	// Surface a deletion failure instead of redirecting as if it worked: a silent
@@ -255,6 +255,6 @@ func (s *Server) handleRevokeInviteForm(w http.ResponseWriter, r *http.Request) 
 		s.renderError(w, r, http.StatusInternalServerError, "Could not revoke the invite. Try again.")
 		return
 	}
-	s.setNotice(w, "Invite revoked")
-	http.Redirect(w, r, "/account", http.StatusSeeOther)
+	s.setNotice(w, r, "Invite revoked")
+	http.Redirect(w, r, s.href(r, "/account"), http.StatusSeeOther)
 }

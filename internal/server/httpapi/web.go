@@ -27,11 +27,19 @@ func (s *Server) requireReadHTML(next http.HandlerFunc) http.HandlerFunc {
 		setPrivateNoStore(w)
 		p, ok := s.resolve(r)
 		if !ok || p.Scope != scopeFull {
-			http.Redirect(w, r, "/login?next="+url.QueryEscape(r.URL.RequestURI()), http.StatusSeeOther)
+			http.Redirect(w, r, s.loginRedirect(r), http.StatusSeeOther)
 			return
 		}
 		next(w, s.withPrincipal(r, p))
 	}
+}
+
+// loginRedirect builds the login bounce for an unauthenticated browser
+// navigation. Both the login page path and the next destination it carries are
+// externalized (prefixed) here, because the browser and the SPA resolve them
+// against the external URL space, not the stripped internal one.
+func (s *Server) loginRedirect(r *http.Request) string {
+	return s.href(r, "/login?next="+url.QueryEscape(s.href(r, r.URL.RequestURI())))
 }
 
 // pageFor builds the shared layout context from the authenticated principal.
@@ -74,6 +82,10 @@ func render(w http.ResponseWriter, r *http.Request, status int, c templ.Componen
 	// means every render path clears it exactly once, regardless of which page the
 	// action's redirect landed on; the authed layout reads it back via web.Notice.
 	r = withNotice(w, r)
+	// The external path prefix rides the render context the same way, so every
+	// templated href, form action, and asset link externalizes through web.Href
+	// and web.StaticURL without each handler threading it.
+	r = r.WithContext(web.WithBasePath(r.Context(), requestPrefix(r)))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
 	_ = c.Render(r.Context(), w)
@@ -122,7 +134,6 @@ func renderPublicError(w http.ResponseWriter, r *http.Request, status int, msg s
 // logged in; the app itself lives at /overview. The page is never gated during a
 // reparse, since it renders no parsed data.
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
-	base := s.baseURL(r)
 	// The meta copy derives from the ogimage package's canonical landing
 	// constants (the same strings the /og.png card draws), so a copy edit
 	// cannot leave the page's tags and its preview image saying different
@@ -131,8 +142,8 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	og := web.OGMeta{
 		Title:       "akari · " + strings.ToLower(strings.TrimSuffix(ogimage.LandingHeadline, ".")),
 		Description: ogimage.LandingSubline,
-		URL:         base + "/",
-		Image:       base + "/og.png",
+		URL:         s.absURL(r, "/"),
+		Image:       s.absURL(r, "/og.png"),
 	}
 	// Resolve the viewer so a full-scope reader (a browser session in practice)
 	// gets the signed-in topbar; a logged-out visitor or a non-full credential (an
@@ -827,18 +838,31 @@ const overviewPath = "/overview"
 // safeNext sanitizes a post-login redirect target, rejecting anything that is not
 // a same-origin absolute path (so a crafted next cannot bounce the user off-site).
 // An empty or rejected value falls back to the app home rather than the public
-// root, so a bare visit to /login still lands in the app after signing in.
-func safeNext(next string) string {
+// root, so a bare visit to /login still lands in the app after signing in. A
+// valid next passes through untouched: it is an external path (already carrying
+// any path prefix), minted by loginRedirect; only the fallback needs prefixing
+// here.
+func (s *Server) safeNext(r *http.Request, next string) string {
+	fallback := s.href(r, overviewPath)
 	if next == "" || !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") {
-		return overviewPath
+		return fallback
 	}
 	u, err := url.Parse(next)
 	if err != nil || u.IsAbs() || u.Host != "" || u.Opaque != "" {
-		return overviewPath
+		return fallback
 	}
 	path, err := url.PathUnescape(u.EscapedPath())
 	if err != nil || strings.Contains(path, `\`) || strings.HasPrefix(path, "//") {
-		return overviewPath
+		return fallback
+	}
+	// A prefixed deployment only routes paths under its mount point, so a next
+	// that lacks the resolved prefix (a link minted before the prefix existed,
+	// or a client unaware of the convention) would land outside the proxy's
+	// mount after login; send those to the fallback instead.
+	if prefix := requestPrefix(r); prefix != "" {
+		if _, ok := stripPrefix(path, prefix); !ok {
+			return fallback
+		}
 	}
 	return next
 }
@@ -846,11 +870,11 @@ func safeNext(next string) string {
 // setFlash stores a one-shot value in a short-lived cookie. These cookies carry
 // freshly minted secrets, so they honor the same Secure setting as the session
 // cookie to avoid leaking a secret over plain HTTP on an HTTPS deployment.
-func (s *Server) setFlash(w http.ResponseWriter, name, value string) {
+func (s *Server) setFlash(w http.ResponseWriter, r *http.Request, name, value string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     name,
 		Value:    url.QueryEscape(value),
-		Path:     "/account",
+		Path:     s.href(r, "/account"),
 		HttpOnly: true,
 		Secure:   s.Cfg.CookieSecure,
 		SameSite: http.SameSiteLaxMode,
@@ -859,12 +883,12 @@ func (s *Server) setFlash(w http.ResponseWriter, name, value string) {
 }
 
 // readFlash reads and immediately clears a flash cookie.
-func readFlash(w http.ResponseWriter, r *http.Request, name string) string {
+func (s *Server) readFlash(w http.ResponseWriter, r *http.Request, name string) string {
 	c, err := r.Cookie(name)
 	if err != nil {
 		return ""
 	}
-	http.SetCookie(w, &http.Cookie{Name: name, Value: "", Path: "/account", MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: name, Value: "", Path: s.href(r, "/account"), MaxAge: -1})
 	v, err := url.QueryUnescape(c.Value)
 	if err != nil {
 		return ""

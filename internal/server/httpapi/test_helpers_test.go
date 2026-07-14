@@ -39,6 +39,15 @@ func newTestServerWithReparse(t *testing.T) (*httptest.Server, *store.Store, *pa
 	return server, st, worker
 }
 
+func newTestServerWithConfig(t *testing.T, cfg config.Server) (*httptest.Server, *store.Store) {
+	t.Helper()
+	st := storetest.NewStore(t)
+	worker := parse.NewWorker(st, 1, 0)
+	server := httptest.NewServer(New(st, cfg, worker).Routes())
+	t.Cleanup(server.Close)
+	return server, st
+}
+
 func newClient(t *testing.T) *http.Client {
 	t.Helper()
 	jar, err := cookiejar.New(nil)

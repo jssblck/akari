@@ -43,7 +43,7 @@ templ LandingPage(og OGMeta, viewer Page) {
 					priced, every project's spend on one screen.
 				</p>
 				<div class="landing-cta">
-					<a class="btn" href="/guide">Read the guide</a>
+					<a class="btn" href={ Href(ctx, "/guide") }>Read the guide</a>
 					<a class="btn secondary" href="https://github.com/jssblck/akari" rel="noopener" target="_blank">View on GitHub</a>
 				</div>
 				<!-- The hero demo: a framed session fragment, the way a developer-tool
@@ -360,13 +360,13 @@ templ LandingPage(og OGMeta, viewer Page) {
 			<section class="landing-foot">
 				if viewer.LoggedIn {
 					<p class="muted">
-						New to akari? Read the <a href="/guide">user guide</a>. Or head to your
-						<a href="/overview">overview</a>.
+						New to akari? Read the <a href={ Href(ctx, "/guide") }>user guide</a>. Or head to your
+						<a href={ Href(ctx, "/overview") }>overview</a>.
 					</p>
 				} else {
 					<p class="muted">
-						New to akari? Read the <a href="/guide">user guide</a>. Already have an
-						account? <a href="/login">Log in</a>.
+						New to akari? Read the <a href={ Href(ctx, "/guide") }>user guide</a>. Already have an
+						account? <a href={ Href(ctx, "/login") }>Log in</a>.
 					</p>
 				}
 			</section>

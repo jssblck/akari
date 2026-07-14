@@ -26,7 +26,7 @@ templ accountReparse(rp ReparseView) {
 				No reparse running.
 			</div>
 		}
-		<form method="post" action="/account/reparse" class="reparse-form">
+		<form method="post" action={ Href(ctx, "/account/reparse") } class="reparse-form">
 			@csrfField()
 			<button type="submit" disabled?={ rp.InProgress }>Reparse now</button>
 		</form>

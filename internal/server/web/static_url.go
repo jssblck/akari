@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"io/fs"
@@ -13,12 +14,14 @@ import (
 // StaticURL fingerprints an embedded asset so a newly deployed binary cannot reuse
 // client code cached from an older HTML/data contract. The asset bytes are immutable
 // for the process lifetime, so build the lookup once and keep templates to a map read.
-func StaticURL(path string) templ.SafeURL {
+// The render context carries the deployment's external path prefix (see BasePath),
+// which lands in front of the rooted asset path.
+func StaticURL(ctx context.Context, path string) templ.SafeURL {
 	url, ok := staticURLs()[strings.TrimPrefix(path, "/")]
 	if !ok {
 		panic("web: static asset not embedded: " + path)
 	}
-	return url
+	return templ.SafeURL(BasePath(ctx)) + url
 }
 
 var staticURLs = sync.OnceValue(func() map[string]templ.SafeURL {

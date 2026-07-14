@@ -113,13 +113,23 @@ func (s *Server) proxyIdentity(r *http.Request) (string, bool) {
 	if username == "" {
 		return "", false
 	}
-	if s.Cfg.ProxyAuthSecret != "" {
-		got := r.Header.Get(s.Cfg.ProxyAuthSecretHeader)
-		if subtle.ConstantTimeCompare([]byte(got), []byte(s.Cfg.ProxyAuthSecret)) != 1 {
-			return "", false
-		}
+	if !s.proxySecretPresented(r) {
+		return "", false
 	}
 	return username, true
+}
+
+// proxySecretPresented reports whether the request carries the configured
+// proxy shared secret. It gates every proxy-asserted header (the identity
+// header here, the prefix header in prefix.go); with no secret configured the
+// deployment's network isolation is the whole trust story and every request
+// qualifies.
+func (s *Server) proxySecretPresented(r *http.Request) bool {
+	if s.Cfg.ProxyAuthSecret == "" {
+		return true
+	}
+	got := r.Header.Get(s.Cfg.ProxyAuthSecretHeader)
+	return subtle.ConstantTimeCompare([]byte(got), []byte(s.Cfg.ProxyAuthSecret)) == 1
 }
 
 func (s *Server) withPrincipal(r *http.Request, p principal) *http.Request {
@@ -175,12 +185,12 @@ func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	})
 }
 
-func (s *Server) setSessionCookie(w http.ResponseWriter, id string) {
+func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, id string) {
 	setPrivateNoStore(w)
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieName,
 		Value:    id,
-		Path:     "/",
+		Path:     cookiePath(r),
 		HttpOnly: true,
 		Secure:   s.Cfg.CookieSecure,
 		SameSite: http.SameSiteLaxMode,
@@ -188,11 +198,11 @@ func (s *Server) setSessionCookie(w http.ResponseWriter, id string) {
 	})
 }
 
-func (s *Server) clearSessionCookie(w http.ResponseWriter) {
+func (s *Server) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieName,
 		Value:    "",
-		Path:     "/",
+		Path:     cookiePath(r),
 		HttpOnly: true,
 		Secure:   s.Cfg.CookieSecure,
 		SameSite: http.SameSiteLaxMode,
@@ -213,8 +223,8 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request, userID int
 	if err := s.Store.CreateWebSession(r.Context(), auth.HashToken(secret), userID, time.Now().Add(sessionTTL)); err != nil {
 		return err
 	}
-	s.setSessionCookie(w, secret)
-	return s.rotateCSRFCookie(w)
+	s.setSessionCookie(w, r, secret)
+	return s.rotateCSRFCookie(w, r)
 }
 
 type registerRequest struct {
@@ -339,10 +349,10 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(cookieName); err == nil {
 		deleteErr = s.Store.DeleteWebSession(r.Context(), auth.HashToken(c.Value))
 	}
-	s.clearSessionCookie(w)
+	s.clearSessionCookie(w, r)
 	// Rotate the CSRF cookie too: the prior token must not outlive the session
 	// it was issued alongside.
-	rotateErr := s.rotateCSRFCookie(w)
+	rotateErr := s.rotateCSRFCookie(w, r)
 	if deleteErr != nil || rotateErr != nil {
 		writeError(w, http.StatusInternalServerError, "delete session")
 		return

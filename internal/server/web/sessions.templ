@@ -24,7 +24,7 @@ templ SessionsPage(p Page, rows []store.SessionRow, facets store.GlobalFacetValu
 					@activeGradeChip(sel)
 					@activeOutcomeChip(sel)
 					@activeRangeChip(sel)
-					<a class="small clear" href="/sessions">Clear all</a>
+					<a class="small clear" href={ Href(ctx, "/sessions") }>Clear all</a>
 				</div>
 			}
 			<div id="session-list">
@@ -42,7 +42,7 @@ templ SessionsPage(p Page, rows []store.SessionRow, facets store.GlobalFacetValu
 // faceted rail, whose single-value User group and thirty-row Project list were
 // most of the old page's clutter.
 templ sessionsToolbar(facets store.GlobalFacetValues, sel store.SessionFilter) {
-	<form class="toolbar" method="get" action="/sessions">
+	<form class="toolbar" method="get" action={ Href(ctx, "/sessions") }>
 		<label class="tb-field tb-search">
 			<span class="tb-k label">Search</span>
 			<input

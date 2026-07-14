@@ -10,6 +10,7 @@ import {
 } from "react-router-dom";
 
 import { AppShell } from "./app-shell";
+import { basePath } from "./base";
 
 const AccountPage = lazy(() =>
   import("./pages/account").then((module) => ({ default: module.AccountPage })),
@@ -89,121 +90,126 @@ function TitledRoute({
   return children;
 }
 
-const router = createBrowserRouter([
-  {
-    path: "/login",
-    element: (
-      <TitledRoute title="Log in">
-        <AuthPage mode="login" />
-      </TitledRoute>
-    ),
-  },
-  {
-    path: "/register",
-    element: (
-      <TitledRoute title="Register">
-        <AuthPage mode="register" />
-      </TitledRoute>
-    ),
-  },
-  {
-    path: "/guide",
-    element: (
-      <TitledRoute title="User guide">
-        <GuidePage />
-      </TitledRoute>
-    ),
-  },
-  {
-    path: "/guide/:slug",
-    element: (
-      <TitledRoute title="User guide">
-        <GuidePage />
-      </TitledRoute>
-    ),
-  },
-  {
-    path: "/api/docs",
-    element: (
-      <TitledRoute title="API">
-        <ApiDocsPage />
-      </TitledRoute>
-    ),
-  },
-  {
-    path: "/oauth/authorize",
-    element: (
-      <TitledRoute title="Authorize">
-        <OAuthConsentPage />
-      </TitledRoute>
-    ),
-  },
-  { path: "/u/:username", element: <PublicOverviewPage /> },
-  { path: "/p/:id", element: <PublicProjectPage /> },
-  { path: "/s/:publicId", element: <PublicSessionPage /> },
-  {
-    element: <AppShell />,
-    children: [
-      {
-        path: "/overview",
-        element: (
-          <TitledRoute title="Overview">
-            <OverviewPage />
-          </TitledRoute>
-        ),
-      },
-      {
-        path: "/insights",
-        element: (
-          <TitledRoute title="Insights">
-            <InsightsPage />
-          </TitledRoute>
-        ),
-      },
-      {
-        path: "/projects",
-        element: (
-          <TitledRoute title="Projects">
-            <ProjectsPage />
-          </TitledRoute>
-        ),
-      },
-      {
-        path: "/projects/:id",
-        element: (
-          <TitledRoute title="Project">
-            <ProjectPage />
-          </TitledRoute>
-        ),
-      },
-      {
-        path: "/sessions",
-        element: (
-          <TitledRoute title="Sessions">
-            <SessionsPage />
-          </TitledRoute>
-        ),
-      },
-      {
-        path: "/sessions/:id",
-        element: (
-          <TitledRoute title="Session">
-            <SessionPage />
-          </TitledRoute>
-        ),
-      },
-      {
-        path: "/account",
-        element: (
-          <TitledRoute title="Account">
-            <AccountPage />
-          </TitledRoute>
-        ),
-      },
-    ],
-  },
-  { path: "*", element: <Navigate to="/overview" replace /> },
-]);
+const router = createBrowserRouter(
+  [
+    {
+      path: "/login",
+      element: (
+        <TitledRoute title="Log in">
+          <AuthPage mode="login" />
+        </TitledRoute>
+      ),
+    },
+    {
+      path: "/register",
+      element: (
+        <TitledRoute title="Register">
+          <AuthPage mode="register" />
+        </TitledRoute>
+      ),
+    },
+    {
+      path: "/guide",
+      element: (
+        <TitledRoute title="User guide">
+          <GuidePage />
+        </TitledRoute>
+      ),
+    },
+    {
+      path: "/guide/:slug",
+      element: (
+        <TitledRoute title="User guide">
+          <GuidePage />
+        </TitledRoute>
+      ),
+    },
+    {
+      path: "/api/docs",
+      element: (
+        <TitledRoute title="API">
+          <ApiDocsPage />
+        </TitledRoute>
+      ),
+    },
+    {
+      path: "/oauth/authorize",
+      element: (
+        <TitledRoute title="Authorize">
+          <OAuthConsentPage />
+        </TitledRoute>
+      ),
+    },
+    { path: "/u/:username", element: <PublicOverviewPage /> },
+    { path: "/p/:id", element: <PublicProjectPage /> },
+    { path: "/s/:publicId", element: <PublicSessionPage /> },
+    {
+      element: <AppShell />,
+      children: [
+        {
+          path: "/overview",
+          element: (
+            <TitledRoute title="Overview">
+              <OverviewPage />
+            </TitledRoute>
+          ),
+        },
+        {
+          path: "/insights",
+          element: (
+            <TitledRoute title="Insights">
+              <InsightsPage />
+            </TitledRoute>
+          ),
+        },
+        {
+          path: "/projects",
+          element: (
+            <TitledRoute title="Projects">
+              <ProjectsPage />
+            </TitledRoute>
+          ),
+        },
+        {
+          path: "/projects/:id",
+          element: (
+            <TitledRoute title="Project">
+              <ProjectPage />
+            </TitledRoute>
+          ),
+        },
+        {
+          path: "/sessions",
+          element: (
+            <TitledRoute title="Sessions">
+              <SessionsPage />
+            </TitledRoute>
+          ),
+        },
+        {
+          path: "/sessions/:id",
+          element: (
+            <TitledRoute title="Session">
+              <SessionPage />
+            </TitledRoute>
+          ),
+        },
+        {
+          path: "/account",
+          element: (
+            <TitledRoute title="Account">
+              <AccountPage />
+            </TitledRoute>
+          ),
+        },
+      ],
+    },
+    { path: "*", element: <Navigate to="/overview" replace /> },
+    // The basename mirrors the external path prefix the server injected, so the
+    // history URLs the router writes match what the reverse proxy serves.
+  ],
+  { basename: basePath || "/" },
+);
 
 const root = document.getElementById("root");
 if (!root) throw new Error("missing React root");

@@ -12,6 +12,7 @@ import { attempt, notify } from "../components/notices";
 import { formatTime } from "../format";
 import type { Viewer } from "../types";
 import "./account.css";
+import { withBase } from "../base";
 
 type Token = {
   ID: number;
@@ -208,7 +209,7 @@ function PublicationSection({
   refresh: () => void;
 }) {
   const [copied, setCopied] = useState(false);
-  const publicURL = `${window.location.origin}/u/${user.username}`;
+  const publicURL = `${window.location.origin}${withBase(`/u/${user.username}`)}`;
   return (
     <section className="settings-section">
       <div className="settings-copy">
@@ -486,7 +487,7 @@ function ReparseSection({
 
   useEffect(() => {
     if (!live.in_progress) return;
-    const source = new EventSource("/api/v1/reparse/events");
+    const source = new EventSource(withBase("/api/v1/reparse/events"));
     const onStatus = (event: MessageEvent<string>) => {
       const next = JSON.parse(event.data) as FleetStatus;
       setLive(next);

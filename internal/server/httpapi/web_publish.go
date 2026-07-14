@@ -31,8 +31,8 @@ func (s *Server) handlePublishSession(w http.ResponseWriter, r *http.Request) {
 		s.renderError(w, r, http.StatusNotFound, "Session not found.")
 		return
 	}
-	s.setNotice(w, "Published")
-	http.Redirect(w, r, fmt.Sprintf("/sessions/%d", id), http.StatusSeeOther)
+	s.setNotice(w, r, "Published")
+	http.Redirect(w, r, s.href(r, fmt.Sprintf("/sessions/%d", id)), http.StatusSeeOther)
 }
 
 // handlePublishOverview marks the signed-in user's own usage overview public and
@@ -47,8 +47,8 @@ func (s *Server) handlePublishOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.analyticsSnapshots.invalidate(analyticsScope{kind: analyticsUserScope, id: p.UserID})
-	s.setNotice(w, "Overview published")
-	http.Redirect(w, r, "/account", http.StatusSeeOther)
+	s.setNotice(w, r, "Overview published")
+	http.Redirect(w, r, s.href(r, "/account"), http.StatusSeeOther)
 }
 
 // handleUnpublishOverview hides the signed-in user's public overview. The URL is
@@ -60,8 +60,8 @@ func (s *Server) handleUnpublishOverview(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	s.analyticsSnapshots.invalidate(analyticsScope{kind: analyticsUserScope, id: p.UserID})
-	s.setNotice(w, "Overview unpublished")
-	http.Redirect(w, r, "/account", http.StatusSeeOther)
+	s.setNotice(w, r, "Overview unpublished")
+	http.Redirect(w, r, s.href(r, "/account"), http.StatusSeeOther)
 }
 
 // handlePublishProjectOverview marks a project's usage overview public and redirects
@@ -86,8 +86,8 @@ func (s *Server) handlePublishProjectOverview(w http.ResponseWriter, r *http.Req
 		return
 	}
 	s.analyticsSnapshots.invalidate(analyticsScope{kind: analyticsProjectScope, id: id})
-	s.setNotice(w, "Overview published")
-	http.Redirect(w, r, fmt.Sprintf("/projects/%d", id), http.StatusSeeOther)
+	s.setNotice(w, r, "Overview published")
+	http.Redirect(w, r, s.href(r, fmt.Sprintf("/projects/%d", id)), http.StatusSeeOther)
 }
 
 // handleUnpublishProjectOverview hides a project's public overview. The URL is the
@@ -109,8 +109,8 @@ func (s *Server) handleUnpublishProjectOverview(w http.ResponseWriter, r *http.R
 		return
 	}
 	s.analyticsSnapshots.invalidate(analyticsScope{kind: analyticsProjectScope, id: id})
-	s.setNotice(w, "Overview unpublished")
-	http.Redirect(w, r, fmt.Sprintf("/projects/%d", id), http.StatusSeeOther)
+	s.setNotice(w, r, "Overview unpublished")
+	http.Redirect(w, r, s.href(r, fmt.Sprintf("/projects/%d", id)), http.StatusSeeOther)
 }
 
 // handlePublicProject serves a project's published usage overview to logged-out
@@ -155,7 +155,7 @@ func (s *Server) handlePublicProject(w http.ResponseWriter, r *http.Request) {
 	og := web.OGMeta{
 		Title:       web.ProjectTitle(proj) + " · usage overview",
 		Description: "A snapshot of AI coding-agent usage on " + web.ProjectTitle(proj) + " on akari.",
-		URL:         s.baseURL(r) + web.PublicProjectPath(proj.ID),
+		URL:         s.absURL(r, web.PublicProjectPath(proj.ID)),
 	}
 	// The preview card is a snapshot of the default trailing-year window, rendered on
 	// demand and cached per project (not per range) for a short TTL, so it may trail the
@@ -164,7 +164,7 @@ func (s *Server) handlePublicProject(w http.ResponseWriter, r *http.Request) {
 	// as the public user overview advertises its card; the page still carries a well-formed
 	// summary card via its title and description when the image is omitted.
 	if rng == web.DefaultRange {
-		og.Image = s.baseURL(r) + web.PublicProjectOGPath(proj.ID)
+		og.Image = s.absURL(r, web.PublicProjectOGPath(proj.ID))
 	}
 	render(w, r, http.StatusOK, web.PublicProjectPage(proj, analytics, insights, rng, og))
 }
@@ -203,7 +203,7 @@ func (s *Server) handlePublicOverview(w http.ResponseWriter, r *http.Request) {
 	og := web.OGMeta{
 		Title:       u.Username + " · usage overview",
 		Description: "A snapshot of " + u.Username + "'s AI coding-agent usage on akari.",
-		URL:         s.baseURL(r) + web.PublicOverviewPath(u.Username),
+		URL:         s.absURL(r, web.PublicOverviewPath(u.Username)),
 	}
 	// The preview card is a snapshot of the default trailing-year window, rendered on
 	// demand and cached per user (not per range) for a short TTL, so it may trail the
@@ -212,7 +212,7 @@ func (s *Server) handlePublicOverview(w http.ResponseWriter, r *http.Request) {
 	// the page still carries a well-formed summary card via its title and description
 	// when the image is omitted.
 	if rng == web.DefaultRange {
-		og.Image = s.baseURL(r) + web.PublicOverviewOGPath(u.Username)
+		og.Image = s.absURL(r, web.PublicOverviewOGPath(u.Username))
 	}
 	render(w, r, http.StatusOK, web.PublicOverviewPage(u.Username, analytics, rng, og))
 }
@@ -229,8 +229,8 @@ func (s *Server) handleUnpublishSession(w http.ResponseWriter, r *http.Request) 
 		s.renderError(w, r, http.StatusNotFound, "Session not found.")
 		return
 	}
-	s.setNotice(w, "Unpublished")
-	http.Redirect(w, r, fmt.Sprintf("/sessions/%d", id), http.StatusSeeOther)
+	s.setNotice(w, r, "Unpublished")
+	http.Redirect(w, r, s.href(r, fmt.Sprintf("/sessions/%d", id)), http.StatusSeeOther)
 }
 
 // handleDeleteSession removes a session. The owner may delete their own session;
@@ -258,8 +258,8 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		s.renderError(w, r, http.StatusInternalServerError, "Could not delete session.")
 		return
 	}
-	s.setNotice(w, "Session deleted")
-	http.Redirect(w, r, fmt.Sprintf("/projects/%d", d.ProjectID), http.StatusSeeOther)
+	s.setNotice(w, r, "Session deleted")
+	http.Redirect(w, r, s.href(r, fmt.Sprintf("/projects/%d", d.ProjectID)), http.StatusSeeOther)
 }
 
 // handlePublicSession serves a bounded tail of a published session to logged-out
@@ -286,8 +286,8 @@ func (s *Server) handlePublicSession(w http.ResponseWriter, r *http.Request) {
 	og := web.OGMeta{
 		Title:       web.SessionPageTitle(d),
 		Description: "A shared " + d.Agent + " session on " + web.SessionProjectLabel(d) + " in akari.",
-		URL:         s.baseURL(r) + web.PublicPath(*d.PublicID),
-		Image:       s.baseURL(r) + web.PublicSessionOGPath(*d.PublicID),
+		URL:         s.absURL(r, web.PublicPath(*d.PublicID)),
+		Image:       s.absURL(r, web.PublicSessionOGPath(*d.PublicID)),
 	}
 	render(w, r, http.StatusOK, web.PublicSessionPage(v, og))
 }

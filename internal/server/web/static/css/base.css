@@ -10,27 +10,27 @@
 /* ---- Fonts (self-hosted, embedded in the binary) ---- */
 @font-face {
   font-family: "Geist";
-  src: url("/static/fonts/Geist-Regular.woff2") format("woff2");
+  src: url("../fonts/Geist-Regular.woff2") format("woff2");
   font-weight: 400; font-style: normal; font-display: swap;
 }
 @font-face {
   font-family: "Geist";
-  src: url("/static/fonts/Geist-Medium.woff2") format("woff2");
+  src: url("../fonts/Geist-Medium.woff2") format("woff2");
   font-weight: 500; font-style: normal; font-display: swap;
 }
 @font-face {
   font-family: "Geist";
-  src: url("/static/fonts/Geist-SemiBold.woff2") format("woff2");
+  src: url("../fonts/Geist-SemiBold.woff2") format("woff2");
   font-weight: 600; font-style: normal; font-display: swap;
 }
 @font-face {
   font-family: "Geist Mono";
-  src: url("/static/fonts/GeistMono-Regular.woff2") format("woff2");
+  src: url("../fonts/GeistMono-Regular.woff2") format("woff2");
   font-weight: 400 450; font-style: normal; font-display: swap;
 }
 @font-face {
   font-family: "Geist Mono";
-  src: url("/static/fonts/GeistMono-Medium.woff2") format("woff2");
+  src: url("../fonts/GeistMono-Medium.woff2") format("woff2");
   font-weight: 500; font-style: normal; font-display: swap;
 }
 

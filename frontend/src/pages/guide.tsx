@@ -10,6 +10,7 @@ import { useParams } from "react-router-dom";
 import remarkGfm from "remark-gfm";
 
 import { useAPI } from "../api";
+import { withBase } from "../base";
 import { AsyncView } from "../components/async-view";
 import { PublicShell } from "../components/public-shell";
 import "./guide.css";
@@ -152,11 +153,11 @@ export function GuidePage() {
                         <a
                           key={chapter.Slug}
                           className={chapter.Slug === data.slug ? "active" : ""}
-                          href={
+                          href={withBase(
                             chapter.Order === 0
                               ? "/guide"
-                              : `/guide/${chapter.Slug}`
-                          }
+                              : `/guide/${chapter.Slug}`,
+                          )}
                           onClick={() => setNavOpen(false)}
                         >
                           <span>{String(chapter.Order).padStart(2, "0")}</span>
@@ -176,7 +177,9 @@ export function GuidePage() {
                           onClick={async () => {
                             const markdown =
                               data.raw_markdown ||
-                              (await (await fetch(data.raw_path)).text());
+                              (await (
+                                await fetch(withBase(data.raw_path))
+                              ).text());
                             await navigator.clipboard.writeText(markdown);
                             setCopied(true);
                             setTimeout(() => setCopied(false), 1600);
@@ -184,7 +187,10 @@ export function GuidePage() {
                         >
                           <CopyIcon /> {copied ? "Copied" : "Copy page"}
                         </button>
-                        <a className="button secondary" href={data.raw_path}>
+                        <a
+                          className="button secondary"
+                          href={withBase(data.raw_path)}
+                        >
                           Markdown
                         </a>
                         <a
@@ -208,11 +214,11 @@ export function GuidePage() {
                     <footer className="guide-pager">
                       {previous ? (
                         <a
-                          href={
+                          href={withBase(
                             previous.Order === 0
                               ? "/guide"
-                              : `/guide/${previous.Slug}`
-                          }
+                              : `/guide/${previous.Slug}`,
+                          )}
                         >
                           <ArrowLeftIcon /> {previous.Title}
                         </a>
@@ -220,7 +226,7 @@ export function GuidePage() {
                         <span />
                       )}
                       {next ? (
-                        <a href={`/guide/${next.Slug}`}>
+                        <a href={withBase(`/guide/${next.Slug}`)}>
                           {next.Title} <ArrowRightIcon />
                         </a>
                       ) : null}

@@ -59,7 +59,7 @@ func newMCPHandler(s *Server) http.Handler {
 func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	setPrivateNoStore(w)
 	mw := mcpauth.RequireBearerToken(s.verifyMCPToken, &mcpauth.RequireBearerTokenOptions{
-		ResourceMetadataURL: s.baseURL(r) + resourceMetaPath,
+		ResourceMetadataURL: s.absURL(r, resourceMetaPath),
 	})
 	mw(s.mcp).ServeHTTP(w, r)
 }

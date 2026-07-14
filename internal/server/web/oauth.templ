@@ -32,7 +32,7 @@ templ ConsentPage(p Page, c ConsentParams) {
 				delete, or change anything, and you can disconnect it any time from your account
 				page.
 			</p>
-			<form method="post" action="/oauth/authorize">
+			<form method="post" action={ Href(ctx, "/oauth/authorize") }>
 				@csrfField()
 				<input type="hidden" name="client_id" value={ c.ClientID }/>
 				<input type="hidden" name="redirect_uri" value={ c.RedirectURI }/>

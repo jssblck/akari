@@ -1,5 +1,6 @@
 import SwaggerUI from "swagger-ui-react";
 
+import { withBase } from "../base";
 import { PublicShell } from "../components/public-shell";
 
 export function ApiDocsPage() {
@@ -12,11 +13,11 @@ export function ApiDocsPage() {
           <p>
             The contract for browser reads, account operations, and session
             ingest. Download the raw document at{" "}
-            <a href="/api/openapi.json">/api/openapi.json</a>.
+            <a href={withBase("/api/openapi.json")}>/api/openapi.json</a>.
           </p>
         </div>
         <SwaggerUI
-          url="/api/openapi.json"
+          url={withBase("/api/openapi.json")}
           deepLinking
           displayRequestDuration
           tryItOutEnabled

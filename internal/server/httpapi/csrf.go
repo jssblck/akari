@@ -70,7 +70,7 @@ func (s *Server) withCSRF(next http.Handler) http.Handler {
 				writeError(w, http.StatusInternalServerError, "could not initialize CSRF protection")
 				return
 			}
-			s.setCSRFCookie(w, token)
+			s.setCSRFCookie(w, r, token)
 		}
 		r = r.WithContext(web.WithCSRFToken(r.Context(), token))
 
@@ -125,17 +125,17 @@ func (s *Server) withCSRFToken(w http.ResponseWriter, r *http.Request) (*http.Re
 		if err != nil {
 			return r, false
 		}
-		s.setCSRFCookie(w, token)
+		s.setCSRFCookie(w, r, token)
 	}
 	return r.WithContext(web.WithCSRFToken(r.Context(), token)), true
 }
 
-func (s *Server) setCSRFCookie(w http.ResponseWriter, token string) {
+func (s *Server) setCSRFCookie(w http.ResponseWriter, r *http.Request, token string) {
 	setPrivateNoStore(w)
 	http.SetCookie(w, &http.Cookie{
 		Name:     csrfCookieName,
 		Value:    token,
-		Path:     "/",
+		Path:     cookiePath(r),
 		HttpOnly: true,
 		Secure:   s.Cfg.CookieSecure,
 		SameSite: http.SameSiteStrictMode,
@@ -147,12 +147,12 @@ func (s *Server) setCSRFCookie(w http.ResponseWriter, token string) {
 // of whatever token predates the call. Login, registration, and logout use it
 // so a token issued before the privilege change cannot go on authorizing
 // requests under the new session state.
-func (s *Server) rotateCSRFCookie(w http.ResponseWriter) error {
+func (s *Server) rotateCSRFCookie(w http.ResponseWriter, r *http.Request) error {
 	token, err := auth.NewToken()
 	if err != nil {
 		return err
 	}
-	s.setCSRFCookie(w, token)
+	s.setCSRFCookie(w, r, token)
 	return nil
 }
 

@@ -46,6 +46,7 @@ import {
   relativeTime,
 } from "../format";
 import "../sessions.css";
+import { withBase } from "../base";
 import type { SessionSnapshot, TranscriptPage } from "../types";
 
 type SessionResponse = {
@@ -82,7 +83,7 @@ export function SessionPage() {
   useEffect(() => {
     if (!id) return;
     const events = new EventSource(
-      `/sessions/${encodeURIComponent(id)}/events`,
+      withBase(`/sessions/${encodeURIComponent(id)}/events`),
     );
     let fetching = false;
     let pending = false;
@@ -212,7 +213,7 @@ export function SessionPage() {
                 <OutlineRail
                   outline={snapshot.Outline ?? []}
                   toolsByOrdinal={groupByOrdinal(snapshot.Tools ?? [])}
-                  blobBase={`/api/v1/session/${detail.ID}/blob`}
+                  blobBase={withBase(`/api/v1/session/${detail.ID}/blob`)}
                 />
                 <div className="session-maincol">
                   <FlowRibbon
@@ -222,7 +223,7 @@ export function SessionPage() {
                   <Transcript
                     ref={transcriptRef}
                     initial={snapshot.Page}
-                    blobBase={`/api/v1/session/${detail.ID}/blob`}
+                    blobBase={withBase(`/api/v1/session/${detail.ID}/blob`)}
                     agent={detail.Agent}
                     loadEarlier={async (before) =>
                       (
@@ -279,7 +280,7 @@ function SessionActions({
             <>
               <a
                 className="share-link muted small"
-                href={`/s/${detail.PublicID}`}
+                href={withBase(`/s/${detail.PublicID}`)}
                 target="_blank"
                 rel="noreferrer"
                 title="Public share link"

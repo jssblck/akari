@@ -21,6 +21,7 @@ import type {
   PublicSessionSnapshot,
 } from "../types";
 import "./public.css";
+import { withBase } from "../base";
 import { ToolsInstrument } from "../components/insights/tools";
 import { TooltipHost } from "../components/insights/tooltip";
 import { InsightsPanel } from "./insights";
@@ -45,7 +46,7 @@ function PublicErrorState({ error }: { error: Error }) {
     <section className="empty-state" role="alert">
       <h2>{notFound ? "Not found" : "Could not load this page"}</h2>
       <p>{error.message}</p>
-      <a className="button secondary" href="/">
+      <a className="button secondary" href={withBase("/")}>
         Go to akari
       </a>
     </section>
@@ -216,7 +217,7 @@ export function PublicSessionPage() {
               ) : null}
               <Transcript
                 initial={data.snapshot.Page}
-                blobBase={`/s/${publicId}/blob`}
+                blobBase={withBase(`/s/${publicId}/blob`)}
                 loadEarlier={async (before) =>
                   (
                     await request<PublicSessionResponse>(
