@@ -69,7 +69,7 @@ func (s *syncSink) registerBody(ctx context.Context, sha, contentType string, re
 
 // flushPending ensures every queued body is in the CAS: it batches the existence checks
 // (up to blobCheckBatch hashes per request, requests in parallel), then uploads the
-// missing bodies in parallel under the client's upload limiter. It is called before any
+// missing bodies in parallel under the client's upload budget. It is called before any
 // chunk uploads (so the transcript never references a body the CAS lacks) and once more
 // at the end of a pass (so a body lifted from a withheld trailing turn is uploaded the
 // tick it is first seen, since the held lines are cached and never re-transformed).
@@ -150,28 +150,27 @@ func (s *syncSink) checkMissing(ctx context.Context, shas []string) (map[string]
 	return missing, nil
 }
 
-// uploadMissing uploads every missing body in parallel, each upload gated on the
-// client's adaptive upload limiter so the live concurrency tracks observed performance.
-// The errgroup limit caps the worker goroutines at the limiter's ceiling; the limiter
-// itself decides how many of them actually run at any moment and samples each upload's
-// latency to retune. The first upload error cancels the rest and fails the flush, which
-// fails the sync (as an inline upload error would have).
+const uploadConcurrency = 8
+
+// uploadMissing uploads every missing body in parallel under one fixed, client-wide
+// budget. The first upload error cancels the rest and fails the sync, as an inline
+// upload error would have.
 func (s *syncSink) uploadMissing(ctx context.Context, order []string, byID map[string]pendingBody, missing map[string]bool) error {
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(uploadMaxConcurrency)
+	g.SetLimit(uploadConcurrency)
 	for _, sha := range order {
 		if !missing[sha] {
 			continue
 		}
 		p := byID[sha]
 		g.Go(func() error {
-			slot, err := s.c.uploads.acquire(gctx)
-			if err != nil {
-				return err
+			select {
+			case s.c.uploadSlots <- struct{}{}:
+			case <-gctx.Done():
+				return gctx.Err()
 			}
-			err = s.c.putBody(gctx, s.enc, p.sha, p.contentType, p.ref)
-			slot.release(err)
-			return err
+			defer func() { <-s.c.uploadSlots }()
+			return s.c.putBody(gctx, s.enc, p.sha, p.contentType, p.ref)
 		})
 	}
 	return g.Wait()

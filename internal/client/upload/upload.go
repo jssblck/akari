@@ -106,10 +106,9 @@ type Client struct {
 	// (a fleet of files, or a batch of uploads) does not oversubscribe the machine.
 	enc *casenc.Encoder
 
-	// uploads bounds how many tool-body uploads run at once, adapting the live width to
-	// observed round-trip latency. It is shared across every file this Client syncs, so
-	// the cap is a whole-client budget, not per file.
-	uploads uploadLimiter
+	// uploadSlots is the whole-client budget for tool-body uploads, so syncing several
+	// files at once cannot multiply the concurrency bound.
+	uploadSlots chan struct{}
 
 	// files caches the transformed-to-original cursor mapping and open trailing
 	// turns. It is guarded by mu; a given path is synced single-flight, so the
@@ -210,21 +209,9 @@ func New(httpClient *http.Client, baseURL, token string) *Client {
 		idleProgressTimeout: defaultIdleProgressTimeout,
 		apiRequestTimeout:   defaultAPIRequestTimeout,
 		enc:                 casenc.NewLimited(runtime.NumCPU()),
-		uploads:             uploadLimiterOrFallback(newAdaptiveUploadLimiter),
+		uploadSlots:         make(chan struct{}, uploadConcurrency),
 		files:               map[string]*fileSync{},
 	}
-}
-
-// uploadLimiterOrFallback returns the adaptive limiter built by make, or a fixed-width
-// limiter when make fails. The adaptive limiter is built from static, valid parameters,
-// so the fallback does not trigger in practice; it exists so a Client is always usable
-// rather than left without upload concurrency control. It takes the constructor as a
-// parameter so a test can drive the fallback branch.
-func uploadLimiterOrFallback(make func() (uploadLimiter, error)) uploadLimiter {
-	if lim, err := make(); err == nil {
-		return lim
-	}
-	return newFixedUploadLimiter(uploadInitialConcurrency)
 }
 
 // retainFileState returns the cached sync state for a path and pins it against
@@ -975,24 +962,9 @@ func (c *Client) putBody(ctx context.Context, enc *casenc.Encoder, sha, contentT
 		return fmt.Errorf("read upload response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		// Return a typed status error so the upload limiter can tell a server shedding
-		// load (429/5xx) from a client-side fault and retune accordingly.
-		return &httpStatusError{op: fmt.Sprintf("upload blob %s", sha), code: resp.StatusCode, body: strings.TrimSpace(string(payload))}
+		return fmt.Errorf("upload blob %s: server returned %d: %s", sha, resp.StatusCode, strings.TrimSpace(string(payload)))
 	}
 	return nil
-}
-
-// httpStatusError is a non-2xx server response carrying the status code, so callers
-// (notably the upload limiter's load-shed detection) can branch on the code rather than
-// parse a formatted string.
-type httpStatusError struct {
-	op   string
-	code int
-	body string
-}
-
-func (e *httpStatusError) Error() string {
-	return fmt.Sprintf("%s: server returned %d: %s", e.op, e.code, e.body)
 }
 
 // doJSON performs a JSON request, optionally decoding a JSON response into out.

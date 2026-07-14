@@ -38,19 +38,13 @@ type fakeServer struct {
 	blobMedia    map[string]string // sha256 -> declared semantic media_type
 	puts         int               // count of accepted blob uploads, for dedup assertions
 
-	// Instrumentation for the batched/parallel upload tests. checkBatchSizes records the
-	// hash count of every existence-check request, so a test can assert no request
-	// exceeds the per-request cap. maxConcurrentChecks / maxConcurrentPuts record the
-	// peak in-flight requests of each kind, so a test can assert the client actually
-	// parallelizes. checkDelay / putDelay, when set, make that endpoint sleep so
-	// concurrent requests overlap long enough for the peak to be observed.
+	// Instrumentation for the batched existence-check tests. checkBatchSizes records the
+	// hash count of every request, while maxConcurrentChecks records the peak in-flight
+	// requests so tests can verify that checks are bounded and parallel.
 	checkBatchSizes     []int
 	curChecks           int
 	maxConcurrentChecks int
-	curPuts             int
-	maxConcurrentPuts   int
 	checkDelay          time.Duration
-	putDelay            time.Duration
 
 	// conflictOnce, when set, makes the next chunk POST return 409 after first
 	// appending injectBytes, simulating another writer advancing the cursor.
@@ -181,18 +175,7 @@ func (s *fakeServer) handler() http.Handler {
 			return
 		}
 		s.mu.Lock()
-		s.curPuts++
-		if s.curPuts > s.maxConcurrentPuts {
-			s.maxConcurrentPuts = s.curPuts
-		}
-		delay := s.putDelay
-		s.mu.Unlock()
-		if delay > 0 {
-			time.Sleep(delay)
-		}
-		s.mu.Lock()
 		defer s.mu.Unlock()
-		s.curPuts--
 		s.blobs[sha] = body
 		s.blobCT[sha] = r.URL.Query().Get("content_type")
 		s.blobMedia[sha] = r.URL.Query().Get("media_type")

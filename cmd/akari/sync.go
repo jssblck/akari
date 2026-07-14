@@ -23,12 +23,10 @@ import (
 // off a typical backlog; pass --time-limit 0 to remove the cap entirely.
 const defaultTimeLimit = 5 * time.Minute
 
-// maxDefaultConcurrency caps the default file-level parallelism. Each file
-// already fans its own body uploads out under the client's shared adaptive
-// limiter and CPU-bounded compression encoder, so the file loop only needs
-// enough parallelism to overlap the per-file announce and existence-check
-// round-trips. A modest cap keeps that overlap without letting the file count
-// multiply against the per-file fan-out.
+// maxDefaultConcurrency caps the default file-level parallelism. Body uploads
+// already share a fixed client-wide budget and CPU-bounded compression encoder,
+// so the file loop only needs enough workers to overlap per-file announce and
+// existence-check round-trips.
 const maxDefaultConcurrency = 8
 
 // defaultConcurrency picks the default for --concurrency: enough to overlap
@@ -68,7 +66,7 @@ func parseSyncArgs(args []string) (syncOptions, error) {
 	configPath := fs.String("config", "", "config file path (default: platform config dir)")
 	dryRun := fs.Bool("dry-run", false, "resolve and report without uploading")
 	timeLimitStr := fs.String("time-limit", defaultTimeLimit.String(), "Go duration to keep starting new uploads, e.g. 30s or 5m (0 for no limit); the in-flight upload always finishes")
-	concurrency := fs.Int("concurrency", defaultConcurrency(), "max files to sync in parallel; each file already parallelizes its own body uploads under a shared limiter, so keep this modest")
+	concurrency := fs.Int("concurrency", defaultConcurrency(), "max files to sync in parallel; body uploads already share a fixed client-wide budget, so keep this modest")
 	finalize := fs.Bool("finalize", false, "treat every session as terminal: flush a Codex session's trailing turn now instead of waiting for the idle settle window. Use on ephemeral hosts (CI, cloud sandboxes) whose window never elapses before teardown")
 	if err := fs.Parse(args); err != nil {
 		return syncOptions{}, err
@@ -134,7 +132,7 @@ func runSync(ctx context.Context, args []string) error {
 	// run is the per-file unit of work: a dry run only resolves and reports, a real
 	// sync resolves then pushes the gap. Both are safe to call from many goroutines
 	// at once (the resolver guards its cache, the uploader serializes per path and
-	// shares its limiter and encoder across files), so syncAll fans them out.
+	// shares its upload budget and encoder across files), so syncAll fans them out.
 	run := func(c context.Context, f discover.File) outcome {
 		if opts.dryRun {
 			res := resolver.Resolve(c, f)
@@ -273,11 +271,10 @@ func (s *summary) foldSync(r syncer.Result) (line string, stderr bool) {
 // dropping that file silently. It returns the folded summary and whether it
 // stopped early.
 //
-// The file-level cap is intentionally modest. Each file already fans its own body
-// uploads out under the client's shared adaptive limiter and CPU-bounded encoder,
-// so the file loop only needs enough parallelism to overlap the per-file announce
-// and existence-check round-trips; a large cap would multiply against that
-// per-file fan-out without bounding aggregate network or CPU any better.
+// The file-level cap is intentionally modest. Body uploads already share a fixed
+// client-wide budget and CPU-bounded encoder, so file concurrency only needs to
+// overlap announce and existence-check round-trips; a larger cap would add
+// metadata pressure and idle goroutines without increasing upload throughput.
 func syncAll(work, deadline context.Context, files []discover.File, concurrency int, run func(context.Context, discover.File) outcome) (*summary, bool) {
 	sum := newSummary()
 	results := make(chan outcome, concurrency)

@@ -48,8 +48,7 @@ func NewHTTPClient() *http.Client {
 }
 
 // idleProgressError identifies which half of an HTTP exchange stopped moving.
-// It is a timeout so callers and the adaptive upload limiter classify it as a
-// transient network failure.
+// It is a timeout so callers classify it as a transient network failure.
 type idleProgressError struct {
 	phase   string
 	timeout time.Duration
@@ -62,10 +61,8 @@ func (e *idleProgressError) Error() string {
 func (e *idleProgressError) Timeout() bool   { return true }
 func (e *idleProgressError) Temporary() bool { return true }
 
-// Is reports an idleProgressError as a context.DeadlineExceeded so errors.Is
-// classifies it that way everywhere a deadline is checked for, in particular
-// the adaptive upload limiter's isLoadShed: a stalled upload is exactly the
-// kind of transient, load-sensitive failure the limiter should back off from.
+// Is reports an idleProgressError as a context.DeadlineExceeded so callers can
+// handle a stalled transfer like any other deadline.
 func (e *idleProgressError) Is(target error) bool {
 	return target == context.DeadlineExceeded
 }
