@@ -173,8 +173,9 @@ func (s *Server) Routes() http.Handler {
 	// The user guide: public documentation, readable logged out and served to a
 	// coding agent as raw Markdown and as one concatenated file. It is static
 	// content independent of the parsed projection, so it carries neither the auth
-	// gate nor the reparse gate. handleGuidePage splits the .md suffix itself, so
-	// /guide/<slug> and /guide/<slug>.md share one route.
+	// gate nor the reparse gate. handleGuideRoute splits the .md suffix itself, so
+	// /guide/<slug> (the React shell) and /guide/<slug>.md (raw Markdown) share
+	// one route.
 	mux.HandleFunc("GET /guide", s.handleAppShell)
 	mux.HandleFunc("GET /guide/{slug}", s.handleGuideRoute)
 	mux.HandleFunc("GET /llms.txt", s.handleLLMsTxt)

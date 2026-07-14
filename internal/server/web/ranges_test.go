@@ -39,6 +39,28 @@ func TestRangeSince(t *testing.T) {
 	}
 }
 
+// TrendBucket aggregates the short windows daily and the long ones weekly, and an
+// unknown key falls back to the default range's unit so a stale ?range still
+// renders a sane grid.
+func TestTrendBucket(t *testing.T) {
+	for _, k := range []string{"7d", "30d"} {
+		if got := TrendBucket(k); got != "day" {
+			t.Errorf("TrendBucket(%q) = %q, want day", k, got)
+		}
+	}
+	for _, k := range []string{"90d", "year", "all"} {
+		if got := TrendBucket(k); got != "week" {
+			t.Errorf("TrendBucket(%q) = %q, want week", k, got)
+		}
+	}
+	want := TrendBucket(DefaultRange)
+	for _, bad := range []string{"", "bogus", "month"} {
+		if got := TrendBucket(bad); got != want {
+			t.Errorf("TrendBucket(%q) = %q, want default unit %q", bad, got, want)
+		}
+	}
+}
+
 // RangeBounds is the sessions feed's whitelist: only a known trailing window bounds the
 // list, so an "all", empty, or hand-typed junk key leaves the feed unbounded rather than
 // falling to ParseRange's trailing-year default.
