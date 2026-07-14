@@ -149,14 +149,14 @@ migration command. See the self-hosting guide for concrete commands.
 
 ## Container image
 
-Tagged releases publish the server to GitHub Container Registry. Pull a
-versioned tag and verify the embedded binary before deployment:
+Tagged releases publish the server to GitHub Container Registry. Pull the
+current stable image and verify the embedded binary before deployment:
 
 ```sh
-docker pull ghcr.io/jssblck/akari-server:v0.1.0
-docker run --rm ghcr.io/jssblck/akari-server:v0.1.0 --version
+docker pull ghcr.io/jssblck/akari-server:latest
+docker run --rm ghcr.io/jssblck/akari-server:latest --version
 docker image inspect --format '{{index .RepoDigests 0}}' \
-  ghcr.io/jssblck/akari-server:v0.1.0
+  ghcr.io/jssblck/akari-server:latest
 ```
 
 Container tags are mutable. Pin the reported digest in production when the
