@@ -648,13 +648,14 @@ without a bump, so the bump cannot be forgotten.
 
 **Fleet rebuilds and UI gating.** An epoch rollout rebuilds the corpus one
 session at a time, so a cross-session view could briefly mix old and new
-sessions. While a fleet rebuild is draining, the server gates the parsed pages
-behind a progress view (pushed over SSE, with `GET /api/v1/reparse/status` as
-the poll fallback); raw-data, auth, and account endpoints stay available. The
-admin Reparse button (`POST /account/reparse`) and the
-`akari-server reparse [--agent claude]` CLI remain as manual triggers, now
-implemented as "mark the scope due" against the same worker rather than a
-parallel service.
+sessions. While a fleet rebuild is draining, parsed-data APIs return a
+structured `503` with `Retry-After`; the React data loader shows the rebuild
+state and retries until the view is available. Raw-data, auth, and account
+endpoints stay available. The Account page follows rebuild progress over
+`GET /api/v1/reparse/events`, then refreshes its account read model when the
+rebuild finishes. Its admin Reparse button (`POST /api/v1/app/reparse`) and the
+`akari-server reparse [--agent claude]` CLI both mark the requested scope due
+against the same worker.
 
 **Migration from the incremental pipeline.** The raw store and the CAS carry
 over unchanged; everything derived is rebuilt. One migration drops the

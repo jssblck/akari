@@ -440,4 +440,4 @@ export type PublicSessionSnapshot = {
   ProjectionRevision: number;
 };
 
-export type APIError = { error: string };
+export type APIError = { error: string; code?: string };

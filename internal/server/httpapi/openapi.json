@@ -21,21 +21,25 @@
     "schemas": {
       "Error": {
         "type": "object",
+        "additionalProperties": false,
         "required": ["error"],
-        "properties": { "error": { "type": "string" } }
+        "properties": { "error": { "type": "string" }, "code": { "type": "string" } }
       },
       "Publication": {
         "type": "object",
+        "additionalProperties": false,
         "required": ["published"],
         "properties": { "published": { "type": "boolean" } }
       },
       "Login": {
         "type": "object",
+        "additionalProperties": false,
         "required": ["username", "password"],
         "properties": { "username": { "type": "string" }, "password": { "type": "string", "format": "password" } }
       },
       "Register": {
         "type": "object",
+        "additionalProperties": false,
         "required": ["username", "password"],
         "properties": {
           "username": { "type": "string" },
@@ -45,6 +49,7 @@
       },
       "CreateToken": {
         "type": "object",
+        "additionalProperties": false,
         "required": ["name"],
         "properties": {
           "name": { "type": "string" },
@@ -53,19 +58,69 @@
       },
       "CreateInvite": {
         "type": "object",
+        "additionalProperties": false,
         "properties": {
           "note": { "type": "string" },
           "expires_hours": { "type": "integer", "minimum": 0 }
         }
       },
-      "AnnounceSession": { "type": "object", "additionalProperties": true },
-      "AppPayload": { "type": "object", "additionalProperties": true }
+      "AnnounceSession": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["agent", "source_session_id"],
+        "properties": {
+          "agent": { "type": "string", "enum": ["claude", "codex", "pi"] },
+          "source_session_id": { "type": "string", "minLength": 1 },
+          "kind": { "type": "string", "enum": ["remote", "standalone", "orphaned"], "default": "remote" },
+          "project_remote": { "type": "string" },
+          "local_root": { "type": "string" },
+          "git_branch": { "type": "string" },
+          "cwd": { "type": "string" },
+          "machine": { "type": "string" },
+          "terminal": { "type": "boolean", "default": false }
+        }
+      },
+      "Viewer": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["authenticated", "is_admin", "overview_public"],
+        "properties": {
+          "authenticated": { "type": "boolean" },
+          "user_id": { "type": "integer", "format": "int64" },
+          "username": { "type": "string" },
+          "is_admin": { "type": "boolean" },
+          "overview_public": { "type": "boolean" },
+          "csrf_token": { "type": "string" }
+        }
+      },
+      "ProjectionRebuild": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["error", "code", "reparse"],
+        "properties": {
+          "error": { "type": "string", "const": "projection rebuild in progress" },
+          "code": { "type": "string", "const": "projection_rebuild" },
+          "reparse": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["in_progress", "done", "total", "failed"],
+            "properties": {
+              "in_progress": { "type": "boolean" },
+              "done": { "type": "integer", "minimum": 0 },
+              "total": { "type": "integer", "minimum": 0 },
+              "failed": { "type": "integer", "minimum": 0 },
+              "started_at": { "type": "string", "format": "date-time" }
+            }
+          }
+        }
+      }
     },
     "responses": {
       "BadRequest": { "description": "The request is invalid.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
       "Unauthorized": { "description": "Authentication is required.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
       "Forbidden": { "description": "The credential does not have the required scope.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
-      "NotFound": { "description": "The requested resource does not exist or is not visible.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+      "NotFound": { "description": "The requested resource does not exist or is not visible.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "ProjectionRebuilding": { "description": "The parsed projection is rebuilding; retry after the requested delay.", "headers": { "Retry-After": { "required": true, "schema": { "type": "integer", "minimum": 1 }, "description": "Seconds before retrying." } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProjectionRebuild" } } } }
     }
   },
   "security": [{ "sessionCookie": [] }, { "bearerToken": [] }],
@@ -83,35 +138,35 @@
       "post": { "tags": ["Account"], "summary": "Delete the current browser session", "responses": { "200": { "description": "Signed out" } } }
     },
     "/api/v1/app/bootstrap": {
-      "get": { "tags": ["Application"], "summary": "Resolve the current application viewer", "security": [], "responses": { "200": { "description": "Viewer state", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AppPayload" } } } } } }
+      "get": { "tags": ["Application"], "summary": "Resolve the current application viewer", "security": [], "responses": { "200": { "description": "Viewer state", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Viewer" } } } } } }
     },
     "/api/v1/app/oauth/authorize": {
       "get": { "tags": ["Account"], "summary": "Resolve an OAuth consent request for the signed-in user", "parameters": [{ "name": "client_id", "in": "query", "required": true, "schema": { "type": "string" } }, { "name": "redirect_uri", "in": "query", "required": true, "schema": { "type": "string", "format": "uri" } }, { "name": "state", "in": "query", "required": true, "schema": { "type": "string" } }, { "name": "code_challenge", "in": "query", "required": true, "schema": { "type": "string" } }, { "name": "resource", "in": "query", "schema": { "type": "string", "format": "uri" } }], "responses": { "200": { "description": "Consent read model" }, "400": { "$ref": "#/components/responses/BadRequest" }, "404": { "$ref": "#/components/responses/NotFound" } } }
     },
     "/api/v1/app/overview": {
-      "get": { "tags": ["Application"], "summary": "Read fleet usage analytics", "parameters": [{ "name": "range", "in": "query", "schema": { "type": "string", "enum": ["7d", "30d", "90d", "year", "all"] } }, { "name": "user", "in": "query", "schema": { "type": "array", "items": { "type": "integer", "format": "int64" } } }], "responses": { "200": { "description": "Overview read model" }, "401": { "$ref": "#/components/responses/Unauthorized" } } }
+      "get": { "tags": ["Application"], "summary": "Read fleet usage analytics", "parameters": [{ "name": "range", "in": "query", "schema": { "type": "string", "enum": ["7d", "30d", "90d", "year", "all"] } }, { "name": "user", "in": "query", "schema": { "type": "array", "items": { "type": "integer", "format": "int64" } } }], "responses": { "200": { "description": "Overview read model" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "503": { "$ref": "#/components/responses/ProjectionRebuilding" } } }
     },
     "/api/v1/app/insights": {
-      "get": { "tags": ["Application"], "summary": "Read quality and workflow insights", "parameters": [{ "name": "range", "in": "query", "schema": { "type": "string", "enum": ["7d", "30d", "90d", "year", "all"] } }], "responses": { "200": { "description": "Insights read model" } } }
+      "get": { "tags": ["Application"], "summary": "Read quality and workflow insights", "parameters": [{ "name": "range", "in": "query", "schema": { "type": "string", "enum": ["7d", "30d", "90d", "year", "all"] } }], "responses": { "200": { "description": "Insights read model" }, "400": { "$ref": "#/components/responses/BadRequest" }, "503": { "$ref": "#/components/responses/ProjectionRebuilding" } } }
     },
     "/api/v1/app/projects": {
-      "get": { "tags": ["Application"], "summary": "List projects with lifetime rollups", "responses": { "200": { "description": "Project collection" } } }
+      "get": { "tags": ["Application"], "summary": "List projects with lifetime rollups", "responses": { "200": { "description": "Project collection" }, "503": { "$ref": "#/components/responses/ProjectionRebuilding" } } }
     },
     "/api/v1/app/projects/{id}": {
-      "get": { "tags": ["Application"], "summary": "Read one project with windowed sessions and analytics", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }, { "name": "range", "in": "query", "schema": { "type": "string" } }, { "name": "agent", "in": "query", "schema": { "type": "string" } }, { "name": "machine", "in": "query", "schema": { "type": "string" } }, { "name": "user", "in": "query", "schema": { "type": "string" } }], "responses": { "200": { "description": "Project read model" }, "404": { "$ref": "#/components/responses/NotFound" } } }
+      "get": { "tags": ["Application"], "summary": "Read one project with windowed sessions and analytics", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }, { "name": "range", "in": "query", "schema": { "type": "string", "enum": ["7d", "30d", "90d", "year", "all"] } }, { "name": "agent", "in": "query", "schema": { "type": "string" } }, { "name": "machine", "in": "query", "schema": { "type": "string" } }, { "name": "user", "in": "query", "schema": { "type": "string" } }], "responses": { "200": { "description": "Project read model" }, "400": { "$ref": "#/components/responses/BadRequest" }, "404": { "$ref": "#/components/responses/NotFound" }, "503": { "$ref": "#/components/responses/ProjectionRebuilding" } } }
     },
     "/api/v1/app/projects/{id}/publication": {
       "put": { "tags": ["Application"], "summary": "Publish or unpublish a project overview", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Publication" } } } }, "responses": { "200": { "description": "Publication updated" }, "404": { "$ref": "#/components/responses/NotFound" } } }
     },
     "/api/v1/app/sessions": {
-      "get": { "tags": ["Application"], "summary": "Search and filter sessions", "parameters": [{ "name": "q", "in": "query", "schema": { "type": "string", "maxLength": 200 } }, { "name": "project", "in": "query", "schema": { "type": "integer", "format": "int64" } }, { "name": "agent", "in": "query", "schema": { "type": "string" } }, { "name": "machine", "in": "query", "schema": { "type": "string" } }, { "name": "user", "in": "query", "schema": { "type": "string" } }, { "name": "grade", "in": "query", "schema": { "type": "string" } }, { "name": "outcome", "in": "query", "schema": { "type": "string" } }, { "name": "after", "in": "query", "schema": { "type": "integer", "format": "int64" } }], "responses": { "200": { "description": "Session collection and facets" }, "400": { "$ref": "#/components/responses/BadRequest" } } }
+      "get": { "tags": ["Application"], "summary": "Search and filter sessions", "parameters": [{ "name": "q", "in": "query", "schema": { "type": "string", "maxLength": 200 } }, { "name": "project", "in": "query", "schema": { "type": "integer", "format": "int64", "minimum": 1 } }, { "name": "agent", "in": "query", "schema": { "type": "string" } }, { "name": "machine", "in": "query", "schema": { "type": "string" } }, { "name": "user", "in": "query", "schema": { "type": "string" } }, { "name": "grade", "in": "query", "schema": { "type": "string", "enum": ["A", "B", "C", "D", "F", "unscored"] } }, { "name": "outcome", "in": "query", "schema": { "type": "string", "enum": ["completed", "abandoned", "errored", "unknown"] } }, { "name": "range", "in": "query", "schema": { "type": "string", "enum": ["7d", "30d", "90d", "year", "all"] } }, { "name": "sort", "in": "query", "schema": { "type": "string", "enum": ["updated", "messages", "tokens", "cost"] } }, { "name": "dir", "in": "query", "schema": { "type": "string", "enum": ["asc", "desc"] } }, { "name": "empty", "in": "query", "schema": { "type": "string", "enum": ["1"] } }, { "name": "subagents", "in": "query", "schema": { "type": "string", "enum": ["1"] } }, { "name": "spanned", "in": "query", "schema": { "type": "string", "enum": ["1"] } }, { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 200, "default": 100 } }, { "name": "after", "in": "query", "schema": { "type": "integer", "format": "int64", "minimum": 1 } }, { "name": "after_value", "in": "query", "description": "Observed sort value paired with after for stable keyset pagination.", "schema": { "type": "string" } }], "responses": { "200": { "description": "Session collection and facets" }, "400": { "$ref": "#/components/responses/BadRequest" }, "503": { "$ref": "#/components/responses/ProjectionRebuilding" } } }
     },
     "/api/v1/app/sessions/{id}": {
-      "get": { "tags": ["Application"], "summary": "Read a session audit and transcript tail", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }], "responses": { "200": { "description": "Session snapshot" }, "404": { "$ref": "#/components/responses/NotFound" } } },
+      "get": { "tags": ["Application"], "summary": "Read a session audit and transcript tail", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }], "responses": { "200": { "description": "Session snapshot" }, "404": { "$ref": "#/components/responses/NotFound" }, "503": { "$ref": "#/components/responses/ProjectionRebuilding" } } },
       "delete": { "tags": ["Application"], "summary": "Delete a session", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }], "responses": { "200": { "description": "Deleted" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" } } }
     },
     "/api/v1/app/sessions/{id}/transcript": {
-      "get": { "tags": ["Application"], "summary": "Read an earlier transcript window", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }, { "name": "before", "in": "query", "required": true, "schema": { "type": "integer", "minimum": 0 } }], "responses": { "200": { "description": "Transcript page" } } }
+      "get": { "tags": ["Application"], "summary": "Read an earlier transcript window", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }, { "name": "before", "in": "query", "required": true, "schema": { "type": "integer", "minimum": 0 } }], "responses": { "200": { "description": "Transcript page" }, "503": { "$ref": "#/components/responses/ProjectionRebuilding" } } }
     },
     "/api/v1/app/sessions/{id}/append": {
       "get": { "tags": ["Application"], "summary": "Read a session's turns past a rendered ordinal", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }, { "name": "after", "in": "query", "required": true, "schema": { "type": "integer", "minimum": 0 } }], "responses": { "200": { "description": "Session snapshot fragment" }, "400": { "$ref": "#/components/responses/BadRequest" }, "404": { "$ref": "#/components/responses/NotFound" } } }
@@ -172,16 +227,16 @@
       "put": { "tags": ["Ingest"], "summary": "Upload a content-addressed blob", "parameters": [{ "name": "sha256", "in": "path", "required": true, "schema": { "type": "string", "pattern": "^[a-f0-9]{64}$" } }], "requestBody": { "required": true, "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary" } } } }, "responses": { "201": { "description": "Stored" }, "204": { "description": "Already present" } } }
     },
     "/api/v1/app/public/users/{username}": {
-      "get": { "tags": ["Public"], "summary": "Read a published user overview", "security": [], "parameters": [{ "name": "username", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Published overview" }, "404": { "$ref": "#/components/responses/NotFound" } } }
+      "get": { "tags": ["Public"], "summary": "Read a published user overview", "security": [], "parameters": [{ "name": "username", "in": "path", "required": true, "schema": { "type": "string" } }, { "name": "range", "in": "query", "schema": { "type": "string", "enum": ["7d", "30d", "90d", "year", "all"] } }], "responses": { "200": { "description": "Published overview" }, "400": { "$ref": "#/components/responses/BadRequest" }, "404": { "$ref": "#/components/responses/NotFound" }, "503": { "$ref": "#/components/responses/ProjectionRebuilding" } } }
     },
     "/api/v1/app/public/projects/{id}": {
-      "get": { "tags": ["Public"], "summary": "Read a published project overview", "security": [], "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }], "responses": { "200": { "description": "Published project overview" }, "404": { "$ref": "#/components/responses/NotFound" } } }
+      "get": { "tags": ["Public"], "summary": "Read a published project overview", "security": [], "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }, { "name": "range", "in": "query", "schema": { "type": "string", "enum": ["7d", "30d", "90d", "year", "all"] } }], "responses": { "200": { "description": "Published project overview" }, "400": { "$ref": "#/components/responses/BadRequest" }, "404": { "$ref": "#/components/responses/NotFound" }, "503": { "$ref": "#/components/responses/ProjectionRebuilding" } } }
     },
     "/api/v1/app/public/sessions/{public_id}": {
-      "get": { "tags": ["Public"], "summary": "Read a published session", "security": [], "parameters": [{ "name": "public_id", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Published session snapshot" }, "404": { "$ref": "#/components/responses/NotFound" } } }
+      "get": { "tags": ["Public"], "summary": "Read a published session", "security": [], "parameters": [{ "name": "public_id", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Published session snapshot" }, "404": { "$ref": "#/components/responses/NotFound" }, "503": { "$ref": "#/components/responses/ProjectionRebuilding" } } }
     },
     "/api/v1/app/public/sessions/{public_id}/transcript": {
-      "get": { "tags": ["Public"], "summary": "Read an earlier published transcript window", "security": [], "parameters": [{ "name": "public_id", "in": "path", "required": true, "schema": { "type": "string" } }, { "name": "before", "in": "query", "required": true, "schema": { "type": "integer", "minimum": 0 } }], "responses": { "200": { "description": "Published transcript page" }, "404": { "$ref": "#/components/responses/NotFound" } } }
+      "get": { "tags": ["Public"], "summary": "Read an earlier published transcript window", "security": [], "parameters": [{ "name": "public_id", "in": "path", "required": true, "schema": { "type": "string" } }, { "name": "before", "in": "query", "required": true, "schema": { "type": "integer", "minimum": 0 } }], "responses": { "200": { "description": "Published transcript page" }, "404": { "$ref": "#/components/responses/NotFound" }, "503": { "$ref": "#/components/responses/ProjectionRebuilding" } } }
     },
     "/api/v1/app/guide/": {
       "get": { "tags": ["Public"], "summary": "Read the user guide index", "security": [], "responses": { "200": { "description": "Guide chapter and chapter index" } } }

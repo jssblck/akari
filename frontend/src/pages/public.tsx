@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 
-import { RequestError, request, useAPI } from "../api";
+import { RequestError, requestWithRetry, useAPI } from "../api";
 import { AsyncView } from "../components/async-view";
 import { PublicShell } from "../components/public-shell";
 import { RangeTabs } from "../components/range-tabs";
@@ -220,7 +220,7 @@ export function PublicSessionPage() {
                 blobBase={withBase(`/s/${publicId}/blob`)}
                 loadEarlier={async (before) =>
                   (
-                    await request<PublicSessionResponse>(
+                    await requestWithRetry<PublicSessionResponse>(
                       `/api/v1/app/public/sessions/${encodeURIComponent(publicId)}/transcript?before=${before}`,
                     )
                   ).snapshot.Page

@@ -691,6 +691,13 @@ code {
 .data-table tr:last-child td {
   border-bottom: 0;
 }
+.data-table .remainder-row td {
+  color: var(--muted);
+  background: var(--surface-2);
+  border-top: 1px solid var(--border);
+  border-bottom: 0;
+  font-size: 12px;
+}
 .data-table tbody tr:hover td {
   background: color-mix(in srgb, var(--surface-2) 55%, transparent);
 }
@@ -1530,7 +1537,7 @@ select:focus {
   }
   .sidebar-foot a span,
   .sidebar-foot a:not(:last-child),
-  .nav-button {
+  .nav-button span {
     display: none;
   }
   .app-main {

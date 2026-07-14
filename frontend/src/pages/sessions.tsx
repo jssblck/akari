@@ -95,7 +95,7 @@ function sessionRowProject(row: SessionRow): string {
 // next page resumes from what the reader already saw rather than a boundary
 // that can drift under it (activity bumps last_active_at, a rebuild moves a
 // count or cost).
-function keysetCursorValue(sort: string, row: SessionRow): string {
+export function keysetCursorValue(sort: string, row: SessionRow): string {
   switch (sort) {
     case "tokens":
       return String(

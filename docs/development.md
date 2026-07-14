@@ -16,9 +16,10 @@ the homepage generator in step:
 
 ```sh
 make build          # build React, generate templ, and build Go
-make test           # check React and run Go tests under -race
+make test           # check, test, and build React, then run Go tests under -race
 make frontend       # rebuild the committed embedded React artifact
 make frontend-check # run Biome and TypeScript
+make frontend-test  # run the frontend unit tests
 make vet
 make fmt
 ```
@@ -26,7 +27,7 @@ make fmt
 The equivalent commands are:
 
 ```sh
-cd frontend && bun install --frozen-lockfile && bun run check && bun run build
+cd frontend && bun install --frozen-lockfile && bun run check && bun run test && bun run build
 go generate ./...
 go build ./...
 go vet ./...

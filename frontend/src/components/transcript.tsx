@@ -166,6 +166,7 @@ export const Transcript = forwardRef<
 ) {
   const [page, setPage] = useState(initial);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState("");
   useEffect(() => setPage(initial), [initial]);
 
   useImperativeHandle(
@@ -230,6 +231,7 @@ export const Transcript = forwardRef<
           disabled={loading}
           onClick={async () => {
             setLoading(true);
+            setLoadError("");
             try {
               const earlier = await loadEarlier(page.Msgs?.[0]?.Ordinal ?? 0);
               setPage((cur) => ({
@@ -248,6 +250,12 @@ export const Transcript = forwardRef<
                 HasEarlier: earlier.HasEarlier,
                 EarlierCount: earlier.EarlierCount,
               }));
+            } catch (error) {
+              setLoadError(
+                error instanceof Error
+                  ? error.message
+                  : "Could not load earlier messages.",
+              );
             } finally {
               setLoading(false);
             }
@@ -260,6 +268,11 @@ export const Transcript = forwardRef<
             </span>
           ) : null}
         </button>
+      ) : null}
+      {loadError ? (
+        <p className="form-error" role="alert">
+          {loadError}
+        </p>
       ) : null}
       {(page.Msgs ?? []).length === 0 ? (
         <div className="empty">No messages parsed yet.</div>

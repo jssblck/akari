@@ -5,7 +5,7 @@ import {
   ListIcon,
 } from "@phosphor-icons/react";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
-import Markdown from "react-markdown";
+import Markdown, { type Components } from "react-markdown";
 import { useParams } from "react-router-dom";
 import remarkGfm from "remark-gfm";
 
@@ -60,6 +60,17 @@ function headingComponent(level: 2 | 3, headings: Heading[]) {
   };
 }
 
+export function guideComponents(headings: Heading[], slug: string): Components {
+  return {
+    h1: () => null,
+    h2: headingComponent(2, headings),
+    h3: headingComponent(3, headings),
+    a: ({ children, href }) => (
+      <a href={rewriteGuideHref(href, slug)}>{children}</a>
+    ),
+  };
+}
+
 export function GuidePage() {
   const { slug = "" } = useParams();
   const state = useAPI<GuideResponse>(
@@ -70,12 +81,9 @@ export function GuidePage() {
   const [activeHeading, setActiveHeading] = useState("");
 
   const headings = state.kind === "ready" ? state.data.headings : [];
-  const components = useMemo(
-    () => ({
-      h2: headingComponent(2, headings),
-      h3: headingComponent(3, headings),
-    }),
-    [headings],
+  const components = useMemo<Components>(
+    () => guideComponents(headings, slug),
+    [headings, slug],
   );
 
   // The drawer is mobile-only chrome; a chapter switch should never leave it
@@ -259,4 +267,30 @@ export function GuidePage() {
       </div>
     </PublicShell>
   );
+}
+
+export function rewriteGuideHref(
+  href: string | undefined,
+  currentSlug: string,
+): string | undefined {
+  if (
+    !href ||
+    href.startsWith("#") ||
+    href.startsWith("/") ||
+    /^[a-z][a-z\d+.-]*:/i.test(href)
+  ) {
+    return href;
+  }
+  const target = new URL(
+    href,
+    `https://guide.invalid/guide/${currentSlug || "index"}.md`,
+  );
+  if (
+    !target.pathname.startsWith("/guide/") ||
+    !target.pathname.endsWith(".md")
+  )
+    return href;
+  const targetSlug = target.pathname.slice("/guide/".length, -3);
+  const route = targetSlug === "index" ? "/guide" : `/guide/${targetSlug}`;
+  return `${withBase(route)}${target.search}${target.hash}`;
 }

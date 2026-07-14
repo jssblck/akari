@@ -128,7 +128,7 @@ export function AuthPage({ mode }: { mode: "login" | "register" }) {
 // scheme" handling), so a value like "/\evil.com" would otherwise parse as
 // same-origin here while still redirecting off-site; the explicit backslash
 // check closes that gap the same way the server's does.
-function safeNext(value: string | null): string {
+export function safeNext(value: string | null): string {
   // next is always an external (prefix-carrying) path: the server's login
   // bounce and the app shell both prefix it before handing it here, so a
   // valid value passes through untouched and only the fallback needs the

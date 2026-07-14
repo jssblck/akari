@@ -3,6 +3,7 @@ package httpapi
 import (
 	"errors"
 	"log"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -54,7 +55,10 @@ func (s *Server) handleAppBootstrap(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAPIOverview(w http.ResponseWriter, r *http.Request) {
-	rng := web.ParseRange(r.URL.Query().Get("range"))
+	rng, ok := apiRange(w, r)
+	if !ok {
+		return
+	}
 	users, err := s.Store.ListUsers(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "load users")
@@ -77,7 +81,10 @@ func (s *Server) handleAPIOverview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAPIInsights(w http.ResponseWriter, r *http.Request) {
-	rng := web.ParseRange(r.URL.Query().Get("range"))
+	rng, ok := apiRange(w, r)
+	if !ok {
+		return
+	}
 	insights, generatedAt, err := s.insights.get(r.Context(), rng)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "load insights")
@@ -118,7 +125,10 @@ func (s *Server) handleAPIProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "load project")
 		return
 	}
-	rng := web.ParseRange(r.URL.Query().Get("range"))
+	rng, ok := apiRange(w, r)
+	if !ok {
+		return
+	}
 	now := time.Now()
 	filter := store.SessionFilter{
 		ProjectID: id, Agent: strings.TrimSpace(r.URL.Query().Get("agent")),
@@ -163,14 +173,77 @@ func (s *Server) handleAPIProject(w http.ResponseWriter, r *http.Request) {
 // generous for any real search term.
 const maxSearchQueryLen = 200
 
+var sessionFilterQueryKeys = map[string]struct{}{
+	"after": {}, "after_value": {}, "agent": {}, "dir": {}, "empty": {},
+	"grade": {}, "limit": {}, "machine": {}, "outcome": {}, "project": {},
+	"q": {}, "range": {}, "sort": {}, "spanned": {}, "subagents": {}, "user": {},
+}
+
+var apiSessionSortKeys = map[string]struct{}{
+	"updated": {}, "tokens": {}, "messages": {}, "cost": {},
+}
+
+var apiGradeKeys = map[string]struct{}{
+	"A": {}, "B": {}, "C": {}, "D": {}, "F": {}, "unscored": {},
+}
+
+var apiOutcomeKeys = map[string]struct{}{
+	"completed": {}, "abandoned": {}, "errored": {}, "unknown": {},
+}
+
+var apiRangeKeys = func() map[string]struct{} {
+	keys := make(map[string]struct{}, len(web.DateRanges))
+	for _, dateRange := range web.DateRanges {
+		keys[dateRange.Key] = struct{}{}
+	}
+	return keys
+}()
+
+func apiRange(w http.ResponseWriter, r *http.Request) (string, bool) {
+	raw := strings.TrimSpace(r.URL.Query().Get("range"))
+	if raw == "" {
+		return web.DefaultRange, true
+	}
+	if _, ok := apiRangeKeys[raw]; !ok {
+		writeError(w, http.StatusBadRequest, "invalid range")
+		return "", false
+	}
+	return raw, true
+}
+
 func apiSessionFilter(r *http.Request) (store.SessionFilter, error) {
 	q := r.URL.Query()
+	for key := range q {
+		if _, ok := sessionFilterQueryKeys[key]; !ok {
+			return store.SessionFilter{}, errors.New("unknown query parameter: " + key)
+		}
+	}
+	includeEmpty, err := queryFlag(q.Get("empty"), "empty")
+	if err != nil {
+		return store.SessionFilter{}, err
+	}
+	includeSubagents, err := queryFlag(q.Get("subagents"), "subagents")
+	if err != nil {
+		return store.SessionFilter{}, err
+	}
+	requireSpan, err := queryFlag(q.Get("spanned"), "spanned")
+	if err != nil {
+		return store.SessionFilter{}, err
+	}
+	desc := true
+	switch q.Get("dir") {
+	case "", "desc":
+	case "asc":
+		desc = false
+	default:
+		return store.SessionFilter{}, errors.New("dir must be asc or desc")
+	}
 	f := store.SessionFilter{
 		Agent: strings.TrimSpace(q.Get("agent")), Machine: strings.TrimSpace(q.Get("machine")),
-		Username: strings.TrimSpace(q.Get("user")), IncludeEmpty: q.Get("empty") == "1",
-		IncludeSubagents: q.Get("subagents") == "1", RequireSpan: q.Get("spanned") == "1",
+		Username: strings.TrimSpace(q.Get("user")), IncludeEmpty: includeEmpty,
+		IncludeSubagents: includeSubagents, RequireSpan: requireSpan,
 		Grade: strings.TrimSpace(q.Get("grade")), Outcome: strings.TrimSpace(q.Get("outcome")),
-		Sort: strings.TrimSpace(q.Get("sort")), Desc: q.Get("dir") != "asc",
+		Sort: strings.TrimSpace(q.Get("sort")), Desc: desc,
 	}
 	if raw := strings.TrimSpace(q.Get("project")); raw != "" {
 		id, err := strconv.ParseInt(raw, 10, 64)
@@ -189,15 +262,24 @@ func apiSessionFilter(r *http.Request) (store.SessionFilter, error) {
 		}
 		f.Query = query
 	}
-	if f.Grade != "" && !web.IsGrade(f.Grade) {
-		return f, errors.New("invalid grade filter")
+	if f.Grade != "" {
+		if _, ok := apiGradeKeys[f.Grade]; !ok {
+			return f, errors.New("invalid grade filter")
+		}
 	}
-	if f.Outcome != "" && !web.IsOutcome(f.Outcome) {
-		return f, errors.New("invalid outcome filter")
+	if f.Outcome != "" {
+		if _, ok := apiOutcomeKeys[f.Outcome]; !ok {
+			return f, errors.New("invalid outcome filter")
+		}
 	}
-	if rng := strings.TrimSpace(q.Get("range")); web.RangeBounds(rng) {
+	if rng := strings.TrimSpace(q.Get("range")); rng != "" {
+		if _, ok := apiRangeKeys[rng]; !ok {
+			return f, errors.New("invalid range")
+		}
 		f.Range = rng
-		f.Since = web.RangeSince(rng, time.Now())
+		if web.RangeBounds(rng) {
+			f.Since = web.RangeSince(rng, time.Now())
+		}
 	}
 	limit := web.DefaultSessionLimit
 	if raw := q.Get("limit"); raw != "" {
@@ -208,6 +290,14 @@ func apiSessionFilter(r *http.Request) (store.SessionFilter, error) {
 		limit = n
 	}
 	f.Limit = limit
+	if f.Sort != "" {
+		if _, ok := apiSessionSortKeys[f.Sort]; !ok {
+			return f, errors.New("invalid sort")
+		}
+	}
+	if q.Get("after") == "" && q.Get("after_value") != "" {
+		return f, errors.New("after_value requires after")
+	}
 	if raw := q.Get("after"); raw != "" {
 		after, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil || after < 1 {
@@ -215,8 +305,41 @@ func apiSessionFilter(r *http.Request) (store.SessionFilter, error) {
 		}
 		f.After = after
 		f.AfterVal = q.Get("after_value")
+		if f.AfterVal == "" {
+			return f, errors.New("after_value is required with after")
+		}
+		if !validAPIKeysetValue(f.Sort, f.AfterVal) {
+			return f, errors.New("invalid after value")
+		}
 	}
 	return f, nil
+}
+
+func validAPIKeysetValue(sortKey, value string) bool {
+	switch sortKey {
+	case "", "updated":
+		_, err := time.Parse(time.RFC3339Nano, value)
+		return err == nil
+	case "tokens", "messages":
+		n, err := strconv.ParseInt(value, 10, 64)
+		return err == nil && n >= 0
+	case "cost":
+		n, err := strconv.ParseFloat(value, 64)
+		return err == nil && n >= 0 && !math.IsInf(n, 0) && !math.IsNaN(n)
+	default:
+		return false
+	}
+}
+
+func queryFlag(value, name string) (bool, error) {
+	switch value {
+	case "":
+		return false, nil
+	case "1":
+		return true, nil
+	default:
+		return false, errors.New(name + " must be 1 when present")
+	}
 }
 
 func (s *Server) handleAPISessions(w http.ResponseWriter, r *http.Request) {
@@ -358,7 +481,10 @@ func (s *Server) handleAPIPublicOverview(w http.ResponseWriter, r *http.Request)
 	if s.writeAPIReparseGate(w, r) {
 		return
 	}
-	rng := web.ParseRange(r.URL.Query().Get("range"))
+	rng, ok := apiRange(w, r)
+	if !ok {
+		return
+	}
 	started := time.Now()
 	snapshot, meta, err := s.analyticsSnapshots.get(r.Context(), analyticsSnapshotKey{
 		scope: analyticsScope{kind: analyticsUserScope, id: user.ID}, rangeKey: rng,
@@ -391,7 +517,10 @@ func (s *Server) handleAPIPublicProject(w http.ResponseWriter, r *http.Request) 
 	if s.writeAPIReparseGate(w, r) {
 		return
 	}
-	rng := web.ParseRange(r.URL.Query().Get("range"))
+	rng, ok := apiRange(w, r)
+	if !ok {
+		return
+	}
 	started := time.Now()
 	snapshot, meta, err := s.analyticsSnapshots.get(r.Context(), analyticsSnapshotKey{
 		scope: analyticsScope{kind: analyticsProjectScope, id: id}, rangeKey: rng,
@@ -465,13 +594,13 @@ func (s *Server) writeAPIReparseGate(w http.ResponseWriter, r *http.Request) boo
 	}
 	w.Header().Set("Retry-After", "2")
 	writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-		"error": "projection rebuild in progress", "reparse": status,
+		"error": "projection rebuild in progress", "code": "projection_rebuild", "reparse": status,
 	})
 	return true
 }
 
 type publicationRequest struct {
-	Published bool `json:"published"`
+	Published *bool `json:"published"`
 }
 
 func (s *Server) handleAPISessionPublication(w http.ResponseWriter, r *http.Request) {
@@ -483,23 +612,34 @@ func (s *Server) handleAPISessionPublication(w http.ResponseWriter, r *http.Requ
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	if req.Published == nil {
+		writeError(w, http.StatusBadRequest, "published is required")
+		return
+	}
 	p, _ := principalFrom(r.Context())
-	if req.Published {
+	if *req.Published {
 		candidate, err := auth.NewPublicID()
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "generate public id")
 			return
 		}
 		publicID, err := s.Store.PublishSession(r.Context(), id, p.UserID, candidate)
-		if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "session not found")
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "publish session")
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"published": true, "public_id": publicID})
 		return
 	}
-	if err := s.Store.UnpublishSession(r.Context(), id, p.UserID); err != nil {
+	if err := s.Store.UnpublishSession(r.Context(), id, p.UserID); errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "session not found")
+		return
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "unpublish session")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"published": false})
@@ -543,8 +683,12 @@ func (s *Server) handleAPIProjectPublication(w http.ResponseWriter, r *http.Requ
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	if req.Published == nil {
+		writeError(w, http.StatusBadRequest, "published is required")
+		return
+	}
 	var err error
-	if req.Published {
+	if *req.Published {
 		err = s.Store.PublishProjectOverview(r.Context(), id)
 	} else {
 		err = s.Store.UnpublishProjectOverview(r.Context(), id)
@@ -558,7 +702,7 @@ func (s *Server) handleAPIProjectPublication(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	s.analyticsSnapshots.invalidate(analyticsScope{kind: analyticsProjectScope, id: id})
-	writeJSON(w, http.StatusOK, map[string]bool{"published": req.Published})
+	writeJSON(w, http.StatusOK, map[string]bool{"published": *req.Published})
 }
 
 func (s *Server) handleAPIOverviewPublication(w http.ResponseWriter, r *http.Request) {
@@ -566,9 +710,13 @@ func (s *Server) handleAPIOverviewPublication(w http.ResponseWriter, r *http.Req
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	if req.Published == nil {
+		writeError(w, http.StatusBadRequest, "published is required")
+		return
+	}
 	p, _ := principalFrom(r.Context())
 	var err error
-	if req.Published {
+	if *req.Published {
 		err = s.Store.PublishOverview(r.Context(), p.UserID)
 	} else {
 		err = s.Store.UnpublishOverview(r.Context(), p.UserID)
@@ -578,7 +726,7 @@ func (s *Server) handleAPIOverviewPublication(w http.ResponseWriter, r *http.Req
 		return
 	}
 	s.analyticsSnapshots.invalidate(analyticsScope{kind: analyticsUserScope, id: p.UserID})
-	writeJSON(w, http.StatusOK, map[string]bool{"published": req.Published})
+	writeJSON(w, http.StatusOK, map[string]bool{"published": *req.Published})
 }
 
 func (s *Server) handleAPIRevokeConnection(w http.ResponseWriter, r *http.Request) {

@@ -1,14 +1,11 @@
 # The web UI
 
-The web UI is where a human reads what the agents did. It is server-rendered: a
-persistent left sidebar carries the primary sections (Overview, Insights,
-Projects, Sessions, Account, and this Guide), with the signed-in user and a
-log-out control at its foot. Reading the UI needs a full-scope credential, which
-in practice is a browser session; signing in gives you that. The site root (`/`)
-is the public homepage, shown to everyone; signing in takes you to the app,
-whose home is the Overview at `/overview`. Every timestamp renders in your own
-timezone: the browser reports its zone in a cookie once, and the server formats
-against it from the next page on.
+The web UI is where a human reads what the agents did. It is a React application
+with a persistent sidebar for Overview, Insights, Projects, Sessions, Account,
+and this Guide. Reading it needs a full-scope credential, which in practice is a
+browser session. The site root (`/`) remains a public, server-rendered homepage;
+signing in opens the Overview at `/overview`. The browser formats timestamps in
+your local timezone.
 
 ## Overview
 
@@ -124,31 +121,18 @@ bars link into this project's filtered sessions.
 
 ## The session view
 
-Clicking a session opens the deep read. A sticky stats header keeps the session's
-gauges in view as you scroll: tokens in, out, and cached; cost; duration; message
-counts; and a **Quality tile** carrying the session's grade and outcome, which
-reveals a score-arithmetic breakdown (each penalty and its points) on hover. Below
-it is the transcript itself:
+Clicking a session opens its metadata, token and cost totals, quality grade,
+outcome, and transcript. The transcript loads the newest window first and can
+fetch earlier messages without losing them when live updates arrive.
 
-- **Messages, thinking, and tool calls**, in order, with a timeline rail that maps
-  the turns and flags any tool that errored. Each turn carries a reply-latency
-  stamp, a per-message context size (for example "ctx 82k"), and a cost stamp whose
-  tooltip breaks the cost down by token class; a divider marks a context shed (for
-  example "context shed: 356k -> 66k"), the sharp drops that read as a compaction
-  or a clear. A user message carries a prompt-hygiene badge (terse, no code
-  pointer, repeat) where it applies.
-- **Tool bodies as chips.** A tool call's input and result show as
-  size-and-type chips (for example "36 KB json"). Clicking one opens the body in
-  the inspector modal, fetched from content-addressed storage on demand, so a
-  large body gets real room without pushing the transcript around. An editing
-  tool's input opens as a rendered **diff** rather than raw JSON. A chip's file
-  path shows worktree-relative rather than absolute; a tool with no file path,
-  such as a shell command or a search pattern, instead carries a one-line summary
-  of its input on the chip, with the full text on hover.
-- **Subagents** spawned by the session are listed under it, so a run that launched
-  helpers reads as a tree rather than scattered rows.
-- **Live updates.** A session still being written updates in place over
-  server-sent events as new bytes are parsed, so you can watch a run unfold.
+- **Messages and thinking** appear in transcript order. Thinking is collapsed by
+  default, while each message shows its role, model, timestamp, token total, and
+  cost when those values are available.
+- **Tool calls** sit under the message that invoked them and show their status,
+  path or summary, and links to stored input and result bodies. The body links
+  open in a new tab so large tool output does not displace the transcript.
+- **Live updates** arrive over server-sent events while a session is still being
+  written. Earlier pages already loaded into the transcript remain in place.
 
 From the session page its owner (or an admin) can publish, unpublish, or delete
 it; [Accounts and sharing](./accounts-and-sharing.md#sharing-a-session) covers

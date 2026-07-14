@@ -47,7 +47,7 @@ sudo systemctl restart akari-server
 With a Go toolchain and a reachable Postgres:
 
 ```sh
-go generate ./...                         # regenerate the templ UI (gitignored)
+go generate ./...                         # regenerate the templated homepage (gitignored)
 go build -o akari-server ./cmd/akari-server
 export AKARI_DATABASE_URL="postgres://akari:akari@localhost:5432/akari?sslmode=disable"
 ./akari-server

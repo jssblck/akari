@@ -33,17 +33,24 @@ function asFleetStatus(value: unknown): FleetStatus | undefined {
 
 export class RequestError extends Error {
   readonly status: number;
+  readonly retryAfterMs: number;
   // Set only when the server rejected the request because a fleet reparse is
   // draining (a 503 whose body carries a reparse status). useAPI polls on
   // this rather than surfacing the failure, so the view self-heals once the
   // rebuild finishes.
   readonly reparse?: FleetStatus | undefined;
 
-  constructor(status: number, message: string, reparse?: FleetStatus) {
+  constructor(
+    status: number,
+    message: string,
+    reparse?: FleetStatus,
+    retryAfterMs = 0,
+  ) {
     super(message);
     this.name = "RequestError";
     this.status = status;
     this.reparse = reparse;
+    this.retryAfterMs = retryAfterMs;
   }
 }
 
@@ -73,10 +80,68 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       // The status line is the useful fallback for non-JSON failures.
     }
-    throw new RequestError(response.status, message, reparse);
+    throw new RequestError(
+      response.status,
+      message,
+      reparse,
+      parseRetryAfter(response.headers.get("Retry-After")),
+    );
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
+}
+
+type Wait = (delayMs: number, signal?: AbortSignal) => Promise<void>;
+
+export const waitForRetry: Wait = (delayMs, signal) =>
+  new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    const onAbort = () => {
+      globalThis.clearTimeout(timer);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    const timer = globalThis.setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+
+// Direct transcript-page reads sit outside useAPI, but they cross the same
+// rebuild gate. Retrying only errors that carry fleet status keeps transient
+// projection work invisible without turning unrelated 503s into an endless loop.
+export async function requestWithRetry<T>(
+  path: string,
+  init: RequestInit = {},
+  waitForRetryDelay: Wait = waitForRetry,
+): Promise<T> {
+  for (;;) {
+    try {
+      return await request<T>(path, init);
+    } catch (error) {
+      if (
+        !(error instanceof RequestError) ||
+        error.status !== 503 ||
+        !error.reparse
+      )
+        throw error;
+      await waitForRetryDelay(
+        error.retryAfterMs || REPARSE_POLL_MS,
+        init.signal ?? undefined,
+      );
+    }
+  }
+}
+
+export function parseRetryAfter(value: string | null): number {
+  if (!value) return 0;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1_000;
+  const at = Date.parse(value);
+  return Number.isNaN(at) ? 0 : Math.max(0, at - Date.now());
 }
 
 // Reparse-gate polling stays slow and constant: the worker's own status
