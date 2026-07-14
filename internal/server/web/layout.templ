@@ -12,17 +12,9 @@ templ layout(p Page) {
 			<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
 			<title>{ p.Title } - akari</title>
 			@faviconLinks()
-			@tzCookieScript()
 			<link rel="preload" href={ StaticURL(ctx, "fonts/Geist-Regular.woff2") } as="font" type="font/woff2" crossorigin/>
 			<link rel="preload" href={ StaticURL(ctx, "fonts/GeistMono-Regular.woff2") } as="font" type="font/woff2" crossorigin/>
 			@stylesheets()
-			<script src={ StaticURL(ctx, "htmx.min.js") } defer></script>
-			<script src={ StaticURL(ctx, "charts.js") } defer></script>
-			<script src={ StaticURL(ctx, "app.js") } defer></script>
-			// The insights chart engine self-guards on #insights-data, so it is a no-op on
-			// every page but /insights; loading it in the shared head keeps it warm for the
-			// htmx swaps the range control drives.
-			<script src={ StaticURL(ctx, "js/insights.js") } defer></script>
 		</head>
 		<body>
 			if p.LoggedIn {
@@ -35,9 +27,6 @@ templ layout(p Page) {
 					<div class="sidebar-scrim" data-drawer-scrim aria-hidden="true"></div>
 					<div class="content-scroll">
 						<main class={ "page-" + p.Active }>
-							if notice := Notice(ctx); notice != "" {
-								@noticeBanner(notice)
-							}
 							{ children... }
 						</main>
 					</div>
@@ -51,28 +40,6 @@ templ layout(p Page) {
 	</html>
 }
 
-// tzCookieScript sets the tz cookie to the browser's resolved IANA timezone so the
-// next request renders every stamp and day heading in the reader's own zone. It runs
-// inline in the head and only writes when the cookie's current value differs, so a
-// steady viewer writes it once and reloads do not churn the header. It is deliberately
-// forward-only: the first-ever view renders UTC (no cookie yet), and the cookie the
-// script sets here takes effect on the following request rather than reloading the
-// page. The server validates the value and falls back to UTC, so a hostile or garbled
-// cookie never affects anything but this reader's clock.
-templ tzCookieScript() {
-	<script>
-		(function () {
-			try {
-				var tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-				if (!tz) return;
-				var current = document.cookie.split("; ").find(function (c) { return c.indexOf("tz=") === 0; });
-				if (current === "tz=" + tz) return;
-				document.cookie = "tz=" + tz + "; path=/; max-age=31536000; samesite=lax";
-			} catch (e) {}
-		})();
-	</script>
-}
-
 // faviconLinks declares the browser tab icon in the three forms current browsers
 // draw from: the scalable SVG (the akari aperture mark, so it stays crisp at any
 // density and follows the dark tile), the legacy .ico served at the root path
@@ -84,23 +51,15 @@ templ faviconLinks() {
 	<link rel="apple-touch-icon" href={ Href(ctx, "/static/apple-touch-icon.png") }/>
 }
 
-// stylesheets links the per-area stylesheets in cascade order: the shared base
-// (tokens, resets, and shared components) first, then the app shell and each
-// page's own rules. The stylesheet was split to match the templates, so a change
-// to one page's styling touches only that page's file. Every page links the whole
-// set, since components are reused across pages; the split is organizational, not
-// a per-page subset.
+// stylesheets links the shared cascade for the remaining templated pages (the
+// auth forms' error re-renders and the styled error pages): the shared base
+// (tokens, resets, and shared components), the shell layout, and the landing
+// rules the public topbar draws from. The per-page stylesheets retired with the
+// server-rendered app; the React frontend carries its own styles.
 templ stylesheets() {
 	<link rel="stylesheet" href={ StaticURL(ctx, "css/base.css") }/>
 	<link rel="stylesheet" href={ StaticURL(ctx, "css/layout.css") }/>
-	<link rel="stylesheet" href={ StaticURL(ctx, "css/auth.css") }/>
 	<link rel="stylesheet" href={ StaticURL(ctx, "css/landing.css") }/>
-	<link rel="stylesheet" href={ StaticURL(ctx, "css/overview.css") }/>
-	<link rel="stylesheet" href={ StaticURL(ctx, "css/insights.css") }/>
-	<link rel="stylesheet" href={ StaticURL(ctx, "css/projects.css") }/>
-	<link rel="stylesheet" href={ StaticURL(ctx, "css/sessions.css") }/>
-	<link rel="stylesheet" href={ StaticURL(ctx, "css/session.css") }/>
-	<link rel="stylesheet" href={ StaticURL(ctx, "css/account.css") }/>
 }
 
 // landingStylesheets is the homepage's deliberately small static cascade. The
@@ -110,19 +69,6 @@ templ landingStylesheets() {
 	<link rel="stylesheet" href={ StaticURL(ctx, "css/base.css") }/>
 	<link rel="stylesheet" href={ StaticURL(ctx, "css/layout.css") }/>
 	<link rel="stylesheet" href={ StaticURL(ctx, "css/landing.css") }/>
-}
-
-// noticeBanner is the slim one-shot confirmation strip rendered at the top of
-// main when the previous POST set a notice cookie: "Published", "Session
-// deleted", and the like. It renders as a plain text node (templ escapes it
-// regardless), so a tampered cookie value can carry no markup. The dismiss
-// button and the auto-fade both live in app.js; this template only emits the
-// element and its terse text.
-templ noticeBanner(notice string) {
-	<div class="notice" data-notice role="status">
-		<span class="notice-text">{ notice }</span>
-		<button type="button" class="notice-dismiss" data-notice-dismiss aria-label="Dismiss">&times;</button>
-	</div>
 }
 
 // navItem is one sidebar link. It carries its own icon as a child and marks
@@ -254,7 +200,6 @@ templ publicLayout(title string, og OGMeta, viewer Page) {
 			<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
 			<title>{ title } - akari</title>
 			@faviconLinks()
-			@tzCookieScript()
 			@ogTags(title, og)
 			<link rel="preload" href={ StaticURL(ctx, "fonts/Geist-Regular.woff2") } as="font" type="font/woff2" crossorigin/>
 			<link rel="preload" href={ StaticURL(ctx, "fonts/GeistMono-Regular.woff2") } as="font" type="font/woff2" crossorigin/>

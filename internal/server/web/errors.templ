@@ -11,3 +11,15 @@ templ ErrorPage(p Page, code int, message string) {
 		</div>
 	}
 }
+
+// PublicErrorPage is the logged-out error page used by public share links and the
+// guide's raw endpoints, where no viewer chrome exists to wrap the message.
+templ PublicErrorPage(code int, message string) {
+	@publicLayout(errorTitle(code), OGMeta{}, Page{}) {
+		<div class="empty big">
+			<h1>{ fmt.Sprintf("%d", code) }</h1>
+			<p>{ message }</p>
+			<p><a href={ Href(ctx, "/") }>Go to akari</a></p>
+		</div>
+	}
+}

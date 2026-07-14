@@ -158,6 +158,11 @@ func (s *Server) handleAPIProject(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// maxSearchQueryLen caps the content-search string before it becomes an ILIKE
+// pattern, so a pasted multi-kilobyte query cannot drive a pathological scan. It is
+// generous for any real search term.
+const maxSearchQueryLen = 200
+
 func apiSessionFilter(r *http.Request) (store.SessionFilter, error) {
 	q := r.URL.Query()
 	f := store.SessionFilter{

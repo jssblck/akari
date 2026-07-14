@@ -6,12 +6,11 @@ import (
 	"github.com/a-h/templ"
 )
 
-// basePathCtxKey keys the external path prefix in the render context, the same
-// seam Loc and Notice use: the httpapi layer resolves the prefix per request
-// (config or a trusted proxy header) and stashes it at the render seam, so
-// every templated href and asset link externalizes without each component
-// threading it. An unexported type keeps the key from colliding with any other
-// package's context values.
+// basePathCtxKey keys the external path prefix in the render context: the
+// httpapi layer resolves the prefix per request (config or a trusted proxy
+// header) and stashes it at the render seam, so every templated href and asset
+// link externalizes without each component threading it. An unexported type
+// keeps the key from colliding with any other package's context values.
 type basePathCtxKey struct{}
 
 // WithBasePath returns a context carrying the external path prefix akari is
