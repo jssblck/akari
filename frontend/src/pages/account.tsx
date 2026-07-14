@@ -20,7 +20,7 @@ import type {
   Viewer,
 } from "../types";
 import "./account.css";
-import { withBase } from "../base";
+import { absoluteURL, withBase } from "../base";
 
 export function AccountPage() {
   const [revision, setRevision] = useState(0);
@@ -185,7 +185,9 @@ function PublicationSection({
   refresh: () => void;
 }) {
   const [copied, setCopied] = useState(false);
-  const publicURL = `${window.location.origin}${withBase(`/u/${user.username}`)}`;
+  const publicURL = absoluteURL(
+    `/u/${encodeURIComponent(user.username ?? "")}`,
+  );
   return (
     <section className="settings-section">
       <div className="settings-copy">
