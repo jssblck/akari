@@ -4,19 +4,25 @@
 # time and release cross-compiles should need only Go. Development targets rebuild
 # it from frontend/ before generating the remaining templ homepage.
 
-.PHONY: frontend frontend-check generate build test vet fmt clean
+.PHONY: frontend-deps frontend frontend-check frontend-test generate build test vet fmt clean
 
-frontend:
-	cd frontend && bun install --frozen-lockfile && bun run build
+frontend-deps:
+	cd frontend && bun install --frozen-lockfile
 
-frontend-check:
-	cd frontend && bun install --frozen-lockfile && bun run check && bun run test
+frontend: frontend-deps
+	cd frontend && bun run build
 
-generate: frontend
+frontend-check: frontend-deps
+	cd frontend && bun run check
+
+frontend-test: frontend-deps
+	cd frontend && bun run test
+
+generate:
 	go generate ./...
 
-# Compile every package (regenerating templ output first).
-build: generate
+# Compile every package after rebuilding both frontend layers.
+build: frontend generate
 	go build ./...
 
 # Run the test suite (regenerating templ output first). The store/parse/web
@@ -27,7 +33,7 @@ build: generate
 # locks keyed to the target Postgres), so the suite's peak connections are bounded
 # at maxLiveStores x poolMaxConns no matter how many package binaries run at once.
 # See the budget note in internal/server/storetest/gate.go.
-test: frontend-check generate
+test: frontend-check frontend-test frontend generate
 	go test -race ./...
 
 # Vet every package (regenerating templ output first).

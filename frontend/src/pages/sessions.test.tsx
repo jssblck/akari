@@ -3,7 +3,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { SessionRow } from "../types";
-import { SessionsPage } from "./sessions";
+import { keysetCursorValue, SessionsPage } from "./sessions";
 
 function row(overrides: Partial<SessionRow> = {}): SessionRow {
   return {
@@ -57,6 +57,24 @@ afterEach(() => {
 });
 
 describe("SessionsPage feed rendering", () => {
+  it("serializes the observed value for every supported keyset order", () => {
+    const session = row({
+      MessageCount: 11,
+      TotalInput: 10,
+      TotalOutput: 20,
+      TotalCacheWrite: 30,
+      TotalCacheRead: 40,
+      TotalCostUSD: 1.25,
+      LastActiveAt: "2026-07-13T12:34:56.123456Z",
+    });
+    expect(keysetCursorValue("updated", session)).toBe(
+      "2026-07-13T12:34:56.123456Z",
+    );
+    expect(keysetCursorValue("tokens", session)).toBe("100");
+    expect(keysetCursorValue("messages", session)).toBe("11");
+    expect(keysetCursorValue("cost", session)).toBe("1.25");
+  });
+
   it("highlights the matched substring of a search snippet in a <mark>", async () => {
     stubSessionsResponse([
       row({

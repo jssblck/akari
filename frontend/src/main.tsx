@@ -1,4 +1,3 @@
-import "swagger-ui-react/swagger-ui.css";
 import "./styles.css";
 
 import { lazy, type ReactNode, StrictMode, Suspense, useEffect } from "react";

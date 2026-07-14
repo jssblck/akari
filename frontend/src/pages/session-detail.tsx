@@ -8,7 +8,7 @@ import { CopyIcon, TrashIcon } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
-import { request, useAPI } from "../api";
+import { request, requestWithRetry, useAPI } from "../api";
 import { AsyncView } from "../components/async-view";
 import { FlowRibbon } from "../components/flow-ribbon";
 import { attempt } from "../components/notices";
@@ -227,7 +227,7 @@ export function SessionPage() {
                     agent={detail.Agent}
                     loadEarlier={async (before) =>
                       (
-                        await request<{ page: TranscriptPage }>(
+                        await requestWithRetry<{ page: TranscriptPage }>(
                           `/api/v1/app/sessions/${detail.ID}/transcript?before=${before}`,
                         )
                       ).page

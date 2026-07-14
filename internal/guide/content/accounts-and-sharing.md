@@ -62,9 +62,8 @@ The intent behind each:
   Treat it as a real credential; it is rarely the right thing to hand a third
   party.
 
-A useful consequence: the server-rendered UI requires a full-scope credential, so
-pointing an ingest- or read-scope token at a browser page just bounces to the
-login screen.
+The browser application requires a full-scope credential, so pointing an ingest-
+or read-scope token at a browser page sends you to the login screen.
 
 ## Session visibility
 

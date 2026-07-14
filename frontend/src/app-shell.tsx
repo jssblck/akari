@@ -15,7 +15,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { request, setCSRFToken, useAPI } from "./api";
 import { withBase } from "./base";
 import { AsyncView } from "./components/async-view";
-import { NoticeHost } from "./components/notices";
+import { attempt, NoticeHost } from "./components/notices";
 import type { Viewer } from "./types";
 
 const nav = [
@@ -92,8 +92,10 @@ export function AppShell() {
                   type="button"
                   className="nav-button"
                   onClick={async () => {
-                    await request("/api/v1/auth/logout", { method: "POST" });
-                    window.location.assign(withBase("/login"));
+                    const ok = await attempt(
+                      request("/api/v1/auth/logout", { method: "POST" }),
+                    );
+                    if (ok) window.location.assign(withBase("/login"));
                   }}
                 >
                   <SignOutIcon size={17} /> Sign out

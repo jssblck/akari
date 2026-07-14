@@ -1,7 +1,7 @@
 import { act, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { useAPI } from "./api";
+import { parseRetryAfter, requestWithRetry, useAPI, waitForRetry } from "./api";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -79,5 +79,71 @@ describe("useAPI", () => {
     });
     expect(await screen.findByText("ready: grace")).toBeInTheDocument();
     expect(call).toBe(2);
+  });
+});
+
+describe("requestWithRetry", () => {
+  it("retries a structured rebuild response and honors Retry-After", async () => {
+    let call = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        call += 1;
+        if (call === 1) {
+          return Response.json(
+            {
+              error: "rebuilding",
+              reparse: { in_progress: true, done: 2, total: 9, failed: 0 },
+            },
+            { status: 503, headers: { "Retry-After": "2" } },
+          );
+        }
+        return Response.json({ value: "ready" });
+      }),
+    );
+    const delays: number[] = [];
+
+    const result = await requestWithRetry<{ value: string }>(
+      "/api/v1/transcript",
+      {},
+      async (delay) => {
+        delays.push(delay);
+      },
+    );
+
+    expect(result.value).toBe("ready");
+    expect(delays).toEqual([2000]);
+  });
+
+  it("surfaces an unrelated 503 without retrying", async () => {
+    const fetchMock = vi.fn(async () =>
+      Response.json({ error: "overloaded" }, { status: 503 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(requestWithRetry("/api/v1/transcript")).rejects.toThrow(
+      "overloaded",
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("retry timing", () => {
+  it("parses seconds and HTTP dates", () => {
+    expect(parseRetryAfter("1.5")).toBe(1500);
+    expect(parseRetryAfter(null)).toBe(0);
+    expect(parseRetryAfter("invalid")).toBe(0);
+  });
+
+  it("removes its abort listener after the timer resolves", async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const remove = vi.spyOn(controller.signal, "removeEventListener");
+    const pending = waitForRetry(25, controller.signal);
+
+    await vi.advanceTimersByTimeAsync(25);
+    await pending;
+
+    expect(remove).toHaveBeenCalledWith("abort", expect.any(Function));
   });
 });
