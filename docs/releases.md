@@ -5,7 +5,9 @@ published asset is.
 
 ## Versioning
 
-Versions come from git tags shaped like `vX.Y.Z` (for example `v0.1.0`).
+Versions come from git tags shaped like `vX.Y.Z` (for example `v0.1.0`), with an
+optional prerelease suffix such as `v0.2.0-rc.1`. Build metadata (`+build.1`) is
+not supported because the Git tag is also used verbatim as an OCI image tag.
 
 The version a binary reports through `akari version` / `akari-server version`
 (and the `--version` flag) is resolved at build time in
@@ -33,22 +35,29 @@ Do not edit a constant to mark a release, tag instead.
    ```
 
 3. The `Release` workflow cross-compiles every target, packages the archives,
-   computes `SHA256SUMS`, and assembles a GitHub Release as a draft: it uploads
-   the assets and generates notes from the pull requests merged since the
-   previous tag. Its final step flips the draft to published, so the release only
-   becomes visible once it is fully assembled (and stays a hidden draft if an
+   computes `SHA256SUMS`, and publishes the multi-platform server image to GHCR.
+   It also assembles a GitHub Release as a draft: it uploads the assets and
+   generates notes from the pull requests merged since the previous tag. Its
+   final step flips the draft to published, so the release only becomes visible
+   once every binary and image build has passed (and stays a hidden draft if an
    earlier step fails). A bare `X.Y.Z` tag is published as the latest stable
    release; any other tag shape (for example a `-rc.1` pre-release suffix) is
    marked as a prerelease.
 4. The release is live as soon as the workflow finishes. Edit the generated notes
    afterward if you want to expand them.
 
+GHCR creates a new container package as private. On the first tagged release,
+the workflow pushes the image, logs out, and stops before publishing the GitHub
+Release when anonymous inspection fails. Set the new `akari-server` package's
+visibility to public in GitHub's package settings, then rerun the failed release
+workflow. Later releases verify anonymous access through the same gate.
+
 ## Published assets
 
 Every release attaches one archive per build target plus a checksum file. The
 archives are named `<bin>_<version>_<os>_<arch>` (the version without the leading
-`v`, matching the goreleaser convention) and each contains the binary and a copy
-of `README.md`.
+`v`, matching the goreleaser convention) and each contains the binary plus
+`README.md`, `LICENSE`, and `NOTICE`.
 
 - **Server** (`akari-server`), Linux only, since the server is deployed as a
   container or a Linux host daemon:
@@ -63,6 +72,12 @@ of `README.md`.
   - `akari_<version>_windows_arm64.zip`
 - `SHA256SUMS`: a sha256 plus filename line for every archive, for manual
   verification (`sha256sum -c SHA256SUMS`).
+
+The same tag publishes `ghcr.io/jssblck/akari-server:vX.Y.Z` as a public OCI
+image index for Linux amd64 and arm64. Stable releases also move the `latest`
+tag; prereleases publish only their versioned tag. The image runs as a non-root
+user and contains the statically linked `akari-server` binary, `LICENSE`, and
+`NOTICE` in a distroless runtime.
 
 All targets cross-compile from a single Linux runner with `CGO_ENABLED=0`: akari
 is pure Go, so there is no per-OS runner matrix. The binaries are built with
@@ -122,8 +137,7 @@ already on or ahead of the latest release is left alone, and a development build
 The server does not update itself. Upgrade it through the deployment mechanism
 that owns the process:
 
-- Build and deploy a container image from a version tag, with `VERSION` set to
-  the same tag so `akari-server version` reports the deployed release.
+- Deploy `ghcr.io/jssblck/akari-server:<tag>` from the selected release.
 - Upgrade the versioned package when a package manager owns the installation.
 - For a binary managed by systemd or another service supervisor, replace the
   binary with the checksum-verified archive from a specific GitHub Release, then
@@ -135,17 +149,31 @@ migration command. See the self-hosting guide for concrete commands.
 
 ## Container image
 
-The `Dockerfile` builds `akari-server`. To stamp the version into the container,
-pass the tag as a build arg:
+Tagged releases publish the server to GitHub Container Registry. Pull the
+current stable image and verify the embedded binary before deployment:
 
 ```sh
-docker build --build-arg VERSION=v0.1.0 -t akari-server:v0.1.0 .
+docker pull ghcr.io/jssblck/akari-server:latest
+docker run --rm ghcr.io/jssblck/akari-server:latest --version
+docker image inspect --format '{{index .RepoDigests 0}}' \
+  ghcr.io/jssblck/akari-server:latest
 ```
 
-Without the arg the image reports `dev` (the `.git` directory is excluded from
-the Docker build context, so there is no VCS stamp to fall back to). The release
-workflow does not publish a container image; only the binary archives above are
-attached to the GitHub Release.
+Container tags are mutable. Pin the reported digest in production when the
+deployment must remain byte-for-byte fixed across workflow reruns.
+
+The `Dockerfile` remains usable for local or downstream builds. Pass `VERSION`
+to stamp a version and `VCS_REF` to set the OCI revision label:
+
+```sh
+docker build \
+  --build-arg VERSION=v0.1.0 \
+  --build-arg VCS_REF="$(git rev-parse HEAD)" \
+  -t akari-server:v0.1.0 .
+```
+
+Without `VERSION`, a locally built image reports `dev` because `.git` is
+excluded from the build context and the binary has no VCS stamp to use.
 
 ## Dry run
 
@@ -157,8 +185,9 @@ version tag:
 - On every push to `main`.
 - On a manual `workflow_dispatch` from the Actions tab.
 
-A dry run builds and packages every archive and computes `SHA256SUMS`, then
-writes a job summary, but it does not create a GitHub Release. The only thing
-that turns a dry run into a real release is the trigger being a `vX.Y.Z` tag. On
-a non-tag ref the version is derived from `git describe` and treated as a
-prerelease.
+A dry run builds and packages every archive, computes `SHA256SUMS`, builds both
+OCI image platforms, and runs `akari-server --version` inside the amd64 and
+arm64 images. It writes a job summary but does not create a GitHub Release or
+push an image. The only thing that turns a dry run into a real release is a push
+of a `vX.Y.Z` tag. On a non-tag ref the version is derived from `git describe`
+and treated as a prerelease.
