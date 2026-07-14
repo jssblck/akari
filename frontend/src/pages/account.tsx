@@ -10,41 +10,15 @@ import { type FleetStatus, RequestError, request, useAPI } from "../api";
 import { AsyncView } from "../components/async-view";
 import { attempt, notify } from "../components/notices";
 import { formatTime } from "../format";
-import type { Viewer } from "../types";
+import type {
+  AccountResponse,
+  Connection,
+  Invite,
+  Token,
+  Viewer,
+} from "../types";
 import "./account.css";
 import { withBase } from "../base";
-
-type Token = {
-  ID: number;
-  Name: string;
-  Scope: string;
-  CreatedAt: string;
-  LastUsedAt: string | null;
-  RevokedAt: string | null;
-};
-type Connection = {
-  ClientID: string;
-  ClientName: string;
-  Scope: string;
-  ConnectedAt: string;
-  LastUsedAt: string;
-};
-type Invite = {
-  ID: number;
-  Note: string;
-  CreatedBy: string;
-  CreatedAt: string;
-  ExpiresAt: string | null;
-  RedeemedBy: string | null;
-  RedeemedAt: string | null;
-};
-type AccountResponse = {
-  user: Viewer;
-  tokens: Token[] | null;
-  connections: Connection[] | null;
-  invites: Invite[] | null;
-  reparse: FleetStatus;
-};
 
 export function AccountPage() {
   const [revision, setRevision] = useState(0);

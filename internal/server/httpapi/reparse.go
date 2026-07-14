@@ -30,7 +30,7 @@ func (s *Server) gateAPIParsed(next http.HandlerFunc) http.HandlerFunc {
 // reports fleet status, so an instance that is only observing another's rebuild
 // still tells its pages to stay gated.
 func (s *Server) handleReparseStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.worker.FleetStatus(r.Context()))
+	writeJSON(w, http.StatusOK, reparseStatusResponse(s.worker.FleetStatus(r.Context())))
 }
 
 // handleReparseEvents streams fleet-rebuild progress to a watching browser over

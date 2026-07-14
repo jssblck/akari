@@ -6,23 +6,12 @@ import { RequestError, useAPI } from "../api";
 import { withBase } from "../base";
 import { AsyncView } from "../components/async-view";
 import { PublicShell } from "../components/public-shell";
-
-type Consent = {
-  client_name: string;
-  username: string;
-  client_id: string;
-  redirect_uri: string;
-  state: string;
-  code_challenge: string;
-  resource: string;
-  csrf: string;
-  app_csrf: string;
-};
+import type { OAuthConsentResponse } from "../types";
 
 export function OAuthConsentPage() {
   const location = useLocation();
   const navigate = useNavigate();
-  const state = useAPI<Consent>(
+  const state = useAPI<OAuthConsentResponse>(
     `/api/v1/app/oauth/authorize${location.search}`,
   );
   const loggedOut =

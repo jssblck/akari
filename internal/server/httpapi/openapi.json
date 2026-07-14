@@ -1,248 +1,6095 @@
 {
-  "openapi": "3.1.0",
-  "info": {
-    "title": "akari API",
-    "version": "1.0.0",
-    "description": "HTTP API for the akari React application, session ingest clients, and account automation. Browser requests authenticate with the akari_session cookie. Non-browser clients use a bearer token with the scope required by each operation."
-  },
-  "servers": [{ "url": "/", "description": "This akari instance" }],
-  "tags": [
-    { "name": "Application", "description": "Read models consumed by the embedded React application." },
-    { "name": "Account", "description": "Authentication, tokens, invitations, and account controls." },
-    { "name": "Ingest", "description": "Session and content-addressed blob upload protocol." },
-    { "name": "Public", "description": "Published read-only views that require no credential." },
-    { "name": "Operations", "description": "Health and projection rebuild state." }
-  ],
   "components": {
-    "securitySchemes": {
-      "sessionCookie": { "type": "apiKey", "in": "cookie", "name": "akari_session" },
-      "bearerToken": { "type": "http", "scheme": "bearer", "bearerFormat": "akari token" }
-    },
-    "schemas": {
-      "Error": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["error"],
-        "properties": { "error": { "type": "string" }, "code": { "type": "string" } }
-      },
-      "Publication": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["published"],
-        "properties": { "published": { "type": "boolean" } }
-      },
-      "Login": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["username", "password"],
-        "properties": { "username": { "type": "string" }, "password": { "type": "string", "format": "password" } }
-      },
-      "Register": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["username", "password"],
-        "properties": {
-          "username": { "type": "string" },
-          "password": { "type": "string", "format": "password" },
-          "invite_token": { "type": "string" }
+    "responses": {
+      "BadRequest": {
+        "description": "The request is invalid.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
         }
       },
-      "CreateToken": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["name"],
-        "properties": {
-          "name": { "type": "string" },
-          "scope": { "type": "string", "enum": ["ingest", "read", "full"], "default": "ingest" }
+      "Forbidden": {
+        "description": "The credential does not have the required scope.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
         }
       },
-      "CreateInvite": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "note": { "type": "string" },
-          "expires_hours": { "type": "integer", "minimum": 0 }
+      "NotFound": {
+        "description": "The requested resource does not exist or is not visible.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
         }
       },
-      "AnnounceSession": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["agent", "source_session_id"],
-        "properties": {
-          "agent": { "type": "string", "enum": ["claude", "codex", "pi"] },
-          "source_session_id": { "type": "string", "minLength": 1 },
-          "kind": { "type": "string", "enum": ["remote", "standalone", "orphaned"], "default": "remote" },
-          "project_remote": { "type": "string" },
-          "local_root": { "type": "string" },
-          "git_branch": { "type": "string" },
-          "cwd": { "type": "string" },
-          "machine": { "type": "string" },
-          "terminal": { "type": "boolean", "default": false }
+      "Unauthorized": {
+        "description": "Authentication is required.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
         }
       },
-      "Viewer": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["authenticated", "is_admin", "overview_public"],
-        "properties": {
-          "authenticated": { "type": "boolean" },
-          "user_id": { "type": "integer", "format": "int64" },
-          "username": { "type": "string" },
-          "is_admin": { "type": "boolean" },
-          "overview_public": { "type": "boolean" },
-          "csrf_token": { "type": "string" }
-        }
-      },
-      "ProjectionRebuild": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["error", "code", "reparse"],
-        "properties": {
-          "error": { "type": "string", "const": "projection rebuild in progress" },
-          "code": { "type": "string", "const": "projection_rebuild" },
-          "reparse": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["in_progress", "done", "total", "failed"],
-            "properties": {
-              "in_progress": { "type": "boolean" },
-              "done": { "type": "integer", "minimum": 0 },
-              "total": { "type": "integer", "minimum": 0 },
-              "failed": { "type": "integer", "minimum": 0 },
-              "started_at": { "type": "string", "format": "date-time" }
+      "ProjectionRebuilding": {
+        "description": "The parsed projection is rebuilding; retry after the requested delay.",
+        "headers": {
+          "Retry-After": {
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "description": "Seconds before retrying."
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ProjectionRebuild"
             }
           }
         }
       }
     },
-    "responses": {
-      "BadRequest": { "description": "The request is invalid.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
-      "Unauthorized": { "description": "Authentication is required.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
-      "Forbidden": { "description": "The credential does not have the required scope.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
-      "NotFound": { "description": "The requested resource does not exist or is not visible.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
-      "ProjectionRebuilding": { "description": "The parsed projection is rebuilding; retry after the requested delay.", "headers": { "Retry-After": { "required": true, "schema": { "type": "integer", "minimum": 1 }, "description": "Seconds before retrying." } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProjectionRebuild" } } } }
+    "schemas": {
+      "AccountInvite": {
+        "additionalProperties": false,
+        "properties": {
+          "CreatedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "CreatedBy": {
+            "type": "string"
+          },
+          "ExpiresAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ID": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Note": {
+            "type": "string"
+          },
+          "RedeemedAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "RedeemedBy": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "CreatedAt",
+          "CreatedBy",
+          "ExpiresAt",
+          "ID",
+          "Note",
+          "RedeemedAt",
+          "RedeemedBy"
+        ],
+        "type": "object"
+      },
+      "AccountResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "connections": {
+            "items": {
+              "$ref": "#/components/schemas/OAuthGrant"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "invites": {
+            "items": {
+              "$ref": "#/components/schemas/AccountInvite"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "reparse": {
+            "$ref": "#/components/schemas/Status"
+          },
+          "tokens": {
+            "items": {
+              "$ref": "#/components/schemas/AccountToken"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "user": {
+            "$ref": "#/components/schemas/Viewer"
+          }
+        },
+        "required": [
+          "connections",
+          "invites",
+          "reparse",
+          "tokens",
+          "user"
+        ],
+        "type": "object"
+      },
+      "AccountToken": {
+        "additionalProperties": false,
+        "properties": {
+          "CreatedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "ID": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "LastUsedAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "Name": {
+            "type": "string"
+          },
+          "RevokedAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "Scope": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "CreatedAt",
+          "ID",
+          "LastUsedAt",
+          "Name",
+          "RevokedAt",
+          "Scope"
+        ],
+        "type": "object"
+      },
+      "Analytics": {
+        "additionalProperties": false,
+        "properties": {
+          "Agents": {
+            "items": {
+              "$ref": "#/components/schemas/Breakdown"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "Cache": {
+            "$ref": "#/components/schemas/CacheStats"
+          },
+          "CostIncomplete": {
+            "type": "boolean"
+          },
+          "Models": {
+            "items": {
+              "$ref": "#/components/schemas/Breakdown"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "Series": {
+            "items": {
+              "$ref": "#/components/schemas/DayPoint"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "Sessions": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "TotalCacheRead": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "TotalCacheWrite": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "TotalCost": {
+            "type": "number"
+          },
+          "TotalIn": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "TotalOut": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "TotalReasoning": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Users": {
+            "items": {
+              "$ref": "#/components/schemas/Breakdown"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "Agents",
+          "Cache",
+          "CostIncomplete",
+          "Models",
+          "Series",
+          "Sessions",
+          "TotalCacheRead",
+          "TotalCacheWrite",
+          "TotalCost",
+          "TotalIn",
+          "TotalOut",
+          "TotalReasoning",
+          "Users"
+        ],
+        "type": "object"
+      },
+      "AnnounceSession": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "agent",
+          "source_session_id"
+        ],
+        "properties": {
+          "agent": {
+            "type": "string",
+            "enum": [
+              "claude",
+              "codex",
+              "pi"
+            ]
+          },
+          "source_session_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "remote",
+              "standalone",
+              "orphaned"
+            ],
+            "default": "remote"
+          },
+          "project_remote": {
+            "type": "string"
+          },
+          "local_root": {
+            "type": "string"
+          },
+          "git_branch": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "machine": {
+            "type": "string"
+          },
+          "terminal": {
+            "type": "boolean",
+            "default": false
+          }
+        }
+      },
+      "AttachmentView": {
+        "additionalProperties": false,
+        "properties": {
+          "ByteLen": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Filename": {
+            "type": "string"
+          },
+          "MediaType": {
+            "type": "string"
+          },
+          "MessageOrdinal": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "SHA256": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ByteLen",
+          "Filename",
+          "MediaType",
+          "MessageOrdinal",
+          "SHA256"
+        ],
+        "type": "object"
+      },
+      "Breakdown": {
+        "additionalProperties": false,
+        "properties": {
+          "CacheRead": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "CacheWrite": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "CostIncomplete": {
+            "type": "boolean"
+          },
+          "CostUSD": {
+            "type": "number"
+          },
+          "Input": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Label": {
+            "type": "string"
+          },
+          "Output": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Reasoning": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Sessions": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "CacheRead",
+          "CacheWrite",
+          "CostIncomplete",
+          "CostUSD",
+          "Input",
+          "Label",
+          "Output",
+          "Reasoning",
+          "Sessions"
+        ],
+        "type": "object"
+      },
+      "CacheStats": {
+        "additionalProperties": false,
+        "properties": {
+          "CacheRead": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "CacheWrite": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Input": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Output": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "SavingsIncomplete": {
+            "type": "boolean"
+          },
+          "SavingsUSD": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "CacheRead",
+          "CacheWrite",
+          "Input",
+          "Output",
+          "SavingsIncomplete",
+          "SavingsUSD"
+        ],
+        "type": "object"
+      },
+      "Chapter": {
+        "additionalProperties": false,
+        "properties": {
+          "Order": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Slug": {
+            "type": "string"
+          },
+          "Summary": {
+            "type": "string"
+          },
+          "Title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "Order",
+          "Slug",
+          "Summary",
+          "Title"
+        ],
+        "type": "object"
+      },
+      "ChurnFile": {
+        "additionalProperties": false,
+        "properties": {
+          "Edits": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Path": {
+            "type": "string"
+          },
+          "Project": {
+            "type": "string"
+          },
+          "ProjectID": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Sessions": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "Edits",
+          "Path",
+          "Project",
+          "ProjectID",
+          "Sessions"
+        ],
+        "type": "object"
+      },
+      "ChurnNode": {
+        "additionalProperties": false,
+        "properties": {
+          "Edits": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Folder": {
+            "type": "string"
+          },
+          "Path": {
+            "type": "string"
+          },
+          "Project": {
+            "type": "string"
+          },
+          "Sessions": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "Edits",
+          "Folder",
+          "Path",
+          "Project",
+          "Sessions"
+        ],
+        "type": "object"
+      },
+      "ChurnTrend": {
+        "additionalProperties": false,
+        "properties": {
+          "Clipped": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Files": {
+            "items": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "Projects": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "ReEdits": {
+            "items": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "TotalHotFiles": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "TotalReEdits": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Tree": {
+            "items": {
+              "$ref": "#/components/schemas/ChurnNode"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "Clipped",
+          "Files",
+          "Projects",
+          "ReEdits",
+          "TotalHotFiles",
+          "TotalReEdits",
+          "Tree"
+        ],
+        "type": "object"
+      },
+      "ConcurrencyStats": {
+        "additionalProperties": false,
+        "properties": {
+          "AvgConcurrent": {
+            "type": "number"
+          },
+          "BusiestUser": {
+            "type": "string"
+          },
+          "BusiestUserPeak": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "FleetPeak": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "FleetPeakAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "Sessions": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "AvgConcurrent",
+          "BusiestUser",
+          "BusiestUserPeak",
+          "FleetPeak",
+          "FleetPeakAt",
+          "Sessions"
+        ],
+        "type": "object"
+      },
+      "ContextBucket": {
+        "additionalProperties": false,
+        "properties": {
+          "Count": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Hi": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Lo": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "Count",
+          "Hi",
+          "Lo"
+        ],
+        "type": "object"
+      },
+      "ContextHealthStats": {
+        "additionalProperties": false,
+        "properties": {
+          "PeakTokensMax": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "PeakTokensP50": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "PeakTokensP90": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Sessions": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "SessionsWithReset": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "TotalResets": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "PeakTokensMax",
+          "PeakTokensP50",
+          "PeakTokensP90",
+          "Sessions",
+          "SessionsWithReset",
+          "TotalResets"
+        ],
+        "type": "object"
+      },
+      "ContextMarker": {
+        "additionalProperties": false,
+        "properties": {
+          "Kind": {
+            "type": "string"
+          },
+          "Tokens": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "Kind",
+          "Tokens"
+        ],
+        "type": "object"
+      },
+      "CreateInvite": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "note": {
+            "type": "string"
+          },
+          "expires_hours": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "CreateToken": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "ingest",
+              "read",
+              "full"
+            ],
+            "default": "ingest"
+          }
+        }
+      },
+      "CreatedInviteResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "invite_token": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "expires_at",
+          "id",
+          "invite_token",
+          "note"
+        ],
+        "type": "object"
+      },
+      "CreatedTokenResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          },
+          "token": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "scope",
+          "token"
+        ],
+        "type": "object"
+      },
+      "DateRange": {
+        "additionalProperties": false,
+        "properties": {
+          "Days": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Key": {
+            "type": "string"
+          },
+          "Label": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "Days",
+          "Key",
+          "Label"
+        ],
+        "type": "object"
+      },
+      "DayPoint": {
+        "additionalProperties": false,
+        "properties": {
+          "CacheRead": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "CacheWrite": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "CostUSD": {
+            "type": "number"
+          },
+          "Day": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "Input": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Output": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "CacheRead",
+          "CacheWrite",
+          "CostUSD",
+          "Day",
+          "Input",
+          "Output"
+        ],
+        "type": "object"
+      },
+      "DeletedSessionResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "deleted": {
+            "type": "boolean"
+          },
+          "project_id": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "deleted",
+          "project_id"
+        ],
+        "type": "object"
+      },
+      "Economics": {
+        "additionalProperties": false,
+        "properties": {
+          "AbandonedIncomplete": {
+            "type": "boolean"
+          },
+          "AbandonedSharePct": {
+            "type": "number"
+          },
+          "CacheHitRate": {
+            "items": {
+              "type": "number"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "CacheHitRateLatest": {
+            "type": "number"
+          },
+          "CacheMeasured": {
+            "items": {
+              "type": "boolean"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "CacheSavings": {
+            "items": {
+              "type": "number"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "CacheSavingsIncomplete": {
+            "type": "boolean"
+          },
+          "CostAbandoned": {
+            "items": {
+              "type": "number"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "CostCompleted": {
+            "items": {
+              "type": "number"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "CostIncomplete": {
+            "type": "boolean"
+          },
+          "CostOther": {
+            "items": {
+              "type": "number"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "TotalAbandoned": {
+            "type": "number"
+          },
+          "TotalCacheSavings": {
+            "type": "number"
+          },
+          "TotalSpend": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "AbandonedIncomplete",
+          "AbandonedSharePct",
+          "CacheHitRate",
+          "CacheHitRateLatest",
+          "CacheMeasured",
+          "CacheSavings",
+          "CacheSavingsIncomplete",
+          "CostAbandoned",
+          "CostCompleted",
+          "CostIncomplete",
+          "CostOther",
+          "TotalAbandoned",
+          "TotalCacheSavings",
+          "TotalSpend"
+        ],
+        "type": "object"
+      },
+      "Error": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          }
+        }
+      },
+      "FacetCount": {
+        "additionalProperties": false,
+        "properties": {
+          "Count": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "Count",
+          "Value"
+        ],
+        "type": "object"
+      },
+      "FacetValues": {
+        "additionalProperties": false,
+        "properties": {
+          "Agents": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "Machines": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "Users": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "Agents",
+          "Machines",
+          "Users"
+        ],
+        "type": "object"
+      },
+      "FileChurn": {
+        "additionalProperties": false,
+        "properties": {
+          "Clipped": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Files": {
+            "items": {
+              "$ref": "#/components/schemas/ChurnFile"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "Clipped",
+          "Files"
+        ],
+        "type": "object"
+      },
+      "FleetMix": {
+        "additionalProperties": false,
+        "properties": {
+          "Models": {
+            "items": {
+              "$ref": "#/components/schemas/ModelSeries"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "NewestFirst": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "NewestModel": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "Models",
+          "NewestFirst",
+          "NewestModel"
+        ],
+        "type": "object"
+      },
+      "Gallery": {
+        "additionalProperties": false,
+        "properties": {
+          "CostIncomplete": {
+            "type": "boolean"
+          },
+          "LongestCostUSD": {
+            "type": "number"
+          },
+          "LongestDurationS": {
+            "type": "number"
+          },
+          "MedianCompletedCostUSD": {
+            "type": "number"
+          },
+          "MedianCostUSD": {
+            "type": "number"
+          },
+          "MedianDurationS": {
+            "type": "number"
+          },
+          "PriciestCostUSD": {
+            "type": "number"
+          },
+          "PriciestDurationS": {
+            "type": "number"
+          },
+          "Rows": {
+            "items": {
+              "$ref": "#/components/schemas/GallerySession"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "Total": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "CostIncomplete",
+          "LongestCostUSD",
+          "LongestDurationS",
+          "MedianCompletedCostUSD",
+          "MedianCostUSD",
+          "MedianDurationS",
+          "PriciestCostUSD",
+          "PriciestDurationS",
+          "Rows",
+          "Total"
+        ],
+        "type": "object"
+      },
+      "GallerySession": {
+        "additionalProperties": false,
+        "properties": {
+          "Archetype": {
+            "type": "string"
+          },
+          "CostIncomplete": {
+            "type": "boolean"
+          },
+          "CostUSD": {
+            "type": "number"
+          },
+          "DurationS": {
+            "type": "number"
+          },
+          "Grade": {
+            "type": "string"
+          },
+          "Outcome": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "Archetype",
+          "CostIncomplete",
+          "CostUSD",
+          "DurationS",
+          "Grade",
+          "Outcome"
+        ],
+        "type": "object"
+      },
+      "GlobalFacetValues": {
+        "additionalProperties": false,
+        "properties": {
+          "Agents": {
+            "items": {
+              "$ref": "#/components/schemas/FacetCount"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "Machines": {
+            "items": {
+              "$ref": "#/components/schemas/FacetCount"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "Projects": {
+            "items": {
+              "$ref": "#/components/schemas/ProjectFacet"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "Users": {
+            "items": {
+              "$ref": "#/components/schemas/FacetCount"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "Agents",
+          "Machines",
+          "Projects",
+          "Users"
+        ],
+        "type": "object"
+      },
+      "GuideResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "chapters": {
+            "items": {
+              "$ref": "#/components/schemas/Chapter"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "github_url": {
+            "type": "string"
+          },
+          "headings": {
+            "items": {
+              "$ref": "#/components/schemas/Heading"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "raw_markdown": {
+            "type": "string"
+          },
+          "raw_path": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "chapters",
+          "github_url",
+          "headings",
+          "raw_markdown",
+          "raw_path",
+          "slug",
+          "summary",
+          "title"
+        ],
+        "type": "object"
+      },
+      "Heading": {
+        "additionalProperties": false,
+        "properties": {
+          "ID": {
+            "type": "string"
+          },
+          "Level": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ID",
+          "Level",
+          "Text"
+        ],
+        "type": "object"
+      },
+      "Insights": {
+        "additionalProperties": false,
+        "properties": {
+          "Archetypes": {
+            "items": {
+              "$ref": "#/components/schemas/LabeledCount"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "Churn": {
+            "$ref": "#/components/schemas/FileChurn"
+          },
+          "Concurrency": {
+            "$ref": "#/components/schemas/ConcurrencyStats"
+          },
+          "Context": {
+            "$ref": "#/components/schemas/ContextHealthStats"
+          },
+          "Hygiene": {
+            "$ref": "#/components/schemas/PromptHygiene"
+          },
+          "Quality": {
+            "$ref": "#/components/schemas/QualityDistribution"
+          },
+          "Tools": {
+            "$ref": "#/components/schemas/ToolStats"
+          },
+          "Trends": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Trends"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "Velocity": {
+            "$ref": "#/components/schemas/VelocityStats"
+          }
+        },
+        "required": [
+          "Archetypes",
+          "Churn",
+          "Concurrency",
+          "Context",
+          "Hygiene",
+          "Quality",
+          "Tools",
+          "Trends",
+          "Velocity"
+        ],
+        "type": "object"
+      },
+      "InsightsResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "generated_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "insights": {
+            "$ref": "#/components/schemas/Insights"
+          },
+          "range": {
+            "type": "string"
+          },
+          "ranges": {
+            "items": {
+              "$ref": "#/components/schemas/DateRange"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "generated_at",
+          "insights",
+          "range",
+          "ranges"
+        ],
+        "type": "object"
+      },
+      "LabeledCount": {
+        "additionalProperties": false,
+        "properties": {
+          "Count": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Key": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "Count",
+          "Key"
+        ],
+        "type": "object"
+      },
+      "Login": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "username",
+          "password"
+        ],
+        "properties": {
+          "username": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string",
+            "format": "password"
+          }
+        }
+      },
+      "LoginResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "is_admin": {
+            "type": "boolean"
+          },
+          "username": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "is_admin",
+          "username"
+        ],
+        "type": "object"
+      },
+      "Message": {
+        "additionalProperties": false,
+        "properties": {
+          "Content": {
+            "type": "string"
+          },
+          "DuplicatePrompt": {
+            "type": "boolean"
+          },
+          "HasThinking": {
+            "type": "boolean"
+          },
+          "HasToolUse": {
+            "type": "boolean"
+          },
+          "Model": {
+            "type": "string"
+          },
+          "Ordinal": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "PromptDigest": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "PromptFactsCurrent": {
+            "type": "boolean"
+          },
+          "PromptNoCode": {
+            "type": "boolean"
+          },
+          "PromptShort": {
+            "type": "boolean"
+          },
+          "Role": {
+            "type": "string"
+          },
+          "ThinkingBytes": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "ThinkingText": {
+            "type": "string"
+          },
+          "Timestamp": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "Usage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TurnUsage"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "Content",
+          "DuplicatePrompt",
+          "HasThinking",
+          "HasToolUse",
+          "Model",
+          "Ordinal",
+          "PromptDigest",
+          "PromptFactsCurrent",
+          "PromptNoCode",
+          "PromptShort",
+          "Role",
+          "ThinkingBytes",
+          "ThinkingText",
+          "Timestamp",
+          "Usage"
+        ],
+        "type": "object"
+      },
+      "ModelFallback": {
+        "additionalProperties": false,
+        "properties": {
+          "DeclinedCacheRead": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "DeclinedCacheWrite": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "DeclinedInput": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "DeclinedOutput": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "DedupKey": {
+            "type": "string"
+          },
+          "FromModel": {
+            "type": "string"
+          },
+          "MessageOrdinal": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "OccurredAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "RefusalCategory": {
+            "type": "string"
+          },
+          "RefusalExplanation": {
+            "type": "string"
+          },
+          "ToModel": {
+            "type": "string"
+          },
+          "Trigger": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "DeclinedCacheRead",
+          "DeclinedCacheWrite",
+          "DeclinedInput",
+          "DeclinedOutput",
+          "DedupKey",
+          "FromModel",
+          "MessageOrdinal",
+          "OccurredAt",
+          "RefusalCategory",
+          "RefusalExplanation",
+          "ToModel",
+          "Trigger"
+        ],
+        "type": "object"
+      },
+      "ModelSeries": {
+        "additionalProperties": false,
+        "properties": {
+          "First": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Model": {
+            "type": "string"
+          },
+          "Share": {
+            "items": {
+              "type": "number"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "WindowShare": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "First",
+          "Model",
+          "Share",
+          "WindowShare"
+        ],
+        "type": "object"
+      },
+      "OAuthConsentResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "app_csrf": {
+            "type": "string"
+          },
+          "client_id": {
+            "type": "string"
+          },
+          "client_name": {
+            "type": "string"
+          },
+          "code_challenge": {
+            "type": "string"
+          },
+          "csrf": {
+            "type": "string"
+          },
+          "redirect_uri": {
+            "type": "string"
+          },
+          "resource": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "app_csrf",
+          "client_id",
+          "client_name",
+          "code_challenge",
+          "csrf",
+          "redirect_uri",
+          "resource",
+          "state",
+          "username"
+        ],
+        "type": "object"
+      },
+      "OAuthGrant": {
+        "additionalProperties": false,
+        "properties": {
+          "ClientID": {
+            "type": "string"
+          },
+          "ClientName": {
+            "type": "string"
+          },
+          "ConnectedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "LastUsedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "Scope": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ClientID",
+          "ClientName",
+          "ConnectedAt",
+          "LastUsedAt",
+          "Scope"
+        ],
+        "type": "object"
+      },
+      "OverviewResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "analytics": {
+            "$ref": "#/components/schemas/Analytics"
+          },
+          "range": {
+            "type": "string"
+          },
+          "ranges": {
+            "items": {
+              "$ref": "#/components/schemas/DateRange"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "selected_user_ids": {
+            "items": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "users": {
+            "items": {
+              "$ref": "#/components/schemas/OverviewUser"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "analytics",
+          "range",
+          "ranges",
+          "selected_user_ids",
+          "users"
+        ],
+        "type": "object"
+      },
+      "OverviewUser": {
+        "additionalProperties": false,
+        "properties": {
+          "ID": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "IsAdmin": {
+            "type": "boolean"
+          },
+          "Username": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ID",
+          "IsAdmin",
+          "Username"
+        ],
+        "type": "object"
+      },
+      "ProjectFacet": {
+        "additionalProperties": false,
+        "properties": {
+          "Count": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "ID": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Key": {
+            "type": "string"
+          },
+          "Kind": {
+            "type": "string"
+          },
+          "Name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "Count",
+          "ID",
+          "Key",
+          "Kind",
+          "Name"
+        ],
+        "type": "object"
+      },
+      "ProjectResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "analytics": {
+            "$ref": "#/components/schemas/Analytics"
+          },
+          "facets": {
+            "$ref": "#/components/schemas/FacetValues"
+          },
+          "filter": {
+            "$ref": "#/components/schemas/SessionFilter"
+          },
+          "insights": {
+            "$ref": "#/components/schemas/Insights"
+          },
+          "project": {
+            "$ref": "#/components/schemas/ProjectSummary"
+          },
+          "range": {
+            "type": "string"
+          },
+          "ranges": {
+            "items": {
+              "$ref": "#/components/schemas/DateRange"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "remainder": {
+            "$ref": "#/components/schemas/SessionRemainder"
+          },
+          "sessions": {
+            "items": {
+              "$ref": "#/components/schemas/SessionSummary"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "analytics",
+          "facets",
+          "filter",
+          "insights",
+          "project",
+          "range",
+          "ranges",
+          "remainder",
+          "sessions"
+        ],
+        "type": "object"
+      },
+      "ProjectSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "CostIncomplete": {
+            "type": "boolean"
+          },
+          "DisplayName": {
+            "type": "string"
+          },
+          "Host": {
+            "type": "string"
+          },
+          "ID": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Kind": {
+            "type": "string"
+          },
+          "LastActivity": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "OverviewPublic": {
+            "type": "boolean"
+          },
+          "Owner": {
+            "type": "string"
+          },
+          "RemoteKey": {
+            "type": "string"
+          },
+          "Repo": {
+            "type": "string"
+          },
+          "SessionCount": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "TotalCacheRead": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "TotalCacheWrite": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "TotalCostUSD": {
+            "type": "number"
+          },
+          "TotalInput": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "TotalOutput": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "CostIncomplete",
+          "DisplayName",
+          "Host",
+          "ID",
+          "Kind",
+          "LastActivity",
+          "OverviewPublic",
+          "Owner",
+          "RemoteKey",
+          "Repo",
+          "SessionCount",
+          "TotalCacheRead",
+          "TotalCacheWrite",
+          "TotalCostUSD",
+          "TotalInput",
+          "TotalOutput"
+        ],
+        "type": "object"
+      },
+      "ProjectsResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "projects": {
+            "items": {
+              "$ref": "#/components/schemas/ProjectSummary"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "sparklines": {
+            "additionalProperties": {
+              "items": {
+                "type": "number"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "projects",
+          "sparklines"
+        ],
+        "type": "object"
+      },
+      "PromptHygiene": {
+        "additionalProperties": false,
+        "properties": {
+          "Duplicate": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "NoCodeContext": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Prompts": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Sessions": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Short": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "UnstructuredStarts": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "Duplicate",
+          "NoCodeContext",
+          "Prompts",
+          "Sessions",
+          "Short",
+          "UnstructuredStarts"
+        ],
+        "type": "object"
+      },
+      "PublicOverviewResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "analytics": {
+            "$ref": "#/components/schemas/Analytics"
+          },
+          "range": {
+            "type": "string"
+          },
+          "ranges": {
+            "items": {
+              "$ref": "#/components/schemas/DateRange"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "username": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "analytics",
+          "range",
+          "ranges",
+          "username"
+        ],
+        "type": "object"
+      },
+      "PublicProjectResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "analytics": {
+            "$ref": "#/components/schemas/Analytics"
+          },
+          "insights": {
+            "$ref": "#/components/schemas/Insights"
+          },
+          "project": {
+            "$ref": "#/components/schemas/ProjectSummary"
+          },
+          "range": {
+            "type": "string"
+          },
+          "ranges": {
+            "items": {
+              "$ref": "#/components/schemas/DateRange"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "analytics",
+          "insights",
+          "project",
+          "range",
+          "ranges"
+        ],
+        "type": "object"
+      },
+      "PublicSessionResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "snapshot": {
+            "$ref": "#/components/schemas/PublicSessionSnapshot"
+          }
+        },
+        "required": [
+          "snapshot"
+        ],
+        "type": "object"
+      },
+      "PublicSessionSnapshot": {
+        "additionalProperties": false,
+        "properties": {
+          "Audit": {
+            "$ref": "#/components/schemas/SessionAudit"
+          },
+          "Outline": {
+            "items": {
+              "$ref": "#/components/schemas/Message"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "Page": {
+            "$ref": "#/components/schemas/TranscriptPage"
+          },
+          "ProjectionRevision": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Tools": {
+            "items": {
+              "$ref": "#/components/schemas/ToolCallView"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "Audit",
+          "Outline",
+          "Page",
+          "ProjectionRevision",
+          "Tools"
+        ],
+        "type": "object"
+      },
+      "Publication": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "published"
+        ],
+        "properties": {
+          "published": {
+            "type": "boolean"
+          }
+        }
+      },
+      "PublicationResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "published": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "published"
+        ],
+        "type": "object"
+      },
+      "QualityDistribution": {
+        "additionalProperties": false,
+        "properties": {
+          "Graded": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Grades": {
+            "items": {
+              "$ref": "#/components/schemas/LabeledCount"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "Outcomes": {
+            "items": {
+              "$ref": "#/components/schemas/LabeledCount"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "Sessions": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "Graded",
+          "Grades",
+          "Outcomes",
+          "Sessions"
+        ],
+        "type": "object"
+      },
+      "Register": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "username",
+          "password"
+        ],
+        "properties": {
+          "username": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string",
+            "format": "password"
+          },
+          "invite_token": {
+            "type": "string"
+          }
+        }
+      },
+      "RegisteredUserResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "is_admin": {
+            "type": "boolean"
+          },
+          "username": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "is_admin",
+          "username"
+        ],
+        "type": "object"
+      },
+      "ReparseStatusResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "done": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "failed": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "in_progress": {
+            "type": "boolean"
+          },
+          "started_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "total": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "done",
+          "failed",
+          "in_progress",
+          "total"
+        ],
+        "type": "object"
+      },
+      "RevokedResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "revoked": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "revoked"
+        ],
+        "type": "object"
+      },
+      "RhythmGrid": {
+        "additionalProperties": false,
+        "properties": {
+          "Cells": {
+            "items": {
+              "items": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "Cells"
+        ],
+        "type": "object"
+      },
+      "SearchSnippet": {
+        "additionalProperties": false,
+        "properties": {
+          "MatchEnd": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "MatchStart": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "MatchEnd",
+          "MatchStart",
+          "Text"
+        ],
+        "type": "object"
+      },
+      "SessionAudit": {
+        "additionalProperties": false,
+        "properties": {
+          "Detail": {
+            "$ref": "#/components/schemas/SessionDetail"
+          },
+          "Fallbacks": {
+            "items": {
+              "$ref": "#/components/schemas/ModelFallback"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "Signals": {
+            "$ref": "#/components/schemas/SessionSignals"
+          },
+          "Subagents": {
+            "items": {
+              "$ref": "#/components/schemas/SubagentRow"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "Detail",
+          "Fallbacks",
+          "Signals",
+          "Subagents"
+        ],
+        "type": "object"
+      },
+      "SessionDetail": {
+        "additionalProperties": false,
+        "properties": {
+          "Agent": {
+            "type": "string"
+          },
+          "CacheSavingsIncomplete": {
+            "type": "boolean"
+          },
+          "CostIncomplete": {
+            "type": "boolean"
+          },
+          "Cwd": {
+            "type": "string"
+          },
+          "EndedAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "GitBranch": {
+            "type": "string"
+          },
+          "ID": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "LastActiveAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "Machine": {
+            "type": "string"
+          },
+          "MessageCount": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "ModelFallbackCount": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "OwnerID": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "ParentID": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ProjectID": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "ProjectKey": {
+            "type": "string"
+          },
+          "ProjectKind": {
+            "type": "string"
+          },
+          "ProjectName": {
+            "type": "string"
+          },
+          "PublicID": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "StartedAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "Title": {
+            "type": "string"
+          },
+          "TotalCacheRead": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "TotalCacheSavingsUSD": {
+            "type": "number"
+          },
+          "TotalCacheWrite": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "TotalCostUSD": {
+            "type": "number"
+          },
+          "TotalInput": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "TotalOutput": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "UserMessageCount": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Username": {
+            "type": "string"
+          },
+          "Visibility": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "Agent",
+          "CacheSavingsIncomplete",
+          "CostIncomplete",
+          "Cwd",
+          "EndedAt",
+          "GitBranch",
+          "ID",
+          "LastActiveAt",
+          "Machine",
+          "MessageCount",
+          "ModelFallbackCount",
+          "OwnerID",
+          "ParentID",
+          "ProjectID",
+          "ProjectKey",
+          "ProjectKind",
+          "ProjectName",
+          "PublicID",
+          "StartedAt",
+          "Title",
+          "TotalCacheRead",
+          "TotalCacheSavingsUSD",
+          "TotalCacheWrite",
+          "TotalCostUSD",
+          "TotalInput",
+          "TotalOutput",
+          "UserMessageCount",
+          "Username",
+          "Visibility"
+        ],
+        "type": "object"
+      },
+      "SessionFilter": {
+        "additionalProperties": false,
+        "properties": {
+          "After": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "AfterVal": {
+            "type": "string"
+          },
+          "Agent": {
+            "type": "string"
+          },
+          "Desc": {
+            "type": "boolean"
+          },
+          "Grade": {
+            "type": "string"
+          },
+          "IncludeEmpty": {
+            "type": "boolean"
+          },
+          "IncludeSubagents": {
+            "type": "boolean"
+          },
+          "Limit": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Machine": {
+            "type": "string"
+          },
+          "Offset": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Outcome": {
+            "type": "string"
+          },
+          "ProjectID": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Query": {
+            "type": "string"
+          },
+          "Range": {
+            "type": "string"
+          },
+          "RequireSpan": {
+            "type": "boolean"
+          },
+          "Since": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "Sort": {
+            "type": "string"
+          },
+          "Username": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "After",
+          "AfterVal",
+          "Agent",
+          "Desc",
+          "Grade",
+          "IncludeEmpty",
+          "IncludeSubagents",
+          "Limit",
+          "Machine",
+          "Offset",
+          "Outcome",
+          "ProjectID",
+          "Query",
+          "Range",
+          "RequireSpan",
+          "Since",
+          "Sort",
+          "Username"
+        ],
+        "type": "object"
+      },
+      "SessionPublicationResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "public_id": {
+            "type": "string"
+          },
+          "published": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "published"
+        ],
+        "type": "object"
+      },
+      "SessionRemainder": {
+        "additionalProperties": false,
+        "properties": {
+          "CacheRead": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "CacheWrite": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "CostIncomplete": {
+            "type": "boolean"
+          },
+          "CostUSD": {
+            "type": "number"
+          },
+          "Input": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Output": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Sessions": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "CacheRead",
+          "CacheWrite",
+          "CostIncomplete",
+          "CostUSD",
+          "Input",
+          "Output",
+          "Sessions"
+        ],
+        "type": "object"
+      },
+      "SessionResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "can_delete": {
+            "type": "boolean"
+          },
+          "owner": {
+            "type": "boolean"
+          },
+          "snapshot": {
+            "$ref": "#/components/schemas/SessionSnapshot"
+          }
+        },
+        "required": [
+          "can_delete",
+          "owner",
+          "snapshot"
+        ],
+        "type": "object"
+      },
+      "SessionRow": {
+        "additionalProperties": false,
+        "properties": {
+          "Agent": {
+            "type": "string"
+          },
+          "CostIncomplete": {
+            "type": "boolean"
+          },
+          "EndedAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "GitBranch": {
+            "type": "string"
+          },
+          "Grade": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ID": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "LastActiveAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "Machine": {
+            "type": "string"
+          },
+          "MessageCount": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "ModelFallbackCount": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Outcome": {
+            "type": "string"
+          },
+          "ProjectID": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "ProjectKey": {
+            "type": "string"
+          },
+          "ProjectKind": {
+            "type": "string"
+          },
+          "ProjectName": {
+            "type": "string"
+          },
+          "PublicID": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "Search": {
+            "$ref": "#/components/schemas/SearchSnippet"
+          },
+          "StartedAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "Title": {
+            "type": "string"
+          },
+          "TotalCacheRead": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "TotalCacheWrite": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "TotalCostUSD": {
+            "type": "number"
+          },
+          "TotalInput": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "TotalOutput": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Tree": {
+            "$ref": "#/components/schemas/TreeRollup"
+          },
+          "UserMessageCount": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Username": {
+            "type": "string"
+          },
+          "Visibility": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "Agent",
+          "CostIncomplete",
+          "EndedAt",
+          "GitBranch",
+          "Grade",
+          "ID",
+          "LastActiveAt",
+          "Machine",
+          "MessageCount",
+          "ModelFallbackCount",
+          "Outcome",
+          "ProjectID",
+          "ProjectKey",
+          "ProjectKind",
+          "ProjectName",
+          "PublicID",
+          "Search",
+          "StartedAt",
+          "Title",
+          "TotalCacheRead",
+          "TotalCacheWrite",
+          "TotalCostUSD",
+          "TotalInput",
+          "TotalOutput",
+          "Tree",
+          "UserMessageCount",
+          "Username",
+          "Visibility"
+        ],
+        "type": "object"
+      },
+      "SessionSignals": {
+        "additionalProperties": false,
+        "properties": {
+          "AssistantTurns": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ContextResetCount": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "DuplicatePromptCount": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "EditChurn": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Grade": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "LongestFailureStreak": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "NoCodeContextCount": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Outcome": {
+            "type": "string"
+          },
+          "OutcomeConfidence": {
+            "type": "string"
+          },
+          "PeakContextTokens": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "PromptCount": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Score": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "SessionID": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "ShortPromptCount": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "ThinkingPeakTokens": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ThinkingTailTokens": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ThinkingTurns": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ToolCalls": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "ToolFailures": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "ToolRetries": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "UnstructuredStart": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "AssistantTurns",
+          "ContextResetCount",
+          "DuplicatePromptCount",
+          "EditChurn",
+          "Grade",
+          "LongestFailureStreak",
+          "NoCodeContextCount",
+          "Outcome",
+          "OutcomeConfidence",
+          "PeakContextTokens",
+          "PromptCount",
+          "Score",
+          "SessionID",
+          "ShortPromptCount",
+          "ThinkingPeakTokens",
+          "ThinkingTailTokens",
+          "ThinkingTurns",
+          "ToolCalls",
+          "ToolFailures",
+          "ToolRetries",
+          "UnstructuredStart"
+        ],
+        "type": "object"
+      },
+      "SessionSnapshot": {
+        "additionalProperties": false,
+        "properties": {
+          "Audit": {
+            "$ref": "#/components/schemas/SessionAudit"
+          },
+          "DupIDs": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Outline": {
+            "items": {
+              "$ref": "#/components/schemas/Message"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "Page": {
+            "$ref": "#/components/schemas/TranscriptPage"
+          },
+          "Tools": {
+            "items": {
+              "$ref": "#/components/schemas/ToolCallView"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "Audit",
+          "DupIDs",
+          "Outline",
+          "Page",
+          "Tools"
+        ],
+        "type": "object"
+      },
+      "SessionSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "Agent": {
+            "type": "string"
+          },
+          "CostIncomplete": {
+            "type": "boolean"
+          },
+          "EndedAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "GitBranch": {
+            "type": "string"
+          },
+          "ID": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "LastActiveAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "Machine": {
+            "type": "string"
+          },
+          "MessageCount": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "ModelFallbackCount": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "PublicID": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "StartedAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "Title": {
+            "type": "string"
+          },
+          "TotalCacheRead": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "TotalCacheWrite": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "TotalCostUSD": {
+            "type": "number"
+          },
+          "TotalInput": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "TotalOutput": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "UserMessageCount": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Username": {
+            "type": "string"
+          },
+          "Visibility": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "Agent",
+          "CostIncomplete",
+          "EndedAt",
+          "GitBranch",
+          "ID",
+          "LastActiveAt",
+          "Machine",
+          "MessageCount",
+          "ModelFallbackCount",
+          "PublicID",
+          "StartedAt",
+          "Title",
+          "TotalCacheRead",
+          "TotalCacheWrite",
+          "TotalCostUSD",
+          "TotalInput",
+          "TotalOutput",
+          "UserMessageCount",
+          "Username",
+          "Visibility"
+        ],
+        "type": "object"
+      },
+      "SessionsResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "facets": {
+            "$ref": "#/components/schemas/GlobalFacetValues"
+          },
+          "filter": {
+            "$ref": "#/components/schemas/SessionFilter"
+          },
+          "has_more": {
+            "type": "boolean"
+          },
+          "sessions": {
+            "items": {
+              "$ref": "#/components/schemas/SessionRow"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "facets",
+          "filter",
+          "has_more",
+          "sessions"
+        ],
+        "type": "object"
+      },
+      "SignalTrends": {
+        "additionalProperties": false,
+        "properties": {
+          "AbandonedCount": {
+            "items": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "AbandonedRate": {
+            "items": {
+              "type": "number"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "ArchetypeShare": {
+            "items": {
+              "additionalProperties": {
+                "type": "number"
+              },
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "CompletedCount": {
+            "items": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "CompletedRate": {
+            "items": {
+              "type": "number"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "ContextHistogram": {
+            "items": {
+              "$ref": "#/components/schemas/ContextBucket"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "ContextMarkers": {
+            "items": {
+              "$ref": "#/components/schemas/ContextMarker"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "ContextResets": {
+            "items": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "GPA": {
+            "items": {
+              "type": "number"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "GradeShare": {
+            "items": {
+              "additionalProperties": {
+                "type": "number"
+              },
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "HygieneNoCode": {
+            "items": {
+              "type": "number"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "HygieneRepeated": {
+            "items": {
+              "type": "number"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "HygieneTerse": {
+            "items": {
+              "type": "number"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "HygieneUnstructured": {
+            "items": {
+              "type": "number"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "OutcomeTotal": {
+            "items": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "AbandonedCount",
+          "AbandonedRate",
+          "ArchetypeShare",
+          "CompletedCount",
+          "CompletedRate",
+          "ContextHistogram",
+          "ContextMarkers",
+          "ContextResets",
+          "GPA",
+          "GradeShare",
+          "HygieneNoCode",
+          "HygieneRepeated",
+          "HygieneTerse",
+          "HygieneUnstructured",
+          "OutcomeTotal"
+        ],
+        "type": "object"
+      },
+      "Status": {
+        "additionalProperties": false,
+        "properties": {
+          "done": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "failed": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "in_progress": {
+            "type": "boolean"
+          },
+          "started_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "total": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "done",
+          "failed",
+          "in_progress",
+          "total"
+        ],
+        "type": "object"
+      },
+      "StatusResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "SubagentRow": {
+        "additionalProperties": false,
+        "properties": {
+          "Agent": {
+            "type": "string"
+          },
+          "CostIncomplete": {
+            "type": "boolean"
+          },
+          "EndedAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "GitBranch": {
+            "type": "string"
+          },
+          "Grade": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ID": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "LastActiveAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "Machine": {
+            "type": "string"
+          },
+          "MessageCount": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "ModelFallbackCount": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Outcome": {
+            "type": "string"
+          },
+          "PublicID": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "StartedAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "Title": {
+            "type": "string"
+          },
+          "TotalCacheRead": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "TotalCacheWrite": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "TotalCostUSD": {
+            "type": "number"
+          },
+          "TotalInput": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "TotalOutput": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "UserMessageCount": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Username": {
+            "type": "string"
+          },
+          "Visibility": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "Agent",
+          "CostIncomplete",
+          "EndedAt",
+          "GitBranch",
+          "Grade",
+          "ID",
+          "LastActiveAt",
+          "Machine",
+          "MessageCount",
+          "ModelFallbackCount",
+          "Outcome",
+          "PublicID",
+          "StartedAt",
+          "Title",
+          "TotalCacheRead",
+          "TotalCacheWrite",
+          "TotalCostUSD",
+          "TotalInput",
+          "TotalOutput",
+          "UserMessageCount",
+          "Username",
+          "Visibility"
+        ],
+        "type": "object"
+      },
+      "SubagentStats": {
+        "additionalProperties": false,
+        "properties": {
+          "CostShare": {
+            "items": {
+              "type": "number"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "CostShareIncomplete": {
+            "type": "boolean"
+          },
+          "CostThroughSubagentsPct": {
+            "type": "number"
+          },
+          "DeepestTree": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "DelegateShare": {
+            "items": {
+              "type": "number"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "FanoutOrder": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "FanoutRows": {
+            "items": {
+              "additionalProperties": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "SessionsThatDelegatePct": {
+            "type": "number"
+          },
+          "SubagentSessionsInWindow": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "CostShare",
+          "CostShareIncomplete",
+          "CostThroughSubagentsPct",
+          "DeepestTree",
+          "DelegateShare",
+          "FanoutOrder",
+          "FanoutRows",
+          "SessionsThatDelegatePct",
+          "SubagentSessionsInWindow"
+        ],
+        "type": "object"
+      },
+      "TokenListItem": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "last_used_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "scope": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "created_at",
+          "id",
+          "last_used_at",
+          "name",
+          "revoked_at",
+          "scope"
+        ],
+        "type": "object"
+      },
+      "TokensResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "tokens": {
+            "items": {
+              "$ref": "#/components/schemas/TokenListItem"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "tokens"
+        ],
+        "type": "object"
+      },
+      "ToolCallView": {
+        "additionalProperties": false,
+        "properties": {
+          "CallIndex": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Category": {
+            "type": "string"
+          },
+          "Detail": {
+            "type": "string"
+          },
+          "FilePath": {
+            "type": "string"
+          },
+          "FileRelPath": {
+            "type": "string"
+          },
+          "InputBytes": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "InputMediaType": {
+            "type": "string"
+          },
+          "InputSHA": {
+            "type": "string"
+          },
+          "MessageOrdinal": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "ResultBytes": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "ResultMediaType": {
+            "type": "string"
+          },
+          "ResultSHA": {
+            "type": "string"
+          },
+          "ResultStatus": {
+            "type": "string"
+          },
+          "ToolName": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "CallIndex",
+          "Category",
+          "Detail",
+          "FilePath",
+          "FileRelPath",
+          "InputBytes",
+          "InputMediaType",
+          "InputSHA",
+          "MessageOrdinal",
+          "ResultBytes",
+          "ResultMediaType",
+          "ResultSHA",
+          "ResultStatus",
+          "ToolName"
+        ],
+        "type": "object"
+      },
+      "ToolFailSeries": {
+        "additionalProperties": false,
+        "properties": {
+          "Name": {
+            "type": "string"
+          },
+          "Rate": {
+            "items": {
+              "type": "number"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "Name",
+          "Rate"
+        ],
+        "type": "object"
+      },
+      "ToolPoint": {
+        "additionalProperties": false,
+        "properties": {
+          "Calls": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Category": {
+            "type": "string"
+          },
+          "Failures": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Name": {
+            "type": "string"
+          },
+          "Sessions": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "Calls",
+          "Category",
+          "Failures",
+          "Name",
+          "Sessions"
+        ],
+        "type": "object"
+      },
+      "ToolStat": {
+        "additionalProperties": false,
+        "properties": {
+          "Calls": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Failures": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "Calls",
+          "Failures",
+          "Name"
+        ],
+        "type": "object"
+      },
+      "ToolStats": {
+        "additionalProperties": false,
+        "properties": {
+          "Clipped": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Tools": {
+            "items": {
+              "$ref": "#/components/schemas/ToolStat"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "TotalCalls": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "TotalFailures": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Turns": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "Clipped",
+          "Tools",
+          "TotalCalls",
+          "TotalFailures",
+          "Turns"
+        ],
+        "type": "object"
+      },
+      "ToolTrends": {
+        "additionalProperties": false,
+        "properties": {
+          "FailFleet": {
+            "items": {
+              "type": "number"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "FailWorst": {
+            "items": {
+              "$ref": "#/components/schemas/ToolFailSeries"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "Mix": {
+            "items": {
+              "additionalProperties": {
+                "type": "number"
+              },
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "MixOrder": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "Reliability": {
+            "items": {
+              "$ref": "#/components/schemas/ToolPoint"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "FailFleet",
+          "FailWorst",
+          "Mix",
+          "MixOrder",
+          "Reliability"
+        ],
+        "type": "object"
+      },
+      "TranscriptPage": {
+        "additionalProperties": false,
+        "properties": {
+          "Attachments": {
+            "items": {
+              "$ref": "#/components/schemas/AttachmentView"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "EarlierCount": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Fallbacks": {
+            "items": {
+              "$ref": "#/components/schemas/ModelFallback"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "HasEarlier": {
+            "type": "boolean"
+          },
+          "More": {
+            "type": "boolean"
+          },
+          "Msgs": {
+            "items": {
+              "$ref": "#/components/schemas/Message"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "Seed": {
+            "items": {
+              "$ref": "#/components/schemas/Message"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "Tools": {
+            "items": {
+              "$ref": "#/components/schemas/ToolCallView"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "Attachments",
+          "EarlierCount",
+          "Fallbacks",
+          "HasEarlier",
+          "More",
+          "Msgs",
+          "Seed",
+          "Tools"
+        ],
+        "type": "object"
+      },
+      "TranscriptResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "page": {
+            "$ref": "#/components/schemas/TranscriptPage"
+          }
+        },
+        "required": [
+          "page"
+        ],
+        "type": "object"
+      },
+      "TreeRollup": {
+        "additionalProperties": false,
+        "properties": {
+          "CostIncomplete": {
+            "type": "boolean"
+          },
+          "CostUSD": {
+            "type": "number"
+          },
+          "SubagentCount": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "CostIncomplete",
+          "CostUSD",
+          "SubagentCount"
+        ],
+        "type": "object"
+      },
+      "Trends": {
+        "additionalProperties": false,
+        "properties": {
+          "BucketStarts": {
+            "items": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "Churn": {
+            "$ref": "#/components/schemas/ChurnTrend"
+          },
+          "Economics": {
+            "$ref": "#/components/schemas/Economics"
+          },
+          "FleetMix": {
+            "$ref": "#/components/schemas/FleetMix"
+          },
+          "Gallery": {
+            "$ref": "#/components/schemas/Gallery"
+          },
+          "Labels": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "Rhythm": {
+            "$ref": "#/components/schemas/RhythmGrid"
+          },
+          "Signals": {
+            "$ref": "#/components/schemas/SignalTrends"
+          },
+          "Subagents": {
+            "$ref": "#/components/schemas/SubagentStats"
+          },
+          "Tools": {
+            "$ref": "#/components/schemas/ToolTrends"
+          },
+          "Unit": {
+            "type": "string"
+          },
+          "Velocity": {
+            "$ref": "#/components/schemas/VelocityTrends"
+          }
+        },
+        "required": [
+          "BucketStarts",
+          "Churn",
+          "Economics",
+          "FleetMix",
+          "Gallery",
+          "Labels",
+          "Rhythm",
+          "Signals",
+          "Subagents",
+          "Tools",
+          "Unit",
+          "Velocity"
+        ],
+        "type": "object"
+      },
+      "TurnUsage": {
+        "additionalProperties": false,
+        "properties": {
+          "CacheRead": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "CacheWrite": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "ContextTokens": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "CostIncomplete": {
+            "type": "boolean"
+          },
+          "CostUSD": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "Input": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Output": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Reasoning": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "CacheRead",
+          "CacheWrite",
+          "ContextTokens",
+          "CostIncomplete",
+          "CostUSD",
+          "Input",
+          "Output",
+          "Reasoning"
+        ],
+        "type": "object"
+      },
+      "VelocityStats": {
+        "additionalProperties": false,
+        "properties": {
+          "ActiveSeconds": {
+            "type": "number"
+          },
+          "FirstResponseP50": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "MsgsPerActiveMin": {
+            "type": "number"
+          },
+          "ResponseP50": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "ResponseP90": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Sessions": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "ToolsPerActiveMin": {
+            "type": "number"
+          },
+          "Turns": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "ActiveSeconds",
+          "FirstResponseP50",
+          "MsgsPerActiveMin",
+          "ResponseP50",
+          "ResponseP90",
+          "Sessions",
+          "ToolsPerActiveMin",
+          "Turns"
+        ],
+        "type": "object"
+      },
+      "VelocityTrends": {
+        "additionalProperties": false,
+        "properties": {
+          "ActiveHours": {
+            "items": {
+              "type": "number"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "MsgsPerMin": {
+            "items": {
+              "type": "number"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "ResponseP50": {
+            "items": {
+              "type": "number"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "ResponseP90": {
+            "items": {
+              "type": "number"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "ResponseP99": {
+            "items": {
+              "type": "number"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "ToolsPerMin": {
+            "items": {
+              "type": "number"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "WallHours": {
+            "items": {
+              "type": "number"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "ActiveHours",
+          "MsgsPerMin",
+          "ResponseP50",
+          "ResponseP90",
+          "ResponseP99",
+          "ToolsPerMin",
+          "WallHours"
+        ],
+        "type": "object"
+      },
+      "Viewer": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "authenticated",
+          "is_admin",
+          "overview_public",
+          "version"
+        ],
+        "properties": {
+          "authenticated": {
+            "type": "boolean"
+          },
+          "user_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "username": {
+            "type": "string"
+          },
+          "is_admin": {
+            "type": "boolean"
+          },
+          "overview_public": {
+            "type": "boolean"
+          },
+          "csrf_token": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "ProjectionRebuild": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error",
+          "code",
+          "reparse"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "const": "projection rebuild in progress"
+          },
+          "code": {
+            "type": "string",
+            "const": "projection_rebuild"
+          },
+          "reparse": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "in_progress",
+              "done",
+              "total",
+              "failed"
+            ],
+            "properties": {
+              "in_progress": {
+                "type": "boolean"
+              },
+              "done": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "total": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "failed": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "started_at": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "bearerToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "akari token"
+      },
+      "sessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "akari_session"
+      }
     }
   },
-  "security": [{ "sessionCookie": [] }, { "bearerToken": [] }],
+  "info": {
+    "description": "HTTP API for the akari React application, session ingest clients, and account automation. Browser requests authenticate with the akari_session cookie. Non-browser clients use a bearer token with the scope required by each operation.",
+    "title": "akari API",
+    "version": "1.0.0"
+  },
+  "openapi": "3.1.0",
   "paths": {
-    "/healthz": {
-      "get": { "tags": ["Operations"], "summary": "Check database connectivity", "security": [], "responses": { "200": { "description": "Healthy" }, "503": { "description": "Database unavailable" } } }
-    },
-    "/api/v1/auth/login": {
-      "post": { "tags": ["Account"], "summary": "Create a browser session", "security": [], "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Login" } } } }, "responses": { "200": { "description": "Signed in" }, "401": { "$ref": "#/components/responses/Unauthorized" } } }
-    },
-    "/api/v1/auth/register": {
-      "post": { "tags": ["Account"], "summary": "Register an account and create a browser session", "security": [], "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Register" } } } }, "responses": { "201": { "description": "Account created" }, "400": { "$ref": "#/components/responses/BadRequest" }, "403": { "$ref": "#/components/responses/Forbidden" } } }
-    },
-    "/api/v1/auth/logout": {
-      "post": { "tags": ["Account"], "summary": "Delete the current browser session", "responses": { "200": { "description": "Signed out" } } }
-    },
-    "/api/v1/app/bootstrap": {
-      "get": { "tags": ["Application"], "summary": "Resolve the current application viewer", "security": [], "responses": { "200": { "description": "Viewer state", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Viewer" } } } } } }
-    },
-    "/api/v1/app/oauth/authorize": {
-      "get": { "tags": ["Account"], "summary": "Resolve an OAuth consent request for the signed-in user", "parameters": [{ "name": "client_id", "in": "query", "required": true, "schema": { "type": "string" } }, { "name": "redirect_uri", "in": "query", "required": true, "schema": { "type": "string", "format": "uri" } }, { "name": "state", "in": "query", "required": true, "schema": { "type": "string" } }, { "name": "code_challenge", "in": "query", "required": true, "schema": { "type": "string" } }, { "name": "resource", "in": "query", "schema": { "type": "string", "format": "uri" } }], "responses": { "200": { "description": "Consent read model" }, "400": { "$ref": "#/components/responses/BadRequest" }, "404": { "$ref": "#/components/responses/NotFound" } } }
-    },
-    "/api/v1/app/overview": {
-      "get": { "tags": ["Application"], "summary": "Read fleet usage analytics", "parameters": [{ "name": "range", "in": "query", "schema": { "type": "string", "enum": ["7d", "30d", "90d", "year", "all"] } }, { "name": "user", "in": "query", "schema": { "type": "array", "items": { "type": "integer", "format": "int64" } } }], "responses": { "200": { "description": "Overview read model" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "503": { "$ref": "#/components/responses/ProjectionRebuilding" } } }
-    },
-    "/api/v1/app/insights": {
-      "get": { "tags": ["Application"], "summary": "Read quality and workflow insights", "parameters": [{ "name": "range", "in": "query", "schema": { "type": "string", "enum": ["7d", "30d", "90d", "year", "all"] } }], "responses": { "200": { "description": "Insights read model" }, "400": { "$ref": "#/components/responses/BadRequest" }, "503": { "$ref": "#/components/responses/ProjectionRebuilding" } } }
-    },
-    "/api/v1/app/projects": {
-      "get": { "tags": ["Application"], "summary": "List projects with lifetime rollups", "responses": { "200": { "description": "Project collection" }, "503": { "$ref": "#/components/responses/ProjectionRebuilding" } } }
-    },
-    "/api/v1/app/projects/{id}": {
-      "get": { "tags": ["Application"], "summary": "Read one project with windowed sessions and analytics", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }, { "name": "range", "in": "query", "schema": { "type": "string", "enum": ["7d", "30d", "90d", "year", "all"] } }, { "name": "agent", "in": "query", "schema": { "type": "string" } }, { "name": "machine", "in": "query", "schema": { "type": "string" } }, { "name": "user", "in": "query", "schema": { "type": "string" } }], "responses": { "200": { "description": "Project read model" }, "400": { "$ref": "#/components/responses/BadRequest" }, "404": { "$ref": "#/components/responses/NotFound" }, "503": { "$ref": "#/components/responses/ProjectionRebuilding" } } }
-    },
-    "/api/v1/app/projects/{id}/publication": {
-      "put": { "tags": ["Application"], "summary": "Publish or unpublish a project overview", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Publication" } } } }, "responses": { "200": { "description": "Publication updated" }, "404": { "$ref": "#/components/responses/NotFound" } } }
-    },
-    "/api/v1/app/sessions": {
-      "get": { "tags": ["Application"], "summary": "Search and filter sessions", "parameters": [{ "name": "q", "in": "query", "schema": { "type": "string", "maxLength": 200 } }, { "name": "project", "in": "query", "schema": { "type": "integer", "format": "int64", "minimum": 1 } }, { "name": "agent", "in": "query", "schema": { "type": "string" } }, { "name": "machine", "in": "query", "schema": { "type": "string" } }, { "name": "user", "in": "query", "schema": { "type": "string" } }, { "name": "grade", "in": "query", "schema": { "type": "string", "enum": ["A", "B", "C", "D", "F", "unscored"] } }, { "name": "outcome", "in": "query", "schema": { "type": "string", "enum": ["completed", "abandoned", "errored", "unknown"] } }, { "name": "range", "in": "query", "schema": { "type": "string", "enum": ["7d", "30d", "90d", "year", "all"] } }, { "name": "sort", "in": "query", "schema": { "type": "string", "enum": ["updated", "messages", "tokens", "cost"] } }, { "name": "dir", "in": "query", "schema": { "type": "string", "enum": ["asc", "desc"] } }, { "name": "empty", "in": "query", "schema": { "type": "string", "enum": ["1"] } }, { "name": "subagents", "in": "query", "schema": { "type": "string", "enum": ["1"] } }, { "name": "spanned", "in": "query", "schema": { "type": "string", "enum": ["1"] } }, { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 200, "default": 100 } }, { "name": "after", "in": "query", "schema": { "type": "integer", "format": "int64", "minimum": 1 } }, { "name": "after_value", "in": "query", "description": "Observed sort value paired with after for stable keyset pagination.", "schema": { "type": "string" } }], "responses": { "200": { "description": "Session collection and facets" }, "400": { "$ref": "#/components/responses/BadRequest" }, "503": { "$ref": "#/components/responses/ProjectionRebuilding" } } }
-    },
-    "/api/v1/app/sessions/{id}": {
-      "get": { "tags": ["Application"], "summary": "Read a session audit and transcript tail", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }], "responses": { "200": { "description": "Session snapshot" }, "404": { "$ref": "#/components/responses/NotFound" }, "503": { "$ref": "#/components/responses/ProjectionRebuilding" } } },
-      "delete": { "tags": ["Application"], "summary": "Delete a session", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }], "responses": { "200": { "description": "Deleted" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" } } }
-    },
-    "/api/v1/app/sessions/{id}/transcript": {
-      "get": { "tags": ["Application"], "summary": "Read an earlier transcript window", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }, { "name": "before", "in": "query", "required": true, "schema": { "type": "integer", "minimum": 0 } }], "responses": { "200": { "description": "Transcript page" }, "503": { "$ref": "#/components/responses/ProjectionRebuilding" } } }
-    },
-    "/api/v1/app/sessions/{id}/append": {
-      "get": { "tags": ["Application"], "summary": "Read a session's turns past a rendered ordinal", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }, { "name": "after", "in": "query", "required": true, "schema": { "type": "integer", "minimum": 0 } }], "responses": { "200": { "description": "Session snapshot fragment" }, "400": { "$ref": "#/components/responses/BadRequest" }, "404": { "$ref": "#/components/responses/NotFound" } } }
-    },
-    "/api/v1/app/sessions/{id}/publication": {
-      "put": { "tags": ["Application"], "summary": "Publish or unpublish an owned session", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Publication" } } } }, "responses": { "200": { "description": "Publication updated" }, "404": { "$ref": "#/components/responses/NotFound" } } }
-    },
     "/api/v1/app/account": {
-      "get": { "tags": ["Account"], "summary": "Read account tokens, connections, invites, and rebuild state", "responses": { "200": { "description": "Account read model" } } }
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountResponse"
+                }
+              }
+            },
+            "description": "Account read model"
+          }
+        },
+        "summary": "Read account tokens, connections, invites, and rebuild state",
+        "tags": [
+          "Account"
+        ]
+      }
     },
     "/api/v1/app/account/connections/{client_id}": {
-      "delete": { "tags": ["Account"], "summary": "Revoke an OAuth client connection", "parameters": [{ "name": "client_id", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Connection revoked" }, "404": { "$ref": "#/components/responses/NotFound" } } }
+      "delete": {
+        "parameters": [
+          {
+            "name": "client_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevokedResponse"
+                }
+              }
+            },
+            "description": "Connection revoked"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "summary": "Revoke an OAuth client connection",
+        "tags": [
+          "Account"
+        ]
+      }
     },
     "/api/v1/app/account/invites/{id}": {
-      "delete": { "tags": ["Account"], "summary": "Revoke a registration invitation", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }], "responses": { "200": { "description": "Invite revoked" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" } } }
-    },
-    "/api/v1/tokens": {
-      "get": { "tags": ["Account"], "summary": "List API tokens", "responses": { "200": { "description": "Token collection" } } },
-      "post": { "tags": ["Account"], "summary": "Create an API token", "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateToken" } } } }, "responses": { "201": { "description": "Token created; the plaintext secret is returned once" } } }
-    },
-    "/api/v1/tokens/{id}/revoke": {
-      "post": { "tags": ["Account"], "summary": "Revoke an API token", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }], "responses": { "200": { "description": "Revoked" } } }
-    },
-    "/api/v1/invites": {
-      "post": { "tags": ["Account"], "summary": "Create a registration invitation", "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateInvite" } } } }, "responses": { "201": { "description": "Invite created; the plaintext secret is returned once" }, "403": { "$ref": "#/components/responses/Forbidden" } } }
+      "delete": {
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevokedResponse"
+                }
+              }
+            },
+            "description": "Invite revoked"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "summary": "Revoke a registration invitation",
+        "tags": [
+          "Account"
+        ]
+      }
     },
     "/api/v1/app/account/overview-publication": {
-      "put": { "tags": ["Account"], "summary": "Publish or unpublish the current user's overview", "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Publication" } } } }, "responses": { "200": { "description": "Publication updated" } } }
+      "put": {
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Publication"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicationResponse"
+                }
+              }
+            },
+            "description": "Publication updated"
+          }
+        },
+        "summary": "Publish or unpublish the current user's overview",
+        "tags": [
+          "Account"
+        ]
+      }
     },
-    "/api/v1/app/reparse": {
-      "post": { "tags": ["Operations"], "summary": "Queue a full projection rebuild", "responses": { "202": { "description": "Rebuild queued" }, "403": { "$ref": "#/components/responses/Forbidden" } } }
-    },
-    "/api/v1/reparse/status": {
-      "get": { "tags": ["Operations"], "summary": "Read projection rebuild progress", "responses": { "200": { "description": "Rebuild status" } } }
-    },
-    "/api/v1/reparse/events": {
-      "get": { "tags": ["Operations"], "summary": "Stream projection rebuild progress", "responses": { "200": { "description": "Server-sent rebuild events", "content": { "text/event-stream": { "schema": { "type": "string" } } } } } }
-    },
-    "/api/v1/session/{id}/blob/{sha256}": {
-      "get": { "tags": ["Application"], "summary": "Download a content-addressed tool body referenced by a visible session", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }, { "name": "sha256", "in": "path", "required": true, "schema": { "type": "string", "pattern": "^[a-f0-9]{64}$" } }], "responses": { "200": { "description": "Blob bytes" }, "404": { "$ref": "#/components/responses/NotFound" } } }
-    },
-    "/api/v1/ingest/session": {
-      "post": { "tags": ["Ingest"], "summary": "Announce or reconcile a session upload", "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AnnounceSession" } } } }, "responses": { "200": { "description": "Upload state" }, "201": { "description": "Session created" }, "403": { "$ref": "#/components/responses/Forbidden" } } }
-    },
-    "/api/v1/ingest/session/{id}/chunk": {
-      "post": { "tags": ["Ingest"], "summary": "Append raw session bytes", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }], "requestBody": { "required": true, "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary" } } } }, "responses": { "200": { "description": "Chunk accepted" } } }
-    },
-    "/api/v1/ingest/session/{id}/finalize": {
-      "post": { "tags": ["Ingest"], "summary": "Declare a session terminal and grade it", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }], "responses": { "200": { "description": "Finalized" } } }
-    },
-    "/api/v1/ingest/session/{id}/reset": {
-      "post": { "tags": ["Ingest"], "summary": "Reset a session upload", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }], "responses": { "200": { "description": "Reset" } } }
-    },
-    "/api/v1/ingest/blobs/check": {
-      "post": { "tags": ["Ingest"], "summary": "Check which content-addressed blobs are missing", "responses": { "200": { "description": "Missing blob hashes" } } }
-    },
-    "/api/v1/ingest/blob/{sha256}": {
-      "put": { "tags": ["Ingest"], "summary": "Upload a content-addressed blob", "parameters": [{ "name": "sha256", "in": "path", "required": true, "schema": { "type": "string", "pattern": "^[a-f0-9]{64}$" } }], "requestBody": { "required": true, "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary" } } } }, "responses": { "201": { "description": "Stored" }, "204": { "description": "Already present" } } }
-    },
-    "/api/v1/app/public/users/{username}": {
-      "get": { "tags": ["Public"], "summary": "Read a published user overview", "security": [], "parameters": [{ "name": "username", "in": "path", "required": true, "schema": { "type": "string" } }, { "name": "range", "in": "query", "schema": { "type": "string", "enum": ["7d", "30d", "90d", "year", "all"] } }], "responses": { "200": { "description": "Published overview" }, "400": { "$ref": "#/components/responses/BadRequest" }, "404": { "$ref": "#/components/responses/NotFound" }, "503": { "$ref": "#/components/responses/ProjectionRebuilding" } } }
-    },
-    "/api/v1/app/public/projects/{id}": {
-      "get": { "tags": ["Public"], "summary": "Read a published project overview", "security": [], "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }, { "name": "range", "in": "query", "schema": { "type": "string", "enum": ["7d", "30d", "90d", "year", "all"] } }], "responses": { "200": { "description": "Published project overview" }, "400": { "$ref": "#/components/responses/BadRequest" }, "404": { "$ref": "#/components/responses/NotFound" }, "503": { "$ref": "#/components/responses/ProjectionRebuilding" } } }
-    },
-    "/api/v1/app/public/sessions/{public_id}": {
-      "get": { "tags": ["Public"], "summary": "Read a published session", "security": [], "parameters": [{ "name": "public_id", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Published session snapshot" }, "404": { "$ref": "#/components/responses/NotFound" }, "503": { "$ref": "#/components/responses/ProjectionRebuilding" } } }
-    },
-    "/api/v1/app/public/sessions/{public_id}/transcript": {
-      "get": { "tags": ["Public"], "summary": "Read an earlier published transcript window", "security": [], "parameters": [{ "name": "public_id", "in": "path", "required": true, "schema": { "type": "string" } }, { "name": "before", "in": "query", "required": true, "schema": { "type": "integer", "minimum": 0 } }], "responses": { "200": { "description": "Published transcript page" }, "404": { "$ref": "#/components/responses/NotFound" }, "503": { "$ref": "#/components/responses/ProjectionRebuilding" } } }
+    "/api/v1/app/bootstrap": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Viewer"
+                }
+              }
+            },
+            "description": "Viewer state"
+          }
+        },
+        "security": [],
+        "summary": "Resolve the current application viewer",
+        "tags": [
+          "Application"
+        ]
+      }
     },
     "/api/v1/app/guide/": {
-      "get": { "tags": ["Public"], "summary": "Read the user guide index", "security": [], "responses": { "200": { "description": "Guide chapter and chapter index" } } }
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GuideResponse"
+                }
+              }
+            },
+            "description": "Guide chapter and chapter index"
+          }
+        },
+        "security": [],
+        "summary": "Read the user guide index",
+        "tags": [
+          "Public"
+        ]
+      }
     },
     "/api/v1/app/guide/{slug}": {
-      "get": { "tags": ["Public"], "summary": "Read a user guide chapter", "security": [], "parameters": [{ "name": "slug", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Guide chapter and chapter index" }, "404": { "$ref": "#/components/responses/NotFound" } } }
+      "get": {
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GuideResponse"
+                }
+              }
+            },
+            "description": "Guide chapter and chapter index"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "security": [],
+        "summary": "Read a user guide chapter",
+        "tags": [
+          "Public"
+        ]
+      }
+    },
+    "/api/v1/app/insights": {
+      "get": {
+        "parameters": [
+          {
+            "name": "range",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "7d",
+                "30d",
+                "90d",
+                "year",
+                "all"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InsightsResponse"
+                }
+              }
+            },
+            "description": "Insights read model"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "503": {
+            "$ref": "#/components/responses/ProjectionRebuilding"
+          }
+        },
+        "summary": "Read quality and workflow insights",
+        "tags": [
+          "Application"
+        ]
+      }
+    },
+    "/api/v1/app/oauth/authorize": {
+      "get": {
+        "parameters": [
+          {
+            "name": "client_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "redirect_uri",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uri"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "code_challenge",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "resource",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "uri"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthConsentResponse"
+                }
+              }
+            },
+            "description": "Consent read model"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "summary": "Resolve an OAuth consent request for the signed-in user",
+        "tags": [
+          "Account"
+        ]
+      }
+    },
+    "/api/v1/app/overview": {
+      "get": {
+        "parameters": [
+          {
+            "name": "range",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "7d",
+                "30d",
+                "90d",
+                "year",
+                "all"
+              ]
+            }
+          },
+          {
+            "name": "user",
+            "in": "query",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "format": "int64"
+              }
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OverviewResponse"
+                }
+              }
+            },
+            "description": "Overview read model"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/ProjectionRebuilding"
+          }
+        },
+        "summary": "Read fleet usage analytics",
+        "tags": [
+          "Application"
+        ]
+      }
+    },
+    "/api/v1/app/projects": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectsResponse"
+                }
+              }
+            },
+            "description": "Project collection"
+          },
+          "503": {
+            "$ref": "#/components/responses/ProjectionRebuilding"
+          }
+        },
+        "summary": "List projects with lifetime rollups",
+        "tags": [
+          "Application"
+        ]
+      }
+    },
+    "/api/v1/app/projects/{id}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "range",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "7d",
+                "30d",
+                "90d",
+                "year",
+                "all"
+              ]
+            }
+          },
+          {
+            "name": "agent",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "machine",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "user",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectResponse"
+                }
+              }
+            },
+            "description": "Project read model"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/ProjectionRebuilding"
+          }
+        },
+        "summary": "Read one project with windowed sessions and analytics",
+        "tags": [
+          "Application"
+        ]
+      }
+    },
+    "/api/v1/app/projects/{id}/publication": {
+      "put": {
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Publication"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicationResponse"
+                }
+              }
+            },
+            "description": "Publication updated"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "summary": "Publish or unpublish a project overview",
+        "tags": [
+          "Application"
+        ]
+      }
+    },
+    "/api/v1/app/public/projects/{id}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "range",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "7d",
+                "30d",
+                "90d",
+                "year",
+                "all"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicProjectResponse"
+                }
+              }
+            },
+            "description": "Published project overview"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/ProjectionRebuilding"
+          }
+        },
+        "security": [],
+        "summary": "Read a published project overview",
+        "tags": [
+          "Public"
+        ]
+      }
+    },
+    "/api/v1/app/public/sessions/{public_id}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "public_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicSessionResponse"
+                }
+              }
+            },
+            "description": "Published session snapshot"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/ProjectionRebuilding"
+          }
+        },
+        "security": [],
+        "summary": "Read a published session",
+        "tags": [
+          "Public"
+        ]
+      }
+    },
+    "/api/v1/app/public/sessions/{public_id}/transcript": {
+      "get": {
+        "parameters": [
+          {
+            "name": "public_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicSessionResponse"
+                }
+              }
+            },
+            "description": "Published transcript page"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/ProjectionRebuilding"
+          }
+        },
+        "security": [],
+        "summary": "Read an earlier published transcript window",
+        "tags": [
+          "Public"
+        ]
+      }
+    },
+    "/api/v1/app/public/users/{username}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "range",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "7d",
+                "30d",
+                "90d",
+                "year",
+                "all"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicOverviewResponse"
+                }
+              }
+            },
+            "description": "Published overview"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/ProjectionRebuilding"
+          }
+        },
+        "security": [],
+        "summary": "Read a published user overview",
+        "tags": [
+          "Public"
+        ]
+      }
+    },
+    "/api/v1/app/reparse": {
+      "post": {
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReparseStatusResponse"
+                }
+              }
+            },
+            "description": "Rebuild queued"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "summary": "Queue a full projection rebuild",
+        "tags": [
+          "Operations"
+        ]
+      }
+    },
+    "/api/v1/app/sessions": {
+      "get": {
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            }
+          },
+          {
+            "name": "project",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "agent",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "machine",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "user",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "grade",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "A",
+                "B",
+                "C",
+                "D",
+                "F",
+                "unscored"
+              ]
+            }
+          },
+          {
+            "name": "outcome",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "completed",
+                "abandoned",
+                "errored",
+                "unknown"
+              ]
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "range",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "7d",
+                "30d",
+                "90d",
+                "year",
+                "all"
+              ]
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "updated",
+                "messages",
+                "tokens",
+                "cost"
+              ]
+            }
+          },
+          {
+            "name": "dir",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ]
+            }
+          },
+          {
+            "name": "empty",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1"
+              ]
+            }
+          },
+          {
+            "name": "subagents",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1"
+              ]
+            }
+          },
+          {
+            "name": "spanned",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 100
+            }
+          },
+          {
+            "name": "after_value",
+            "in": "query",
+            "description": "Observed sort value paired with after for stable keyset pagination.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionsResponse"
+                }
+              }
+            },
+            "description": "Session collection and facets"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "503": {
+            "$ref": "#/components/responses/ProjectionRebuilding"
+          }
+        },
+        "summary": "Search and filter sessions",
+        "tags": [
+          "Application"
+        ]
+      }
+    },
+    "/api/v1/app/sessions/{id}": {
+      "delete": {
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletedSessionResponse"
+                }
+              }
+            },
+            "description": "Deleted"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "summary": "Delete a session",
+        "tags": [
+          "Application"
+        ]
+      },
+      "get": {
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionResponse"
+                }
+              }
+            },
+            "description": "Session snapshot"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/ProjectionRebuilding"
+          }
+        },
+        "summary": "Read a session audit and transcript tail",
+        "tags": [
+          "Application"
+        ]
+      }
+    },
+    "/api/v1/app/sessions/{id}/publication": {
+      "put": {
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Publication"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionPublicationResponse"
+                }
+              }
+            },
+            "description": "Publication updated"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "summary": "Publish or unpublish an owned session",
+        "tags": [
+          "Application"
+        ]
+      }
+    },
+    "/api/v1/app/sessions/{id}/transcript": {
+      "get": {
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TranscriptResponse"
+                }
+              }
+            },
+            "description": "Transcript page"
+          },
+          "503": {
+            "$ref": "#/components/responses/ProjectionRebuilding"
+          }
+        },
+        "summary": "Read an earlier transcript window",
+        "tags": [
+          "Application"
+        ]
+      }
+    },
+    "/api/v1/auth/login": {
+      "post": {
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Login"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            },
+            "description": "Signed in"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "security": [],
+        "summary": "Create a browser session",
+        "tags": [
+          "Account"
+        ]
+      }
+    },
+    "/api/v1/auth/logout": {
+      "post": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            },
+            "description": "Signed out"
+          }
+        },
+        "summary": "Delete the current browser session",
+        "tags": [
+          "Account"
+        ]
+      }
+    },
+    "/api/v1/auth/register": {
+      "post": {
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Register"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegisteredUserResponse"
+                }
+              }
+            },
+            "description": "Account created"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "security": [],
+        "summary": "Register an account and create a browser session",
+        "tags": [
+          "Account"
+        ]
+      }
+    },
+    "/api/v1/ingest/blob/{sha256}": {
+      "put": {
+        "parameters": [
+          {
+            "name": "sha256",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Stored"
+          },
+          "204": {
+            "description": "Already present"
+          }
+        },
+        "summary": "Upload a content-addressed blob",
+        "tags": [
+          "Ingest"
+        ]
+      }
+    },
+    "/api/v1/ingest/blobs/check": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Missing blob hashes"
+          }
+        },
+        "summary": "Check which content-addressed blobs are missing",
+        "tags": [
+          "Ingest"
+        ]
+      }
+    },
+    "/api/v1/ingest/session": {
+      "post": {
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnnounceSession"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Upload state"
+          },
+          "201": {
+            "description": "Session created"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "summary": "Announce or reconcile a session upload",
+        "tags": [
+          "Ingest"
+        ]
+      }
+    },
+    "/api/v1/ingest/session/{id}/chunk": {
+      "post": {
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Chunk accepted"
+          }
+        },
+        "summary": "Append raw session bytes",
+        "tags": [
+          "Ingest"
+        ]
+      }
+    },
+    "/api/v1/ingest/session/{id}/finalize": {
+      "post": {
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Finalized"
+          }
+        },
+        "summary": "Declare a session terminal and grade it",
+        "tags": [
+          "Ingest"
+        ]
+      }
+    },
+    "/api/v1/ingest/session/{id}/reset": {
+      "post": {
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Reset"
+          }
+        },
+        "summary": "Reset a session upload",
+        "tags": [
+          "Ingest"
+        ]
+      }
+    },
+    "/api/v1/invites": {
+      "post": {
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateInvite"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedInviteResponse"
+                }
+              }
+            },
+            "description": "Invite created; the plaintext secret is returned once"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "summary": "Create a registration invitation",
+        "tags": [
+          "Account"
+        ]
+      }
+    },
+    "/api/v1/reparse/events": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Server-sent rebuild events"
+          }
+        },
+        "summary": "Stream projection rebuild progress",
+        "tags": [
+          "Operations"
+        ]
+      }
+    },
+    "/api/v1/reparse/status": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReparseStatusResponse"
+                }
+              }
+            },
+            "description": "Rebuild status"
+          }
+        },
+        "summary": "Read projection rebuild progress",
+        "tags": [
+          "Operations"
+        ]
+      }
+    },
+    "/api/v1/session/{id}/blob/{sha256}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "sha256",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Blob bytes"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "summary": "Download a content-addressed tool body referenced by a visible session",
+        "tags": [
+          "Application"
+        ]
+      }
+    },
+    "/api/v1/tokens": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokensResponse"
+                }
+              }
+            },
+            "description": "Token collection"
+          }
+        },
+        "summary": "List API tokens",
+        "tags": [
+          "Account"
+        ]
+      },
+      "post": {
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateToken"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedTokenResponse"
+                }
+              }
+            },
+            "description": "Token created; the plaintext secret is returned once"
+          }
+        },
+        "summary": "Create an API token",
+        "tags": [
+          "Account"
+        ]
+      }
+    },
+    "/api/v1/tokens/{id}/revoke": {
+      "post": {
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            },
+            "description": "Revoked"
+          }
+        },
+        "summary": "Revoke an API token",
+        "tags": [
+          "Account"
+        ]
+      }
+    },
+    "/healthz": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Healthy"
+          },
+          "503": {
+            "description": "Database unavailable"
+          }
+        },
+        "security": [],
+        "summary": "Check database connectivity",
+        "tags": [
+          "Operations"
+        ]
+      }
+    },
+    "/api/v1/app/sessions/{id}/append": {
+      "get": {
+        "tags": [
+          "Application"
+        ],
+        "summary": "Read a session's turns past a rendered ordinal",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session snapshot fragment"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
     }
-  }
+  },
+  "security": [
+    {
+      "sessionCookie": []
+    },
+    {
+      "bearerToken": []
+    }
+  ],
+  "servers": [
+    {
+      "description": "This akari instance",
+      "url": "/"
+    }
+  ],
+  "tags": [
+    {
+      "description": "Read models consumed by the embedded React application.",
+      "name": "Application"
+    },
+    {
+      "description": "Authentication, tokens, invitations, and account controls.",
+      "name": "Account"
+    },
+    {
+      "description": "Session and content-addressed blob upload protocol.",
+      "name": "Ingest"
+    },
+    {
+      "description": "Published read-only views that require no credential.",
+      "name": "Public"
+    },
+    {
+      "description": "Health and projection rebuild state.",
+      "name": "Operations"
+    }
+  ]
 }

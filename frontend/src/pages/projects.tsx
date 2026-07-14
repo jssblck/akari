@@ -25,19 +25,13 @@ import {
 import "../projects.css";
 import { withBase } from "../base";
 import type {
-  Analytics,
-  DateRange,
-  Insights,
   Project,
+  ProjectResponse,
+  ProjectsResponse,
   SessionSummary,
 } from "../types";
 import { InsightsPanel } from "./insights";
 import { AnalyticsPanel } from "./overview";
-
-type ProjectsResponse = {
-  projects: Project[];
-  sparklines: Record<string, number[]>;
-};
 
 // isLocalKind mirrors the server's IsLocalKind: a standalone or orphaned
 // project has no git remote, so it groups and labels apart from a repository
@@ -227,7 +221,7 @@ export function ProjectsPage() {
       </header>
       <AsyncView state={state}>
         {(data) =>
-          data.projects.length === 0 ? (
+          (data.projects ?? []).length === 0 ? (
             <section className="empty-state">
               <h2>No projects yet</h2>
               <p>
@@ -245,7 +239,7 @@ export function ProjectsPage() {
                 projects={data.projects.filter(
                   (project) => !isLocalKind(project.Kind),
                 )}
-                sparklines={data.sparklines}
+                sparklines={data.sparklines ?? {}}
                 showKind={false}
               />
               <ProjectSection
@@ -253,7 +247,7 @@ export function ProjectsPage() {
                 projects={data.projects.filter((project) =>
                   isLocalKind(project.Kind),
                 )}
-                sparklines={data.sparklines}
+                sparklines={data.sparklines ?? {}}
                 showKind
               />
             </>
@@ -263,29 +257,6 @@ export function ProjectsPage() {
     </div>
   );
 }
-
-type ProjectResponse = {
-  project: Project;
-  range: string;
-  ranges: DateRange[];
-  sessions: SessionSummary[] | null;
-  remainder: {
-    Sessions: number;
-    Input: number;
-    Output: number;
-    CacheRead: number;
-    CacheWrite: number;
-    CostUSD: number;
-    CostIncomplete: boolean;
-  };
-  facets: {
-    Agents: string[] | null;
-    Machines: string[] | null;
-    Users: string[] | null;
-  };
-  analytics: Analytics;
-  insights: Insights;
-};
 
 // ProjectToolbar is the project page's session filter: three auto-applying
 // selects (Agent, User, Machine) that narrow the whole scoped view (the usage

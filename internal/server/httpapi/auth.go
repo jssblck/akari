@@ -280,8 +280,8 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "start session")
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"id": u.ID, "username": u.Username, "is_admin": u.IsAdmin,
+	writeJSON(w, http.StatusCreated, registeredUserResponse{
+		ID: u.ID, Username: u.Username, IsAdmin: u.IsAdmin,
 	})
 }
 
@@ -305,7 +305,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "start session")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"username": u.Username, "is_admin": u.IsAdmin})
+	writeJSON(w, http.StatusOK, loginResponse{Username: u.Username, IsAdmin: u.IsAdmin})
 }
 
 // authenticatePassword keeps every failed local login on one externally visible
@@ -357,7 +357,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "delete session")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "logged out"})
+	writeJSON(w, http.StatusOK, statusResponse{Status: "logged out"})
 }
 
 func setPrivateNoStore(w http.ResponseWriter) {
@@ -397,8 +397,8 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The plaintext token is returned exactly once, here.
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"id": id, "name": req.Name, "scope": req.Scope, "token": token,
+	writeJSON(w, http.StatusCreated, createdTokenResponse{
+		ID: id, Name: req.Name, Scope: req.Scope, Token: token,
 	})
 }
 
@@ -409,14 +409,14 @@ func (s *Server) handleListTokens(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "list tokens")
 		return
 	}
-	out := make([]map[string]any, 0, len(tokens))
+	out := make([]tokenListItem, 0, len(tokens))
 	for _, t := range tokens {
-		out = append(out, map[string]any{
-			"id": t.ID, "name": t.Name, "scope": t.Scope,
-			"created_at": t.CreatedAt, "last_used_at": t.LastUsedAt, "revoked_at": t.RevokedAt,
+		out = append(out, tokenListItem{
+			ID: t.ID, Name: t.Name, Scope: t.Scope,
+			CreatedAt: t.CreatedAt, LastUsedAt: t.LastUsedAt, RevokedAt: t.RevokedAt,
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"tokens": out})
+	writeJSON(w, http.StatusOK, tokensResponse{Tokens: out})
 }
 
 func (s *Server) handleRevokeToken(w http.ResponseWriter, r *http.Request) {
@@ -430,7 +430,7 @@ func (s *Server) handleRevokeToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "revoke token")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
+	writeJSON(w, http.StatusOK, statusResponse{Status: "revoked"})
 }
 
 type createInviteRequest struct {
@@ -459,8 +459,8 @@ func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "store invite")
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"id": id, "note": req.Note, "invite_token": token, "expires_at": expires,
+	writeJSON(w, http.StatusCreated, createdInviteResponse{
+		ID: id, Note: req.Note, InviteToken: token, ExpiresAt: expires,
 	})
 }
 

@@ -19,15 +19,7 @@ import {
 } from "../format";
 import "../overview.css";
 import { withBase } from "../base";
-import type { Analytics, Breakdown, DateRange, User, Viewer } from "../types";
-
-type OverviewResponse = {
-  range: string;
-  ranges: DateRange[];
-  users: User[];
-  selected_user_ids: number[] | null;
-  analytics: Analytics;
-};
+import type { Analytics, Breakdown, OverviewResponse, Viewer } from "../types";
 
 // formatSavings mirrors the server's FmtSavings: a non-negative saving reads
 // "saved $X", and the rare negative (cache written but never re-read enough
@@ -266,13 +258,13 @@ export function OverviewPage() {
                   Fleet usage across projects, models, agents, and accounts.
                 </p>
               </div>
-              <RangeTabs ranges={data.ranges} active={data.range} />
+              <RangeTabs ranges={data.ranges ?? []} active={data.range} />
             </header>
-            {data.users.length > 1 ? (
+            {(data.users ?? []).length > 1 ? (
               <fieldset className="filter-row">
                 <legend className="sr-only">Account filter</legend>
                 <span className="label">Accounts</span>
-                {data.users.map((user) => (
+                {(data.users ?? []).map((user) => (
                   <button
                     type="button"
                     key={user.ID}

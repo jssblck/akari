@@ -47,13 +47,11 @@ import {
 } from "../format";
 import "../sessions.css";
 import { withBase } from "../base";
-import type { SessionSnapshot, TranscriptPage } from "../types";
-
-type SessionResponse = {
-  snapshot: SessionSnapshot;
-  owner: boolean;
-  can_delete: boolean;
-};
+import type {
+  SessionResponse,
+  SessionSnapshot,
+  TranscriptPage,
+} from "../types";
 
 export function SessionPage() {
   const { id = "" } = useParams();
