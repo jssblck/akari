@@ -1,7 +1,12 @@
 .git
 .gitignore
 .gitattributes
+/build
+/frontend/node_modules
 *.md
+*.exe
+*.test
+*.out
 .dockerignore
 Dockerfile
 docker-compose.yml

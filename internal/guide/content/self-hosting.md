@@ -355,18 +355,22 @@ running code and its reported version are reproducible.
 
 ### Container deployment
 
-Check out the release tag, build a versioned image, and redeploy it through the
-same container orchestrator that runs the current image:
+Pull the versioned image from GitHub Container Registry and redeploy it through
+the same container orchestrator that runs the current image. Release images
+support Linux amd64 and arm64:
 
 ```sh
-git checkout v0.1.0
-docker build --build-arg VERSION=v0.1.0 -t registry.example.com/akari-server:v0.1.0 .
-docker push registry.example.com/akari-server:v0.1.0
+docker pull ghcr.io/jssblck/akari-server:v0.1.0
+docker run --rm ghcr.io/jssblck/akari-server:v0.1.0 --version
+docker image inspect --format '{{index .RepoDigests 0}}' \
+  ghcr.io/jssblck/akari-server:v0.1.0
 ```
 
-Update the deployment to that immutable image tag. Do not replace a binary
-inside a running container; the next container restart would restore the old
-image contents.
+Update the deployment to that versioned image. Stable releases also update
+`latest`, but production deployments should use `vX.Y.Z` or, when the deployed
+bytes must remain fixed across release-workflow reruns, the digest printed
+above. Do not replace a binary inside a running container; the next container
+restart would restore the old image contents.
 
 ### Package or managed binary
 

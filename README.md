@@ -47,6 +47,12 @@ Server, Linux:
 curl -fsSL https://raw.githubusercontent.com/jssblck/akari/main/scripts/install-server.sh | sh
 ```
 
+Server OCI image, Linux amd64 and arm64:
+
+```sh
+docker pull ghcr.io/jssblck/akari-server:v0.1.0
+```
+
 Add `-s -- --systemd` to the server command to also install a managed systemd
 service, a dedicated `akari` user, and an environment file at
 `/etc/akari/server.env`. The client updates itself in place with `akari update`.

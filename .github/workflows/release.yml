@@ -1,23 +1,25 @@
 name: Release
 
-# Build and publish akari releases to GitHub Releases.
+# Build and publish akari releases to GitHub Releases and GHCR.
 #
 # On a version tag (v*) this cross-compiles every target (the akari-server for
 # Linux, the akari client for Linux, macOS, and Windows), packages each into an
-# archive, computes a SHA256SUMS over them, then assembles a GitHub Release as a
-# draft (uploading the assets and generating notes from the pull requests merged
-# since the previous tag, the "releases as changelog" pattern) and flips it to
-# published as the final step. Assembling the draft first means the release only
-# becomes visible once it is complete, never half-populated. Edit the generated
-# notes afterward if you want to expand them.
+# archive, computes a SHA256SUMS over them, builds the server image for Linux
+# amd64 and arm64, and publishes that image to GHCR. It then assembles a GitHub
+# Release as a draft (uploading the assets and generating notes from the pull
+# requests merged since the previous tag, the "releases as changelog" pattern)
+# and flips it to published as the final step. Assembling the draft first means
+# the release only becomes visible once it is complete, never half-populated.
+# Edit the generated notes afterward if you want to expand them.
 #
 # On every pull request and every push to main this runs as a DRY RUN: it
-# executes the exact same build and packaging matrix and computes SHA256SUMS but
-# stops short of creating a GitHub Release. That makes the release pipeline a
-# PR-time gate, so a change that breaks the release build fails on the PR instead
-# of when a tag is cut. The only difference between a dry run and a real release
-# is whether the ref is a version tag. workflow_dispatch triggers a manual dry
-# run on any ref.
+# executes the exact same binary build and packaging matrix, computes
+# SHA256SUMS, builds both image platforms, and runs `akari-server --version`
+# inside the amd64 and arm64 images. It stops short of creating a GitHub Release
+# or pushing the image. That makes the release pipeline a PR-time gate, so a
+# change that breaks a release artifact fails on the PR instead of when a tag is
+# cut. The only difference between a dry run and a real release is a version-tag
+# push event. workflow_dispatch triggers a manual dry run on any ref.
 #
 # Go style: every target cross-compiles from a single Linux runner with
 # CGO_ENABLED=0 (akari is pure Go), so there is no per-OS build matrix of
@@ -62,11 +64,24 @@ jobs:
       - name: Extract version from tag
         id: version
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          GIT_REF: ${{ github.ref }}
+          GIT_REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+          if [[ "$EVENT_NAME" == "push" && "$GIT_REF" == refs/tags/v* ]]; then
             # A version tag is the one and only path that publishes a release.
-            TAG="${{ github.ref_name }}"
+            TAG="$GIT_REF_NAME"
+            # The tag becomes an OCI tag verbatim, so reject Git refs that are
+            # not strict SemVer or exceed the registry's 128-character limit.
+            # Build metadata uses "+", which OCI tags do not accept; use a
+            # prerelease suffix such as -rc.1 instead.
+            semver='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*)|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(\.((0|[1-9][0-9]*)|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?'
+            if (( ${#TAG} > 128 )) || [[ ! "${TAG#v}" =~ ^${semver}$ ]]; then
+              echo "Release tag '$TAG' must match vX.Y.Z or vX.Y.Z-prerelease; build metadata is not supported." >&2
+              exit 1
+            fi
             # Strip the leading v for the version stamped into filenames: v0.1.0
             # becomes 0.1.0. The binary still reports the full tag (with the v).
             VERSION="${TAG#v}"
@@ -78,7 +93,7 @@ jobs:
             TAG="$(git describe --always --tags --dirty)"
             VERSION="${TAG#v}"
             DRY_RUN=true
-            echo "::notice::Dry run (${{ github.event_name }} on ${{ github.ref }}); using git describe version: $TAG"
+            echo "::notice::Dry run ($EVENT_NAME on $GIT_REF); using git describe version: $TAG"
           fi
 
           # Anything that is not a bare X.Y.Z (a pre-release suffix, or a
@@ -191,17 +206,82 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  release:
-    name: Release
-    needs: [prepare, build]
+  image:
+    name: Test server image
+    needs: prepare
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      contents: read
     steps:
       - uses: actions/checkout@v7
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build release platforms without publishing
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          outputs: type=oci,dest=/tmp/akari-server.tar
+          build-args: |
+            VERSION=${{ needs.prepare.outputs.tag }}
+            VCS_REF=${{ github.sha }}
+          cache-from: type=gha,scope=akari-server-image
+          cache-to: type=gha,mode=max,scope=akari-server-image,ignore-error=true
+
+      - name: Build amd64 smoke-test image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: akari-server:smoke-amd64
+          build-args: |
+            VERSION=${{ needs.prepare.outputs.tag }}
+            VCS_REF=${{ github.sha }}
+          cache-from: type=gha,scope=akari-server-image
+          cache-to: type=gha,mode=max,scope=akari-server-image,ignore-error=true
+
+      - name: Build arm64 smoke-test image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/arm64
+          load: true
+          tags: akari-server:smoke-arm64
+          build-args: |
+            VERSION=${{ needs.prepare.outputs.tag }}
+            VCS_REF=${{ github.sha }}
+          cache-from: type=gha,scope=akari-server-image
+          cache-to: type=gha,mode=max,scope=akari-server-image,ignore-error=true
+
+      - name: Smoke test server binaries
+        shell: bash
+        env:
+          EXPECTED_VERSION: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            actual="$(docker run --rm --platform "linux/${arch}" "akari-server:smoke-${arch}" --version)"
+            if [[ "$actual" != "$EXPECTED_VERSION" ]]; then
+              echo "Expected linux/${arch} akari-server --version to print '$EXPECTED_VERSION', got '$actual'." >&2
+              exit 1
+            fi
+          done
+
+  release_assets:
+    name: Stage release assets
+    needs: [prepare, build, image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
       - name: Download all archives
         uses: actions/download-artifact@v8
         with:
@@ -223,68 +303,20 @@ jobs:
           echo "SHA256SUMS:"
           cat SHA256SUMS
 
-      - name: Create draft GitHub release
-        if: ${{ needs.prepare.outputs.dry_run == 'false' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          tag="${{ needs.prepare.outputs.tag }}"
-          # Stable releases (bare X.Y.Z) are marked latest; everything else is a
-          # prerelease.
-          if [[ "${{ needs.prepare.outputs.prerelease }}" == "true" ]]; then
-            channel=(--prerelease)
-          else
-            channel=(--latest)
-          fi
-
-          # Assemble as a draft first: upload every asset and generate the notes
-          # while the release stays hidden. The "Publish release" step below
-          # flips it visible, so it never appears half-populated.
-          gh release create "$tag" \
-            --draft \
-            --generate-notes \
-            "${channel[@]}" \
-            --title "$tag" \
-            dist/*
-
-      - name: Write release summary
-        if: ${{ needs.prepare.outputs.dry_run == 'false' }}
-        shell: bash
-        run: |
-          tag="${{ needs.prepare.outputs.tag }}"
-          {
-            echo "## Released: $tag"
-            echo
-            echo "Published a GitHub Release with auto-generated notes (the merged PRs since the previous tag)."
-            echo
-            echo "View it at https://github.com/${{ github.repository }}/releases/tag/$tag"
-            echo
-            echo "### SHA256SUMS"
-            echo
-            echo '```'
-            cat dist/SHA256SUMS
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Publish release
-        # The final step, run only for a real release: flip the fully assembled
-        # draft to published. This is the one step that makes the release
-        # visible, so it runs last; if any earlier step fails the release stays a
-        # hidden draft rather than going out half-built.
-        if: ${{ needs.prepare.outputs.dry_run == 'false' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          tag="${{ needs.prepare.outputs.tag }}"
-          gh release edit "$tag" --draft=false
+      - name: Upload staged release assets
+        uses: actions/upload-artifact@v7
+        with:
+          name: akari-release-assets
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Write dry run summary
         if: ${{ needs.prepare.outputs.dry_run == 'true' }}
         shell: bash
         run: |
-          tag="${{ needs.prepare.outputs.tag }}"
           {
-            echo "## Dry run: $tag"
+            echo "## Dry run: $RELEASE_TAG"
             echo
             echo "No release was created. This was a dry run."
             echo
@@ -300,3 +332,235 @@ jobs:
             cat dist/SHA256SUMS
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  publish_image:
+    name: Publish server image
+    if: ${{ needs.prepare.outputs.dry_run == 'false' }}
+    needs: [prepare, image, release_assets]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.publish.outputs.digest }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      IMAGE: ghcr.io/${{ github.repository_owner }}/akari-server
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Refuse published release collision
+        shell: bash
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          response="$RUNNER_TEMP/release.json"
+          status="$(curl --location --silent --show-error \
+            --output "$response" \
+            --write-out '%{http_code}' \
+            --header 'Accept: application/vnd.github+json' \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}")"
+          case "$status" in
+          200)
+            if [[ "$(jq -r .draft "$response")" != "true" ]]; then
+              echo "Release $TAG is already published; refusing to replace its container image." >&2
+              exit 1
+            fi
+            ;;
+          404) ;;
+          *)
+            echo "Could not determine whether release $TAG already exists (GitHub returned HTTP $status)." >&2
+            cat "$response" >&2
+            exit 1
+            ;;
+          esac
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Select published image tag
+        id: image_tag
+        shell: bash
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          image="${IMAGE,,}"
+          echo "tag=${image}:${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish multi-platform server image
+        id: publish
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.image_tag.outputs.tag }}
+          build-args: |
+            VERSION=${{ needs.prepare.outputs.tag }}
+            VCS_REF=${{ github.sha }}
+          cache-from: type=gha,scope=akari-server-image
+          cache-to: type=gha,mode=max,scope=akari-server-image,ignore-error=true
+
+      - name: Verify anonymous image access
+        shell: bash
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          image="${IMAGE,,}"
+          docker logout ghcr.io
+          if ! docker buildx imagetools inspect "${image}:${TAG}"; then
+            echo "The image was pushed but is not public. First publication creates a private GHCR package; set its visibility to public, then rerun this workflow." >&2
+            exit 1
+          fi
+
+  release:
+    name: Release
+    needs: [prepare, release_assets, publish_image]
+    if: ${{ needs.prepare.outputs.dry_run == 'false' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download staged release assets
+        uses: actions/download-artifact@v8
+        with:
+          name: akari-release-assets
+          path: dist
+
+      - name: Create draft GitHub release
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$RELEASE_TAG"
+          # Stable releases (bare X.Y.Z) are marked latest; everything else is a
+          # prerelease.
+          if [[ "$RELEASE_PRERELEASE" == "true" ]]; then
+            channel=(--prerelease)
+          else
+            channel=(--latest)
+          fi
+
+          # A failed upload can leave a partial draft. Reuse it on rerun and
+          # replace every expected asset. Remove stale assets from an older
+          # workflow shape so the verified draft exactly matches this build.
+          if is_draft="$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null)"; then
+            if [[ "$is_draft" != "true" ]]; then
+              echo "Release $tag is already published; refusing to replace it." >&2
+              exit 1
+            fi
+            while IFS=$'\t' read -r name id; do
+              if [[ ! -f "dist/$name" ]]; then
+                gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${id}"
+              fi
+            done < <(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" \
+              --jq '.assets[] | [.name, .id] | @tsv')
+            gh release upload "$tag" dist/* --clobber
+          else
+            gh release create "$tag" \
+              --draft \
+              --generate-notes \
+              "${channel[@]}" \
+              --title "$tag" \
+              dist/*
+          fi
+
+      - name: Verify draft release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="$(find dist -maxdepth 1 -type f -printf '%f\n' | sort)"
+          actual="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | sort)"
+          if [[ "$actual" != "$expected" ]]; then
+            echo "Draft release assets do not match the staged files." >&2
+            diff -u <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") || true
+            exit 1
+          fi
+
+          mkdir remote
+          gh release download "$RELEASE_TAG" --dir remote
+          cmp dist/SHA256SUMS remote/SHA256SUMS
+          (cd remote && sha256sum -c SHA256SUMS)
+
+      - name: Publish release
+        # The final step, run only for a real release: flip the fully assembled
+        # draft to published. This is the one step that makes the release
+        # visible, so it runs last; if any earlier step fails the release stays a
+        # hidden draft rather than going out half-built.
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$RELEASE_TAG"
+          gh release edit "$tag" --draft=false
+
+      - name: Write release summary
+        shell: bash
+        run: |
+          tag="$RELEASE_TAG"
+          {
+            echo "## Released: $tag"
+            echo
+            echo "Published a GitHub Release with auto-generated notes (the merged PRs since the previous tag)."
+            echo "Published \`ghcr.io/${{ github.repository_owner }}/akari-server:${tag}\` for Linux amd64 and arm64."
+            echo "Image digest: \`${{ needs.publish_image.outputs.digest }}\`"
+            echo
+            echo "View it at https://github.com/${{ github.repository }}/releases/tag/$tag"
+            echo
+            echo "### SHA256SUMS"
+            echo
+            echo '```'
+            cat dist/SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  promote_image:
+    name: Promote stable server image
+    needs: [prepare, publish_image, release]
+    if: >-
+      ${{
+        needs.prepare.outputs.dry_run == 'false' &&
+        needs.prepare.outputs.prerelease == 'false'
+      }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      DIGEST: ${{ needs.publish_image.outputs.digest }}
+      IMAGE: ghcr.io/${{ github.repository_owner }}/akari-server
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Promote verified digest to latest
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="${IMAGE,,}"
+          docker buildx imagetools create \
+            --tag "${image}:latest" \
+            "${image}@${DIGEST}"
