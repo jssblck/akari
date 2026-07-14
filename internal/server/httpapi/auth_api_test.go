@@ -24,10 +24,8 @@ func postJSON(t *testing.T, c *http.Client, url string, body string) (int, map[s
 
 // TestAuthAPIFlow drives the JSON auth and token endpoints end to end: register
 // the first (admin) account, log out and back in, mint and revoke API tokens,
-// and mint an invite that lets a second account register. The HTML form flow has
-// its own coverage; this exercises the JSON envelopes, status codes, and the
-// validation branches the forms do not share (strict body decoding, the invalid
-// scope rejection).
+// and mint an invite that lets a second account register. It covers the JSON
+// envelopes, status codes, strict body decoding, and invalid-scope rejection.
 func TestAuthAPIFlow(t *testing.T) {
 	t.Parallel()
 	srv, _ := newTestServer(t)

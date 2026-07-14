@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -208,40 +207,6 @@ func TestPathPrefixExternalizesOAuthDiscovery(t *testing.T) {
 	response.Body.Close()
 	if resource.Resource != server.URL+testPrefix+"/mcp" {
 		t.Fatalf("resource = %q, want %q", resource.Resource, server.URL+testPrefix+"/mcp")
-	}
-}
-
-func TestSafeNextRequiresPrefix(t *testing.T) {
-	s := &Server{}
-	withPrefix := func(prefix string) *http.Request {
-		r := httptest.NewRequest(http.MethodGet, "/login", nil)
-		if prefix != "" {
-			r = r.WithContext(context.WithValue(r.Context(), prefixKey, prefix))
-		}
-		return r
-	}
-
-	// next is external by convention, so under a prefix a value that does not
-	// carry the mount point (a link minted before the prefix existed) must fall
-	// back rather than redirect off the mount after login.
-	prefixed := withPrefix(testPrefix)
-	fallback := testPrefix + "/overview"
-	for next, want := range map[string]string{
-		"/overview":                  fallback,
-		testPrefix + "/sessions/5":   testPrefix + "/sessions/5",
-		testPrefix:                   testPrefix,
-		"/proxy/akari-other/x":       fallback,
-		"":                           fallback,
-		"https://evil.example/proxy": fallback,
-	} {
-		if got := s.safeNext(prefixed, next); got != want {
-			t.Errorf("safeNext(prefixed, %q) = %q, want %q", next, got, want)
-		}
-	}
-
-	// A root deployment keeps accepting plain rooted paths.
-	if got := s.safeNext(withPrefix(""), "/overview"); got != "/overview" {
-		t.Errorf("safeNext(root, /overview) = %q", got)
 	}
 }
 

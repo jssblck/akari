@@ -15,7 +15,6 @@ import (
 	"github.com/jssblck/akari/internal/config"
 	"github.com/jssblck/akari/internal/server/auth"
 	"github.com/jssblck/akari/internal/server/store"
-	"github.com/jssblck/akari/internal/server/web"
 )
 
 // The OAuth 2.1 authorization server backing the remote MCP endpoint. akari is its
@@ -523,7 +522,7 @@ func writeOAuthError(w http.ResponseWriter, status int, code, desc string) {
 // redirect (an unknown client or an unregistered redirect), so a crafted authorize
 // link cannot bounce the user to an attacker URL.
 func (s *Server) renderOAuthErrorPage(w http.ResponseWriter, r *http.Request, status int, msg string) {
-	render(w, r, status, web.ErrorPage(web.Page{Title: "Authorization error"}, status, msg))
+	renderPublicError(w, r, status, msg)
 }
 
 func (s *Server) setOAuthCSRFCookie(w http.ResponseWriter, r *http.Request, value string) {

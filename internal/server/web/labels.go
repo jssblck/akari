@@ -1,6 +1,4 @@
-// Package web holds akari's server-rendered UI: templ templates and the small
-// view-model helpers they use. Handlers in the httpapi package resolve auth,
-// query the store, and render these templates, so all rendering lives here.
+// Package web holds Akari's public server-rendered pages and their view helpers.
 package web
 
 import (

@@ -6,25 +6,35 @@ import (
 	"testing"
 )
 
-func TestWrongMethodPreservesServeMuxResponse(t *testing.T) {
+func TestRetiredFormRoutesStayRemoved(t *testing.T) {
 	t.Parallel()
 	srv, _ := newTestServer(t)
 
-	req, err := http.NewRequest(http.MethodDelete, srv.URL+"/login", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("DELETE /login: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusMethodNotAllowed {
-		t.Fatalf("DELETE /login = %d, want %d", resp.StatusCode, http.StatusMethodNotAllowed)
-	}
-	allow := resp.Header.Get("Allow")
-	if !strings.Contains(allow, http.MethodGet) || !strings.Contains(allow, http.MethodPost) {
-		t.Fatalf("Allow = %q, want GET and POST", allow)
+	for _, test := range []struct {
+		path   string
+		status int
+	}{
+		{path: "/login", status: http.StatusMethodNotAllowed},
+		{path: "/register", status: http.StatusMethodNotAllowed},
+		{path: "/logout", status: http.StatusNotFound},
+	} {
+		t.Run(test.path, func(t *testing.T) {
+			request, err := http.NewRequest(http.MethodPost, srv.URL+test.path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := http.DefaultClient.Do(request)
+			if err != nil {
+				t.Fatalf("POST %s: %v", test.path, err)
+			}
+			response.Body.Close()
+			if response.StatusCode != test.status {
+				t.Fatalf("POST %s = %d, want %d", test.path, response.StatusCode, test.status)
+			}
+			if allow := response.Header.Get("Allow"); strings.Contains(allow, http.MethodPost) {
+				t.Fatalf("POST %s remains allowed: %q", test.path, allow)
+			}
+		})
 	}
 }
 

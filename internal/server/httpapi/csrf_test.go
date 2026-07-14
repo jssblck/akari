@@ -11,7 +11,6 @@ import (
 
 	"github.com/jssblck/akari/internal/config"
 	"github.com/jssblck/akari/internal/server/auth"
-	"github.com/jssblck/akari/internal/server/web"
 )
 
 // cookieValue reads a named cookie's current value out of a client's jar for
@@ -84,44 +83,6 @@ func TestCSRFOriginAndFetchMetadataPolicy(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestCSRFTokenFallbackFromRenderedForm(t *testing.T) {
-	t.Parallel()
-	s := &Server{Cfg: config.Server{}}
-	handler := s.withCSRF(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
-			_, _ = w.Write([]byte(`<form><input name="_csrf" value="` + webToken(r) + `"></form>`))
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-	}))
-
-	get := httptest.NewRequest(http.MethodGet, "http://akari.example/login", nil)
-	getRec := httptest.NewRecorder()
-	handler.ServeHTTP(getRec, get)
-	cookies := getRec.Result().Cookies()
-	if len(cookies) != 1 || cookies[0].Name != csrfCookieName {
-		t.Fatalf("GET /login cookies = %+v, want %s", cookies, csrfCookieName)
-	}
-	token := cookies[0].Value
-	if !strings.Contains(getRec.Body.String(), `value="`+token+`"`) {
-		t.Fatalf("rendered form did not receive CSRF token: %s", getRec.Body.String())
-	}
-
-	form := url.Values{csrfFormName: {token}}
-	post := httptest.NewRequest(http.MethodPost, "http://akari.example/login", strings.NewReader(form.Encode()))
-	post.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	post.AddCookie(cookies[0])
-	postRec := httptest.NewRecorder()
-	handler.ServeHTTP(postRec, post)
-	if postRec.Code != http.StatusNoContent {
-		t.Fatalf("token fallback status = %d, want %d; body=%s", postRec.Code, http.StatusNoContent, postRec.Body.String())
-	}
-}
-
-func webToken(r *http.Request) string {
-	return web.CSRFToken(r.Context())
 }
 
 func TestCSRFTrustedProxyUsesConfiguredPublicOrigin(t *testing.T) {

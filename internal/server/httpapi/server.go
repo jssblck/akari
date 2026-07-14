@@ -249,10 +249,7 @@ func (s *Server) Routes() http.Handler {
 	// card route it needs no auth and no reparse gate.
 	mux.HandleFunc("GET /og.png", s.handleLandingOGImage)
 	mux.HandleFunc("GET /login", s.handleAppShell)
-	mux.HandleFunc("POST /login", s.handleLoginForm)
 	mux.HandleFunc("GET /register", s.handleAppShell)
-	mux.HandleFunc("POST /register", s.handleRegisterForm)
-	mux.HandleFunc("POST /logout", s.handleLogoutForm)
 	mux.HandleFunc("GET /api/docs", s.handleAppShell)
 
 	// Private React routes require a full-scope browser session. Parsed-data API
@@ -264,7 +261,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /sessions", s.requireAppShell(s.handleAppShell))
 	mux.HandleFunc("GET /projects/{id}", s.requireAppShell(s.handleAppShell))
 	mux.HandleFunc("GET /sessions/{id}", s.requireAppShell(s.handleAppShell))
-	mux.HandleFunc("GET /sessions/{id}/events", s.requireReadHTML(s.handleSessionEvents))
+	mux.HandleFunc("GET /sessions/{id}/events", s.requireBrowserRead(s.handleSessionEvents))
 
 	// Account stays fully available during a reparse: it is not parsed data, and it
 	// hosts the reparse status and the admin Reparse button.

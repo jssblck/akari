@@ -1503,8 +1503,8 @@ first sight, and treats the request as that signed-in user at full scope, the sa
 as a browser session. This is the standard "identity-aware proxy" pattern: the
 proxy owns the session, and akari believes the header per request rather than
 running its own login. Provisioned accounts are *federated*: they carry
-`auth_source = 'proxy'` and no password, so the local `/login` form refuses them
-(their only way in is the proxy). See `proxyPrincipal` in
+`auth_source = 'proxy'` and no password, so the password login endpoint refuses
+them (their only way in is the proxy). See `proxyPrincipal` in
 `internal/server/httpapi/auth.go`.
 
 Configuration (all off by default; a direct deployment sets none of these):

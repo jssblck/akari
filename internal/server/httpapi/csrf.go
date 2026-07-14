@@ -9,7 +9,6 @@ import (
 
 	"github.com/jssblck/akari/internal/config"
 	"github.com/jssblck/akari/internal/server/auth"
-	"github.com/jssblck/akari/internal/server/web"
 )
 
 const (
@@ -47,9 +46,7 @@ func (s *Server) withCSRF(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isSafeMethod(r.Method) {
 			if s.csrfTokenPage(r) {
-				var ok bool
-				r, ok = s.withCSRFToken(w, r)
-				if !ok {
+				if !s.ensureCSRFCookie(w, r) {
 					writeError(w, http.StatusInternalServerError, "could not initialize CSRF protection")
 					return
 				}
@@ -72,8 +69,6 @@ func (s *Server) withCSRF(next http.Handler) http.Handler {
 			}
 			s.setCSRFCookie(w, r, token)
 		}
-		r = r.WithContext(web.WithCSRFToken(r.Context(), token))
-
 		browserSignal, ok := s.validBrowserOrigin(r)
 		if !ok || (!browserSignal && (!hadToken || !validCSRFToken(r, token))) {
 			writeError(w, http.StatusForbidden, "CSRF validation failed")
@@ -117,17 +112,16 @@ func (s *Server) csrfTokenPage(r *http.Request) bool {
 	return asserted
 }
 
-func (s *Server) withCSRFToken(w http.ResponseWriter, r *http.Request) (*http.Request, bool) {
-	token, ok := csrfTokenFromRequest(r)
+func (s *Server) ensureCSRFCookie(w http.ResponseWriter, r *http.Request) bool {
+	_, ok := csrfTokenFromRequest(r)
 	if !ok {
-		var err error
-		token, err = auth.NewToken()
+		token, err := auth.NewToken()
 		if err != nil {
-			return r, false
+			return false
 		}
 		s.setCSRFCookie(w, r, token)
 	}
-	return r.WithContext(web.WithCSRFToken(r.Context(), token)), true
+	return true
 }
 
 func (s *Server) setCSRFCookie(w http.ResponseWriter, r *http.Request, token string) {
