@@ -22,8 +22,8 @@ func (s *Server) handleGuideRoute(w http.ResponseWriter, r *http.Request) {
 // handleAppShell serves the same embedded React entry document for every client-side
 // route. The homepage deliberately remains outside this path and continues to render
 // from landing.templ.
-func (s *Server) handleAppShell(w http.ResponseWriter, _ *http.Request) {
-	index, err := frontend.Index()
+func (s *Server) handleAppShell(w http.ResponseWriter, r *http.Request) {
+	index, err := frontend.Index(requestPrefix(r))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "load embedded frontend")
 		return
@@ -39,14 +39,14 @@ func (s *Server) handlePublicUserShell(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	user, err := s.Store.PublicOverviewUser(r.Context(), r.PathValue("username"))
 	if err != nil {
-		s.handlePublicShellLookupError(w, err)
+		s.handlePublicShellLookupError(w, r, err)
 		return
 	}
 	title := user.Username + " usage overview"
-	s.handleAppShellMetadata(w, frontend.Metadata{
+	s.handleAppShellMetadata(w, r, frontend.Metadata{
 		Title: title, Description: "A snapshot of " + user.Username + "'s AI coding-agent usage on akari.",
-		URL:   s.baseURL(r) + web.PublicOverviewPath(user.Username),
-		Image: s.baseURL(r) + web.PublicOverviewOGPath(user.Username),
+		URL:   s.absURL(r, web.PublicOverviewPath(user.Username)),
+		Image: s.absURL(r, web.PublicOverviewOGPath(user.Username)),
 	})
 }
 
@@ -54,18 +54,18 @@ func (s *Server) handlePublicProjectShell(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Cache-Control", "no-store")
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil || id < 1 {
-		s.handlePublicShellLookupError(w, store.ErrNotFound)
+		s.handlePublicShellLookupError(w, r, store.ErrNotFound)
 		return
 	}
 	project, err := s.Store.PublicProjectOverview(r.Context(), id)
 	if err != nil {
-		s.handlePublicShellLookupError(w, err)
+		s.handlePublicShellLookupError(w, r, err)
 		return
 	}
 	name := web.ProjectTitle(project)
-	s.handleAppShellMetadata(w, frontend.Metadata{
+	s.handleAppShellMetadata(w, r, frontend.Metadata{
 		Title: name + " usage overview", Description: "A snapshot of AI coding-agent usage on " + name + " on akari.",
-		URL: s.baseURL(r) + web.PublicProjectPath(project.ID), Image: s.baseURL(r) + web.PublicProjectOGPath(project.ID),
+		URL: s.absURL(r, web.PublicProjectPath(project.ID)), Image: s.absURL(r, web.PublicProjectOGPath(project.ID)),
 	})
 }
 
@@ -73,18 +73,18 @@ func (s *Server) handlePublicSessionShell(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Cache-Control", "no-store")
 	detail, err := s.Store.SessionDetailByPublicID(r.Context(), r.PathValue("public_id"))
 	if err != nil {
-		s.handlePublicShellLookupError(w, err)
+		s.handlePublicShellLookupError(w, r, err)
 		return
 	}
 	publicID := r.PathValue("public_id")
-	s.handleAppShellMetadata(w, frontend.Metadata{
+	s.handleAppShellMetadata(w, r, frontend.Metadata{
 		Title: web.SessionPageTitle(detail), Description: "A shared " + detail.Agent + " session on " + web.SessionProjectLabel(detail) + " in akari.",
-		URL: s.baseURL(r) + web.PublicPath(publicID), Image: s.baseURL(r) + web.PublicSessionOGPath(publicID),
+		URL: s.absURL(r, web.PublicPath(publicID)), Image: s.absURL(r, web.PublicSessionOGPath(publicID)),
 	})
 }
 
-func (s *Server) handleAppShellMetadata(w http.ResponseWriter, meta frontend.Metadata) {
-	index, err := frontend.Document(meta)
+func (s *Server) handleAppShellMetadata(w http.ResponseWriter, r *http.Request, meta frontend.Metadata) {
+	index, err := frontend.Document(meta, requestPrefix(r))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "load embedded frontend")
 		return
@@ -98,12 +98,12 @@ func (s *Server) handleAppShellMetadata(w http.ResponseWriter, meta frontend.Met
 // renders the app's styled "Not found" state with a way back home (the old
 // templ UI's PublicErrorPage did the same server-side). The status code stays
 // honest for crawlers and link unfurlers; only browsers run the shell.
-func (s *Server) handlePublicShellLookupError(w http.ResponseWriter, err error) {
+func (s *Server) handlePublicShellLookupError(w http.ResponseWriter, r *http.Request, err error) {
 	status := http.StatusInternalServerError
 	if errors.Is(err, store.ErrNotFound) {
 		status = http.StatusNotFound
 	}
-	index, docErr := frontend.Index()
+	index, docErr := frontend.Index(requestPrefix(r))
 	if docErr != nil {
 		writeError(w, http.StatusInternalServerError, "load embedded frontend")
 		return
@@ -120,7 +120,7 @@ func (s *Server) requireAppShell(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		p, ok := s.resolve(r)
 		if !ok || p.Scope != scopeFull {
-			http.Redirect(w, r, "/login?next="+r.URL.RequestURI(), http.StatusSeeOther)
+			http.Redirect(w, r, s.loginRedirect(r), http.StatusSeeOther)
 			return
 		}
 		setPrivateNoStore(w)

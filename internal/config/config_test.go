@@ -10,13 +10,16 @@ func TestLoadServerPublicOrigin(t *testing.T) {
 	t.Setenv("AKARI_DATABASE_URL", "postgres://x/y")
 
 	for _, tc := range []struct {
-		name string
-		raw  string
-		want string
+		name       string
+		raw        string
+		want       string
+		wantPrefix string
 	}{
 		{name: "canonical", raw: "https://akari.example", want: "https://akari.example"},
 		{name: "case and default port", raw: "HTTPS://AKARI.EXAMPLE:443/", want: "https://akari.example"},
 		{name: "nondefault port", raw: "http://localhost:8080", want: "http://localhost:8080"},
+		{name: "path prefix", raw: "https://akari.example/proxy/akari", want: "https://akari.example", wantPrefix: "/proxy/akari"},
+		{name: "path prefix trailing slash", raw: "https://akari.example/proxy/akari/", want: "https://akari.example", wantPrefix: "/proxy/akari"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("AKARI_PUBLIC_URL", tc.raw)
@@ -27,16 +30,20 @@ func TestLoadServerPublicOrigin(t *testing.T) {
 			if cfg.PublicURL != tc.want {
 				t.Fatalf("PublicURL = %q, want %q", cfg.PublicURL, tc.want)
 			}
+			if cfg.PathPrefix != tc.wantPrefix {
+				t.Fatalf("PathPrefix = %q, want %q", cfg.PathPrefix, tc.wantPrefix)
+			}
 		})
 	}
 
 	for _, raw := range []string{
 		"akari.example",
 		"ftp://akari.example",
-		"https://akari.example/path",
 		"https://akari.example?query=1",
 		"https://user@akari.example",
 		"https://akari.example#fragment",
+		"https://akari.example/a//b",
+		"https://akari.example/a/../b",
 	} {
 		t.Run("reject "+raw, func(t *testing.T) {
 			t.Setenv("AKARI_PUBLIC_URL", raw)
@@ -44,6 +51,57 @@ func TestLoadServerPublicOrigin(t *testing.T) {
 				t.Fatalf("LoadServer(%q) error = %v, want AKARI_PUBLIC_URL error", raw, err)
 			}
 		})
+	}
+}
+
+func TestLoadServerPrefixHeader(t *testing.T) {
+	t.Setenv("AKARI_DATABASE_URL", "postgres://x/y")
+	t.Setenv("AKARI_PREFIX_HEADER", " X-Forwarded-Prefix ")
+	cfg, err := LoadServer()
+	if err != nil {
+		t.Fatalf("LoadServer: %v", err)
+	}
+	if cfg.PrefixHeader != "X-Forwarded-Prefix" {
+		t.Fatalf("PrefixHeader = %q, want trimmed X-Forwarded-Prefix", cfg.PrefixHeader)
+	}
+}
+
+func TestNormalizePathPrefix(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want string
+	}{
+		{raw: "", want: ""},
+		{raw: "/", want: ""},
+		{raw: "/proxy/akari", want: "/proxy/akari"},
+		{raw: "/proxy/akari/", want: "/proxy/akari"},
+		{raw: "/a-b_c.d~e@f+g:1", want: "/a-b_c.d~e@f+g:1"},
+	} {
+		got, err := NormalizePathPrefix(tc.raw)
+		if err != nil {
+			t.Fatalf("NormalizePathPrefix(%q): %v", tc.raw, err)
+		}
+		if got != tc.want {
+			t.Fatalf("NormalizePathPrefix(%q) = %q, want %q", tc.raw, got, tc.want)
+		}
+	}
+	for _, raw := range []string{
+		"proxy/akari",
+		"/a//b",
+		"//evil.example",
+		"/a/./b",
+		"/a/../b",
+		"/a?b",
+		"/a#b",
+		"/a b",
+		"/a%2fb",
+		`/a\b`,
+		"/a\"b",
+		"/a<b",
+	} {
+		if got, err := NormalizePathPrefix(raw); err == nil {
+			t.Fatalf("NormalizePathPrefix(%q) = %q, want error", raw, got)
+		}
 	}
 }
 

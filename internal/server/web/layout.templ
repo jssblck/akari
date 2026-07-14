@@ -13,16 +13,16 @@ templ layout(p Page) {
 			<title>{ p.Title } - akari</title>
 			@faviconLinks()
 			@tzCookieScript()
-			<link rel="preload" href={ StaticURL("fonts/Geist-Regular.woff2") } as="font" type="font/woff2" crossorigin/>
-			<link rel="preload" href={ StaticURL("fonts/GeistMono-Regular.woff2") } as="font" type="font/woff2" crossorigin/>
+			<link rel="preload" href={ StaticURL(ctx, "fonts/Geist-Regular.woff2") } as="font" type="font/woff2" crossorigin/>
+			<link rel="preload" href={ StaticURL(ctx, "fonts/GeistMono-Regular.woff2") } as="font" type="font/woff2" crossorigin/>
 			@stylesheets()
-			<script src={ StaticURL("htmx.min.js") } defer></script>
-			<script src={ StaticURL("charts.js") } defer></script>
-			<script src={ StaticURL("app.js") } defer></script>
+			<script src={ StaticURL(ctx, "htmx.min.js") } defer></script>
+			<script src={ StaticURL(ctx, "charts.js") } defer></script>
+			<script src={ StaticURL(ctx, "app.js") } defer></script>
 			// The insights chart engine self-guards on #insights-data, so it is a no-op on
 			// every page but /insights; loading it in the shared head keeps it warm for the
 			// htmx swaps the range control drives.
-			<script src={ StaticURL("js/insights.js") } defer></script>
+			<script src={ StaticURL(ctx, "js/insights.js") } defer></script>
 		</head>
 		<body>
 			if p.LoggedIn {
@@ -79,9 +79,9 @@ templ tzCookieScript() {
 // browsers auto-request, and the apple-touch PNG for an iOS home-screen tile. The
 // SVG is listed after the .ico so a browser that understands it prefers it.
 templ faviconLinks() {
-	<link rel="icon" href="/favicon.ico" sizes="32x32"/>
-	<link rel="icon" href="/static/favicon.svg" type="image/svg+xml"/>
-	<link rel="apple-touch-icon" href="/static/apple-touch-icon.png"/>
+	<link rel="icon" href={ Href(ctx, "/favicon.ico") } sizes="32x32"/>
+	<link rel="icon" href={ Href(ctx, "/static/favicon.svg") } type="image/svg+xml"/>
+	<link rel="apple-touch-icon" href={ Href(ctx, "/static/apple-touch-icon.png") }/>
 }
 
 // stylesheets links the per-area stylesheets in cascade order: the shared base
@@ -91,25 +91,25 @@ templ faviconLinks() {
 // set, since components are reused across pages; the split is organizational, not
 // a per-page subset.
 templ stylesheets() {
-	<link rel="stylesheet" href={ StaticURL("css/base.css") }/>
-	<link rel="stylesheet" href={ StaticURL("css/layout.css") }/>
-	<link rel="stylesheet" href={ StaticURL("css/auth.css") }/>
-	<link rel="stylesheet" href={ StaticURL("css/landing.css") }/>
-	<link rel="stylesheet" href={ StaticURL("css/overview.css") }/>
-	<link rel="stylesheet" href={ StaticURL("css/insights.css") }/>
-	<link rel="stylesheet" href={ StaticURL("css/projects.css") }/>
-	<link rel="stylesheet" href={ StaticURL("css/sessions.css") }/>
-	<link rel="stylesheet" href={ StaticURL("css/session.css") }/>
-	<link rel="stylesheet" href={ StaticURL("css/account.css") }/>
+	<link rel="stylesheet" href={ StaticURL(ctx, "css/base.css") }/>
+	<link rel="stylesheet" href={ StaticURL(ctx, "css/layout.css") }/>
+	<link rel="stylesheet" href={ StaticURL(ctx, "css/auth.css") }/>
+	<link rel="stylesheet" href={ StaticURL(ctx, "css/landing.css") }/>
+	<link rel="stylesheet" href={ StaticURL(ctx, "css/overview.css") }/>
+	<link rel="stylesheet" href={ StaticURL(ctx, "css/insights.css") }/>
+	<link rel="stylesheet" href={ StaticURL(ctx, "css/projects.css") }/>
+	<link rel="stylesheet" href={ StaticURL(ctx, "css/sessions.css") }/>
+	<link rel="stylesheet" href={ StaticURL(ctx, "css/session.css") }/>
+	<link rel="stylesheet" href={ StaticURL(ctx, "css/account.css") }/>
 }
 
 // landingStylesheets is the homepage's deliberately small static cascade. The
 // React application owns every other browser route, so the templated homepage no
 // longer ships the retired app shell or page-specific styles.
 templ landingStylesheets() {
-	<link rel="stylesheet" href={ StaticURL("css/base.css") }/>
-	<link rel="stylesheet" href={ StaticURL("css/layout.css") }/>
-	<link rel="stylesheet" href={ StaticURL("css/landing.css") }/>
+	<link rel="stylesheet" href={ StaticURL(ctx, "css/base.css") }/>
+	<link rel="stylesheet" href={ StaticURL(ctx, "css/layout.css") }/>
+	<link rel="stylesheet" href={ StaticURL(ctx, "css/landing.css") }/>
 }
 
 // noticeBanner is the slim one-shot confirmation strip rendered at the top of
@@ -145,7 +145,7 @@ templ navItem(href, key, label, active string) {
 // mobile header, so the two surfaces share one navigation idiom on a phone.
 templ mobileTopbar() {
 	<header class="mobile-topbar">
-		<a class="brand" href="/overview">@brandMark()</a>
+		<a class="brand" href={ Href(ctx, "/overview") }>@brandMark()</a>
 		<button
 			type="button"
 			class="menu-toggle"
@@ -167,7 +167,7 @@ templ mobileTopbar() {
 // off-canvas drawer the mobile topbar's menu button opens (layout.css + app.js).
 templ sidebar(p Page) {
 	<aside class="sidebar" id="app-sidebar">
-		<a class="brand" href="/overview">@brandMark()</a>
+		<a class="brand" href={ Href(ctx, "/overview") }>@brandMark()</a>
 		<nav class="navgroup" aria-label="Primary">
 			@navItem("/overview", "overview", "Overview", p.Active)
 			@navItem("/insights", "insights", "Insights", p.Active)
@@ -181,7 +181,7 @@ templ sidebar(p Page) {
 			<span class="who">{ p.Username }</span>
 			<span class="spacer"></span>
 			<a class="sb-icon" href="https://github.com/jssblck/akari" aria-label="akari on GitHub" title="akari on GitHub" rel="noopener" target="_blank">@githubGlyph()</a>
-			<form method="post" action="/logout" class="inline">
+			<form method="post" action={ Href(ctx, "/logout") } class="inline">
 				@csrfField()
 				<button class="ghost small" type="submit">Log out</button>
 			</form>
@@ -256,21 +256,21 @@ templ publicLayout(title string, og OGMeta, viewer Page) {
 			@faviconLinks()
 			@tzCookieScript()
 			@ogTags(title, og)
-			<link rel="preload" href={ StaticURL("fonts/Geist-Regular.woff2") } as="font" type="font/woff2" crossorigin/>
-			<link rel="preload" href={ StaticURL("fonts/GeistMono-Regular.woff2") } as="font" type="font/woff2" crossorigin/>
+			<link rel="preload" href={ StaticURL(ctx, "fonts/Geist-Regular.woff2") } as="font" type="font/woff2" crossorigin/>
+			<link rel="preload" href={ StaticURL(ctx, "fonts/GeistMono-Regular.woff2") } as="font" type="font/woff2" crossorigin/>
 			@landingStylesheets()
 		</head>
 		<body>
 			<header class="topbar">
-				<a class="brand" href="/">@brandMark()</a>
+				<a class="brand" href={ Href(ctx, "/") }>@brandMark()</a>
 				<span class="spacer"></span>
 				<nav aria-label="Site">
-					<a href="/guide">Docs</a>
+					<a href={ Href(ctx, "/guide") }>Docs</a>
 					<a class="gh-link" href="https://github.com/jssblck/akari" aria-label="akari on GitHub" rel="noopener" target="_blank">@githubGlyph()</a>
 					if viewer.LoggedIn {
-						<a href="/overview">Overview</a>
+						<a href={ Href(ctx, "/overview") }>Overview</a>
 					} else {
-						<a href="/login">Log in</a>
+						<a href={ Href(ctx, "/login") }>Log in</a>
 					}
 				</nav>
 			</header>

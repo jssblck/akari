@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 
+import { withBase } from "./base";
+
 let csrfToken = "";
 
 export function setCSRFToken(token: string | undefined) {
@@ -56,7 +58,7 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   ) {
     headers.set("X-Akari-CSRF-Token", csrfToken);
   }
-  const response = await fetch(path, {
+  const response = await fetch(withBase(path), {
     ...init,
     headers,
     credentials: "same-origin",

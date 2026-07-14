@@ -18,6 +18,7 @@ import {
   formatTokens,
 } from "../format";
 import "../overview.css";
+import { withBase } from "../base";
 import type { Analytics, Breakdown, DateRange, User, Viewer } from "../types";
 
 type OverviewResponse = {
@@ -243,14 +244,14 @@ export function OverviewPage() {
         <div className="overview-public-badge">
           <a
             className="tag public"
-            href={`/u/${encodeURIComponent(viewer.username)}`}
+            href={withBase(`/u/${encodeURIComponent(viewer.username)}`)}
             target="_blank"
             rel="noopener"
             title="Open the public page in a new tab"
           >
             public <ArrowSquareOutIcon size={10} />
           </a>
-          <a className="muted-link" href="/account#publicity">
+          <a className="muted-link" href={withBase("/account#publicity")}>
             Manage
           </a>
         </div>

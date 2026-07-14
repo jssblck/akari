@@ -26,11 +26,11 @@ const noticeMaxLen = 80
 // overview) and read back on whatever page the redirect lands on. It honors the
 // same Secure setting as the session cookie: nothing in a notice is secret, but
 // consistent cookie hygiene avoids a plaintext cookie policy exception to explain.
-func (s *Server) setNotice(w http.ResponseWriter, notice string) {
+func (s *Server) setNotice(w http.ResponseWriter, r *http.Request, notice string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     noticeCookie,
 		Value:    url.QueryEscape(notice),
-		Path:     "/",
+		Path:     cookiePath(r),
 		HttpOnly: true,
 		Secure:   s.Cfg.CookieSecure,
 		SameSite: http.SameSiteLaxMode,
@@ -54,7 +54,7 @@ func withNotice(w http.ResponseWriter, r *http.Request) *http.Request {
 	if err != nil {
 		return r
 	}
-	http.SetCookie(w, &http.Cookie{Name: noticeCookie, Value: "", Path: "/", MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: noticeCookie, Value: "", Path: cookiePath(r), MaxAge: -1})
 	v, err := url.QueryUnescape(c.Value)
 	if err != nil || !validNotice(v) {
 		return r

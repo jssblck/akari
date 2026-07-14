@@ -19,13 +19,13 @@ templ GuidePage(v GuideView) {
 			<meta name="description" content={ v.Summary }/>
 			// Point agents and crawlers at the machine-readable mirrors: this page as
 			// raw Markdown, and the guide-wide discovery index.
-			<link rel="alternate" type="text/markdown" href={ templ.SafeURL(v.RawPath) }/>
-			<link rel="alternate" type="text/plain" title="llms.txt" href="/llms.txt"/>
-			<link rel="preload" href="/static/fonts/Geist-Regular.woff2" as="font" type="font/woff2" crossorigin/>
-			<link rel="preload" href="/static/fonts/GeistMono-Regular.woff2" as="font" type="font/woff2" crossorigin/>
-			<link rel="stylesheet" href="/static/css/base.css"/>
-			<link rel="stylesheet" href="/static/guide.css"/>
-			<script src="/static/guide.js" defer></script>
+			<link rel="alternate" type="text/markdown" href={ Href(ctx, v.RawPath) }/>
+			<link rel="alternate" type="text/plain" title="llms.txt" href={ Href(ctx, "/llms.txt") }/>
+			<link rel="preload" href={ Href(ctx, "/static/fonts/Geist-Regular.woff2") } as="font" type="font/woff2" crossorigin/>
+			<link rel="preload" href={ Href(ctx, "/static/fonts/GeistMono-Regular.woff2") } as="font" type="font/woff2" crossorigin/>
+			<link rel="stylesheet" href={ Href(ctx, "/static/css/base.css") }/>
+			<link rel="stylesheet" href={ Href(ctx, "/static/guide.css") }/>
+			<script src={ Href(ctx, "/static/guide.js") } defer></script>
 		</head>
 		<body class="guide-body">
 			<a href="#guide-main" class="guide-skip">Skip to content</a>
@@ -64,14 +64,14 @@ templ guideHeader(v GuideView) {
 				<path d="M2 4h12M2 8h12M2 12h12"></path>
 			</svg>
 		</button>
-		<a class="guide-brand" href="/guide">@brandMark()</a>
+		<a class="guide-brand" href={ Href(ctx, "/guide") }>@brandMark()</a>
 		<span class="guide-header-sep"></span>
 		<span class="guide-header-label">docs</span>
 		<span class="spacer"></span>
 		if v.LoggedIn {
-			<a class="guide-header-action" href="/overview">Open app</a>
+			<a class="guide-header-action" href={ Href(ctx, "/overview") }>Open app</a>
 		} else {
-			<a class="guide-header-action" href="/login">Log in</a>
+			<a class="guide-header-action" href={ Href(ctx, "/login") }>Log in</a>
 		}
 	</header>
 }
@@ -87,7 +87,7 @@ templ guideSidebar(v GuideView) {
 					<li>
 						<a
 							class={ "guide-nav-link", templ.KV("is-active", it.Active) }
-							href={ templ.SafeURL(it.Route) }
+							href={ Href(ctx, it.Route) }
 							if it.Active {
 								aria-current="page"
 							}
@@ -113,7 +113,7 @@ templ guidePageActions(v GuideView) {
 			</svg>
 			<span class="guide-action-text" data-copy-label>Copy page</span>
 		</button>
-		<a class="guide-action" href={ templ.SafeURL(v.RawPath) }>
+		<a class="guide-action" href={ Href(ctx, v.RawPath) }>
 			<svg class="guide-action-ico" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
 				<path d="M2.5 4.5v7h11v-7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"></path>
 				<path d="M4.5 9.5v-3l1.75 2 1.75-2v3M11 6.5v3M9.5 8l1.5 1.5L12.5 8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"></path>
@@ -135,7 +135,7 @@ templ guidePageActions(v GuideView) {
 templ guidePrevNext(v GuideView) {
 	<nav class="guide-prevnext" aria-label="Chapter navigation">
 		if v.Prev != nil {
-			<a class="guide-prevnext-link is-prev" href={ templ.SafeURL(v.Prev.Route) }>
+			<a class="guide-prevnext-link is-prev" href={ Href(ctx, v.Prev.Route) }>
 				<span class="guide-prevnext-dir">Previous</span>
 				<span class="guide-prevnext-title">{ v.Prev.Label }</span>
 			</a>
@@ -143,7 +143,7 @@ templ guidePrevNext(v GuideView) {
 			<span class="guide-prevnext-spacer"></span>
 		}
 		if v.Next != nil {
-			<a class="guide-prevnext-link is-next" href={ templ.SafeURL(v.Next.Route) }>
+			<a class="guide-prevnext-link is-next" href={ Href(ctx, v.Next.Route) }>
 				<span class="guide-prevnext-dir">Next</span>
 				<span class="guide-prevnext-title">{ v.Next.Label }</span>
 			</a>
@@ -175,7 +175,7 @@ templ guideFooter() {
 	<footer class="guide-footer">
 		<span>akari user guide</span>
 		<span class="spacer"></span>
-		<a href="/llms-full.txt">llms-full.txt</a>
+		<a href={ Href(ctx, "/llms-full.txt") }>llms-full.txt</a>
 		<a href="https://github.com/jssblck/akari" rel="noopener" target="_blank">Source</a>
 	</footer>
 }

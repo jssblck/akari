@@ -1530,6 +1530,30 @@ admin). So create the bootstrap admin through local password registration
 *before* enabling proxy auth, otherwise the first proxied request creates a
 non-admin account and there is no admin left to mint invites or run a reparse.
 
+### Serving under a path prefix
+
+The proxy in front does not have to hand akari the whole origin: the server can
+be mounted under an arbitrary external path
+(`https://ops.example.com/tools/akari/...`). The prefix is either static (the
+path component of `AKARI_PUBLIC_URL`) or asserted per request by the proxy in a
+trusted header (`AKARI_PREFIX_HEADER`, typically `X-Forwarded-Prefix`), under
+the same trust rule as the identity header: enable it only when the proxy is
+the sole ingress, and when `AKARI_PROXY_AUTH_SECRET` is set the prefix header
+counts only alongside the matching secret.
+
+Internally routing stays rooted: a middleware resolves the prefix once per
+request, strips it from the incoming path (so the proxy may forward stripped or
+unstripped), and stashes it in the request context. Everything a client
+resolves externally is built back through that context: redirects and cookie
+Path scopes in the handlers, templated hrefs and asset links via the render
+context (`web.Href`, `web.StaticURL`), the OAuth/MCP discovery documents, and
+the React entry document, which the server rewrites per request (asset URLs plus
+an injected `window.__AKARI_BASE_PATH__` that the SPA router and API client read
+back). The frontend builds with Vite's relative base so the bundle itself is
+relocatable; only the entry document needs the rewrite. See
+`internal/server/httpapi/prefix.go` and the self-hosting guide's "Serving under
+a path prefix" section.
+
 Two follow-on protocols extend this same federation seam and are tracked as
 separate work: OIDC relying-party login with just-in-time provisioning (the
 portable standard for orgs with their own IdP), and SCIM 2.0 for provisioning and

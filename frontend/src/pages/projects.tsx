@@ -23,6 +23,7 @@ import {
   sessionTokens,
 } from "../format";
 import "../projects.css";
+import { withBase } from "../base";
 import type {
   Analytics,
   DateRange,
@@ -233,7 +234,7 @@ export function ProjectsPage() {
                 Run an akari client sync to create the first project and
                 session.
               </p>
-              <a className="button" href="/guide">
+              <a className="button" href={withBase("/guide")}>
                 Read the setup guide
               </a>
             </section>
@@ -351,7 +352,7 @@ function SessionPublicTag({ session }: { session: SessionSummary }) {
     return (
       <a
         className="tag public"
-        href={`/s/${session.PublicID}`}
+        href={withBase(`/s/${session.PublicID}`)}
         target="_blank"
         rel="noopener"
         title="Open the public page in a new tab"
@@ -409,7 +410,7 @@ export function ProjectPage() {
                       <>
                         <a
                           className="tag public"
-                          href={`/p/${data.project.ID}`}
+                          href={withBase(`/p/${data.project.ID}`)}
                           target="_blank"
                           rel="noopener"
                           title="Open the public page in a new tab"

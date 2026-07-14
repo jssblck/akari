@@ -3,6 +3,7 @@ import { useEffect } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { RequestError, useAPI } from "../api";
+import { withBase } from "../base";
 import { AsyncView } from "../components/async-view";
 import { PublicShell } from "../components/public-shell";
 
@@ -59,7 +60,7 @@ export function OAuthConsentPage() {
                 will be able to read projects, sessions, transcripts, and usage
                 analytics.
               </p>
-              <form method="post" action="/oauth/authorize">
+              <form method="post" action={withBase("/oauth/authorize")}>
                 <input type="hidden" name="_csrf" value={consent.app_csrf} />
                 <input type="hidden" name="csrf" value={consent.csrf} />
                 <input

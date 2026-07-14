@@ -97,13 +97,13 @@ func (s *Server) serveGuideRaw(w http.ResponseWriter, r *http.Request, slug stri
 // in one fetch.
 func (s *Server) handleLLMsTxt(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = w.Write([]byte(guide.LLMsTxt(s.baseURL(r))))
+	_, _ = w.Write([]byte(guide.LLMsTxt(s.absURL(r, ""))))
 }
 
 // handleLLMsFullTxt serves llms-full.txt: every chapter concatenated in reading
 // order, so an agent ingests the whole guide in a single request.
 func (s *Server) handleLLMsFullTxt(w http.ResponseWriter, r *http.Request) {
-	body, err := guide.LLMsFullTxt(s.baseURL(r))
+	body, err := guide.LLMsFullTxt(s.absURL(r, ""))
 	if err != nil {
 		http.Error(w, "Could not load the guide.", http.StatusInternalServerError)
 		return

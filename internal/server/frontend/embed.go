@@ -4,7 +4,11 @@
 package frontend
 
 import (
+	"bytes"
 	"embed"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"html"
 	"io/fs"
 	"net/http"
@@ -39,13 +43,82 @@ func Assets() http.Handler {
 	return http.FileServer(http.FS(dist))
 }
 
-// Index returns the React entry document embedded in the binary.
-func Index() ([]byte, error) {
+// Index returns the React entry document embedded in the binary, externalized
+// for the path prefix the request resolved ("" for a root deployment).
+//
+// The build uses Vite's relative base, so chunk-to-chunk resolution inside the
+// bundle rides import.meta.url and needs no rewriting; only this document's
+// own references are document-relative and would break on nested SPA routes
+// (/sessions/123). Index rewrites them to absolute prefixed paths and injects
+// the prefix as window.__AKARI_BASE_PATH__, which the router basename and the
+// API client read back. The prefix arrives validated (config.NormalizePathPrefix),
+// so it is safe to interpolate into markup.
+func Index(basePath string) ([]byte, error) {
+	indexMu.Lock()
+	cached, ok := indexCache[basePath]
+	indexMu.Unlock()
+	if ok {
+		return cached, nil
+	}
+	document, err := buildIndex(basePath)
+	if err != nil {
+		return nil, err
+	}
+	indexMu.Lock()
+	if len(indexCache) < indexCacheCap {
+		indexCache[basePath] = document
+	}
+	indexMu.Unlock()
+	return document, nil
+}
+
+// indexCache memoizes the externalized entry document per base path. A
+// deployment normally sees one prefix, but the header mode admits several, so
+// the cache is capped instead of trusting header cardinality; past the cap the
+// document is rebuilt per request, which is still just two string passes.
+var (
+	indexMu    sync.Mutex
+	indexCache = map[string][]byte{}
+)
+
+const indexCacheCap = 32
+
+func buildIndex(basePath string) ([]byte, error) {
 	dist, err := productionFS()
 	if err != nil {
 		return nil, err
 	}
-	return fs.ReadFile(dist, "index.html")
+	index, err := fs.ReadFile(dist, "index.html")
+	if err != nil {
+		return nil, err
+	}
+	// externalize edits by plain string replacement, which matches zero times
+	// without complaint if a toolchain upgrade reshapes the document. Refuse to
+	// serve in that case: a loud 500 beats an entry document whose assets or
+	// injected base silently stop being prefixed.
+	if !bytes.Contains(index, []byte(`"./assets/`)) || !bytes.Contains(index, []byte("<head>")) {
+		return nil, errors.New("dist/index.html does not match the externalize markers; update frontend.externalize alongside the build output")
+	}
+	return externalize(index, basePath), nil
+}
+
+// externalize rewrites the entry document's own references against the
+// external base path and injects the base for the application to read.
+func externalize(index []byte, basePath string) []byte {
+	document := string(index)
+	// Vite emits the entry script and stylesheet document-relative under the
+	// relative base ("./assets/..."); route them to the /app-assets mount the
+	// server actually serves the build from.
+	document = strings.ReplaceAll(document, `"./assets/`, `"`+basePath+`/app-assets/assets/`)
+	// References the build does not manage (the favicon) are authored absolute.
+	document = strings.ReplaceAll(document, `"/static/`, `"`+basePath+`/static/`)
+	// The base rides a JSON string literal so no prefix byte can terminate the
+	// script early, and the tag sits at the head's start so it executes before
+	// the (deferred) module entry reads it.
+	base, _ := json.Marshal(basePath)
+	document = strings.Replace(document, "<head>",
+		fmt.Sprintf("<head><script>window.__AKARI_BASE_PATH__=%s;</script>", base), 1)
+	return []byte(document)
 }
 
 // Metadata describes the crawler-visible identity of a public React route. The
@@ -58,9 +131,10 @@ type Metadata struct {
 	Image       string
 }
 
-// Document returns the embedded entry document with route-specific metadata.
-func Document(meta Metadata) ([]byte, error) {
-	index, err := Index()
+// Document returns the embedded entry document with route-specific metadata,
+// externalized for the given base path like Index.
+func Document(meta Metadata, basePath string) ([]byte, error) {
+	index, err := Index(basePath)
 	if err != nil {
 		return nil, err
 	}

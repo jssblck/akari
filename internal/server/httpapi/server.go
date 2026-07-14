@@ -127,9 +127,18 @@ func (s *Server) Routes() http.Handler {
 	// discovery documents, dynamic client registration, and token endpoint are
 	// public; the authorize endpoint recognizes the browser session cookie so a user
 	// connects an agent with one consent click. See oauth.go and mcp.go.
+	// The suffixed forms serve a path-prefixed deployment: RFC 8414 and RFC 9728
+	// derive a well-known URL by inserting the well-known segment between the
+	// origin and the resource's path, so the metadata for an issuer or resource
+	// under "/proxy/akari" is requested at
+	// "/.well-known/oauth-authorization-server/proxy/akari" (at the origin
+	// root). The proxy must forward "/.well-known/oauth-*" to akari for that
+	// discovery to work; the handlers answer any suffix with the metadata for
+	// the prefix this request resolves (see prefix.go).
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource", s.handleProtectedResourceMetadata)
-	mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp", s.handleProtectedResourceMetadata)
+	mux.HandleFunc("GET /.well-known/oauth-protected-resource/{rest...}", s.handleProtectedResourceMetadata)
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server", s.handleAuthServerMetadata)
+	mux.HandleFunc("GET /.well-known/oauth-authorization-server/{rest...}", s.handleAuthServerMetadata)
 	mux.HandleFunc("POST /oauth/register", s.admit(requestbudget.OAuthRegistration, s.handleOAuthRegister))
 	mux.HandleFunc("GET /oauth/authorize", s.handleOAuthAuthorize)
 	mux.HandleFunc("POST /oauth/authorize", s.handleOAuthDecision)
@@ -260,7 +269,7 @@ func (s *Server) Routes() http.Handler {
 	// hosts the reparse status and the admin Reparse button.
 	mux.HandleFunc("GET /account", s.requireAppShell(s.handleAppShell))
 
-	return s.withRouteCSRF(mux, withStyledNotFound(mux, s.handleNotFound))
+	return s.withPathPrefix(s.withRouteCSRF(mux, withStyledNotFound(mux, s.handleNotFound)))
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {

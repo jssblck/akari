@@ -65,7 +65,8 @@ Only the database URL is required.
 | --- | --- | --- |
 | `AKARI_DATABASE_URL` | (required) | Postgres connection string, for example `postgres://akari:akari@localhost:5432/akari?sslmode=disable`. |
 | `AKARI_LISTEN` | `:8080` | Address the HTTP server binds. Falls back to `PORT` when unset. |
-| `AKARI_PUBLIC_URL` | (derived) | The externally reachable origin (`https://akari.example.com`). It is the OAuth issuer, the base of the URLs the [MCP](./agent-access.md) authorization flow advertises, and the trusted origin for browser writes. It must contain only an HTTP or HTTPS scheme and host, with no path, query, fragment, or user information. When unset the server derives the origin per request, which suits local dev where the server is reached on more than one loopback port. Set it explicitly in production. |
+| `AKARI_PUBLIC_URL` | (derived) | The externally reachable base URL (`https://akari.example.com`). It is the OAuth issuer, the base of the URLs the [MCP](./agent-access.md) authorization flow advertises, and the trusted origin for browser writes. It may carry a path (`https://ops.example.com/akari`) when a reverse proxy serves akari under a prefix; see [Serving under a path prefix](#serving-under-a-path-prefix). Query, fragment, and user information are rejected. When unset the server derives the origin per request, which suits local dev where the server is reached on more than one loopback port. Set it explicitly in production. |
+| `AKARI_PREFIX_HEADER` | unset | The request header a trusted reverse proxy sets to the external path prefix it serves akari under (for example `X-Forwarded-Prefix`). When set, the prefix resolves per request from that header, so one instance can be mounted wherever the proxy chooses without a restart. Only safe when akari is reachable exclusively through the proxy; when `AKARI_PROXY_AUTH_SECRET` is set, the header is honored only on requests whose secret matches. See [Serving under a path prefix](#serving-under-a-path-prefix). |
 | `AKARI_MCP_RESPONSE_BUDGET_BYTES` | `8388608` | Maximum encoded MCP tool result in bytes. Transcript pages stop at a message boundary before this limit; oversized message fields become authenticated content references. Must be between 8388608 (8 MiB) and 16777216 (16 MiB). |
 | `AKARI_COOKIE_INSECURE` | unset | Set truthy to drop the `Secure` flag on session cookies, for plain-HTTP local development. Leave unset in production so cookies are HTTPS-only. |
 | `AKARI_PROXY_AUTH_HEADER` | unset | Enables reverse-proxy single sign-on. The request header a trusted proxy in front sets to the authenticated username (for example `X-Auth-Request-Preferred-Username`). When set, akari trusts that header as the signed-in user and provisions the account on first sight. Leave unset for a direct, locally-authenticated deployment. See [Single sign-on behind a trusted proxy](#single-sign-on-behind-a-trusted-proxy). |
@@ -230,6 +231,72 @@ Native OIDC login (akari as a relying party, provisioning users on first login) 
 SCIM provisioning are planned, so you will be able to point akari straight at an
 identity provider and manage the account lifecycle from it. Until then, the
 reverse-proxy pattern above is the supported integration.
+
+## Serving under a path prefix
+
+akari does not have to own its origin: a reverse proxy can mount it under any
+path, so `https://ops.example.com/tools/akari/` works beside whatever else the
+host serves. Tell akari the prefix one of two ways:
+
+- **Statically**, by putting the path in `AKARI_PUBLIC_URL`:
+
+  ```sh
+  AKARI_PUBLIC_URL=https://ops.example.com/tools/akari
+  ```
+
+- **Per request**, by setting `AKARI_PREFIX_HEADER` to a header your proxy sets
+  to the mount path (most proxies call it `X-Forwarded-Prefix`):
+
+  ```sh
+  AKARI_PREFIX_HEADER=X-Forwarded-Prefix
+  ```
+
+  The header form needs no restart to move the mount and lets one instance be
+  reached under a prefix through the proxy and at the root directly (a request
+  without the header resolves no prefix). It carries the same trust rule as
+  proxy single sign-on: only enable it when akari is reachable exclusively
+  through the proxy, and if `AKARI_PROXY_AUTH_SECRET` is set the prefix header
+  counts only on requests that carry the matching secret. Set the header on
+  every request forwarded under the mount: cookie `Path` scopes follow the
+  resolved prefix, so a mount whose requests carry the header inconsistently
+  would mint cookies that other requests never present.
+
+With a prefix resolved, akari accepts the forwarded path stripped or
+unstripped (proxies differ; both route the same), generates every URL under
+the prefix (redirects, asset and API paths in served pages, Open Graph tags,
+the OAuth discovery documents, `llms.txt`), and scopes its session and CSRF
+cookies to the prefix so sibling applications on the same origin never receive
+them.
+
+A Caddy mount looks like:
+
+```
+ops.example.com {
+	handle /tools/akari/* {
+		reverse_proxy localhost:8080 {
+			header_up X-Forwarded-Prefix /tools/akari
+		}
+	}
+}
+```
+
+Two paths live outside the prefix and deserve a thought:
+
+- **MCP OAuth discovery.** RFC 8414 and RFC 9728 put well-known documents at
+  the origin root with the mount path appended, so an MCP client connecting to
+  `https://ops.example.com/tools/akari/mcp` fetches
+  `/.well-known/oauth-authorization-server/tools/akari`. akari answers those
+  suffixed paths; the proxy must forward `/.well-known/oauth-*` to akari for
+  agent [OAuth connections](./agent-access.md) to work. The suffix itself
+  names the mount, so this forwarding rule does not need to set the prefix
+  header. Tokens pasted manually need nothing extra.
+- **`/favicon.ico`.** Browsers probe the origin root for it unprompted. Pages
+  link the icon under the prefix, so tabs render it either way; the root probe
+  belongs to whatever owns the root of that origin.
+
+Ingest and MCP clients need no special handling: point them at the prefixed
+base URL (`akari` client `server = https://ops.example.com/tools/akari`) and
+they join their API paths under it.
 
 ## Reparse
 

@@ -23,7 +23,7 @@ templ OverviewPage(p Page, a store.Analytics, rng string, users []store.User, se
 			// to the account control to toggle it off.
 			<div class="overview-public-badge">
 				@publicTag(PublicOverviewHref(p.Username))
-				<a class="muted small" href="/account#publicity">Manage</a>
+				<a class="muted small" href={ Href(ctx, "/account#publicity") }>Manage</a>
 			</div>
 		}
 		// A range or per-user change refetches the overview and replaces #usage (the
@@ -241,7 +241,7 @@ templ userFilter(users []store.User, selected []int64, rng string, swap string) 
 						name="user"
 						value={ fmt.Sprintf("%d", u.ID) }
 						checked?={ sel[u.ID] }
-						hx-get="/overview"
+						hx-get={ string(Href(ctx, "/overview")) }
 						hx-include="closest .userfilter-menu"
 						hx-target={ swap }
 						hx-select={ swap }

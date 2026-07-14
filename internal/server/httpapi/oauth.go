@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jssblck/akari/internal/config"
 	"github.com/jssblck/akari/internal/server/auth"
 	"github.com/jssblck/akari/internal/server/store"
 	"github.com/jssblck/akari/internal/server/web"
@@ -66,15 +68,44 @@ func (s *Server) baseURL(r *http.Request) string {
 	return scheme + "://" + r.Host
 }
 
+// withWellKnownPrefix rebinds the request's resolved prefix from the suffix of
+// a well-known discovery URL. RFC 8414 and RFC 9728 insert the well-known
+// segment between the origin and the issuer or resource path, so the suffix a
+// client appends is itself the external prefix (plus, for the protected
+// resource, the resource's own path). Deriving the prefix from the suffix
+// keeps discovery correct even when the proxy's separate well-known forwarding
+// rule does not attach the prefix header. An empty or invalid derivation keeps
+// the prefix the request already resolved: a proxy may equally forward the
+// unsuffixed form mounted under the prefix, where the suffix carries no
+// prefix information but the stripped path and header already did.
+func withWellKnownPrefix(r *http.Request, resourcePath string) *http.Request {
+	rest := r.PathValue("rest")
+	if rest == "" {
+		return r
+	}
+	candidate := "/" + rest
+	if resourcePath != "" {
+		if !strings.HasSuffix(candidate, resourcePath) {
+			return r
+		}
+		candidate = strings.TrimSuffix(candidate, resourcePath)
+	}
+	prefix, err := config.NormalizePathPrefix(candidate)
+	if err != nil || prefix == "" {
+		return r
+	}
+	return r.WithContext(context.WithValue(r.Context(), prefixKey, prefix))
+}
+
 // handleProtectedResourceMetadata serves RFC 9728 metadata: it tells an MCP client
 // which authorization server guards the /mcp resource, so the client knows where to
 // register and authorize. akari is both the resource server and the authorization
 // server, so the resource points back at this same origin.
 func (s *Server) handleProtectedResourceMetadata(w http.ResponseWriter, r *http.Request) {
-	base := s.baseURL(r)
+	r = withWellKnownPrefix(r, mcpPath)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"resource":                 base + mcpPath,
-		"authorization_servers":    []string{base},
+		"resource":                 s.absURL(r, mcpPath),
+		"authorization_servers":    []string{s.absURL(r, "")},
 		"scopes_supported":         []string{scopeRead},
 		"bearer_methods_supported": []string{"header"},
 	})
@@ -85,12 +116,12 @@ func (s *Server) handleProtectedResourceMetadata(w http.ResponseWriter, r *http.
 // the only challenge method, and clients authenticate as public clients (no
 // secret), matching how the dynamic registration issues them.
 func (s *Server) handleAuthServerMetadata(w http.ResponseWriter, r *http.Request) {
-	base := s.baseURL(r)
+	r = withWellKnownPrefix(r, "")
 	writeJSON(w, http.StatusOK, map[string]any{
-		"issuer":                                base,
-		"authorization_endpoint":                base + oauthAuthorizePath,
-		"token_endpoint":                        base + oauthTokenPath,
-		"registration_endpoint":                 base + oauthRegisterPath,
+		"issuer":                                s.absURL(r, ""),
+		"authorization_endpoint":                s.absURL(r, oauthAuthorizePath),
+		"token_endpoint":                        s.absURL(r, oauthTokenPath),
+		"registration_endpoint":                 s.absURL(r, oauthRegisterPath),
 		"response_types_supported":              []string{"code"},
 		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
 		"code_challenge_methods_supported":      []string{"S256"},
@@ -164,7 +195,7 @@ func (s *Server) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
 	setPrivateNoStore(w)
 	p, ok := s.resolve(r)
 	if !ok || p.Scope != scopeFull {
-		http.Redirect(w, r, "/login?next="+url.QueryEscape(r.URL.RequestURI()), http.StatusSeeOther)
+		http.Redirect(w, r, s.loginRedirect(r), http.StatusSeeOther)
 		return
 	}
 	s.handleAppShell(w, s.withPrincipal(r, p))
@@ -208,7 +239,7 @@ func (s *Server) handleAPIOAuthConsent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "start consent flow")
 		return
 	}
-	s.setOAuthCSRFCookie(w, csrf)
+	s.setOAuthCSRFCookie(w, r, csrf)
 	appCSRF, _ := csrfTokenFromRequest(r)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"client_name": clientDisplayName(client), "username": user.Username,
@@ -227,7 +258,7 @@ func (s *Server) handleOAuthDecision(w http.ResponseWriter, r *http.Request) {
 	setPrivateNoStore(w)
 	p, ok := s.resolve(r)
 	if !ok || p.Scope != scopeFull {
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		http.Redirect(w, r, s.href(r, "/login"), http.StatusSeeOther)
 		return
 	}
 	if err := r.ParseForm(); err != nil {
@@ -238,7 +269,7 @@ func (s *Server) handleOAuthDecision(w http.ResponseWriter, r *http.Request) {
 		s.renderOAuthErrorPage(w, r, http.StatusBadRequest, "This consent form expired. Start the connection again.")
 		return
 	}
-	s.clearOAuthCSRFCookie(w)
+	s.clearOAuthCSRFCookie(w, r)
 
 	clientID := r.PostFormValue("client_id")
 	redirectURI := r.PostFormValue("redirect_uri")
@@ -495,11 +526,11 @@ func (s *Server) renderOAuthErrorPage(w http.ResponseWriter, r *http.Request, st
 	render(w, r, status, web.ErrorPage(web.Page{Title: "Authorization error"}, status, msg))
 }
 
-func (s *Server) setOAuthCSRFCookie(w http.ResponseWriter, value string) {
+func (s *Server) setOAuthCSRFCookie(w http.ResponseWriter, r *http.Request, value string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     oauthCSRFCookie,
 		Value:    value,
-		Path:     "/oauth",
+		Path:     s.href(r, "/oauth"),
 		HttpOnly: true,
 		Secure:   s.Cfg.CookieSecure,
 		SameSite: http.SameSiteLaxMode,
@@ -507,11 +538,11 @@ func (s *Server) setOAuthCSRFCookie(w http.ResponseWriter, value string) {
 	})
 }
 
-func (s *Server) clearOAuthCSRFCookie(w http.ResponseWriter) {
+func (s *Server) clearOAuthCSRFCookie(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     oauthCSRFCookie,
 		Value:    "",
-		Path:     "/oauth",
+		Path:     s.href(r, "/oauth"),
 		HttpOnly: true,
 		Secure:   s.Cfg.CookieSecure,
 		SameSite: http.SameSiteLaxMode,

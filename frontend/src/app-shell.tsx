@@ -13,6 +13,7 @@ import { useEffect } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 
 import { request, setCSRFToken, useAPI } from "./api";
+import { withBase } from "./base";
 import { AsyncView } from "./components/async-view";
 import { NoticeHost } from "./components/notices";
 import type { Viewer } from "./types";
@@ -34,8 +35,11 @@ export function AppShell() {
     if (viewer.kind !== "ready") return;
     setCSRFToken(viewer.data.csrf_token);
     if (!viewer.data.authenticated) {
+      // next is always an external path (the server's login bounce builds it
+      // the same way), and the router strips the basename from pathname, so
+      // put it back before handing the value off.
       navigate(
-        `/login?next=${encodeURIComponent(location.pathname + location.search)}`,
+        `/login?next=${encodeURIComponent(withBase(location.pathname + location.search))}`,
         { replace: true },
       );
     }
@@ -47,7 +51,11 @@ export function AppShell() {
         user.authenticated ? (
           <div className="app-frame">
             <aside className="sidebar">
-              <a href="/" className="brand" aria-label="Akari homepage">
+              <a
+                href={withBase("/")}
+                className="brand"
+                aria-label="Akari homepage"
+              >
                 <span className="brand-mark" aria-hidden="true" />
                 <span>akari</span>
                 {user.version ? (
@@ -85,7 +93,7 @@ export function AppShell() {
                   className="nav-button"
                   onClick={async () => {
                     await request("/api/v1/auth/logout", { method: "POST" });
-                    window.location.assign("/login");
+                    window.location.assign(withBase("/login"));
                   }}
                 >
                   <SignOutIcon size={17} /> Sign out

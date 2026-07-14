@@ -21,7 +21,7 @@ templ AccountPage(p Page, tokens []store.APIToken, grants []store.OAuthGrant, in
 		}
 		<section>
 			<div class="panel-head"><h2>API tokens</h2></div>
-			<form method="post" action="/account/tokens" class="filters">
+			<form method="post" action={ Href(ctx, "/account/tokens") } class="filters">
 				@csrfField()
 				<input name="name" placeholder="token name"/>
 				<select name="scope">
@@ -114,7 +114,7 @@ templ accountInvites(invites []store.Invite, newInvite string) {
 				<strong>New invite (shown once):</strong> <code>{ newInvite }</code>
 			</div>
 		}
-		<form method="post" action="/account/invites">
+		<form method="post" action={ Href(ctx, "/account/invites") }>
 			@csrfField()
 			<button type="submit">Create invite</button>
 		</form>
@@ -178,13 +178,13 @@ templ accountPublicity(p Page) {
 				@publicTag(PublicOverviewHref(p.Username))
 				<a class="share-link muted small" href={ PublicOverviewHref(p.Username) } target="_blank" rel="noopener" title="Public overview link">{ PublicOverviewPath(p.Username) }</a>
 				@copyLink(PublicOverviewPath(p.Username))
-				<form method="post" action="/account/overview/unpublish" class="inline">
+				<form method="post" action={ Href(ctx, "/account/overview/unpublish") } class="inline">
 					@csrfField()
 					<button class="secondary small" type="submit" title="Hide the public page. The URL is your username, so making it public again brings the same link back.">Make private</button>
 				</form>
 			</div>
 		} else {
-			<form method="post" action="/account/overview/publish" class="inline">
+			<form method="post" action={ Href(ctx, "/account/overview/publish") } class="inline">
 				@csrfField()
 				<button class="secondary small" type="submit" title="Anyone can read your usage overview by username while it is public.">Make overview public</button>
 			</form>

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
 import { RequestError, request, useAPI } from "../api";
+import { basePath, withBase } from "../base";
 import { PublicShell } from "../components/public-shell";
 import type { Viewer } from "../types";
 
@@ -128,7 +129,11 @@ export function AuthPage({ mode }: { mode: "login" | "register" }) {
 // same-origin here while still redirecting off-site; the explicit backslash
 // check closes that gap the same way the server's does.
 function safeNext(value: string | null): string {
-  const fallback = "/overview";
+  // next is always an external (prefix-carrying) path: the server's login
+  // bounce and the app shell both prefix it before handing it here, so a
+  // valid value passes through untouched and only the fallback needs the
+  // base put back.
+  const fallback = withBase("/overview");
   if (!value?.startsWith("/") || value.startsWith("//")) return fallback;
   if (value.includes("\\")) return fallback;
   let parsed: URL;
@@ -145,6 +150,15 @@ function safeNext(value: string | null): string {
     return fallback;
   }
   if (decodedPath.includes("\\") || decodedPath.startsWith("//"))
+    return fallback;
+  // A prefixed deployment only routes paths under its mount point, so a next
+  // minted before the prefix existed would land outside the proxy's mount
+  // after login; send those to the fallback instead of off the app.
+  if (
+    basePath &&
+    parsed.pathname !== basePath &&
+    !parsed.pathname.startsWith(`${basePath}/`)
+  )
     return fallback;
   return value;
 }
