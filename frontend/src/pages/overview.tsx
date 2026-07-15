@@ -1,5 +1,5 @@
 import { ArrowSquareOutIcon } from "@phosphor-icons/react";
-import { useMemo, useState } from "react";
+import { type ReactNode, useState } from "react";
 import { useOutletContext, useSearchParams } from "react-router-dom";
 
 import { useAPI } from "../api";
@@ -19,7 +19,13 @@ import {
 } from "../format";
 import "../overview.css";
 import { withBase } from "../base";
-import type { Analytics, Breakdown, OverviewResponse, Viewer } from "../types";
+import type {
+  Analytics,
+  Breakdown,
+  OverviewResponse,
+  User,
+  Viewer,
+} from "../types";
 
 // formatSavings mirrors the server's FmtSavings: a non-negative saving reads
 // "saved $X", and the rare negative (cache written but never re-read enough
@@ -36,12 +42,18 @@ function formatSavings(usd: number, incomplete: boolean): string {
 export function AnalyticsPanel({
   analytics,
   showUsers = false,
+  activityControls,
 }: {
   analytics: Analytics;
   // showUsers gates the by-user cost breakdown: the signed-in overview and
   // project pages opt in explicitly, while the public project surface keeps
   // the default off so the accounts that ran in a repo stay private.
   showUsers?: boolean;
+  // activityControls render in the Daily activity header row, directly under
+  // the stat strip. The overview page slots its range picker and account
+  // filter here; pages that keep those controls in their own header pass
+  // nothing.
+  activityControls?: ReactNode;
 }) {
   const promptTokens =
     analytics.Cache.Input +
@@ -60,10 +72,17 @@ export function AnalyticsPanel({
     (analytics.Series?.length ?? 0) > 0;
 
   if (!hasData) {
+    // The controls stay reachable above the empty card: a window with no
+    // usage must still offer the range picker as the way back out.
     return (
-      <section className="usage-empty">
-        <p>No usage recorded yet.</p>
-      </section>
+      <>
+        {activityControls ? (
+          <div className="activity-controls standalone">{activityControls}</div>
+        ) : null}
+        <section className="usage-empty">
+          <p>No usage recorded yet.</p>
+        </section>
+      </>
     );
   }
 
@@ -88,7 +107,6 @@ export function AnalyticsPanel({
             </HoverTip>
           }
         />
-        <Stat label="Sessions" value={formatCount(analytics.Sessions)} />
         <Stat
           label="Cache hit"
           value={
@@ -112,8 +130,9 @@ export function AnalyticsPanel({
             </HoverTip>
           }
         />
+        <Stat label="Sessions" value={formatCount(analytics.Sessions)} />
       </StatStrip>
-      <ActivityPanel analytics={analytics} />
+      <ActivityPanel analytics={analytics} controls={activityControls} />
       <div className="usage-breakdowns">
         <BreakdownTable title="Models" rows={analytics.Models ?? []} />
         <BreakdownTable title="Agents" rows={analytics.Agents ?? []} />
@@ -127,34 +146,40 @@ export function AnalyticsPanel({
 
 // ActivityPanel is the calendar activity grid with its Tokens/Dollars toggle:
 // one cell per day over a trailing year, intensity scaled by the chosen metric.
-export function ActivityPanel({ analytics }: { analytics: Analytics }) {
+export function ActivityPanel({
+  analytics,
+  controls,
+}: {
+  analytics: Analytics;
+  controls?: ReactNode;
+}) {
   const [metric, setMetric] = useState<HeatmapMetric>("tokens");
   return (
     <section className="instrument">
       <div className="section-head">
-        <div>
-          <h2>Daily activity</h2>
-          <p>One cell per day; darker cells carried more of the window.</p>
+        <h2>Daily activity</h2>
+        <div className="activity-controls">
+          {controls}
+          <fieldset className="segmented">
+            <legend className="sr-only">Metric</legend>
+            {(
+              [
+                ["tokens", "Tokens"],
+                ["cost", "Dollars"],
+              ] as const
+            ).map(([key, label]) => (
+              <button
+                type="button"
+                key={key}
+                className={metric === key ? "active" : ""}
+                aria-pressed={metric === key}
+                onClick={() => setMetric(key)}
+              >
+                {label}
+              </button>
+            ))}
+          </fieldset>
         </div>
-        <fieldset className="segmented">
-          <legend className="sr-only">Metric</legend>
-          {(
-            [
-              ["tokens", "Tokens"],
-              ["cost", "Dollars"],
-            ] as const
-          ).map(([key, label]) => (
-            <button
-              type="button"
-              key={key}
-              className={metric === key ? "active" : ""}
-              aria-pressed={metric === key}
-              onClick={() => setMetric(key)}
-            >
-              {label}
-            </button>
-          ))}
-        </fieldset>
       </div>
       <ActivityHeatmap series={analytics.Series} metric={metric} />
     </section>
@@ -172,17 +197,21 @@ function BreakdownTable({ title, rows }: { title: string; rows: Breakdown[] }) {
         <p className="empty-inline">No usage in this window.</p>
       ) : (
         <div className="breakdown-list">
-          {rows.map((row) => {
+          {rows.map((row, index) => {
             const tokens =
               row.Input + row.Output + row.CacheRead + row.CacheWrite;
             return (
-              <div className="breakdown-row-wrap" key={row.Label}>
-                <div className="breakdown-row">
+              <div className="breakdown-row" key={row.Label}>
+                <span
+                  className="breakdown-fill"
+                  style={{
+                    width: `${Math.max((row.CostUSD / max) * 100, 1)}%`,
+                    background: `var(--viz-${(index % 8) + 1})`,
+                  }}
+                />
+                <div className="breakdown-head">
                   <span className="breakdown-label">
                     {row.Label || "unknown"}
-                  </span>
-                  <span className="bar-track">
-                    <span style={{ width: `${(row.CostUSD / max) * 100}%` }} />
                   </span>
                   <span className="data">
                     {formatCost(row.CostUSD, row.CostIncomplete)}
@@ -214,18 +243,50 @@ function BreakdownTable({ title, rows }: { title: string; rows: Breakdown[] }) {
   );
 }
 
+// AccountFilter narrows the whole overview to one account, mirroring the
+// project page's auto-applying select filters. The URL param is the source of
+// truth so the control reflects a click immediately, before the refetch lands.
+function AccountFilter({ users }: { users: User[] }) {
+  const [params, setParams] = useSearchParams();
+  const selected = params.getAll("user");
+  // The API still honors repeated user params (an old bookmark, a hand-built
+  // link). The select cannot express that set, so it names the state honestly
+  // with a disabled placeholder instead of claiming "All accounts" while the
+  // data underneath is filtered; any pick replaces the whole set.
+  const value =
+    selected.length === 1 ? selected[0] : selected.length > 1 ? "%multi" : "";
+  return (
+    <select
+      aria-label="Account filter"
+      className={value ? "active" : ""}
+      value={value}
+      onChange={(event) => {
+        const next = new URLSearchParams(params);
+        next.delete("user");
+        if (event.target.value) next.append("user", event.target.value);
+        setParams(next);
+      }}
+    >
+      <option value="">All accounts</option>
+      {selected.length > 1 ? (
+        <option value="%multi" disabled>
+          {selected.length} accounts
+        </option>
+      ) : null}
+      {users.map((user) => (
+        <option key={user.ID} value={String(user.ID)}>
+          {user.Username}
+        </option>
+      ))}
+    </select>
+  );
+}
+
 export function OverviewPage() {
   const viewer = useOutletContext<Viewer>();
-  const [params, setParams] = useSearchParams();
+  const [params] = useSearchParams();
   const path = `/api/v1/app/overview?${params.toString()}`;
   const state = useAPI<OverviewResponse>(path);
-  const selected = useMemo(
-    () =>
-      new Set(
-        state.kind === "ready" ? (state.data.selected_user_ids ?? []) : [],
-      ),
-    [state],
-  );
   return (
     <div className="page">
       {viewer.overview_public && viewer.username ? (
@@ -250,47 +311,18 @@ export function OverviewPage() {
       ) : null}
       <AsyncView state={state}>
         {(data) => (
-          <>
-            <header className="page-head">
-              <div>
-                <h1>Overview</h1>
-                <p>
-                  Fleet usage across projects, models, agents, and accounts.
-                </p>
-              </div>
-              <RangeTabs ranges={data.ranges ?? []} active={data.range} />
-            </header>
-            {(data.users ?? []).length > 1 ? (
-              <fieldset className="filter-row">
-                <legend className="sr-only">Account filter</legend>
-                <span className="label">Accounts</span>
-                {(data.users ?? []).map((user) => (
-                  <button
-                    type="button"
-                    key={user.ID}
-                    className={
-                      selected.has(user.ID)
-                        ? "filter-chip active"
-                        : "filter-chip"
-                    }
-                    onClick={() => {
-                      const next = new URLSearchParams(params);
-                      const values = new Set(next.getAll("user"));
-                      const value = String(user.ID);
-                      if (values.has(value)) values.delete(value);
-                      else values.add(value);
-                      next.delete("user");
-                      for (const id of values) next.append("user", id);
-                      setParams(next);
-                    }}
-                  >
-                    {user.Username}
-                  </button>
-                ))}
-              </fieldset>
-            ) : null}
-            <AnalyticsPanel analytics={data.analytics} showUsers />
-          </>
+          <AnalyticsPanel
+            analytics={data.analytics}
+            showUsers
+            activityControls={
+              <>
+                {(data.users ?? []).length > 1 ? (
+                  <AccountFilter users={data.users ?? []} />
+                ) : null}
+                <RangeTabs ranges={data.ranges ?? []} active={data.range} />
+              </>
+            }
+          />
         )}
       </AsyncView>
     </div>

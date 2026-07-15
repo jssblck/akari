@@ -81,12 +81,28 @@ html {
   background: var(--bg);
   scroll-behavior: smooth;
 }
+/* The chrome is not selectable: the app should feel native, and stray
+   i-beams over labels, figures, and controls break that. Content a reader
+   copies out (transcripts, thinking, tool bodies, code, guide prose) opts
+   back in below. */
 body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
   font-size: 14px;
   line-height: 1.5;
+  -webkit-user-select: none;
+  user-select: none;
+}
+input,
+textarea,
+pre,
+code,
+.msg .content,
+.thinking-body,
+.prose {
+  -webkit-user-select: text;
+  user-select: text;
 }
 button,
 input,
@@ -370,6 +386,8 @@ code {
   background: var(--lilac);
 }
 
+/* No overflow clipping here: the stat tiles host hover tip cards that must
+   escape the strip. */
 .stat-strip {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
@@ -377,7 +395,6 @@ code {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 6px;
-  overflow: hidden;
 }
 .stat {
   position: relative;
@@ -472,10 +489,6 @@ code {
   position: absolute;
   z-index: 5;
   min-width: 150px;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 8px 10px;
   pointer-events: none;
   opacity: 0;
   transform: translateY(2px);
@@ -538,21 +551,6 @@ code {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 18px;
 }
-.breakdown-list {
-  display: grid;
-  gap: 10px;
-}
-.breakdown-row {
-  display: grid;
-  grid-template-columns: minmax(90px, 1fr) minmax(100px, 2fr) 84px;
-  align-items: center;
-  gap: 12px;
-}
-.breakdown-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .bar-track {
   display: block;
   height: 5px;
@@ -594,7 +592,18 @@ code {
   flex-wrap: wrap;
   margin: -8px 0 18px;
 }
-.filter-chip,
+/* Inline control cluster in a section head: range tabs, filter selects, and
+   metric toggles share one right-aligned row. */
+.activity-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.activity-controls.standalone {
+  margin-bottom: 18px;
+}
 .tag {
   display: inline-flex;
   align-items: center;
@@ -605,14 +614,6 @@ code {
   border: 1px solid var(--border);
   border-radius: 4px;
   font-size: 11px;
-}
-.filter-chip {
-  cursor: pointer;
-}
-.filter-chip.active {
-  color: var(--ink-on-lilac);
-  background: var(--lilac);
-  border-color: var(--lilac);
 }
 .tag.agent {
   color: var(--lilac);
@@ -745,6 +746,15 @@ select {
   border: 1px solid var(--border);
   border-radius: 4px;
 }
+/* Replace the platform chevron with our own so its color and inset are the
+   design system's, not the OS theme's. */
+select {
+  appearance: none;
+  padding-right: 28px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6' fill='none'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%239a94ad' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+}
 input::placeholder {
   color: var(--muted);
 }
@@ -757,6 +767,22 @@ select:focus {
   border-color: var(--lilac);
   outline: 0;
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--lilac) 32%, transparent);
+}
+/* A select in a section-head control row matches the segmented controls it
+   sits beside: same height, surface, radius, and muted 12px text, brightening
+   when a filter is active. */
+.activity-controls select {
+  min-height: 0;
+  height: 35px;
+  padding: 0 26px 0 9px;
+  color: var(--muted);
+  border-radius: 5px;
+  font-size: 12px;
+  background-position: right 9px center;
+}
+.activity-controls select:hover,
+.activity-controls select.active {
+  color: var(--text);
 }
 .search-bar input {
   flex: 1;
@@ -1633,6 +1659,19 @@ select:focus {
   }
 }
 
+/* Shared popover card chrome: hover tip cards, the heatmap tooltip, and the
+   insights chart tooltip all read as the same card. width: max-content sizes
+   the card to its content; an absolutely positioned card otherwise shrinks to
+   the room its offsets leave in the containing block and wraps its labels
+   mid-word. Positioning, reveal, and z-index stay with each caller. */
+.popover {
+  width: max-content;
+  padding: 8px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
 /* Shared hover/focus tooltip card: token breakdowns on stat tiles, breakdown
    rows, and feed rows all reveal the same card shape. */
 .hover-tip {
@@ -1640,28 +1679,36 @@ select:focus {
   display: inline-flex;
   cursor: default;
 }
+/* The tip card lives in the browser's top layer (popover="manual"): HoverTip
+   opens it with showPopover and pins it to the trigger in viewport
+   coordinates, so the UA popover defaults (margin auto, inset 0) are reset
+   here. */
 .hover-tip .tip-card {
-  position: absolute;
-  bottom: calc(100% + 8px);
-  left: 50%;
-  transform: translateX(-50%) translateY(2px);
-  z-index: 6;
+  position: fixed;
+  inset: auto;
+  margin: 0;
   min-width: 170px;
-  padding: 8px 10px;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 4px;
   opacity: 0;
   pointer-events: none;
   transition:
     opacity 120ms ease,
-    transform 120ms ease;
+    display 120ms allow-discrete,
+    overlay 120ms allow-discrete;
 }
-.hover-tip:hover .tip-card,
-.hover-tip:focus-visible .tip-card,
-.hover-tip:focus-within .tip-card {
+.hover-tip .tip-card:popover-open {
   opacity: 1;
-  transform: translateX(-50%);
+}
+@starting-style {
+  .hover-tip .tip-card:popover-open {
+    opacity: 0;
+  }
+}
+/* Stat-tile hover figures advertise their tip card with a dotted underline.
+   Placement needs no special case: HoverTip flips the card below a trigger
+   that sits too close to the viewport's top edge. */
+.stat .hover-tip {
+  text-decoration: underline dotted var(--faint);
+  text-underline-offset: 5px;
 }
 .tip-card .tt-grid {
   display: grid;

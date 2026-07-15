@@ -64,7 +64,12 @@ export function TooltipHost({ children }: { children: ReactNode }) {
   return (
     <TooltipCtx.Provider value={ctx}>
       {children}
-      <div ref={nodeRef} className="chart-tooltip" role="status" style={style}>
+      <div
+        ref={nodeRef}
+        className="chart-tooltip popover"
+        role="status"
+        style={style}
+      >
         {state?.content}
       </div>
     </TooltipCtx.Provider>

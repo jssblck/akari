@@ -48,6 +48,34 @@ describe("useAPI", () => {
     expect(await screen.findByText("error: not found")).toBeInTheDocument();
   });
 
+  it("keeps the last payload rendered while a path change refetches", async () => {
+    let resolveSecond: (response: Response) => void = () => {};
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        if (String(input).endsWith("/first"))
+          return Promise.resolve(Response.json({ value: "grace" }));
+        return new Promise<Response>((resolve) => {
+          resolveSecond = resolve;
+        });
+      }),
+    );
+
+    const { rerender } = render(<Probe path="/api/v1/first" />);
+    expect(await screen.findByText("ready: grace")).toBeInTheDocument();
+
+    // An in-page filter change swaps the path. The old payload must stay up
+    // (no loading skeleton) until the new one lands.
+    rerender(<Probe path="/api/v1/second" />);
+    expect(screen.getByText("ready: grace")).toBeInTheDocument();
+    expect(screen.queryByText("loading")).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolveSecond(Response.json({ value: "ada" }));
+    });
+    expect(await screen.findByText("ready: ada")).toBeInTheDocument();
+  });
+
   it("enters the gated state on a 503 reparse body and schedules a refetch", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     let call = 0;

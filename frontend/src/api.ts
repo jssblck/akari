@@ -193,7 +193,11 @@ export function useAPI<T>(path: string): LoadState<T> {
         });
     };
 
-    setState({ kind: "loading" });
+    // Stale-while-revalidate: when the path changes on a mounted view (a
+    // range or filter tweak), keep showing the last payload until the new one
+    // lands instead of collapsing to the loading skeleton, which reads as a
+    // full page reload. Only the first load has no data to hold onto.
+    setState((prev) => (prev.kind === "ready" ? prev : { kind: "loading" }));
     load();
 
     return () => {
