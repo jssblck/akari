@@ -370,6 +370,8 @@ code {
   background: var(--lilac);
 }
 
+/* No overflow clipping here: the stat tiles host hover tip cards that must
+   escape the strip. */
 .stat-strip {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
@@ -377,7 +379,6 @@ code {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 6px;
-  overflow: hidden;
 }
 .stat {
   position: relative;
@@ -594,7 +595,23 @@ code {
   flex-wrap: wrap;
   margin: -8px 0 18px;
 }
-.filter-chip,
+/* Inline control cluster in a section head: range tabs, filter selects, and
+   metric toggles share one right-aligned row. */
+.activity-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.activity-controls select {
+  min-height: 0;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+.activity-controls.standalone {
+  margin-bottom: 18px;
+}
 .tag {
   display: inline-flex;
   align-items: center;
@@ -605,14 +622,6 @@ code {
   border: 1px solid var(--border);
   border-radius: 4px;
   font-size: 11px;
-}
-.filter-chip {
-  cursor: pointer;
-}
-.filter-chip.active {
-  color: var(--ink-on-lilac);
-  background: var(--lilac);
-  border-color: var(--lilac);
 }
 .tag.agent {
   color: var(--lilac);
@@ -1662,6 +1671,18 @@ select:focus {
 .hover-tip:focus-within .tip-card {
   opacity: 1;
   transform: translateX(-50%);
+}
+/* Stat-tile hover figures advertise their tip card with a dotted underline,
+   and the card opens downward: the strip sits at the top of the page, so an
+   upward card would leave the viewport. Ordered after the base rules so the
+   bottom override survives the tie on specificity. */
+.stat .hover-tip {
+  text-decoration: underline dotted var(--faint);
+  text-underline-offset: 5px;
+}
+.stat .tip-card {
+  top: calc(100% + 8px);
+  bottom: auto;
 }
 .tip-card .tt-grid {
   display: grid;

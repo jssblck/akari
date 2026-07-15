@@ -10,14 +10,17 @@ export function RangeTabs({
   active: string;
 }) {
   const [params, setParams] = useSearchParams();
+  // The URL param wins over the server-echoed range so the active tab flips
+  // on click; `active` covers the default view with no explicit param.
+  const current = params.get("range") ?? active;
   return (
     <fieldset className="segmented">
       <legend className="sr-only">Trailing window</legend>
       {ranges.map((range) => (
         <button
           type="button"
-          className={range.Key === active ? "active" : ""}
-          aria-pressed={range.Key === active}
+          className={range.Key === current ? "active" : ""}
+          aria-pressed={range.Key === current}
           key={range.Key}
           onClick={() => {
             const next = new URLSearchParams(params);
