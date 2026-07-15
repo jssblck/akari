@@ -7,15 +7,15 @@ pricing table, or the maintainability of the system.
 
 ## Local setup
 
-Install Go (the version in `go.mod`) and Git. The web UI is
-[templ](https://templ.guide), pinned as a Go tool in `go.mod`, so it needs no
-separate install: the generated `internal/server/web/*_templ.go` is gitignored
-and regenerated on every build. A fresh clone will not compile until it has been
-generated once, so run the generate step first:
+Install Go (the version in `go.mod`), Bun, and Git. The application UI is React
+under `frontend/`; its committed production build is embedded in the Go binary.
+The root homepage uses [templ](https://templ.guide), pinned as a Go tool in
+`go.mod`, and its generated `internal/server/web/*_templ.go` files are
+gitignored. Use the Makefile to keep both frontend layers and Go in step:
 
 ```sh
-make build        # go generate ./... then go build ./...
-make test         # go generate ./... then go test -race ./...
+make build        # build React, generate templ, then build Go
+make test         # check, test, and build React, then run Go tests under -race
 make vet
 make fmt          # report files that are not gofmt-clean
 ```
@@ -33,9 +33,10 @@ databases; each test provisions and drops its own database. See
 - Do not preserve backwards compatibility by default; if the clean solution means
   changing schemas, renaming concepts, or rewriting call sites, do it and mention
   the breakage plainly.
-- The `.templ` files are the source of truth for the web UI. Re-run
-  `go generate ./...` (or `make generate`) after editing one, and never commit
-  the generated `*_templ.go`.
+- React under `frontend/` owns the application routes. Run `make frontend` after
+  changing it and commit the rebuilt `internal/server/frontend/dist/` artifact.
+  The `.templ` files own only the root homepage; regenerate them after edits and
+  never commit the generated `*_templ.go` files.
 - Keep a schema change and its migration together: `migrations` holds the
   embedded SQL, and the server reparses stored sessions in the background when the
   parser changes, so a parser or projection change should still round-trip old
