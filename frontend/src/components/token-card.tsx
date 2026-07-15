@@ -8,6 +8,82 @@ import {
 
 import { formatCost, formatTokens } from "../format";
 
+type PointerPosition = { clientX: number; clientY: number };
+
+// useHoverPopover keeps every tooltip on the same positioning model. Pointer
+// opens capture their initial horizontal cursor position and stay there, while
+// the vertical gap is measured from the trigger's edge. Keyboard opens use the
+// trigger center. Both prefer above and flip below at the viewport edge.
+export function useHoverPopover<
+  Trigger extends HTMLElement,
+  Card extends HTMLElement,
+>() {
+  const triggerRef = useRef<Trigger>(null);
+  const popoverRef = useRef<Card>(null);
+  const openRef = useRef(false);
+  const [open, setOpen] = useState(false);
+
+  const show = useCallback((pointer?: PointerPosition) => {
+    const trigger = triggerRef.current;
+    const card = popoverRef.current;
+    if (
+      openRef.current ||
+      !trigger ||
+      !card ||
+      typeof card.showPopover !== "function"
+    )
+      return;
+    try {
+      card.showPopover();
+    } catch {
+      // The native popover may already be open after a browser-managed focus.
+    }
+    const margin = 8;
+    const triggerRect = trigger.getBoundingClientRect();
+    const cardRect = card.getBoundingClientRect();
+    const pointerOpen =
+      pointer &&
+      Number.isFinite(pointer.clientX) &&
+      Number.isFinite(pointer.clientY);
+    const anchorX = pointerOpen
+      ? pointer.clientX
+      : triggerRect.left + triggerRect.width / 2;
+    const left = Math.max(
+      margin,
+      Math.min(
+        anchorX - cardRect.width / 2,
+        window.innerWidth - cardRect.width - margin,
+      ),
+    );
+    let top = triggerRect.top - cardRect.height - margin;
+    if (top < margin) top = triggerRect.bottom + margin;
+    card.style.left = `${Math.round(left)}px`;
+    card.style.top = `${Math.round(top)}px`;
+    openRef.current = true;
+    setOpen(true);
+  }, []);
+
+  const hide = useCallback(() => {
+    try {
+      popoverRef.current?.hidePopover();
+    } catch {
+      // Already closed.
+    }
+    openRef.current = false;
+    setOpen(false);
+  }, []);
+
+  // A top-layer card holds viewport coordinates, so scrolling would leave it
+  // drifting away from its trigger; close it instead.
+  useEffect(() => {
+    if (!open) return;
+    window.addEventListener("scroll", hide, true);
+    return () => window.removeEventListener("scroll", hide, true);
+  }, [open, hide]);
+
+  return { triggerRef, popoverRef, show, hide };
+}
+
 // TokenCard is the shared per-class token breakdown (In / Out / Cache read /
 // Cache write, optional Reasoning line, optional cost footer) that surfaces on
 // hover or keyboard focus wherever a summed token figure appears: stat tiles,
@@ -61,9 +137,9 @@ export function TokenCard({
 //
 // The card is a native top-layer popover, so it always paints above the page
 // and no ancestor's overflow, stacking context, or z-index can trap it. Top
-// layer means viewport coordinates: the card is placed centered above the
-// trigger, clamped to the viewport, and flipped below when the trigger sits
-// too close to the top.
+// layer means viewport coordinates: pointer opens align horizontally with the
+// initial mouse position while staying outside the trigger's edge, keyboard
+// opens center on the trigger, and either flips below when needed.
 export function HoverTip({
   summary,
   children,
@@ -73,51 +149,10 @@ export function HoverTip({
   children: ReactNode;
   className?: string;
 }) {
-  const wrapRef = useRef<HTMLSpanElement>(null);
-  const tipRef = useRef<HTMLSpanElement>(null);
-  const [open, setOpen] = useState(false);
-
-  const show = () => {
-    const wrap = wrapRef.current;
-    const tip = tipRef.current;
-    if (!wrap || !tip || typeof tip.showPopover !== "function") return;
-    try {
-      tip.showPopover();
-    } catch {
-      // Already open (a focus following a hover); reposition below.
-    }
-    const margin = 8;
-    const anchor = wrap.getBoundingClientRect();
-    const card = tip.getBoundingClientRect();
-    const left = Math.max(
-      margin,
-      Math.min(
-        anchor.left + anchor.width / 2 - card.width / 2,
-        window.innerWidth - card.width - margin,
-      ),
-    );
-    let top = anchor.top - card.height - margin;
-    if (top < margin) top = anchor.bottom + margin;
-    tip.style.left = `${Math.round(left)}px`;
-    tip.style.top = `${Math.round(top)}px`;
-    setOpen(true);
-  };
-  const hide = useCallback(() => {
-    try {
-      tipRef.current?.hidePopover();
-    } catch {
-      // Already closed.
-    }
-    setOpen(false);
-  }, []);
-
-  // A top-layer card holds viewport coordinates, so scrolling would leave it
-  // drifting away from its trigger; close it instead.
-  useEffect(() => {
-    if (!open) return;
-    window.addEventListener("scroll", hide, true);
-    return () => window.removeEventListener("scroll", hide, true);
-  }, [open, hide]);
+  const { triggerRef, popoverRef, show, hide } = useHoverPopover<
+    HTMLSpanElement,
+    HTMLSpanElement
+  >();
 
   return (
     // biome-ignore lint/a11y/noStaticElementInteractions: the WAI tooltip pattern hangs hover and focus reveal off a non-interactive trigger; the handlers only toggle the card.
@@ -125,10 +160,10 @@ export function HoverTip({
       className={`hover-tip ${className}`.trim()}
       // biome-ignore lint/a11y/noNoninteractiveTabindex: the WAI tooltip pattern needs a focusable trigger so the card is reachable by keyboard, and the trigger itself performs no action.
       tabIndex={0}
-      ref={wrapRef}
-      onMouseEnter={show}
+      ref={triggerRef}
+      onMouseEnter={(event) => show(event)}
       onMouseLeave={hide}
-      onFocus={show}
+      onFocus={() => show()}
       onBlur={hide}
       // A manual popover opts out of the UA's Escape handling, so dismiss-
       // without-blurring is wired up here per the WAI tooltip pattern.
@@ -141,7 +176,7 @@ export function HoverTip({
         className="tip-card popover"
         role="tooltip"
         popover="manual"
-        ref={tipRef}
+        ref={popoverRef}
       >
         {children}
       </span>

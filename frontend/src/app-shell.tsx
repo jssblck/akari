@@ -56,7 +56,13 @@ export function AppShell() {
                 className="brand"
                 aria-label="Akari homepage"
               >
-                <span className="brand-mark" aria-hidden="true" />
+                <img
+                  className="brand-mark"
+                  src={withBase("/static/favicon.svg")}
+                  width="18"
+                  height="18"
+                  alt=""
+                />
                 <span>akari</span>
                 {user.version ? (
                   <span className="brandver">{user.version}</span>

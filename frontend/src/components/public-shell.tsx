@@ -25,7 +25,13 @@ export function PublicShell({
     <div className={compact ? "public-frame compact" : "public-frame"}>
       <header className="public-topbar">
         <a href={withBase("/")} className="brand">
-          <span className="brand-mark" aria-hidden="true" />
+          <img
+            className="brand-mark"
+            src={withBase("/static/favicon.svg")}
+            width="18"
+            height="18"
+            alt=""
+          />
           <span>akari</span>
           {version ? <span className="brandver">{version}</span> : null}
         </a>
