@@ -1,0 +1,1 @@
+import{j as s}from"./index-Cniq-4R8.js";function e({children:t}){return s.jsx("div",{className:"stat-strip",children:t})}function i({label:t,value:n,note:a}){return s.jsxs("div",{className:"stat",children:[s.jsx("span",{className:"label",children:t}),s.jsx("strong",{children:n}),a?s.jsx("span",{className:"stat-note",children:a}):null]})}export{e as S,i as a};

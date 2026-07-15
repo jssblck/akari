@@ -81,12 +81,28 @@ html {
   background: var(--bg);
   scroll-behavior: smooth;
 }
+/* The chrome is not selectable: the app should feel native, and stray
+   i-beams over labels, figures, and controls break that. Content a reader
+   copies out (transcripts, thinking, tool bodies, code, guide prose) opts
+   back in below. */
 body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
   font-size: 14px;
   line-height: 1.5;
+  -webkit-user-select: none;
+  user-select: none;
+}
+input,
+textarea,
+pre,
+code,
+.message-content,
+.thinking-body,
+.prose {
+  -webkit-user-select: text;
+  user-select: text;
 }
 button,
 input,
@@ -1653,36 +1669,36 @@ select:focus {
   display: inline-flex;
   cursor: default;
 }
+/* The tip card lives in the browser's top layer (popover="manual"): HoverTip
+   opens it with showPopover and pins it to the trigger in viewport
+   coordinates, so the UA popover defaults (margin auto, inset 0) are reset
+   here. */
 .hover-tip .tip-card {
-  position: absolute;
-  bottom: calc(100% + 8px);
-  left: 50%;
-  transform: translateX(-50%) translateY(2px);
-  z-index: 6;
+  position: fixed;
+  inset: auto;
+  margin: 0;
   min-width: 170px;
   opacity: 0;
   pointer-events: none;
   transition:
     opacity 120ms ease,
-    transform 120ms ease;
+    display 120ms allow-discrete,
+    overlay 120ms allow-discrete;
 }
-.hover-tip:hover .tip-card,
-.hover-tip:focus-visible .tip-card,
-.hover-tip:focus-within .tip-card {
+.hover-tip .tip-card:popover-open {
   opacity: 1;
-  transform: translateX(-50%);
 }
-/* Stat-tile hover figures advertise their tip card with a dotted underline,
-   and the card opens downward: the strip sits at the top of the page, so an
-   upward card would leave the viewport. Ordered after the base rules so the
-   bottom override survives the tie on specificity. */
+@starting-style {
+  .hover-tip .tip-card:popover-open {
+    opacity: 0;
+  }
+}
+/* Stat-tile hover figures advertise their tip card with a dotted underline.
+   Placement needs no special case: HoverTip flips the card below a trigger
+   that sits too close to the viewport's top edge. */
 .stat .hover-tip {
   text-decoration: underline dotted var(--faint);
   text-underline-offset: 5px;
-}
-.stat .tip-card {
-  top: calc(100% + 8px);
-  bottom: auto;
 }
 .tip-card .tt-grid {
   display: grid;
