@@ -31,6 +31,10 @@
   gap: 8px;
   min-width: 0;
 }
+.project-section-title h2 {
+  font-weight: 550;
+  letter-spacing: normal;
+}
 .project-sort {
   flex: 0 1 170px;
   min-width: 128px;
@@ -48,6 +52,10 @@
 }
 .projects-table th {
   background: color-mix(in srgb, var(--surface-2) 58%, var(--surface));
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.5;
+  letter-spacing: 0.07em;
 }
 .project-col-kind {
   width: 112px;
