@@ -1,7 +1,7 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { TokenCard } from "./token-card";
+import { HoverTip, TokenCard } from "./token-card";
 
 describe("TokenCard", () => {
   it("renders the In/Out/Cache read/Cache write classes", () => {
@@ -77,5 +77,46 @@ describe("TokenCard", () => {
       />,
     );
     expect(screen.getByText("$1.50+")).toBeInTheDocument();
+  });
+});
+
+describe("HoverTip", () => {
+  // happy-dom has no Popover API; stub the two calls HoverTip makes so the
+  // show/hide wiring is observable.
+  const showPopover = vi.fn();
+  const hidePopover = vi.fn();
+  const proto = HTMLElement.prototype as unknown as Record<string, unknown>;
+
+  afterEach(() => {
+    delete proto.showPopover;
+    delete proto.hidePopover;
+    showPopover.mockClear();
+    hidePopover.mockClear();
+  });
+
+  function renderTip() {
+    proto.showPopover = showPopover;
+    proto.hidePopover = hidePopover;
+    render(
+      <HoverTip summary="1.2k">
+        <div>card body</div>
+      </HoverTip>,
+    );
+    const trigger = screen.getByText("1.2k");
+    expect(trigger.className).toContain("hover-tip");
+    return trigger;
+  }
+
+  it("opens the card on keyboard focus", () => {
+    const trigger = renderTip();
+    fireEvent.focus(trigger);
+    expect(showPopover).toHaveBeenCalled();
+  });
+
+  it("closes the card on Escape without requiring a blur", () => {
+    const trigger = renderTip();
+    fireEvent.focus(trigger);
+    fireEvent.keyDown(trigger, { key: "Escape" });
+    expect(hidePopover).toHaveBeenCalled();
   });
 });

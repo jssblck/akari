@@ -130,6 +130,11 @@ export function HoverTip({
       onMouseLeave={hide}
       onFocus={show}
       onBlur={hide}
+      // A manual popover opts out of the UA's Escape handling, so dismiss-
+      // without-blurring is wired up here per the WAI tooltip pattern.
+      onKeyDown={(event) => {
+        if (event.key === "Escape") hide();
+      }}
     >
       {summary}
       <span

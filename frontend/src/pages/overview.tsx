@@ -249,7 +249,12 @@ function BreakdownTable({ title, rows }: { title: string; rows: Breakdown[] }) {
 function AccountFilter({ users }: { users: User[] }) {
   const [params, setParams] = useSearchParams();
   const selected = params.getAll("user");
-  const value = selected.length === 1 ? selected[0] : "";
+  // The API still honors repeated user params (an old bookmark, a hand-built
+  // link). The select cannot express that set, so it names the state honestly
+  // with a disabled placeholder instead of claiming "All accounts" while the
+  // data underneath is filtered; any pick replaces the whole set.
+  const value =
+    selected.length === 1 ? selected[0] : selected.length > 1 ? "%multi" : "";
   return (
     <select
       aria-label="Account filter"
@@ -263,6 +268,11 @@ function AccountFilter({ users }: { users: User[] }) {
       }}
     >
       <option value="">All accounts</option>
+      {selected.length > 1 ? (
+        <option value="%multi" disabled>
+          {selected.length} accounts
+        </option>
+      ) : null}
       {users.map((user) => (
         <option key={user.ID} value={String(user.ID)}>
           {user.Username}

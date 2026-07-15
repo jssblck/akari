@@ -98,7 +98,7 @@ input,
 textarea,
 pre,
 code,
-.message-content,
+.msg .content,
 .thinking-body,
 .prose {
   -webkit-user-select: text;
