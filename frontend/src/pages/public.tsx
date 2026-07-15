@@ -13,6 +13,7 @@ import {
   relativeTime,
   sessionTokens,
 } from "../format";
+import { normalizeInsights } from "../normalize-insights";
 import type {
   PublicOverviewResponse,
   PublicProjectResponse,
@@ -93,31 +94,34 @@ export function PublicProjectPage() {
         state={state}
         renderError={(error) => <PublicErrorState error={error} />}
       >
-        {(data) => (
-          <>
-            <header className="page-head">
-              <div>
-                <span className="tag public">published</span>
-                <h1>
-                  {data.project.DisplayName || data.project.RemoteKey} / usage
-                </h1>
-                <p>{data.project.RemoteKey}</p>
+        {(data) => {
+          const insights = normalizeInsights(data.insights);
+          return (
+            <>
+              <header className="page-head">
+                <div>
+                  <span className="tag public">published</span>
+                  <h1>
+                    {data.project.DisplayName || data.project.RemoteKey} / usage
+                  </h1>
+                  <p>{data.project.RemoteKey}</p>
+                </div>
+                <RangeTabs ranges={data.ranges ?? []} active={data.range} />
+              </header>
+              <AnalyticsPanel analytics={data.analytics} />
+              <div className="project-insights">
+                <h2>Quality signals</h2>
+                <InsightsPanel insights={insights} />
+                <TooltipHost>
+                  <ToolsInstrument
+                    insights={insights}
+                    resetKey={`${id}:${data.range}`}
+                  />
+                </TooltipHost>
               </div>
-              <RangeTabs ranges={data.ranges ?? []} active={data.range} />
-            </header>
-            <AnalyticsPanel analytics={data.analytics} />
-            <div className="project-insights">
-              <h2>Quality signals</h2>
-              <InsightsPanel insights={data.insights} />
-              <TooltipHost>
-                <ToolsInstrument
-                  insights={data.insights}
-                  resetKey={`${id}:${data.range}`}
-                />
-              </TooltipHost>
-            </div>
-          </>
-        )}
+            </>
+          );
+        }}
       </AsyncView>
     </PublicPage>
   );

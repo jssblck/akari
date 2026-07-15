@@ -17,11 +17,7 @@ func (s *Server) gateAPIParsed(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		w.Header().Set("Retry-After", "2")
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-			"error":   "projection rebuild in progress",
-			"code":    "projection_rebuild",
-			"reparse": status,
-		})
+		writeJSON(w, http.StatusServiceUnavailable, newReparseGateResponse(status))
 	}
 }
 

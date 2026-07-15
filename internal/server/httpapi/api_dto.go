@@ -176,9 +176,26 @@ type revokedResponse struct {
 
 type reparseStatusResponse parse.Status
 
+type projectionRebuildError string
+type projectionRebuildCode string
+
+const (
+	projectionRebuildInProgress projectionRebuildError = "projection rebuild in progress"
+	projectionRebuildCodeValue  projectionRebuildCode  = "projection_rebuild"
+)
+
 type reparseGateResponse struct {
-	Error   string       `json:"error"`
-	Reparse parse.Status `json:"reparse"`
+	Error   projectionRebuildError `json:"error"`
+	Code    projectionRebuildCode  `json:"code"`
+	Reparse reparseStatusResponse  `json:"reparse"`
+}
+
+func newReparseGateResponse(status parse.Status) reparseGateResponse {
+	return reparseGateResponse{
+		Error:   projectionRebuildInProgress,
+		Code:    projectionRebuildCodeValue,
+		Reparse: reparseStatusResponse(status),
+	}
 }
 
 type registeredUserResponse struct {

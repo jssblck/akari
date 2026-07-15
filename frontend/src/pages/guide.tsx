@@ -68,7 +68,7 @@ export function GuidePage() {
   const [copied, setCopied] = useState(false);
   const [activeHeading, setActiveHeading] = useState("");
 
-  const headings = state.kind === "ready" ? state.data.headings : [];
+  const headings = state.kind === "ready" ? (state.data.headings ?? []) : [];
   const components = useMemo<Components>(
     () => guideComponents(headings, slug),
     [headings, slug],
@@ -146,7 +146,7 @@ export function GuidePage() {
                   <aside className="guide-nav" id="guide-sidebar">
                     <span className="label">User guide</span>
                     <nav>
-                      {data.chapters.map((chapter) => (
+                      {(data.chapters ?? []).map((chapter) => (
                         <a
                           key={chapter.Slug}
                           className={chapter.Slug === data.slug ? "active" : ""}
@@ -229,10 +229,10 @@ export function GuidePage() {
                       ) : null}
                     </footer>
                   </article>
-                  {data.headings.length > 1 ? (
+                  {(data.headings ?? []).length > 1 ? (
                     <aside className="guide-toc">
                       <span className="label">On this page</span>
-                      {data.headings.map((heading) => (
+                      {(data.headings ?? []).map((heading) => (
                         <a
                           className={[
                             heading.Level === 3 ? "nested" : "",

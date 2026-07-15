@@ -26,6 +26,7 @@ import "../insights.css";
 import { RangeTabs } from "../components/range-tabs";
 import { Stat, StatStrip } from "../components/stat-strip";
 import { formatCount, formatPercent, formatTime } from "../format";
+import { normalizeInsights } from "../normalize-insights";
 import type { Insights, InsightsResponse } from "../types";
 
 // InsightsPanel is the project (and public-project) quality band: three
@@ -170,7 +171,8 @@ export function InsightsPage() {
           const generatedAt = data.generated_at
             ? new Date(data.generated_at)
             : null;
-          const trends = data.insights.Trends;
+          const insights = normalizeInsights(data.insights);
+          const trends = insights.Trends;
           const hasData = !!trends && trends.BucketStarts.length > 0;
           return (
             <>
@@ -183,7 +185,7 @@ export function InsightsPage() {
                     {snapshotAge(new Date(), generatedAt)}
                   </span>
                 )}
-                <RangeTabs ranges={data.ranges} active={data.range} />
+                <RangeTabs ranges={data.ranges ?? []} active={data.range} />
               </header>
               {!hasData || !trends ? (
                 <EmptyInsights />
@@ -192,16 +194,13 @@ export function InsightsPage() {
                   <FleetMixInstrument trends={trends} />
                   <SessionGalleryInstrument trends={trends} />
                   <VelocityInstrument
-                    insights={data.insights}
+                    insights={insights}
                     trends={trends}
                     resetKey={data.range}
                   />
-                  <ToolsInstrument
-                    insights={data.insights}
-                    resetKey={data.range}
-                  />
+                  <ToolsInstrument insights={insights} resetKey={data.range} />
                   <HealthInstrument
-                    insights={data.insights}
+                    insights={insights}
                     trends={trends}
                     resetKey={data.range}
                   />

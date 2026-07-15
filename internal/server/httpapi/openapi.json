@@ -4422,8 +4422,8 @@
         "type": "object",
         "additionalProperties": false,
         "required": [
-          "error",
           "code",
+          "error",
           "reparse"
         ],
         "properties": {
@@ -4436,35 +4436,7 @@
             "const": "projection_rebuild"
           },
           "reparse": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "in_progress",
-              "done",
-              "total",
-              "failed"
-            ],
-            "properties": {
-              "in_progress": {
-                "type": "boolean"
-              },
-              "done": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "total": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "failed": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "started_at": {
-                "type": "string",
-                "format": "date-time"
-              }
-            }
+            "$ref": "#/components/schemas/ReparseStatusResponse"
           }
         }
       }
@@ -6044,13 +6016,23 @@
         ],
         "responses": {
           "200": {
-            "description": "Session snapshot fragment"
+            "description": "Session snapshot fragment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionResponse"
+                }
+              }
+            }
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/ProjectionRebuilding"
           }
         }
       }

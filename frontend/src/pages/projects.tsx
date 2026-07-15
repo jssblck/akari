@@ -24,6 +24,7 @@ import {
 } from "../format";
 import "../projects.css";
 import { withBase } from "../base";
+import { normalizeInsights } from "../normalize-insights";
 import type {
   Project,
   ProjectResponse,
@@ -39,6 +40,17 @@ import { AnalyticsPanel } from "./overview";
 // publicity control, the session filter facets).
 function isLocalKind(kind: string): boolean {
   return kind === "standalone" || kind === "orphaned";
+}
+
+function normalizeSparklines(
+  sparklines: ProjectsResponse["sparklines"],
+): Record<string, number[]> {
+  return Object.fromEntries(
+    Object.entries(sparklines ?? {}).map(([key, values]) => [
+      key,
+      values ?? [],
+    ]),
+  );
 }
 
 function projectLabel(project: Project): string {
@@ -236,18 +248,18 @@ export function ProjectsPage() {
             <>
               <ProjectSection
                 title="Repositories"
-                projects={data.projects.filter(
+                projects={(data.projects ?? []).filter(
                   (project) => !isLocalKind(project.Kind),
                 )}
-                sparklines={data.sparklines ?? {}}
+                sparklines={normalizeSparklines(data.sparklines)}
                 showKind={false}
               />
               <ProjectSection
                 title="Local folders"
-                projects={data.projects.filter((project) =>
+                projects={(data.projects ?? []).filter((project) =>
                   isLocalKind(project.Kind),
                 )}
-                sparklines={data.sparklines ?? {}}
+                sparklines={normalizeSparklines(data.sparklines)}
                 showKind
               />
             </>
@@ -344,6 +356,7 @@ export function ProjectPage() {
     <div className="page">
       <AsyncView state={state}>
         {(data) => {
+          const insights = normalizeInsights(data.insights);
           const local = isLocalKind(data.project.Kind);
           const remainderTokens =
             data.remainder.Input +
@@ -375,7 +388,7 @@ export function ProjectPage() {
                   <p>{data.project.RemoteKey}</p>
                 </div>
                 <div className="head-actions">
-                  <RangeTabs ranges={data.ranges} active={data.range} />
+                  <RangeTabs ranges={data.ranges ?? []} active={data.range} />
                   {!local ? (
                     data.project.OverviewPublic ? (
                       <>
@@ -532,10 +545,10 @@ export function ProjectPage() {
               </section>
               <div className="project-insights">
                 <h2>Quality signals</h2>
-                <InsightsPanel insights={data.insights} />
+                <InsightsPanel insights={insights} />
                 <TooltipHost>
                   <ToolsInstrument
-                    insights={data.insights}
+                    insights={insights}
                     resetKey={`${data.project.ID}:${data.range}`}
                   />
                 </TooltipHost>

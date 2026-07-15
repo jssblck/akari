@@ -586,9 +586,7 @@ func (s *Server) writeAPIReparseGate(w http.ResponseWriter, r *http.Request) boo
 		return false
 	}
 	w.Header().Set("Retry-After", "2")
-	writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-		"error": "projection rebuild in progress", "code": "projection_rebuild", "reparse": status,
-	})
+	writeJSON(w, http.StatusServiceUnavailable, newReparseGateResponse(status))
 	return true
 }
 

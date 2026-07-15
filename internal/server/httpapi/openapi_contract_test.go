@@ -32,6 +32,7 @@ var browserContracts = []browserContract{
 	{"/api/v1/app/projects/{id}/publication", "put", "200", "PublicationResponse", publicationResponse{}},
 	{"/api/v1/app/sessions", "get", "200", "SessionsResponse", sessionsResponse{}},
 	{"/api/v1/app/sessions/{id}", "get", "200", "SessionResponse", sessionResponse{}},
+	{"/api/v1/app/sessions/{id}/append", "get", "200", "SessionResponse", sessionResponse{}},
 	{"/api/v1/app/sessions/{id}", "delete", "200", "DeletedSessionResponse", deletedSessionResponse{}},
 	{"/api/v1/app/sessions/{id}/transcript", "get", "200", "TranscriptResponse", transcriptResponse{}},
 	{"/api/v1/app/sessions/{id}/publication", "put", "200", "SessionPublicationResponse", sessionPublicationResponse{}},
@@ -157,6 +158,7 @@ func browserContractSchemas(t *testing.T) map[string]any {
 		reflect.TypeOf(oauthGrantDTO{}):              "OAuthGrant",
 		reflect.TypeOf(accountInviteDTO{}):           "AccountInvite",
 		reflect.TypeOf(reparseStatusResponse{}):      "ReparseStatusResponse",
+		reflect.TypeOf(reparseGateResponse{}):        "ProjectionRebuild",
 		reflect.TypeOf(overviewResponse{}):           "OverviewResponse",
 		reflect.TypeOf(insightsResponse{}):           "InsightsResponse",
 		reflect.TypeOf(projectsResponse{}):           "ProjectsResponse",
@@ -264,6 +266,12 @@ func (b *schemaBuilder) structSchema(typ reflect.Type) map[string]any {
 }
 
 func (b *schemaBuilder) fieldSchema(typ reflect.Type) any {
+	if typ == reflect.TypeOf(projectionRebuildError("")) {
+		return map[string]any{"const": string(projectionRebuildInProgress), "type": "string"}
+	}
+	if typ == reflect.TypeOf(projectionRebuildCode("")) {
+		return map[string]any{"const": string(projectionRebuildCodeValue), "type": "string"}
+	}
 	if typ == reflect.TypeOf(time.Time{}) {
 		return map[string]any{"format": "date-time", "type": "string"}
 	}

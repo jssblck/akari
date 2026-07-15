@@ -69,35 +69,18 @@ export type Heading = Schema["Heading"];
 export type FacetCount = Schema["FacetCount"];
 export type ProjectFacet = Schema["ProjectFacet"];
 
-export type AccountResponse = NormalizeArrays<Schema["AccountResponse"]>;
-export type OverviewResponse = NormalizeArrays<Schema["OverviewResponse"]>;
-export type InsightsResponse = Omit<
-  NormalizeArrays<Schema["InsightsResponse"]>,
-  "insights"
-> & {
-  insights: Insights;
-};
-export type ProjectsResponse = NormalizeArrays<Schema["ProjectsResponse"]>;
-export type ProjectResponse = Omit<
-  NormalizeArrays<Schema["ProjectResponse"]>,
-  "insights"
-> & {
-  insights: Insights;
-};
-export type SessionsResponse = NormalizeArrays<Schema["SessionsResponse"]>;
-export type SessionResponse = NormalizeArrays<Schema["SessionResponse"]>;
-export type TranscriptResponse = NormalizeArrays<Schema["TranscriptResponse"]>;
-export type PublicOverviewResponse = NormalizeArrays<
-  Schema["PublicOverviewResponse"]
->;
-export type PublicProjectResponse = Omit<
-  NormalizeArrays<Schema["PublicProjectResponse"]>,
-  "insights"
-> & { insights: Insights };
-export type PublicSessionResponse = NormalizeArrays<
-  Schema["PublicSessionResponse"]
->;
-export type GuideResponse = NormalizeArrays<Schema["GuideResponse"]>;
+export type AccountResponse = Schema["AccountResponse"];
+export type OverviewResponse = Schema["OverviewResponse"];
+export type InsightsResponse = Schema["InsightsResponse"];
+export type ProjectsResponse = Schema["ProjectsResponse"];
+export type ProjectResponse = Schema["ProjectResponse"];
+export type SessionsResponse = Schema["SessionsResponse"];
+export type SessionResponse = Schema["SessionResponse"];
+export type TranscriptResponse = Schema["TranscriptResponse"];
+export type PublicOverviewResponse = Schema["PublicOverviewResponse"];
+export type PublicProjectResponse = Schema["PublicProjectResponse"];
+export type PublicSessionResponse = Schema["PublicSessionResponse"];
+export type GuideResponse = Schema["GuideResponse"];
 export type OAuthConsentResponse = Schema["OAuthConsentResponse"];
 export type CreatedTokenResponse = Schema["CreatedTokenResponse"];
 export type CreatedInviteResponse = Schema["CreatedInviteResponse"];

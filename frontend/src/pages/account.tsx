@@ -13,6 +13,8 @@ import { formatTime } from "../format";
 import type {
   AccountResponse,
   Connection,
+  CreatedInviteResponse,
+  CreatedTokenResponse,
   Invite,
   Token,
   Viewer,
@@ -83,7 +85,7 @@ function TokenSection({
             const form = event.currentTarget;
             const data = new FormData(form);
             try {
-              const result = await request<{ token: string }>(
+              const result = await request<CreatedTokenResponse>(
                 "/api/v1/tokens",
                 {
                   method: "POST",
@@ -350,7 +352,7 @@ function InviteSection({
             const form = event.currentTarget;
             const data = new FormData(form);
             try {
-              const result = await request<{ invite_token: string }>(
+              const result = await request<CreatedInviteResponse>(
                 "/api/v1/invites",
                 {
                   method: "POST",

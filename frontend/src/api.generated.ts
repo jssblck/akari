@@ -1605,10 +1605,13 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["SessionResponse"];
+                    };
                 };
                 400: components["responses"]["BadRequest"];
                 404: components["responses"]["NotFound"];
+                503: components["responses"]["ProjectionRebuilding"];
             };
         };
         put?: never;
@@ -2639,14 +2642,7 @@ export interface components {
             error: "projection rebuild in progress";
             /** @constant */
             code: "projection_rebuild";
-            reparse: {
-                in_progress: boolean;
-                done: number;
-                total: number;
-                failed: number;
-                /** Format: date-time */
-                started_at?: string;
-            };
+            reparse: components["schemas"]["ReparseStatusResponse"];
         };
     };
     responses: {
