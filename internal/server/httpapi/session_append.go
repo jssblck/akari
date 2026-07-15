@@ -37,8 +37,9 @@ func (s *Server) handleAPISessionAppend(w http.ResponseWriter, r *http.Request) 
 	}
 	p, _ := principalFrom(r.Context())
 	viewer, _ := s.Store.UserByID(r.Context(), p.UserID)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"snapshot": snapshot, "owner": snapshot.Audit.Detail.OwnerID == p.UserID,
-		"can_delete": snapshot.Audit.Detail.OwnerID == p.UserID || viewer.IsAdmin,
+	writeJSON(w, http.StatusOK, sessionResponse{
+		Snapshot:  snapshot,
+		Owner:     snapshot.Audit.Detail.OwnerID == p.UserID,
+		CanDelete: snapshot.Audit.Detail.OwnerID == p.UserID || viewer.IsAdmin,
 	})
 }

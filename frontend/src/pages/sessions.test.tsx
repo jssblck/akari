@@ -34,7 +34,7 @@ function row(overrides: Partial<SessionRow> = {}): SessionRow {
     Grade: null,
     Outcome: "completed",
     Search: { Text: "", MatchStart: 0, MatchEnd: 0 },
-    Tree: { SubagentCount: 0, TotalCostUSD: 0, CostIncomplete: false },
+    Tree: { SubagentCount: 0, CostUSD: 0, CostIncomplete: false },
     ...overrides,
   };
 }

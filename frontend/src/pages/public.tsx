@@ -13,12 +13,11 @@ import {
   relativeTime,
   sessionTokens,
 } from "../format";
+import { normalizeInsights } from "../normalize-insights";
 import type {
-  Analytics,
-  DateRange,
-  Insights,
-  Project,
-  PublicSessionSnapshot,
+  PublicOverviewResponse,
+  PublicProjectResponse,
+  PublicSessionResponse,
 } from "../types";
 import "./public.css";
 import { withBase } from "../base";
@@ -53,13 +52,6 @@ function PublicErrorState({ error }: { error: Error }) {
   );
 }
 
-type PublicOverviewResponse = {
-  username: string;
-  range: string;
-  ranges: DateRange[];
-  analytics: Analytics;
-};
-
 export function PublicOverviewPage() {
   const { username = "" } = useParams();
   const [params] = useSearchParams();
@@ -80,7 +72,7 @@ export function PublicOverviewPage() {
                 <h1>{data.username} / usage</h1>
                 <p>AI coding-agent activity shared from akari.</p>
               </div>
-              <RangeTabs ranges={data.ranges} active={data.range} />
+              <RangeTabs ranges={data.ranges ?? []} active={data.range} />
             </header>
             <AnalyticsPanel analytics={data.analytics} />
           </>
@@ -89,14 +81,6 @@ export function PublicOverviewPage() {
     </PublicPage>
   );
 }
-
-type PublicProjectResponse = {
-  project: Project;
-  range: string;
-  ranges: DateRange[];
-  analytics: Analytics;
-  insights: Insights;
-};
 
 export function PublicProjectPage() {
   const { id = "" } = useParams();
@@ -110,37 +94,38 @@ export function PublicProjectPage() {
         state={state}
         renderError={(error) => <PublicErrorState error={error} />}
       >
-        {(data) => (
-          <>
-            <header className="page-head">
-              <div>
-                <span className="tag public">published</span>
-                <h1>
-                  {data.project.DisplayName || data.project.RemoteKey} / usage
-                </h1>
-                <p>{data.project.RemoteKey}</p>
+        {(data) => {
+          const insights = normalizeInsights(data.insights);
+          return (
+            <>
+              <header className="page-head">
+                <div>
+                  <span className="tag public">published</span>
+                  <h1>
+                    {data.project.DisplayName || data.project.RemoteKey} / usage
+                  </h1>
+                  <p>{data.project.RemoteKey}</p>
+                </div>
+                <RangeTabs ranges={data.ranges ?? []} active={data.range} />
+              </header>
+              <AnalyticsPanel analytics={data.analytics} />
+              <div className="project-insights">
+                <h2>Quality signals</h2>
+                <InsightsPanel insights={insights} />
+                <TooltipHost>
+                  <ToolsInstrument
+                    insights={insights}
+                    resetKey={`${id}:${data.range}`}
+                  />
+                </TooltipHost>
               </div>
-              <RangeTabs ranges={data.ranges} active={data.range} />
-            </header>
-            <AnalyticsPanel analytics={data.analytics} />
-            <div className="project-insights">
-              <h2>Quality signals</h2>
-              <InsightsPanel insights={data.insights} />
-              <TooltipHost>
-                <ToolsInstrument
-                  insights={data.insights}
-                  resetKey={`${id}:${data.range}`}
-                />
-              </TooltipHost>
-            </div>
-          </>
-        )}
+            </>
+          );
+        }}
       </AsyncView>
     </PublicPage>
   );
 }
-
-type PublicSessionResponse = { snapshot: PublicSessionSnapshot };
 
 export function PublicSessionPage() {
   const { publicId = "" } = useParams();

@@ -84,6 +84,7 @@ func TestOpenAPIDocumentsProjectionRebuildResponses(t *testing.T) {
 		"/api/v1/app/projects/{id}",
 		"/api/v1/app/sessions",
 		"/api/v1/app/sessions/{id}",
+		"/api/v1/app/sessions/{id}/append",
 		"/api/v1/app/sessions/{id}/transcript",
 		"/api/v1/app/public/users/{username}",
 		"/api/v1/app/public/projects/{id}",

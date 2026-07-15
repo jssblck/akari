@@ -26,14 +26,8 @@ import "../insights.css";
 import { RangeTabs } from "../components/range-tabs";
 import { Stat, StatStrip } from "../components/stat-strip";
 import { formatCount, formatPercent, formatTime } from "../format";
-import type { DateRange, Insights } from "../types";
-
-type InsightsResponse = {
-  range: string;
-  ranges: DateRange[];
-  generated_at: string;
-  insights: Insights;
-};
+import { normalizeInsights } from "../normalize-insights";
+import type { Insights, InsightsResponse } from "../types";
 
 // InsightsPanel is the project (and public-project) quality band: three
 // signal-trend charts (Grades, Outcomes, session shape) plus the reusable
@@ -62,7 +56,7 @@ export function InsightsPanel({ insights }: { insights: Insights }) {
         <Stat
           label="Archetypes"
           value={formatCount(
-            insights.Archetypes.filter((item) => item.Count > 0).length,
+            (insights.Archetypes ?? []).filter((item) => item.Count > 0).length,
           )}
         />
         <Stat
@@ -177,7 +171,8 @@ export function InsightsPage() {
           const generatedAt = data.generated_at
             ? new Date(data.generated_at)
             : null;
-          const trends = data.insights.Trends;
+          const insights = normalizeInsights(data.insights);
+          const trends = insights.Trends;
           const hasData = !!trends && trends.BucketStarts.length > 0;
           return (
             <>
@@ -190,7 +185,7 @@ export function InsightsPage() {
                     {snapshotAge(new Date(), generatedAt)}
                   </span>
                 )}
-                <RangeTabs ranges={data.ranges} active={data.range} />
+                <RangeTabs ranges={data.ranges ?? []} active={data.range} />
               </header>
               {!hasData || !trends ? (
                 <EmptyInsights />
@@ -199,16 +194,13 @@ export function InsightsPage() {
                   <FleetMixInstrument trends={trends} />
                   <SessionGalleryInstrument trends={trends} />
                   <VelocityInstrument
-                    insights={data.insights}
+                    insights={insights}
                     trends={trends}
                     resetKey={data.range}
                   />
-                  <ToolsInstrument
-                    insights={data.insights}
-                    resetKey={data.range}
-                  />
+                  <ToolsInstrument insights={insights} resetKey={data.range} />
                   <HealthInstrument
-                    insights={data.insights}
+                    insights={insights}
                     trends={trends}
                     resetKey={data.range}
                   />

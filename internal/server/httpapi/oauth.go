@@ -241,11 +241,11 @@ func (s *Server) handleAPIOAuthConsent(w http.ResponseWriter, r *http.Request) {
 	}
 	s.setOAuthCSRFCookie(w, r, csrf)
 	appCSRF, _ := csrfTokenFromRequest(r)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"client_name": clientDisplayName(client), "username": user.Username,
-		"client_id": clientID, "redirect_uri": redirectURI, "state": q.Get("state"),
-		"code_challenge": challenge, "resource": q.Get("resource"),
-		"csrf": csrf, "app_csrf": appCSRF,
+	writeJSON(w, http.StatusOK, oauthConsentResponse{
+		ClientName: clientDisplayName(client), Username: user.Username,
+		ClientID: clientID, RedirectURI: redirectURI, State: q.Get("state"),
+		CodeChallenge: challenge, Resource: q.Get("resource"),
+		CSRF: csrf, AppCSRF: appCSRF,
 	})
 }
 

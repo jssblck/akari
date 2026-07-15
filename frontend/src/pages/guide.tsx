@@ -13,20 +13,8 @@ import { useAPI } from "../api";
 import { withBase } from "../base";
 import { AsyncView } from "../components/async-view";
 import { PublicShell } from "../components/public-shell";
+import type { GuideResponse, Heading } from "../types";
 import "./guide.css";
-
-type Chapter = { Slug: string; Title: string; Summary: string; Order: number };
-type Heading = { Level: number; ID: string; Text: string };
-type GuideResponse = {
-  slug: string;
-  title: string;
-  summary: string;
-  raw_markdown: string;
-  headings: Heading[];
-  raw_path: string;
-  github_url: string;
-  chapters: Chapter[];
-};
 
 // flattenText reduces a heading's rendered children (plain text mixed with
 // inline formatting like `**bold**` or `code`) back to the bare string the
@@ -80,7 +68,7 @@ export function GuidePage() {
   const [copied, setCopied] = useState(false);
   const [activeHeading, setActiveHeading] = useState("");
 
-  const headings = state.kind === "ready" ? state.data.headings : [];
+  const headings = state.kind === "ready" ? (state.data.headings ?? []) : [];
   const components = useMemo<Components>(
     () => guideComponents(headings, slug),
     [headings, slug],
@@ -129,11 +117,12 @@ export function GuidePage() {
       <div className={navOpen ? "guide-shell nav-open" : "guide-shell"}>
         <AsyncView state={state}>
           {(data) => {
-            const index = data.chapters.findIndex(
+            const chapters = data.chapters ?? [];
+            const index = chapters.findIndex(
               (chapter) => chapter.Slug === data.slug,
             );
-            const previous = index > 0 ? data.chapters[index - 1] : undefined;
-            const next = index >= 0 ? data.chapters[index + 1] : undefined;
+            const previous = index > 0 ? chapters[index - 1] : undefined;
+            const next = index >= 0 ? chapters[index + 1] : undefined;
             return (
               <>
                 <button
@@ -157,7 +146,7 @@ export function GuidePage() {
                   <aside className="guide-nav" id="guide-sidebar">
                     <span className="label">User guide</span>
                     <nav>
-                      {data.chapters.map((chapter) => (
+                      {(data.chapters ?? []).map((chapter) => (
                         <a
                           key={chapter.Slug}
                           className={chapter.Slug === data.slug ? "active" : ""}
@@ -240,10 +229,10 @@ export function GuidePage() {
                       ) : null}
                     </footer>
                   </article>
-                  {data.headings.length > 1 ? (
+                  {(data.headings ?? []).length > 1 ? (
                     <aside className="guide-toc">
                       <span className="label">On this page</span>
-                      {data.headings.map((heading) => (
+                      {(data.headings ?? []).map((heading) => (
                         <a
                           className={[
                             heading.Level === 3 ? "nested" : "",

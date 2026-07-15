@@ -47,13 +47,13 @@ import {
 } from "../format";
 import "../sessions.css";
 import { withBase } from "../base";
-import type { SessionSnapshot, TranscriptPage } from "../types";
-
-type SessionResponse = {
-  snapshot: SessionSnapshot;
-  owner: boolean;
-  can_delete: boolean;
-};
+import type {
+  DeletedSessionResponse,
+  SessionPublicationResponse,
+  SessionResponse,
+  SessionSnapshot,
+  TranscriptResponse,
+} from "../types";
 
 export function SessionPage() {
   const { id = "" } = useParams();
@@ -227,7 +227,7 @@ export function SessionPage() {
                     agent={detail.Agent}
                     loadEarlier={async (before) =>
                       (
-                        await requestWithRetry<{ page: TranscriptPage }>(
+                        await requestWithRetry<TranscriptResponse>(
                           `/api/v1/app/sessions/${detail.ID}/transcript?before=${before}`,
                         )
                       ).page
@@ -313,7 +313,7 @@ function SessionActions({
             onClick={async () => {
               const publish = detail.Visibility !== "public";
               const ok = await attempt(
-                request<{ published: boolean; public_id?: string }>(
+                request<SessionPublicationResponse>(
                   `/api/v1/app/sessions/${detail.ID}/publication`,
                   {
                     method: "PUT",
@@ -346,7 +346,7 @@ function SessionActions({
             )
               return;
             await attempt(
-              request<{ project_id: number }>(
+              request<DeletedSessionResponse>(
                 `/api/v1/app/sessions/${detail.ID}`,
                 { method: "DELETE" },
               ).then((result) => onDeleted(result.project_id)),

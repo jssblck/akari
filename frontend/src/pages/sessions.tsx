@@ -20,29 +20,10 @@ import {
 import { HoverTip, TokenCard } from "../components/token-card";
 import { formatCount, formatTokens, relativeTime } from "../format";
 import "../sessions.css";
-import type { SessionRow } from "../types";
+import type { ProjectFacet, SessionRow, SessionsResponse } from "../types";
 
 export { Transcript } from "../components/transcript";
 export { SessionPage } from "./session-detail";
-
-type FacetCount = { Value: string; Count: number };
-type ProjectFacet = {
-  ID: number;
-  Key: string;
-  Name: string;
-  Kind: string;
-  Count: number;
-};
-type SessionsResponse = {
-  sessions: SessionRow[] | null;
-  has_more: boolean;
-  facets: {
-    Agents: FacetCount[] | null;
-    Machines: FacetCount[] | null;
-    Users: FacetCount[] | null;
-    Projects: ProjectFacet[] | null;
-  };
-};
 
 const SORT_OPTIONS = [
   { key: "updated", label: "Recent" },
@@ -633,7 +614,7 @@ function SessionFeedRow({
           <FallbackTag count={session.ModelFallbackCount} />
           <FanoutTag
             subagentCount={session.Tree.SubagentCount}
-            costUSD={session.Tree.TotalCostUSD}
+            costUSD={session.Tree.CostUSD}
             costIncomplete={session.Tree.CostIncomplete}
           />
         </div>

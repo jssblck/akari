@@ -18,18 +18,6 @@ import (
 	"github.com/jssblck/akari/internal/version"
 )
 
-type appViewer struct {
-	Authenticated  bool   `json:"authenticated"`
-	UserID         int64  `json:"user_id,omitempty"`
-	Username       string `json:"username,omitempty"`
-	IsAdmin        bool   `json:"is_admin"`
-	OverviewPublic bool   `json:"overview_public"`
-	CSRFToken      string `json:"csrf_token,omitempty"`
-	// Version rides the bootstrap payload so the shell can show the running
-	// server version the way the old templated sidebar did.
-	Version string `json:"version"`
-}
-
 func (s *Server) handleAppBootstrap(w http.ResponseWriter, r *http.Request) {
 	setPrivateNoStore(w)
 	viewer := appViewer{Version: version.String()}
@@ -74,9 +62,9 @@ func (s *Server) handleAPIOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setDashboardCache(w)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"range": rng, "ranges": web.DateRanges, "users": users,
-		"selected_user_ids": selected, "analytics": analytics,
+	writeJSON(w, http.StatusOK, overviewResponse{
+		Range: rng, Ranges: web.DateRanges, Users: overviewUserDTOs(users),
+		SelectedUserIDs: selected, Analytics: analytics,
 	})
 }
 
@@ -91,8 +79,8 @@ func (s *Server) handleAPIInsights(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setDashboardCache(w)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"range": rng, "ranges": web.DateRanges, "generated_at": generatedAt, "insights": insights,
+	writeJSON(w, http.StatusOK, insightsResponse{
+		Range: rng, Ranges: web.DateRanges, GeneratedAt: generatedAt, Insights: insights,
 	})
 }
 
@@ -108,7 +96,7 @@ func (s *Server) handleAPIProjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setDashboardCache(w)
-	writeJSON(w, http.StatusOK, map[string]any{"projects": projects, "sparklines": sparklines})
+	writeJSON(w, http.StatusOK, projectsResponse{Projects: projects, Sparklines: sparklines})
 }
 
 func (s *Server) handleAPIProject(w http.ResponseWriter, r *http.Request) {
@@ -161,10 +149,10 @@ func (s *Server) handleAPIProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "load project insights")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"project": project, "range": rng, "ranges": web.DateRanges,
-		"filter": filter, "sessions": page.Sessions, "remainder": page.Remainder,
-		"facets": facets, "analytics": analytics, "insights": insights,
+	writeJSON(w, http.StatusOK, projectResponse{
+		Project: project, Range: rng, Ranges: web.DateRanges,
+		Filter: filter, Sessions: page.Sessions, Remainder: page.Remainder,
+		Facets: facets, Analytics: analytics, Insights: insights,
 	})
 }
 
@@ -358,8 +346,8 @@ func (s *Server) handleAPISessions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "load session filters")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"sessions": rows, "has_more": hasMore, "filter": filter, "facets": facets,
+	writeJSON(w, http.StatusOK, sessionsResponse{
+		Sessions: rows, HasMore: hasMore, Filter: filter, Facets: facets,
 	})
 }
 
@@ -379,9 +367,9 @@ func (s *Server) handleAPISession(w http.ResponseWriter, r *http.Request) {
 	}
 	p, _ := principalFrom(r.Context())
 	viewer, _ := s.Store.UserByID(r.Context(), p.UserID)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"snapshot": snapshot, "owner": snapshot.Audit.Detail.OwnerID == p.UserID,
-		"can_delete": snapshot.Audit.Detail.OwnerID == p.UserID || viewer.IsAdmin,
+	writeJSON(w, http.StatusOK, sessionResponse{
+		Snapshot: snapshot, Owner: snapshot.Audit.Detail.OwnerID == p.UserID,
+		CanDelete: snapshot.Audit.Detail.OwnerID == p.UserID || viewer.IsAdmin,
 	})
 }
 
@@ -404,7 +392,7 @@ func (s *Server) handleAPISessionEarlier(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "load transcript")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"page": page})
+	writeJSON(w, http.StatusOK, transcriptResponse{Page: page})
 }
 
 func (s *Server) handleAPIAccount(w http.ResponseWriter, r *http.Request) {
@@ -432,11 +420,11 @@ func (s *Server) handleAPIAccount(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"user": appViewer{Authenticated: true, UserID: user.ID, Username: user.Username,
+	writeJSON(w, http.StatusOK, accountResponse{
+		User: appViewer{Authenticated: true, UserID: user.ID, Username: user.Username,
 			IsAdmin: user.IsAdmin, OverviewPublic: user.OverviewPublic},
-		"tokens": tokens, "connections": grants, "invites": invites,
-		"reparse": s.worker.FleetStatus(r.Context()),
+		Tokens: accountTokenDTOs(tokens), Connections: oauthGrantDTOs(grants), Invites: accountInviteDTOs(invites),
+		Reparse: s.worker.FleetStatus(r.Context()),
 	})
 }
 
@@ -461,10 +449,10 @@ func (s *Server) handleAPIGuide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	chapters := guide.Chapters()
-	writeJSON(w, http.StatusOK, map[string]any{
-		"slug": chapter.Slug, "title": chapter.Title, "summary": chapter.Summary,
-		"raw_markdown": raw, "headings": rendered.Headings,
-		"raw_path": chapter.RawRoute(), "github_url": chapter.GitHubURL(), "chapters": chapters,
+	writeJSON(w, http.StatusOK, guideResponse{
+		Slug: chapter.Slug, Title: chapter.Title, Summary: chapter.Summary,
+		RawMarkdown: raw, Headings: rendered.Headings,
+		RawPath: chapter.RawRoute(), GitHubURL: chapter.GitHubURL(), Chapters: chapters,
 	})
 }
 
@@ -497,7 +485,9 @@ func (s *Server) handleAPIPublicOverview(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	observeAnalyticsSnapshot(w, started, meta, s.analyticsSnapshots.freshFor, s.analyticsSnapshots.staleFor)
-	writeJSON(w, http.StatusOK, map[string]any{"username": user.Username, "range": rng, "ranges": web.DateRanges, "analytics": snapshot.analytics})
+	writeJSON(w, http.StatusOK, publicOverviewResponse{
+		Username: user.Username, Range: rng, Ranges: web.DateRanges, Analytics: snapshot.analytics,
+	})
 }
 
 func (s *Server) handleAPIPublicProject(w http.ResponseWriter, r *http.Request) {
@@ -533,7 +523,10 @@ func (s *Server) handleAPIPublicProject(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	observeAnalyticsSnapshot(w, started, meta, s.analyticsSnapshots.freshFor, s.analyticsSnapshots.staleFor)
-	writeJSON(w, http.StatusOK, map[string]any{"project": project, "range": rng, "ranges": web.DateRanges, "analytics": snapshot.analytics, "insights": snapshot.insights})
+	writeJSON(w, http.StatusOK, publicProjectResponse{
+		Project: project, Range: rng, Ranges: web.DateRanges,
+		Analytics: snapshot.analytics, Insights: snapshot.insights,
+	})
 }
 
 func (s *Server) handleAPIPublicSession(w http.ResponseWriter, r *http.Request) {
@@ -556,7 +549,7 @@ func (s *Server) handleAPIPublicSession(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, "load session")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"snapshot": snapshot})
+	writeJSON(w, http.StatusOK, publicSessionResponse{Snapshot: snapshot})
 }
 
 func (s *Server) handleAPIPublicSessionEarlier(w http.ResponseWriter, r *http.Request) {
@@ -584,7 +577,7 @@ func (s *Server) handleAPIPublicSessionEarlier(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusInternalServerError, "load session")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"snapshot": snapshot})
+	writeJSON(w, http.StatusOK, publicSessionResponse{Snapshot: snapshot})
 }
 
 func (s *Server) writeAPIReparseGate(w http.ResponseWriter, r *http.Request) bool {
@@ -593,9 +586,7 @@ func (s *Server) writeAPIReparseGate(w http.ResponseWriter, r *http.Request) boo
 		return false
 	}
 	w.Header().Set("Retry-After", "2")
-	writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-		"error": "projection rebuild in progress", "code": "projection_rebuild", "reparse": status,
-	})
+	writeJSON(w, http.StatusServiceUnavailable, newReparseGateResponse(status))
 	return true
 }
 
@@ -642,7 +633,7 @@ func (s *Server) handleAPISessionPublication(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusInternalServerError, "unpublish session")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"published": false})
+	writeJSON(w, http.StatusOK, sessionPublicationResponse{Published: false})
 }
 
 func (s *Server) handleAPIDeleteSession(w http.ResponseWriter, r *http.Request) {
@@ -671,7 +662,7 @@ func (s *Server) handleAPIDeleteSession(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, "delete session")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"deleted": true, "project_id": detail.ProjectID})
+	writeJSON(w, http.StatusOK, deletedSessionResponse{Deleted: true, ProjectID: detail.ProjectID})
 }
 
 func (s *Server) handleAPIProjectPublication(w http.ResponseWriter, r *http.Request) {
@@ -735,7 +726,7 @@ func (s *Server) handleAPIRevokeConnection(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, "revoke connection")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"revoked": true})
+	writeJSON(w, http.StatusOK, revokedResponse{Revoked: true})
 }
 
 func (s *Server) handleAPIRevokeInvite(w http.ResponseWriter, r *http.Request) {
@@ -747,7 +738,7 @@ func (s *Server) handleAPIRevokeInvite(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "revoke invite")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"revoked": true})
+	writeJSON(w, http.StatusOK, revokedResponse{Revoked: true})
 }
 
 func (s *Server) handleAPIReparse(w http.ResponseWriter, r *http.Request) {
@@ -756,7 +747,7 @@ func (s *Server) handleAPIReparse(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "trigger reparse")
 		return
 	}
-	writeJSON(w, http.StatusAccepted, s.worker.FleetStatus(r.Context()))
+	writeJSON(w, http.StatusAccepted, reparseStatusResponse(s.worker.FleetStatus(r.Context())))
 }
 
 func pathInt64(w http.ResponseWriter, r *http.Request, name, kind string) (int64, bool) {

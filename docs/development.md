@@ -11,6 +11,13 @@ binary. The build artifact is committed so release cross-compilation and source
 builds need only Go. The root homepage remains server-rendered with
 [templ](https://templ.guide); its generated `*_templ.go` files are gitignored.
 
+The browser API contract lives in
+`internal/server/httpapi/openapi.json`. `bun run generate:api` regenerates
+`frontend/src/api.generated.ts`, while `bun run check` fails when the committed
+types no longer match the OpenAPI document. HTTP handlers return named DTOs from
+`internal/server/httpapi`; the contract tests compare those DTOs with the
+OpenAPI response schemas.
+
 Development builds require Bun. The Makefile keeps source, embedded assets, and
 the homepage generator in step:
 

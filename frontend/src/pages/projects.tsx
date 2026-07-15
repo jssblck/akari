@@ -24,20 +24,15 @@ import {
 } from "../format";
 import "../projects.css";
 import { withBase } from "../base";
+import { normalizeInsights } from "../normalize-insights";
 import type {
-  Analytics,
-  DateRange,
-  Insights,
   Project,
+  ProjectResponse,
+  ProjectsResponse,
   SessionSummary,
 } from "../types";
 import { InsightsPanel } from "./insights";
 import { AnalyticsPanel } from "./overview";
-
-type ProjectsResponse = {
-  projects: Project[];
-  sparklines: Record<string, number[]>;
-};
 
 // isLocalKind mirrors the server's IsLocalKind: a standalone or orphaned
 // project has no git remote, so it groups and labels apart from a repository
@@ -45,6 +40,17 @@ type ProjectsResponse = {
 // publicity control, the session filter facets).
 function isLocalKind(kind: string): boolean {
   return kind === "standalone" || kind === "orphaned";
+}
+
+function normalizeSparklines(
+  sparklines: ProjectsResponse["sparklines"],
+): Record<string, number[]> {
+  return Object.fromEntries(
+    Object.entries(sparklines ?? {}).map(([key, values]) => [
+      key,
+      values ?? [],
+    ]),
+  );
 }
 
 function projectLabel(project: Project): string {
@@ -227,7 +233,7 @@ export function ProjectsPage() {
       </header>
       <AsyncView state={state}>
         {(data) =>
-          data.projects.length === 0 ? (
+          (data.projects ?? []).length === 0 ? (
             <section className="empty-state">
               <h2>No projects yet</h2>
               <p>
@@ -242,18 +248,18 @@ export function ProjectsPage() {
             <>
               <ProjectSection
                 title="Repositories"
-                projects={data.projects.filter(
+                projects={(data.projects ?? []).filter(
                   (project) => !isLocalKind(project.Kind),
                 )}
-                sparklines={data.sparklines}
+                sparklines={normalizeSparklines(data.sparklines)}
                 showKind={false}
               />
               <ProjectSection
                 title="Local folders"
-                projects={data.projects.filter((project) =>
+                projects={(data.projects ?? []).filter((project) =>
                   isLocalKind(project.Kind),
                 )}
-                sparklines={data.sparklines}
+                sparklines={normalizeSparklines(data.sparklines)}
                 showKind
               />
             </>
@@ -263,29 +269,6 @@ export function ProjectsPage() {
     </div>
   );
 }
-
-type ProjectResponse = {
-  project: Project;
-  range: string;
-  ranges: DateRange[];
-  sessions: SessionSummary[] | null;
-  remainder: {
-    Sessions: number;
-    Input: number;
-    Output: number;
-    CacheRead: number;
-    CacheWrite: number;
-    CostUSD: number;
-    CostIncomplete: boolean;
-  };
-  facets: {
-    Agents: string[] | null;
-    Machines: string[] | null;
-    Users: string[] | null;
-  };
-  analytics: Analytics;
-  insights: Insights;
-};
 
 // ProjectToolbar is the project page's session filter: three auto-applying
 // selects (Agent, User, Machine) that narrow the whole scoped view (the usage
@@ -373,6 +356,7 @@ export function ProjectPage() {
     <div className="page">
       <AsyncView state={state}>
         {(data) => {
+          const insights = normalizeInsights(data.insights);
           const local = isLocalKind(data.project.Kind);
           const remainderTokens =
             data.remainder.Input +
@@ -404,7 +388,7 @@ export function ProjectPage() {
                   <p>{data.project.RemoteKey}</p>
                 </div>
                 <div className="head-actions">
-                  <RangeTabs ranges={data.ranges} active={data.range} />
+                  <RangeTabs ranges={data.ranges ?? []} active={data.range} />
                   {!local ? (
                     data.project.OverviewPublic ? (
                       <>
@@ -561,10 +545,10 @@ export function ProjectPage() {
               </section>
               <div className="project-insights">
                 <h2>Quality signals</h2>
-                <InsightsPanel insights={data.insights} />
+                <InsightsPanel insights={insights} />
                 <TooltipHost>
                   <ToolsInstrument
-                    insights={data.insights}
+                    insights={insights}
                     resetKey={`${data.project.ID}:${data.range}`}
                   />
                 </TooltipHost>
