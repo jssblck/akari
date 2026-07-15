@@ -107,7 +107,6 @@ export function AnalyticsPanel({
             </HoverTip>
           }
         />
-        <Stat label="Sessions" value={formatCount(analytics.Sessions)} />
         <Stat
           label="Cache hit"
           value={
@@ -131,6 +130,7 @@ export function AnalyticsPanel({
             </HoverTip>
           }
         />
+        <Stat label="Sessions" value={formatCount(analytics.Sessions)} />
       </StatStrip>
       <ActivityPanel analytics={analytics} controls={activityControls} />
       <div className="usage-breakdowns">
