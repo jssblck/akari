@@ -201,18 +201,17 @@ function BreakdownTable({ title, rows }: { title: string; rows: Breakdown[] }) {
             const tokens =
               row.Input + row.Output + row.CacheRead + row.CacheWrite;
             return (
-              <div className="breakdown-row-wrap" key={row.Label}>
-                <div className="breakdown-row">
+              <div className="breakdown-row" key={row.Label}>
+                <span
+                  className="breakdown-fill"
+                  style={{
+                    width: `${Math.max((row.CostUSD / max) * 100, 1)}%`,
+                    background: `var(--viz-${(index % 8) + 1})`,
+                  }}
+                />
+                <div className="breakdown-head">
                   <span className="breakdown-label">
                     {row.Label || "unknown"}
-                  </span>
-                  <span className="bar-track">
-                    <span
-                      style={{
-                        width: `${(row.CostUSD / max) * 100}%`,
-                        background: `var(--viz-${(index % 8) + 1})`,
-                      }}
-                    />
                   </span>
                   <span className="data">
                     {formatCost(row.CostUSD, row.CostIncomplete)}

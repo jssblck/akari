@@ -539,21 +539,6 @@ code {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 18px;
 }
-.breakdown-list {
-  display: grid;
-  gap: 10px;
-}
-.breakdown-row {
-  display: grid;
-  grid-template-columns: minmax(90px, 1fr) minmax(100px, 2fr) 84px;
-  align-items: center;
-  gap: 12px;
-}
-.breakdown-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .bar-track {
   display: block;
   height: 5px;
