@@ -249,10 +249,12 @@ function BreakdownTable({ title, rows }: { title: string; rows: Breakdown[] }) {
 function AccountFilter({ users }: { users: User[] }) {
   const [params, setParams] = useSearchParams();
   const selected = params.getAll("user");
+  const value = selected.length === 1 ? selected[0] : "";
   return (
     <select
       aria-label="Account filter"
-      value={selected.length === 1 ? selected[0] : ""}
+      className={value ? "active" : ""}
+      value={value}
       onChange={(event) => {
         const next = new URLSearchParams(params);
         next.delete("user");
@@ -304,10 +306,10 @@ export function OverviewPage() {
             showUsers
             activityControls={
               <>
-                <RangeTabs ranges={data.ranges ?? []} active={data.range} />
                 {(data.users ?? []).length > 1 ? (
                   <AccountFilter users={data.users ?? []} />
                 ) : null}
+                <RangeTabs ranges={data.ranges ?? []} active={data.range} />
               </>
             }
           />

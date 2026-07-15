@@ -265,7 +265,9 @@ export function ActivityHeatmap({
       </svg>
       <div
         ref={tooltipRef}
-        className={tooltip ? "heatmap-tooltip on" : "heatmap-tooltip"}
+        className={
+          tooltip ? "heatmap-tooltip popover on" : "heatmap-tooltip popover"
+        }
         style={{ left: tooltipPos.left, top: tooltipPos.top }}
         aria-hidden="true"
       >

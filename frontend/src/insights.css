@@ -243,19 +243,15 @@
 
 /* tooltip: one shared fixed-position host per mounted instrument tree */
 
+/* Card chrome comes from the shared .popover class; only the fixed pointer-
+   follow positioning and type treatment live here. */
 .chart-tooltip {
   position: fixed;
   z-index: 50;
   font-family: "Geist Mono", monospace;
   font-size: 0.75rem;
-  background: var(--surface-3);
-  border: 1px solid var(--border-strong);
-  border-radius: 4px;
-  padding: 6px 8px;
   color: var(--text);
   pointer-events: none;
-  white-space: nowrap;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
 }
 
 .chart-tooltip .tt-title {

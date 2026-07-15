@@ -473,10 +473,6 @@ code {
   position: absolute;
   z-index: 5;
   min-width: 150px;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 8px 10px;
   pointer-events: none;
   opacity: 0;
   transform: translateY(2px);
@@ -588,11 +584,6 @@ code {
   gap: 8px;
   flex-wrap: wrap;
   justify-content: flex-end;
-}
-.activity-controls select {
-  min-height: 0;
-  padding: 4px 8px;
-  font-size: 12px;
 }
 .activity-controls.standalone {
   margin-bottom: 18px;
@@ -751,6 +742,21 @@ select:focus {
   border-color: var(--lilac);
   outline: 0;
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--lilac) 32%, transparent);
+}
+/* A select in a section-head control row matches the segmented controls it
+   sits beside: same height, surface, radius, and muted 12px text, brightening
+   when a filter is active. */
+.activity-controls select {
+  min-height: 0;
+  height: 35px;
+  padding: 0 9px;
+  color: var(--muted);
+  border-radius: 5px;
+  font-size: 12px;
+}
+.activity-controls select:hover,
+.activity-controls select.active {
+  color: var(--text);
 }
 .search-bar input {
   flex: 1;
@@ -1627,6 +1633,19 @@ select:focus {
   }
 }
 
+/* Shared popover card chrome: hover tip cards, the heatmap tooltip, and the
+   insights chart tooltip all read as the same card. width: max-content sizes
+   the card to its content; an absolutely positioned card otherwise shrinks to
+   the room its offsets leave in the containing block and wraps its labels
+   mid-word. Positioning, reveal, and z-index stay with each caller. */
+.popover {
+  width: max-content;
+  padding: 8px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
 /* Shared hover/focus tooltip card: token breakdowns on stat tiles, breakdown
    rows, and feed rows all reveal the same card shape. */
 .hover-tip {
@@ -1641,10 +1660,6 @@ select:focus {
   transform: translateX(-50%) translateY(2px);
   z-index: 6;
   min-width: 170px;
-  padding: 8px 10px;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 4px;
   opacity: 0;
   pointer-events: none;
   transition:

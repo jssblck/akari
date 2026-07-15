@@ -65,7 +65,7 @@ export function HoverTip({
     // biome-ignore lint/a11y/noNoninteractiveTabindex: the WAI tooltip pattern needs a focusable trigger so the card is reachable by keyboard, and the trigger itself performs no action.
     <span className={`hover-tip ${className}`.trim()} tabIndex={0}>
       {summary}
-      <span className="tip-card" role="tooltip">
+      <span className="tip-card popover" role="tooltip">
         {children}
       </span>
     </span>
