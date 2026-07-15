@@ -611,7 +611,7 @@ func scanBreakdowns(rows pgx.Rows) ([]Breakdown, error) {
 	return out, rows.Err()
 }
 
-// ProjectSparklines returns, per project id, a fixed-length slice of daily cost
+// ProjectSparklines returns, per project id, a fixed-length slice of daily tokens
 // over the last `days` days (index 0 oldest, last index today, UTC). Projects
 // with no recent usage are simply absent from the map; the index view renders a
 // flat line for them. One query buckets in Go so the index stays a single round
@@ -623,7 +623,8 @@ func (s *Store) ProjectSparklines(ctx context.Context, days int) (map[int64][]fl
 	rows, err := s.Pool.Query(ctx,
 		`SELECT s.project_id,
 		        date_trunc('day', ue.occurred_at) AS day,
-		        coalesce(sum(ue.cost_usd), 0)
+		        coalesce(sum(ue.input_tokens + ue.output_tokens
+		                     + ue.cache_read_tokens + ue.cache_write_tokens), 0)::double precision
 		   FROM usage_events ue
 		   JOIN sessions s ON s.id = ue.session_id
 		  WHERE ue.occurred_at IS NOT NULL
@@ -641,8 +642,8 @@ func (s *Store) ProjectSparklines(ctx context.Context, days int) (map[int64][]fl
 	for rows.Next() {
 		var pid int64
 		var day time.Time
-		var cost float64
-		if err := rows.Scan(&pid, &day, &cost); err != nil {
+		var tokens float64
+		if err := rows.Scan(&pid, &day, &tokens); err != nil {
 			return nil, err
 		}
 		idx := int(day.UTC().Sub(start).Hours() / 24)
@@ -654,7 +655,7 @@ func (s *Store) ProjectSparklines(ctx context.Context, days int) (map[int64][]fl
 			vals = make([]float64, days)
 			out[pid] = vals
 		}
-		vals[idx] += cost
+		vals[idx] += tokens
 	}
 	return out, rows.Err()
 }

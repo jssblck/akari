@@ -190,17 +190,28 @@ function buildFeed(rows: SessionRow[], grouped: boolean): DayGroup[] {
 export function SessionsPage() {
   const [params, setParams] = useSearchParams();
   const [search, setSearch] = useState(params.get("q") ?? "");
+  const committedSearch = params.get("q") ?? "";
   const filterKey = params.toString();
   const state = useAPI<SessionsResponse>(`/api/v1/app/sessions?${filterKey}`);
 
   const [morePages, setMorePages] = useState<SessionRow[]>([]);
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: reset keys off the filter query alone; params is a fresh object every render.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: filterKey deliberately resets pagination; the effect does not otherwise read it.
   useEffect(() => {
     setMorePages([]);
-    setSearch(params.get("q") ?? "");
   }, [filterKey]);
+  useEffect(() => setSearch(committedSearch), [committedSearch]);
+  useEffect(() => {
+    const nextSearch = search.trim();
+    if (nextSearch === committedSearch) return;
+    const timeout = window.setTimeout(() => {
+      setParams(setQuery(setQuery(params, "q", nextSearch), "after", ""), {
+        replace: true,
+      });
+    }, 250);
+    return () => window.clearTimeout(timeout);
+  }, [committedSearch, params, search, setParams]);
   useEffect(() => {
     if (state.kind === "ready") setHasMore(state.data.has_more);
   }, [state]);
@@ -254,9 +265,6 @@ export function SessionsPage() {
           onChange={(event) => setSearch(event.target.value)}
           placeholder="Search sessions"
         />
-        <button className="button" type="submit">
-          Search
-        </button>
       </form>
       <AsyncView state={state}>
         {(data) => (

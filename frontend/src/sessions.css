@@ -32,6 +32,9 @@
   max-width: none;
   margin: 0 0 16px;
 }
+.sessions-search input {
+  border-radius: 4px;
+}
 .sessions-list {
   overflow: hidden;
   background: var(--surface);
@@ -265,7 +268,6 @@
   color: var(--muted);
   font-size: 11px;
   line-height: 1.45;
-  white-space: nowrap;
 }
 .srow-snippet mark {
   color: var(--text);

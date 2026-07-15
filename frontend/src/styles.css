@@ -562,9 +562,10 @@ code {
   font-family: "Geist Mono", monospace;
   font-size: 12px;
 }
-.sparkline {
+.activity-bars {
   display: block;
-  width: 110px;
+  width: 120px;
+  max-width: 100%;
   height: 24px;
 }
 
@@ -1571,11 +1572,17 @@ select:focus {
    the room its offsets leave in the containing block and wraps its labels
    mid-word. Positioning, reveal, and z-index stay with each caller. */
 .popover {
+  box-sizing: border-box;
   width: max-content;
+  max-width: calc(100vw - 16px);
+  max-height: none;
   padding: 8px 10px;
+  overflow: visible;
+  overflow-wrap: anywhere;
   background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: 4px;
+  white-space: normal;
 }
 
 /* Shared hover/focus tooltip card: token breakdowns on stat tiles, breakdown
@@ -1593,7 +1600,7 @@ select:focus {
   position: fixed;
   inset: auto;
   margin: 0;
-  min-width: 170px;
+  min-width: min(170px, calc(100vw - 16px));
   opacity: 0;
   pointer-events: none;
   transition:

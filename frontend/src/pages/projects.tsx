@@ -1,5 +1,5 @@
 import { ArrowSquareOutIcon } from "@phosphor-icons/react";
-import type { MouseEvent } from "react";
+import { type MouseEvent, useState } from "react";
 import {
   Link,
   useNavigate,
@@ -9,7 +9,7 @@ import {
 
 import { request, useAPI } from "../api";
 import { AsyncView } from "../components/async-view";
-import { Sparkline } from "../components/charts";
+import { ActivityBars } from "../components/charts";
 import { ToolsInstrument } from "../components/insights/tools";
 import { TooltipHost } from "../components/insights/tooltip";
 import { attempt } from "../components/notices";
@@ -53,6 +53,70 @@ function normalizeSparklines(
   );
 }
 
+type ProjectSort = "recent" | "sessions" | "tokens" | "cost";
+
+const PROJECT_SORTS: Array<{ value: ProjectSort; label: string }> = [
+  { value: "recent", label: "Recent" },
+  { value: "sessions", label: "Most sessions" },
+  { value: "tokens", label: "Most tokens" },
+  { value: "cost", label: "Highest cost" },
+];
+
+function parseProjectSort(value: string): ProjectSort {
+  switch (value) {
+    case "sessions":
+    case "tokens":
+    case "cost":
+      return value;
+    default:
+      return "recent";
+  }
+}
+
+function projectTokens(project: Project): number {
+  return (
+    project.TotalInput +
+    project.TotalOutput +
+    project.TotalCacheRead +
+    project.TotalCacheWrite
+  );
+}
+
+function projectTimestamp(project: Project): number {
+  return project.LastActivity ? new Date(project.LastActivity).getTime() : 0;
+}
+
+function orderProjects(projects: Project[], sort: ProjectSort): Project[] {
+  return [...projects].sort((left, right) => {
+    let difference = projectTimestamp(right) - projectTimestamp(left);
+    if (sort === "sessions")
+      difference = right.SessionCount - left.SessionCount;
+    if (sort === "tokens")
+      difference = projectTokens(right) - projectTokens(left);
+    if (sort === "cost") difference = right.TotalCostUSD - left.TotalCostUSD;
+    return difference || projectTimestamp(right) - projectTimestamp(left);
+  });
+}
+
+function matchingProjects(
+  projects: Project[],
+  query: string,
+  sort: ProjectSort,
+): Project[] {
+  const needle = query.trim().toLocaleLowerCase();
+  const matches = needle
+    ? projects.filter((project) =>
+        [
+          project.DisplayName,
+          project.RemoteKey,
+          project.Host,
+          localPath(project),
+        ].some((value) => value.toLocaleLowerCase().includes(needle)),
+      )
+    : projects;
+  return orderProjects(matches, sort);
+}
+
 function projectLabel(project: Project): string {
   return project.DisplayName || project.RemoteKey || `Project ${project.ID}`;
 }
@@ -68,37 +132,34 @@ function localPath(project: Project): string {
     : project.RemoteKey;
 }
 
-// KindTag is the one state chip for a non-remote project; a remote project
-// gets no chip since it is the default and needs no label.
-function KindTag({ kind }: { kind: string }) {
-  if (kind === "standalone") {
-    return (
-      <span className="tag" title="No .git, or no git origin remote.">
-        standalone
-      </span>
-    );
-  }
-  if (kind === "orphaned") {
-    return (
-      <span
-        className="tag warn"
-        title="The working directory no longer exists on disk."
-      >
-        orphaned
-      </span>
-    );
-  }
-  return null;
+function ProjectKindCell({ kind }: { kind: string }) {
+  if (kind !== "standalone" && kind !== "orphaned")
+    return <span className="project-kind-empty" />;
+  const detail =
+    kind === "standalone"
+      ? "No Git repository or origin remote was found for this project."
+      : "The working directory no longer exists on disk.";
+  return (
+    <HoverTip
+      className="project-kind"
+      summary={<span className={`tag ${kind}`}>{kind}</span>}
+    >
+      <strong className="tip-title">{kind}</strong>
+      <p className="tip-copy">{detail}</p>
+    </HoverTip>
+  );
 }
 
 function ProjectTokensCell({ project }: { project: Project }) {
-  const total =
-    project.TotalInput +
-    project.TotalOutput +
-    project.TotalCacheRead +
-    project.TotalCacheWrite;
   return (
-    <HoverTip summary={formatCount(total)} className="tok-cell">
+    <HoverTip
+      summary={
+        <span className="project-token-total">
+          {formatCount(projectTokens(project))}
+        </span>
+      }
+      className="tok-cell"
+    >
       <TokenCard
         input={project.TotalInput}
         output={project.TotalOutput}
@@ -111,6 +172,73 @@ function ProjectTokensCell({ project }: { project: Project }) {
   );
 }
 
+function ProjectActivityCell({ values }: { values: number[] | undefined }) {
+  const buckets = values ?? [];
+  const activeDays = buckets.filter((value) => value > 0).length;
+  const total = buckets.reduce((sum, value) => sum + Math.max(value, 0), 0);
+  const peak = Math.max(...buckets, 0);
+  return (
+    <HoverTip
+      className="project-activity"
+      summary={<ActivityBars values={values} />}
+    >
+      <strong className="tip-title">30-day token activity</strong>
+      <dl className="tt-grid">
+        <dt>Active days</dt>
+        <dd>{formatCount(activeDays)}</dd>
+        <dt>Total tokens</dt>
+        <dd>{formatCount(total)}</dd>
+        <dt>Peak day</dt>
+        <dd>{formatCount(peak)}</dd>
+      </dl>
+    </HoverTip>
+  );
+}
+
+function ProjectDateCell({ value }: { value: string | null }) {
+  const fullDate = value
+    ? new Intl.DateTimeFormat(undefined, {
+        dateStyle: "full",
+        timeStyle: "short",
+      }).format(new Date(value))
+    : "No activity timestamp is available.";
+  return (
+    <HoverTip
+      className="project-date"
+      summary={<span>{relativeTime(value)}</span>}
+    >
+      <strong className="tip-title">Last active</strong>
+      {value ? (
+        <time className="tip-date" dateTime={value}>
+          {fullDate}
+        </time>
+      ) : (
+        <span className="tip-date">{fullDate}</span>
+      )}
+    </HoverTip>
+  );
+}
+
+function ProjectLocation({ value, tail }: { value: string; tail: boolean }) {
+  return (
+    <HoverTip
+      className="project-location-tip"
+      summary={
+        <span
+          className={
+            tail ? "project-location-path tail" : "project-location-path"
+          }
+        >
+          {value}
+        </span>
+      }
+    >
+      <strong className="tip-title">Location</strong>
+      <code className="project-location-full">{value}</code>
+    </HoverTip>
+  );
+}
+
 // ProjectRow makes the whole row a click target while keeping a real anchor
 // for modifier-clicks (open in new tab, copy link): a plain click anywhere in
 // the row navigates via the router, but a click on the anchor itself, or one
@@ -119,11 +247,9 @@ function ProjectTokensCell({ project }: { project: Project }) {
 function ProjectRow({
   project,
   sparkline,
-  showKind,
 }: {
   project: Project;
   sparkline: number[] | undefined;
-  showKind: boolean;
 }) {
   const navigate = useNavigate();
   const local = isLocalKind(project.Kind);
@@ -131,7 +257,7 @@ function ProjectRow({
     if (event.button !== 0) return;
     if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
       return;
-    if ((event.target as HTMLElement).closest("a")) return;
+    if ((event.target as HTMLElement).closest("a, .hover-tip")) return;
     navigate(`/projects/${project.ID}`);
   };
   return (
@@ -142,27 +268,34 @@ function ProjectRow({
             ? project.DisplayName || `Project ${project.ID}`
             : projectLabel(project)}
         </Link>
-        <span className="cell-note">
-          {local ? localPath(project) : project.RemoteKey}
+        <span className="cell-note project-location">
+          <ProjectLocation
+            value={local ? localPath(project) : project.RemoteKey}
+            tail={local}
+          />
+          {local && project.Host ? (
+            <>
+              <span className="project-meta-separator" aria-hidden="true">
+                /
+              </span>
+              <span className="project-location-host">{project.Host}</span>
+            </>
+          ) : null}
         </span>
       </td>
-      {showKind ? (
-        <td>
-          <KindTag kind={project.Kind} />
-          {project.Host ? <span className="muted"> {project.Host}</span> : null}
-        </td>
-      ) : null}
+      <td className="project-kind-cell">
+        <ProjectKindCell kind={project.Kind} />
+      </td>
       <td className="num">{formatCount(project.SessionCount)}</td>
       <td className="num">
         <ProjectTokensCell project={project} />
       </td>
-      <td>
-        <Sparkline values={sparkline} />
+      <td className="project-activity-cell">
+        <ProjectActivityCell values={sparkline} />
       </td>
-      <td className="num">
-        {formatCost(project.TotalCostUSD, project.CostIncomplete)}
+      <td className="project-date-cell">
+        <ProjectDateCell value={project.LastActivity} />
       </td>
-      <td>{relativeTime(project.LastActivity)}</td>
     </tr>
   );
 }
@@ -174,13 +307,13 @@ function ProjectRow({
 function ProjectSection({
   title,
   projects,
+  totalProjects,
   sparklines,
-  showKind,
 }: {
   title: string;
   projects: Project[];
+  totalProjects: number;
   sparklines: Record<string, number[]>;
-  showKind: boolean;
 }) {
   if (projects.length === 0) return null;
   return (
@@ -188,20 +321,30 @@ function ProjectSection({
       <div className="section-head">
         <h2>{title}</h2>
         <span className="muted">
-          {formatCount(projects.length)} project
-          {projects.length === 1 ? "" : "s"}
+          {projects.length !== totalProjects
+            ? `${formatCount(projects.length)} of `
+            : null}
+          {formatCount(totalProjects)} project
+          {totalProjects === 1 ? "" : "s"}
         </span>
       </div>
       <div className="table-wrap embedded">
-        <table className="data-table">
+        <table className="data-table projects-table">
+          <colgroup>
+            <col className="project-col-name" />
+            <col className="project-col-kind" />
+            <col className="project-col-sessions" />
+            <col className="project-col-tokens" />
+            <col className="project-col-activity" />
+            <col className="project-col-active" />
+          </colgroup>
           <thead>
             <tr>
               <th>Project</th>
-              {showKind ? <th>Kind</th> : null}
+              <th>Kind</th>
               <th className="num">Sessions</th>
               <th className="num">Tokens</th>
-              <th>30-day activity</th>
-              <th className="num">Cost</th>
+              <th>30 day tokens</th>
               <th>Last active</th>
             </tr>
           </thead>
@@ -211,7 +354,6 @@ function ProjectSection({
                 key={project.ID}
                 project={project}
                 sparkline={sparklines[String(project.ID)]}
-                showKind={showKind}
               />
             ))}
           </tbody>
@@ -223,48 +365,90 @@ function ProjectSection({
 
 export function ProjectsPage() {
   const state = useAPI<ProjectsResponse>("/api/v1/app/projects");
+  const [query, setQuery] = useState("");
+  const [sort, setSort] = useState<ProjectSort>("recent");
   return (
-    <div className="page">
-      <header className="page-head">
-        <div>
-          <h1>Projects</h1>
-          <p>Repositories and local workspaces, ordered by recent activity.</p>
-        </div>
-      </header>
+    <div className="page projects-page">
+      <div className="projects-toolbar">
+        <input
+          type="search"
+          value={query}
+          aria-label="Search projects"
+          placeholder="Search projects"
+          onChange={(event) => setQuery(event.target.value)}
+        />
+        <select
+          aria-label="Sort projects"
+          value={sort}
+          onChange={(event) => setSort(parseProjectSort(event.target.value))}
+        >
+          {PROJECT_SORTS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </div>
       <AsyncView state={state}>
-        {(data) =>
-          (data.projects ?? []).length === 0 ? (
-            <section className="empty-state">
-              <h2>No projects yet</h2>
-              <p>
-                Run an akari client sync to create the first project and
-                session.
-              </p>
-              <a className="button" href={withBase("/guide")}>
-                Read the setup guide
-              </a>
-            </section>
-          ) : (
+        {(data) => {
+          const allProjects = data.projects ?? [];
+          if (allProjects.length === 0)
+            return (
+              <section className="empty-state">
+                <h2>No projects yet</h2>
+                <p>
+                  Run an akari client sync to create the first project and
+                  session.
+                </p>
+                <a className="button" href={withBase("/guide")}>
+                  Read the setup guide
+                </a>
+              </section>
+            );
+          const repositories = allProjects.filter(
+            (project) => !isLocalKind(project.Kind),
+          );
+          const localFolders = allProjects.filter((project) =>
+            isLocalKind(project.Kind),
+          );
+          const visibleRepositories = matchingProjects(
+            repositories,
+            query,
+            sort,
+          );
+          const visibleLocalFolders = matchingProjects(
+            localFolders,
+            query,
+            sort,
+          );
+          if (
+            visibleRepositories.length === 0 &&
+            visibleLocalFolders.length === 0
+          )
+            return (
+              <section className="empty-state projects-empty">
+                <h2>No matching projects</h2>
+                <p>Search for a different name, path, remote, or host.</p>
+              </section>
+            );
+          const sparklines = normalizeSparklines(data.sparklines);
+          return (
             <>
               <ProjectSection
                 title="Repositories"
-                projects={(data.projects ?? []).filter(
-                  (project) => !isLocalKind(project.Kind),
-                )}
-                sparklines={normalizeSparklines(data.sparklines)}
-                showKind={false}
+                projects={visibleRepositories}
+                totalProjects={repositories.length}
+                sparklines={sparklines}
               />
               <ProjectSection
                 title="Local folders"
-                projects={(data.projects ?? []).filter((project) =>
-                  isLocalKind(project.Kind),
-                )}
-                sparklines={normalizeSparklines(data.sparklines)}
-                showKind
+                projects={visibleLocalFolders}
+                totalProjects={localFolders.length}
+                sparklines={sparklines}
               />
             </>
-          )
-        }
+          );
+        }}
       </AsyncView>
     </div>
   );

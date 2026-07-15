@@ -105,12 +105,10 @@ on either lands you on this feed already filtered to it.
 
 ## Projects
 
-The **Projects** index is one full-width table of git-remote projects. Each row
-carries the project's session count, a single token total (hover it for the
-input/output/cache-read/cache-write breakdown), its cost, a 30-day cost
-**sparkline**, and a relative "updated" time. Fleet-wide usage lives on the
-Overview, and standalone or orphaned local folders reach you through the Sessions
-project filter, so neither crowds this table.
+The **Projects** index separates repositories from standalone and orphaned local
+folders. Each row carries the project's session count, a lifetime token total
+(hover it for the input/output/cache-read/cache-write breakdown), a 30-day token
+trend, and a relative "updated" time. Search and sorting apply to both sections.
 
 Click a project for the **project view**: that project's sessions across all users
 and machines, with agent, user, and machine filters and the same analytics panel

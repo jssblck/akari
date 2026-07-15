@@ -1335,8 +1335,9 @@ func TestProjectSparklines(t *testing.T) {
 	for _, v := range vals {
 		sum += v
 	}
-	// Only the two in-window events (1.0 + 1.0) count; the 90-days-ago event is excluded.
-	if sum < 1.99 || sum > 2.01 {
-		t.Errorf("sparkline should sum only in-window cost (~2.0), got %.2f", sum)
+	// Only the two in-window events (100 input + 20 output each) count; the
+	// 90-days-ago event is excluded.
+	if sum != 240 {
+		t.Errorf("sparkline should sum only in-window tokens (240), got %.0f", sum)
 	}
 }

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -57,6 +57,37 @@ afterEach(() => {
 });
 
 describe("SessionsPage feed rendering", () => {
+  it("debounces transcript searches while Enter still submits immediately", async () => {
+    stubSessionsResponse([row({ ID: 1 })]);
+    render(
+      <MemoryRouter initialEntries={["/sessions"]}>
+        <SessionsPage />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("Fix the flaky test");
+    const fetchMock = vi.mocked(fetch);
+    const search = screen.getByLabelText("Search session content");
+    vi.useFakeTimers();
+    try {
+      fireEvent.change(search, { target: { value: "ada" } });
+      await act(async () => vi.advanceTimersByTimeAsync(249));
+      expect(fetchMock).toHaveBeenCalledOnce();
+      await act(async () => vi.advanceTimersByTimeAsync(1));
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(String(fetchMock.mock.calls[1]?.[0])).toContain("q=ada");
+
+      fireEvent.change(search, { target: { value: "grace" } });
+      await act(async () =>
+        fireEvent.submit(search.closest("form") as HTMLFormElement),
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(String(fetchMock.mock.calls[2]?.[0])).toContain("q=grace");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("serializes the observed value for every supported keyset order", () => {
     const session = row({
       MessageCount: 11,

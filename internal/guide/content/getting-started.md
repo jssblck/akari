@@ -124,8 +124,8 @@ Open the server in a browser. Your sessions appear on:
   window, with an activity heatmap.
 - **Sessions**: every session in one feed, filterable by agent, project, user,
   and machine.
-- **Projects**: one row per git-remote project, with its usage and a cost
-  sparkline.
+- **Projects**: repositories and local folders with lifetime totals and a
+  30-day token trend.
 
 Click any session to read its full transcript. [The web UI](./the-web-ui.md) is
 the tour. To read the same history from a coding agent instead of a browser, wire
