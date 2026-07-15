@@ -2,23 +2,52 @@
    fixed measurement grid so repository and local-folder totals line up. */
 
 .projects-toolbar {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 170px;
-  gap: 8px;
   margin-bottom: 14px;
 }
-.projects-toolbar input,
-.projects-toolbar select {
+.projects-toolbar input {
   width: 100%;
 }
 
+.proj-section {
+  overflow: hidden;
+  border-color: var(--border-strong);
+  border-radius: 7px;
+}
 .proj-section + .proj-section {
   margin-top: 24px;
+}
+.proj-section > .section-head {
+  align-items: center;
+  gap: 16px;
+  min-height: 54px;
+  margin: -14px -16px 0;
+  padding: 9px 14px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+}
+.project-section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.project-sort {
+  flex: 0 1 170px;
+  min-width: 128px;
+  max-width: 170px;
+  min-height: 32px;
+  height: 32px;
+  padding-block: 0;
+  color: var(--subtext);
+  font-size: 14px;
 }
 
 .projects-table {
   table-layout: fixed;
   min-width: 872px;
+}
+.projects-table th {
+  background: color-mix(in srgb, var(--surface-2) 58%, var(--surface));
 }
 .project-col-kind {
   width: 112px;
@@ -146,12 +175,6 @@
   cursor: pointer;
 }
 
-@media (max-width: 720px) {
-  .projects-toolbar {
-    grid-template-columns: 1fr;
-  }
-}
-
 /* The session table's remainder footer reads as a summary line, not another
    row of data, so it recedes a step from the rows above it. */
 .remainder td {
@@ -161,4 +184,7 @@
 .remainder .tok-cell,
 .remainder .num {
   font-style: normal;
+}
+.projects-table tbody tr:hover td {
+  background: var(--surface-2);
 }

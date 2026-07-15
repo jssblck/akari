@@ -273,7 +273,7 @@ export function SessionsPage() {
               <div className="sessions-scope">
                 <span className="sessions-total">
                   Sessions
-                  <span className="sessions-count">
+                  <span className="count-badge">
                     {hasMore ? `${rows.length}+` : rows.length}
                   </span>
                 </span>

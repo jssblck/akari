@@ -309,24 +309,46 @@ function ProjectSection({
   projects,
   totalProjects,
   sparklines,
+  sort,
+  onSortChange,
 }: {
   title: string;
   projects: Project[];
   totalProjects: number;
   sparklines: Record<string, number[]>;
+  sort: ProjectSort;
+  onSortChange: (sort: ProjectSort) => void;
 }) {
   if (projects.length === 0) return null;
+  const countLabel = `${formatCount(projects.length)}${
+    projects.length === totalProjects ? "" : ` of ${formatCount(totalProjects)}`
+  } project${totalProjects === 1 ? "" : "s"}`;
   return (
     <section className="instrument compact proj-section">
       <div className="section-head">
-        <h2>{title}</h2>
-        <span className="muted">
-          {projects.length !== totalProjects
-            ? `${formatCount(projects.length)} of `
-            : null}
-          {formatCount(totalProjects)} project
-          {totalProjects === 1 ? "" : "s"}
-        </span>
+        <div className="project-section-title">
+          <h2>{title}</h2>
+          <span className="count-badge" aria-hidden="true">
+            {projects.length === totalProjects
+              ? formatCount(totalProjects)
+              : `${formatCount(projects.length)}/${formatCount(totalProjects)}`}
+          </span>
+          <span className="sr-only">{countLabel}</span>
+        </div>
+        <select
+          className="project-sort"
+          aria-label={`Sort ${title.toLocaleLowerCase()}`}
+          value={sort}
+          onChange={(event) =>
+            onSortChange(parseProjectSort(event.target.value))
+          }
+        >
+          {PROJECT_SORTS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
       </div>
       <div className="table-wrap embedded">
         <table className="data-table projects-table">
@@ -377,17 +399,6 @@ export function ProjectsPage() {
           placeholder="Search projects"
           onChange={(event) => setQuery(event.target.value)}
         />
-        <select
-          aria-label="Sort projects"
-          value={sort}
-          onChange={(event) => setSort(parseProjectSort(event.target.value))}
-        >
-          {PROJECT_SORTS.map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
       </div>
       <AsyncView state={state}>
         {(data) => {
@@ -439,12 +450,16 @@ export function ProjectsPage() {
                 projects={visibleRepositories}
                 totalProjects={repositories.length}
                 sparklines={sparklines}
+                sort={sort}
+                onSortChange={setSort}
               />
               <ProjectSection
                 title="Local folders"
                 projects={visibleLocalFolders}
                 totalProjects={localFolders.length}
                 sparklines={sparklines}
+                sort={sort}
+                onSortChange={setSort}
               />
             </>
           );

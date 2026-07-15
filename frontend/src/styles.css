@@ -280,6 +280,21 @@ code {
 .muted {
   color: var(--muted);
 }
+.count-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  padding: 2px 7px;
+  color: var(--subtext);
+  background: var(--surface-3);
+  border-radius: 999px;
+  font-family: "Geist Mono", monospace;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.5;
+  text-align: center;
+}
 
 .button {
   display: inline-flex;

@@ -125,6 +125,13 @@ describe("ProjectsPage", () => {
       projects: [
         project({ ID: 1, DisplayName: "smaller", SessionCount: 2 }),
         project({ ID: 2, DisplayName: "larger", SessionCount: 20 }),
+        project({
+          ID: 3,
+          DisplayName: "local",
+          Kind: "standalone",
+          Host: "ada",
+          RemoteKey: "local:ada:C:\\Temp\\local",
+        }),
       ],
       sparklines: {},
     });
@@ -134,8 +141,9 @@ describe("ProjectsPage", () => {
       </MemoryRouter>,
     );
 
-    const sort = await screen.findByLabelText("Sort projects");
-    fireEvent.change(sort, { target: { value: "sessions" } });
+    const repositorySort = await screen.findByLabelText("Sort repositories");
+    fireEvent.change(repositorySort, { target: { value: "sessions" } });
+    expect(screen.getByLabelText("Sort local folders")).toHaveValue("sessions");
     const section = screen.getByText("Repositories").closest("section");
     expect(section).not.toBeNull();
     const links = within(section as HTMLElement).getAllByRole("link");
