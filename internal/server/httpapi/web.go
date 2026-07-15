@@ -13,12 +13,10 @@ import (
 	"github.com/jssblck/akari/internal/server/web"
 )
 
-// requireReadHTML guards the server-rendered UI. Reading the UI needs a
-// full-scope credential: a browser session in practice, though a full-scope API
-// token reads the same surface its owner can (ingest-only tokens are rejected).
-// Unauthenticated requests are redirected to the login page, not handed a JSON
-// error.
-func (s *Server) requireReadHTML(next http.HandlerFunc) http.HandlerFunc {
+// requireBrowserRead preserves browser navigation semantics for non-JSON reads:
+// unauthenticated clients go through the React login route instead of receiving
+// a JSON error.
+func (s *Server) requireBrowserRead(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		setPrivateNoStore(w)
 		p, ok := s.resolve(r)
@@ -36,22 +34,6 @@ func (s *Server) requireReadHTML(next http.HandlerFunc) http.HandlerFunc {
 // against the external URL space, not the stripped internal one.
 func (s *Server) loginRedirect(r *http.Request) string {
 	return s.href(r, "/login?next="+url.QueryEscape(s.href(r, r.URL.RequestURI())))
-}
-
-// pageFor builds the shared layout context from the authenticated principal.
-func (s *Server) pageFor(r *http.Request, title string) web.Page {
-	pg := web.Page{Title: title}
-	p, ok := principalFrom(r.Context())
-	if !ok {
-		return pg
-	}
-	pg.LoggedIn = true
-	if u, err := s.Store.UserByID(r.Context(), p.UserID); err == nil {
-		pg.Username = u.Username
-		pg.IsAdmin = u.IsAdmin
-		pg.OverviewPublic = u.OverviewPublic
-	}
-	return pg
 }
 
 // render writes a templ component with the given status. The status is committed
@@ -93,16 +75,14 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		URL:         s.absURL(r, "/"),
 		Image:       s.absURL(r, "/og.png"),
 	}
-	// Resolve the viewer so a full-scope reader (a browser session in practice)
-	// gets the signed-in topbar; a logged-out visitor or a non-full credential (an
-	// ingest- or read-scope token pointed at the UI) gets the logged-out variant,
-	// matching requireReadHTML's gate on the rest of the UI.
-	var viewer web.Page
+	// A full-scope reader gets a route back into the application. The landing page
+	// does not need the account record itself.
+	loggedIn := false
 	if p, ok := s.resolve(r); ok && p.Scope == scopeFull {
 		setPrivateNoStore(w)
-		viewer = s.pageFor(s.withPrincipal(r, p), "akari")
+		loggedIn = true
 	}
-	render(w, r, http.StatusOK, web.LandingPage(og, viewer))
+	render(w, r, http.StatusOK, web.LandingPage(og, loggedIn))
 }
 
 // dashboardCacheMaxAge lets a browser reuse a dashboard response for a few seconds,
@@ -118,18 +98,9 @@ func setDashboardCache(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "private, max-age="+strconv.Itoa(dashboardCacheMaxAge))
 }
 
-// handleNotFound is the catch-all for a GET whose path no route claims: a typed or
-// stale URL, or a guessed pretty project path (projects are keyed by numeric id, so
-// /projects/github.com/owner/repo lands here). It renders the styled error page in
-// the viewer's shell rather than net/http's bare "404 page not found" text, with a
-// way back into the app. It gates nothing: an error page shows no parsed data, and a
-// logged-out visitor should get the public 404 rather than a login bounce.
+// handleNotFound gives unknown paths the public error shell. It performs no
+// account lookup because an error page exposes no private state.
 func (s *Server) handleNotFound(w http.ResponseWriter, r *http.Request) {
-	if p, ok := s.resolve(r); ok && p.Scope == scopeFull {
-		setPrivateNoStore(w)
-		render(w, r, http.StatusNotFound, web.ErrorPage(s.pageFor(s.withPrincipal(r, p), "Not found"), http.StatusNotFound, "That page does not exist."))
-		return
-	}
 	render(w, r, http.StatusNotFound, web.PublicErrorPage(http.StatusNotFound, "That page does not exist."))
 }
 
@@ -152,44 +123,6 @@ func (s *Server) handleSessionEvents(w http.ResponseWriter, r *http.Request) {
 	serveSSE(w, r, ch, func(struct{}) string { return "event: update\ndata: 1\n\n" }, func(write func(string) bool) bool {
 		return write("event: update\ndata: 1\n\n")
 	})
-}
-
-// overviewPath is the app's home surface: where a fresh sign-in lands and the
-// fallback for a login with no saved destination. The root "/" is the public
-// homepage now, so post-auth flows aim here rather than dropping the user back on
-// the marketing page.
-const overviewPath = "/overview"
-
-// safeNext sanitizes a post-login redirect target, rejecting anything that is not
-// a same-origin absolute path (so a crafted next cannot bounce the user off-site).
-// An empty or rejected value falls back to the app home rather than the public
-// root, so a bare visit to /login still lands in the app after signing in. A
-// valid next passes through untouched: it is an external path (already carrying
-// any path prefix), minted by loginRedirect; only the fallback needs prefixing
-// here.
-func (s *Server) safeNext(r *http.Request, next string) string {
-	fallback := s.href(r, overviewPath)
-	if next == "" || !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") {
-		return fallback
-	}
-	u, err := url.Parse(next)
-	if err != nil || u.IsAbs() || u.Host != "" || u.Opaque != "" {
-		return fallback
-	}
-	path, err := url.PathUnescape(u.EscapedPath())
-	if err != nil || strings.Contains(path, `\`) || strings.HasPrefix(path, "//") {
-		return fallback
-	}
-	// A prefixed deployment only routes paths under its mount point, so a next
-	// that lacks the resolved prefix (a link minted before the prefix existed,
-	// or a client unaware of the convention) would land outside the proxy's
-	// mount after login; send those to the fallback instead.
-	if prefix := requestPrefix(r); prefix != "" {
-		if _, ok := stripPrefix(path, prefix); !ok {
-			return fallback
-		}
-	}
-	return next
 }
 
 // staticHandler serves the embedded static assets under /static/.

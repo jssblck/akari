@@ -46,7 +46,7 @@ import {
   relativeTime,
 } from "../format";
 import "../sessions.css";
-import { withBase } from "../base";
+import { absoluteURL, withBase } from "../base";
 import type {
   DeletedSessionResponse,
   SessionPublicationResponse,
@@ -54,6 +54,7 @@ import type {
   SessionSnapshot,
   TranscriptResponse,
 } from "../types";
+import { watchSessionUpdates } from "./session-live";
 
 export function SessionPage() {
   const { id = "" } = useParams();
@@ -67,38 +68,19 @@ export function SessionPage() {
   const transcriptRef = useRef<TranscriptHandle>(null);
 
   useEffect(() => {
-    if (state.kind === "ready") {
-      setSnapshot(state.data.snapshot);
-      setOwner(state.data.owner);
-      setCanDelete(state.data.can_delete);
-    }
-  }, [state]);
+    if (state.kind !== "ready" || !id) return;
+    if (state.data.snapshot.Audit.Detail.ID !== Number(id)) return;
+    setSnapshot(state.data.snapshot);
+    setOwner(state.data.owner);
+    setCanDelete(state.data.can_delete);
 
-  // Live refresh: fetch only the turns past the last rendered ordinal and splice
-  // them into the transcript, while replacing the audit/outline/flow shape whole
-  // (those are small, bounded reads, and must reflect the latest projection). A
-  // burst of "update" events collapses into one trailing refresh, matching the
-  // old app.js's fetching/pending pair, so overlapping requests can never land
-  // their swaps out of order.
-  useEffect(() => {
-    if (!id) return;
-    const events = new EventSource(
-      withBase(`/sessions/${encodeURIComponent(id)}/events`),
-    );
-    let fetching = false;
-    let pending = false;
-    async function refresh() {
-      if (fetching) {
-        pending = true;
-        return;
-      }
-      fetching = true;
-      try {
-        const after = transcriptRef.current?.lastOrdinal();
-        const query = after == null ? "0" : String(after);
-        const result = await request<SessionResponse>(
-          `/api/v1/app/sessions/${encodeURIComponent(id)}/append?after=${query}`,
-        );
+    // The SSE endpoint sends an immediate wake-up, so open it only after the
+    // matching full response has been adopted. This keeps a slow initial read
+    // from overwriting a newer append response.
+    return watchSessionUpdates(
+      id,
+      () => transcriptRef.current?.lastOrdinal() ?? null,
+      (result, after) => {
         setSnapshot((cur) =>
           cur
             ? {
@@ -114,19 +96,9 @@ export function SessionPage() {
         setCanDelete(result.can_delete);
         if (after != null)
           transcriptRef.current?.appendPage(result.snapshot.Page);
-      } finally {
-        fetching = false;
-        if (pending) {
-          pending = false;
-          refresh();
-        }
-      }
-    }
-    events.addEventListener("update", () => {
-      refresh();
-    });
-    return () => events.close();
-  }, [id]);
+      },
+    );
+  }, [id, state]);
 
   return (
     <div className="page session-page">
@@ -269,9 +241,7 @@ function SessionActions({
   onDeleted: (projectID: number) => void;
 }) {
   const [copied, setCopied] = useState(false);
-  const shareURL = detail.PublicID
-    ? `${window.location.origin}/s/${detail.PublicID}`
-    : "";
+  const shareURL = detail.PublicID ? absoluteURL(`/s/${detail.PublicID}`) : "";
   return (
     <div className="session-actions">
       {owner ? (

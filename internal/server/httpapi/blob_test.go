@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"net/url"
 	"testing"
 
 	"github.com/jssblck/akari/internal/server/auth"
@@ -61,12 +60,10 @@ func TestDeleteSessionAuthz(t *testing.T) {
 
 	login := func(username, password string) *http.Client {
 		c := newClient(t)
-		c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-		resp, err := c.PostForm(srv.URL+"/login", url.Values{"username": {username}, "password": {password}})
-		if err != nil {
-			t.Fatalf("login %s: %v", username, err)
+		status, body := postJSON(t, c, srv.URL+"/api/v1/auth/login", fmt.Sprintf(`{"username":%q,"password":%q}`, username, password))
+		if status != http.StatusOK {
+			t.Fatalf("login %s: status=%d body=%v", username, status, body)
 		}
-		resp.Body.Close()
 		return c
 	}
 	del := func(c *http.Client, id int64) int {
@@ -142,10 +139,8 @@ func TestBlobServingAccessControl(t *testing.T) {
 		t.Fatalf("publish: %v", err)
 	}
 
-	if _, err := c.PostForm(srv.URL+"/login", url.Values{
-		"username": {"grace"}, "password": {"hopper-1906"},
-	}); err != nil {
-		t.Fatalf("login: %v", err)
+	if status, body := postJSON(t, c, srv.URL+"/api/v1/auth/login", `{"username":"grace","password":"hopper-1906"}`); status != http.StatusOK {
+		t.Fatalf("login: status=%d body=%v", status, body)
 	}
 
 	// Authenticated owner can fetch A's blob through A.

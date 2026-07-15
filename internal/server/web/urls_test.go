@@ -57,12 +57,3 @@ func TestSelectedUserIDs(t *testing.T) {
 		t.Errorf("all-invalid selection should be nil, got %v", got)
 	}
 }
-
-func TestNavClass(t *testing.T) {
-	if got := navClass("sessions", "sessions"); got != "nav active" {
-		t.Errorf("active navClass = %q", got)
-	}
-	if got := navClass("sessions", "overview"); got != "nav" {
-		t.Errorf("inactive navClass = %q", got)
-	}
-}

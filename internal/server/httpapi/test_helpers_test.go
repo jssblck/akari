@@ -91,14 +91,6 @@ func rebuildWith(t *testing.T, st *store.Store, sessionID int64, delta store.Pro
 	}
 }
 
-func stampSessionCurrent(t *testing.T, st *store.Store, sessionID int64) {
-	t.Helper()
-	if _, err := st.Pool.Exec(context.Background(),
-		"UPDATE session_raw SET parser_epoch = $2 WHERE session_id = $1", sessionID, parse.Epoch); err != nil {
-		t.Fatalf("stamp session %d current: %v", sessionID, err)
-	}
-}
-
 func mustGet(t *testing.T, client *http.Client, url string) *http.Response {
 	t.Helper()
 	response, err := client.Get(url)

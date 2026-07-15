@@ -26,7 +26,7 @@ func TestStaticURLCarriesBasePath(t *testing.T) {
 }
 
 func TestLandingUsesOnlyFingerprintedStaticStyles(t *testing.T) {
-	html := renderComponent(t, LandingPage(OGMeta{}, Page{}))
+	html := renderComponent(t, LandingPage(OGMeta{}, false))
 	for _, asset := range []string{"css/base.css", "css/layout.css", "css/landing.css"} {
 		if want := `href="/static/` + asset + `?v=`; !strings.Contains(html, want) {
 			t.Errorf("landing layout is missing %q", asset)

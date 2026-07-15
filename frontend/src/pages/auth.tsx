@@ -121,13 +121,11 @@ export function AuthPage({ mode }: { mode: "login" | "register" }) {
   );
 }
 
-// safeNext mirrors the server's safeNext (web.go): reject anything that is
-// not a same-origin absolute path, so a crafted next cannot bounce a
-// signed-in user off-site. Browsers treat a backslash as a path separator
-// equivalent to "/" when resolving a URL (the WHATWG URL spec's "special
-// scheme" handling), so a value like "/\evil.com" would otherwise parse as
-// same-origin here while still redirecting off-site; the explicit backslash
-// check closes that gap the same way the server's does.
+// safeNext rejects anything that is not a same-origin absolute path, so a
+// crafted next cannot bounce a signed-in user off-site. Browsers treat a
+// backslash as a path separator equivalent to "/" when resolving a URL (the
+// WHATWG URL spec's "special scheme" handling), so a value like "/\evil.com"
+// would otherwise parse as same-origin here while still redirecting off-site.
 export function safeNext(value: string | null): string {
   // next is always an external (prefix-carrying) path: the server's login
   // bounce and the app shell both prefix it before handing it here, so a

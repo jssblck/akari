@@ -2,44 +2,6 @@ package web
 
 import "github.com/jssblck/akari/internal/version"
 
-templ layout(p Page) {
-	<!DOCTYPE html>
-	<html lang="en">
-		<head>
-			<meta charset="utf-8"/>
-			// viewport-fit=cover lets the shell paint edge to edge on notched phones; the
-			// bars and drawer pad themselves back out with env(safe-area-inset-*).
-			<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
-			<title>{ p.Title } - akari</title>
-			@faviconLinks()
-			<link rel="preload" href={ StaticURL(ctx, "fonts/Geist-Regular.woff2") } as="font" type="font/woff2" crossorigin/>
-			<link rel="preload" href={ StaticURL(ctx, "fonts/GeistMono-Regular.woff2") } as="font" type="font/woff2" crossorigin/>
-			@stylesheets()
-		</head>
-		<body>
-			if p.LoggedIn {
-				<div class="app">
-					@mobileTopbar()
-					@sidebar(p)
-					// The drawer scrim: shown while the mobile drawer is open (app.js flips
-					// body.drawer-open); a tap on it closes the drawer. Hidden entirely on
-					// desktop, where the sidebar is a fixed column.
-					<div class="sidebar-scrim" data-drawer-scrim aria-hidden="true"></div>
-					<div class="content-scroll">
-						<main class={ "page-" + p.Active }>
-							{ children... }
-						</main>
-					</div>
-				</div>
-			} else {
-				<main>
-					{ children... }
-				</main>
-			}
-		</body>
-	</html>
-}
-
 // faviconLinks declares the browser tab icon in the three forms current browsers
 // draw from: the scalable SVG (the akari aperture mark, so it stays crisp at any
 // density and follows the dark tile), the legacy .ico served at the root path
@@ -51,17 +13,6 @@ templ faviconLinks() {
 	<link rel="apple-touch-icon" href={ Href(ctx, "/static/apple-touch-icon.png") }/>
 }
 
-// stylesheets links the shared cascade for the remaining templated pages (the
-// auth forms' error re-renders and the styled error pages): the shared base
-// (tokens, resets, and shared components), the shell layout, and the landing
-// rules the public topbar draws from. The per-page stylesheets retired with the
-// server-rendered app; the React frontend carries its own styles.
-templ stylesheets() {
-	<link rel="stylesheet" href={ StaticURL(ctx, "css/base.css") }/>
-	<link rel="stylesheet" href={ StaticURL(ctx, "css/layout.css") }/>
-	<link rel="stylesheet" href={ StaticURL(ctx, "css/landing.css") }/>
-}
-
 // landingStylesheets is the homepage's deliberately small static cascade. The
 // React application owns every other browser route, so the templated homepage no
 // longer ships the retired app shell or page-specific styles.
@@ -69,100 +20,6 @@ templ landingStylesheets() {
 	<link rel="stylesheet" href={ StaticURL(ctx, "css/base.css") }/>
 	<link rel="stylesheet" href={ StaticURL(ctx, "css/layout.css") }/>
 	<link rel="stylesheet" href={ StaticURL(ctx, "css/landing.css") }/>
-}
-
-// navItem is one sidebar link. It carries its own icon as a child and marks
-// itself active when its key matches the page's active section.
-templ navItem(href, key, label, active string) {
-	// aria-label and title carry the name independently of the visible span, which
-	// the responsive layout hides below 980px (layout.css). Without them a collapsed
-	// nav link would have no accessible name at all (the icon is aria-hidden), so a
-	// screen reader would announce four empty links and a sighted user would have
-	// only the glyph; the title also gives the collapsed strip a hover tooltip.
-	<a class={ navClass(key, active) } href={ templ.SafeURL(href) } aria-label={ label } title={ label }>
-		@navIcon(key)
-		<span class="nav-label">{ label }</span>
-	</a>
-}
-
-// mobileTopbar is the compact sticky bar the app shell shows below the 900px
-// shell breakpoint (layout.css hides it on desktop): the wordmark and a menu
-// button that opens the sidebar as an off-canvas drawer. It mirrors the guide's
-// mobile header, so the two surfaces share one navigation idiom on a phone.
-templ mobileTopbar() {
-	<header class="mobile-topbar">
-		<a class="brand" href={ Href(ctx, "/overview") }>@brandMark()</a>
-		<button
-			type="button"
-			class="menu-toggle"
-			data-drawer-toggle
-			aria-label="Menu"
-			aria-expanded="false"
-			aria-controls="app-sidebar"
-		>
-			<svg viewBox="0 0 16 16" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-				<path d="M2 4h12M2 8h12M2 12h12"></path>
-			</svg>
-		</button>
-	</header>
-}
-
-// sidebar is the persistent left navigation that replaced the three-link top
-// bar: the wordmark, the primary sections, and the signed-in user with a log-out
-// control pinned to the foot. Below the 900px shell breakpoint it renders as an
-// off-canvas drawer the mobile topbar's menu button opens (layout.css + app.js).
-templ sidebar(p Page) {
-	<aside class="sidebar" id="app-sidebar">
-		<a class="brand" href={ Href(ctx, "/overview") }>@brandMark()</a>
-		<nav class="navgroup" aria-label="Primary">
-			@navItem("/overview", "overview", "Overview", p.Active)
-			@navItem("/insights", "insights", "Insights", p.Active)
-			@navItem("/projects", "projects", "Projects", p.Active)
-			@navItem("/sessions", "sessions", "Sessions", p.Active)
-			@navItem("/account", "account", "Account", p.Active)
-			@navItem("/guide", "guide", "Guide", p.Active)
-		</nav>
-		<span class="spacer"></span>
-		<div class="sb-foot">
-			<span class="who">{ p.Username }</span>
-			<span class="spacer"></span>
-			<a class="sb-icon" href="https://github.com/jssblck/akari" aria-label="akari on GitHub" title="akari on GitHub" rel="noopener" target="_blank">@githubGlyph()</a>
-			<form method="post" action={ Href(ctx, "/logout") } class="inline">
-				@csrfField()
-				<button class="ghost small" type="submit">Log out</button>
-			</form>
-		</div>
-	</aside>
-}
-
-// navIcon draws the small line glyph for a sidebar item, keyed by section.
-templ navIcon(key string) {
-	<svg class="nav-ico" viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
-		switch key {
-			case "overview":
-				<rect x="1.5" y="1.5" width="5" height="5" rx="1"></rect>
-				<rect x="9.5" y="1.5" width="5" height="5" rx="1"></rect>
-				<rect x="1.5" y="9.5" width="5" height="5" rx="1"></rect>
-				<rect x="9.5" y="9.5" width="5" height="5" rx="1"></rect>
-			case "insights":
-				<path d="M2 14V2"></path>
-				<path d="M2 14h12"></path>
-				<rect x="4" y="9" width="2.4" height="3.5" rx="0.5"></rect>
-				<rect x="7.8" y="6" width="2.4" height="6.5" rx="0.5"></rect>
-				<rect x="11.6" y="3.5" width="2.4" height="9" rx="0.5"></rect>
-			case "sessions":
-				<path d="M2 4h12M2 8h12M2 12h8"></path>
-			case "projects":
-				<path d="M2 12V6l3-2 3 2 3-2 3 2v6"></path>
-				<path d="M2 12h12"></path>
-			case "account":
-				<circle cx="8" cy="5.5" r="2.6"></circle>
-				<path d="M3 14c0-2.8 2.2-4.5 5-4.5s5 1.7 5 4.5"></path>
-			case "guide":
-				<path d="M3 3h6.5a1.5 1.5 0 0 1 1.5 1.5V14a1.2 1.2 0 0 0-1.2-1.2H3z"></path>
-				<path d="M13 3H9.5A1.5 1.5 0 0 0 8 4.5V14a1.2 1.2 0 0 1 1.2-1.2H13z"></path>
-		}
-	</svg>
 }
 
 // brandMark is the wordmark: a small lilac aperture glyph beside the name, a nod
@@ -186,13 +43,9 @@ templ githubGlyph() {
 	</svg>
 }
 
-// publicLayout is the shell for pages served without the signed-in app chrome: the
-// homepage, public session and overview views, and the reparse and error stand-ins.
-// viewer carries the current reader's sign-in state so the topbar can adapt: a
-// logged-in reader gets a link back into the app (Overview) where a logged-out one
-// gets "Log in". Genuinely public callers that never resolve a principal pass the
-// zero Page, which reads as logged out and renders the original topbar unchanged.
-templ publicLayout(title string, og OGMeta, viewer Page) {
+// publicLayout adapts its navigation for a signed-in reader without pulling user
+// data into an otherwise public, cacheable page.
+templ publicLayout(title string, og OGMeta, loggedIn bool) {
 	<!DOCTYPE html>
 	<html lang="en">
 		<head>
@@ -212,7 +65,7 @@ templ publicLayout(title string, og OGMeta, viewer Page) {
 				<nav aria-label="Site">
 					<a href={ Href(ctx, "/guide") }>Docs</a>
 					<a class="gh-link" href="https://github.com/jssblck/akari" aria-label="akari on GitHub" rel="noopener" target="_blank">@githubGlyph()</a>
-					if viewer.LoggedIn {
+					if loggedIn {
 						<a href={ Href(ctx, "/overview") }>Overview</a>
 					} else {
 						<a href={ Href(ctx, "/login") }>Log in</a>

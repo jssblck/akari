@@ -19,11 +19,10 @@ import (
 // cookie jar on c carries a live session afterward.
 func registerGrace(t *testing.T, srv string, c *http.Client) {
 	t.Helper()
-	resp, err := c.PostForm(srv+"/register", url.Values{"username": {"grace"}, "password": {"hopper-1906"}})
-	if err != nil {
-		t.Fatalf("register: %v", err)
+	status, body := postJSON(t, c, srv+"/api/v1/auth/register", `{"username":"grace","password":"hopper-1906"}`)
+	if status != http.StatusCreated {
+		t.Fatalf("register: status=%d body=%v", status, body)
 	}
-	resp.Body.Close()
 }
 
 // bearerRT injects a bearer token on every request, so an MCP client transport

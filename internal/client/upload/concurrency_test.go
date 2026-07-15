@@ -2,7 +2,6 @@ package upload
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -83,36 +82,6 @@ func TestBatchedExistenceChecksBounded(t *testing.T) {
 	}
 }
 
-// TestParallelBodyUploadsRespectLimiter proves missing bodies upload concurrently and
-// that the upload limiter bounds the concurrency: with a fixed limiter of width 4, the
-// server never sees more than 4 uploads at once, yet sees more than one (they are not
-// serialized).
-func TestParallelBodyUploadsRespectLimiter(t *testing.T) {
-	setChunkTarget(t, 1<<30)
-	c, fs := newTestClient(t)
-	const width = 4
-	c.uploads = newFixedUploadLimiter(width)
-	fs.putDelay = 5 * time.Millisecond
-
-	const n = 40
-	content := distinctBodySession(n, 40)
-	if _, err := c.SyncFile(context.Background(), target(tempFile(t, content))); err != nil {
-		t.Fatal(err)
-	}
-
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-	if fs.puts != n {
-		t.Fatalf("uploaded %d bodies, want %d", fs.puts, n)
-	}
-	if fs.maxConcurrentPuts > width {
-		t.Fatalf("peak concurrent uploads = %d, over the limiter width %d", fs.maxConcurrentPuts, width)
-	}
-	if fs.maxConcurrentPuts < 2 {
-		t.Fatalf("peak concurrent uploads = %d, want at least 2 (uploads must run in parallel)", fs.maxConcurrentPuts)
-	}
-}
-
 // TestDuplicateBodiesUploadOnce proves an identical body repeated across many lines is
 // uploaded exactly once in a pass: the in-pass dedup collapses it before the existence
 // check, so the CAS sees a single PUT.
@@ -160,20 +129,6 @@ func TestEarlyFlushOnByteBudgetUploadsEverything(t *testing.T) {
 	}
 	if string(fs.buf) == "" {
 		t.Fatal("server stored no transcript, want the rewritten lines")
-	}
-}
-
-// TestNewFallsBackToFixedLimiter proves the Client's limiter wiring degrades to a fixed
-// limiter when the adaptive one cannot be built, and otherwise uses what the constructor
-// returns.
-func TestNewFallsBackToFixedLimiter(t *testing.T) {
-	got := uploadLimiterOrFallback(func() (uploadLimiter, error) { return nil, errors.New("boom") })
-	if _, ok := got.(*fixedUploadLimiter); !ok {
-		t.Fatalf("fallback limiter = %T, want *fixedUploadLimiter", got)
-	}
-	sentinel := newFixedUploadLimiter(3)
-	if got := uploadLimiterOrFallback(func() (uploadLimiter, error) { return sentinel, nil }); got != sentinel {
-		t.Fatalf("constructor result not used; got %v", got)
 	}
 }
 
@@ -232,9 +187,9 @@ func TestPresentBodyIsNotReuploaded(t *testing.T) {
 	}
 }
 
-// TestPutBodyTypedStatusErrorPropagates proves a failed upload surfaces as the typed
-// status error the upload limiter classifies on, carrying the server's status code.
-func TestPutBodyTypedStatusErrorPropagates(t *testing.T) {
+// TestPutBodyStatusErrorPropagates proves a failed upload carries the server's status
+// code instead of being mistaken for a successful sync.
+func TestPutBodyStatusErrorPropagates(t *testing.T) {
 	setChunkTarget(t, 1<<30)
 	c, fs := newTestClient(t)
 	fs.failPutStatus = http.StatusServiceUnavailable
@@ -242,9 +197,8 @@ func TestPutBodyTypedStatusErrorPropagates(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error when the blob upload fails")
 	}
-	var se *httpStatusError
-	if !errors.As(err, &se) || se.code != http.StatusServiceUnavailable {
-		t.Fatalf("error = %v, want a *httpStatusError with code %d", err, http.StatusServiceUnavailable)
+	if !strings.Contains(err.Error(), "server returned 503") {
+		t.Fatalf("error = %v, want server status %d", err, http.StatusServiceUnavailable)
 	}
 }
 

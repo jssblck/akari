@@ -15,7 +15,7 @@ import (
 // spine at the source package guards the anonymous root independently of the httpapi
 // route wiring.
 func TestLandingPageRendersHeroAndEntryPoints(t *testing.T) {
-	html := renderComponent(t, LandingPage(OGMeta{}, Page{}))
+	html := renderComponent(t, LandingPage(OGMeta{}, false))
 
 	// The public layout wraps it: the top bar's brand, the Docs and GitHub links,
 	// the Log in link, and the product name in the page title.
@@ -92,11 +92,10 @@ func TestLandingPageRendersHeroAndEntryPoints(t *testing.T) {
 // A signed-in reader can reach the homepage too (the root no longer bounces them
 // into the app), so the page must adapt its entry points: the public layout's
 // topbar and the page foot point back into the app (Overview) instead of offering
-// "Log in", and the marketing spine still renders. Passing a logged-out Page keeps
-// the original "Log in" affordances, pinned by the test above.
+// "Log in", and the marketing spine still renders. The false case keeps the
+// original "Log in" affordances, pinned by the test above.
 func TestLandingPageLoggedInPointsIntoApp(t *testing.T) {
-	viewer := Page{LoggedIn: true, Username: "grace"}
-	html := renderComponent(t, LandingPage(OGMeta{}, viewer))
+	html := renderComponent(t, LandingPage(OGMeta{}, true))
 
 	// The topbar swaps "Log in" for a link into the app.
 	if !strings.Contains(html, `<a href="/overview">Overview</a>`) {
@@ -163,7 +162,7 @@ func TestLandingMockDataReconciles(t *testing.T) {
 // card say different things. Importing ogimage from a web test is cycle-safe:
 // neither package imports the other.
 func TestLandingHeroMatchesCardCopy(t *testing.T) {
-	html := renderComponent(t, LandingPage(OGMeta{}, Page{}))
+	html := renderComponent(t, LandingPage(OGMeta{}, false))
 	if want := "<h1>" + ogimage.LandingHeadline + "</h1>"; !strings.Contains(html, want) {
 		t.Errorf("landing hero h1 does not carry ogimage.LandingHeadline; want %q in the rendered page", want)
 	}

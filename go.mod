@@ -10,7 +10,6 @@ require (
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/klauspost/compress v1.19.0
 	github.com/modelcontextprotocol/go-sdk v1.6.1
-	github.com/platinummonkey/go-concurrency-limits v1.0.0
 	github.com/tidwall/gjson v1.19.0
 	github.com/tidwall/match v1.2.0
 	github.com/yuin/goldmark v1.8.2

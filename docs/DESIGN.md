@@ -427,9 +427,8 @@ each tool body's reference from its sentinel rather than the CAS.
    - `PUT /api/v1/ingest/blob/{sha256}?media_type=<type>&content_type=<enc>`
      streams one body's stored bytes to the CAS, where `content_type` is the
      storage encoding (`application/octet-stream` raw or `application/zstd`). The
-     missing bodies upload in parallel under an adaptive concurrency limiter that
-     walks the in-flight width from observed upload latency (shrinking when the
-     server sheds load or the network saturates, growing when it is healthy). The
+     missing bodies upload in parallel under a fixed client-wide budget of eight,
+     so syncing several files cannot multiply the upload concurrency. The
      server streams the bytes to the large object in bounded slices and verifies
      they hash to the path's sha256, so a corrupt or mislabeled upload is rejected
      rather than poisoning the store; it never decompresses. Each upload pins the
@@ -1387,7 +1386,7 @@ cron-friendly mode.
 
 Discovered files sync in parallel, bounded by `--concurrency` (default
 `min(NumCPU, 8)`). The cap stays modest on purpose: each file already fans its
-own body uploads out under the client's shared adaptive limiter and CPU-bounded
+own body uploads out under the client's shared fixed budget and CPU-bounded
 compression encoder, so the file loop only needs enough parallelism to overlap
 the per-file announce and existence-check round-trips. Outcomes are folded on one
 goroutine that owns the running tally and the printed lines, so counts stay exact
@@ -1503,8 +1502,8 @@ first sight, and treats the request as that signed-in user at full scope, the sa
 as a browser session. This is the standard "identity-aware proxy" pattern: the
 proxy owns the session, and akari believes the header per request rather than
 running its own login. Provisioned accounts are *federated*: they carry
-`auth_source = 'proxy'` and no password, so the local `/login` form refuses them
-(their only way in is the proxy). See `proxyPrincipal` in
+`auth_source = 'proxy'` and no password, so the password login endpoint refuses
+them (their only way in is the proxy). See `proxyPrincipal` in
 `internal/server/httpapi/auth.go`.
 
 Configuration (all off by default; a direct deployment sets none of these):

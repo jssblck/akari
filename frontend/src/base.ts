@@ -18,3 +18,7 @@ export const basePath = window.__AKARI_BASE_PATH__ ?? "";
 export function withBase(path: string): string {
   return basePath + path;
 }
+
+export function absoluteURL(path: string): string {
+  return `${window.location.origin}${withBase(path)}`;
+}

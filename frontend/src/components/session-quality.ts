@@ -1,8 +1,6 @@
-// Pure view-model helpers ported from internal/quality and internal/server/web, so
-// the session list and session detail pages can derive the same bands, labels, and
-// score arithmetic the Go renderer used to, without a server round trip. Each
-// function names the Go source it mirrors; keep them in step by hand since there is
-// no shared source of truth across the language boundary.
+// View-model helpers let the session pages derive display labels and score
+// arithmetic without a server round trip. Helpers that mirror Go rules name
+// their source because there is no shared definition across the language boundary.
 
 import { formatTokens } from "../format";
 import type {
@@ -11,7 +9,7 @@ import type {
   TurnUsageFull,
 } from "./session-types";
 
-// quality.GradeBand: buckets a letter grade into the tier the UI colors by.
+// gradeBand maps a stored grade to the CSS tier used only by the frontend.
 export function gradeBand(
   grade: string | null,
 ): "good" | "watch" | "poor" | "none" {

@@ -380,10 +380,8 @@ func TestBlobServeContentEncoding(t *testing.T) {
 
 	// Log in as the owner so the authenticated blob route is reachable.
 	web := newClient(t)
-	if _, err := web.PostForm(srv.URL+"/login", url.Values{
-		"username": {"grace"}, "password": {"hopper-1906"},
-	}); err != nil {
-		t.Fatalf("login: %v", err)
+	if status, body := postJSON(t, web, srv.URL+"/api/v1/auth/login", `{"username":"grace","password":"hopper-1906"}`); status != http.StatusOK {
+		t.Fatalf("login: status=%d body=%v", status, body)
 	}
 	// The Go HTTP client only auto-decodes gzip, never zstd, and it did not request
 	// zstd, so the response body is the stored bytes verbatim: exactly what this test
@@ -468,10 +466,8 @@ func TestBlobETagConditional(t *testing.T) {
 	}
 
 	web := newClient(t)
-	if _, err := web.PostForm(srv.URL+"/login", url.Values{
-		"username": {"grace"}, "password": {"hopper-1906"},
-	}); err != nil {
-		t.Fatalf("login: %v", err)
+	if status, body := postJSON(t, web, srv.URL+"/api/v1/auth/login", `{"username":"grace","password":"hopper-1906"}`); status != http.StatusOK {
+		t.Fatalf("login: status=%d body=%v", status, body)
 	}
 	blobURL := fmt.Sprintf("%s/api/v1/session/%d/blob/%s", srv.URL, sid, inputSHA)
 

@@ -3,9 +3,8 @@ package web
 // LandingPage is the root at "/": a product landing page that answers "why do I
 // care" by showing akari through inline mockups built from the app's own visual
 // language (transcript chips, the instrument stat strip, a session feed, and grade
-// banding), rather than a grid of feature cards. It is served to every visitor, not
-// just logged-out ones: viewer carries the reader's sign-in state so the public
-// layout's topbar and the page foot point a signed-in reader back into the app
+// banding), rather than a grid of feature cards. It is served to every visitor; the
+// reader's sign-in state lets the public layout and page foot point back into the app
 // (Overview) instead of offering "Log in". The hero carries a framed transcript
 // demo directly under the lede, the way a developer-tool landing page leads with a
 // real surface. The mocks are static HTML and CSS only: no JavaScript hydration,
@@ -25,8 +24,8 @@ templ landingTokensCell(p landingMockProject) {
 	</span>
 }
 
-templ LandingPage(og OGMeta, viewer Page) {
-	@publicLayout("akari", og, viewer) {
+templ LandingPage(og OGMeta, loggedIn bool) {
+	@publicLayout("akari", og, loggedIn) {
 		<div class="landing">
 			<section class="landing-hero">
 				<span class="landing-glyph">
@@ -358,7 +357,7 @@ templ LandingPage(og OGMeta, viewer Page) {
 				</div>
 			</section>
 			<section class="landing-foot">
-				if viewer.LoggedIn {
+				if loggedIn {
 					<p class="muted">
 						New to akari? Read the <a href={ Href(ctx, "/guide") }>user guide</a>. Or head to your
 						<a href={ Href(ctx, "/overview") }>overview</a>.
