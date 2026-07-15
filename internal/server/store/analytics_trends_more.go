@@ -102,15 +102,12 @@ type GallerySession struct {
 	Outcome        string
 }
 
-// Gallery is the per-session scatter: one point per fully-spanned session in the window
-// (capped for the payload), with Total the full count so the panel can note a sample.
+// Gallery is the per-session scatter: one point per fully-spanned session in the window.
 type Gallery struct {
 	Rows  []GallerySession
 	Total int
 
-	// Window-wide summary figures, computed over the full cohort rather than the capped Rows, so
-	// the headline medians and the priciest and longest callouts describe every session in the
-	// window and not just the most recent maxGalleryPoints kept for the scatter payload.
+	// Window-wide summary figures, computed over the same full cohort returned in Rows.
 	MedianDurationS        float64
 	MedianCostUSD          float64
 	MedianCompletedCostUSD float64
@@ -633,18 +630,12 @@ func churnFolder(p string) string {
 	return dir
 }
 
-// maxGalleryPoints caps the session scatter so a big window ships a bounded payload; the
-// panel notes the sample when Total exceeds it. The most recent sessions are kept.
-const maxGalleryPoints = 400
-
 // galleryFrom reads one point per fully-spanned session in the window: its duration, cost,
-// archetype, and gated grade and outcome. Total is the full count so the panel can note a
-// sample when the window holds more than the cap.
+// archetype, and gated grade and outcome. The scatter intentionally represents the full
+// selected cohort so its visible distribution matches the window-wide analytics.
 func (s *Store) galleryFrom(ctx context.Context, q querier, f AnalyticsFilter) (Gallery, error) {
 	var out Gallery
 	filter, args := f.clauseFor("s.started_at")
-	limitArg := fmt.Sprintf("$%d", len(args)+1)
-	args = append(args, maxGalleryPoints)
 	rows, err := q.Query(ctx, fmt.Sprintf(
 		`SELECT extract(epoch FROM (s.ended_at - s.started_at)) AS dur,
 		        s.total_cost_usd,
@@ -657,8 +648,7 @@ func (s *Store) galleryFrom(ctx context.Context, q querier, f AnalyticsFilter) (
 		   LEFT JOIN session_signals sig
 		     ON sig.session_id = s.id AND `+signalsCurrent()+`
 		  WHERE s.started_at IS NOT NULL AND s.ended_at IS NOT NULL AND s.ended_at >= s.started_at%s
-		  ORDER BY s.started_at DESC
-		  LIMIT %s`, archetypeCaseExpr, filter, limitArg), args...)
+		  ORDER BY s.started_at DESC`, archetypeCaseExpr, filter), args...)
 	if err != nil {
 		return Gallery{}, fmt.Errorf("session gallery: %w", err)
 	}
@@ -676,8 +666,7 @@ func (s *Store) galleryFrom(ctx context.Context, q querier, f AnalyticsFilter) (
 		return Gallery{}, fmt.Errorf("iterate session gallery: %w", err)
 	}
 
-	// Window-wide summaries over the full cohort, so the headline medians and the priciest and
-	// longest callouts are not skewed by the maxGalleryPoints sampling that bounds Rows. The two
+	// Window-wide summaries over the full cohort. The two
 	// max(ARRAY[...]) pairs pick the priciest (by cost, ties by duration) and longest (by
 	// duration, ties by cost) session in a single pass: max over a numeric array compares
 	// element by element, so the leading key wins and the trailing key breaks ties.

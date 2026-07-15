@@ -260,8 +260,7 @@ func TestInsightsTrends(t *testing.T) {
 		t.Error("subagents CostShareIncomplete = false, want true (the cost share divides lower-bound sums)")
 	}
 
-	// Gallery summaries are computed over the full cohort in the store (not the capped Rows), so
-	// the headline median duration describes every fully-spanned session. Each seeded session
+	// Gallery summaries and Rows cover the same full cohort. Each seeded session
 	// spans 20 minutes, so the median is 1200 seconds over all six.
 	if tr.Gallery.Total != 6 {
 		t.Errorf("gallery total = %d, want 6 fully-spanned sessions", tr.Gallery.Total)
@@ -358,12 +357,10 @@ func TestInsightsTrends(t *testing.T) {
 	}
 }
 
-// TestInsightsGalleryCap pins the session scatter's cap contract: the payload ships at most
-// maxGalleryPoints dots, but Total counts the whole cohort and the median duration reads all of
-// it, so a window past the cap can note "showing N of M" and its headline still describes every
-// session rather than the recent sample. Without both figures the panel would either silently
-// drop the note or describe sessions the dots omit.
-func TestInsightsGalleryCap(t *testing.T) {
+// TestInsightsGalleryIncludesFullCohort pins the scatter's full-window contract: every
+// fully-spanned session in the selected range is returned, so the chart cannot quietly replace
+// the cohort with a recent sample.
+func TestInsightsGalleryIncludesFullCohort(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
 	ctx := context.Background()
@@ -373,10 +370,10 @@ func TestInsightsGalleryCap(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// One more than the scatter cap, every session fully spanned inside the window at the same
+	// More rows than the scatter's former cap, every session fully spanned inside the window at the same
 	// 20-minute duration. started_at trails now by gs+20 minutes and ended_at by gs, so each spans
 	// 20 minutes and all sit within the last few hours, comfortably inside the seven-day window.
-	const seeded = 401 // maxGalleryPoints (400) + 1
+	const seeded = 401
 	if _, err := st.Pool.Exec(ctx,
 		`INSERT INTO sessions (user_id, project_id, agent, source_session_id, machine, started_at, ended_at)
 		 SELECT $1, $2, 'claude', 'gallery-' || gs, 'laptop',
@@ -393,18 +390,11 @@ func TestInsightsGalleryCap(t *testing.T) {
 		t.Fatalf("insights with trends: %v", err)
 	}
 	g := ins.Trends.Gallery
-	if g.Total != seeded {
-		t.Errorf("gallery total = %d, want %d (the full cohort, not the capped sample)", g.Total, seeded)
-	}
-	if len(g.Rows) != 400 {
-		t.Errorf("gallery rows = %d, want the cap 400 (maxGalleryPoints)", len(g.Rows))
-	}
-	if len(g.Rows) >= g.Total {
-		t.Errorf("gallery shown %d is not below total %d, so the sample note would never render", len(g.Rows), g.Total)
+	if g.Total != seeded || len(g.Rows) != seeded {
+		t.Errorf("gallery total/rows = %d/%d, want the full cohort %d/%d", g.Total, len(g.Rows), seeded, seeded)
 	}
 	// Each session spans exactly 20 minutes, so the full-cohort median duration is 1200s. The
-	// summary is computed over Total, not the capped Rows, so this proves the headline is not
-	// silently the recent sample's.
+	// summary is computed over the same full cohort as Rows.
 	if got := g.MedianDurationS; got < 1199 || got > 1201 {
 		t.Errorf("gallery median duration = %v, want 1200 (each session spans 20 minutes)", got)
 	}

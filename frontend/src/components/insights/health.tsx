@@ -1,6 +1,5 @@
 import { formatTokens } from "../../format";
 import type { Insights, SignalTrends, Trends } from "../../types";
-import { InstrumentCaption } from "./caption";
 import {
   ARCHETYPE_ORDER,
   archetypeColor,
@@ -20,7 +19,6 @@ import {
   pathArea,
   pathBand,
   pathLine,
-  resolveLabelCollisions,
   scaleLinear,
   scaleLog,
   TooltipRow,
@@ -89,8 +87,6 @@ export function GradesChart({
   const gpaPts = signals.GPA.map(
     (v, i) => [xScale(i), gpaScale(v)] as [number, number],
   );
-  const gpaNow = signals.GPA[signals.GPA.length - 1] ?? 0;
-  const lastPt = gpaPts[gpaPts.length - 1];
 
   return (
     <ChartSvg w={w} h={h}>
@@ -146,16 +142,6 @@ export function GradesChart({
               {v.toFixed(0)}
             </text>
           ))}
-          {lastPt && (
-            <text
-              x={w - pR + 6}
-              y={lastPt[1] - 6}
-              className="callout-label"
-              fill="var(--text)"
-            >
-              GPA {gpaNow.toFixed(2)}
-            </text>
-          )}
           <AxisBaseline x1={pL} x2={w - pR} y={h - pB} />
           <HoverBucket
             w={w}
@@ -553,21 +539,11 @@ function HygieneChart({
   const w = W;
   const h = H;
   const pL = padL;
-  const pR = 100;
+  const pR = padR;
   const pT = padT;
   const pB = padB;
   const xScale = scaleLinear([0, Math.max(n - 1, 1)], [pL, w - pR]);
   const yScale = scaleLinear([0, 10], [h - pB, pT]);
-  const pendingLabels = HYGIENE_SERIES.map((s) => {
-    const vals = signals[s.key];
-    const last = vals[vals.length - 1] ?? 0;
-    return {
-      y: yScale(last),
-      color: s.color,
-      text: `${s.label} ${last.toFixed(1)}%`,
-    };
-  });
-
   return (
     <ChartSvg w={w} h={h}>
       <AxisTicksY
@@ -598,17 +574,6 @@ function HygieneChart({
           />
         ))}
       </ClipRect>
-      {resolveLabelCollisions(pendingLabels, 14, pT, h - pB).map((lbl) => (
-        <text
-          key={lbl.text}
-          x={w - pR + 6}
-          y={lbl.y + 3}
-          className="callout-label"
-          fill={lbl.color}
-        >
-          {lbl.text}
-        </text>
-      ))}
       <AxisBaseline x1={pL} x2={w - pR} y={h - pB} />
       <HoverBucket
         w={w}
@@ -687,31 +652,6 @@ function ContextHistogramChart({
               {formatTokens(v)}
             </text>
           ))}
-          {signals.ContextMarkers.map((m, idx) => {
-            const x = xScale(m.Tokens);
-            return (
-              <g key={m.Kind}>
-                <line
-                  x1={x}
-                  x2={x}
-                  y1={pT - 4}
-                  y2={h - pB}
-                  stroke="var(--subtext)"
-                  strokeWidth={1}
-                  strokeDasharray="3,3"
-                />
-                <text
-                  x={x}
-                  y={pT - 8 - (idx % 2) * 14}
-                  className="callout-label"
-                  textAnchor="middle"
-                  fill="var(--subtext)"
-                >
-                  {m.Kind} {formatTokens(m.Tokens)}
-                </text>
-              </g>
-            );
-          })}
           <AxisBaseline x1={pL} x2={w - pR} y={h - pB} />
         </>
       )}
@@ -895,11 +835,6 @@ export function HealthInstrument({
               label: gradeLabel(key),
             }))}
           />
-          <InstrumentCaption lead="How session quality graded over time.">
-            <code>session_signals.grade</code> re-read per bucket. The settle
-            pass already stamps every session; this is the same column drawn
-            over time instead of one rolled-up number.
-          </InstrumentCaption>
         </TabPanel>
         <TabPanel stripId="health-tabs" tabId="outcomes" active={active}>
           <OutcomesChart
@@ -908,10 +843,6 @@ export function HealthInstrument({
             labels={trends.Labels}
             mini={false}
           />
-          <InstrumentCaption lead="How sessions ended over time: completed against abandoned.">
-            <code>session_signals.outcome</code> per bucket, with raw session
-            counts underneath.
-          </InstrumentCaption>
         </TabPanel>
         <TabPanel stripId="health-tabs" tabId="hygiene" active={active}>
           <HygieneChart
@@ -926,10 +857,6 @@ export function HealthInstrument({
               label: s.label,
             }))}
           />
-          <InstrumentCaption lead="How well-formed the prompts were over time: short, code-free, or repeated.">
-            <code>messages.prompt_facts</code> classified per prompt, rolled up
-            per bucket as a share of the bucket's prompts touched by each flag.
-          </InstrumentCaption>
         </TabPanel>
         <TabPanel stripId="health-tabs" tabId="context" active={active}>
           <div>
@@ -955,15 +882,6 @@ export function HealthInstrument({
               </div>
             </div>
           </div>
-          <p className="panel-caption">
-            session_signals context peaks and weekly reset counts, from the same
-            settle-pass rows as the other Health instruments.
-          </p>
-          <InstrumentCaption lead="How close sessions ran to the model's context limit.">
-            Peak context tokens per session, banded on the absolute token scale,
-            so a fleet crowding its context window reads before sessions start
-            dropping work.
-          </InstrumentCaption>
         </TabPanel>
       </div>
     </section>

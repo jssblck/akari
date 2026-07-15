@@ -20,10 +20,9 @@ import type { Viewer } from "./types";
 
 const nav = [
   { to: "/overview", label: "Overview", icon: GaugeIcon },
-  { to: "/sessions", label: "Sessions", icon: ListMagnifyingGlassIcon },
   { to: "/projects", label: "Projects", icon: FolderOpenIcon },
+  { to: "/sessions", label: "Sessions", icon: ListMagnifyingGlassIcon },
   { to: "/insights", label: "Insights", icon: ChartLineUpIcon },
-  { to: "/guide", label: "Guide", icon: BookOpenTextIcon },
 ];
 
 export function AppShell() {
@@ -88,9 +87,20 @@ export function AppShell() {
                 >
                   <GithubLogoIcon size={17} /> GitHub
                 </a>
-                <NavLink to="/api/docs">
+                <a
+                  href={withBase("/api/docs")}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
                   <CirclesThreePlusIcon size={17} /> API
-                </NavLink>
+                </a>
+                <a
+                  href={withBase("/guide")}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  <BookOpenTextIcon size={17} /> Guide
+                </a>
                 <NavLink to="/account">
                   <UserCircleIcon size={17} /> {user.username}
                 </NavLink>

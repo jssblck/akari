@@ -36,8 +36,20 @@ export function PublicShell({
           {version ? <span className="brandver">{version}</span> : null}
         </a>
         <nav>
-          <a href={withBase("/guide")}>Guide</a>
-          <a href={withBase("/api/docs")}>API</a>
+          <a
+            href={withBase("/guide")}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Guide
+          </a>
+          <a
+            href={withBase("/api/docs")}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            API
+          </a>
           <a
             className="gh-link"
             href="https://github.com/jssblck/akari"
