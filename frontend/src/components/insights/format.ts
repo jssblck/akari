@@ -1,8 +1,7 @@
 // Formatters specific to the Insights chart engine. These mirror the old
 // insights.js formatters (fmtInt/fmtK/fmtPct/fmtS) and the Go web package's
-// insights_data.go helpers (fmtCostShort, fmtDurationShort, FmtSnapshotAge,
-// prettyModel) exactly, since captions and tooltips must read identically to
-// the port's source of truth. frontend/src/format.ts already covers the
+// prettyModel helper exactly, since captions and tooltips must read identically
+// to the port's source of truth. frontend/src/format.ts already covers the
 // app-wide cost/token/count formatters used elsewhere; these are the ones
 // unique to this page's charts.
 
@@ -37,22 +36,6 @@ export function fmtDuration(s: number): string {
   return `${(s / 3600).toFixed(1)}h`;
 }
 
-// fmtDurationShort is the gallery's outlier-callout label: a shorter, coarser
-// form than fmtDuration (whole minutes/seconds, one decimal hour).
-export function fmtDurationShort(secs: number): string {
-  if (secs >= 3600) return `${(secs / 3600).toFixed(1)}h`;
-  if (secs >= 60) return `${(secs / 60).toFixed(0)}m`;
-  return `${Math.round(secs)}s`;
-}
-
-// fmtCostShort is the gallery's priciest-session callout label: whole dollars
-// past $100, cents below it, no lower-bound marker (the callout points at a
-// specific point already drawn with its own cost).
-export function fmtCostShort(usd: number): string {
-  if (usd >= 100) return `$${usd.toFixed(0)}`;
-  return `$${usd.toFixed(2)}`;
-}
-
 // prettyModel shortens a model identifier for a legend chip, matching the
 // server's insights_data.go prettyModel exactly.
 export function prettyModel(m: string): string {
@@ -66,20 +49,6 @@ export function prettyModel(m: string): string {
 export function titleCase(s: string): string {
   if (!s) return s;
   return s.charAt(0).toUpperCase() + s.slice(1);
-}
-
-// snapshotAge mirrors internal/server/web/freshness.go's FmtSnapshotAge
-// verbatim: the Insights page is served from an hourly precomputed snapshot,
-// not live data, so the header note names the snapshot's age rather than
-// implying the figures are current.
-export function snapshotAge(now: Date, at: Date): string {
-  const deltaMs = now.getTime() - at.getTime();
-  const minutes = deltaMs / 60000;
-  const hours = deltaMs / 3600000;
-  if (deltaMs < 90_000) return "updated just now";
-  if (deltaMs < 3_600_000) return `updated ${Math.floor(minutes)} min ago`;
-  if (deltaMs < 48 * 3_600_000) return `updated ${Math.floor(hours)} hr ago`;
-  return `updated ${Math.floor(hours / 24)} days ago`;
 }
 
 // vizVars is the ordered ramp assigned to ranked series (models, projects),

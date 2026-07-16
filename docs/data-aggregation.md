@@ -110,7 +110,7 @@ the ledger.
 | --- | --- | --- | --- |
 | Overview usage panel (totals, daily grid, by-model, by-agent) | `Store.Analytics(0, …)` | ledger | One base grouped three ways; headline summed from the by-agent split, so `sum(by-model) == sum(by-agent) == headline` by construction (#40). |
 | Project usage panel | `Store.Analytics(projectID, …)` | ledger | Same function, scoped to one project. The project header shows no rollup figure of its own (`Store.Project` loads identity only), so nothing on the page contradicts the panel. |
-| Project sparklines (30d trend on the projects index) | `Store.ProjectSparklines` | ledger | Per-project daily cost over a trailing window; a trend, not a lifetime total, so it is not expected to equal the index's lifetime columns. |
+| Project sparklines (30d trend on the projects index) | `Store.ProjectSparklines` | ledger | Per-project daily tokens over a trailing window; a trend, not a lifetime total, so it is not expected to equal the index's lifetime columns. |
 | Projects index (tokens, cost columns) | `Store.ListProjects` | rollups | Lifetime per-project totals. Must equal the project usage panel's all-time figure (same datum, two pages). Pinned by `TestProjectsIndexReconcilesWithAnalytics`. |
 | Global session list / project session list / subagents | `Store.ListAllSessions` / `Store.ListSessions` / `Store.Subagents` | rollups | Per-session rollups; the `tokens` sort walks the generated `total_tokens` column. |
 | Session detail header (Tokens tile, cost) | `Store.SessionDetailByID` | rollups | Per-session rollups. The session page shows no ledger-derived figure beside them, so the invariant alone keeps them honest. |

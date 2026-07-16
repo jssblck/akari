@@ -1,6 +1,5 @@
 import type { Trends } from "../../types";
 import { Stat, StatStrip } from "../stat-strip";
-import { InstrumentCaption } from "./caption";
 import { fanoutColor, fanoutLabel, fmtInt } from "./format";
 import { Legend } from "./legend";
 import {
@@ -12,7 +11,6 @@ import {
   HoverBucket,
   pathBand,
   pathLine,
-  resolveLabelCollisions,
   scaleLinear,
   TooltipRow,
   TooltipTitle,
@@ -35,7 +33,7 @@ function DelegationChart({
 }) {
   const clipId = useClipId();
   const pL = 40;
-  const pR = 90;
+  const pR = 16;
   const pT = 14;
   const pB = 26;
   const xScale = scaleLinear([0, Math.max(n - 1, 1)], [pL, W - pR]);
@@ -47,20 +45,6 @@ function DelegationChart({
   const costPts = costShare.map(
     (v, i) => [xScale(i), yScale(v)] as [number, number],
   );
-  const lastDel = delPts[delPts.length - 1];
-  const lastCost = costPts[costPts.length - 1];
-  const pendingLabels = [
-    lastDel && {
-      y: lastDel[1],
-      color: "var(--accent)",
-      text: `delegate ${(delegateShare[delegateShare.length - 1] ?? 0).toFixed(0)}%`,
-    },
-    lastCost && {
-      y: lastCost[1],
-      color: "var(--muted)",
-      text: `cost share ${(costShare[costShare.length - 1] ?? 0).toFixed(0)}%`,
-    },
-  ].filter((v): v is { y: number; color: string; text: string } => Boolean(v));
 
   return (
     <ChartSvg w={W} h={H}>
@@ -96,17 +80,6 @@ function DelegationChart({
           strokeDasharray="3,3"
         />
       </ClipRect>
-      {resolveLabelCollisions(pendingLabels, 14, pT, H - pB).map((lbl) => (
-        <text
-          key={lbl.text}
-          x={W - pR + 6}
-          y={lbl.y + 3}
-          className="callout-label"
-          fill={lbl.color}
-        >
-          {lbl.text}
-        </text>
-      ))}
       <AxisBaseline x1={pL} x2={W - pR} y={H - pB} />
       <HoverBucket
         w={W}
@@ -267,12 +240,6 @@ export function SubagentsInstrument({ trends }: { trends: Trends }) {
         <div style={{ marginTop: 20 }}>
           <FanoutChart trends={trends} />
         </div>
-        <InstrumentCaption lead="How much work runs through delegation: how often the fleet spawns subagents, how wide the fan-out runs, and what share of spend rides on it.">
-          <code>parent_session_id</code> and <code>relationship_type</code> ride
-          every session row and appear in no other aggregate. The stack below
-          shows how wide the fan-out runs, not just how often delegation
-          happens.
-        </InstrumentCaption>
       </div>
     </section>
   );

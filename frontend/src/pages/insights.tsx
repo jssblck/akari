@@ -8,7 +8,6 @@ import {
   GRADE_ORDER,
   gradeColor,
   gradeLabel,
-  snapshotAge,
 } from "../components/insights/format";
 import { SessionGalleryInstrument } from "../components/insights/gallery";
 import {
@@ -25,7 +24,7 @@ import { VelocityInstrument } from "../components/insights/velocity";
 import "../insights.css";
 import { RangeTabs } from "../components/range-tabs";
 import { Stat, StatStrip } from "../components/stat-strip";
-import { formatCount, formatPercent, formatTime } from "../format";
+import { formatCount, formatPercent } from "../format";
 import { normalizeInsights } from "../normalize-insights";
 import type { Insights, InsightsResponse } from "../types";
 
@@ -168,23 +167,12 @@ export function InsightsPage() {
     <div className="page">
       <AsyncView state={state}>
         {(data) => {
-          const generatedAt = data.generated_at
-            ? new Date(data.generated_at)
-            : null;
           const insights = normalizeInsights(data.insights);
           const trends = insights.Trends;
           const hasData = !!trends && trends.BucketStarts.length > 0;
           return (
             <>
               <header className="page-head">
-                {generatedAt && (
-                  <span
-                    className="snapshot-age muted"
-                    title={formatTime(data.generated_at)}
-                  >
-                    {snapshotAge(new Date(), generatedAt)}
-                  </span>
-                )}
                 <RangeTabs ranges={data.ranges ?? []} active={data.range} />
               </header>
               {!hasData || !trends ? (

@@ -11,7 +11,7 @@ import { useChartTooltip } from "./tooltip";
 
 // Shared SVG chart engine, ported behavior-for-behavior from the pre-React
 // insights.js (scaleLinear/scaleLog, the path builders, bucketAxis, the hover
-// crosshair, and resolveLabelCollisions). Every chart in components/insights/
+// crosshair). Every chart in components/insights/
 // composes these instead of reinventing axis or scale math, so the seven
 // instruments read as one visual system.
 
@@ -77,52 +77,6 @@ export function pathBand(topPoints: Point[], bottomPoints: Point[]): string {
     .map((p) => `L${p[0].toFixed(2)},${p[1].toFixed(2)}`)
     .join(" ");
   return `${top} ${bottom} Z`;
-}
-
-// resolveLabelCollisions pushes overlapping right-edge value labels apart:
-// sort by y, spread any pair closer than minGap, then clamp the whole
-// resolved set back inside [top, bottom]. Shared by every chart that stacks
-// labels on its right edge (Fleet mix, Throughput, Failures, Hygiene,
-// Subagents).
-export function resolveLabelCollisions<T extends { y: number }>(
-  items: T[],
-  minGap: number,
-  top: number,
-  bottom: number,
-): T[] {
-  const sorted = items.map((it) => ({ ...it }));
-  sorted.sort((a, b) => a.y - b.y);
-  // Every index touched below (i, i-1, 0, length-1) is proven in range by
-  // the surrounding loop bounds and the sorted.length guard; the `if (cur &&
-  // prev)` style checks document that invariant for the type checker
-  // without asserting past it.
-  for (let pass = 0; pass < sorted.length; pass++) {
-    let moved = false;
-    for (let i = 1; i < sorted.length; i++) {
-      const cur = sorted[i];
-      const prev = sorted[i - 1];
-      if (!cur || !prev) continue;
-      const gap = cur.y - prev.y;
-      if (gap < minGap) {
-        const push = (minGap - gap) / 2;
-        prev.y -= push;
-        cur.y += push;
-        moved = true;
-      }
-    }
-    if (!moved) break;
-  }
-  const firstItem = sorted[0];
-  if (firstItem && firstItem.y < top) {
-    const d = top - firstItem.y;
-    for (const s of sorted) s.y += d;
-  }
-  const last = sorted[sorted.length - 1];
-  if (last && last.y > bottom) {
-    const d = last.y - bottom;
-    for (const s of sorted) s.y -= d;
-  }
-  return sorted;
 }
 
 export function ChartSvg({

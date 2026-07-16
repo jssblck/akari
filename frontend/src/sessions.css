@@ -23,13 +23,93 @@
   color: var(--muted);
 }
 
-/* ---- Active-filter chips (Sessions list) ---- */
+/* ---- GitHub-style Sessions list ---- */
+.sessions-page {
+  max-width: none;
+}
+.sessions-page .sessions-search {
+  width: 100%;
+  max-width: none;
+  margin: 0 0 16px;
+}
+.sessions-search input {
+  border-radius: 4px;
+}
+.sessions-list {
+  overflow: hidden;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+}
+.sessions-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 54px;
+  padding: 9px 14px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+}
+.sessions-scope,
+.sessions-filter-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.sessions-total {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: 8px;
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 550;
+  white-space: nowrap;
+}
+.sessions-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.sessions-toggle:hover {
+  color: var(--text);
+}
+.sessions-toggle input {
+  width: 14px;
+  min-height: 0;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--lilac);
+}
+.sessions-filter-controls {
+  justify-content: flex-end;
+  min-width: 0;
+}
+.sessions-filter-controls select {
+  width: auto;
+  min-width: 104px;
+  max-width: 260px;
+  min-height: 32px;
+  height: 32px;
+  padding-block: 0;
+  color: var(--subtext);
+  font-size: 14px;
+}
 .active-filters {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 7px;
-  margin: -6px 0 14px;
+  margin: 0;
+  padding: 9px 14px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
 }
 .fchip {
   display: inline-flex;
@@ -65,41 +145,43 @@
 }
 
 /* ---- Day-grouped feed ---- */
+.sessions-feed {
+  background: var(--surface);
+}
 .day-head {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin: 18px 0 6px;
-}
-.day-head:first-child {
-  margin-top: 0;
+  min-height: 29px;
+  padding: 6px 15px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--surface-2) 58%, var(--surface));
+  border-bottom: 1px solid var(--border);
 }
 .day-label {
   white-space: nowrap;
-}
-.day-rule {
-  flex: 1;
-  border-top: 1px solid var(--border);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
 }
 
 /* ---- Feed row: the whole row is the click target ---- */
 .srow {
   display: grid;
-  grid-template-columns: 70px minmax(0, 1fr) 50px 130px 90px;
-  align-items: center;
-  gap: 14px;
-  padding: 10px 12px;
-  border: 1px solid transparent;
-  border-radius: 6px;
+  grid-template-columns: minmax(0, 1fr) 264px;
+  align-items: start;
+  gap: 18px;
+  min-height: 65px;
+  padding: 12px 15px 10px;
+  border-bottom: 1px solid var(--border);
   color: inherit;
   text-decoration: none;
 }
 .srow:hover {
-  background: var(--surface);
-  border-color: var(--border);
+  background: var(--surface-2);
 }
-.srow-agent {
-  color: var(--lilac);
+.session-day:last-child .srow:last-child {
+  border-bottom: 0;
 }
 .srow-main {
   min-width: 0;
@@ -107,71 +189,198 @@
 .srow-line {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   flex-wrap: wrap;
+}
+.srow-title {
+  flex: 1 1 100%;
+  overflow: hidden;
+  width: 100%;
+  max-width: none;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.srow-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.srow-meta > span + span::before {
+  margin-right: 7px;
+  color: var(--faint);
+  content: "/";
 }
 .srow-proj {
   overflow: hidden;
-  color: var(--text);
-  font-weight: 500;
+  max-width: 54ch;
+  color: var(--subtext);
+  font-weight: 450;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .srow-proj.faded {
-  color: var(--muted);
-  font-weight: 400;
+  color: var(--subtext);
+}
+.srow-agent {
+  color: var(--lilac);
 }
 .srow-branch {
   color: var(--muted);
   font-size: 11px;
 }
-.srow-sub {
-  overflow: hidden;
-  margin-top: 3px;
+.srow-date {
   color: var(--muted);
+}
+.srow-date > span:first-child {
+  text-decoration: underline dotted var(--faint);
+  text-underline-offset: 3px;
+}
+.srow-date .tip-card {
+  max-width: min(320px, calc(100vw - 16px));
+}
+.srow-date .tip-title {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--text);
   font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-weight: 600;
+}
+.srow-date .tip-date {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
 }
 .srow-snippet mark {
   color: var(--text);
   background: color-mix(in srgb, var(--lilac) 30%, transparent);
   border-radius: 2px;
 }
-.srow-msgs,
-.srow-time {
-  color: var(--muted);
-  text-align: right;
+.srow-signals {
+  display: grid;
+  grid-template-columns: 80px 104px 34px 28px;
+  align-items: center;
+  justify-items: end;
+  gap: 6px;
+  width: 264px;
+  padding-top: 3px;
 }
-.srow-tok {
+.srow-signal {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
   justify-content: flex-end;
+  min-width: 0;
 }
-.tokbar {
-  display: inline-block;
-  width: 46px;
-  height: 4px;
-  background: var(--surface-3);
-  border-radius: 2px;
-  overflow: hidden;
+.srow-kind,
+.srow-kind-empty {
+  justify-self: end;
+  width: 80px;
 }
-.tokbar-fill {
-  display: block;
-  height: 100%;
-  background: var(--faint);
+.srow-kind .tag {
+  margin-left: auto;
+  white-space: nowrap;
 }
-.tok-total {
-  color: var(--subtext);
+.srow-outcome {
+  justify-self: center;
+  color: var(--muted);
+}
+.srow-outcome.outcome-completed {
+  color: var(--ok);
+}
+.srow-outcome.outcome-abandoned {
+  color: var(--warn);
+}
+.srow-outcome.outcome-errored {
+  color: var(--err);
+}
+.srow-grade {
+  justify-self: center;
+}
+.srow-grade .signal-empty {
+  color: var(--faint);
+  font-family: "Geist Mono", monospace;
   font-size: 11px;
+}
+.srow-fanout,
+.srow-fanout-empty {
+  justify-self: end;
+  width: 104px;
+}
+.srow-fanout .tag {
+  margin-left: auto;
+  white-space: nowrap;
+}
+.srow-signal .tip-card {
+  max-width: 280px;
+}
+.srow-signal .tip-title {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+.srow-signal .tip-copy {
+  max-width: 32ch;
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.session-overview {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  width: min(300px, calc(100vw - 16px));
+  padding: 12px 14px;
+  pointer-events: none;
+}
+.session-overview .tip-title {
+  display: block;
+  margin-bottom: 9px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+.session-overview-grid {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px 18px;
+  margin: 0;
+  font-size: 11px;
+}
+.session-overview-grid dt {
+  color: var(--muted);
+}
+.session-overview-grid dd {
+  margin: 0;
+  color: var(--text);
+  font-family: var(--mono);
+  text-align: right;
+}
+.session-overview-meta {
+  display: block;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 10px;
 }
 .feed-footer {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 12px;
-  margin-top: 12px;
-  padding-top: 10px;
+  min-height: 45px;
+  padding: 10px 14px;
+  background: var(--surface-2);
   border-top: 1px solid var(--border);
 }
 .feed-count {
@@ -190,6 +399,36 @@
 .showmore:disabled {
   color: var(--faint);
   cursor: progress;
+}
+
+@media (max-width: 1050px) {
+  .sessions-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .sessions-filter-controls {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    width: 100%;
+  }
+}
+
+@media (max-width: 720px) {
+  .sessions-scope {
+    flex-wrap: wrap;
+  }
+  .sessions-filter-controls select {
+    flex: 1 1 140px;
+    max-width: none;
+  }
+  .srow {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .srow-signals {
+    grid-column: 1;
+    justify-self: end;
+    padding-top: 0;
+  }
 }
 
 /* ---- Project-kind and fan-out chips (shared by the feed and the session header) ---- */

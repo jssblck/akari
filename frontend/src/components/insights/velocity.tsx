@@ -1,6 +1,5 @@
 import type { Insights, Trends } from "../../types";
 import { Stat, StatStrip } from "../stat-strip";
-import { InstrumentCaption } from "./caption";
 import { fmtS } from "./format";
 import {
   AxisBaseline,
@@ -11,7 +10,6 @@ import {
   HoverBucket,
   pathBand,
   pathLine,
-  resolveLabelCollisions,
   scaleLinear,
   TooltipRow,
   TooltipTitle,
@@ -41,22 +39,6 @@ const mpadB = 18;
 
 const DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
-function clampX(x: number, w: number, pR: number, labelW: number) {
-  return Math.min(x, w - pR - labelW);
-}
-
-function activeHoursPeak(active: number[]) {
-  let idx = -1;
-  let best = 0;
-  active.forEach((h, i) => {
-    if (h > best) {
-      best = h;
-      idx = i;
-    }
-  });
-  return idx;
-}
-
 function ActiveHoursChart({ trends, mini }: { trends: Trends; mini: boolean }) {
   const clipId = useClipId();
   const n = trends.BucketStarts.length;
@@ -74,7 +56,6 @@ function ActiveHoursChart({ trends, mini }: { trends: Trends; mini: boolean }) {
   const wallPts = V.WallHours.map(
     (v, i) => [xScale(i), yScale(v)] as [number, number],
   );
-  const peakIdx = activeHoursPeak(V.ActiveHours);
 
   return (
     <ChartSvg w={w} h={h}>
@@ -120,26 +101,6 @@ function ActiveHoursChart({ trends, mini }: { trends: Trends; mini: boolean }) {
           strokeDasharray="3,3"
         />
       </ClipRect>
-      {!mini && peakIdx >= 0 && (
-        <>
-          <circle
-            cx={xScale(peakIdx)}
-            cy={yScale(V.ActiveHours[peakIdx] ?? 0)}
-            r={3.2}
-            fill="var(--viz-8)"
-            stroke="var(--bg)"
-            strokeWidth={1.5}
-          />
-          <text
-            x={clampX(xScale(peakIdx) + 8, w, pR, 150)}
-            y={yScale(V.ActiveHours[peakIdx] ?? 0) - 10}
-            className="callout-label"
-          >
-            peak {trends.Labels[peakIdx]} &middot;{" "}
-            {(V.ActiveHours[peakIdx] ?? 0).toFixed(1)}h
-          </text>
-        </>
-      )}
       <AxisBaseline x1={pL} x2={w - pR} y={h - pB} />
       {!mini && (
         <HoverBucket
@@ -180,7 +141,7 @@ function ResponseTimeChart({
   const w = mini ? MW : W;
   const h = mini ? MH : H;
   const pL = mini ? mpadL : padL;
-  const pR = mini ? mpadR : padR + 70;
+  const pR = mini ? mpadR : padR;
   const pT = mini ? mpadT : padT;
   const pB = mini ? mpadB : padB;
   const RT = trends.Velocity;
@@ -203,7 +164,6 @@ function ResponseTimeChart({
   const p99Pts = RT.ResponseP99.map(
     (v, i) => [xScale(i), yScale(v)] as [number, number],
   );
-  const lastP99 = p99Pts[p99Pts.length - 1];
 
   return (
     <ChartSvg w={w} h={h}>
@@ -252,16 +212,6 @@ function ResponseTimeChart({
           </>
         )}
       </ClipRect>
-      {!mini && lastP99 && (
-        <text
-          x={w - pR + 6}
-          y={lastP99[1] + 3}
-          className="callout-label"
-          fill="var(--warn)"
-        >
-          p99 {fmtS(RT.ResponseP99[RT.ResponseP99.length - 1] ?? 0)}
-        </text>
-      )}
       <AxisBaseline x1={pL} x2={w - pR} y={h - pB} />
       {!mini && (
         <HoverBucket
@@ -299,7 +249,7 @@ function ThroughputChart({ trends, mini }: { trends: Trends; mini: boolean }) {
   const w = mini ? MW : W;
   const h = mini ? MH : H;
   const pL = mini ? mpadL : padL;
-  const pR = mini ? mpadR : padR + 90;
+  const pR = mini ? mpadR : padR;
   const pT = mini ? mpadT : padT;
   const pB = mini ? mpadB : padB;
   const T = trends.Velocity;
@@ -321,19 +271,6 @@ function ThroughputChart({ trends, mini }: { trends: Trends; mini: boolean }) {
       width: mini ? 1.2 : 1.7,
     },
   ];
-  const pendingLabels = series
-    .map((s) => {
-      const vals = T[s.key];
-      if (!vals.length) return null;
-      const last = vals[vals.length - 1] ?? 0;
-      return {
-        y: yScale(last),
-        color: s.color,
-        text: `${s.label} ${last.toFixed(1)}`,
-      };
-    })
-    .filter((v): v is { y: number; color: string; text: string } => v !== null);
-
   return (
     <ChartSvg w={w} h={h}>
       <AxisTicksY
@@ -368,18 +305,6 @@ function ThroughputChart({ trends, mini }: { trends: Trends; mini: boolean }) {
           />
         ))}
       </ClipRect>
-      {!mini &&
-        resolveLabelCollisions(pendingLabels, 14, pT, h - pB).map((lbl) => (
-          <text
-            key={lbl.text}
-            x={w - pR + 6}
-            y={lbl.y + 3}
-            className="callout-label"
-            fill={lbl.color}
-          >
-            {lbl.text}
-          </text>
-        ))}
       <AxisBaseline x1={pL} x2={w - pR} y={h - pB} />
       {!mini && (
         <HoverBucket
@@ -613,19 +538,9 @@ export function VelocityInstrument({
             />
           </StatStrip>
           <ActiveHoursChart trends={trends} mini={false} />
-          <InstrumentCaption lead="Hands-on agent time against wall-clock time; the gap between them is sessions left sitting open.">
-            Bars are hands-on agent time per bucket (gap time over the idle
-            threshold removed); the dotted line is wall-clock session span, the
-            same integral behind the concurrency figures.
-          </InstrumentCaption>
         </TabPanel>
         <TabPanel stripId="velocity-tabs" tabId="response" active={active}>
           <ResponseTimeChart trends={trends} mini={false} />
-          <InstrumentCaption lead="How quickly the agent answers a prompt, and how long the slow tail runs.">
-            <code>messages.timestamp</code> deltas between a prompt and the
-            agent's first reply: p50 line, p50 to p90 band, and a p99 line for
-            the long tail.
-          </InstrumentCaption>
         </TabPanel>
         <TabPanel stripId="velocity-tabs" tabId="throughput" active={active}>
           <StatStrip>
@@ -639,11 +554,6 @@ export function VelocityInstrument({
             />
           </StatStrip>
           <ThroughputChart trends={trends} mini={false} />
-          <InstrumentCaption lead="How much the agent gets through per active minute: messages and tool calls.">
-            Cadence per active minute over hands-on time. Output tokens per
-            second would need a generation duration the projection does not
-            record, so this reads the two densities we can derive honestly.
-          </InstrumentCaption>
         </TabPanel>
         <TabPanel stripId="velocity-tabs" tabId="rhythm" active={active}>
           <div className="overflow-x">
@@ -651,11 +561,6 @@ export function VelocityInstrument({
               <PunchcardChart trends={trends} mini={false} />
             </div>
           </div>
-          <InstrumentCaption lead="When in the week the fleet is busiest.">
-            Cell brightness is message and tool volume by hour of week, joining{" "}
-            <code>tool_calls</code> and <code>messages</code> to{" "}
-            <code>messages.timestamp</code>.
-          </InstrumentCaption>
         </TabPanel>
       </div>
     </section>

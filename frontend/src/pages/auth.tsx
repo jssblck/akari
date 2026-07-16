@@ -31,13 +31,10 @@ export function AuthPage({ mode }: { mode: "login" | "register" }) {
     <PublicShell compact>
       <div className="auth-wrap">
         <section className="auth-panel">
-          <span className="brand-mark large" aria-hidden="true" />
           <h1>{mode === "login" ? "Log in to akari" : "Create an account"}</h1>
-          <p>
-            {mode === "login"
-              ? "Open the shared history on this instance."
-              : "Use the invitation issued by an instance administrator."}
-          </p>
+          {mode === "register" ? (
+            <p>Use the invitation issued by an instance administrator.</p>
+          ) : null}
           <form
             onSubmit={async (event) => {
               event.preventDefault();

@@ -154,27 +154,10 @@ button {
   font-size: 15px;
 }
 .brand-mark {
-  position: relative;
+  display: block;
   width: 18px;
   height: 18px;
   flex: 0 0 auto;
-  border: 1px solid var(--lilac);
-  border-radius: 50%;
-}
-.brand-mark::after {
-  content: "";
-  position: absolute;
-  inset: 5px;
-  border-radius: 50%;
-  background: var(--lilac);
-}
-.brand-mark.large {
-  width: 32px;
-  height: 32px;
-  margin-bottom: 18px;
-}
-.brand-mark.large::after {
-  inset: 9px;
 }
 .sidebar > .brand {
   padding: 4px 10px 24px;
@@ -296,6 +279,21 @@ code {
 }
 .muted {
   color: var(--muted);
+}
+.count-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  padding: 2px 7px;
+  color: var(--subtext);
+  background: var(--surface-3);
+  border-radius: 999px;
+  font-family: "Geist Mono", monospace;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.5;
+  text-align: center;
 }
 
 .button {
@@ -579,9 +577,10 @@ code {
   font-family: "Geist Mono", monospace;
   font-size: 12px;
 }
-.sparkline {
+.activity-bars {
   display: block;
-  width: 110px;
+  width: 120px;
+  max-width: 100%;
   height: 24px;
 }
 
@@ -790,70 +789,6 @@ select:focus {
 }
 .search-bar .button {
   border-radius: 0 4px 4px 0;
-}
-.session-browser {
-  display: grid;
-  grid-template-columns: 200px minmax(0, 1fr);
-  gap: 18px;
-  align-items: start;
-}
-.filter-rail {
-  position: sticky;
-  top: 16px;
-  padding: 12px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-}
-.facet {
-  margin-bottom: 17px;
-}
-.facet h2 {
-  margin: 0 8px 7px;
-}
-.facet-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  width: 100%;
-  padding: 6px 8px;
-  color: var(--muted);
-  background: transparent;
-  border: 0;
-  border-radius: 3px;
-  text-align: left;
-  cursor: pointer;
-}
-.facet-row span:first-child {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.facet-row span:last-child {
-  margin-left: 8px;
-  color: var(--muted);
-  font-family: "Geist Mono", monospace;
-  font-size: 11px;
-}
-.facet-row:hover {
-  color: var(--text);
-  background: var(--surface-2);
-}
-.facet-row.active {
-  color: var(--text);
-  background: var(--surface-3);
-}
-.check-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  color: var(--muted);
-  font-size: 12px;
-}
-.check-row input {
-  min-height: auto;
-  accent-color: var(--lilac);
 }
 .feed {
   overflow: hidden;
@@ -1581,19 +1516,6 @@ select:focus {
   .split-panels {
     grid-template-columns: 1fr;
   }
-  .session-browser {
-    grid-template-columns: 1fr;
-  }
-  .filter-rail {
-    position: static;
-    display: flex;
-    gap: 10px;
-    overflow-x: auto;
-  }
-  .facet {
-    min-width: 150px;
-    margin: 0;
-  }
   .feed-row {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -1665,11 +1587,17 @@ select:focus {
    the room its offsets leave in the containing block and wraps its labels
    mid-word. Positioning, reveal, and z-index stay with each caller. */
 .popover {
+  box-sizing: border-box;
   width: max-content;
+  max-width: calc(100vw - 16px);
+  max-height: none;
   padding: 8px 10px;
+  overflow: visible;
+  overflow-wrap: anywhere;
   background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: 4px;
+  white-space: normal;
 }
 
 /* Shared hover/focus tooltip card: token breakdowns on stat tiles, breakdown
@@ -1687,7 +1615,7 @@ select:focus {
   position: fixed;
   inset: auto;
   margin: 0;
-  min-width: 170px;
+  min-width: min(170px, calc(100vw - 16px));
   opacity: 0;
   pointer-events: none;
   transition:

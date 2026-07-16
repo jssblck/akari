@@ -1,6 +1,5 @@
 import type { Insights, ToolPoint } from "../../types";
 import { Stat, StatStrip } from "../stat-strip";
-import { InstrumentCaption } from "./caption";
 import {
   CATEGORY_LABEL,
   categoryColor,
@@ -19,7 +18,6 @@ import {
   pathArea,
   pathBand,
   pathLine,
-  resolveLabelCollisions,
   scaleLinear,
   scaleLog,
   TooltipRow,
@@ -40,7 +38,6 @@ const W = 1000;
 const H = 380;
 const MW = 420;
 const MH = 210;
-const LABELED_TOOLS = new Set(["PowerShell", "shell_command", "Edit", "Bash"]);
 const FAIL_PALETTE = [
   "var(--err)",
   "var(--viz-4)",
@@ -99,24 +96,6 @@ function ReliabilityChart({
               </text>
             </g>
           ))}
-          <line
-            x1={pL}
-            x2={w - pR}
-            y1={yScale(1)}
-            y2={yScale(1)}
-            stroke="var(--faint)"
-            strokeWidth={1}
-            strokeDasharray="2,3"
-          />
-          <text
-            x={w - pR}
-            y={yScale(1) - 5}
-            className="axis-tick-text"
-            textAnchor="end"
-            fill="var(--faint)"
-          >
-            1% fleet rate
-          </text>
           <AxisBaseline x1={pL} x2={w - pR} y={h - pB} />
         </>
       )}
@@ -164,26 +143,6 @@ function ReliabilityChart({
           );
         })}
       </ClipRect>
-      {!mini &&
-        tools
-          .filter((t) => LABELED_TOOLS.has(t.Name))
-          .map((t) => {
-            const err = t.Calls === 0 ? 0 : (t.Failures / t.Calls) * 100;
-            const cx = xScale(Math.max(t.Calls, 10));
-            const cy = yScale(Math.min(err, 12));
-            const r = rScale(t.Sessions);
-            return (
-              <text
-                key={t.Name}
-                x={cx + r + 6}
-                y={cy + 4}
-                className="scatter-label"
-                fontSize={11}
-              >
-                {t.Name}
-              </text>
-            );
-          })}
     </ChartSvg>
   );
 }
@@ -297,7 +256,7 @@ function FailuresChart({
   const w = mini ? MW : W;
   const h = mini ? MH : H;
   const pL = mini ? 26 : 40;
-  const pR = mini ? 8 : 96;
+  const pR = mini ? 8 : 16;
   const pT = mini ? 8 : 14;
   const pB = mini ? 16 : 26;
   const xScale = scaleLinear([0, Math.max(n - 1, 1)], [pL, w - pR]);
@@ -322,17 +281,6 @@ function FailuresChart({
         width: mini ? 1.4 : 2,
       },
     ]);
-  const pendingLabels = series
-    .filter((s) => s.rate.length)
-    .map((s) => {
-      const last = s.rate[s.rate.length - 1] ?? 0;
-      return {
-        y: yScale(last),
-        color: s.color,
-        text: `${s.label} ${last.toFixed(1)}%`,
-      };
-    });
-
   return (
     <ChartSvg w={w} h={h}>
       <AxisTicksY
@@ -367,18 +315,6 @@ function FailuresChart({
           />
         ))}
       </ClipRect>
-      {!mini &&
-        resolveLabelCollisions(pendingLabels, 14, pT, h - pB).map((lbl) => (
-          <text
-            key={lbl.text}
-            x={w - pR + 6}
-            y={lbl.y + 3}
-            className="callout-label"
-            fill={lbl.color}
-          >
-            {lbl.text}
-          </text>
-        ))}
       <AxisBaseline x1={pL} x2={w - pR} y={h - pB} />
       {!mini && (
         <HoverBucket
@@ -632,11 +568,6 @@ export function ToolsInstrument({
               label: categoryLabel(cat),
             }))}
           />
-          <InstrumentCaption lead="Which tools the fleet leans on most, and which ones fail most.">
-            Every tool in one frame: volume says how much you lean on it, height
-            says how often it bites. <code>tool_calls</code> grouped by{" "}
-            <code>tool_name</code>; error = <code>result_status='error'</code>.
-          </InstrumentCaption>
         </TabPanel>
         <TabPanel stripId="tools-tabs" tabId="mix" active={active}>
           <ToolMixChart
@@ -652,11 +583,6 @@ export function ToolsInstrument({
               label: categoryLabel(cat),
             }))}
           />
-          <InstrumentCaption lead="How the balance of tool categories shifted over time.">
-            Share of each bucket's tool calls by category. Same{" "}
-            <code>tool_calls</code> rows as the reliability map, grouped by
-            category and drawn over time instead of collapsed to one snapshot.
-          </InstrumentCaption>
         </TabPanel>
         <TabPanel stripId="tools-tabs" tabId="failures" active={active}>
           <FailuresChart
@@ -666,11 +592,6 @@ export function ToolsInstrument({
             worst={trends.Tools.FailWorst}
             mini={false}
           />
-          <InstrumentCaption lead="The tool failure rate over time, so a regression shows up the week it lands.">
-            Same <code>tool_calls</code> base as the scatter, drawn over time
-            instead of collapsed to a snapshot. The fleet rate plus the window's
-            worst offenders.
-          </InstrumentCaption>
         </TabPanel>
         <TabPanel stripId="tools-tabs" tabId="churn" active={active}>
           <StatStrip>
@@ -698,18 +619,6 @@ export function ToolsInstrument({
             mini={false}
           />
           <ChurnTreemap trends={trends} />
-          {trends.Churn.Clipped > 0 && (
-            <p className="panel-caption" style={{ marginTop: 6 }}>
-              +{fmtInt(trends.Churn.Clipped)} more hot file
-              {trends.Churn.Clipped === 1 ? "" : "s"} beyond the treemap cap,
-              counted in the totals above.
-            </p>
-          )}
-          <InstrumentCaption lead="Which files were edited most, and how that trended.">
-            The headline is the trend; the treemap answers which files. Drill
-            from project to folder to file, <kbd>Escape</kbd> or a breadcrumb
-            crumb goes back up.
-          </InstrumentCaption>
         </TabPanel>
       </div>
     </section>

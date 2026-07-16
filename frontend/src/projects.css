@@ -1,9 +1,179 @@
-/* Projects index and project detail: whole-row navigation on the ledger, and
-   spacing between the Repositories and Local folders sections. Page-specific
-   rules only; the shared table/instrument/tag shapes live in styles.css. */
+/* Projects index and project detail. The two ledgers deliberately share one
+   fixed measurement grid so repository and local-folder totals line up. */
 
+.projects-toolbar {
+  margin-bottom: 14px;
+}
+.projects-toolbar input {
+  width: 100%;
+}
+
+.proj-section {
+  overflow: hidden;
+  border-color: var(--border-strong);
+  border-radius: 7px;
+}
 .proj-section + .proj-section {
   margin-top: 24px;
+}
+.proj-section > .section-head {
+  align-items: center;
+  gap: 16px;
+  min-height: 54px;
+  margin: -14px -16px 0;
+  padding: 9px 14px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+}
+.project-section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.project-section-title h2 {
+  font-weight: 550;
+  letter-spacing: normal;
+}
+.project-sort {
+  flex: 0 1 170px;
+  min-width: 128px;
+  max-width: 170px;
+  min-height: 32px;
+  height: 32px;
+  padding-block: 0;
+  color: var(--subtext);
+  font-size: 14px;
+}
+
+.projects-table {
+  table-layout: fixed;
+  min-width: 872px;
+}
+.projects-table th {
+  background: color-mix(in srgb, var(--surface-2) 58%, var(--surface));
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.5;
+  letter-spacing: 0.07em;
+}
+.project-col-kind {
+  width: 112px;
+}
+.project-col-sessions {
+  width: 88px;
+}
+.project-col-tokens {
+  width: 100px;
+}
+.project-col-activity {
+  width: 152px;
+}
+.project-col-active {
+  width: 112px;
+}
+.projects-table td {
+  height: 65px;
+}
+.project-location {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.project-location-path {
+  display: block;
+  overflow: hidden;
+  min-width: 0;
+  width: 100%;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-location-path.tail {
+  direction: rtl;
+  text-align: left;
+}
+.project-location-tip {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.project-location-tip .tip-card {
+  max-width: min(560px, calc(100vw - 16px));
+}
+.project-location-tip .tip-title {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+.project-location-full {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.project-location-host {
+  flex: none;
+}
+.project-meta-separator {
+  color: var(--faint);
+}
+.project-kind-cell,
+.project-date-cell {
+  white-space: nowrap;
+}
+.project-kind,
+.project-kind-empty {
+  display: inline-flex;
+  width: 100%;
+  justify-content: flex-start;
+}
+.project-activity-cell {
+  padding-right: 16px;
+}
+.project-activity {
+  display: block;
+  width: 120px;
+}
+.project-activity .tip-card,
+.project-kind .tip-card,
+.project-date .tip-card {
+  max-width: min(320px, calc(100vw - 16px));
+}
+.project-activity .tip-title,
+.project-kind .tip-title,
+.project-date .tip-title {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+.project-kind .tip-copy {
+  max-width: 32ch;
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.project-date > span:first-child {
+  text-decoration: underline dotted var(--faint);
+  text-underline-offset: 3px;
+}
+.project-token-total {
+  text-decoration: underline dotted var(--faint);
+  text-underline-offset: 3px;
+}
+.project-date .tip-date {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.projects-empty {
+  margin-top: 0;
 }
 
 /* The whole row is a click target (see ProjectRow's guarded onClick), but the
@@ -22,4 +192,7 @@
 .remainder .tok-cell,
 .remainder .num {
   font-style: normal;
+}
+.projects-table tbody tr:hover td {
+  background: var(--surface-2);
 }

@@ -4,82 +4,8 @@
    from the pre-React insights.js/insights.css chart engine; see AGENTS.md and
    docs/DESIGN.md for the surface this replaces. Reuses styles.css's tokens and
    the app's existing .page/.instrument/.stat-strip/.segmented classes; only
-   the instrument-internal chrome (tabs, treemap, tooltip, captions, minis)
+   the instrument-internal chrome (tabs, treemap, tooltip, minis)
    lives here. */
-
-.snapshot-age {
-  align-self: center;
-  margin-right: auto;
-  font-size: 0.8125rem;
-}
-
-/* ---------- panel captions ---------- */
-
-.panel-caption {
-  font-size: 0.8125rem;
-  color: var(--muted);
-  margin: 12px 0 0;
-  line-height: 1.5;
-}
-
-.panel-how {
-  margin-top: 4px;
-  font-size: 0.75rem;
-}
-.panel-how > summary {
-  color: var(--faint);
-  list-style: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  width: fit-content;
-  cursor: pointer;
-  transition: color 120ms ease;
-}
-.panel-how > summary::-webkit-details-marker {
-  display: none;
-}
-.panel-how > summary::before {
-  content: "";
-  width: 0;
-  height: 0;
-  border-left: 3.5px solid currentColor;
-  border-top: 3.5px solid transparent;
-  border-bottom: 3.5px solid transparent;
-  transition: transform 120ms ease;
-}
-.panel-how[open] > summary::before {
-  transform: rotate(90deg);
-}
-.panel-how > summary:hover {
-  color: var(--muted);
-}
-.panel-how-body {
-  margin-top: 6px;
-  color: var(--faint);
-  line-height: 1.5;
-}
-
-.panel-caption code,
-.panel-how-body code {
-  font-family: "Geist Mono", monospace;
-  font-size: 0.75rem;
-  color: var(--muted);
-  background: var(--surface-2);
-  padding: 1px 4px;
-  border-radius: 3px;
-}
-
-.panel-caption kbd,
-.panel-how-body kbd {
-  font-family: "Geist Mono", monospace;
-  font-size: 0.75rem;
-  color: var(--subtext);
-  background: var(--surface-3);
-  border: 1px solid var(--border-strong);
-  padding: 1px 5px;
-  border-radius: 3px;
-}
 
 /* ---------- tabs ---------- */
 
@@ -165,24 +91,12 @@
   font-size: 11px;
   fill: var(--faint);
 }
-.scatter-label {
-  font-family: "Geist Mono", monospace;
-  font-size: 11px;
-  fill: var(--subtext);
-}
 .punchcard-row-label {
   font-family: "Geist Mono", monospace;
   font-size: 11px;
   fill: var(--faint);
 }
-.callout-label {
-  font-family: "Geist Mono", monospace;
-  font-size: 11px;
-  fill: var(--subtext);
-}
 .mini-multiple .axis-tick-text,
-.mini-multiple .scatter-label,
-.mini-multiple .callout-label,
 .mini-multiple .punchcard-row-label {
   font-size: 8px;
 }

@@ -1,7 +1,6 @@
 import { formatCount } from "../../format";
 import type { Trends } from "../../types";
 import { Stat, StatStrip } from "../stat-strip";
-import { InstrumentCaption } from "./caption";
 import { pickVizVar, prettyModel } from "./format";
 import { Legend } from "./legend";
 import {
@@ -12,7 +11,6 @@ import {
   ClipRect,
   HoverBucket,
   pathBand,
-  resolveLabelCollisions,
   scaleLinear,
   TooltipRow,
   TooltipTitle,
@@ -22,7 +20,7 @@ import {
 const W = 1000;
 const H = 380;
 const PL = 34;
-const PR = 130;
+const PR = 24;
 const PT = 14;
 const PB = 24;
 
@@ -58,17 +56,13 @@ function FleetMixChart({ trends }: { trends: Trends }) {
   const xScale = scaleLinear([0, Math.max(n - 1, 1)], [PL, W - PR]);
   const yScale = scaleLinear([0, 100], [H - PB, PT]);
 
-  // Stack bottom-up in the server's Models order (tokens desc, "other"
-  // last), tracking each model's cumulative [bottom, top] band at every
-  // bucket so the trailing-bucket right-edge label can center on its own
-  // band rather than recomputing the stack from scratch.
+  // Stack bottom-up in the server's Models order (tokens desc, "other" last).
   let cum = new Array(n).fill(0);
   const bands: {
     key: string;
     bottomPts: [number, number][];
     topPts: [number, number][];
   }[] = [];
-  const lastBand: Record<string, [number, number]> = {};
   for (const m of models) {
     const bottom = cum.slice();
     const top = cum.map((c, i) => c + (m.Share[i] ?? 0));
@@ -79,25 +73,8 @@ function FleetMixChart({ trends }: { trends: Trends }) {
       ),
       topPts: top.map((v, i) => [xScale(i), yScale(v)] as [number, number]),
     });
-    lastBand[m.Model] = [bottom[n - 1] ?? 0, top[n - 1] ?? 0];
     cum = top;
   }
-
-  const arrival = trends.FleetMix.NewestFirst;
-  const showArrival = arrival > 0 && arrival < n;
-
-  const pendingLabels = models
-    .map((m) => {
-      const [lo, hi] = lastBand[m.Model] ?? [0, 0];
-      const share = hi - lo;
-      if (share < 3) return null;
-      return {
-        y: yScale((lo + hi) / 2),
-        color: colorOf(m.Model),
-        text: `${labelOf(m.Model)} ${share.toFixed(0)}%`,
-      };
-    })
-    .filter((v): v is { y: number; color: string; text: string } => v !== null);
 
   return (
     <ChartSvg w={W} h={H}>
@@ -118,17 +95,6 @@ function FleetMixChart({ trends }: { trends: Trends }) {
         n={n}
         labels={trends.Labels}
       />
-      {showArrival && (
-        <line
-          x1={xScale(arrival)}
-          x2={xScale(arrival)}
-          y1={PT}
-          y2={H - PB}
-          stroke="var(--faint)"
-          strokeWidth={1}
-          strokeDasharray="2,3"
-        />
-      )}
       <ClipRect id={clipId} x={PL} y={PT} w={W - PL - PR} h={H - PT - PB}>
         {bands.map((b) => (
           <path
@@ -140,19 +106,6 @@ function FleetMixChart({ trends }: { trends: Trends }) {
         ))}
       </ClipRect>
       <AxisBaseline x1={PL} x2={W - PR} y={H - PB} />
-      {resolveLabelCollisions(pendingLabels, 14, PT, H - PB).map((lbl) => (
-        <text
-          key={lbl.text}
-          x={W - PR + 8}
-          y={lbl.y + 3}
-          className="axis-tick-text"
-          fill={lbl.color}
-          fontFamily="Geist Mono, monospace"
-          fontSize={11}
-        >
-          {lbl.text}
-        </text>
-      ))}
       <HoverBucket
         w={W}
         h={H}
@@ -199,17 +152,12 @@ export function FleetMixInstrument({ trends }: { trends: Trends }) {
         <StatStrip>
           <Stat label="models in window" value={formatCount(models.length)} />
           {busiest && (
-            <Stat
-              label="busiest model"
-              value={labelOf(busiest.Model)}
-              note={`${busiest.WindowShare.toFixed(0)}% of window tokens`}
-            />
+            <Stat label="busiest model" value={labelOf(busiest.Model)} />
           )}
           {showArrival && (
             <Stat
               label="newest arrival"
               value={prettyModel(trends.FleetMix.NewestModel)}
-              note={`first seen ${trends.Labels[arrival]}`}
             />
           )}
         </StatStrip>
@@ -220,11 +168,6 @@ export function FleetMixInstrument({ trends }: { trends: Trends }) {
             label: labelOf(m.Model),
           }))}
         />
-        <InstrumentCaption lead="Which models did the work, and how the mix shifted across the window.">
-          <code>usage_events.model</code> token share per bucket; a migration
-          shows up here as one band growing while another shrinks, without
-          reading release notes.
-        </InstrumentCaption>
       </div>
     </section>
   );

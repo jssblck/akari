@@ -88,6 +88,7 @@ describe("HoverTip", () => {
   const proto = HTMLElement.prototype as unknown as Record<string, unknown>;
 
   afterEach(() => {
+    vi.restoreAllMocks();
     delete proto.showPopover;
     delete proto.hidePopover;
     showPopover.mockClear();
@@ -111,6 +112,37 @@ describe("HoverTip", () => {
     const trigger = renderTip();
     fireEvent.focus(trigger);
     expect(showPopover).toHaveBeenCalled();
+  });
+
+  it("opens near the initial pointer position", () => {
+    const trigger = renderTip();
+    const card = screen.getByRole("tooltip");
+    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue({
+      top: 200,
+      bottom: 220,
+      left: 100,
+      right: 180,
+      width: 80,
+      height: 20,
+      x: 100,
+      y: 200,
+      toJSON: () => ({}),
+    } as DOMRect);
+    vi.spyOn(card, "getBoundingClientRect").mockReturnValue({
+      top: 0,
+      bottom: 100,
+      left: 0,
+      right: 200,
+      width: 200,
+      height: 100,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    } as DOMRect);
+
+    fireEvent.mouseEnter(trigger, { clientX: 500, clientY: 400 });
+    expect(card.style.left).toBe("400px");
+    expect(card.style.top).toBe("92px");
   });
 
   it("closes the card on Escape without requiring a blur", () => {

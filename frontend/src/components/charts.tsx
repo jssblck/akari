@@ -69,24 +69,44 @@ export function DistributionChart({
   );
 }
 
-export function Sparkline({ values }: { values: number[] | undefined }) {
-  if (!values || values.length === 0) return <span className="muted">-</span>;
+export function ActivityBars({ values }: { values: number[] | undefined }) {
+  const observed =
+    values?.map((value) => (Number.isFinite(value) && value > 0 ? value : 0)) ??
+    [];
+  const buckets =
+    observed.length > 0 ? observed : Array.from({ length: 30 }, () => 0);
+  const peak = Math.max(...buckets, 0);
+  const width = 120;
+  const height = 24;
+  const gap = 1;
+  const barWidth =
+    (width - gap * Math.max(buckets.length - 1, 0)) / buckets.length;
   return (
     <svg
-      className="sparkline"
-      viewBox={`0 0 ${Math.max(values.length - 1, 1)} 20`}
-      preserveAspectRatio="none"
-      aria-hidden="true"
+      className="activity-bars"
+      viewBox={`0 0 ${width} ${height}`}
+      role="img"
+      aria-label="Daily project tokens over the last 30 days"
     >
-      <polyline
-        fill="none"
-        stroke={chartTheme.lilac}
-        strokeWidth="1.4"
-        vectorEffect="non-scaling-stroke"
-        points={values
-          .map((value, index) => `${index},${20 - value * 20}`)
-          .join(" ")}
-      />
+      {buckets.map((value, index) => {
+        const active = value > 0 && peak > 0;
+        const barHeight = active
+          ? Math.max(2, Math.sqrt(value / peak) * (height - 2))
+          : 1;
+        return (
+          <rect
+            // biome-ignore lint/suspicious/noArrayIndexKey: each index is a stable calendar-day bucket in the fixed 30-day series.
+            key={index}
+            x={index * (barWidth + gap)}
+            y={height - barHeight}
+            width={Math.max(barWidth, 0.5)}
+            height={barHeight}
+            rx={0.6}
+            fill={chartTheme.lilac}
+            opacity={active ? 0.88 : 0.14}
+          />
+        );
+      })}
     </svg>
   );
 }

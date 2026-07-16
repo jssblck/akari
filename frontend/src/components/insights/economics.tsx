@@ -1,7 +1,6 @@
 import { formatCost } from "../../format";
 import type { Economics, Trends } from "../../types";
 import { Stat, StatStrip } from "../stat-strip";
-import { InstrumentCaption } from "./caption";
 import { fmtInt, fmtK } from "./format";
 import { Legend } from "./legend";
 import {
@@ -182,17 +181,6 @@ function CacheChart({
   const measuredPts = economics.CacheHitRate.map(
     (v, i) => [xScale(i), yScaleHit(v)] as [number, number],
   ).filter((_, i) => economics.CacheMeasured[i]);
-  // The headline hit-rate callout reads the latest measured bucket (a real 0%
-  // included), not just the last point of the array: an idle trailing bucket
-  // must not silently reuse a stale earlier rate.
-  let lastMeasuredIdx = -1;
-  for (let i = economics.CacheMeasured.length - 1; i >= 0; i--) {
-    if (economics.CacheMeasured[i]) {
-      lastMeasuredIdx = i;
-      break;
-    }
-  }
-
   return (
     <ChartSvg w={w} h={h}>
       <AxisTicksY
@@ -247,17 +235,6 @@ function CacheChart({
               {v}%
             </text>
           ))}
-          {lastMeasuredIdx >= 0 && (
-            <text
-              x={w - pR + 6}
-              y={yScaleHit(economics.CacheHitRate[lastMeasuredIdx] ?? 0) - 8}
-              className="callout-label"
-              fill="var(--viz-7)"
-            >
-              hit rate{" "}
-              {(economics.CacheHitRate[lastMeasuredIdx] ?? 0).toFixed(0)}%
-            </text>
-          )}
           <AxisBaseline x1={pL} x2={w - pR} y={h - pB} />
           <HoverBucket
             w={w}
@@ -368,7 +345,6 @@ export function EconomicsInstrument({
             <Stat
               label="sunk"
               value={`$${fmtInt(e.TotalAbandoned)}${spendMark}`}
-              note={`${e.AbandonedSharePct.toFixed(0)}% of spend`}
             />
             <Stat
               label="median $ per completed session"
@@ -391,11 +367,6 @@ export function EconomicsInstrument({
               { color: "var(--muted)", label: "Other outcomes" },
             ]}
           />
-          <InstrumentCaption lead="How much spend went to work that completed against work that was abandoned.">
-            <code>usage_events</code> cost joined to{" "}
-            <code>session_signals.outcome</code>; puts a price on the abandon
-            rate.
-          </InstrumentCaption>
         </TabPanel>
         <TabPanel stripId="economics-tabs" tabId="cache" active={active}>
           <StatStrip>
@@ -413,10 +384,6 @@ export function EconomicsInstrument({
             />
           </StatStrip>
           <CacheChart n={n} labels={trends.Labels} economics={e} mini={false} />
-          <InstrumentCaption lead="What prompt caching saved over time.">
-            What caching saved, priced per day and model then given a time axis;
-            the same figure the token tiles reconcile with.
-          </InstrumentCaption>
         </TabPanel>
       </div>
     </section>
