@@ -51,15 +51,15 @@ type projectsResponse struct {
 }
 
 type projectResponse struct {
-	Project   store.ProjectSummary   `json:"project"`
-	Range     string                 `json:"range"`
-	Ranges    []web.DateRange        `json:"ranges"`
-	Filter    store.SessionFilter    `json:"filter"`
-	Sessions  []store.SessionSummary `json:"sessions"`
-	Remainder store.SessionRemainder `json:"remainder"`
-	Facets    store.FacetValues      `json:"facets"`
-	Analytics store.Analytics        `json:"analytics"`
-	Insights  store.Insights         `json:"insights"`
+	Project   store.ProjectSummary          `json:"project"`
+	Range     string                        `json:"range"`
+	Ranges    []web.DateRange               `json:"ranges"`
+	Filter    store.SessionFilter           `json:"filter"`
+	Sessions  []store.ProjectSessionSummary `json:"sessions"`
+	Remainder store.SessionRemainder        `json:"remainder"`
+	Facets    store.FacetValues             `json:"facets"`
+	Analytics store.Analytics               `json:"analytics"`
+	Insights  store.Insights                `json:"insights"`
 }
 
 type sessionsResponse struct {

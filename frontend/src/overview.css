@@ -83,3 +83,34 @@
 .usage-empty p {
   margin: 0;
 }
+
+@media (max-width: 780px) {
+  .activity-panel.range-only {
+    padding: 0;
+    background: transparent;
+    border: 0;
+  }
+  .activity-panel.range-only .section-head {
+    margin: 0;
+  }
+  .activity-panel.range-only .section-head h2,
+  .activity-panel.range-only .activity-controls > select,
+  .activity-panel.range-only .heatmap {
+    display: none;
+  }
+  .activity-panel.range-only .activity-controls,
+  .activity-panel.range-only .activity-controls > .segmented {
+    width: 100%;
+  }
+  .activity-panel.range-only .activity-controls > .segmented {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+  }
+  .activity-panel.range-only .activity-controls > .activity-metric {
+    display: none;
+  }
+  .activity-panel.range-only .segmented button {
+    min-height: 44px;
+    padding-inline: 4px;
+  }
+}

@@ -43,6 +43,7 @@ export function AnalyticsPanel({
   analytics,
   showUsers = false,
   activityControls,
+  mobileActivity = "full",
 }: {
   analytics: Analytics;
   // showUsers gates the by-user cost breakdown: the signed-in overview and
@@ -54,6 +55,7 @@ export function AnalyticsPanel({
   // filter here; pages that keep those controls in their own header pass
   // nothing.
   activityControls?: ReactNode;
+  mobileActivity?: "full" | "range-only";
 }) {
   const promptTokens =
     analytics.Cache.Input +
@@ -132,7 +134,11 @@ export function AnalyticsPanel({
         />
         <Stat label="Sessions" value={formatCount(analytics.Sessions)} />
       </StatStrip>
-      <ActivityPanel analytics={analytics} controls={activityControls} />
+      <ActivityPanel
+        analytics={analytics}
+        controls={activityControls}
+        mobileActivity={mobileActivity}
+      />
       <div className="usage-breakdowns">
         <BreakdownTable title="Models" rows={analytics.Models ?? []} />
         <BreakdownTable title="Agents" rows={analytics.Agents ?? []} />
@@ -149,18 +155,20 @@ export function AnalyticsPanel({
 export function ActivityPanel({
   analytics,
   controls,
+  mobileActivity = "full",
 }: {
   analytics: Analytics;
   controls?: ReactNode;
+  mobileActivity?: "full" | "range-only";
 }) {
   const [metric, setMetric] = useState<HeatmapMetric>("tokens");
   return (
-    <section className="instrument">
+    <section className={`instrument activity-panel ${mobileActivity}`}>
       <div className="section-head">
         <h2>Daily activity</h2>
         <div className="activity-controls">
           {controls}
-          <fieldset className="segmented">
+          <fieldset className="segmented activity-metric">
             <legend className="sr-only">Metric</legend>
             {(
               [
@@ -314,6 +322,7 @@ export function OverviewPage() {
           <AnalyticsPanel
             analytics={data.analytics}
             showUsers
+            mobileActivity="range-only"
             activityControls={
               <>
                 {(data.users ?? []).length > 1 ? (

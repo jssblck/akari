@@ -14,6 +14,8 @@ import { ToolsInstrument } from "../components/insights/tools";
 import { TooltipHost } from "../components/insights/tooltip";
 import { attempt } from "../components/notices";
 import { RangeTabs } from "../components/range-tabs";
+import { stripPromptPreamble } from "../components/session-quality";
+import { SessionGrade, SessionOutcome } from "../components/session-signals";
 import { HoverTip, TokenCard } from "../components/token-card";
 import {
   formatCost,
@@ -262,7 +264,7 @@ function ProjectRow({
   };
   return (
     <tr className="row-link" onClick={handleRowClick}>
-      <td>
+      <td className="project-identity-cell">
         <Link className="primary-link" to={`/projects/${project.ID}`}>
           {local
             ? project.DisplayName || `Project ${project.ID}`
@@ -300,10 +302,8 @@ function ProjectRow({
   );
 }
 
-// ProjectSection is one ledger of the projects index: Repositories or Local
-// folders, each headed by its own count so a fleet with, say, no local
-// scratch folders shows the repositories ledger alone rather than an empty
-// second table.
+// ProjectSection keeps repositories and local folders in separate ledgers so
+// an empty group disappears instead of leaving an empty table behind.
 function ProjectSection({
   title,
   projects,
@@ -552,7 +552,7 @@ export function ProjectPage() {
   const path = `/api/v1/app/projects/${encodeURIComponent(id)}?${params.toString()}`;
   const state = useAPI<ProjectResponse>(path);
   return (
-    <div className="page">
+    <div className="page project-page">
       <AsyncView state={state}>
         {(data) => {
           const insights = normalizeInsights(data.insights);
@@ -622,9 +622,11 @@ export function ProjectPage() {
                   ) : null}
                 </div>
               </header>
-              <ProjectToolbar facets={data.facets} />
+              <div className="project-session-filters">
+                <ProjectToolbar facets={data.facets} />
+              </div>
               <AnalyticsPanel analytics={data.analytics} showUsers />
-              <section className="instrument compact">
+              <section className="instrument compact project-sessions">
                 <div className="section-head">
                   <div>
                     <h2>Sessions</h2>
@@ -637,7 +639,7 @@ export function ProjectPage() {
                   </p>
                 ) : (
                   <div className="table-wrap embedded">
-                    <table className="data-table">
+                    <table className="data-table project-sessions-table">
                       <thead>
                         <tr>
                           <th>Session</th>
@@ -649,17 +651,21 @@ export function ProjectPage() {
                           <th className="num">Tokens</th>
                           <th className="num">Cost</th>
                           <th>Updated</th>
+                          <th className="project-session-signal-head">
+                            <span className="sr-only">Signals</span>
+                          </th>
                         </tr>
                       </thead>
                       <tbody>
                         {(data.sessions ?? []).map((session) => (
                           <tr key={session.ID}>
-                            <td>
+                            <td className="project-session-title-cell">
                               <Link
-                                className="primary-link"
+                                className="primary-link project-session-title"
                                 to={`/sessions/${session.ID}`}
                               >
-                                {session.Title || `Session ${session.ID}`}
+                                {stripPromptPreamble(session.Title) ||
+                                  `Session ${session.ID}`}
                               </Link>{" "}
                               <SessionPublicTag session={session} />
                             </td>
@@ -699,6 +705,10 @@ export function ProjectPage() {
                             >
                               {relativeTime(session.LastActiveAt)}
                             </td>
+                            <td className="project-session-signals">
+                              <SessionGrade grade={session.Grade} />
+                              <SessionOutcome outcome={session.Outcome} />
+                            </td>
                           </tr>
                         ))}
                       </tbody>
@@ -735,6 +745,7 @@ export function ProjectPage() {
                               )}
                             </td>
                             <td></td>
+                            <td className="project-session-signals"></td>
                           </tr>
                         </tfoot>
                       ) : null}

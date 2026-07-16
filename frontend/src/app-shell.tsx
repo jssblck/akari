@@ -5,11 +5,13 @@ import {
   FolderOpenIcon,
   GaugeIcon,
   GithubLogoIcon,
+  ListIcon,
   ListMagnifyingGlassIcon,
   SignOutIcon,
   UserCircleIcon,
+  XIcon,
 } from "@phosphor-icons/react";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 
 import { request, setCSRFToken, useAPI } from "./api";
@@ -22,13 +24,19 @@ const nav = [
   { to: "/overview", label: "Overview", icon: GaugeIcon },
   { to: "/projects", label: "Projects", icon: FolderOpenIcon },
   { to: "/sessions", label: "Sessions", icon: ListMagnifyingGlassIcon },
-  { to: "/insights", label: "Insights", icon: ChartLineUpIcon },
+  {
+    to: "/insights",
+    label: "Insights",
+    icon: ChartLineUpIcon,
+    hideOnMobile: true,
+  },
 ];
 
 export function AppShell() {
   const viewer = useAPI<Viewer>("/api/v1/app/bootstrap");
   const location = useLocation();
   const navigate = useNavigate();
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   useEffect(() => {
     if (viewer.kind !== "ready") return;
@@ -44,35 +52,70 @@ export function AppShell() {
     }
   }, [location.pathname, location.search, navigate, viewer]);
 
+  useEffect(() => {
+    if (!mobileNavOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMobileNavOpen(false);
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [mobileNavOpen]);
+
   return (
     <AsyncView state={viewer}>
       {(user) =>
         user.authenticated ? (
           <div className="app-frame">
-            <aside className="sidebar">
-              <a
-                href={withBase("/")}
-                className="brand"
-                aria-label="Akari homepage"
+            <header className="mobile-topbar">
+              <AppBrand version={user.version} />
+              <button
+                type="button"
+                className="nav-toggle"
+                aria-controls="primary-sidebar"
+                aria-expanded={mobileNavOpen}
+                onClick={() => setMobileNavOpen(true)}
               >
-                <img
-                  className="brand-mark"
-                  src={withBase("/static/favicon.svg")}
-                  width="18"
-                  height="18"
-                  alt=""
-                />
-                <span>akari</span>
-                {user.version ? (
-                  <span className="brandver">{user.version}</span>
-                ) : null}
-              </a>
+                <ListIcon size={22} aria-hidden="true" />
+                <span className="sr-only">Open navigation</span>
+              </button>
+            </header>
+            {mobileNavOpen ? (
+              <button
+                type="button"
+                className="sidebar-backdrop"
+                aria-label="Close navigation"
+                onClick={() => setMobileNavOpen(false)}
+              />
+            ) : null}
+            <aside
+              className={mobileNavOpen ? "sidebar mobile-open" : "sidebar"}
+              id="primary-sidebar"
+            >
+              <div className="sidebar-head">
+                <AppBrand version={user.version} />
+                <button
+                  type="button"
+                  className="nav-toggle sidebar-close"
+                  onClick={() => setMobileNavOpen(false)}
+                >
+                  <XIcon size={20} aria-hidden="true" />
+                  <span className="sr-only">Close navigation</span>
+                </button>
+              </div>
               <nav aria-label="Primary navigation">
                 {nav.map((item) => (
                   <NavLink
                     key={item.to}
                     to={item.to}
-                    className={({ isActive }) => (isActive ? "active" : "")}
+                    className={({ isActive }) =>
+                      [
+                        isActive ? "active" : "",
+                        item.hideOnMobile ? "mobile-nav-hidden" : "",
+                      ]
+                        .filter(Boolean)
+                        .join(" ")
+                    }
+                    onClick={() => setMobileNavOpen(false)}
                   >
                     <item.icon size={17} weight="regular" />
                     {item.label}
@@ -101,7 +144,7 @@ export function AppShell() {
                 >
                   <BookOpenTextIcon size={17} /> Guide
                 </a>
-                <NavLink to="/account">
+                <NavLink to="/account" onClick={() => setMobileNavOpen(false)}>
                   <UserCircleIcon size={17} /> {user.username}
                 </NavLink>
                 <button
@@ -126,5 +169,21 @@ export function AppShell() {
         ) : null
       }
     </AsyncView>
+  );
+}
+
+function AppBrand({ version }: { version: string }) {
+  return (
+    <a href={withBase("/")} className="brand" aria-label="Akari homepage">
+      <img
+        className="brand-mark"
+        src={withBase("/static/favicon.svg")}
+        width="18"
+        height="18"
+        alt=""
+      />
+      <span>akari</span>
+      {version ? <span className="brandver">{version}</span> : null}
+    </a>
   );
 }

@@ -68,8 +68,17 @@ func (s *Store) ListSessions(ctx context.Context, f SessionFilter) ([]SessionSum
 // (Remainder). Shown rows plus Remainder reproduce the usage panel's headline, since
 // both the rows and the remainder derive from the one dated-usage base the panel sums.
 type SessionPage struct {
-	Sessions  []SessionSummary
+	Sessions  []ProjectSessionSummary
 	Remainder SessionRemainder
+}
+
+// ProjectSessionSummary adds the current quality signals used by the compact
+// project-session list. Keeping it separate from SessionSummary avoids making
+// every summary read pay for signals that only this surface renders.
+type ProjectSessionSummary struct {
+	SessionSummary
+	Grade   *string
+	Outcome string
 }
 
 // SessionRemainder is the aggregate of the windowed sessions the capped table did not
@@ -156,13 +165,14 @@ func (s *Store) windowSessionPage(ctx context.Context, query querier, f SessionF
 		       coalesce(sum(ue.cache_write_tokens), 0), coalesce(sum(ue.cache_read_tokens), 0),
 		       coalesce(sum(ue.cost_usd), 0), ` + costIncompleteExpr + `,
 		       s.visibility, s.public_id, s.started_at, s.ended_at, s.last_active_at,
-		       coalesce(title.content, '')
+		       coalesce(title.content, ''), sig.grade, coalesce(sig.outcome, '')
 		  FROM usage_events ue
 		  JOIN sessions s ON s.id = ue.session_id
 		  JOIN users u ON u.id = s.user_id
+		  LEFT JOIN session_signals sig ON sig.session_id = s.id AND ` + signalsCurrent() + `
 		  ` + titleLateralSQL + `
 		 WHERE ` + where + `
-		 GROUP BY s.id, u.username, title.content
+		 GROUP BY s.id, u.username, title.content, sig.grade, sig.outcome
 		 ORDER BY s.last_active_at DESC, s.id DESC
 		 LIMIT $` + itoa(len(args)+1)
 	rowArgs := append(append([]any{}, args...), windowSessionLimit)
@@ -172,14 +182,14 @@ func (s *Store) windowSessionPage(ctx context.Context, query querier, f SessionF
 		return SessionPage{}, fmt.Errorf("query window sessions: %w", err)
 	}
 	defer rows.Close()
-	var out []SessionSummary
+	var out []ProjectSessionSummary
 	for rows.Next() {
-		var sm SessionSummary
+		var sm ProjectSessionSummary
 		if err := rows.Scan(&sm.ID, &sm.Agent, &sm.Machine, &sm.GitBranch, &sm.Username,
 			&sm.MessageCount, &sm.UserMessageCount, &sm.ModelFallbackCount,
 			&sm.TotalInput, &sm.TotalOutput, &sm.TotalCacheWrite, &sm.TotalCacheRead,
 			&sm.TotalCostUSD, &sm.CostIncomplete, &sm.Visibility, &sm.PublicID,
-			&sm.StartedAt, &sm.EndedAt, &sm.LastActiveAt, &sm.Title); err != nil {
+			&sm.StartedAt, &sm.EndedAt, &sm.LastActiveAt, &sm.Title, &sm.Grade, &sm.Outcome); err != nil {
 			return SessionPage{}, fmt.Errorf("scan window session: %w", err)
 		}
 		sm.Title = squashSpaces(sm.Title)

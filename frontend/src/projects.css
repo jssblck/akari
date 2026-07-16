@@ -1,5 +1,5 @@
-/* Projects index and project detail. The two ledgers deliberately share one
-   fixed measurement grid so repository and local-folder totals line up. */
+/* Projects index and project detail. Desktop ledgers share one measurement
+   grid; mobile rows reduce each project to its name and activity sparkline. */
 
 .projects-toolbar {
   margin-bottom: 14px;
@@ -70,7 +70,7 @@
   width: 152px;
 }
 .project-col-active {
-  width: 112px;
+  width: 140px;
 }
 .projects-table td {
   height: 65px;
@@ -96,6 +96,12 @@
 .project-location-tip {
   flex: 1 1 auto;
   min-width: 0;
+}
+.project-location-tip .hover-tip-summary {
+  display: block;
+  overflow: hidden;
+  min-width: 0;
+  width: 100%;
 }
 .project-location-tip .tip-card {
   max-width: min(560px, calc(100vw - 16px));
@@ -159,14 +165,6 @@
   font-size: 11px;
   line-height: 1.45;
 }
-.project-date > span:first-child {
-  text-decoration: underline dotted var(--faint);
-  text-underline-offset: 3px;
-}
-.project-token-total {
-  text-decoration: underline dotted var(--faint);
-  text-underline-offset: 3px;
-}
 .project-date .tip-date {
   color: var(--muted);
   font-size: 11px;
@@ -193,6 +191,173 @@
 .remainder .num {
   font-style: normal;
 }
+.project-session-signal-head,
+.project-session-signals {
+  display: none;
+}
 .projects-table tbody tr:hover td {
   background: var(--surface-2);
+}
+
+@media (max-width: 780px) {
+  .project-session-filters,
+  .project-page .activity-panel,
+  .project-head .head-actions > .button,
+  .project-head .head-actions > .tag.public {
+    display: none;
+  }
+  .project-sessions {
+    overflow: visible;
+    padding: 0;
+    background: transparent;
+    border: 0;
+  }
+  .project-sessions .table-wrap.embedded {
+    overflow: visible;
+    margin: 0;
+    background: transparent;
+    border: 0;
+  }
+  .project-sessions-table,
+  .project-sessions-table tbody,
+  .project-sessions-table tfoot {
+    display: block;
+    width: 100%;
+    min-width: 0;
+  }
+  .project-sessions-table thead {
+    display: none;
+  }
+  .project-sessions-table tbody {
+    display: grid;
+    gap: 8px;
+  }
+  .project-sessions-table tbody tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 68px;
+    align-items: center;
+    gap: 10px;
+    overflow: hidden;
+    min-height: 56px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .project-sessions-table tbody td {
+    display: none;
+  }
+  .project-sessions-table tbody .project-session-title-cell {
+    display: block;
+    min-width: 0;
+    height: 100%;
+    padding: 0 0 0 12px;
+    border: 0;
+  }
+  .project-session-title {
+    display: flex;
+    align-items: center;
+    overflow: hidden;
+    width: 100%;
+    height: 100%;
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .project-session-title-cell > .tag {
+    display: none;
+  }
+  .project-sessions-table tbody .project-session-signals {
+    display: grid;
+    grid-template-columns: 34px 28px;
+    align-items: center;
+    justify-items: end;
+    gap: 6px;
+    width: 68px;
+    padding: 0;
+    border: 0;
+  }
+  .project-sessions-table tfoot {
+    margin-top: 8px;
+  }
+  .project-sessions-table tfoot tr,
+  .project-sessions-table tfoot td:first-child {
+    display: block;
+  }
+  .project-sessions-table tfoot td {
+    display: none;
+  }
+  .project-sessions-table tfoot td:first-child {
+    padding: 6px 2px;
+    border: 0;
+  }
+  .proj-section {
+    overflow: visible;
+    padding: 0;
+    background: transparent;
+    border: 0;
+  }
+  .proj-section > .section-head {
+    min-height: 44px;
+    margin: 0 0 10px;
+    padding: 0;
+    background: transparent;
+    border: 0;
+  }
+  .proj-section .table-wrap.embedded {
+    overflow: visible;
+    margin: 0;
+    background: transparent;
+    border: 0;
+  }
+  .projects-table,
+  .projects-table tbody {
+    display: block;
+    width: 100%;
+    min-width: 0;
+  }
+  .projects-table colgroup,
+  .projects-table thead {
+    display: none;
+  }
+  .projects-table tbody {
+    display: grid;
+    gap: 10px;
+  }
+  .projects-table tbody tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 120px;
+    align-items: center;
+    overflow: hidden;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .projects-table td {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: flex-start;
+    min-width: 0;
+    height: auto;
+    padding: 10px 12px;
+    border: 0;
+  }
+  .projects-table .project-identity-cell {
+    padding-block: 12px;
+  }
+  .projects-table .project-location,
+  .projects-table .project-kind-cell,
+  .projects-table td.num,
+  .projects-table .project-date-cell {
+    display: none;
+  }
+  .projects-table .project-activity-cell {
+    padding: 12px;
+  }
+  .projects-table .project-activity,
+  .projects-table .project-activity .activity-bars {
+    width: 100%;
+  }
 }

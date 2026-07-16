@@ -2066,7 +2066,7 @@ export interface components {
             range: string;
             ranges: components["schemas"]["DateRange"][] | null;
             remainder: components["schemas"]["SessionRemainder"];
-            sessions: components["schemas"]["SessionSummary"][] | null;
+            sessions: components["schemas"]["ProjectSessionSummary"][] | null;
         };
         ProjectSummary: {
             CostIncomplete: boolean;
@@ -2091,6 +2091,38 @@ export interface components {
             TotalInput: number;
             /** Format: int64 */
             TotalOutput: number;
+        };
+        ProjectSessionSummary: {
+            Agent: string;
+            CostIncomplete: boolean;
+            EndedAt: string | null;
+            GitBranch: string;
+            Grade: string | null;
+            /** Format: int64 */
+            ID: number;
+            LastActiveAt: string | null;
+            Machine: string;
+            /** Format: int64 */
+            MessageCount: number;
+            /** Format: int64 */
+            ModelFallbackCount: number;
+            Outcome: string;
+            PublicID: string | null;
+            StartedAt: string | null;
+            Title: string;
+            /** Format: int64 */
+            TotalCacheRead: number;
+            /** Format: int64 */
+            TotalCacheWrite: number;
+            TotalCostUSD: number;
+            /** Format: int64 */
+            TotalInput: number;
+            /** Format: int64 */
+            TotalOutput: number;
+            /** Format: int64 */
+            UserMessageCount: number;
+            Username: string;
+            Visibility: string;
         };
         ProjectsResponse: {
             projects: components["schemas"]["ProjectSummary"][] | null;

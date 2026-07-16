@@ -2,6 +2,7 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useId,
   useRef,
   useState,
 } from "react";
@@ -21,6 +22,7 @@ export function useHoverPopover<
   const triggerRef = useRef<Trigger>(null);
   const popoverRef = useRef<Card>(null);
   const openRef = useRef(false);
+  const pinnedRef = useRef(false);
   const [open, setOpen] = useState(false);
 
   const show = useCallback((pointer?: PointerPosition) => {
@@ -70,8 +72,44 @@ export function useHoverPopover<
       // Already closed.
     }
     openRef.current = false;
+    pinnedRef.current = false;
     setOpen(false);
   }, []);
+
+  const hideTransient = useCallback(() => {
+    if (!pinnedRef.current) hide();
+  }, [hide]);
+
+  const togglePinned = useCallback(
+    (pointer?: PointerPosition) => {
+      if (pinnedRef.current) {
+        hide();
+        return;
+      }
+      pinnedRef.current = true;
+      show(pointer);
+    },
+    [hide, show],
+  );
+
+  // Manual popovers lack light-dismiss. Register the outside-pointer handler
+  // only while a card is open, so closed tips add no document listener.
+  useEffect(() => {
+    if (!open) return;
+    const dismissOutside = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (
+        triggerRef.current?.contains(target) ||
+        popoverRef.current?.contains(target)
+      )
+        return;
+      hide();
+    };
+    document.addEventListener("pointerdown", dismissOutside, true);
+    return () =>
+      document.removeEventListener("pointerdown", dismissOutside, true);
+  }, [hide, open]);
 
   // A top-layer card holds viewport coordinates, so scrolling would leave it
   // drifting away from its trigger; close it instead.
@@ -81,7 +119,15 @@ export function useHoverPopover<
     return () => window.removeEventListener("scroll", hide, true);
   }, [open, hide]);
 
-  return { triggerRef, popoverRef, show, hide };
+  return {
+    triggerRef,
+    popoverRef,
+    open,
+    show,
+    hide,
+    hideTransient,
+    togglePinned,
+  };
 }
 
 // TokenCard is the shared per-class token breakdown (In / Out / Cache read /
@@ -131,15 +177,14 @@ export function TokenCard({
   );
 }
 
-// HoverTip wraps an inline figure with a card revealed on hover or keyboard
-// focus. The wrapper is focusable so the breakdown is reachable without a
-// pointer, matching the old UI's .tok-cell / .stat-tip convention.
+// HoverTip wraps an inline figure with a card revealed by hover, keyboard
+// focus, or a pinned tap. A second tap, an outside tap, Escape, blur, or scroll
+// dismisses the card.
 //
 // The card is a native top-layer popover, so it always paints above the page
-// and no ancestor's overflow, stacking context, or z-index can trap it. Top
-// layer means viewport coordinates: pointer opens align horizontally with the
-// initial mouse position while staying outside the trigger's edge, keyboard
-// opens center on the trigger, and either flips below when needed.
+// above ancestor overflow and stacking contexts. Top-layer placement uses
+// viewport coordinates: pointer opens align with the initial pointer position,
+// keyboard opens center on the trigger, and either flips below when needed.
 export function HoverTip({
   summary,
   children,
@@ -149,30 +194,56 @@ export function HoverTip({
   children: ReactNode;
   className?: string;
 }) {
-  const { triggerRef, popoverRef, show, hide } = useHoverPopover<
-    HTMLSpanElement,
-    HTMLSpanElement
-  >();
+  const tipId = useId();
+  const summaryId = useId();
+  const {
+    triggerRef,
+    popoverRef,
+    open,
+    show,
+    hide,
+    hideTransient,
+    togglePinned,
+  } = useHoverPopover<HTMLSpanElement, HTMLSpanElement>();
 
   return (
-    // biome-ignore lint/a11y/noStaticElementInteractions: the WAI tooltip pattern hangs hover and focus reveal off a non-interactive trigger; the handlers only toggle the card.
+    // biome-ignore lint/a11y/useSemanticElements: HoverTip is phrasing content and often sits inside a linked data row, where a nested button would be invalid HTML; keyboard and disclosure semantics are provided explicitly.
     <span
       className={`hover-tip ${className}`.trim()}
-      // biome-ignore lint/a11y/noNoninteractiveTabindex: the WAI tooltip pattern needs a focusable trigger so the card is reachable by keyboard, and the trigger itself performs no action.
+      role="button"
       tabIndex={0}
       ref={triggerRef}
+      aria-controls={tipId}
+      aria-expanded={open}
+      aria-labelledby={summaryId}
       onMouseEnter={(event) => show(event)}
-      onMouseLeave={hide}
+      onMouseLeave={hideTransient}
       onFocus={() => show()}
       onBlur={hide}
-      // A manual popover opts out of the UA's Escape handling, so dismiss-
-      // without-blurring is wired up here per the WAI tooltip pattern.
+      onClick={(event) => {
+        // A HoverTip can sit inside a linked data row. Tapping its disclosure
+        // must not navigate the row out from under the card it just opened.
+        event.preventDefault();
+        event.stopPropagation();
+        togglePinned(event);
+      }}
       onKeyDown={(event) => {
-        if (event.key === "Escape") hide();
+        if (event.key === "Escape") {
+          hide();
+          return;
+        }
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          event.stopPropagation();
+          togglePinned();
+        }
       }}
     >
-      {summary}
+      <span className="hover-tip-summary" id={summaryId}>
+        {summary}
+      </span>
       <span
+        id={tipId}
         className="tip-card popover"
         role="tooltip"
         popover="manual"

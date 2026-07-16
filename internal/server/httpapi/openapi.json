@@ -1897,7 +1897,7 @@
           },
           "sessions": {
             "items": {
-              "$ref": "#/components/schemas/SessionSummary"
+              "$ref": "#/components/schemas/ProjectSessionSummary"
             },
             "type": [
               "array",
@@ -2001,6 +2001,148 @@
           "TotalCostUSD",
           "TotalInput",
           "TotalOutput"
+        ],
+        "type": "object"
+      },
+      "ProjectSessionSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "Agent": {
+            "type": "string"
+          },
+          "CostIncomplete": {
+            "type": "boolean"
+          },
+          "EndedAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "GitBranch": {
+            "type": "string"
+          },
+          "Grade": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ID": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "LastActiveAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "Machine": {
+            "type": "string"
+          },
+          "MessageCount": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "ModelFallbackCount": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Outcome": {
+            "type": "string"
+          },
+          "PublicID": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "StartedAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "Title": {
+            "type": "string"
+          },
+          "TotalCacheRead": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "TotalCacheWrite": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "TotalCostUSD": {
+            "type": "number"
+          },
+          "TotalInput": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "TotalOutput": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "UserMessageCount": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Username": {
+            "type": "string"
+          },
+          "Visibility": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "Agent",
+          "CostIncomplete",
+          "EndedAt",
+          "GitBranch",
+          "Grade",
+          "ID",
+          "LastActiveAt",
+          "Machine",
+          "MessageCount",
+          "ModelFallbackCount",
+          "Outcome",
+          "PublicID",
+          "StartedAt",
+          "Title",
+          "TotalCacheRead",
+          "TotalCacheWrite",
+          "TotalCostUSD",
+          "TotalInput",
+          "TotalOutput",
+          "UserMessageCount",
+          "Username",
+          "Visibility"
         ],
         "type": "object"
       },
