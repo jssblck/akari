@@ -1549,6 +1549,9 @@ select:focus {
   .sidebar nav {
     flex-direction: column;
   }
+  .sidebar nav a.mobile-nav-hidden {
+    display: none;
+  }
   .sidebar-foot {
     flex-direction: column;
     margin: auto 0 0;

@@ -410,6 +410,18 @@
 }
 
 @media (max-width: 720px) {
+  .sessions-list {
+    overflow: visible;
+    background: transparent;
+    border: 0;
+  }
+  .sessions-toolbar {
+    min-height: 0;
+    margin-bottom: 14px;
+    padding: 0;
+    background: transparent;
+    border: 0;
+  }
   .sessions-scope {
     flex-wrap: wrap;
   }
@@ -417,13 +429,66 @@
     flex: 1 1 140px;
     max-width: none;
   }
+  .active-filters {
+    margin-bottom: 12px;
+    padding: 0;
+    background: transparent;
+    border: 0;
+  }
+  .sessions-feed {
+    background: transparent;
+  }
+  .session-day {
+    display: grid;
+    gap: 8px;
+    margin-bottom: 14px;
+  }
+  .day-head {
+    min-height: 22px;
+    padding: 2px;
+    background: transparent;
+    border: 0;
+  }
   .srow {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) 68px;
+    align-items: center;
+    gap: 10px;
+    overflow: hidden;
+    min-height: 56px;
+    padding: 10px 12px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .session-day:last-child .srow:last-child {
+    border-bottom: 1px solid var(--border);
+  }
+  .srow-line {
+    display: block;
+  }
+  .srow-line > :not(.srow-title),
+  .srow-meta,
+  .srow-kind,
+  .srow-kind-empty,
+  .srow-fanout,
+  .srow-fanout-empty {
+    display: none;
+  }
+  .srow-title {
+    display: block;
+    font-size: 13px;
   }
   .srow-signals {
-    grid-column: 1;
-    justify-self: end;
+    grid-template-columns: 34px 28px;
+    grid-column: 2;
+    width: 68px;
     padding-top: 0;
+  }
+  .feed-footer {
+    min-height: 36px;
+    padding: 6px 0;
+    background: transparent;
+    border: 0;
   }
 }
 
