@@ -268,12 +268,6 @@
   width: 264px;
   padding-top: 3px;
 }
-.srow-signal {
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-end;
-  min-width: 0;
-}
 .srow-kind,
 .srow-kind-empty {
   justify-self: end;
@@ -283,27 +277,6 @@
   margin-left: auto;
   white-space: nowrap;
 }
-.srow-outcome {
-  justify-self: center;
-  color: var(--muted);
-}
-.srow-outcome.outcome-completed {
-  color: var(--ok);
-}
-.srow-outcome.outcome-abandoned {
-  color: var(--warn);
-}
-.srow-outcome.outcome-errored {
-  color: var(--err);
-}
-.srow-grade {
-  justify-self: center;
-}
-.srow-grade .signal-empty {
-  color: var(--faint);
-  font-family: "Geist Mono", monospace;
-  font-size: 11px;
-}
 .srow-fanout,
 .srow-fanout-empty {
   justify-self: end;
@@ -312,23 +285,6 @@
 .srow-fanout .tag {
   margin-left: auto;
   white-space: nowrap;
-}
-.srow-signal .tip-card {
-  max-width: 280px;
-}
-.srow-signal .tip-title {
-  display: block;
-  margin-bottom: 5px;
-  color: var(--text);
-  font-size: 12px;
-  font-weight: 600;
-}
-.srow-signal .tip-copy {
-  max-width: 32ch;
-  margin: 6px 0 0;
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.45;
 }
 .session-overview {
   position: fixed;

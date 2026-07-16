@@ -191,11 +191,107 @@
 .remainder .num {
   font-style: normal;
 }
+.project-session-signal-head,
+.project-session-signals {
+  display: none;
+}
 .projects-table tbody tr:hover td {
   background: var(--surface-2);
 }
 
 @media (max-width: 780px) {
+  .project-session-filters,
+  .project-page .activity-panel,
+  .project-head .head-actions > .button,
+  .project-head .head-actions > .tag.public {
+    display: none;
+  }
+  .project-sessions {
+    overflow: visible;
+    padding: 0;
+    background: transparent;
+    border: 0;
+  }
+  .project-sessions .table-wrap.embedded {
+    overflow: visible;
+    margin: 0;
+    background: transparent;
+    border: 0;
+  }
+  .project-sessions-table,
+  .project-sessions-table tbody,
+  .project-sessions-table tfoot {
+    display: block;
+    width: 100%;
+    min-width: 0;
+  }
+  .project-sessions-table thead {
+    display: none;
+  }
+  .project-sessions-table tbody {
+    display: grid;
+    gap: 8px;
+  }
+  .project-sessions-table tbody tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 68px;
+    align-items: center;
+    gap: 10px;
+    overflow: hidden;
+    min-height: 56px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .project-sessions-table tbody td {
+    display: none;
+  }
+  .project-sessions-table tbody .project-session-title-cell {
+    display: block;
+    min-width: 0;
+    height: 100%;
+    padding: 0 0 0 12px;
+    border: 0;
+  }
+  .project-session-title {
+    display: flex;
+    align-items: center;
+    overflow: hidden;
+    width: 100%;
+    height: 100%;
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .project-session-title-cell > .tag {
+    display: none;
+  }
+  .project-sessions-table tbody .project-session-signals {
+    display: grid;
+    grid-template-columns: 34px 28px;
+    align-items: center;
+    justify-items: end;
+    gap: 6px;
+    width: 68px;
+    padding: 0;
+    border: 0;
+  }
+  .project-sessions-table tfoot {
+    margin-top: 8px;
+  }
+  .project-sessions-table tfoot tr,
+  .project-sessions-table tfoot td:first-child {
+    display: block;
+  }
+  .project-sessions-table tfoot td {
+    display: none;
+  }
+  .project-sessions-table tfoot td:first-child {
+    padding: 6px 2px;
+    border: 0;
+  }
   .proj-section {
     overflow: visible;
     padding: 0;

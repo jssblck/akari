@@ -4,18 +4,13 @@
 // files (pages/session-detail.tsx, components/transcript.tsx); this file
 // re-exports them so main.tsx and public.tsx keep importing from one module.
 
-import {
-  CheckCircleIcon,
-  QuestionIcon,
-  WarningDiamondIcon,
-  XCircleIcon,
-} from "@phosphor-icons/react";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
 import { request, useAPI } from "../api";
 import { AsyncView } from "../components/async-view";
 import { stripPromptPreamble } from "../components/session-quality";
+import { SessionGrade, SessionOutcome } from "../components/session-signals";
 import { FallbackTag, SessionPublicTag } from "../components/session-tags";
 import { HoverTip, useHoverPopover } from "../components/token-card";
 import {
@@ -52,21 +47,6 @@ const OUTCOME_LABELS: Record<string, string> = {
   errored: "Errored",
   abandoned: "Abandoned",
   unknown: "Unknown",
-};
-
-const GRADE_DETAILS: Record<string, string> = {
-  A: "Strong execution with few or no observed quality problems.",
-  B: "Good execution with minor quality deductions.",
-  C: "Mixed execution with meaningful quality deductions.",
-  D: "Weak execution with substantial quality problems.",
-  F: "Failed execution with severe quality problems.",
-};
-
-const OUTCOME_DETAILS: Record<string, string> = {
-  completed: "The session ended normally.",
-  errored: "The session ended after an execution error.",
-  abandoned: "The transcript stopped without a normal completion signal.",
-  unknown: "No reliable terminal outcome was detected.",
 };
 
 function setQuery(
@@ -627,8 +607,8 @@ function SessionFeedRow({
       <div className="srow-signals">
         <ProjectKindCell kind={session.ProjectKind} />
         <FanoutCell session={session} />
-        <GradeCell grade={session.Grade} />
-        <OutcomeCell outcome={session.Outcome} />
+        <SessionGrade grade={session.Grade} />
+        <SessionOutcome outcome={session.Outcome} />
       </div>
       <span
         className="session-overview popover"
@@ -693,58 +673,6 @@ function ProjectKindCell({ kind }: { kind: string }) {
     >
       <strong className="tip-title">{kind}</strong>
       <p className="tip-copy">{detail}</p>
-    </HoverTip>
-  );
-}
-
-function GradeCell({ grade }: { grade: string | null }) {
-  const label = grade ?? "-";
-  return (
-    <HoverTip
-      className="srow-signal srow-grade"
-      summary={
-        <span
-          className={
-            grade ? `tag grade grade-${grade.toLowerCase()}` : "signal-empty"
-          }
-        >
-          {label}
-        </span>
-      }
-    >
-      <strong className="tip-title">
-        {grade ? `Quality grade ${grade}` : "Not graded"}
-      </strong>
-      <p className="tip-copy">
-        {grade
-          ? (GRADE_DETAILS[grade] ?? "Akari assigned this quality grade.")
-          : "A session is graded after it settles."}
-      </p>
-    </HoverTip>
-  );
-}
-
-function OutcomeCell({ outcome }: { outcome: string }) {
-  const label = OUTCOME_LABELS[outcome] ?? outcome;
-  const iconProps = { size: 17, weight: "bold" as const, "aria-hidden": true };
-  let icon = <QuestionIcon {...iconProps} />;
-  if (outcome === "completed") icon = <CheckCircleIcon {...iconProps} />;
-  if (outcome === "abandoned") icon = <WarningDiamondIcon {...iconProps} />;
-  if (outcome === "errored") icon = <XCircleIcon {...iconProps} />;
-  return (
-    <HoverTip
-      className={`srow-signal srow-outcome outcome-${outcome}`}
-      summary={
-        <>
-          {icon}
-          <span className="sr-only">{label}</span>
-        </>
-      }
-    >
-      <strong className="tip-title">{label}</strong>
-      <p className="tip-copy">
-        {OUTCOME_DETAILS[outcome] ?? OUTCOME_DETAILS.unknown}
-      </p>
     </HoverTip>
   );
 }
