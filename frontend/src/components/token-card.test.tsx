@@ -103,8 +103,9 @@ describe("HoverTip", () => {
         <div>card body</div>
       </HoverTip>,
     );
-    const trigger = screen.getByText("1.2k");
-    expect(trigger.className).toContain("hover-tip");
+    const trigger = screen.getByRole("button", { name: "1.2k" });
+    expect(trigger).toHaveClass("hover-tip");
+    expect(screen.getByText("1.2k")).toHaveClass("hover-tip-summary");
     return trigger;
   }
 
@@ -150,5 +151,17 @@ describe("HoverTip", () => {
     fireEvent.focus(trigger);
     fireEvent.keyDown(trigger, { key: "Escape" });
     expect(hidePopover).toHaveBeenCalled();
+  });
+
+  it("pins on tap and dismisses on the next outside tap", () => {
+    const trigger = renderTip();
+    fireEvent.click(trigger, { clientX: 120, clientY: 80 });
+    expect(showPopover).toHaveBeenCalledOnce();
+
+    fireEvent.mouseLeave(trigger);
+    expect(hidePopover).not.toHaveBeenCalled();
+
+    fireEvent.pointerDown(document.body);
+    expect(hidePopover).toHaveBeenCalledOnce();
   });
 });

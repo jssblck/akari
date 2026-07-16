@@ -159,8 +159,13 @@ button {
   height: 18px;
   flex: 0 0 auto;
 }
-.sidebar > .brand {
+.sidebar-head > .brand {
   padding: 4px 10px 24px;
+}
+.mobile-topbar,
+.sidebar-backdrop,
+.nav-toggle {
+  display: none;
 }
 .sidebar nav,
 .sidebar-foot {
@@ -1469,37 +1474,91 @@ select:focus {
   }
 }
 @media (max-width: 780px) {
-  .sidebar {
-    position: static;
-    width: auto;
-    height: auto;
-    flex-direction: row;
+  .mobile-topbar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    display: flex;
     align-items: center;
-    overflow-x: auto;
-    padding: 8px 10px;
-    border-right: 0;
+    justify-content: space-between;
+    min-height: 58px;
+    padding: 8px 14px;
+    background: #111014;
     border-bottom: 1px solid var(--border);
-    scrollbar-width: none;
   }
-  .sidebar::-webkit-scrollbar {
-    display: none;
+  .nav-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    color: var(--subtext);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    cursor: pointer;
+    transition:
+      color 120ms ease,
+      background 120ms ease,
+      transform 120ms cubic-bezier(0.23, 1, 0.32, 1);
   }
-  .sidebar > .brand {
-    padding: 5px 12px 5px 4px;
+  .nav-toggle:hover {
+    color: var(--text);
+    background: var(--surface-2);
   }
-  .sidebar nav {
-    flex-direction: row;
+  .nav-toggle:active {
+    transform: scale(0.97);
   }
-  .sidebar-foot {
-    flex-direction: row;
-    margin: 0 0 0 auto;
-    padding: 0 0 0 10px;
+  .sidebar-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 25;
+    display: block;
+    padding: 0;
+    background: rgba(7, 6, 9, 0.72);
     border: 0;
   }
-  .sidebar-foot a span,
-  .sidebar-foot a:not(:last-child),
-  .nav-button span {
-    display: none;
+  .sidebar {
+    z-index: 30;
+    width: min(300px, calc(100vw - 52px));
+    padding: 14px 12px;
+    visibility: hidden;
+    border-right: 1px solid var(--border);
+    transform: translateX(-100%);
+    transition:
+      transform 220ms cubic-bezier(0.32, 0.72, 0, 1),
+      visibility 220ms;
+  }
+  .sidebar.mobile-open {
+    visibility: visible;
+    transform: translateX(0);
+  }
+  .sidebar-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 18px;
+  }
+  .sidebar-head > .brand {
+    padding: 5px 10px;
+  }
+  .sidebar-close {
+    flex: 0 0 auto;
+  }
+  .sidebar nav {
+    flex-direction: column;
+  }
+  .sidebar-foot {
+    flex-direction: column;
+    margin: auto 0 0;
+    padding: 14px 0 0;
+    border-top: 1px solid var(--border);
+  }
+  .sidebar nav a,
+  .sidebar-foot a,
+  .nav-button {
+    min-height: 44px;
   }
   .app-main {
     margin-left: 0;
@@ -1600,12 +1659,17 @@ select:focus {
   white-space: normal;
 }
 
-/* Shared hover/focus tooltip card: token breakdowns on stat tiles, breakdown
-   rows, and feed rows all reveal the same card shape. */
+/* HoverTip summaries draw the shared dotted underline. The wrapper supplies
+   pointer, keyboard, and tap behavior for every explanatory text disclosure. */
 .hover-tip {
   position: relative;
   display: inline-flex;
-  cursor: default;
+  cursor: help;
+}
+.hover-tip-summary {
+  display: inline-flex;
+  text-decoration: underline dotted var(--faint);
+  text-underline-offset: 4px;
 }
 /* The tip card lives in the browser's top layer (popover="manual"): HoverTip
    opens it with showPopover and pins it to the trigger in viewport
@@ -1618,23 +1682,31 @@ select:focus {
   min-width: min(170px, calc(100vw - 16px));
   opacity: 0;
   pointer-events: none;
+  transform: scale(0.97);
+  transform-origin: center bottom;
   transition:
-    opacity 120ms ease,
-    display 120ms allow-discrete,
-    overlay 120ms allow-discrete;
+    opacity 140ms cubic-bezier(0.23, 1, 0.32, 1),
+    transform 140ms cubic-bezier(0.23, 1, 0.32, 1),
+    display 140ms allow-discrete,
+    overlay 140ms allow-discrete;
 }
 .hover-tip .tip-card:popover-open {
   opacity: 1;
+  transform: scale(1);
 }
 @starting-style {
   .hover-tip .tip-card:popover-open {
     opacity: 0;
+    transform: scale(0.97);
   }
 }
-/* Stat-tile hover figures advertise their tip card with a dotted underline.
-   Placement needs no special case: HoverTip flips the card below a trigger
-   that sits too close to the viewport's top edge. */
-.stat .hover-tip {
+/* A stat tile is a block trigger, but only its measured value is explanatory
+   text. Keep the stamped label quiet and underline the readout itself. */
+.stat.hover-tip .hover-tip-summary {
+  display: block;
+  text-decoration: none;
+}
+.stat.hover-tip .hover-tip-summary strong {
   text-decoration: underline dotted var(--faint);
   text-underline-offset: 5px;
 }
@@ -1655,6 +1727,14 @@ select:focus {
   color: var(--subtext);
   text-align: right;
   font-variant-numeric: tabular-nums;
+}
+.tip-card .tt-total {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--text);
+  font:
+    450 0.75rem "Geist Mono",
+    monospace;
 }
 .tip-card .tt-cost {
   margin-top: 5px;

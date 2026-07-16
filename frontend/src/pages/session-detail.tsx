@@ -36,6 +36,7 @@ import {
   type SessionSignals,
 } from "../components/session-types";
 import { Stat } from "../components/stat-strip";
+import { HoverTip } from "../components/token-card";
 import { Transcript, type TranscriptHandle } from "../components/transcript";
 import {
   formatCost,
@@ -411,9 +412,8 @@ function SessionStats({
   );
 }
 
-// StatTip is a stat tile whose value carries a hover/focus breakdown card, the
-// session page's own flavor of the shared hover-tip pattern: the tile itself
-// (not a wrapping span) is the trigger, so it lays out as a stat-strip cell.
+// StatTip keeps session-specific card content on the shared disclosure behavior
+// while preserving the stat tile itself as the grid item and tap target.
 function StatTip({
   label,
   value,
@@ -424,150 +424,149 @@ function StatTip({
   children: React.ReactNode;
 }) {
   return (
-    // biome-ignore lint/a11y/noNoninteractiveTabindex: the stat tile is the tooltip trigger, so it must be focusable to reach the breakdown by keyboard (matches HoverTip's convention).
-    <div className="stat" tabIndex={0}>
-      <span className="label">{label}</span>
-      <strong>{value}</strong>
-      <div className="tip-card" role="tooltip">
-        {children}
-      </div>
-    </div>
+    <HoverTip
+      className="stat"
+      summary={
+        <>
+          <span className="label">{label}</span>
+          <strong>{value}</strong>
+        </>
+      }
+    >
+      {children}
+    </HoverTip>
   );
 }
 
 function QualityStat({ signals }: { signals: SessionSignals }) {
   const breakdown = scoreBreakdownItems(signals);
   return (
-    <div
+    <HoverTip
       className={`stat quality-stat q-${gradeBand(signals.Grade)}`}
-      // biome-ignore lint/a11y/noNoninteractiveTabindex: the stat tile is the tooltip trigger, so it must be focusable to reach the breakdown by keyboard (matches HoverTip's convention).
-      tabIndex={0}
+      summary={
+        <>
+          <span className="label">Quality</span>
+          <strong>{qualityGrade(signals)}</strong>
+        </>
+      }
     >
-      <span className="label">Quality</span>
-      <strong>{qualityGrade(signals)}</strong>
-      <div className="tip-card" role="tooltip">
-        <dl className="tt-grid">
-          <dt>Outcome</dt>
-          <dd>{outcomeLabel(signals.Outcome)}</dd>
-          <dt>Confidence</dt>
-          <dd>{signals.OutcomeConfidence}</dd>
-          <dt>Score</dt>
-          <dd>{qualityScoreLabel(signals)}</dd>
-          {signals.ToolCalls > 0 ? (
-            <>
-              <dt>Failures</dt>
-              <dd>
-                {signals.ToolFailures} / {signals.ToolCalls}
-              </dd>
-              <dt>Retries</dt>
-              <dd>{signals.ToolRetries}</dd>
-              <dt>Edit churn</dt>
-              <dd>{signals.EditChurn}</dd>
-              <dt>Longest fail streak</dt>
-              <dd>{signals.LongestFailureStreak}</dd>
-            </>
-          ) : null}
-        </dl>
-        {!isScored(signals) ? (
-          <div className="tt-note muted small">
-            Not graded yet. A session is graded once it settles.
-          </div>
-        ) : null}
-        {hasHygieneSignal(signals) ? (
+      <dl className="tt-grid">
+        <dt>Outcome</dt>
+        <dd>{outcomeLabel(signals.Outcome)}</dd>
+        <dt>Confidence</dt>
+        <dd>{signals.OutcomeConfidence}</dd>
+        <dt>Score</dt>
+        <dd>{qualityScoreLabel(signals)}</dd>
+        {signals.ToolCalls > 0 ? (
           <>
-            <div className="tt-sub">Input</div>
-            <dl className="tt-grid">
-              {signals.ShortPromptCount > 0 ? (
-                <>
-                  <dt>Terse prompts</dt>
-                  <dd>{signals.ShortPromptCount}</dd>
-                </>
-              ) : null}
-              {signals.DuplicatePromptCount > 0 ? (
-                <>
-                  <dt>Repeated</dt>
-                  <dd>{signals.DuplicatePromptCount}</dd>
-                </>
-              ) : null}
-              {signals.NoCodeContextCount > 0 ? (
-                <>
-                  <dt>No code pointer</dt>
-                  <dd>{signals.NoCodeContextCount}</dd>
-                </>
-              ) : null}
-              {signals.UnstructuredStart ? (
-                <>
-                  <dt>Opening</dt>
-                  <dd>terse</dd>
-                </>
-              ) : null}
-            </dl>
+            <dt>Failures</dt>
+            <dd>
+              {signals.ToolFailures} / {signals.ToolCalls}
+            </dd>
+            <dt>Retries</dt>
+            <dd>{signals.ToolRetries}</dd>
+            <dt>Edit churn</dt>
+            <dd>{signals.EditChurn}</dd>
+            <dt>Longest fail streak</dt>
+            <dd>{signals.LongestFailureStreak}</dd>
           </>
         ) : null}
-        {signals.AssistantTurns !== null ? (
-          <>
-            <div className="tt-sub">Thinking</div>
-            <dl className="tt-grid">
-              <dt>Observed</dt>
-              <dd>
-                {thinkingBucketLabel(
-                  (signals.ThinkingTurns ?? 0) > 0 &&
-                    signals.ThinkingTailTokens !== null
-                    ? bucketFor(signals.ThinkingTailTokens)
-                    : "off",
-                )}
-              </dd>
-              {(signals.ThinkingTurns ?? 0) > 0 ? (
-                <>
-                  <dt>Hard-turn mean</dt>
-                  <dd>
-                    {thinkingTokensLabel(signals.ThinkingTailTokens ?? 0)}
-                  </dd>
-                  <dt>Hardest turn</dt>
-                  <dd>
-                    {thinkingTokensLabel(signals.ThinkingPeakTokens ?? 0)}
-                  </dd>
-                  <dt>Reasoned</dt>
-                  <dd>
-                    {signals.ThinkingTurns} of {signals.AssistantTurns} turns
-                  </dd>
-                </>
-              ) : null}
-            </dl>
-            <div className="tt-note muted small">
-              Observed deliberation on an absolute token scale: how hard the
-              model actually thought, not a configured level. Per-turn tokens
-              are exact where the agent reports them, else estimated from the
-              reasoning trace.
-            </div>
-          </>
-        ) : null}
-        {isScored(signals) ? (
-          <>
-            <div className="tt-sub">Score arithmetic</div>
-            <dl className="tt-grid tt-score">
-              {breakdown.length === 0 ? (
-                <>
-                  <dt>No penalties</dt>
-                  <dd className="mono">-0</dd>
-                </>
-              ) : (
-                breakdown.map((item) => (
-                  <>
-                    <dt key={`${item.label}-label`}>{item.label}</dt>
-                    <dd key={`${item.label}-points`} className="mono">
-                      -{item.points}
-                    </dd>
-                  </>
-                ))
+      </dl>
+      {!isScored(signals) ? (
+        <div className="tt-note muted small">
+          Not graded yet. A session is graded once it settles.
+        </div>
+      ) : null}
+      {hasHygieneSignal(signals) ? (
+        <>
+          <div className="tt-sub">Input</div>
+          <dl className="tt-grid">
+            {signals.ShortPromptCount > 0 ? (
+              <>
+                <dt>Terse prompts</dt>
+                <dd>{signals.ShortPromptCount}</dd>
+              </>
+            ) : null}
+            {signals.DuplicatePromptCount > 0 ? (
+              <>
+                <dt>Repeated</dt>
+                <dd>{signals.DuplicatePromptCount}</dd>
+              </>
+            ) : null}
+            {signals.NoCodeContextCount > 0 ? (
+              <>
+                <dt>No code pointer</dt>
+                <dd>{signals.NoCodeContextCount}</dd>
+              </>
+            ) : null}
+            {signals.UnstructuredStart ? (
+              <>
+                <dt>Opening</dt>
+                <dd>terse</dd>
+              </>
+            ) : null}
+          </dl>
+        </>
+      ) : null}
+      {signals.AssistantTurns !== null ? (
+        <>
+          <div className="tt-sub">Thinking</div>
+          <dl className="tt-grid">
+            <dt>Observed</dt>
+            <dd>
+              {thinkingBucketLabel(
+                (signals.ThinkingTurns ?? 0) > 0 &&
+                  signals.ThinkingTailTokens !== null
+                  ? bucketFor(signals.ThinkingTailTokens)
+                  : "off",
               )}
-              <dt>Score</dt>
-              <dd className="mono">{signals.Score}</dd>
-            </dl>
-          </>
-        ) : null}
-      </div>
-    </div>
+            </dd>
+            {(signals.ThinkingTurns ?? 0) > 0 ? (
+              <>
+                <dt>Hard-turn mean</dt>
+                <dd>{thinkingTokensLabel(signals.ThinkingTailTokens ?? 0)}</dd>
+                <dt>Hardest turn</dt>
+                <dd>{thinkingTokensLabel(signals.ThinkingPeakTokens ?? 0)}</dd>
+                <dt>Reasoned</dt>
+                <dd>
+                  {signals.ThinkingTurns} of {signals.AssistantTurns} turns
+                </dd>
+              </>
+            ) : null}
+          </dl>
+          <div className="tt-note muted small">
+            Observed deliberation on an absolute token scale: how hard the model
+            actually thought, not a configured level. Per-turn tokens are exact
+            where the agent reports them, else estimated from the reasoning
+            trace.
+          </div>
+        </>
+      ) : null}
+      {isScored(signals) ? (
+        <>
+          <div className="tt-sub">Score arithmetic</div>
+          <dl className="tt-grid tt-score">
+            {breakdown.length === 0 ? (
+              <>
+                <dt>No penalties</dt>
+                <dd className="mono">-0</dd>
+              </>
+            ) : (
+              breakdown.map((item) => (
+                <>
+                  <dt key={`${item.label}-label`}>{item.label}</dt>
+                  <dd key={`${item.label}-points`} className="mono">
+                    -{item.points}
+                  </dd>
+                </>
+              ))
+            )}
+            <dt>Score</dt>
+            <dd className="mono">{signals.Score}</dd>
+          </dl>
+        </>
+      ) : null}
+    </HoverTip>
   );
 }
 
@@ -590,41 +589,44 @@ function FallbackStat({
   const shown = fallbacks.slice(0, 5);
   const overflow = count > shown.length ? count - shown.length : 0;
   return (
-    // biome-ignore lint/a11y/noNoninteractiveTabindex: the stat tile is the tooltip trigger, so it must be focusable to reach the breakdown by keyboard (matches HoverTip's convention).
-    <div className="stat fallback-stat" tabIndex={0}>
-      <span className="label">Fallbacks</span>
-      <strong>{count}</strong>
-      <div className="tip-card" role="tooltip">
-        {shown.map((f, i) => (
-          <div key={f.DedupKey || i}>
-            {i > 0 ? <div className="tt-sub">Fallback</div> : null}
-            <dl className="tt-grid">
-              <dt>Models</dt>
-              <dd>{fallbackModelsLabel(f)}</dd>
-              <dt>Category</dt>
-              <dd>{fallbackCategoryLabel(f)}</dd>
-              {fallbackDeclinedObserved(f) ? (
-                <>
-                  <dt>Declined input</dt>
-                  <dd>{formatTokens(f.DeclinedInput ?? 0)}</dd>
-                  <dt>Declined output</dt>
-                  <dd>{formatTokens(f.DeclinedOutput ?? 0)}</dd>
-                  <dt>Declined cache write</dt>
-                  <dd>{formatTokens(f.DeclinedCacheWrite ?? 0)}</dd>
-                  <dt>Declined cache read</dt>
-                  <dd>{formatTokens(f.DeclinedCacheRead ?? 0)}</dd>
-                </>
-              ) : null}
-              <dt>Time</dt>
-              <dd>{f.OccurredAt ? formatTime(f.OccurredAt) : "-"}</dd>
-            </dl>
-          </div>
-        ))}
-        {overflow > 0 ? (
-          <div className="tt-note">plus {overflow} more</div>
-        ) : null}
-      </div>
-    </div>
+    <HoverTip
+      className="stat fallback-stat"
+      summary={
+        <>
+          <span className="label">Fallbacks</span>
+          <strong>{count}</strong>
+        </>
+      }
+    >
+      {shown.map((f, i) => (
+        <div key={f.DedupKey || i}>
+          {i > 0 ? <div className="tt-sub">Fallback</div> : null}
+          <dl className="tt-grid">
+            <dt>Models</dt>
+            <dd>{fallbackModelsLabel(f)}</dd>
+            <dt>Category</dt>
+            <dd>{fallbackCategoryLabel(f)}</dd>
+            {fallbackDeclinedObserved(f) ? (
+              <>
+                <dt>Declined input</dt>
+                <dd>{formatTokens(f.DeclinedInput ?? 0)}</dd>
+                <dt>Declined output</dt>
+                <dd>{formatTokens(f.DeclinedOutput ?? 0)}</dd>
+                <dt>Declined cache write</dt>
+                <dd>{formatTokens(f.DeclinedCacheWrite ?? 0)}</dd>
+                <dt>Declined cache read</dt>
+                <dd>{formatTokens(f.DeclinedCacheRead ?? 0)}</dd>
+              </>
+            ) : null}
+            <dt>Time</dt>
+            <dd>{f.OccurredAt ? formatTime(f.OccurredAt) : "-"}</dd>
+          </dl>
+        </div>
+      ))}
+      {overflow > 0 ? (
+        <div className="tt-note">plus {overflow} more</div>
+      ) : null}
+    </HoverTip>
   );
 }
 

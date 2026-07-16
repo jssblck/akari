@@ -159,14 +159,6 @@
   font-size: 11px;
   line-height: 1.45;
 }
-.project-date > span:first-child {
-  text-decoration: underline dotted var(--faint);
-  text-underline-offset: 3px;
-}
-.project-token-total {
-  text-decoration: underline dotted var(--faint);
-  text-underline-offset: 3px;
-}
 .project-date .tip-date {
   color: var(--muted);
   font-size: 11px;

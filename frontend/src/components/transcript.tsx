@@ -36,6 +36,7 @@ import {
   type ModelFallback,
   type TurnUsageFull,
 } from "./session-types";
+import { HoverTip } from "./token-card";
 import { openToolInspector, ToolInspectorModal } from "./tool-inspector";
 
 type ShedMark = {
@@ -428,22 +429,27 @@ function MessageTurn({
             </span>
           ) : null}
           {message.Usage ? (
-            // biome-ignore lint/a11y/noNoninteractiveTabindex: the tok-cell tooltip trigger must be focusable so the breakdown is reachable by keyboard (matches HoverTip's convention).
-            <span className="tok-cell turn-metrics" tabIndex={0}>
-              <span className="stamp-ctx mono">
-                {contextStamp(message.Usage)}
-              </span>
-              {message.Usage.CostUSD !== null &&
-              message.Usage.CostUSD !== undefined ? (
-                <span className="stamp-cost mono">
-                  {formatCost(
-                    message.Usage.CostUSD,
-                    message.Usage.CostIncomplete,
-                  )}
-                </span>
-              ) : null}
+            <HoverTip
+              className="tok-cell turn-metrics"
+              summary={
+                <>
+                  <span className="stamp-ctx mono">
+                    {contextStamp(message.Usage)}
+                  </span>
+                  {message.Usage.CostUSD !== null &&
+                  message.Usage.CostUSD !== undefined ? (
+                    <span className="stamp-cost mono">
+                      {formatCost(
+                        message.Usage.CostUSD,
+                        message.Usage.CostIncomplete,
+                      )}
+                    </span>
+                  ) : null}
+                </>
+              }
+            >
               <TurnCard usage={message.Usage} />
-            </span>
+            </HoverTip>
           ) : null}
         </span>
         <time className="muted small">{formatTime(message.Timestamp)}</time>
@@ -492,7 +498,7 @@ function MessageTurn({
 
 function TurnCard({ usage }: { usage: TurnUsageFull }) {
   return (
-    <span className="tok-tip" role="tooltip">
+    <>
       <span className="tt-total">
         {formatTokens(turnTokenTotal(usage))} tokens
       </span>
@@ -515,29 +521,28 @@ function TurnCard({ usage }: { usage: TurnUsageFull }) {
         <dd>{formatTokens(usage.ContextTokens)}</dd>
       </dl>
       <span className="tt-cost">{turnCostLabel(usage, formatCost)}</span>
-    </span>
+    </>
   );
 }
 
 function ShedDivider({ shed }: { shed: ShedMark }) {
   return (
-    // biome-ignore lint/a11y/noNoninteractiveTabindex: the divider's visible label is also its tooltip trigger, so it must be focusable to reach the breakdown by keyboard (matches HoverTip's convention). The visible shed-label text supplies the accessible name.
-    <div className="msg-shed tok-cell" tabIndex={0}>
-      <span className="shed-label mono">
-        {shedLabel(shed.fromTokens, shed.toTokens)}
-      </span>
-      <span className="tok-tip shed-tip" role="tooltip">
-        <span className="tt-total">context shed</span>
-        <UsageGrid usage={shed.fromUsage} label="Before" />
-        <span className="tt-cost">
-          {turnCostLabel(shed.fromUsage, formatCost)}
+    <HoverTip
+      className="msg-shed tok-cell"
+      summary={
+        <span className="shed-label mono">
+          {shedLabel(shed.fromTokens, shed.toTokens)}
         </span>
-        <UsageGrid usage={shed.toUsage} label="After" className="shed-after" />
-        <span className="tt-cost">
-          {turnCostLabel(shed.toUsage, formatCost)}
-        </span>
+      }
+    >
+      <span className="tt-total">context shed</span>
+      <UsageGrid usage={shed.fromUsage} label="Before" />
+      <span className="tt-cost">
+        {turnCostLabel(shed.fromUsage, formatCost)}
       </span>
-    </div>
+      <UsageGrid usage={shed.toUsage} label="After" className="shed-after" />
+      <span className="tt-cost">{turnCostLabel(shed.toUsage, formatCost)}</span>
+    </HoverTip>
   );
 }
 

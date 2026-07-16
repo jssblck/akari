@@ -239,10 +239,6 @@
 .srow-date {
   color: var(--muted);
 }
-.srow-date > span:first-child {
-  text-decoration: underline dotted var(--faint);
-  text-underline-offset: 3px;
-}
 .srow-date .tip-card {
   max-width: min(320px, calc(100vw - 16px));
 }
@@ -566,29 +562,6 @@ main:has(> .session-page) {
 }
 .stats.session-stats .fallback-stat strong {
   color: var(--warn);
-}
-.stats.session-stats .stat .tip-card {
-  position: absolute;
-  bottom: calc(100% + 8px);
-  left: 12px;
-  z-index: 6;
-  min-width: 200px;
-  padding: 9px 11px;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  opacity: 0;
-  pointer-events: none;
-  transition:
-    opacity 120ms ease,
-    transform 120ms ease;
-  transform: translateY(2px);
-}
-.stats.session-stats .stat:hover .tip-card,
-.stats.session-stats .stat:focus-visible .tip-card,
-.stats.session-stats .stat:focus-within .tip-card {
-  opacity: 1;
-  transform: none;
 }
 .tip-card .tt-sub {
   margin: 7px 0 2px;
@@ -1323,12 +1296,7 @@ pre.tool-body.error {
   border-radius: 4px;
   box-shadow: 0 0 0 2px var(--lilac);
 }
-.msg-shed .shed-tip {
-  left: 50%;
-  right: auto;
-  transform: translateX(-50%);
-}
-.tok-tip .tt-grid.shed-after {
+.tip-card .tt-grid.shed-after {
   margin-top: 6px;
   padding-top: 5px;
   border-top: 1px solid var(--border);
@@ -1346,73 +1314,4 @@ pre.tool-body.error {
   font-family: "Geist Mono", monospace;
   letter-spacing: 0.02em;
   font-size: 11px;
-}
-
-/* ---- The per-turn and shed-divider breakdown card (.tok-cell / .tok-tip) ---- */
-/* A .tok-cell is any inline figure whose breakdown reveals on hover or keyboard
-   focus, matching the shared .hover-tip pattern but for figures that are not
-   wrapped in HoverTip (the turn stamp cluster and the shed divider label, both
-   ported straight from the templ source). */
-.tok-cell {
-  position: relative;
-  cursor: help;
-}
-.tok-tip {
-  position: absolute;
-  bottom: calc(100% + 8px);
-  left: 50%;
-  z-index: 6;
-  min-width: 190px;
-  padding: 8px 10px;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  opacity: 0;
-  pointer-events: none;
-  transform: translateX(-50%) translateY(2px);
-  transition:
-    opacity 120ms ease,
-    transform 120ms ease;
-}
-.tok-cell:hover .tok-tip,
-.tok-cell:focus-visible .tok-tip,
-.tok-cell:focus-within .tok-tip {
-  opacity: 1;
-  transform: translateX(-50%);
-}
-.tok-tip .tt-total {
-  display: block;
-  margin-bottom: 5px;
-  color: var(--text);
-  font:
-    450 12px "Geist Mono",
-    monospace;
-}
-.tok-tip .tt-grid {
-  display: grid;
-  grid-template-columns: auto auto;
-  gap: 1px 10px;
-  margin: 0;
-  font:
-    450 12px / 1.5 "Geist Mono",
-    monospace;
-}
-.tok-tip .tt-grid dt {
-  color: var(--muted);
-}
-.tok-tip .tt-grid dd {
-  margin: 0;
-  color: var(--subtext);
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-.tok-tip .tt-cost {
-  margin-top: 5px;
-  padding-top: 5px;
-  color: var(--subtext);
-  border-top: 1px solid var(--border);
-  font:
-    450 12px "Geist Mono",
-    monospace;
-  font-variant-numeric: tabular-nums;
 }
