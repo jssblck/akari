@@ -262,7 +262,7 @@ function ProjectRow({
   };
   return (
     <tr className="row-link" onClick={handleRowClick}>
-      <td>
+      <td className="project-identity-cell">
         <Link className="primary-link" to={`/projects/${project.ID}`}>
           {local
             ? project.DisplayName || `Project ${project.ID}`
@@ -300,10 +300,8 @@ function ProjectRow({
   );
 }
 
-// ProjectSection is one ledger of the projects index: Repositories or Local
-// folders, each headed by its own count so a fleet with, say, no local
-// scratch folders shows the repositories ledger alone rather than an empty
-// second table.
+// ProjectSection keeps repositories and local folders in separate ledgers so
+// an empty group disappears instead of leaving an empty table behind.
 function ProjectSection({
   title,
   projects,
