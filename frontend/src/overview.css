@@ -1,20 +1,6 @@
-/* Overview page: the public-overview badge, the model/agent/user breakdown
-   grid, and the unified "no usage yet" empty state. Page-specific rules only;
-   the shared instrument/stat/hover-tip shapes live in styles.css. */
-
-.overview-public-badge {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 16px;
-}
-.overview-public-badge .muted-link {
-  color: var(--muted);
-  font-size: 12px;
-}
-.overview-public-badge .muted-link:hover {
-  color: var(--text);
-}
+/* Overview page: the model/agent/user breakdown grid and the unified "no
+   usage yet" empty state. Page-specific rules only; the shared
+   instrument/stat/hover-tip shapes live in styles.css. */
 
 /* Models, Agents, and (when scoped) Users lay out as an even-width row that
    wraps to one column per breakdown once the window can no longer fit two

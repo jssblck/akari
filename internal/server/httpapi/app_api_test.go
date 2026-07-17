@@ -261,6 +261,32 @@ func TestPublicationAPIsRequireExplicitState(t *testing.T) {
 	}
 }
 
+func TestAccountAPIListsRepositoryPublicationControls(t *testing.T) {
+	t.Parallel()
+	server, st := newTestServer(t)
+	client := registerAdmin(t, server.URL)
+	remoteID, err := st.UpsertProject(t.Context(), "github.com/jssblck/akari", "github.com", "jssblck", "akari", "akari", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.UpsertProject(t.Context(), "local:grace:C:/work/scratch", "grace", "", "", "scratch", "standalone"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PublishProjectOverview(t.Context(), remoteID); err != nil {
+		t.Fatal(err)
+	}
+
+	response, account := doJSON(t, client, http.MethodGet, server.URL+"/api/v1/app/account", nil)
+	projects, ok := account["projects"].([]any)
+	if response.StatusCode != http.StatusOK || !ok || len(projects) != 1 {
+		t.Fatalf("account projects: status=%d projects=%v body=%v", response.StatusCode, projects, account)
+	}
+	project, ok := projects[0].(map[string]any)
+	if !ok || project["id"] != float64(remoteID) || project["name"] != "akari" || project["published"] != true {
+		t.Fatalf("account project = %#v, want published akari project %d", projects[0], remoteID)
+	}
+}
+
 func TestSessionsAPIRejectsInvalidCursorValues(t *testing.T) {
 	t.Parallel()
 	server, _ := newTestServer(t)

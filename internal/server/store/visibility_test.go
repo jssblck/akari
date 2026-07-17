@@ -150,6 +150,16 @@ func TestPublishUnpublishProjectOverview(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := st.UpsertProject(ctx, "local:grace:C:/work/scratch", "grace", "", "", "scratch", "standalone"); err != nil {
+		t.Fatal(err)
+	}
+	publications, err := st.ListProjectPublications(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(publications) != 1 || publications[0].ID != projectID || publications[0].OverviewPublic {
+		t.Fatalf("fresh project publications = %+v, want one private remote project", publications)
+	}
 
 	// A fresh project is not public; Project reports the gate as false and the public
 	// lookup finds nothing.
@@ -169,6 +179,10 @@ func TestPublishUnpublishProjectOverview(t *testing.T) {
 	}
 	if p, err := st.Project(ctx, projectID); err != nil || !p.OverviewPublic {
 		t.Fatalf("Project after publish err=%v public=%v, want true", err, p.OverviewPublic)
+	}
+	publications, err = st.ListProjectPublications(ctx)
+	if err != nil || len(publications) != 1 || !publications[0].OverviewPublic {
+		t.Fatalf("published project publications = %+v err=%v", publications, err)
 	}
 	// The projects-index rollup reports the same flag as the single-project read, so the
 	// two projections of the public gate cannot drift.

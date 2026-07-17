@@ -1,6 +1,5 @@
-import { ArrowSquareOutIcon } from "@phosphor-icons/react";
 import { type ReactNode, useState } from "react";
-import { useOutletContext, useSearchParams } from "react-router-dom";
+import { useSearchParams } from "react-router-dom";
 
 import { useAPI } from "../api";
 import {
@@ -18,14 +17,7 @@ import {
   formatTokens,
 } from "../format";
 import "../overview.css";
-import { withBase } from "../base";
-import type {
-  Analytics,
-  Breakdown,
-  OverviewResponse,
-  User,
-  Viewer,
-} from "../types";
+import type { Analytics, Breakdown, OverviewResponse, User } from "../types";
 
 // formatSavings mirrors the server's FmtSavings: a non-negative saving reads
 // "saved $X", and the rare negative (cache written but never re-read enough
@@ -290,32 +282,11 @@ function AccountFilter({ users }: { users: User[] }) {
 }
 
 export function OverviewPage() {
-  const viewer = useOutletContext<Viewer>();
   const [params] = useSearchParams();
   const path = `/api/v1/app/overview?${params.toString()}`;
   const state = useAPI<OverviewResponse>(path);
   return (
     <div className="page">
-      {viewer.overview_public && viewer.username ? (
-        // A second entry point to the publicity control, so a published overview
-        // is discoverable from the overview itself and not only buried in the
-        // account settings. The chip links to the public view (scoped to this
-        // one user), and Manage jumps to the account control to toggle it off.
-        <div className="overview-public-badge">
-          <a
-            className="tag public"
-            href={withBase(`/u/${encodeURIComponent(viewer.username)}`)}
-            target="_blank"
-            rel="noopener"
-            title="Open the public page in a new tab"
-          >
-            public <ArrowSquareOutIcon size={10} />
-          </a>
-          <a className="muted-link" href={withBase("/account#publicity")}>
-            Manage
-          </a>
-        </div>
-      ) : null}
       <AsyncView state={state}>
         {(data) => (
           <AnalyticsPanel

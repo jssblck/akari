@@ -200,10 +200,6 @@
 }
 
 @media (max-width: 780px) {
-  .project-head .head-actions > .button,
-  .project-head .head-actions > .tag.public {
-    display: none;
-  }
   .project-sessions {
     overflow: visible;
     padding: 0;

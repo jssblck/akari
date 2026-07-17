@@ -412,6 +412,11 @@ func (s *Server) handleAPIAccount(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "load connections")
 		return
 	}
+	projects, err := s.Store.ListProjectPublications(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "load project publications")
+		return
+	}
 	var invites []store.Invite
 	if user.IsAdmin {
 		invites, err = s.Store.ListInvites(r.Context())
@@ -423,7 +428,8 @@ func (s *Server) handleAPIAccount(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, accountResponse{
 		User: appViewer{Authenticated: true, UserID: user.ID, Username: user.Username,
 			IsAdmin: user.IsAdmin, OverviewPublic: user.OverviewPublic},
-		Tokens: accountTokenDTOs(tokens), Connections: oauthGrantDTOs(grants), Invites: accountInviteDTOs(invites),
+		Projects: accountProjectDTOs(projects), Tokens: accountTokenDTOs(tokens),
+		Connections: oauthGrantDTOs(grants), Invites: accountInviteDTOs(invites),
 		Reparse: s.worker.FleetStatus(r.Context()),
 	})
 }

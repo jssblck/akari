@@ -9,6 +9,43 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// ProjectPublication is the account settings read model for repository overview
+// pages. It omits analytics rollups so loading account settings does not
+// aggregate the session corpus just to populate a selector.
+type ProjectPublication struct {
+	ID             int64
+	DisplayName    string
+	RemoteKey      string
+	OverviewPublic bool
+}
+
+// ListProjectPublications returns repository projects in stable display order.
+// Standalone and orphaned folders are excluded because their machine-specific
+// paths do not identify shareable repositories.
+func (s *Store) ListProjectPublications(ctx context.Context) ([]ProjectPublication, error) {
+	rows, err := s.Pool.Query(ctx,
+		`SELECT id, display_name, remote_key, overview_public
+		   FROM projects
+		  WHERE kind = 'remote'
+		  ORDER BY lower(COALESCE(NULLIF(display_name, ''), remote_key)), id`)
+	if err != nil {
+		return nil, fmt.Errorf("list project publications: %w", err)
+	}
+	defer rows.Close()
+	var projects []ProjectPublication
+	for rows.Next() {
+		var project ProjectPublication
+		if err := rows.Scan(&project.ID, &project.DisplayName, &project.RemoteKey, &project.OverviewPublic); err != nil {
+			return nil, fmt.Errorf("scan project publication: %w", err)
+		}
+		projects = append(projects, project)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list project publications: %w", err)
+	}
+	return projects, nil
+}
+
 // PublishSession marks a session public and returns its public id, minting a new
 // one only if it had none. The owner check is folded into the WHERE clause, so a
 // session that does not belong to the user returns ErrNotFound and is untouched.

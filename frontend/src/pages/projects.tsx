@@ -7,12 +7,11 @@ import {
   useSearchParams,
 } from "react-router-dom";
 
-import { request, useAPI } from "../api";
+import { useAPI } from "../api";
 import { AsyncView } from "../components/async-view";
 import { ActivityBars } from "../components/charts";
 import { ToolsInstrument } from "../components/insights/tools";
 import { TooltipHost } from "../components/insights/tooltip";
-import { attempt } from "../components/notices";
 import { RangeTabs } from "../components/range-tabs";
 import { stripPromptPreamble } from "../components/session-quality";
 import { SessionGrade, SessionOutcome } from "../components/session-signals";
@@ -38,8 +37,7 @@ import { AnalyticsPanel } from "./overview";
 
 // isLocalKind mirrors the server's IsLocalKind: a standalone or orphaned
 // project has no git remote, so it groups and labels apart from a repository
-// everywhere the UI distinguishes the two (the projects ledger, the
-// publicity control, the session filter facets).
+// in the projects ledger and session filter facets.
 function isLocalKind(kind: string): boolean {
   return kind === "standalone" || kind === "orphaned";
 }
@@ -556,70 +554,18 @@ export function ProjectPage() {
       <AsyncView state={state}>
         {(data) => {
           const insights = normalizeInsights(data.insights);
-          const local = isLocalKind(data.project.Kind);
           const remainderTokens =
             data.remainder.Input +
             data.remainder.Output +
             data.remainder.CacheRead +
             data.remainder.CacheWrite;
-          const togglePublicity = async () => {
-            const next = !data.project.OverviewPublic;
-            const ok = await attempt(
-              request(`/api/v1/app/projects/${data.project.ID}/publication`, {
-                method: "PUT",
-                body: JSON.stringify({ published: next }),
-              }),
-              next
-                ? "Project overview published."
-                : "Project overview made private.",
-            );
-            if (ok) window.location.reload();
-          };
           return (
             <>
-              <header className="page-head project-head">
-                <div>
-                  <span className="crumb">
-                    <Link to="/projects">Projects</Link> /{" "}
-                    {data.project.Host || "local"}
-                  </span>
-                  <h1>{projectLabel(data.project)}</h1>
-                  <p>{data.project.RemoteKey}</p>
-                </div>
-                <div className="head-actions">
-                  {!local ? (
-                    data.project.OverviewPublic ? (
-                      <>
-                        <a
-                          className="tag public"
-                          href={withBase(`/p/${data.project.ID}`)}
-                          target="_blank"
-                          rel="noopener"
-                          title="Open the public page in a new tab"
-                        >
-                          public <ArrowSquareOutIcon size={10} />
-                        </a>
-                        <button
-                          type="button"
-                          className="button secondary"
-                          onClick={togglePublicity}
-                          title="Hide the public page. The URL is the project id, so making it public again brings the same link back."
-                        >
-                          Make private
-                        </button>
-                      </>
-                    ) : (
-                      <button
-                        type="button"
-                        className="button secondary"
-                        onClick={togglePublicity}
-                        title="Anyone can read this project's usage overview while it is public. Sessions stay private."
-                      >
-                        Make overview public
-                      </button>
-                    )
-                  ) : null}
-                </div>
+              <header className="page-head">
+                <span className="crumb">
+                  <Link to="/projects">Projects</Link> /{" "}
+                  {projectLabel(data.project)}
+                </span>
               </header>
               <AnalyticsPanel
                 analytics={data.analytics}

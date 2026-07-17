@@ -1637,9 +1637,17 @@ export interface components {
             RedeemedAt: string | null;
             RedeemedBy: string | null;
         };
+        AccountProject: {
+            /** Format: int64 */
+            id: number;
+            name: string;
+            published: boolean;
+            remote_key: string;
+        };
         AccountResponse: {
             connections: components["schemas"]["OAuthGrant"][] | null;
             invites: components["schemas"]["AccountInvite"][] | null;
+            projects: components["schemas"]["AccountProject"][] | null;
             reparse: components["schemas"]["Status"];
             tokens: components["schemas"]["AccountToken"][] | null;
             user: components["schemas"]["Viewer"];
