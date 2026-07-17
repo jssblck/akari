@@ -124,6 +124,31 @@
         ],
         "type": "object"
       },
+      "AccountProject": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "published": {
+            "type": "boolean"
+          },
+          "remote_key": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "published",
+          "remote_key"
+        ],
+        "type": "object"
+      },
       "AccountResponse": {
         "additionalProperties": false,
         "properties": {
@@ -139,6 +164,15 @@
           "invites": {
             "items": {
               "$ref": "#/components/schemas/AccountInvite"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "projects": {
+            "items": {
+              "$ref": "#/components/schemas/AccountProject"
             },
             "type": [
               "array",
@@ -164,6 +198,7 @@
         "required": [
           "connections",
           "invites",
+          "projects",
           "reparse",
           "tokens",
           "user"

@@ -154,6 +154,7 @@ func browserContractSchemas(t *testing.T) map[string]any {
 	names := map[reflect.Type]string{
 		reflect.TypeOf(appViewer{}):                  "Viewer",
 		reflect.TypeOf(overviewUserDTO{}):            "OverviewUser",
+		reflect.TypeOf(accountProjectDTO{}):          "AccountProject",
 		reflect.TypeOf(accountTokenDTO{}):            "AccountToken",
 		reflect.TypeOf(oauthGrantDTO{}):              "OAuthGrant",
 		reflect.TypeOf(accountInviteDTO{}):           "AccountInvite",

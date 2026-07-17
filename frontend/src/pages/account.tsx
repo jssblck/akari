@@ -11,6 +11,7 @@ import { AsyncView } from "../components/async-view";
 import { attempt, notify } from "../components/notices";
 import { formatTime } from "../format";
 import type {
+  AccountProject,
   AccountResponse,
   Connection,
   CreatedInviteResponse,
@@ -43,6 +44,10 @@ export function AccountPage() {
           <div className="account-sections">
             <TokenSection tokens={data.tokens ?? []} refresh={refresh} />
             <PublicationSection user={data.user} refresh={refresh} />
+            <ProjectPublicationSection
+              projects={data.projects ?? []}
+              refresh={refresh}
+            />
             <ConnectionSection
               connections={data.connections ?? []}
               refresh={refresh}
@@ -184,7 +189,6 @@ function PublicationSection({
   user: Viewer;
   refresh: () => void;
 }) {
-  const [copied, setCopied] = useState(false);
   const publicURL = absoluteURL(
     `/u/${encodeURIComponent(user.username ?? "")}`,
   );
@@ -198,32 +202,10 @@ function PublicationSection({
       </div>
       <div className="settings-control">
         <div className="settings-row">
-          <div>
+          <div className="publication-summary">
             <strong>{user.overview_public ? "Published" : "Private"}</strong>
             {user.overview_public ? (
-              <span className="share-link-row">
-                <a
-                  className="share-link"
-                  href={publicURL}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  {publicURL}
-                </a>
-                <button
-                  type="button"
-                  className="icon-link"
-                  aria-label="Copy public link"
-                  title="Copy link"
-                  onClick={async () => {
-                    await navigator.clipboard.writeText(publicURL);
-                    setCopied(true);
-                    setTimeout(() => setCopied(false), 1200);
-                  }}
-                >
-                  {copied ? <CheckIcon /> : <CopyIcon />}
-                </button>
-              </span>
+              <PublicLink url={publicURL} copyLabel="Copy public link" />
             ) : (
               <span>No public overview.</span>
             )}
@@ -248,6 +230,149 @@ function PublicationSection({
           >
             {user.overview_public ? "Make private" : "Publish"}
           </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function PublicLink({ url, copyLabel }: { url: string; copyLabel: string }) {
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const timeout = window.setTimeout(() => setCopied(false), 1200);
+    return () => window.clearTimeout(timeout);
+  }, [copied]);
+  return (
+    <span className="share-link-row">
+      <a className="share-link" href={url} target="_blank" rel="noreferrer">
+        {url}
+      </a>
+      <button
+        type="button"
+        className="icon-link"
+        aria-label={copyLabel}
+        title="Copy link"
+        onClick={async () => {
+          await navigator.clipboard.writeText(url);
+          setCopied(true);
+        }}
+      >
+        {copied ? <CheckIcon /> : <CopyIcon />}
+      </button>
+    </span>
+  );
+}
+
+function ProjectPublicationSection({
+  projects,
+  refresh,
+}: {
+  projects: AccountProject[];
+  refresh: () => void;
+}) {
+  const [selectedProjectID, setSelectedProjectID] = useState("");
+  const unpublishedProjects = projects.filter((project) => !project.published);
+  const publishedProjects = projects.filter((project) => project.published);
+  return (
+    <section className="settings-section">
+      <div className="settings-copy">
+        <h2>Public project overviews</h2>
+        <p>
+          Publish aggregate usage for repository projects. Session content stays
+          private.
+        </p>
+      </div>
+      <div className="settings-control">
+        <form
+          className="inline-form project-publication-form"
+          onSubmit={async (event) => {
+            event.preventDefault();
+            const project = unpublishedProjects.find(
+              (candidate) => String(candidate.id) === selectedProjectID,
+            );
+            if (!project) return;
+            if (
+              await attempt(
+                request(`/api/v1/app/projects/${project.id}/publication`, {
+                  method: "PUT",
+                  body: JSON.stringify({ published: true }),
+                }),
+                "Project overview published",
+              )
+            ) {
+              setSelectedProjectID("");
+              refresh();
+            }
+          }}
+        >
+          <select
+            aria-label="Project to publish"
+            value={selectedProjectID}
+            disabled={unpublishedProjects.length === 0}
+            onChange={(event) => setSelectedProjectID(event.target.value)}
+          >
+            <option value="">
+              {unpublishedProjects.length === 0
+                ? "No private projects available"
+                : "Select a project"}
+            </option>
+            {unpublishedProjects.map((project) => (
+              <option key={project.id} value={String(project.id)}>
+                {project.name === project.remote_key
+                  ? project.name
+                  : `${project.name} - ${project.remote_key}`}
+              </option>
+            ))}
+          </select>
+          <button
+            className="button"
+            type="submit"
+            disabled={!selectedProjectID}
+          >
+            Publish
+          </button>
+        </form>
+        <div className="settings-list project-publication-list">
+          {publishedProjects.length === 0 ? (
+            <p className="empty-inline">No public project overviews.</p>
+          ) : (
+            publishedProjects.map((project) => {
+              const publicURL = absoluteURL(`/p/${project.id}`);
+              return (
+                <div className="settings-row" key={project.id}>
+                  <div className="publication-summary">
+                    <strong>{project.name}</strong>
+                    <PublicLink
+                      url={publicURL}
+                      copyLabel={`Copy public link for ${project.name}`}
+                    />
+                  </div>
+                  <button
+                    className="button secondary"
+                    type="button"
+                    onClick={async () => {
+                      if (
+                        await attempt(
+                          request(
+                            `/api/v1/app/projects/${project.id}/publication`,
+                            {
+                              method: "PUT",
+                              body: JSON.stringify({ published: false }),
+                            },
+                          ),
+                          "Project overview made private",
+                        )
+                      )
+                        refresh();
+                    }}
+                  >
+                    Make private
+                  </button>
+                </div>
+              );
+            })
+          )}
         </div>
       </div>
     </section>

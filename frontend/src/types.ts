@@ -70,6 +70,7 @@ export type FacetCount = Schema["FacetCount"];
 export type ProjectFacet = Schema["ProjectFacet"];
 
 export type AccountResponse = Schema["AccountResponse"];
+export type AccountProject = Schema["AccountProject"];
 export type OverviewResponse = Schema["OverviewResponse"];
 export type InsightsResponse = Schema["InsightsResponse"];
 export type ProjectsResponse = Schema["ProjectsResponse"];
