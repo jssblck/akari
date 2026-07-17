@@ -1,5 +1,5 @@
 import SwaggerUI from "swagger-ui-react";
-import "swagger-ui-react/swagger-ui.css";
+import "./api-docs.css";
 
 import { withBase } from "../base";
 import { PublicShell } from "../components/public-shell";

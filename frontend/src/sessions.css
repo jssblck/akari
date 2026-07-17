@@ -73,7 +73,6 @@
   gap: 6px;
   padding: 6px 8px;
   color: var(--muted);
-  cursor: pointer;
   font-size: 12px;
   white-space: nowrap;
 }
@@ -120,7 +119,6 @@
   background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: 4px;
-  cursor: pointer;
   font-size: 11px;
 }
 .fchip:hover {
@@ -136,7 +134,6 @@
 .active-filters .clear {
   color: var(--muted);
   font-size: 11px;
-  cursor: pointer;
   background: none;
   border: 0;
 }
@@ -342,7 +339,6 @@
   color: var(--lilac);
   background: none;
   border: 0;
-  cursor: pointer;
   font-size: 12px;
 }
 .showmore:hover {
@@ -615,7 +611,6 @@ main:has(> .session-page) {
   gap: 8px;
   padding: 4px 0;
   color: var(--text);
-  cursor: pointer;
   list-style: none;
 }
 .subagents-fold > summary::-webkit-details-marker {
@@ -651,10 +646,6 @@ main:has(> .session-page) {
 .sub-verdict {
   white-space: nowrap;
 }
-tr.row-link {
-  cursor: pointer;
-}
-
 /* ---- Flow ribbon: the turn minimap ---- */
 /* The ticks squeeze to fit one row even in a dense session (Fix dense turn
    minimap overflow, 46441c1): a gradient background paints the tick's color over
@@ -897,7 +888,6 @@ body.modal-open {
   color: var(--faint);
   background: transparent;
   border: none;
-  cursor: pointer;
   font-size: 14px;
 }
 .insp-close:hover {
@@ -915,7 +905,6 @@ body.modal-open {
   background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: 4px;
-  cursor: pointer;
   font-size: 12px;
 }
 .seg-group .seg.active {
@@ -961,7 +950,6 @@ body.modal-open {
   background: var(--surface);
   border: 1px dashed var(--border);
   border-radius: 6px;
-  cursor: pointer;
   font-size: 13px;
 }
 .transcript-earlier:hover {
@@ -1073,7 +1061,6 @@ body.modal-open {
   color: var(--muted);
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  cursor: pointer;
   font-size: 12px;
   user-select: none;
 }
@@ -1205,7 +1192,6 @@ a.attachment.file {
   font: inherit;
 }
 button.stamp {
-  cursor: pointer;
   transition:
     background 120ms ease,
     color 120ms ease,
