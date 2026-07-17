@@ -518,6 +518,12 @@ main:has(> .session-page) {
   align-items: start;
   gap: 16px;
 }
+/* OutlineRail renders nothing until parsing produces outline entries. Remove
+   the unused rail track in that state so the transcript is not auto-placed into
+   the 220px rail column. */
+.session-grid:not(:has(> .outline-rail)) {
+  grid-template-columns: minmax(0, 1fr);
+}
 .session-maincol {
   min-width: 0;
 }
