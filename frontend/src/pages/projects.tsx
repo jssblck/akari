@@ -485,7 +485,6 @@ function ProjectToolbar({ facets }: { facets: ProjectResponse["facets"] }) {
   return (
     <fieldset className="filter-row">
       <legend className="sr-only">Session filters</legend>
-      <span className="label">Filter</span>
       <select
         aria-label="Agent"
         value={params.get("agent") ?? ""}
@@ -635,10 +634,7 @@ export function ProjectPage() {
               />
               <section className="instrument compact project-sessions">
                 <div className="section-head">
-                  <div>
-                    <h2>Sessions</h2>
-                    <p>Usage-bearing sessions inside the selected window.</p>
-                  </div>
+                  <h2>Sessions</h2>
                 </div>
                 {(data.sessions ?? []).length === 0 ? (
                   <p className="empty-inline">
