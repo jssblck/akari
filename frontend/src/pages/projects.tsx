@@ -472,7 +472,8 @@ export function ProjectsPage() {
 // ProjectToolbar is the project page's session filter: three auto-applying
 // selects (Agent, User, Machine) that narrow the whole scoped view (the usage
 // panel and the session table both re-fetch under the chosen facets), reading
-// and writing the same URL params the project API already accepts.
+// and writing the same URL params the project API already accepts. It renders
+// beside the activity range because those controls describe the same scope.
 function ProjectToolbar({ facets }: { facets: ProjectResponse["facets"] }) {
   const [params, setParams] = useSearchParams();
   const update = (key: string, value: string) => {
@@ -587,7 +588,6 @@ export function ProjectPage() {
                   <p>{data.project.RemoteKey}</p>
                 </div>
                 <div className="head-actions">
-                  <RangeTabs ranges={data.ranges ?? []} active={data.range} />
                   {!local ? (
                     data.project.OverviewPublic ? (
                       <>
@@ -622,10 +622,17 @@ export function ProjectPage() {
                   ) : null}
                 </div>
               </header>
-              <div className="project-session-filters">
-                <ProjectToolbar facets={data.facets} />
-              </div>
-              <AnalyticsPanel analytics={data.analytics} showUsers />
+              <AnalyticsPanel
+                analytics={data.analytics}
+                showUsers
+                mobileActivity="range-only"
+                activityControls={
+                  <>
+                    <ProjectToolbar facets={data.facets} />
+                    <RangeTabs ranges={data.ranges ?? []} active={data.range} />
+                  </>
+                }
+              />
               <section className="instrument compact project-sessions">
                 <div className="section-head">
                   <div>

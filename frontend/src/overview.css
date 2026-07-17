@@ -95,6 +95,7 @@
   }
   .activity-panel.range-only .section-head h2,
   .activity-panel.range-only .activity-controls > select,
+  .activity-panel.range-only .activity-controls > .filter-row,
   .activity-panel.range-only .heatmap {
     display: none;
   }
