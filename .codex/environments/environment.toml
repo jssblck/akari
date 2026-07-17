@@ -4,7 +4,7 @@ name = "akari"
 [setup]
 script = '''
 go generate ./...
-eph up postgres
+eph check
 '''
 
 [cleanup]
