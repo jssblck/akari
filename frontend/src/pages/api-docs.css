@@ -1,0 +1,6 @@
+@import "swagger-ui-react/swagger-ui.css" layer(swagger);
+
+.swagger-ui,
+.swagger-ui * {
+  cursor: default;
+}

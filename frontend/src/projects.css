@@ -174,13 +174,6 @@
   margin-top: 0;
 }
 
-/* The whole row is a click target (see ProjectRow's guarded onClick), but the
-   project name stays a real anchor so a modifier-click or middle-click still
-   opens it the native way instead of being swallowed by the row handler. */
-.row-link {
-  cursor: pointer;
-}
-
 /* The session table's remainder footer reads as a summary line, not another
    row of data, so it recedes a step from the rows above it. */
 .remainder td {

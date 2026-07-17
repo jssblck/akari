@@ -33,7 +33,6 @@
     color 0.18s ease;
   flex: none;
   white-space: nowrap;
-  cursor: pointer;
 }
 
 .tabstrip button[role="tab"]:hover {
@@ -238,7 +237,6 @@
   font-family: Geist, sans-serif;
   display: block;
   width: 100%;
-  cursor: pointer;
 }
 
 .mini-multiple:hover {
@@ -278,14 +276,8 @@
   cursor: default;
 }
 
-/* Only the drillable cells carry a click handler; the deepest-level (file)
-   cells render as buttons too, for keyboard focus and an accessible name,
-   but do nothing on activation, so they keep the base rule's plain cursor
-   instead of implying an action that isn't there. */
-.treemap-cell.drillable {
-  cursor: pointer;
-}
-
+/* Only cells with a click handler brighten on hover; deepest-level file cells
+   remain buttons for keyboard focus and an accessible name. */
 .treemap-cell.drillable:hover {
   filter: brightness(1.18);
 }
@@ -338,7 +330,6 @@
   border: none;
   padding: 1px 3px;
   border-radius: 3px;
-  cursor: pointer;
 }
 
 .treemap-breadcrumb button:hover {

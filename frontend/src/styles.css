@@ -66,6 +66,7 @@
 
 * {
   box-sizing: border-box;
+  cursor: default;
 }
 .sr-only {
   position: absolute;
@@ -186,7 +187,6 @@ button {
   border-radius: 4px;
   background: transparent;
   text-align: left;
-  cursor: pointer;
 }
 .sidebar nav a:hover,
 .sidebar-foot a:hover,
@@ -313,7 +313,6 @@ code {
   border: 1px solid var(--lilac);
   border-radius: 4px;
   font-weight: 500;
-  cursor: pointer;
   transition:
     background-color 140ms ease,
     border-color 140ms ease,
@@ -349,7 +348,6 @@ code {
   background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: 4px;
-  cursor: pointer;
 }
 .icon-link:hover {
   color: var(--text);
@@ -378,7 +376,6 @@ code {
   background: transparent;
   border: 0;
   border-radius: 3px;
-  cursor: pointer;
   font-size: 12px;
 }
 .segmented button:hover {
@@ -873,7 +870,6 @@ select:focus {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 5px;
-  cursor: pointer;
 }
 .earlier:hover {
   color: var(--text);
@@ -936,7 +932,6 @@ select:focus {
   display: flex;
   align-items: center;
   gap: 7px;
-  cursor: pointer;
   list-style: none;
 }
 .thinking summary::-webkit-details-marker,
@@ -1502,7 +1497,6 @@ select:focus {
     background: transparent;
     border: 1px solid transparent;
     border-radius: 4px;
-    cursor: pointer;
     transition:
       color 120ms ease,
       background 120ms ease,
@@ -1788,7 +1782,6 @@ select:focus {
   border: 0;
   font-size: 15px;
   line-height: 1;
-  cursor: pointer;
 }
 .notice button:hover {
   color: var(--text);
