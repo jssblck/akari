@@ -605,6 +605,11 @@ code {
   flex-wrap: wrap;
   justify-content: flex-end;
 }
+.activity-controls .filter-row {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
 .activity-controls.standalone {
   margin-bottom: 18px;
 }

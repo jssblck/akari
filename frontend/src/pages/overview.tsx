@@ -51,9 +51,8 @@ export function AnalyticsPanel({
   // the default off so the accounts that ran in a repo stay private.
   showUsers?: boolean;
   // activityControls render in the Daily activity header row, directly under
-  // the stat strip. The overview page slots its range picker and account
-  // filter here; pages that keep those controls in their own header pass
-  // nothing.
+  // the stat strip. Scoped overview pages slot their range and facet filters
+  // here so the controls stay attached to the chart they configure.
   activityControls?: ReactNode;
   mobileActivity?: "full" | "range-only";
 }) {

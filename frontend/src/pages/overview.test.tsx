@@ -79,7 +79,7 @@ describe("AnalyticsPanel", () => {
     expect(screen.getByText("claude")).toBeInTheDocument();
   });
 
-  it("marks the activity panel for range-only mobile presentation", () => {
+  it("places scoped controls in the activity header and marks its mobile presentation", () => {
     render(
       <AnalyticsPanel
         analytics={analytics()}
@@ -88,9 +88,9 @@ describe("AnalyticsPanel", () => {
       />,
     );
 
-    expect(screen.getByText("Daily activity").closest("section")).toHaveClass(
-      "range-only",
-    );
+    const activityPanel = screen.getByText("Daily activity").closest("section");
+    expect(activityPanel).toHaveClass("range-only");
+    expect(activityPanel).toContainElement(screen.getByText("Trailing window"));
   });
 
   it("hides the Users breakdown by default even with users present", () => {

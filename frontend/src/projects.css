@@ -200,8 +200,6 @@
 }
 
 @media (max-width: 780px) {
-  .project-session-filters,
-  .project-page .activity-panel,
   .project-head .head-actions > .button,
   .project-head .head-actions > .tag.public {
     display: none;
