@@ -9,7 +9,7 @@ package web
 // reasoning is the model's hidden-deliberation class, shown only when a slice carries it
 // (codex and pi report it; Claude and the session/project rollups do not, and pass 0), so
 // the line appears only where a real figure exists rather than reading a hardcoded zero.
-templ tokenCard(total, in, out, cacheRead, cacheWrite, reasoning int64, cost float64, incomplete bool) {
+templ tokenCard(total, in, out, cacheRead, cacheWrite, reasoning int64, cost float64) {
 	<span class="tok-tip" role="tooltip">
 		<span class="tt-total">{ FmtTokens(total) } tokens</span>
 		<dl class="tt-grid">
@@ -26,6 +26,6 @@ templ tokenCard(total, in, out, cacheRead, cacheWrite, reasoning int64, cost flo
 				<dd>{ FmtTokens(reasoning) }</dd>
 			}
 		</dl>
-		<span class="tt-cost">{ FmtCost(cost, incomplete) }</span>
+		<span class="tt-cost">{ FmtCost(cost) }</span>
 	</span>
 }

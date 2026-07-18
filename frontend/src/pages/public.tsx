@@ -166,10 +166,7 @@ export function PublicSessionPage() {
                   label="Tokens"
                   value={formatCount(sessionTokens(detail))}
                 />
-                <Stat
-                  label="Cost"
-                  value={formatCost(detail.TotalCostUSD, detail.CostIncomplete)}
-                />
+                <Stat label="Cost" value={formatCost(detail.TotalCostUSD)} />
                 <Stat label="Agent" value={detail.Agent} />
               </StatStrip>
               {subagents.length > 0 ? (

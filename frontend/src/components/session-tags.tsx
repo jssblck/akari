@@ -108,20 +108,18 @@ export function FallbackTag({ count }: { count: number }) {
 export function FanoutTag({
   subagentCount,
   costUSD,
-  costIncomplete,
 }: {
   subagentCount: number;
   costUSD: number;
-  costIncomplete: boolean;
 }) {
   if (subagentCount <= 0) return null;
   const unit = subagentCount === 1 ? "subagent" : "subagents";
   return (
     <span
       className="tag fanout"
-      title={`Whole work item: ${formatCost(costUSD, costIncomplete)} across ${subagentCount} ${unit} fanned out (the row's own cost is the root turn's alone)`}
+      title={`Whole work item: ${formatCost(costUSD)} across ${subagentCount} ${unit} fanned out (the row's own cost is the root turn's alone)`}
     >
-      {subagentCount} {unit} · {formatCost(costUSD, costIncomplete)}
+      {subagentCount} {unit} · {formatCost(costUSD)}
     </span>
   );
 }

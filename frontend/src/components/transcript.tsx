@@ -439,10 +439,7 @@ function MessageTurn({
                   {message.Usage.CostUSD !== null &&
                   message.Usage.CostUSD !== undefined ? (
                     <span className="stamp-cost mono">
-                      {formatCost(
-                        message.Usage.CostUSD,
-                        message.Usage.CostIncomplete,
-                      )}
+                      {formatCost(message.Usage.CostUSD)}
                     </span>
                   ) : null}
                 </>

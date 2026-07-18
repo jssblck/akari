@@ -88,7 +88,7 @@ type ProjectSessionSummary struct {
 // match than the table caps at. It carries all four token classes (not just a total)
 // so the footer can show the same breakdown card every other token figure does, and
 // its CostIncomplete is a bool_or over the hidden sessions alone, so the footer flags
-// "$X+" only when a hidden session is the unpriced one, never because a visible row was.
+// incomplete only when a hidden session is the unpriced one, never because a visible row was.
 type SessionRemainder struct {
 	Sessions       int
 	Input          int64

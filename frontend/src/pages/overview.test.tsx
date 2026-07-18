@@ -79,6 +79,21 @@ describe("AnalyticsPanel", () => {
     expect(screen.getByText("claude")).toBeInTheDocument();
   });
 
+  it("does not mark incomplete costs with a plus", () => {
+    render(
+      <AnalyticsPanel
+        analytics={analytics({
+          CostIncomplete: true,
+          Models: [breakdown("unpriced", { CostIncomplete: true })],
+        })}
+      />,
+    );
+
+    expect(screen.getByText("$12.5")).toBeInTheDocument();
+    expect(screen.getAllByText("$1.00").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/\$[\d.]+\+/)).not.toBeInTheDocument();
+  });
+
   it("places scoped controls in the activity header and marks its mobile presentation", () => {
     render(
       <AnalyticsPanel

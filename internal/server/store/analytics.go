@@ -40,8 +40,7 @@ type Breakdown struct {
 	Sessions  int
 	// CostIncomplete is true when this slice folded in a usage event that carried
 	// real token volume but no price (an unpriced model), so the slice's cost is a
-	// lower bound. It lets a by-model or by-agent row show the same "$X+" marker the
-	// per-session figures use rather than an exact cost that understates the slice.
+	// lower bound. API consumers can distinguish that estimate from a complete cost.
 	CostIncomplete bool
 }
 
@@ -81,10 +80,8 @@ type Analytics struct {
 	TotalReasoning int64
 	Sessions       int
 	// CostIncomplete is true when any usage event in the window carried token
-	// volume but no price, so TotalCost is a lower bound. The headline Cost tile
-	// shows the "$X+" marker when set, matching how a single session flags an
-	// incomplete cost. It is the OR of the by-agent slices, the same rows the
-	// headline totals are summed from.
+	// volume but no price, so TotalCost is a lower bound. It is the OR of the
+	// by-agent slices, the same rows the headline totals are summed from.
 	CostIncomplete bool
 	// Cache is the prompt-cache effectiveness over the same scope: hit rate, the
 	// dollars caching saved, and the prompt-token split. It reads from the same dated
@@ -501,11 +498,12 @@ func (s *Store) analyticsByModel(ctx context.Context, q querier, f AnalyticsFilt
 	// occurred_at IS NOT NULL matches the series and the by-agent split, so the
 	// three reconcile; see Analytics. No model <> '' filter though: usage that
 	// carries no model id still has to be in the split, or the by-model rows would
-	// sum to less than the headline. An unnamed model groups into its own row and
-	// FoldUnknownModels collapses it (with every other unpriced model) into
-	// "Other", so it counts without leaking a blank row.
+	// sum to less than the headline. A NULL cost is the persisted proof that pricing
+	// was unavailable for that usage event, so those models collapse into one
+	// "Other" row before aggregation. Grouping in SQL keeps the row's distinct
+	// session count correct when one session used several unpriced models.
 	rows, err := q.Query(ctx,
-		`SELECT ue.model,
+		`SELECT CASE WHEN ue.cost_usd IS NULL THEN 'Other' ELSE ue.model END AS model,
 		        coalesce(sum(ue.cost_usd), 0),
 		        coalesce(sum(ue.input_tokens), 0),
 		        coalesce(sum(ue.output_tokens), 0),
@@ -517,7 +515,7 @@ func (s *Store) analyticsByModel(ctx context.Context, q querier, f AnalyticsFilt
 		   FROM usage_events ue
 		   JOIN sessions s ON s.id = ue.session_id
 		  WHERE ue.occurred_at IS NOT NULL`+filter+`
-		  GROUP BY ue.model
+		  GROUP BY 1
 		  ORDER BY 2 DESC, coalesce(sum(ue.input_tokens + ue.output_tokens + ue.cache_read_tokens + ue.cache_write_tokens), 0) DESC`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query analytics by model: %w", err)

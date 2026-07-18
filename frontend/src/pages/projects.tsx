@@ -166,7 +166,6 @@ function ProjectTokensCell({ project }: { project: Project }) {
         cacheRead={project.TotalCacheRead}
         cacheWrite={project.TotalCacheWrite}
         costUSD={project.TotalCostUSD}
-        costIncomplete={project.CostIncomplete}
       />
     </HoverTip>
   );
@@ -638,15 +637,11 @@ export function ProjectPage() {
                                   cacheRead={session.TotalCacheRead}
                                   cacheWrite={session.TotalCacheWrite}
                                   costUSD={session.TotalCostUSD}
-                                  costIncomplete={session.CostIncomplete}
                                 />
                               </HoverTip>
                             </td>
                             <td className="num">
-                              {formatCost(
-                                session.TotalCostUSD,
-                                session.CostIncomplete,
-                              )}
+                              {formatCost(session.TotalCostUSD)}
                             </td>
                             <td
                               className="muted"
@@ -683,15 +678,11 @@ export function ProjectPage() {
                                   cacheRead={data.remainder.CacheRead}
                                   cacheWrite={data.remainder.CacheWrite}
                                   costUSD={data.remainder.CostUSD}
-                                  costIncomplete={data.remainder.CostIncomplete}
                                 />
                               </HoverTip>
                             </td>
                             <td className="num">
-                              {formatCost(
-                                data.remainder.CostUSD,
-                                data.remainder.CostIncomplete,
-                              )}
+                              {formatCost(data.remainder.CostUSD)}
                             </td>
                             <td></td>
                             <td className="project-session-signals"></td>

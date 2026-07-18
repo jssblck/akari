@@ -7,20 +7,15 @@ import (
 
 // FmtCost renders a USD cost. Sub-cent costs still show enough precision to be
 // meaningful.
-func FmtCost(usd float64, incomplete bool) string {
-	var s string
+func FmtCost(usd float64) string {
 	switch {
 	case usd == 0:
-		s = "$0"
+		return "$0"
 	case usd < 0.01:
-		s = fmt.Sprintf("$%.4f", usd)
+		return fmt.Sprintf("$%.4f", usd)
 	default:
-		s = fmt.Sprintf("$%.2f", usd)
+		return fmt.Sprintf("$%.2f", usd)
 	}
-	if incomplete {
-		s += "+"
-	}
-	return s
 }
 
 // FmtPercent renders a 0..1 fraction as a whole-number percent, for the cache hit

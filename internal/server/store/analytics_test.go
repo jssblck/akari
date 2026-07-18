@@ -135,7 +135,7 @@ func seedUsageUnpriced(t *testing.T, st *store.Store, sessionID int64, model str
 // propagates the "cost is a lower bound" marker into both aggregate paths the UI
 // reads: the analytics headline and breakdowns, and the projects-index rollup.
 // Without this, a project built partly from unpriced sessions would read an exact
-// "$X" while its own session rows show "$X+".
+// complete cost while its own session rows report an incomplete one.
 func TestCostIncompleteRollsUp(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -706,6 +706,66 @@ func TestAnalyticsRollups(t *testing.T) {
 	if g.Sessions != 2 || len(g.Series) != 3 {
 		t.Errorf("global rollup mismatch: %+v", g)
 	}
+}
+
+// Unpriced models share one row in both overview scopes. The two unknown models
+// in project A deliberately share a session: the folded row must count that
+// session once, not add the source rows' distinct counts after the query.
+func TestAnalyticsFoldsUnpricedModelsIntoOther(t *testing.T) {
+	t.Parallel()
+	st := storetest.NewStore(t)
+	ctx := context.Background()
+
+	admin, err := st.Register(ctx, "grace", "h", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	projectA, err := st.UpsertProject(ctx, "github.com/ada/engine", "github.com", "ada", "engine", "engine", "remote")
+	if err != nil {
+		t.Fatalf("project A: %v", err)
+	}
+	projectB, err := st.UpsertProject(ctx, "github.com/ada/compiler", "github.com", "ada", "compiler", "compiler", "remote")
+	if err != nil {
+		t.Fatalf("project B: %v", err)
+	}
+
+	sessionA := seedSessionWithStats(t, st, admin.ID, projectA, "codex", "a", 0, 0, 0)
+	sessionB := seedSessionWithStats(t, st, admin.ID, projectB, "codex", "b", 0, 0, 0)
+	seedUsage(t, st, sessionA, "gpt-5.5", 1, 100, 20, 0, "priced")
+	seedUsageUnpriced(t, st, sessionA, "unlisted-alpha", 30, 3, "unknown-a")
+	seedUsageUnpriced(t, st, sessionA, "unlisted-beta", 40, 4, "unknown-b")
+	seedUsageUnpriced(t, st, sessionB, "unlisted-gamma", 50, 5, "unknown-c")
+
+	assertModels := func(scope string, got store.Analytics, wantOtherTokens int64, wantOtherSessions int) {
+		t.Helper()
+		var other *store.Breakdown
+		for i := range got.Models {
+			if got.Models[i].Label == "Other" {
+				other = &got.Models[i]
+			}
+			if strings.HasPrefix(got.Models[i].Label, "unlisted-") {
+				t.Errorf("%s leaked unpriced model row: %+v", scope, got.Models[i])
+			}
+		}
+		if other == nil {
+			t.Fatalf("%s models missing Other row: %+v", scope, got.Models)
+		}
+		if other.Tokens() != wantOtherTokens || other.Sessions != wantOtherSessions || !other.CostIncomplete {
+			t.Errorf("%s Other row = %+v, want tokens=%d sessions=%d incomplete", scope, *other, wantOtherTokens, wantOtherSessions)
+		}
+	}
+
+	project, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: projectA})
+	if err != nil {
+		t.Fatalf("project analytics: %v", err)
+	}
+	assertModels("project", project, 77, 1)
+
+	global, err := st.Analytics(ctx, store.AnalyticsFilter{})
+	if err != nil {
+		t.Fatalf("global analytics: %v", err)
+	}
+	assertModels("global", global, 132, 2)
 }
 
 // A non-empty userIDs scopes every rollup to the named users' sessions, leaving

@@ -100,7 +100,7 @@ function GalleryChart({ trends }: { trends: Trends }) {
                       duration <b>{fmtDuration(p.DurationS)}</b>
                     </TooltipRow>
                     <TooltipRow>
-                      cost <b>{formatCost(p.CostUSD, p.CostIncomplete)}</b>
+                      cost <b>{formatCost(p.CostUSD)}</b>
                     </TooltipRow>
                     <TooltipRow>
                       grade <b>{p.Grade || "unscored"}</b>

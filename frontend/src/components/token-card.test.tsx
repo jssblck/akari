@@ -64,20 +64,6 @@ describe("TokenCard", () => {
     );
     expect(screen.getByText("$1.50")).toBeInTheDocument();
   });
-
-  it("appends + to the cost footer when the figure is incomplete", () => {
-    render(
-      <TokenCard
-        input={1}
-        output={1}
-        cacheRead={0}
-        cacheWrite={0}
-        costUSD={1.5}
-        costIncomplete
-      />,
-    );
-    expect(screen.getByText("$1.50+")).toBeInTheDocument();
-  });
 });
 
 describe("HoverTip", () => {

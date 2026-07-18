@@ -142,7 +142,6 @@ export function TokenCard({
   cacheWrite,
   reasoning = 0,
   costUSD,
-  costIncomplete = false,
 }: {
   input: number;
   output: number;
@@ -150,7 +149,6 @@ export function TokenCard({
   cacheWrite: number;
   reasoning?: number;
   costUSD?: number;
-  costIncomplete?: boolean;
 }) {
   return (
     <>
@@ -171,7 +169,7 @@ export function TokenCard({
         ) : null}
       </dl>
       {costUSD !== undefined ? (
-        <div className="tt-cost">{formatCost(costUSD, costIncomplete)}</div>
+        <div className="tt-cost">{formatCost(costUSD)}</div>
       ) : null}
     </>
   );

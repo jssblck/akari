@@ -255,19 +255,16 @@ describe("turn usage / cost / context helpers", () => {
     // CostUSD is typed as a plain number, but a Go nil *float64 still arrives
     // over JSON as null, which is exactly the case turnCostLabel guards.
     const noCost = { ...usage(), CostUSD: null as unknown as number };
-    const label = turnCostLabel(
-      noCost,
-      (v, incomplete) => `$${v}${incomplete ? "+" : ""}`,
-    );
+    const label = turnCostLabel(noCost, (v) => `$${v}`);
     expect(label).toBe("unpriced");
   });
 
   it("formats a priced turn through the given formatter", () => {
     const label = turnCostLabel(
       usage({ CostUSD: 0.5, CostIncomplete: true }),
-      (v, incomplete) => `$${v}${incomplete ? "+" : ""}`,
+      (v) => `$${v}`,
     );
-    expect(label).toBe("$0.5+");
+    expect(label).toBe("$0.5");
   });
 
   it("stamps the context token figure", () => {

@@ -285,7 +285,6 @@ export function EconomicsInstrument({
   const n = trends.BucketStarts.length;
   const e = trends.Economics;
   const gallery = trends.Gallery;
-  const spendMark = e.CostIncomplete ? "+" : "";
   const perDollar = e.TotalSpend > 0 ? e.TotalCacheSavings / e.TotalSpend : 0;
   const perDollarMark =
     e.CacheSavingsIncomplete || e.CostIncomplete ? " partial" : "";
@@ -338,20 +337,11 @@ export function EconomicsInstrument({
         </TabPanel>
         <TabPanel stripId="economics-tabs" tabId="costquality" active={active}>
           <StatStrip>
-            <Stat
-              label="total spend"
-              value={`$${fmtInt(e.TotalSpend)}${spendMark}`}
-            />
-            <Stat
-              label="sunk"
-              value={`$${fmtInt(e.TotalAbandoned)}${spendMark}`}
-            />
+            <Stat label="total spend" value={`$${fmtInt(e.TotalSpend)}`} />
+            <Stat label="sunk" value={`$${fmtInt(e.TotalAbandoned)}`} />
             <Stat
               label="median $ per completed session"
-              value={formatCost(
-                gallery.MedianCompletedCostUSD,
-                gallery.CostIncomplete,
-              )}
+              value={formatCost(gallery.MedianCompletedCostUSD)}
             />
           </StatStrip>
           <CostQualityChart

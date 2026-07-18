@@ -23,8 +23,7 @@ import type { Analytics, Breakdown, OverviewResponse, User } from "../types";
 // "saved $X", and the rare negative (cache written but never re-read enough
 // to repay the write premium) reads "cost $X" on its magnitude, so the Cache
 // tile stays honest without a stray minus sign. Incomplete appends "partial"
-// rather than the cost figures' "$X+" lower-bound marker, because an omitted
-// model's saving can run either direction, not just under the shown value.
+// because an omitted model's saving can run either direction.
 function formatSavings(usd: number, incomplete: boolean): string {
   const verb = usd < 0 ? "cost " : "saved ";
   const amount = formatCost(Math.abs(usd));
@@ -82,10 +81,7 @@ export function AnalyticsPanel({
   return (
     <>
       <StatStrip>
-        <Stat
-          label="Cost"
-          value={formatCost(analytics.TotalCost, analytics.CostIncomplete)}
-        />
+        <Stat label="Cost" value={formatCost(analytics.TotalCost)} />
         <Stat
           label="Tokens"
           value={
@@ -212,9 +208,7 @@ function BreakdownTable({ title, rows }: { title: string; rows: Breakdown[] }) {
                   <span className="breakdown-label">
                     {row.Label || "unknown"}
                   </span>
-                  <span className="data">
-                    {formatCost(row.CostUSD, row.CostIncomplete)}
-                  </span>
+                  <span className="data">{formatCost(row.CostUSD)}</span>
                 </div>
                 <div className="breakdown-sub">
                   <HoverTip summary={formatTokens(tokens)} className="tok-cell">
@@ -225,7 +219,6 @@ function BreakdownTable({ title, rows }: { title: string; rows: Breakdown[] }) {
                       cacheWrite={row.CacheWrite}
                       reasoning={row.Reasoning}
                       costUSD={row.CostUSD}
-                      costIncomplete={row.CostIncomplete}
                     />
                   </HoverTip>
                   <span>

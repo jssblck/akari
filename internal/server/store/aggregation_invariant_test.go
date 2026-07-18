@@ -584,7 +584,7 @@ func TestUndatedUsageIsTheOnlyRollupAnalyticsGap(t *testing.T) {
 // TestCostIncompleteFollowsUndatedGap pins that the cost-incomplete marker rides the
 // same documented rollup-vs-analytics gap as the token and cost totals. An undated,
 // unpriced usage row (tokens, no cost, no occurred_at) sets the session rollup's
-// flag, so the projects index reads "$X+", but it is dropped from the dated
+// flag, so the projects index reports an incomplete cost, but it is dropped from the dated
 // analytics base, so the all-time panel's cost is exact and reads no marker. The two
 // surfaces are allowed to differ here, and only here, for exactly the undated row;
 // any OTHER source of divergence in the flag would be a bug this guards against.

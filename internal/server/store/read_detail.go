@@ -223,7 +223,7 @@ func (s *Store) scanToolCalls(ctx context.Context, q querier, query string, args
 // CostIncomplete is true when the turn folded in a usage row that carried real token volume but no
 // price, so CostUSD (when present) is a lower bound: the summed cost covers only the priced subset
 // of the token classes the card shows beside it. It is the per-turn shape of the session and
-// analytics costIncompleteExpr, so the turn's cost stamp gets the same "$X+" lower-bound marker
+// analytics costIncompleteExpr, so API consumers can identify the same lower-bound cost
 // those figures do rather than an exact-looking cost next to unpriced tokens. It is false for a
 // fully-priced turn and for a fully-unpriced one (where CostUSD is nil and the card reads
 // "unpriced" instead).
