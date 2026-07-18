@@ -146,8 +146,8 @@ func TestLandingMockDataReconciles(t *testing.T) {
 	if got := FmtTokensCompact(totals.Tokens()); got != "96.4M" {
 		t.Errorf("FmtTokensCompact(landingMockTotals().Tokens()) = %q, want %q", got, "96.4M")
 	}
-	if got := FmtCost(totals.Cost, false); got != "$412.87" {
-		t.Errorf("FmtCost(landingMockTotals().Cost, false) = %q, want %q", got, "$412.87")
+	if got := FmtCost(totals.Cost); got != "$412.87" {
+		t.Errorf("FmtCost(landingMockTotals().Cost) = %q, want %q", got, "$412.87")
 	}
 	if got := FmtPercent(landingMockCacheHit()); got != "71%" {
 		t.Errorf("FmtPercent(landingMockCacheHit()) = %q, want %q", got, "71%")

@@ -108,21 +108,17 @@ describe("FallbackTag", () => {
 
 describe("FanoutTag", () => {
   it("renders nothing when there is no subagent fan-out", () => {
-    const { container } = render(
-      <FanoutTag subagentCount={0} costUSD={0} costIncomplete={false} />,
-    );
+    const { container } = render(<FanoutTag subagentCount={0} costUSD={0} />);
     expect(container).toBeEmptyDOMElement();
   });
 
   it("singularizes the unit for exactly one subagent", () => {
-    render(
-      <FanoutTag subagentCount={1} costUSD={0.5} costIncomplete={false} />,
-    );
+    render(<FanoutTag subagentCount={1} costUSD={0.5} />);
     expect(screen.getByText("1 subagent · $0.50")).toBeInTheDocument();
   });
 
-  it("pluralizes the unit and appends + for an incomplete whole-tree cost", () => {
-    render(<FanoutTag subagentCount={5} costUSD={2.5} costIncomplete />);
-    expect(screen.getByText("5 subagents · $2.50+")).toBeInTheDocument();
+  it("pluralizes the unit", () => {
+    render(<FanoutTag subagentCount={5} costUSD={2.5} />);
+    expect(screen.getByText("5 subagents · $2.50")).toBeInTheDocument();
   });
 });

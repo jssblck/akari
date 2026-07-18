@@ -25,7 +25,7 @@ type CacheStats struct {
 	// this is NOT a clean lower bound: an omitted model's saving can be negative (a
 	// Claude cache write is priced above input, a cost paid up front), so the true
 	// figure could be lower OR higher than what is shown. The Cache readout flags it
-	// "partial" rather than the cost figures' "$X+" lower-bound marker.
+	// "partial" because the omitted saving can run in either direction.
 	SavingsIncomplete bool
 }
 

@@ -32,7 +32,7 @@ type ProjectSummary struct {
 	// CostIncomplete is true when any session folded into this project's totals
 	// carries an unpriced usage event, so the rolled-up cost is a lower bound. It
 	// is the OR of the per-session cost_incomplete flags, letting the index render
-	// the same "$X+" marker the per-session rows show instead of an exact figure
+	// API consumers can distinguish it from an exact figure
 	// that silently understates an aggregate built from incomplete sessions.
 	//
 	// Like every other figure on this index, it is rollup-scoped (every surviving
@@ -736,7 +736,7 @@ const messageReadColumns = `m.ordinal, m.role, m.content, m.thinking_text, m.mod
 //     a summed zero that would misread as free; a mixed turn keeps its priced partial), and
 //     cost_incomplete flags a turn that folded a token-bearing but unpriced row so the priced cost
 //     reads as a lower bound. That cost_incomplete rule mirrors costIncompleteExpr (analytics.go),
-//     so a turn's "$X+" marker and the session and analytics cost markers agree. Only turn-attributed
+//     so the turn, session, and analytics incompleteness flags agree. Only turn-attributed
 //     usage contributes to the rollup: a NULL-ordinal usage row belongs to the session totals, not
 //     to any one message, so it is never folded here (projection.go skips it). This is the deliberate
 //     divergence from the stored context signal (gatherContextHealth), which folds every raw

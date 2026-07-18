@@ -198,11 +198,11 @@ export function turnTokenTotal(u: TurnUsageFull): number {
 
 export function turnCostLabel(
   u: TurnUsageFull,
-  formatCost: (v: number, incomplete?: boolean) => string,
+  formatCost: (v: number) => string,
 ): string {
   return u.CostUSD === null || u.CostUSD === undefined
     ? "unpriced"
-    : formatCost(u.CostUSD, u.CostIncomplete);
+    : formatCost(u.CostUSD);
 }
 
 export function contextStamp(u: TurnUsageFull): string {

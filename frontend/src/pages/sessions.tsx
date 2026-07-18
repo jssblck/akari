@@ -625,7 +625,7 @@ function SessionFeedRow({
           <dt>Total tokens</dt>
           <dd>{formatTokens(sessionTokens(session))}</dd>
           <dt>Session cost</dt>
-          <dd>{formatCost(session.TotalCostUSD, session.CostIncomplete)}</dd>
+          <dd>{formatCost(session.TotalCostUSD)}</dd>
         </dl>
         <span className="session-overview-meta">
           {session.Agent} on {session.Machine}
@@ -695,9 +695,9 @@ function FanoutCell({ session }: { session: SessionRow }) {
         <dt>Subagents</dt>
         <dd>{formatCount(count)}</dd>
         <dt>Root session</dt>
-        <dd>{formatCost(session.TotalCostUSD, session.CostIncomplete)}</dd>
+        <dd>{formatCost(session.TotalCostUSD)}</dd>
         <dt>Total cost</dt>
-        <dd>{formatCost(session.Tree.CostUSD, session.Tree.CostIncomplete)}</dd>
+        <dd>{formatCost(session.Tree.CostUSD)}</dd>
       </dl>
       <p className="tip-copy">
         Total cost includes the root session and its subagents.

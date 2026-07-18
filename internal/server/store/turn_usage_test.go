@@ -105,7 +105,7 @@ func TestMessagesTurnUsageFolds(t *testing.T) {
 		t.Errorf("turn 1 cost = %v, want ~0.30 (the priced partial)", u1.CostUSD)
 	}
 	// The mixed group folded a token-bearing unpriced row, so its cost is a lower bound: the flag
-	// must fire so the stamp reads "$0.30+" rather than an exact figure beside unpriced tokens.
+	// must fire so API consumers do not treat the priced portion as complete beside unpriced tokens.
 	if !u1.CostIncomplete {
 		t.Error("turn 1 mixes priced and token-bearing unpriced rows and must read cost-incomplete")
 	}

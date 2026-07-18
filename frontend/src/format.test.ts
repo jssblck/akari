@@ -7,16 +7,8 @@ describe("formatCost", () => {
     expect(formatCost(0.0042)).toBe("$0.0042");
   });
 
-  it("appends + for an incomplete sub-cent cost", () => {
-    expect(formatCost(0.0042, true)).toBe("$0.0042+");
-  });
-
   it("does not take the sub-cent path at exactly zero", () => {
     expect(formatCost(0)).toBe("$0.00");
-  });
-
-  it("appends + for an incomplete cost at normal magnitude", () => {
-    expect(formatCost(1.5, true)).toBe("$1.50+");
   });
 
   it("uses two decimal digits under $10", () => {

@@ -378,9 +378,7 @@ function SessionStats({
             </div>
           </>
         ) : null}
-        <div className="tt-cost">
-          {formatCost(detail.TotalCostUSD, detail.CostIncomplete)}
-        </div>
+        <div className="tt-cost">{formatCost(detail.TotalCostUSD)}</div>
       </StatTip>
       <StatTip label="Cache" value={formatPercent(hitRate)}>
         <dl className="tt-grid">
@@ -395,7 +393,7 @@ function SessionStats({
         </dl>
         <div className="tt-cost">
           {(detail.TotalCacheSavingsUSD < 0 ? "cost " : "saved ") +
-            formatCost(Math.abs(detail.TotalCacheSavingsUSD), false) +
+            formatCost(Math.abs(detail.TotalCacheSavingsUSD)) +
             (detail.CacheSavingsIncomplete ? " partial" : "")}
         </div>
       </StatTip>
@@ -668,15 +666,13 @@ function subagentsSummaryLabel(
   rows: NonNullable<SessionSnapshot["Audit"]["Subagents"]>,
 ): string {
   let cost = 0;
-  let incomplete = false;
   let failed = 0;
   for (const r of rows) {
     cost += r.TotalCostUSD;
-    incomplete = incomplete || r.CostIncomplete;
     if (r.Outcome === "errored") failed++;
   }
   const unit = rows.length === 1 ? "subagent" : "subagents";
-  let label = `${rows.length} ${unit} · ${formatCost(cost, incomplete)}`;
+  let label = `${rows.length} ${unit} · ${formatCost(cost)}`;
   if (failed > 0) label += ` · ${failed} failed`;
   return label;
 }
@@ -746,9 +742,7 @@ function SubagentsTable({
                 ) : null}
               </td>
               <td className="num">{s.MessageCount}</td>
-              <td className="num">
-                {formatCost(s.TotalCostUSD, s.CostIncomplete)}
-              </td>
+              <td className="num">{formatCost(s.TotalCostUSD)}</td>
               <td className="muted">{formatTime(s.LastActiveAt)}</td>
             </tr>
           ))}

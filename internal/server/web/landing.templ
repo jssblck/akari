@@ -20,7 +20,7 @@ package web
 templ landingTokensCell(p landingMockProject) {
 	<span class="tok-cell" tabindex="0">
 		<span class="tok-total">{ FmtTokensCompact(p.Tokens()) }</span>
-		@tokenCard(p.Tokens(), p.In, p.Out, p.CacheRead, p.CacheWrite, 0, p.Cost, false)
+		@tokenCard(p.Tokens(), p.In, p.Out, p.CacheRead, p.CacheWrite, 0, p.Cost)
 	</span>
 }
 
@@ -145,7 +145,7 @@ templ LandingPage(og OGMeta, loggedIn bool) {
 					<div class="mock-strip">
 						<div class="mk-stat">
 							<span class="label">Cost</span>
-							<span class="mk-val">{ FmtCost(totals.Cost, false) }</span>
+							<span class="mk-val">{ FmtCost(totals.Cost) }</span>
 						</div>
 						<div class="mk-stat">
 							<span class="label">Tokens</span>
@@ -188,7 +188,7 @@ templ LandingPage(og OGMeta, loggedIn bool) {
 												</svg>
 											}
 										</td>
-										<td class="num">{ FmtCost(p.Cost, false) }</td>
+										<td class="num">{ FmtCost(p.Cost) }</td>
 									</tr>
 								}
 							</tbody>
@@ -206,7 +206,7 @@ templ LandingPage(og OGMeta, loggedIn bool) {
 										@landingTokensCell(landingMockRemainder)
 									</td>
 									<td class="num"></td>
-									<td class="num">{ FmtCost(landingMockRemainder.Cost, false) }</td>
+									<td class="num">{ FmtCost(landingMockRemainder.Cost) }</td>
 								</tr>
 							</tfoot>
 						</table>
