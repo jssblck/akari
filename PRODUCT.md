@@ -76,9 +76,9 @@ never overwhelming.
 
 ## Design Principles
 
-1. **Instrument, not dashboard.** Every figure is exact, stable, and trustworthy:
-   tabular numerics, no reflow as data streams, honest about partial or
-   incomplete cost. The UI measures and reports rather than persuades.
+1. **Instrument, not dashboard.** Figures use tabular numerics and do not reflow
+   as data streams. Dollar values are application-wide best-effort estimates.
+   The UI measures and reports rather than persuades.
 2. **Density without clutter.** High information density is a feature for this
    reader, but every element earns its place. Whitespace and hierarchy do the
    calming, so a dense screen still reads quietly.

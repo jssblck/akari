@@ -20,13 +20,6 @@ type CacheStats struct {
 	CacheRead  int64 // prompt tokens served from cache (the discounted read)
 	CacheWrite int64 // prompt tokens written to cache (creation)
 	SavingsUSD float64
-	// SavingsIncomplete is true when some cached read or write volume rode an unpriced
-	// model, so that model's saving is omitted and SavingsUSD is partial. Unlike cost,
-	// this is NOT a clean lower bound: an omitted model's saving can be negative (a
-	// Claude cache write is priced above input, a cost paid up front), so the true
-	// figure could be lower OR higher than what is shown. The Cache readout flags it
-	// "partial" because the omitted saving can run in either direction.
-	SavingsIncomplete bool
 }
 
 // PromptTokens is the total prompt-side token volume: uncached input plus cached reads
@@ -52,8 +45,7 @@ func (c CacheStats) HasData() bool { return c.PromptTokens() > 0 }
 
 // foldCacheRows folds a (model, UTC day, token-sums) result set into a CacheStats as the
 // rows stream off the connection, pricing each bucket's saving at the rate in effect that
-// day and flagging the result incomplete when cached volume rode an unpriced model (so the
-// saving omits it). The token totals sum across the buckets, so the grand figures are
+// day. Unknown model rates contribute zero. The token totals sum across the buckets, so the grand figures are
 // unaffected by the day split; only the saving is priced per bucket, which is what lets a
 // model with a dated rate change price each side at its own rate.
 //
@@ -94,14 +86,7 @@ func foldCacheRows(rows pgx.Rows) (CacheStats, error) {
 		if day != nil {
 			at = *day
 		}
-		if saving, ok := pricing.CacheSavings(model, at, cacheRead, cacheWrite); ok {
-			c.SavingsUSD += saving
-		} else if cacheRead > 0 || cacheWrite > 0 {
-			// Cached volume on a model the pricing table does not know: the saving omits
-			// it and the flag says the figure is partial. The omitted term can be either
-			// sign, so this is not a lower bound the way cost_incomplete is for cost.
-			c.SavingsIncomplete = true
-		}
+		c.SavingsUSD += pricing.CacheSavings(model, at, cacheRead, cacheWrite)
 	}
 	if err := rows.Err(); err != nil {
 		return CacheStats{}, fmt.Errorf("iterate cache model rows: %w", err)

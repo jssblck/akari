@@ -1,8 +1,9 @@
 // Package pricing computes session cost from a model rate table compiled into
 // the binary. There is no runtime catalog or refresh: updating rates means a new
 // build. Rates are a snapshot in USD per one million tokens and are intentionally
-// approximate; an unknown model yields known=false so callers can mark a cost as
-// partial rather than reporting a misleading zero.
+// approximate. An unknown model has a zero rate: every dollar figure in Akari is
+// already a best-effort estimate, and zero is the single representation for a
+// price the table does not know.
 //
 // A model's price carries a time dimension: each model maps to a list of
 // date-effective rates, and a lookup selects the entry in effect at the usage
@@ -60,8 +61,8 @@ var sonnet5Sticker = time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 //
 // A prefix that looked uniform today would silently misprice the next version that
 // repriced. With exact matching that whole bug class is impossible: a model we have not
-// listed (a new minor, a new variant) falls through to known=false and is reported as
-// an incomplete cost rather than a wrong number.
+// listed (a new minor, a new variant) prices at zero rather than inheriting a
+// potentially wrong family rate.
 //
 // Keys are the canonical, dateless IDs. Lookup strips a trailing release-date
 // snapshot before matching (see datedSnapshot), so both the alias
@@ -218,37 +219,24 @@ func RateAt(model string, at time.Time) (Rate, bool) {
 	return rateAt(rates, at), true
 }
 
-// Known reports whether a model is priced at all, independent of any date. A model's
-// windows all share one ID, so its presence in the table does not depend on when it ran;
-// a by-model view that only needs to fold unpriced models into an "Other" bucket asks
-// this rather than picking an arbitrary window's rate.
-func Known(model string) bool {
-	m := normalize(model)
-	if m == "" {
-		return false
-	}
-	_, ok := table[m]
-	return ok
-}
-
-// Cost returns the USD cost for a token count under a model at the time the usage
-// occurred, and whether the model was priced. Token counts are in tokens (not millions).
-// The time selects the date-effective rate window.
-func Cost(model string, at time.Time, input, output, cacheWrite, cacheRead int) (float64, bool) {
+// Cost returns the estimated USD cost for a token count under a model at the time
+// the usage occurred. Token counts are in tokens (not millions). An unknown model
+// returns zero. The time selects the date-effective rate window.
+func Cost(model string, at time.Time, input, output, cacheWrite, cacheRead int) float64 {
 	r, ok := RateAt(model, at)
 	if !ok {
-		return 0, false
+		return 0
 	}
 	const million = 1_000_000.0
 	cost := float64(input)/million*r.Input +
 		float64(output)/million*r.Output +
 		float64(cacheWrite)/million*r.CacheWrite +
 		float64(cacheRead)/million*r.CacheRead
-	return cost, true
+	return cost
 }
 
 // CacheSavings returns the USD that prompt caching saved versus paying the full
-// uncached input rate for the same prompt tokens, and whether the model was priced.
+// uncached input rate for the same prompt tokens. An unknown model returns zero.
 // The time selects the date-effective rate window, so cached volume prices at the rate
 // in effect when it was spent.
 //
@@ -271,13 +259,13 @@ func Cost(model string, at time.Time, input, output, cacheWrite, cacheRead int) 
 // that rolls many events into one figure must bucket them so every event in a bucket
 // falls in one rate window (see store/analytics_cache.go), since a single time picks a
 // single window for the whole sum.
-func CacheSavings(model string, at time.Time, cacheRead, cacheWrite int64) (float64, bool) {
+func CacheSavings(model string, at time.Time, cacheRead, cacheWrite int64) float64 {
 	r, ok := RateAt(model, at)
 	if !ok {
-		return 0, false
+		return 0
 	}
 	const million = 1_000_000.0
 	saving := float64(cacheRead)/million*(r.Input-r.CacheRead) +
 		float64(cacheWrite)/million*(r.Input-r.CacheWrite)
-	return saving, true
+	return saving
 }

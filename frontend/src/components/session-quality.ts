@@ -200,9 +200,7 @@ export function turnCostLabel(
   u: TurnUsageFull,
   formatCost: (v: number) => string,
 ): string {
-  return u.CostUSD === null || u.CostUSD === undefined
-    ? "unpriced"
-    : formatCost(u.CostUSD);
+  return formatCost(u.CostUSD);
 }
 
 export function contextStamp(u: TurnUsageFull): string {

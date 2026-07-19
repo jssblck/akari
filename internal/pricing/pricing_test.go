@@ -118,16 +118,13 @@ func TestDatedWindowsStartAtUTCMidnight(t *testing.T) {
 	}
 }
 
-func TestKnownFableAndMythos(t *testing.T) {
+func TestRateAtFableAndMythos(t *testing.T) {
 	// Fable 5, Mythos 5, and the Mythos preview all price at $10/$50.
 	for _, model := range []string{
 		"claude-fable-5",
 		"claude-mythos-5",
 		"claude-mythos-preview",
 	} {
-		if !Known(model) {
-			t.Errorf("%s should be known", model)
-		}
 		r, ok := RateAt(model, anytime)
 		if !ok || r.Input != 10 || r.Output != 50 {
 			t.Errorf("%s rate = %+v (ok=%v), want input 10 / output 50", model, r, ok)
@@ -183,20 +180,12 @@ func TestDateSnapshotNormalization(t *testing.T) {
 	if r, ok := RateAt("gpt-5.4-mini", anytime); !ok || r.Input != 0.75 {
 		t.Errorf("variant suffix wrongly altered: %+v (ok=%v)", r, ok)
 	}
-
-	// Known normalizes the same way, so a dated, priced label reports known: this is what
-	// keeps charts.FoldUnknownModels from folding a dated model ID into the "Other" bucket.
-	for _, model := range []string{"claude-opus-4-8-20260115", "gpt-5-2025-08-07", "claude-sonnet-5"} {
-		if !Known(model) {
-			t.Errorf("Known(%q) = false, want true (dated/priced label must normalize to a table key)", model)
-		}
-	}
 }
 
 func TestUnlistedModelsAreUnknown(t *testing.T) {
 	// Plausible future or sibling models we have deliberately NOT priced. Each
-	// must report unknown so the cost is flagged incomplete rather than billed at
-	// a neighbor's rate. Because matching is exact, this now covers same-version
+	// must report unknown rather than inherit a neighbor's rate. Because matching
+	// is exact, this now covers same-version
 	// variants too (gpt-5.4-turbo no longer collapses onto gpt-5.4), which prefix
 	// matching could not guard.
 	for _, model := range []string{
@@ -208,9 +197,6 @@ func TestUnlistedModelsAreUnknown(t *testing.T) {
 		"gpt-5.4-turbo", "gpt-5.5-ultra", // same-version variants we never priced
 		"gpt-5.6-mini", "gpt-5.6-nano", // GPT-5.6's real tiers are sol/terra/luna, not mini/nano
 	} {
-		if Known(model) {
-			t.Errorf("unlisted model %q reports known; expected unknown", model)
-		}
 		if r, ok := RateAt(model, anytime); ok {
 			t.Errorf("unlisted model %q priced as %+v; expected unknown", model, r)
 		}
@@ -224,9 +210,6 @@ func TestRateAtUnknown(t *testing.T) {
 	if _, ok := RateAt("", anytime); ok {
 		t.Error("empty model should not be priced")
 	}
-	if Known("") {
-		t.Error("empty model should not be known")
-	}
 	// A bare date-like string normalizes to empty and must not panic or match.
 	if _, ok := RateAt("20250514", anytime); ok {
 		t.Error("bare token should not be priced")
@@ -235,36 +218,33 @@ func TestRateAtUnknown(t *testing.T) {
 
 func TestCost(t *testing.T) {
 	// 1M input + 1M output on Sonnet 4.0 (dated ID) at 3 + 15 per million.
-	cost, known := Cost("claude-sonnet-4-20250514", anytime, 1_000_000, 1_000_000, 0, 0)
-	if !known {
-		t.Fatal("sonnet should be priced")
-	}
+	cost := Cost("claude-sonnet-4-20250514", anytime, 1_000_000, 1_000_000, 0, 0)
 	if math.Abs(cost-18.0) > 1e-9 {
 		t.Errorf("cost = %v, want 18", cost)
 	}
 
 	// All four token classes contribute.
-	cost, _ = Cost("claude-sonnet-4-5", anytime, 1_000_000, 0, 1_000_000, 1_000_000)
+	cost = Cost("claude-sonnet-4-5", anytime, 1_000_000, 0, 1_000_000, 1_000_000)
 	want := 3.0 + 3.75 + 0.30
 	if math.Abs(cost-want) > 1e-9 {
 		t.Errorf("cost = %v, want %v", cost, want)
 	}
 
-	if _, known := Cost("mystery-model", anytime, 100, 100, 0, 0); known {
-		t.Error("unknown model cost should report known=false")
+	if got := Cost("mystery-model", anytime, 100, 100, 0, 0); got != 0 {
+		t.Errorf("unknown model cost = %v, want 0", got)
 	}
 }
 
 func TestCostSelectsDatedWindow(t *testing.T) {
 	// The same 1M input + 1M output on Sonnet 5 prices at the intro rate inside the
 	// promo window and the sticker rate after it.
-	intro, known := Cost("claude-sonnet-5", time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC), 1_000_000, 1_000_000, 0, 0)
-	if !known || math.Abs(intro-12.0) > 1e-9 {
-		t.Errorf("intro cost = %v (known=%v), want 12 (2 + 10)", intro, known)
+	intro := Cost("claude-sonnet-5", time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC), 1_000_000, 1_000_000, 0, 0)
+	if math.Abs(intro-12.0) > 1e-9 {
+		t.Errorf("intro cost = %v, want 12 (2 + 10)", intro)
 	}
-	sticker, known := Cost("claude-sonnet-5", sonnet5Sticker, 1_000_000, 1_000_000, 0, 0)
-	if !known || math.Abs(sticker-18.0) > 1e-9 {
-		t.Errorf("sticker cost = %v (known=%v), want 18 (3 + 15)", sticker, known)
+	sticker := Cost("claude-sonnet-5", sonnet5Sticker, 1_000_000, 1_000_000, 0, 0)
+	if math.Abs(sticker-18.0) > 1e-9 {
+		t.Errorf("sticker cost = %v, want 18 (3 + 15)", sticker)
 	}
 }
 
@@ -277,27 +257,21 @@ func TestCacheSavings(t *testing.T) {
 		model       string
 		read, write int64
 		wantSaving  float64
-		wantKnown   bool
 	}{
 		// 1M read alone: 1 * (5 - 0.50) = 4.50.
-		{"read only", "claude-opus-4-8", 1_000_000, 0, 4.50, true},
+		{"read only", "claude-opus-4-8", 1_000_000, 0, 4.50},
 		// 1M write alone: 1 * (5 - 6.25) = -1.25, caching costs more than it saved.
-		{"write only is negative", "claude-opus-4-8", 0, 1_000_000, -1.25, true},
+		{"write only is negative", "claude-opus-4-8", 0, 1_000_000, -1.25},
 		// Both: 4.50 - 1.25 = 3.25.
-		{"read and write net", "claude-opus-4-8", 1_000_000, 1_000_000, 3.25, true},
+		{"read and write net", "claude-opus-4-8", 1_000_000, 1_000_000, 3.25},
 		// OpenAI bills no separate cache write (CacheWrite rate is 0), so a read saves
 		// the input-minus-read gap and the parser reports no write tokens to charge.
-		{"openai read", "gpt-5.5", 1_000_000, 0, 4.50, true},
-		// An unlisted model cannot be priced, so the saving is unknown, not zero.
-		{"unknown model", "secret-model", 1_000_000, 0, 0, false},
+		{"openai read", "gpt-5.5", 1_000_000, 0, 4.50},
+		{"unknown model", "secret-model", 1_000_000, 0, 0},
 	}
 	for _, c := range cases {
-		saving, known := CacheSavings(c.model, anytime, c.read, c.write)
-		if known != c.wantKnown {
-			t.Errorf("%s: known = %v, want %v", c.name, known, c.wantKnown)
-			continue
-		}
-		if known && math.Abs(saving-c.wantSaving) > 1e-9 {
+		saving := CacheSavings(c.model, anytime, c.read, c.write)
+		if math.Abs(saving-c.wantSaving) > 1e-9 {
 			t.Errorf("%s: saving = %v, want %v", c.name, saving, c.wantSaving)
 		}
 	}
@@ -306,12 +280,12 @@ func TestCacheSavings(t *testing.T) {
 func TestCacheSavingsSelectsDatedWindow(t *testing.T) {
 	// Sonnet 5 intro (Input 2, CacheRead 0.20): 1M read saves 1 * (2 - 0.20) = 1.80.
 	// After the sticker (Input 3, CacheRead 0.30): 1M read saves 1 * (3 - 0.30) = 2.70.
-	intro, known := CacheSavings("claude-sonnet-5", time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC), 1_000_000, 0)
-	if !known || math.Abs(intro-1.80) > 1e-9 {
-		t.Errorf("intro saving = %v (known=%v), want 1.80", intro, known)
+	intro := CacheSavings("claude-sonnet-5", time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC), 1_000_000, 0)
+	if math.Abs(intro-1.80) > 1e-9 {
+		t.Errorf("intro saving = %v, want 1.80", intro)
 	}
-	sticker, known := CacheSavings("claude-sonnet-5", sonnet5Sticker, 1_000_000, 0)
-	if !known || math.Abs(sticker-2.70) > 1e-9 {
-		t.Errorf("sticker saving = %v (known=%v), want 2.70", sticker, known)
+	sticker := CacheSavings("claude-sonnet-5", sonnet5Sticker, 1_000_000, 0)
+	if math.Abs(sticker-2.70) > 1e-9 {
+		t.Errorf("sticker saving = %v, want 2.70", sticker)
 	}
 }

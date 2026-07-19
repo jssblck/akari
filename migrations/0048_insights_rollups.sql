@@ -11,10 +11,9 @@
 -- per-session derivation in rollups.go; TestRollupBackfillMatchesDerivations pins the two
 -- equal, so they cannot drift silently.
 
--- Usage per (UTC day, model): the four token classes, summed cost, and whether any folded
--- event was token-bearing but unpriced (the read side's cost_incomplete base). day is NULL
--- for undated usage (occurred_at IS NULL), preserving the documented rollup-versus-
--- analytics gap: dated consumers filter day IS NOT NULL.
+-- Usage per (UTC day, model): the four token classes and summed best-effort cost. day is
+-- NULL for undated usage (occurred_at IS NULL), preserving the documented rollup-versus-
+-- analytics gap: dated consumers filter day IS NOT NULL. Unknown rates contribute zero.
 CREATE TABLE session_usage_daily (
     session_id         BIGINT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     day                DATE,
@@ -23,8 +22,7 @@ CREATE TABLE session_usage_daily (
     output_tokens      BIGINT NOT NULL,
     cache_read_tokens  BIGINT NOT NULL,
     cache_write_tokens BIGINT NOT NULL,
-    cost_usd           DOUBLE PRECISION NOT NULL,
-    unpriced           BOOLEAN NOT NULL
+    cost_usd           DOUBLE PRECISION NOT NULL
 );
 CREATE INDEX idx_session_usage_daily_session ON session_usage_daily (session_id);
 CREATE INDEX idx_session_usage_daily_day ON session_usage_daily (day) WHERE day IS NOT NULL;
@@ -84,7 +82,7 @@ CREATE INDEX idx_sessions_project_started ON sessions (project_id, started_at)
 -- after this marker line against a hand-seeded projection)
 
 INSERT INTO session_usage_daily
-  (session_id, day, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, unpriced)
+  (session_id, day, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd)
 SELECT ue.session_id,
        (ue.occurred_at AT TIME ZONE 'UTC')::date,
        ue.model,
@@ -92,8 +90,7 @@ SELECT ue.session_id,
        coalesce(sum(ue.output_tokens), 0),
        coalesce(sum(ue.cache_read_tokens), 0),
        coalesce(sum(ue.cache_write_tokens), 0),
-       coalesce(sum(ue.cost_usd), 0),
-       coalesce(bool_or(ue.cost_usd IS NULL AND (ue.input_tokens + ue.output_tokens + ue.cache_read_tokens + ue.cache_write_tokens + ue.reasoning_tokens) > 0), false)
+       coalesce(sum(ue.cost_usd), 0)
   FROM usage_events ue
  GROUP BY 1, 2, 3;
 

@@ -63,13 +63,12 @@ func usersToRefs(us []store.User) []userRefDTO {
 // --- analytics ---
 
 type analyticsDTO struct {
-	TotalCostUSD   float64        `json:"total_cost_usd"`
-	CostIncomplete bool           `json:"cost_incomplete"`
-	Tokens         tokens         `json:"tokens"`
-	Sessions       int            `json:"sessions"`
-	Series         []dayPointDTO  `json:"series"`
-	Models         []breakdownDTO `json:"models"`
-	Agents         []breakdownDTO `json:"agents"`
+	TotalCostUSD float64        `json:"total_cost_usd"`
+	Tokens       tokens         `json:"tokens"`
+	Sessions     int            `json:"sessions"`
+	Series       []dayPointDTO  `json:"series"`
+	Models       []breakdownDTO `json:"models"`
+	Agents       []breakdownDTO `json:"agents"`
 }
 
 type dayPointDTO struct {
@@ -82,22 +81,20 @@ type dayPointDTO struct {
 }
 
 type breakdownDTO struct {
-	Label          string  `json:"label"`
-	CostUSD        float64 `json:"cost_usd"`
-	CostIncomplete bool    `json:"cost_incomplete"`
-	Tokens         tokens  `json:"tokens"`
-	Sessions       int     `json:"sessions"`
+	Label    string  `json:"label"`
+	CostUSD  float64 `json:"cost_usd"`
+	Tokens   tokens  `json:"tokens"`
+	Sessions int     `json:"sessions"`
 }
 
 func analyticsToDTO(a store.Analytics) analyticsDTO {
 	d := analyticsDTO{
-		TotalCostUSD:   a.TotalCost,
-		CostIncomplete: a.CostIncomplete,
-		Tokens:         toks(a.TotalIn, a.TotalOut, a.TotalCacheRead, a.TotalCacheWrite),
-		Sessions:       a.Sessions,
-		Series:         make([]dayPointDTO, 0, len(a.Series)),
-		Models:         make([]breakdownDTO, 0, len(a.Models)),
-		Agents:         make([]breakdownDTO, 0, len(a.Agents)),
+		TotalCostUSD: a.TotalCost,
+		Tokens:       toks(a.TotalIn, a.TotalOut, a.TotalCacheRead, a.TotalCacheWrite),
+		Sessions:     a.Sessions,
+		Series:       make([]dayPointDTO, 0, len(a.Series)),
+		Models:       make([]breakdownDTO, 0, len(a.Models)),
+		Agents:       make([]breakdownDTO, 0, len(a.Agents)),
 	}
 	for _, p := range a.Series {
 		d.Series = append(d.Series, dayPointDTO{
@@ -116,7 +113,7 @@ func analyticsToDTO(a store.Analytics) analyticsDTO {
 
 func breakdownToDTO(b store.Breakdown) breakdownDTO {
 	return breakdownDTO{
-		Label: b.Label, CostUSD: b.CostUSD, CostIncomplete: b.CostIncomplete,
+		Label: b.Label, CostUSD: b.CostUSD,
 		Tokens: toks(b.Input, b.Output, b.CacheRead, b.CacheWrite), Sessions: b.Sessions,
 	}
 }
@@ -128,25 +125,24 @@ type projectsDTO struct {
 }
 
 type projectDTO struct {
-	ID             int64      `json:"id"`
-	RemoteKey      string     `json:"remote_key"`
-	Host           string     `json:"host,omitempty"`
-	Owner          string     `json:"owner,omitempty"`
-	Repo           string     `json:"repo,omitempty"`
-	DisplayName    string     `json:"display_name"`
-	Kind           string     `json:"kind"`
-	SessionCount   int        `json:"session_count"`
-	CostUSD        float64    `json:"cost_usd"`
-	CostIncomplete bool       `json:"cost_incomplete"`
-	Tokens         tokens     `json:"tokens"`
-	LastActivity   *time.Time `json:"last_activity,omitempty"`
+	ID           int64      `json:"id"`
+	RemoteKey    string     `json:"remote_key"`
+	Host         string     `json:"host,omitempty"`
+	Owner        string     `json:"owner,omitempty"`
+	Repo         string     `json:"repo,omitempty"`
+	DisplayName  string     `json:"display_name"`
+	Kind         string     `json:"kind"`
+	SessionCount int        `json:"session_count"`
+	CostUSD      float64    `json:"cost_usd"`
+	Tokens       tokens     `json:"tokens"`
+	LastActivity *time.Time `json:"last_activity,omitempty"`
 }
 
 func projectToDTO(p store.ProjectSummary) projectDTO {
 	return projectDTO{
 		ID: p.ID, RemoteKey: p.RemoteKey, Host: p.Host, Owner: p.Owner, Repo: p.Repo,
 		DisplayName: p.DisplayName, Kind: p.Kind, SessionCount: p.SessionCount,
-		CostUSD: p.TotalCostUSD, CostIncomplete: p.CostIncomplete,
+		CostUSD:      p.TotalCostUSD,
 		Tokens:       toks(p.TotalInput, p.TotalOutput, p.TotalCacheRead, p.TotalCacheWrite),
 		LastActivity: p.LastActivity,
 	}
@@ -229,7 +225,6 @@ type sessionDTO struct {
 	ModelFallbackCount int        `json:"model_fallback_count"`
 	Tokens             tokens     `json:"tokens"`
 	CostUSD            float64    `json:"cost_usd"`
-	CostIncomplete     bool       `json:"cost_incomplete"`
 	Visibility         string     `json:"visibility"`
 	PublicID           *string    `json:"public_id,omitempty"`
 	StartedAt          *time.Time `json:"started_at,omitempty"`
@@ -259,8 +254,8 @@ func sessionSummaryToDTO(s store.SessionSummary) sessionDTO {
 		MessageCount: s.MessageCount, UserMessageCount: s.UserMessageCount,
 		ModelFallbackCount: s.ModelFallbackCount,
 		Tokens:             toks(s.TotalInput, s.TotalOutput, s.TotalCacheRead, s.TotalCacheWrite),
-		CostUSD:            s.TotalCostUSD, CostIncomplete: s.CostIncomplete,
-		Visibility: s.Visibility, PublicID: s.PublicID,
+		CostUSD:            s.TotalCostUSD,
+		Visibility:         s.Visibility, PublicID: s.PublicID,
 		StartedAt: s.StartedAt, EndedAt: s.EndedAt, LastActiveAt: s.LastActiveAt,
 	}
 }

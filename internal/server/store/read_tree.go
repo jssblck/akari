@@ -22,10 +22,6 @@ type TreeRollup struct {
 	// price of the whole work item, which the row's own cost understates whenever the
 	// session delegated work to subagents.
 	CostUSD float64
-	// CostIncomplete is true when any session folded into the subtree could not be
-	// fully priced (an unknown model, a missing rate), so the rolled-up cost is a
-	// floor rather than an exact figure and the UI can mark it approximate.
-	CostIncomplete bool
 }
 
 // treeRollupSQL walks each root's subagent subtree in one recursive pass and folds
@@ -46,9 +42,8 @@ WITH RECURSIVE tree AS (
      WHERE c.relationship_type = 'subagent'
 )
 SELECT t.root,
-       count(*) FILTER (WHERE t.depth > 0)  AS subagents,
-       coalesce(sum(s.total_cost_usd), 0)   AS tree_cost,
-       coalesce(bool_or(s.cost_incomplete), false) AS tree_incomplete
+	   count(*) FILTER (WHERE t.depth > 0)  AS subagents,
+	   coalesce(sum(s.total_cost_usd), 0)   AS tree_cost
   FROM tree t
   JOIN sessions s ON s.id = t.node
  GROUP BY t.root`
@@ -71,7 +66,7 @@ func (s *Store) treeRollups(ctx context.Context, q querier, ids []int64) (map[in
 	for rows.Next() {
 		var root int64
 		var tr TreeRollup
-		if err := rows.Scan(&root, &tr.SubagentCount, &tr.CostUSD, &tr.CostIncomplete); err != nil {
+		if err := rows.Scan(&root, &tr.SubagentCount, &tr.CostUSD); err != nil {
 			return nil, fmt.Errorf("scan tree rollup: %w", err)
 		}
 		out[root] = tr

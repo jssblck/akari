@@ -48,6 +48,7 @@ import {
 } from "../format";
 import "../sessions.css";
 import { absoluteURL, withBase } from "../base";
+import { formatSavings } from "../pricing-format";
 import type {
   DeletedSessionResponse,
   SessionPublicationResponse,
@@ -392,9 +393,7 @@ function SessionStats({
           <dd>{formatTokens(detail.TotalInput)}</dd>
         </dl>
         <div className="tt-cost">
-          {(detail.TotalCacheSavingsUSD < 0 ? "cost " : "saved ") +
-            formatCost(Math.abs(detail.TotalCacheSavingsUSD)) +
-            (detail.CacheSavingsIncomplete ? " partial" : "")}
+          {formatSavings(detail.TotalCacheSavingsUSD)}
         </div>
       </StatTip>
       <QualityStat signals={signals} />

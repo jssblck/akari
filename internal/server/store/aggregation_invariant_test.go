@@ -38,13 +38,12 @@ import (
 
 // usageRow is one usage_events insert for a test ingest, named so a delta reads
 // like the transcript it stands in for. A zero At means an undated event (NULL
-// occurred_at); a nil Cost means a model the pricing table does not know, which
-// makes the session total a partial sum.
+// occurred_at). Unknown model prices use the zero value.
 type usageRow struct {
 	Model           string
 	In, Out, CR, CW int64
 	At              time.Time
-	Cost            *float64
+	Cost            float64
 	DedupKey        string
 	SourceOffset    int64
 	SourceIndex     int
@@ -160,12 +159,11 @@ func assertRollupMatchesLedger(t *testing.T, st *store.Store, sessionID int64, w
 // dedup_key (Claude streams one assistant message across several lines that share
 // it, so the ledger keeps one and the rollup must count one), a second priced model, an
 // undated row (NULL occurred_at, which the rollup counts but the analytics time
-// axis drops), and an unpriced model (tokens but no cost, which sets
-// cost_incomplete). If applyDelta folded pre-dedup rows, or zeroed a subset on
+// axis drops), and an unknown-price model (tokens with zero cost). If applyDelta folded pre-dedup rows, or zeroed a subset on
 // reparse, or skipped a class, the invariant assertion would catch it.
 func adversarialUsage() []usageRow {
 	at := time.Date(2024, 3, 1, 12, 0, 0, 0, time.UTC)
-	priced := func(v float64) *float64 { return &v }
+	priced := func(v float64) float64 { return v }
 	return []usageRow{
 		{Model: "claude-opus-4-8", In: 1000, Out: 2000, CR: 50000, CW: 4000, At: at, Cost: priced(1.50), DedupKey: "msg_a", SourceOffset: 10, SourceIndex: 0},
 		// Claude's repeat: identical numbers, same message id, different source
@@ -177,8 +175,7 @@ func adversarialUsage() []usageRow {
 		// counts it. This is the one legitimate rollup/analytics gap (see
 		// TestUndatedUsageIsTheOnlyRollupAnalyticsGap).
 		{Model: "claude-opus-4-8", In: 100, Out: 100, CR: 0, CW: 0, Cost: priced(0.05), DedupKey: "msg_undated", SourceOffset: 40, SourceIndex: 0},
-		// Unpriced model: tokens but no cost, which sets cost_incomplete and must
-		// still fold its tokens into the rollup.
+		// Unknown-price model: tokens with a zero cost still fold into the rollup.
 		{Model: "some-unpriced-model", In: 500, Out: 250, CR: 0, CW: 0, At: at.Add(2 * time.Hour), DedupKey: "msg_c", SourceOffset: 50, SourceIndex: 0},
 	}
 }
@@ -187,7 +184,7 @@ func adversarialUsage() []usageRow {
 // for every session, sessions.total_* equals the sum over its usage_events, after
 // a first rebuild and again after a repeat rebuild of the identical delta (the
 // epoch-rollout path). It runs across several sessions, agents, models, cache
-// tokens, duplicate usage, undated usage, and unpriced usage, so a fold that drops
+// tokens, duplicate usage, undated usage, and unknown model rates, so a fold that drops
 // a class, double-counts a duplicate, or fails to clear-and-rewrite a class on the
 // repeat rebuild is caught.
 func TestSessionRollupMatchesLedger(t *testing.T) {
@@ -245,13 +242,12 @@ func TestSessionRollupMatchesLedger(t *testing.T) {
 // cache reads save money while its cache write costs money (the saving nets the two and can
 // go negative), the SAME row repeated under a colliding dedup_key (the ledger keeps one, so
 // the saving must not double), a second priced model that also carries cache reads, and an
-// unpriced model that carries cache reads (its saving is omitted, so cache_savings_incomplete
-// must be set while its tokens still fold). A fold that priced pre-dedup rows, dropped a
-// model, missed the unpriced-with-cache case, or mishandled the negative cache-write term
+// unknown model that carries cache reads and contributes zero savings. A fold that priced
+// pre-dedup rows, dropped a model, missed the unknown-rate case, or mishandled the negative cache-write term
 // would diverge from the per-model recompute the test reconciles against.
 func cacheSavingsUsage() []usageRow {
 	at := time.Date(2024, 3, 1, 12, 0, 0, 0, time.UTC)
-	priced := func(v float64) *float64 { return &v }
+	priced := func(v float64) float64 { return v }
 	return []usageRow{
 		{Model: "claude-opus-4-8", In: 1000, Out: 2000, CR: 500_000, CW: 40_000, At: at, Cost: priced(1.50), DedupKey: "sv_a", SourceOffset: 10},
 		{Model: "claude-opus-4-8", In: 1000, Out: 2000, CR: 500_000, CW: 40_000, At: at, Cost: priced(1.50), DedupKey: "sv_a", SourceOffset: 20},
@@ -264,9 +260,9 @@ func cacheSavingsUsage() []usageRow {
 // (sessions.total_cache_savings_usd, folded per surviving usage row by the rebuild) against
 // SessionCacheStats, the from-scratch per-model recompute over the same rows. Pricing is
 // linear in tokens, so the per-row fold and the per-model recompute must land on the same
-// dollars and the same incomplete flag, after a first rebuild and again after a repeat
+// dollars after a first rebuild and again after a repeat
 // rebuild. It is the savings analogue of TestSessionRollupMatchesLedger: a fold that doubles
-// a deduped row, drops a model, mishandles the unpriced-with-cache case, swaps the read and
+// a deduped row, drops a model, mishandles the unknown-rate case, swaps the read and
 // write terms, or fails to clear-and-rewrite on the repeat rebuild diverges from the
 // recompute here. The rollup is what the session header's Cache tile reads in O(1), so this
 // is the guard that the O(1) tile shows the same figure the per-row scan would.
@@ -300,9 +296,6 @@ func TestCacheSavingsRollupMatchesRecompute(t *testing.T) {
 		if math.Abs(d.TotalCacheSavingsUSD-recompute.SavingsUSD) > 1e-9 {
 			t.Errorf("%s: session %d rollup savings %v != recompute %v", when, id, d.TotalCacheSavingsUSD, recompute.SavingsUSD)
 		}
-		if d.CacheSavingsIncomplete != recompute.SavingsIncomplete {
-			t.Errorf("%s: session %d rollup incomplete %v != recompute %v", when, id, d.CacheSavingsIncomplete, recompute.SavingsIncomplete)
-		}
 	}
 
 	sMixed, deltaMixed := ingestSession(t, st, user.ID, proj, "claude", "s-mixed", msgs, cacheSavingsUsage())
@@ -311,15 +304,10 @@ func TestCacheSavingsRollupMatchesRecompute(t *testing.T) {
 	reconcile(t, sMixed, "after ingest")
 	reconcile(t, sEmpty, "after ingest")
 
-	// Beyond reconciling with the oracle, pin the boundary values directly: the mixed session
-	// saves real money from its priced models yet flags incomplete for the unpriced one, and
-	// the empty session is a complete zero rather than a misleading incomplete or non-zero.
+	// Beyond reconciling with the oracle, pin the boundary values directly.
 	dMixed, err := st.SessionDetailByID(ctx, sMixed)
 	if err != nil {
 		t.Fatalf("mixed detail: %v", err)
-	}
-	if !dMixed.CacheSavingsIncomplete {
-		t.Error("mixed session should flag cache_savings_incomplete: an unpriced model carried cache reads")
 	}
 	if dMixed.TotalCacheSavingsUSD <= 0 {
 		t.Errorf("mixed session should have a positive saving from its priced cache reads; got %v", dMixed.TotalCacheSavingsUSD)
@@ -328,8 +316,8 @@ func TestCacheSavingsRollupMatchesRecompute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("empty detail: %v", err)
 	}
-	if dEmpty.CacheSavingsIncomplete || dEmpty.TotalCacheSavingsUSD != 0 {
-		t.Errorf("empty session should carry a zero complete saving; got %v incomplete=%v", dEmpty.TotalCacheSavingsUSD, dEmpty.CacheSavingsIncomplete)
+	if dEmpty.TotalCacheSavingsUSD != 0 {
+		t.Errorf("empty session should carry a zero saving; got %v", dEmpty.TotalCacheSavingsUSD)
 	}
 
 	// Rebuild both again through the identical fold: the clear must drop the old
@@ -403,9 +391,6 @@ func TestCacheSavingsRollupMatchesRecomputeAcrossDatedWindow(t *testing.T) {
 		if math.Abs(d.TotalCacheSavingsUSD-wantSaving) > 1e-9 {
 			t.Errorf("%s: session %d rollup savings %v != windowed want %v (1.80 intro + 2.70 sticker)", when, id, d.TotalCacheSavingsUSD, wantSaving)
 		}
-		if d.CacheSavingsIncomplete {
-			t.Errorf("%s: session %d should be complete: Sonnet 5 is priced in both windows", when, id)
-		}
 	}
 
 	s, delta := ingestSession(t, st, user.ID, proj, "claude", "s-windowed", msgs, datedCacheSavingsUsage())
@@ -441,7 +426,7 @@ func TestProjectsIndexReconcilesWithAnalytics(t *testing.T) {
 	}
 
 	at := time.Date(2024, 3, 1, 12, 0, 0, 0, time.UTC)
-	priced := func(v float64) *float64 { return &v }
+	priced := func(v float64) float64 { return v }
 	// All dated, with duplicates and cache tokens, but nothing undated.
 	dated := func(prefix string) []usageRow {
 		return []usageRow{
@@ -536,7 +521,7 @@ func TestUndatedUsageIsTheOnlyRollupAnalyticsGap(t *testing.T) {
 	}
 
 	at := time.Date(2024, 3, 1, 12, 0, 0, 0, time.UTC)
-	priced := func(v float64) *float64 { return &v }
+	priced := func(v float64) float64 { return v }
 	const undatedIn, undatedOut, undatedCR, undatedCW = 100, 200, 300, 400
 	undatedCost := 0.25
 	usage := []usageRow{
@@ -578,57 +563,5 @@ func TestUndatedUsageIsTheOnlyRollupAnalyticsGap(t *testing.T) {
 	}
 	if got := p.TotalCostUSD - a.TotalCost; got < undatedCost-1e-9 || got > undatedCost+1e-9 {
 		t.Errorf("cost gap = %v, want exactly the undated %v", got, undatedCost)
-	}
-}
-
-// TestCostIncompleteFollowsUndatedGap pins that the cost-incomplete marker rides the
-// same documented rollup-vs-analytics gap as the token and cost totals. An undated,
-// unpriced usage row (tokens, no cost, no occurred_at) sets the session rollup's
-// flag, so the projects index reports an incomplete cost, but it is dropped from the dated
-// analytics base, so the all-time panel's cost is exact and reads no marker. The two
-// surfaces are allowed to differ here, and only here, for exactly the undated row;
-// any OTHER source of divergence in the flag would be a bug this guards against.
-func TestCostIncompleteFollowsUndatedGap(t *testing.T) {
-	t.Parallel()
-	st := storetest.NewStore(t)
-	ctx := context.Background()
-
-	user, err := st.Register(ctx, "grace", "h", "")
-	if err != nil {
-		t.Fatalf("register: %v", err)
-	}
-	proj, err := st.UpsertProject(ctx, "github.com/ada/engine", "github.com", "ada", "engine", "engine", "remote")
-	if err != nil {
-		t.Fatalf("project: %v", err)
-	}
-
-	// One undated, unpriced row: tokens but no cost (unpriced model) and no
-	// occurred_at (no place on the time axis).
-	usage := []usageRow{
-		{Model: "some-unpriced-model", In: 500, Out: 250, DedupKey: "undated-unpriced", SourceOffset: 10},
-	}
-	sid := ingestOnly(t, st, user.ID, proj, "claude", "s1", []store.MessageDelta{{Ordinal: 0, Role: "user", Content: "hi"}}, usage)
-	assertRollupMatchesLedger(t, st, sid, "after ingest")
-
-	projects, err := st.ListProjects(ctx)
-	if err != nil {
-		t.Fatalf("list projects: %v", err)
-	}
-	var p store.ProjectSummary
-	for _, pr := range projects {
-		if pr.ID == proj {
-			p = pr
-		}
-	}
-	if !p.CostIncomplete {
-		t.Error("projects index should flag the project cost-incomplete: the rollup counts the undated unpriced row")
-	}
-
-	a, err := st.Analytics(ctx, store.AnalyticsFilter{ProjectID: proj})
-	if err != nil {
-		t.Fatalf("analytics: %v", err)
-	}
-	if a.CostIncomplete {
-		t.Error("all-time analytics drops the undated row, so its cost is exact and must not flag incomplete")
 	}
 }

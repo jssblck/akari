@@ -699,11 +699,10 @@ reverts, a mid-life reprice); the usage event's time selects the window in effec
 when it occurred. There is no runtime catalog or refresh endpoint; updating prices
 means a new build. The computed cost is stored on each usage event.
 
-A turn whose model is not in the table records its token usage with no cost. The
-session's `total_cost_usd` is then the partial sum of the turns that did have
-prices, and `cost_incomplete` is set so the UI can show, for example,
-"$1.42 (partial)". This keeps a real number visible instead of collapsing the
-whole session to unknown when a single turn used an unpriced model.
+A turn whose model is not in the table records its token usage with a zero cost.
+Zero is the application-wide representation for an unknown price; it does not mean
+the model was free. Dollar figures are best-effort estimates, and analytics group
+zero-priced models under `Other` without a separate completeness marker.
 
 ### Postgres schema
 
@@ -786,8 +785,7 @@ CREATE TABLE sessions (
   total_output_tokens  BIGINT NOT NULL DEFAULT 0,
   total_cache_write_tokens BIGINT NOT NULL DEFAULT 0,
   total_cache_read_tokens  BIGINT NOT NULL DEFAULT 0,
-  total_cost_usd       DOUBLE PRECISION NOT NULL DEFAULT 0,  -- partial sum
-  cost_incomplete      BOOLEAN NOT NULL DEFAULT FALSE,        -- any unpriced model
+  total_cost_usd       DOUBLE PRECISION NOT NULL DEFAULT 0,  -- best-effort estimate
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),  -- row write time; moves on reparse
   -- Feed recency: the session's last event time, falling back to created_at for a
@@ -945,7 +943,7 @@ CREATE TABLE session_usage_daily (      -- usage per (UTC day, model); day NULL 
   day DATE, model TEXT NOT NULL,
   input_tokens BIGINT NOT NULL, output_tokens BIGINT NOT NULL,
   cache_read_tokens BIGINT NOT NULL, cache_write_tokens BIGINT NOT NULL,
-  cost_usd DOUBLE PRECISION NOT NULL, unpriced BOOLEAN NOT NULL
+  cost_usd DOUBLE PRECISION NOT NULL
 );
 CREATE TABLE session_tool_rollup (      -- deduped calls/failures per (tool, category)
   session_id BIGINT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,

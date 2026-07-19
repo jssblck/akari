@@ -82,7 +82,7 @@ func stressDelta(sessionIdx int, shared []string) store.ProjectionDelta {
 			usage = append(usage, store.ProjUsage{
 				MessageOrdinal: &ord, Model: "claude-fable-5",
 				Input: 1200, Output: 400, CacheWrite: 100, CacheRead: 9000, Reasoning: 200,
-				CostUSD: &cost, OccurredAt: ts,
+				CostUSD: cost, OccurredAt: ts,
 				DedupKey: fmt.Sprintf("turn-%d", m), SourceOffset: int64(m * 100), SourceIndex: 0,
 			})
 		}

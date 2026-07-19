@@ -270,9 +270,6 @@
           "Cache": {
             "$ref": "#/components/schemas/CacheStats"
           },
-          "CostIncomplete": {
-            "type": "boolean"
-          },
           "Models": {
             "items": {
               "$ref": "#/components/schemas/Breakdown"
@@ -331,7 +328,6 @@
         "required": [
           "Agents",
           "Cache",
-          "CostIncomplete",
           "Models",
           "Series",
           "Sessions",
@@ -436,9 +432,6 @@
             "format": "int64",
             "type": "integer"
           },
-          "CostIncomplete": {
-            "type": "boolean"
-          },
           "CostUSD": {
             "type": "number"
           },
@@ -465,7 +458,6 @@
         "required": [
           "CacheRead",
           "CacheWrite",
-          "CostIncomplete",
           "CostUSD",
           "Input",
           "Label",
@@ -494,9 +486,6 @@
             "format": "int64",
             "type": "integer"
           },
-          "SavingsIncomplete": {
-            "type": "boolean"
-          },
           "SavingsUSD": {
             "type": "number"
           }
@@ -506,7 +495,6 @@
           "CacheWrite",
           "Input",
           "Output",
-          "SavingsIncomplete",
           "SavingsUSD"
         ],
         "type": "object"
@@ -941,9 +929,6 @@
       "Economics": {
         "additionalProperties": false,
         "properties": {
-          "AbandonedIncomplete": {
-            "type": "boolean"
-          },
           "AbandonedSharePct": {
             "type": "number"
           },
@@ -977,9 +962,6 @@
               "null"
             ]
           },
-          "CacheSavingsIncomplete": {
-            "type": "boolean"
-          },
           "CostAbandoned": {
             "items": {
               "type": "number"
@@ -997,9 +979,6 @@
               "array",
               "null"
             ]
-          },
-          "CostIncomplete": {
-            "type": "boolean"
           },
           "CostOther": {
             "items": {
@@ -1021,16 +1000,13 @@
           }
         },
         "required": [
-          "AbandonedIncomplete",
           "AbandonedSharePct",
           "CacheHitRate",
           "CacheHitRateLatest",
           "CacheMeasured",
           "CacheSavings",
-          "CacheSavingsIncomplete",
           "CostAbandoned",
           "CostCompleted",
-          "CostIncomplete",
           "CostOther",
           "TotalAbandoned",
           "TotalCacheSavings",
@@ -1161,9 +1137,6 @@
       "Gallery": {
         "additionalProperties": false,
         "properties": {
-          "CostIncomplete": {
-            "type": "boolean"
-          },
           "LongestCostUSD": {
             "type": "number"
           },
@@ -1200,7 +1173,6 @@
           }
         },
         "required": [
-          "CostIncomplete",
           "LongestCostUSD",
           "LongestDurationS",
           "MedianCompletedCostUSD",
@@ -1219,9 +1191,6 @@
           "Archetype": {
             "type": "string"
           },
-          "CostIncomplete": {
-            "type": "boolean"
-          },
           "CostUSD": {
             "type": "number"
           },
@@ -1237,7 +1206,6 @@
         },
         "required": [
           "Archetype",
-          "CostIncomplete",
           "CostUSD",
           "DurationS",
           "Grade",
@@ -1956,9 +1924,6 @@
       "ProjectSummary": {
         "additionalProperties": false,
         "properties": {
-          "CostIncomplete": {
-            "type": "boolean"
-          },
           "DisplayName": {
             "type": "string"
           },
@@ -2020,7 +1985,6 @@
           }
         },
         "required": [
-          "CostIncomplete",
           "DisplayName",
           "Host",
           "ID",
@@ -2044,9 +2008,6 @@
         "properties": {
           "Agent": {
             "type": "string"
-          },
-          "CostIncomplete": {
-            "type": "boolean"
           },
           "EndedAt": {
             "anyOf": [
@@ -2157,7 +2118,6 @@
         },
         "required": [
           "Agent",
-          "CostIncomplete",
           "EndedAt",
           "GitBranch",
           "Grade",
@@ -2605,12 +2565,6 @@
           "Agent": {
             "type": "string"
           },
-          "CacheSavingsIncomplete": {
-            "type": "boolean"
-          },
-          "CostIncomplete": {
-            "type": "boolean"
-          },
           "Cwd": {
             "type": "string"
           },
@@ -2741,8 +2695,6 @@
         },
         "required": [
           "Agent",
-          "CacheSavingsIncomplete",
-          "CostIncomplete",
           "Cwd",
           "EndedAt",
           "GitBranch",
@@ -2883,9 +2835,6 @@
             "format": "int64",
             "type": "integer"
           },
-          "CostIncomplete": {
-            "type": "boolean"
-          },
           "CostUSD": {
             "type": "number"
           },
@@ -2905,7 +2854,6 @@
         "required": [
           "CacheRead",
           "CacheWrite",
-          "CostIncomplete",
           "CostUSD",
           "Input",
           "Output",
@@ -2938,9 +2886,6 @@
         "properties": {
           "Agent": {
             "type": "string"
-          },
-          "CostIncomplete": {
-            "type": "boolean"
           },
           "EndedAt": {
             "anyOf": [
@@ -3070,7 +3015,6 @@
         },
         "required": [
           "Agent",
-          "CostIncomplete",
           "EndedAt",
           "GitBranch",
           "Grade",
@@ -3312,9 +3256,6 @@
           "Agent": {
             "type": "string"
           },
-          "CostIncomplete": {
-            "type": "boolean"
-          },
           "EndedAt": {
             "anyOf": [
               {
@@ -3411,7 +3352,6 @@
         },
         "required": [
           "Agent",
-          "CostIncomplete",
           "EndedAt",
           "GitBranch",
           "ID",
@@ -3686,9 +3626,6 @@
           "Agent": {
             "type": "string"
           },
-          "CostIncomplete": {
-            "type": "boolean"
-          },
           "EndedAt": {
             "anyOf": [
               {
@@ -3798,7 +3735,6 @@
         },
         "required": [
           "Agent",
-          "CostIncomplete",
           "EndedAt",
           "GitBranch",
           "Grade",
@@ -3833,9 +3769,6 @@
               "array",
               "null"
             ]
-          },
-          "CostShareIncomplete": {
-            "type": "boolean"
           },
           "CostThroughSubagentsPct": {
             "type": "number"
@@ -3888,7 +3821,6 @@
         },
         "required": [
           "CostShare",
-          "CostShareIncomplete",
           "CostThroughSubagentsPct",
           "DeepestTree",
           "DelegateShare",
@@ -4298,9 +4230,6 @@
       "TreeRollup": {
         "additionalProperties": false,
         "properties": {
-          "CostIncomplete": {
-            "type": "boolean"
-          },
           "CostUSD": {
             "type": "number"
           },
@@ -4310,7 +4239,6 @@
           }
         },
         "required": [
-          "CostIncomplete",
           "CostUSD",
           "SubagentCount"
         ],
@@ -4400,18 +4328,8 @@
             "format": "int64",
             "type": "integer"
           },
-          "CostIncomplete": {
-            "type": "boolean"
-          },
           "CostUSD": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "type": "number"
           },
           "Input": {
             "format": "int64",
@@ -4430,7 +4348,6 @@
           "CacheRead",
           "CacheWrite",
           "ContextTokens",
-          "CostIncomplete",
           "CostUSD",
           "Input",
           "Output",

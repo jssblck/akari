@@ -54,9 +54,6 @@ func TestCacheStats(t *testing.T) {
 	if math.Abs(c.SavingsUSD-5.85) > 1e-9 {
 		t.Errorf("savings = %v, want 5.85 (3.60 + 2.25)", c.SavingsUSD)
 	}
-	if c.SavingsIncomplete {
-		t.Error("savings should be complete: every model is priced")
-	}
 }
 
 // TestCacheStatsDatedWindowSplitsSaving pins the aggregate cache paths across a dated rate
@@ -96,9 +93,6 @@ func TestCacheStatsDatedWindowSplitsSaving(t *testing.T) {
 	}
 	if math.Abs(scoped.SavingsUSD-want) > 1e-9 {
 		t.Errorf("scoped savings = %v, want %v (1.80 intro + 2.70 sticker)", scoped.SavingsUSD, want)
-	}
-	if scoped.SavingsIncomplete {
-		t.Error("savings should be complete: Sonnet 5 is priced in both windows")
 	}
 
 	// The per-session recompute is the oracle the parse-time rollup reconciles against, so it
@@ -167,11 +161,10 @@ func TestCacheStatsReconcilesWithSnapshotTotals(t *testing.T) {
 	}
 }
 
-// TestCacheStatsIncompleteAndUndated pins two boundaries: an unpriced model's cached
-// volume flags the saving incomplete (a lower bound) rather than dropping silently to
-// zero, and the scoped analytics path excludes undated usage (matching the panel's time
+// TestCacheStatsUnknownPriceAndUndated pins two boundaries: an unknown model's cached
+// volume contributes zero savings, and the scoped analytics path excludes undated usage (matching the panel's time
 // axis) while the per-session path counts it (matching the session's token rollups).
-func TestCacheStatsIncompleteAndUndated(t *testing.T) {
+func TestCacheStatsUnknownPriceAndUndated(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
 	ctx := context.Background()
@@ -186,8 +179,7 @@ func TestCacheStatsIncompleteAndUndated(t *testing.T) {
 	}
 
 	s := seedSessionWithStats(t, st, admin.ID, proj, "claude", "s", 1, 0, 0)
-	// A priced dated event and an unpriced dated event that carries cached reads: the
-	// scoped saving must flag incomplete because the unpriced model's saving is omitted.
+	// A priced dated event and an unknown-price dated event that carries cached reads.
 	seedUsageCache(t, st, s, "claude-opus-4-8", 1, 100_000, 50_000, 100_000, 0, 0, "priced")
 	seedUsageCacheUndatedOrUnpriced(t, st, s, "secret-model", 0, 0, 200_000, 0, true, "unpriced")
 
@@ -195,8 +187,8 @@ func TestCacheStatsIncompleteAndUndated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cache stats: %v", err)
 	}
-	if !c.SavingsIncomplete {
-		t.Error("savings should be incomplete: an unpriced model carried cached reads")
+	if math.Abs(c.SavingsUSD-0.45) > 1e-9 {
+		t.Errorf("savings = %v, want 0.45 from the priced model only", c.SavingsUSD)
 	}
 
 	// Add an UNDATED cached event. The scoped (dated) path must not see it; the
@@ -207,10 +199,8 @@ func TestCacheStatsIncompleteAndUndated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("scoped cache stats: %v", err)
 	}
-	// Scoped cache read is the priced dated event's reads only (100k); the undated
-	// million and the unpriced event's reads carry no dated, priced read contribution
-	// the panel would plot. (The unpriced dated event's 200k reads still count in the
-	// token split, only its saving is omitted.)
+	// Scoped cache read includes both dated events; the unknown model contributes zero
+	// savings, while the undated million reads remain outside this view.
 	if scoped.CacheRead != 300_000 {
 		t.Errorf("scoped cache read = %d, want 300000 (100k priced + 200k unpriced, both dated; the undated 1M excluded)", scoped.CacheRead)
 	}
@@ -227,7 +217,7 @@ func TestCacheStatsIncompleteAndUndated(t *testing.T) {
 
 // seedUsageCacheUndatedOrUnpriced inserts a usage event carrying cache tokens that is
 // either undated (no occurred_at, so the scoped analytics path drops it) or dated, and
-// either unpriced (NULL cost, so it flags the saving incomplete) or priced. It covers
+// either unknown-priced (zero cost) or priced. It covers
 // the two boundary shapes the dated cache tests need without widening the shared
 // seedUsageCache helper.
 func seedUsageCacheUndatedOrUnpriced(t *testing.T, st *store.Store, sessionID int64, model string, in, out, cacheRead, cacheWrite int64, dated bool, dedup string) {
@@ -238,7 +228,7 @@ func seedUsageCacheUndatedOrUnpriced(t *testing.T, st *store.Store, sessionID in
 	}
 	_, err := st.Pool.Exec(context.Background(),
 		`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, occurred_at, dedup_key)
-		 VALUES ($1,$2,$3,$4,$5,$6, NULL, `+occurred+`, $7)`,
+		 VALUES ($1,$2,$3,$4,$5,$6, 0, `+occurred+`, $7)`,
 		sessionID, model, in, out, cacheRead, cacheWrite, dedup)
 	if err != nil {
 		t.Fatalf("seed cache usage: %v", err)

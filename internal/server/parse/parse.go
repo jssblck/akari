@@ -157,17 +157,11 @@ func toProjectionDelta(p parser.Delta) store.ProjectionDelta {
 			CacheWrite:     u.CacheWrite,
 			CacheRead:      u.CacheRead,
 			Reasoning:      u.Reasoning,
+			CostUSD:        pricing.Cost(u.Model, u.OccurredAt, u.Input, u.Output, u.CacheWrite, u.CacheRead),
 			OccurredAt:     u.OccurredAt,
 			DedupKey:       u.DedupKey,
 			SourceOffset:   u.SourceOffset,
 			SourceIndex:    u.SourceIndex,
-		}
-		// Price the event here at the rate in effect when it occurred (OccurredAt
-		// selects the date-effective window); whether it counts toward the session
-		// total is decided by the store's dedup fold, where a duplicate usage line is
-		// dropped and only the surviving row folds into the rollup.
-		if cost, known := pricing.Cost(u.Model, u.OccurredAt, u.Input, u.Output, u.CacheWrite, u.CacheRead); known {
-			pu.CostUSD = &cost
 		}
 		d.Usage = append(d.Usage, pu)
 	}

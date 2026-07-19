@@ -14,7 +14,7 @@ func scanSession(rows pgx.Rows) (SessionSummary, error) {
 	err := rows.Scan(&s.ID, &s.Agent, &s.Machine, &s.GitBranch, &s.Username,
 		&s.MessageCount, &s.UserMessageCount, &s.ModelFallbackCount,
 		&s.TotalInput, &s.TotalOutput, &s.TotalCacheWrite, &s.TotalCacheRead,
-		&s.TotalCostUSD, &s.CostIncomplete, &s.Visibility, &s.PublicID,
+		&s.TotalCostUSD, &s.Visibility, &s.PublicID,
 		&s.StartedAt, &s.EndedAt, &s.LastActiveAt)
 	return s, err
 }
@@ -82,21 +82,17 @@ type ProjectSessionSummary struct {
 }
 
 // SessionRemainder is the aggregate of the windowed sessions the capped table did not
-// show: how many, their per-class token volume, their summed cost, and whether any of
-// them carried unpriced usage. The project page renders it as a footer so the visible
+// show: how many, their per-class token volume, and their summed cost. The project page renders it as a footer so the visible
 // rows plus this line reconcile with the usage panel headline even when more sessions
 // match than the table caps at. It carries all four token classes (not just a total)
-// so the footer can show the same breakdown card every other token figure does, and
-// its CostIncomplete is a bool_or over the hidden sessions alone, so the footer flags
-// incomplete only when a hidden session is the unpriced one, never because a visible row was.
+// so the footer can show the same breakdown card every other token figure does.
 type SessionRemainder struct {
-	Sessions       int
-	Input          int64
-	Output         int64
-	CacheRead      int64
-	CacheWrite     int64
-	CostUSD        float64
-	CostIncomplete bool
+	Sessions   int
+	Input      int64
+	Output     int64
+	CacheRead  int64
+	CacheWrite int64
+	CostUSD    float64
 }
 
 // Has reports whether any windowed sessions fell outside the capped table, so the
@@ -130,10 +126,8 @@ func windowSessionConds(f SessionFilter) ([]string, []any) {
 //
 // The cap keeps a project with thousands of windowed sessions from rendering an
 // unbounded table. So the visible rows alone need not sum to the headline; the
-// remainder closes the gap. It is queried, not subtracted from the panel: a boolean
-// OR like cost_incomplete cannot be undone by subtraction (a visible unpriced row
-// would wrongly mark the priced tail incomplete), so the tail is aggregated directly
-// over the hidden sessions, carrying its own per-class sums, cost, and bool_or flag.
+// remainder closes the gap. It is queried rather than subtracted from the panel, so
+// the tail is aggregated directly over the hidden sessions with its own token and cost sums.
 // The remainder query runs only when the cap actually engaged.
 func (s *Store) WindowSessionPage(ctx context.Context, f SessionFilter) (SessionPage, error) {
 	var page SessionPage
@@ -163,7 +157,7 @@ func (s *Store) windowSessionPage(ctx context.Context, query querier, f SessionF
 		       s.message_count, s.user_message_count, s.model_fallback_count,
 		       coalesce(sum(ue.input_tokens), 0), coalesce(sum(ue.output_tokens), 0),
 		       coalesce(sum(ue.cache_write_tokens), 0), coalesce(sum(ue.cache_read_tokens), 0),
-		       coalesce(sum(ue.cost_usd), 0), ` + costIncompleteExpr + `,
+		       coalesce(sum(ue.cost_usd), 0),
 		       s.visibility, s.public_id, s.started_at, s.ended_at, s.last_active_at,
 		       coalesce(title.content, ''), sig.grade, coalesce(sig.outcome, '')
 		  FROM usage_events ue
@@ -188,7 +182,7 @@ func (s *Store) windowSessionPage(ctx context.Context, query querier, f SessionF
 		if err := rows.Scan(&sm.ID, &sm.Agent, &sm.Machine, &sm.GitBranch, &sm.Username,
 			&sm.MessageCount, &sm.UserMessageCount, &sm.ModelFallbackCount,
 			&sm.TotalInput, &sm.TotalOutput, &sm.TotalCacheWrite, &sm.TotalCacheRead,
-			&sm.TotalCostUSD, &sm.CostIncomplete, &sm.Visibility, &sm.PublicID,
+			&sm.TotalCostUSD, &sm.Visibility, &sm.PublicID,
 			&sm.StartedAt, &sm.EndedAt, &sm.LastActiveAt, &sm.Title, &sm.Grade, &sm.Outcome); err != nil {
 			return SessionPage{}, fmt.Errorf("scan window session: %w", err)
 		}
@@ -220,21 +214,19 @@ func (s *Store) windowSessionPage(ctx context.Context, query querier, f SessionF
 // windowSessionRemainder aggregates the windowed sessions past the cap into the
 // footer's totals. It re-derives the same per-session grouping WindowSessionPage
 // shows, orders it identically, skips the rows already shown (OFFSET the cap), and
-// sums what is left: per-class tokens, cost, the count, and a bool_or over those
-// sessions' own incompleteness so the marker reflects the hidden tail, not the panel.
+// sums what is left: per-class tokens, cost, and the count.
 func (s *Store) windowSessionRemainder(ctx context.Context, query querier, where string, args []any) (SessionRemainder, error) {
 	q := `
 		SELECT coalesce(count(*), 0),
 		       coalesce(sum(t.input), 0), coalesce(sum(t.output), 0),
 		       coalesce(sum(t.cache_read), 0), coalesce(sum(t.cache_write), 0),
-		       coalesce(sum(t.cost), 0), coalesce(bool_or(t.incomplete), false)
+		       coalesce(sum(t.cost), 0)
 		  FROM (
 		       SELECT coalesce(sum(ue.input_tokens), 0) AS input,
 		              coalesce(sum(ue.output_tokens), 0) AS output,
 		              coalesce(sum(ue.cache_read_tokens), 0) AS cache_read,
 		              coalesce(sum(ue.cache_write_tokens), 0) AS cache_write,
-		              coalesce(sum(ue.cost_usd), 0) AS cost,
-		              ` + costIncompleteExpr + ` AS incomplete
+		              coalesce(sum(ue.cost_usd), 0) AS cost
 		         FROM usage_events ue
 		         JOIN sessions s ON s.id = ue.session_id
 		         JOIN users u ON u.id = s.user_id
@@ -246,7 +238,7 @@ func (s *Store) windowSessionRemainder(ctx context.Context, query querier, where
 	remArgs := append(append([]any{}, args...), windowSessionLimit)
 	var r SessionRemainder
 	if err := query.QueryRow(ctx, q, remArgs...).Scan(
-		&r.Sessions, &r.Input, &r.Output, &r.CacheRead, &r.CacheWrite, &r.CostUSD, &r.CostIncomplete,
+		&r.Sessions, &r.Input, &r.Output, &r.CacheRead, &r.CacheWrite, &r.CostUSD,
 	); err != nil {
 		return SessionRemainder{}, fmt.Errorf("aggregate window session remainder: %w", err)
 	}
@@ -277,7 +269,7 @@ func globalSessionSelect(matchLateral, matchCol, matchCutCol string) string {
 	       s.message_count, s.user_message_count, s.model_fallback_count,
 	       s.total_input_tokens, s.total_output_tokens,
 	       s.total_cache_write_tokens, s.total_cache_read_tokens,
-	       s.total_cost_usd, s.cost_incomplete, s.visibility, s.public_id,
+	       s.total_cost_usd, s.visibility, s.public_id,
 	       s.started_at, s.ended_at, s.last_active_at,
 	       p.id, p.remote_key, p.display_name, p.kind,
 	       sig.grade, sig.outcome,
@@ -306,7 +298,7 @@ func scanSessionRow(rows pgx.Rows, matchActive bool) (r SessionRow, raw string, 
 	dest := []any{&r.ID, &r.Agent, &r.Machine, &r.GitBranch, &r.Username,
 		&r.MessageCount, &r.UserMessageCount, &r.ModelFallbackCount,
 		&r.TotalInput, &r.TotalOutput, &r.TotalCacheWrite, &r.TotalCacheRead,
-		&r.TotalCostUSD, &r.CostIncomplete, &r.Visibility, &r.PublicID,
+		&r.TotalCostUSD, &r.Visibility, &r.PublicID,
 		&r.StartedAt, &r.EndedAt, &r.LastActiveAt,
 		&r.ProjectID, &r.ProjectKey, &r.ProjectName, &r.ProjectKind,
 		&r.Grade, &outcome,

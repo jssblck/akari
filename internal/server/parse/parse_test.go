@@ -162,14 +162,13 @@ func assertClaudeProjection(t *testing.T, st *store.Store, sid int64) {
 		mc, umc           int
 		totalIn, totalOut int64
 		cost              float64
-		costIncomplete    bool
 		startedAt, ended  *string
 	)
 	if err := st.Pool.QueryRow(ctx,
 		`SELECT message_count, user_message_count, total_input_tokens, total_output_tokens,
-		        total_cost_usd, cost_incomplete, started_at::text, ended_at::text
+		        total_cost_usd, started_at::text, ended_at::text
 		   FROM sessions WHERE id=$1`, sid).
-		Scan(&mc, &umc, &totalIn, &totalOut, &cost, &costIncomplete, &startedAt, &ended); err != nil {
+		Scan(&mc, &umc, &totalIn, &totalOut, &cost, &startedAt, &ended); err != nil {
 		t.Fatal(err)
 	}
 	if mc != 2 || umc != 1 {
@@ -180,9 +179,6 @@ func assertClaudeProjection(t *testing.T, st *store.Store, sid int64) {
 	}
 	if cost < 17.999 || cost > 18.001 {
 		t.Errorf("cost = %v, want ~18", cost)
-	}
-	if costIncomplete {
-		t.Error("cost should be complete: sonnet is priced")
 	}
 	if startedAt == nil || ended == nil {
 		t.Error("started_at/ended_at should be set from message timestamps")
@@ -943,13 +939,12 @@ func TestClaudeModelFallbackSystemFirstMerge(t *testing.T) {
 	}
 }
 
-// TestCostIncompleteForUnknownModel confirms an unpriced model flips the
-// session's cost_incomplete flag while still recording token totals.
-func TestCostIncompleteForUnknownModel(t *testing.T) {
+// TestUnknownModelHasZeroCost confirms an unknown model still records its token totals.
+func TestUnknownModelHasZeroCost(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
 	ctx := context.Background()
-	sid := seedSession(t, st, "unpriced")
+	sid := seedSession(t, st, "unknown-price")
 
 	raw := `{"type":"assistant","message":{"id":"m1","model":"future-model-9","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":500,"output_tokens":500}}}` + "\n"
 	if _, err := st.AppendChunk(ctx, sid, 0, []byte(raw)); err != nil {
@@ -960,18 +955,14 @@ func TestCostIncompleteForUnknownModel(t *testing.T) {
 	}
 
 	var cost float64
-	var incomplete bool
 	var totalIn int64
 	if err := st.Pool.QueryRow(ctx,
-		"SELECT total_cost_usd, cost_incomplete, total_input_tokens FROM sessions WHERE id=$1", sid).
-		Scan(&cost, &incomplete, &totalIn); err != nil {
+		"SELECT total_cost_usd, total_input_tokens FROM sessions WHERE id=$1", sid).
+		Scan(&cost, &totalIn); err != nil {
 		t.Fatal(err)
 	}
-	if !incomplete {
-		t.Error("unknown model should set cost_incomplete")
-	}
 	if cost != 0 {
-		t.Errorf("cost = %v, want 0 for an unpriced model", cost)
+		t.Errorf("cost = %v, want 0 for a model with no known rate", cost)
 	}
 	if totalIn != 500 {
 		t.Errorf("total_input_tokens = %d, want 500", totalIn)

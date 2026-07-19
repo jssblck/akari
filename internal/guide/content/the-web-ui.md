@@ -14,8 +14,7 @@ trailing window. Pick the window (7, 30, or 90 days, a year, or all of history)
 and every figure on the panel follows it:
 
 - **Cost, combined tokens, and session totals** for the window, as stable tabular
-  figures. A partial cost (some session used a model the rate table does not
-  price) shows a trailing `+`.
+  figures. Dollar figures are best-effort estimates from the built-in rate table.
 - **A daily-activity heatmap**, one cell per day, so a busy stretch or a quiet one
   is visible at a glance.
 - **By-model and by-agent breakdowns** of where the usage went, plus a by-user

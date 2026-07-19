@@ -38,10 +38,6 @@ type Breakdown struct {
 	// and unsettle the headline-equals-sum reconciliation. It surfaces as its own figure.
 	Reasoning int64
 	Sessions  int
-	// CostIncomplete is true when this slice folded in a usage event that carried
-	// real token volume but no price (an unpriced model), so the slice's cost is a
-	// lower bound. API consumers can distinguish that estimate from a complete cost.
-	CostIncomplete bool
 }
 
 // Tokens is the all-class token volume (input, output, cache read, cache write)
@@ -79,10 +75,6 @@ type Analytics struct {
 	// disturbing the headline-equals-sum-of-series reconciliation the four billed classes hold.
 	TotalReasoning int64
 	Sessions       int
-	// CostIncomplete is true when any usage event in the window carried token
-	// volume but no price, so TotalCost is a lower bound. It is the OR of the
-	// by-agent slices, the same rows the headline totals are summed from.
-	CostIncomplete bool
 	// Cache is the prompt-cache effectiveness over the same scope: hit rate, the
 	// dollars caching saved, and the prompt-token split. It reads from the same dated
 	// usage_events base as the totals (see CacheStats), so the Cache tile reconciles
@@ -254,7 +246,6 @@ func (s *Store) analyticsFrom(ctx context.Context, q querier, f AnalyticsFilter)
 		a.TotalCacheRead += ag.CacheRead
 		a.TotalCacheWrite += ag.CacheWrite
 		a.TotalReasoning += ag.Reasoning
-		a.CostIncomplete = a.CostIncomplete || ag.CostIncomplete
 	}
 
 	// Cache effectiveness shares the same scoped dated-usage base, so its prompt
@@ -484,34 +475,22 @@ func (s *Store) analyticsSeries(ctx context.Context, q querier, f AnalyticsFilte
 	return out, nil
 }
 
-// costIncompleteExpr is the per-slice incompleteness aggregate shared by the
-// by-model and by-agent splits: true when the slice folded in a usage event that
-// carried real token volume but no price, so its summed cost is a lower bound. The
-// token sum mirrors projection.go exactly (input + output + cache read + cache
-// write + reasoning), so a reasoning-only unpriced row flags the breakdown the same
-// way it already flags the session rollup; kept here as one expression so both
-// splits agree.
-const costIncompleteExpr = `bool_or(ue.cost_usd IS NULL AND (ue.input_tokens + ue.output_tokens + ue.cache_read_tokens + ue.cache_write_tokens + ue.reasoning_tokens) > 0)`
-
 func (s *Store) analyticsByModel(ctx context.Context, q querier, f AnalyticsFilter) ([]Breakdown, error) {
 	filter, args := f.clause()
 	// occurred_at IS NOT NULL matches the series and the by-agent split, so the
 	// three reconcile; see Analytics. No model <> '' filter though: usage that
 	// carries no model id still has to be in the split, or the by-model rows would
-	// sum to less than the headline. A NULL cost is the persisted proof that pricing
-	// was unavailable for that usage event, so those models collapse into one
-	// "Other" row before aggregation. Grouping in SQL keeps the row's distinct
-	// session count correct when one session used several unpriced models.
+	// sum to less than the headline. Zero-priced rows collapse into one "Other"
+	// bucket, the canonical representation for models outside the rate table.
 	rows, err := q.Query(ctx,
-		`SELECT CASE WHEN ue.cost_usd IS NULL THEN 'Other' ELSE ue.model END AS model,
+		`SELECT CASE WHEN ue.cost_usd = 0 THEN 'Other' ELSE ue.model END AS model,
 		        coalesce(sum(ue.cost_usd), 0),
 		        coalesce(sum(ue.input_tokens), 0),
 		        coalesce(sum(ue.output_tokens), 0),
 		        coalesce(sum(ue.cache_read_tokens), 0),
 		        coalesce(sum(ue.cache_write_tokens), 0),
 		        coalesce(sum(ue.reasoning_tokens), 0),
-		        count(DISTINCT ue.session_id),
-		        coalesce(`+costIncompleteExpr+`, false)
+		        count(DISTINCT ue.session_id)
 		   FROM usage_events ue
 		   JOIN sessions s ON s.id = ue.session_id
 		  WHERE ue.occurred_at IS NOT NULL`+filter+`
@@ -544,8 +523,7 @@ func (s *Store) analyticsByAgent(ctx context.Context, q querier, f AnalyticsFilt
 		        coalesce(sum(ue.cache_read_tokens), 0),
 		        coalesce(sum(ue.cache_write_tokens), 0),
 		        coalesce(sum(ue.reasoning_tokens), 0),
-		        count(DISTINCT ue.session_id),
-		        coalesce(`+costIncompleteExpr+`, false)
+		        count(DISTINCT ue.session_id)
 		   FROM usage_events ue
 		   JOIN sessions s ON s.id = ue.session_id
 		  WHERE ue.occurred_at IS NOT NULL`+filter+`
@@ -578,8 +556,7 @@ func (s *Store) analyticsByUser(ctx context.Context, q querier, f AnalyticsFilte
 		        coalesce(sum(ue.cache_read_tokens), 0),
 		        coalesce(sum(ue.cache_write_tokens), 0),
 		        coalesce(sum(ue.reasoning_tokens), 0),
-		        count(DISTINCT ue.session_id),
-		        coalesce(`+costIncompleteExpr+`, false)
+		        count(DISTINCT ue.session_id)
 		   FROM usage_events ue
 		   JOIN sessions s ON s.id = ue.session_id
 		   JOIN users u ON u.id = s.user_id
@@ -601,7 +578,7 @@ func scanBreakdowns(rows pgx.Rows) ([]Breakdown, error) {
 	var out []Breakdown
 	for rows.Next() {
 		var b Breakdown
-		if err := rows.Scan(&b.Label, &b.CostUSD, &b.Input, &b.Output, &b.CacheRead, &b.CacheWrite, &b.Reasoning, &b.Sessions, &b.CostIncomplete); err != nil {
+		if err := rows.Scan(&b.Label, &b.CostUSD, &b.Input, &b.Output, &b.CacheRead, &b.CacheWrite, &b.Reasoning, &b.Sessions); err != nil {
 			return nil, err
 		}
 		out = append(out, b)

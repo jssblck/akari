@@ -215,4 +215,10 @@ package parse
 // anywhere in the turn, which also handles reordered framing without accepting
 // a prompt that quotes one marker. Rebuilding the corpus updates affected
 // message roles and their derived session data.
-const Epoch = 18
+//
+// Epoch 18 -> 19: represent unknown model prices as zero throughout the
+// projection and remove pricing-completeness state. Analytics now identifies
+// unknown models solely by zero cost and folds them into Other. Rebuilding the
+// corpus replaces historical NULL usage costs and refreshes every derived cost
+// rollup under the same best-effort estimate rule.
+const Epoch = 19

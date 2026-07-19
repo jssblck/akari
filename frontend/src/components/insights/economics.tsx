@@ -1,4 +1,5 @@
 import { formatCost } from "../../format";
+import { formatSavings } from "../../pricing-format";
 import type { Economics, Trends } from "../../types";
 import { Stat, StatStrip } from "../stat-strip";
 import { fmtInt, fmtK } from "./format";
@@ -286,8 +287,6 @@ export function EconomicsInstrument({
   const e = trends.Economics;
   const gallery = trends.Gallery;
   const perDollar = e.TotalSpend > 0 ? e.TotalCacheSavings / e.TotalSpend : 0;
-  const perDollarMark =
-    e.CacheSavingsIncomplete || e.CostIncomplete ? " partial" : "";
 
   return (
     <section
@@ -329,7 +328,7 @@ export function EconomicsInstrument({
             >
               <ChartCaption
                 title="Cache"
-                value={`$${fmtInt(e.TotalCacheSavings)} saved`}
+                value={formatSavings(e.TotalCacheSavings)}
               />
               <CacheChart n={n} labels={trends.Labels} economics={e} mini />
             </MiniMultipleButton>
@@ -361,17 +360,14 @@ export function EconomicsInstrument({
         <TabPanel stripId="economics-tabs" tabId="cache" active={active}>
           <StatStrip>
             <Stat
-              label="savings total"
-              value={`$${fmtInt(e.TotalCacheSavings)}${e.CacheSavingsIncomplete ? " partial" : ""}`}
+              label="cache effect"
+              value={formatSavings(e.TotalCacheSavings)}
             />
             <Stat
               label="hit rate"
               value={`${e.CacheHitRateLatest.toFixed(0)}%`}
             />
-            <Stat
-              label="savings per $1 spent"
-              value={`$${perDollar.toFixed(2)}${perDollarMark}`}
-            />
+            <Stat label="savings per $1 spent" value={formatCost(perDollar)} />
           </StatStrip>
           <CacheChart n={n} labels={trends.Labels} economics={e} mini={false} />
         </TabPanel>

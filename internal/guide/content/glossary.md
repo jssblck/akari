@@ -97,10 +97,10 @@ pricing is part of parsing, reprices old sessions automatically on the next
 [reparse](#parsing-and-reparse)).
 
 When a session uses a model the table does not know, its tokens are still recorded
-but that portion of the cost is left unpriced, and the session is marked
-**cost incomplete**. The UI shows such a total with a trailing `+` (for example
-`$1.42+`), so a partial figure is never silently rounded to look complete. Costs
-below a cent show extra precision rather than collapsing to `$0`.
+and its cost is stored as zero. Zero means Akari does not know the price; it does
+not mean the model was free. All dollar figures are best-effort estimates, and
+analytics group zero-priced models under `Other`. Costs below a cent show extra
+precision rather than collapsing to `$0`.
 
 Per-session totals roll up across the session's turns; fleet and project totals
 roll those up further, always within the selected trailing window.
