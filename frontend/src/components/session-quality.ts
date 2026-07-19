@@ -285,7 +285,8 @@ export function fallbackNoticeLabel(f: ModelFallback): string {
 
 // web.ContextLabel: names what an injected-context turn carries, from the marker
 // its content opens with.
-export function contextLabel(content: string): string {
+export function contextLabel(content: string, role = "context"): string {
+  if (role === "system") return "system prompt";
   const t = content.trim();
   const hasAgents =
     t.startsWith("# AGENTS.md instructions for ") ||
@@ -315,7 +316,9 @@ export function isDiffTool(name: string): boolean {
 
 // web.OutlineTitle: a compact one-line label for an outline turn or flow-tick title.
 export function outlineTitle(role: string, content: string): string {
-  if (role === "context") return contextLabel(content);
+  if (role === "context" || role === "system") {
+    return contextLabel(content, role);
+  }
   const collapsed = content.replace(/\s+/g, " ").trim();
   const max = 48;
   if (collapsed.length <= max) return collapsed;

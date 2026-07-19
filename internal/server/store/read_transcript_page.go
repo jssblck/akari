@@ -2,9 +2,11 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -50,6 +52,7 @@ type TranscriptPage struct {
 	Tools       []ToolCallView
 	Attachments []AttachmentView
 	Fallbacks   []ModelFallback
+	Events      []SessionEvent
 	// HasEarlier reports whether any rows precede the window, so the renderer knows to
 	// draw the "Show earlier" bar. EarlierCount is how many (for the bar's label).
 	HasEarlier   bool
@@ -59,6 +62,51 @@ type TranscriptPage struct {
 	// behind for an append to reconcile, and the handler should re-render the window
 	// whole instead of leaving a gap in the DOM.
 	More bool
+}
+
+// SessionEvent is one notable transcript occurrence. Attrs stays raw JSON so
+// event-specific fields cross the store boundary without a second schema.
+type SessionEvent struct {
+	MessageOrdinal *int64
+	Kind           string
+	Attrs          json.RawMessage
+	OccurredAt     time.Time
+}
+
+// SessionEvents returns the first bounded event set in transcript order.
+func (s *Store) SessionEvents(ctx context.Context, sessionID int64, limit int) ([]SessionEvent, error) {
+	return s.scanSessionEvents(ctx, s.Pool, sessionID, limit)
+}
+
+func (s *Store) scanSessionEvents(ctx context.Context, q querier, sessionID int64, limit int) ([]SessionEvent, error) {
+	if limit <= 0 || limit > ModelFallbackListCap {
+		limit = ModelFallbackListCap
+	}
+	rows, err := q.Query(ctx,
+		`SELECT message_ordinal, kind, attrs, occurred_at
+		   FROM session_events WHERE session_id = $1 ORDER BY seq LIMIT $2`, sessionID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query events for session %d: %w", sessionID, err)
+	}
+	defer rows.Close()
+	var out []SessionEvent
+	for rows.Next() {
+		var event SessionEvent
+		var attrs []byte
+		var occurredAt *time.Time
+		if err := rows.Scan(&event.MessageOrdinal, &event.Kind, &attrs, &occurredAt); err != nil {
+			return nil, fmt.Errorf("scan event for session %d: %w", sessionID, err)
+		}
+		event.Attrs = json.RawMessage(attrs)
+		if occurredAt != nil {
+			event.OccurredAt = *occurredAt
+		}
+		out = append(out, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate events for session %d: %w", sessionID, err)
+	}
+	return out, nil
 }
 
 // snapshotTx runs fn inside a repeatable-read, read-only transaction, so the several
@@ -210,6 +258,11 @@ func (s *Store) fillWindowExtras(ctx context.Context, tx pgx.Tx, sessionID int64
 		return err
 	}
 	page.Fallbacks = fallbacks
+	events, err := s.scanSessionEvents(ctx, tx, sessionID, ModelFallbackListCap)
+	if err != nil {
+		return err
+	}
+	page.Events = events
 	return nil
 }
 

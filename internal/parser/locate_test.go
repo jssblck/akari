@@ -66,12 +66,20 @@ func locateParity(t *testing.T, agent Agent, line string) {
 // tool inputs and results, including a multi-block assistant line and an array-shaped
 // result body.
 func TestLocateClaudeBodies(t *testing.T) {
+	img := fakePNGBase64()
 	cases := []string{
 		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"a.go"}}]}}`,
 		`{"type":"assistant","message":{"content":[{"type":"text","text":"thinking"},{"type":"tool_use","id":"t1","name":"Read","input":{"x":1}},{"type":"tool_use","id":"t2","name":"Write","input":{"y":[1,2,3]}}]}}`,
 		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"package a"}]}}`,
 		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":"line one"},{"type":"text","text":"line two"}]}]}}`,
 		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":{"nested":"object"}}]}}`,
+		`{"type":"user","message":{"content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + img + `"}}]}}`,
+		`{"type":"user","toolUseResult":{"stdout":"structured"},"message":{"content":"done"}}`,
+		`{"type":"user","message":{"content":"done"},"toolUseResult":"plain result"}`,
+		// The duplicate can sit on either side of message. Its actual source position
+		// must determine the emitted order when the line also carries a block body.
+		`{"type":"user","toolUseResult":{"structured":true},"message":{"content":[{"type":"tool_result","content":"block result"}]}}`,
+		`{"type":"user","message":{"content":[{"type":"tool_result","content":"block result"}]},"toolUseResult":[{"structured":true}]}`,
 		`{"type":"user","message":{"content":"just a string, no tool body"}}`,
 		// A Bash input carries a command detail (a raw-body input, exercising the
 		// BodyRaw span read); the sentinel must carry it.

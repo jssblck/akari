@@ -39,28 +39,71 @@ func (r *reducer) reduceClaude(region []byte, base int64) error {
 		if br := e.Get("gitBranch").String(); br != "" {
 			r.d.GitBranch = br
 		}
+		if slug := e.Get("slug").String(); slug != "" {
+			r.d.Identity.Slug = slug
+		}
+		// Every line of a subagent transcript stamps the agent type that ran it;
+		// that is the session's role for its parent, not a per-line fact.
+		if e.Get("isSidechain").Bool() {
+			if agent := e.Get("attributionAgent").String(); agent != "" {
+				r.d.Identity.SubagentName = agent
+			}
+		}
 
 		switch typ {
 		case "user":
 			content := e.Get("message.content")
 			text := blockText(content)
+			hasImage := false
 			if content.IsArray() {
+				var resultIDs []string
 				for _, b := range content.Array() {
-					if b.Get("type").String() == "tool_result" {
-						r.applyResult(b.Get("tool_use_id").String(), b.Get("content"), b.Get("is_error").Bool())
+					switch b.Get("type").String() {
+					case "tool_result":
+						id := b.Get("tool_use_id").String()
+						resultIDs = append(resultIDs, id)
+						r.applyResult(id, b.Get("content"), b.Get("is_error").Bool())
+					case "image":
+						hasImage = true
 					}
 				}
+				// The top-level toolUseResult is the same result in structured form. It
+				// is unkeyed, so it can only be matched when the line delivered exactly
+				// one result; a multi-result line leaves it ambiguous and dropped.
+				if len(resultIDs) == 1 {
+					r.applyStructResult(resultIDs[0], e.Get("toolUseResult"))
+				}
 			}
-			if strings.TrimSpace(text) == "" {
+			if strings.TrimSpace(text) == "" && !hasImage {
 				// A turn that only delivers tool results is not a message, and it does
 				// not close the open assistant turn either: when one response carries
 				// parallel tool calls, Claude Code logs each call's result between that
 				// response's own content-block lines, so the response's remaining
 				// tool_use lines (same message.id) are still part of the open turn. A
-				// real user message or a different id is what ends the response.
+				// real user message or a different id is what ends the response. An
+				// image-only paste is a message even with no text.
 				return nil
 			}
-			r.addUser(text, ts)
+			// isMeta marks injected material (a skill body, a coordinator note, an
+			// image caption); isCompactSummary marks the replayed summary after a
+			// compaction. Neither is a human prompt, so both take the context role and
+			// stay out of the title, user count, and prompt hygiene.
+			var ord int
+			if e.Get("isMeta").Bool() || e.Get("isCompactSummary").Bool() {
+				ord = r.addContext(text, ts)
+			} else {
+				ord = r.addUser(text, ts)
+			}
+			// Pasted images arrive as typed image blocks carrying base64 at
+			// source.data (a CAS sentinel once the client lifted it); record each as
+			// an attachment on this message.
+			if hasImage {
+				for _, b := range content.Array() {
+					if b.Get("type").String() == "image" {
+						r.addAttachment(ord, b.Get("source.data"), "")
+					}
+				}
+			}
 
 		case "assistant":
 			msg := e.Get("message")
@@ -99,6 +142,12 @@ func (r *reducer) reduceClaude(region []byte, base int64) error {
 						ToolName: name, Category: toolCategory(name),
 						FilePath: b.Get("input.file_path").String(),
 						CallUID:  b.Get("id").String(),
+						// The line-level attribution stamps what drove this call: the
+						// subagent type, the invoked skill, and its plugin. They co-occur
+						// freely, so all three are carried.
+						AttributionAgent:  e.Get("attributionAgent").String(),
+						AttributionSkill:  e.Get("attributionSkill").String(),
+						AttributionPlugin: e.Get("attributionPlugin").String(),
 					}
 					setToolInput(&tc, b.Get("input"), "application/json")
 					r.d.ToolCalls = append(r.d.ToolCalls, tc)
@@ -125,16 +174,139 @@ func (r *reducer) reduceClaude(region []byte, base int64) error {
 			r.claudeFallbackFromAssistant(e, msg, ord, ts)
 
 		case "system":
-			// Only the safety-classifier fallback notice is kept; every other system entry
-			// stays dropped (the parser has no message row for them). It arrives on its own
-			// line, separate from the assistant entries, and carries the refusal detail the
-			// assistant side does not: trigger, category, and explanation.
-			if e.Get("subtype").String() == "model_refusal_fallback" {
+			switch e.Get("subtype").String() {
+			case "model_refusal_fallback":
+				// The safety-classifier fallback notice arrives on its own line, separate
+				// from the assistant entries, and carries the refusal detail the
+				// assistant side does not: trigger, category, and explanation.
 				r.claudeFallbackFromSystem(e, ts)
+			case "compact_boundary":
+				m := e.Get("compactMetadata")
+				r.addEvent(EventCompaction, map[string]any{
+					"trigger":        m.Get("trigger").String(),
+					"pre_tokens":     m.Get("preTokens").Int(),
+					"post_tokens":    m.Get("postTokens").Int(),
+					"dropped_tokens": m.Get("cumulativeDroppedTokens").Int(),
+				}, ts)
+			case "turn_duration":
+				r.addEvent(EventTurnEnd, map[string]any{
+					"duration_ms":   e.Get("durationMs").Int(),
+					"message_count": e.Get("messageCount").Int(),
+				}, ts)
+			case "api_error":
+				msg := e.Get("error.formatted").String()
+				if msg == "" {
+					msg = e.Get("error.message").String()
+				}
+				r.addEvent(EventAPIError, map[string]any{
+					"message":       msg,
+					"retry_attempt": e.Get("retryAttempt").Int(),
+					"max_retries":   e.Get("maxRetries").Int(),
+				}, ts)
+			case "stop_hook_summary":
+				attrs := map[string]any{
+					"hook_count":             e.Get("hookCount").Int(),
+					"prevented_continuation": e.Get("preventedContinuation").Bool(),
+				}
+				if reason := e.Get("stopReason").String(); reason != "" {
+					attrs["stop_reason"] = reason
+				}
+				if errs := e.Get("hookErrors"); errs.IsArray() && len(errs.Array()) > 0 {
+					var msgs []string
+					for _, he := range errs.Array() {
+						msgs = append(msgs, he.String())
+					}
+					attrs["errors"] = msgs
+				}
+				r.addEvent(EventStopHook, attrs, ts)
 			}
+
+		case "attachment":
+			// Attachment entries carry the material Claude Code injects between turns.
+			// Only the instruction-bearing kinds become context turns; the per-turn
+			// state reminders (task lists, queued commands, file snapshots, hook
+			// output) stay dropped as noise.
+			if text, ok := claudeAttachmentContext(e.Get("attachment")); ok {
+				r.addContext(text, ts)
+			}
+
+		case "custom-title":
+			if t := e.Get("customTitle").String(); t != "" {
+				r.d.Identity.CustomTitle = t
+			}
+
+		case "permission-mode":
+			if m := e.Get("permissionMode").String(); m != "" {
+				r.d.Identity.PermissionMode = m
+			}
+
+		case "pr-link":
+			r.d.Identity.PRNumber = int(e.Get("prNumber").Int())
+			r.d.Identity.PRURL = e.Get("prUrl").String()
+			r.d.Identity.PRRepo = e.Get("prRepository").String()
 		}
 		return nil
 	})
+}
+
+// claudeAttachmentContext renders an instruction-bearing attachment entry as
+// context text, or reports false for the kinds that are per-turn state noise.
+// Each renderer keeps the payload's own prose and drops the envelope.
+func claudeAttachmentContext(a gjson.Result) (string, bool) {
+	switch a.Get("type").String() {
+	case "skill_listing":
+		if c := a.Get("content").String(); c != "" {
+			return "Available skills:\n" + c, true
+		}
+	case "mcp_instructions_delta":
+		if blocks := joinStrings(a.Get("addedBlocks"), "\n\n"); blocks != "" {
+			return "MCP server instructions:\n\n" + blocks, true
+		}
+	case "agent_listing_delta":
+		if lines := joinStrings(a.Get("addedLines"), "\n"); lines != "" {
+			return "Available agents:\n" + lines, true
+		}
+	case "deferred_tools_delta":
+		if names := joinStrings(a.Get("addedNames"), ", "); names != "" {
+			return "Deferred tools available: " + names, true
+		}
+	case "nested_memory":
+		if c := a.Get("content.content").String(); c != "" {
+			if path := a.Get("path").String(); path != "" {
+				return "Memory from " + path + ":\n\n" + c, true
+			}
+			return c, true
+		}
+	case "command_permissions":
+		if tools := joinStrings(a.Get("allowedTools"), ", "); tools != "" {
+			return "Allowed tools: " + tools, true
+		}
+	case "invoked_skills":
+		var parts []string
+		for _, s := range a.Get("skills").Array() {
+			if c := s.Get("content").String(); c != "" {
+				parts = append(parts, c)
+			}
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, "\n\n"), true
+		}
+	}
+	return "", false
+}
+
+// joinStrings joins a JSON array of strings, skipping empties.
+func joinStrings(arr gjson.Result, sep string) string {
+	if !arr.IsArray() {
+		return ""
+	}
+	var parts []string
+	for _, v := range arr.Array() {
+		if s := v.String(); s != "" {
+			parts = append(parts, s)
+		}
+	}
+	return strings.Join(parts, sep)
 }
 
 // claudeFallbackFromAssistant emits a FallbackOp when the assistant entry carries an
@@ -264,6 +436,33 @@ func (r *reducer) applyResult(id string, body gjson.Result, isErr bool) {
 		op.Body, op.Bytes, op.MediaType = content, len(content), media
 	}
 	r.d.ToolResults = append(r.d.ToolResults, op)
+}
+
+// applyStructResult amends the result op applyResult just emitted with the
+// line's structured toolUseResult. It patches the last op in place (the caller
+// guarantees it was appended by the same line for the same call id) rather than
+// emitting a second op, because the store's result merge is first-wins per call
+// id and a struct-only op would lose. A scalar toolUseResult other than a string
+// carries nothing worth storing and is dropped.
+func (r *reducer) applyStructResult(id string, v gjson.Result) {
+	if id == "" || len(r.d.ToolResults) == 0 {
+		return
+	}
+	op := &r.d.ToolResults[len(r.d.ToolResults)-1]
+	if op.CallUID != id {
+		return
+	}
+	if ref, ok := asCASRef(v); ok {
+		op.StructSHA256, op.StructBytes, op.StructMediaType = ref.SHA256, ref.Bytes, ref.MediaType
+		return
+	}
+	switch {
+	case v.IsObject(), v.IsArray():
+		op.StructBody, op.StructBytes, op.StructMediaType = v.Raw, len(v.Raw), "application/json"
+	case v.Type == gjson.String:
+		s := v.String()
+		op.StructBody, op.StructBytes, op.StructMediaType = s, len(s), "text/plain"
+	}
 }
 
 // setToolInput records a tool call's input, recognizing a CAS sentinel. When the

@@ -74,8 +74,9 @@ func (s *Store) sessionAudit(ctx context.Context, tx pgx.Tx, sessionID int64) (S
 // newer epoch), the same LEFT JOIN convention the feed row uses.
 type SubagentRow struct {
 	SessionSummary
-	Grade   *string
-	Outcome string
+	Grade        *string
+	Outcome      string
+	SubagentName string
 }
 
 // Failed reports whether this child ended in an error, the one outcome the fold summary
@@ -99,7 +100,7 @@ func (s *Store) subagents(ctx context.Context, q querier, parentID int64) ([]Sub
 		       s.total_cache_write_tokens, s.total_cache_read_tokens,
 		       s.total_cost_usd, s.visibility, s.public_id,
 		       s.started_at, s.ended_at, s.last_active_at,
-		       sig.grade, sig.outcome,
+		       sig.grade, sig.outcome, s.subagent_name,
 		       coalesce(title.content, '')
 		  FROM sessions s
 		  JOIN users u ON u.id = s.user_id
@@ -120,7 +121,7 @@ func (s *Store) subagents(ctx context.Context, q querier, parentID int64) ([]Sub
 			&r.TotalInput, &r.TotalOutput, &r.TotalCacheWrite, &r.TotalCacheRead,
 			&r.TotalCostUSD, &r.Visibility, &r.PublicID,
 			&r.StartedAt, &r.EndedAt, &r.LastActiveAt,
-			&r.Grade, &outcome,
+			&r.Grade, &outcome, &r.SubagentName,
 			&r.Title); err != nil {
 			return nil, fmt.Errorf("scan subagent of session %d: %w", parentID, err)
 		}

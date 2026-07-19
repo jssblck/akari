@@ -279,6 +279,9 @@ func (b *schemaBuilder) fieldSchema(typ reflect.Type) any {
 	if typ == reflect.TypeOf(time.Duration(0)) {
 		return map[string]any{"format": "int64", "type": "integer"}
 	}
+	if typ == reflect.TypeOf(json.RawMessage{}) {
+		return map[string]any{"additionalProperties": map[string]any{}, "type": "object"}
+	}
 	switch typ.Kind() {
 	case reflect.Pointer:
 		return map[string]any{"anyOf": []any{b.fieldSchema(typ.Elem()), map[string]any{"type": "null"}}}

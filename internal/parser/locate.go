@@ -167,9 +167,9 @@ func (s *lineSource) unquoted(sp ValueSpan) (string, error) {
 	return raw, nil
 }
 
-// locateClaude finds claude tool inputs (on an assistant line) and tool results
-// (on a user line) by walking the content array once, emitting each body as it is
-// found.
+// locateClaude finds Claude tool inputs and the bodies duplicated across user lines.
+// User fields are registered together so their byte spans, rather than schema order,
+// decide emission order when toolUseResult appears before message.
 func locateClaude(s *lineSource, emit func(BodyLocation) error) error {
 	typ, err := s.topType(Key("type"))
 	if err != nil {
@@ -181,11 +181,112 @@ func locateClaude(s *lineSource, emit func(BodyLocation) error) error {
 			[]Step{Key("message"), Key("content")},
 			"tool_use", Key("input"), BodyRaw, "application/json", emit)
 	case "user":
-		return s.locateResultBlocks(
-			[]Step{Key("message"), Key("content")},
-			"tool_result", Key("content"), emit)
+		return s.locateClaudeUser(emit)
 	}
 	return nil
+}
+
+func (s *lineSource) locateClaudeUser(emit func(BodyLocation) error) error {
+	contentPath := []Step{Key("message"), Key("content")}
+	resultPath := []Step{Key("toolUseResult")}
+	paths := [][]Step{
+		contentPath,
+		resultPath,
+		{Key("toolUseResult"), Key(sentinelKey)},
+	}
+	spans, err := s.locate(paths)
+	if err != nil {
+		return err
+	}
+	content, hasContent := spans[0]
+	result, hasResult := spans[1]
+	_, resultIsSentinel := spans[2]
+
+	emitBlocks := func() error {
+		if !hasContent {
+			return nil
+		}
+		return s.locateClaudeUserBlocks(contentPath, emit)
+	}
+	emitResult := func() error {
+		if !hasResult || resultIsSentinel {
+			return nil
+		}
+		return s.emitClaudeToolUseResult(result, emit)
+	}
+	if hasResult && (!hasContent || result.Start < content.Start) {
+		if err := emitResult(); err != nil {
+			return err
+		}
+		return emitBlocks()
+	}
+	if err := emitBlocks(); err != nil {
+		return err
+	}
+	return emitResult()
+}
+
+func (s *lineSource) locateClaudeUserBlocks(arr []Step, emit func(BodyLocation) error) error {
+	return WalkArrayElements(s.ctx, arr, []Step{Key("type"), Key("content"), Key("source")}, s.reader(),
+		func(_ int, _ ValueSpan, subs map[Step]ValueSpan) error {
+			typeSpan, ok := subs[Key("type")]
+			if !ok {
+				return nil
+			}
+			bt, err := s.unquoted(typeSpan)
+			if err != nil {
+				return err
+			}
+			switch bt {
+			case "tool_result":
+				body, ok := subs[Key("content")]
+				if !ok || body.End <= body.Start {
+					return nil
+				}
+				loc, ok, err := s.classifyResult(body)
+				if err != nil || !ok {
+					return err
+				}
+				return emit(loc)
+			case "image":
+				source, ok := subs[Key("source")]
+				if !ok {
+					return nil
+				}
+				return s.locateImageInSpan(source, emit)
+			}
+			return nil
+		})
+}
+
+// locateImageInSpan keeps source.data streaming even though the array walker only
+// reports direct block fields. Its result span is translated back to line offsets.
+func (s *lineSource) locateImageInSpan(source ValueSpan, emit func(BodyLocation) error) error {
+	r := CanonicalBodyReader(s.ctx, s.f, s.base, source, BodyRaw)
+	sp, ok, err := LocateValue(s.ctx, []Step{Key("data")}, readerWindows(r))
+	if err != nil || !ok {
+		return err
+	}
+	sp.Start += source.Start
+	sp.End += source.Start
+	return s.emitImage(sp, emit)
+}
+
+// emitClaudeToolUseResult deliberately keeps arrays as JSON. Typed-block flattening
+// belongs only to message.content tool results.
+func (s *lineSource) emitClaudeToolUseResult(sp ValueSpan, emit func(BodyLocation) error) error {
+	head, err := s.readHead(sp)
+	if err != nil {
+		return err
+	}
+	switch head {
+	case '{', '[':
+		return emit(BodyLocation{Span: sp, Kind: BodyRaw, Media: "application/json"})
+	case '"':
+		return emit(BodyLocation{Span: sp, Kind: BodyJSONString, Media: "text/plain"})
+	default:
+		return nil
+	}
 }
 
 // locatePi finds pi tool inputs (assistant) and tool results (toolResult message).

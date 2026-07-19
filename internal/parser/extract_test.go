@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"sort"
@@ -273,6 +274,73 @@ func TestSentinelFilePathInputsOnly(t *testing.T) {
 	rewritten, _ = RewriteLine(AgentCodex, []byte(patch), idEncoder{})
 	if strings.Contains(string(rewritten), `"file_path"`) {
 		t.Errorf("non-JSON input sentinel must not carry a file_path: %s", rewritten)
+	}
+}
+
+func TestClaudeUserLiftExtensionsAreIdempotent(t *testing.T) {
+	img := fakePNGBase64()
+	line := []byte(`{"type":"user","toolUseResult":{"stdout":"structured"},"message":{"content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + img + `"}}]}}` + "\n")
+
+	rewritten, bodies := RewriteLine(AgentClaude, line, idEncoder{})
+	if len(bodies) != 2 {
+		t.Fatalf("lifted %d bodies, want 2", len(bodies))
+	}
+	if got := string(bodies[0].Stored); got != `{"stdout":"structured"}` || bodies[0].MediaType != "application/json" {
+		t.Errorf("structured result = %q/%q", got, bodies[0].MediaType)
+	}
+	wantImage, err := base64.StdEncoding.DecodeString(img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(bodies[1].Stored); got != string(wantImage) || bodies[1].MediaType != "image/png" || bodies[1].Kind != bodyKindAttachment {
+		t.Errorf("image body differs: bytes=%d media=%q kind=%q", len(got), bodies[1].MediaType, bodies[1].Kind)
+	}
+	if strings.Contains(string(rewritten), img) || strings.Contains(string(rewritten), "structured") {
+		t.Fatalf("lifted body remains inline: %s", rewritten)
+	}
+	if strings.Contains(string(rewritten), `"file_path"`) || strings.Contains(string(rewritten), `"detail"`) {
+		t.Fatalf("non-input sentinel gained input projections: %s", rewritten)
+	}
+
+	again, againBodies := RewriteLine(AgentClaude, rewritten, idEncoder{})
+	if len(againBodies) != 0 || string(again) != string(rewritten) {
+		t.Fatalf("second rewrite changed output or lifted %d bodies", len(againBodies))
+	}
+	located, err := collectToolBodies(context.Background(), AgentClaude, strings.NewReader(string(rewritten)), 0, int64(len(rewritten)))
+	if err != nil {
+		t.Fatalf("locate rewritten line: %v", err)
+	}
+	if len(located) != 0 {
+		t.Fatalf("streaming re-rewrite located %d sentinel bodies", len(located))
+	}
+}
+
+func TestClaudeToolUseResultShapeRule(t *testing.T) {
+	cases := []struct {
+		name, value, want, media string
+		lifted                   bool
+	}{
+		{"object", `{"ok":true}`, `{"ok":true}`, "application/json", true},
+		{"array remains JSON", `[1,{"ok":true}]`, `[1,{"ok":true}]`, "application/json", true},
+		{"string", `"plain"`, "plain", "text/plain", true},
+		{"number", `42`, "", "", false},
+		{"boolean", `true`, "", "", false},
+		{"null", `null`, "", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			line := []byte(`{"type":"user","message":{"content":"done"},"toolUseResult":` + c.value + `}`)
+			_, bodies := RewriteLine(AgentClaude, line, idEncoder{})
+			if !c.lifted {
+				if len(bodies) != 0 {
+					t.Fatalf("lifted %d bodies, want none", len(bodies))
+				}
+				return
+			}
+			if len(bodies) != 1 || string(bodies[0].Stored) != c.want || bodies[0].MediaType != c.media {
+				t.Fatalf("bodies = %+v, want %q/%q", bodies, c.want, c.media)
+			}
+		})
 	}
 }
 

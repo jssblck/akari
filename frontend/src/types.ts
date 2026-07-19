@@ -21,6 +21,7 @@ export type Project = Schema["ProjectSummary"];
 export type SessionSummary = Schema["SessionSummary"];
 export type SessionRow = Schema["SessionRow"];
 export type SessionDetail = Schema["SessionDetail"];
+export type SessionEvent = Schema["SessionEvent"];
 export type TurnUsage = Schema["TurnUsage"];
 export type Message = Schema["Message"];
 export type ToolCall = Schema["ToolCallView"];

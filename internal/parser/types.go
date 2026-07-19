@@ -31,6 +31,8 @@ type Session struct {
 	UsageEvent  []Usage
 	Attachments []Attachment
 	Fallbacks   []FallbackOp
+	Events      []EventOp
+	Identity    SessionIdentity
 }
 
 // Attachment is one binary blob attached to a message: today a lifted image (a Codex
@@ -56,15 +58,16 @@ const (
 	RoleAssistant Role = "assistant"
 	RoleSystem    Role = "system"
 	RoleTool      Role = "tool"
-	// RoleContext marks an injected-context turn: agent framing (project
-	// instructions, the environment block) that an agent prepends to a session
-	// rather than a human prompt. It is a distinct role so every role='user'
-	// reader (the session title, user_message_count, the prompt-hygiene
-	// aggregate) excludes it, and the transcript renders it in its own Context
-	// section instead of as the opening turn. Only Codex records such framing as a
-	// transcript message today (Claude and pi keep their framing in the system
-	// prompt, which akari never ingests); the role is agent-agnostic so any
-	// reducer can classify into it.
+	// RoleContext marks an injected-context turn: material an agent inserted into
+	// the conversation that is not a human prompt. It is a distinct role so every
+	// role='user' reader (the session title, user_message_count, the prompt-hygiene
+	// aggregate) excludes it, and the transcript renders it collapsed instead of as
+	// a real turn. Codex records its opening framing (AGENTS.md, the environment
+	// block), per-mode developer instructions, world-state snapshots, and
+	// inter-agent messages this way; Claude records skill bodies and other isMeta
+	// injections, instruction-bearing attachment entries, and post-compaction
+	// summaries. RoleSystem is the system prompt proper (Codex logs it verbatim;
+	// Claude and pi never write theirs to the transcript).
 	RoleContext Role = "context"
 )
 
@@ -118,23 +121,42 @@ type Message struct {
 // path it is derived here from the raw input; on the sentinel path the body is no
 // longer readable, so it rides the sentinel and comes back through the casRef,
 // exactly the way FilePath does.
+//
+// AttributionAgent, AttributionSkill, and AttributionPlugin carry Claude Code's
+// per-line attribution: which subagent type, invoked skill, and plugin drove the
+// line that issued the call. They co-occur freely (a plugin's skill running
+// inside a subagent stamps all three), so they are separate fields rather than a
+// kind/name pair. MCP attribution is deliberately dropped: an MCP call's tool
+// name already encodes it ("mcp__<server>__<tool>").
+//
+// StructSHA256/StructBytes/StructMediaType reference the structured tool result
+// (Claude's top-level toolUseResult), stored in the CAS beside the flattened
+// text body; StructJSON carries it inline on the batch/test path exactly as
+// InputJSON does for inputs. It is empty for agents that never log one.
 type ToolCall struct {
-	MessageOrdinal  int
-	CallIndex       int
-	ToolName        string
-	Category        string
-	FilePath        string
-	Detail          string
-	InputJSON       string
-	InputSHA256     string
-	InputBytes      int
-	InputMediaType  string
-	ResultBody      string
-	ResultSHA256    string
-	ResultBytes     int
-	ResultMediaType string
-	ResultStatus    string // "ok" | "error" | "" (pending)
-	CallUID         string
+	MessageOrdinal    int
+	CallIndex         int
+	ToolName          string
+	Category          string
+	FilePath          string
+	Detail            string
+	InputJSON         string
+	InputSHA256       string
+	InputBytes        int
+	InputMediaType    string
+	ResultBody        string
+	ResultSHA256      string
+	ResultBytes       int
+	ResultMediaType   string
+	ResultStatus      string // "ok" | "error" | "" (pending)
+	CallUID           string
+	AttributionAgent  string
+	AttributionSkill  string
+	AttributionPlugin string
+	StructJSON        string
+	StructSHA256      string
+	StructBytes       int
+	StructMediaType   string
 }
 
 // Usage is one token-accounting record. MessageOrdinal is nil for session-level

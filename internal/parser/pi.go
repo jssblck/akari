@@ -26,6 +26,17 @@ func (r *reducer) reducePi(region []byte, base int64) error {
 				r.d.Cwd = cwd
 			}
 
+		case "model_change":
+			r.addEvent(EventModelChange, map[string]any{
+				"provider": e.Get("provider").String(),
+				"model":    e.Get("modelId").String(),
+			}, ts)
+
+		case "thinking_level_change":
+			r.addEvent(EventThinkingLevelChange, map[string]any{
+				"level": e.Get("thinkingLevel").String(),
+			}, ts)
+
 		case "message":
 			msg := e.Get("message")
 			switch msg.Get("role").String() {

@@ -136,6 +136,28 @@ export function SessionPage() {
                       visibility={detail.Visibility}
                       publicID={detail.PublicID}
                     />
+                    {detail.PRURL ? (
+                      <a
+                        className="tag tag-link"
+                        href={detail.PRURL}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        {detail.PRRepo && detail.PRNumber > 0
+                          ? `${detail.PRRepo}#${detail.PRNumber}`
+                          : "pull request"}
+                      </a>
+                    ) : null}
+                    {detail.PermissionMode ? (
+                      <span className="tag" title="permission mode">
+                        {detail.PermissionMode}
+                      </span>
+                    ) : null}
+                    {detail.ReasoningEffort ? (
+                      <span className="tag" title="reasoning effort">
+                        {detail.ReasoningEffort} reasoning
+                      </span>
+                    ) : null}
                     {snapshot.DupIDs > 0 ? (
                       <span
                         className="tag warn"
@@ -718,8 +740,11 @@ function SubagentsTable({
                   publicID={s.PublicID}
                 />
               </td>
-              <td>
+              <td className="sub-agent">
                 <span className="tag agent">{s.Agent}</span>
+                {s.SubagentName ? (
+                  <span className="tag">{s.SubagentName}</span>
+                ) : null}
               </td>
               <td className="sub-verdict">
                 {s.Outcome === "abandoned" || s.Outcome === "errored" ? (
