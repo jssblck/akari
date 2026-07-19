@@ -407,6 +407,9 @@ describe("contextLabel", () => {
   it("falls back to a generic label", () => {
     expect(contextLabel("something else entirely")).toBe("agent context");
   });
+  it("labels system turns without inspecting their contents", () => {
+    expect(contextLabel("policy text", "system")).toBe("system prompt");
+  });
 });
 
 describe("isDiffTool", () => {
@@ -425,6 +428,9 @@ describe("outlineTitle", () => {
     expect(
       outlineTitle("context", "<environment_context>x</environment_context>"),
     ).toBe("environment");
+  });
+  it("labels a system turn through contextLabel", () => {
+    expect(outlineTitle("system", "policy text")).toBe("system prompt");
   });
   it("collapses whitespace and passes short content through unchanged", () => {
     expect(outlineTitle("user", "  fix the   bug  ")).toBe("fix the bug");

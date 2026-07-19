@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/jssblck/akari/internal/server/store"
@@ -322,9 +323,16 @@ type getSessionInput struct {
 
 type sessionDetailDTO struct {
 	sessionDTO
-	OwnerID  int64  `json:"owner_id"`
-	Cwd      string `json:"cwd,omitempty"`
-	ParentID *int64 `json:"parent_session_id,omitempty"`
+	OwnerID         int64  `json:"owner_id"`
+	Cwd             string `json:"cwd,omitempty"`
+	ParentID        *int64 `json:"parent_session_id,omitempty"`
+	Slug            string `json:"slug,omitempty"`
+	PermissionMode  string `json:"permission_mode,omitempty"`
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	SubagentName    string `json:"subagent_name,omitempty"`
+	PRNumber        int    `json:"pr_number,omitempty"`
+	PRURL           string `json:"pr_url,omitempty"`
+	PRRepo          string `json:"pr_repo,omitempty"`
 	// DuplicateToolCallIDs counts tool-call ids that appear on more than one row, a
 	// sign the transcript replayed a turn (a resumed or compacted run); normally 0. It
 	// is a session-wide aggregate, returned only on the first view (the header-only call
@@ -397,23 +405,31 @@ func modelFallbackToDTO(f store.ModelFallback) modelFallbackDTO {
 // true, next_after is the ordinal to pass back as transcript_after for the next
 // window; paging stops when has_more is false.
 type transcriptDTO struct {
-	Limit               int             `json:"limit"`
-	Returned            int             `json:"returned"`
-	TotalMessages       int             `json:"total_messages"`
-	HasMore             bool            `json:"has_more"`
-	NextAfter           *int            `json:"next_after,omitempty"`
-	ByteBudgetTruncated bool            `json:"byte_budget_truncated"`
-	Messages            []messageDTO    `json:"messages"`
-	ToolCalls           []toolCallDTO   `json:"tool_calls"`
-	Attachments         []attachmentDTO `json:"attachments"`
+	Limit               int               `json:"limit"`
+	Returned            int               `json:"returned"`
+	TotalMessages       int               `json:"total_messages"`
+	HasMore             bool              `json:"has_more"`
+	NextAfter           *int              `json:"next_after,omitempty"`
+	ByteBudgetTruncated bool              `json:"byte_budget_truncated"`
+	Messages            []messageDTO      `json:"messages"`
+	ToolCalls           []toolCallDTO     `json:"tool_calls"`
+	Attachments         []attachmentDTO   `json:"attachments"`
+	Events              []sessionEventDTO `json:"events,omitempty"`
 }
 
 func sessionDetailToDTO(d store.SessionDetail) sessionDetailDTO {
 	out := sessionDetailDTO{
-		sessionDTO: sessionSummaryToDTO(d.SessionSummary),
-		OwnerID:    d.OwnerID,
-		Cwd:        d.Cwd,
-		ParentID:   d.ParentID,
+		sessionDTO:      sessionSummaryToDTO(d.SessionSummary),
+		OwnerID:         d.OwnerID,
+		Cwd:             d.Cwd,
+		ParentID:        d.ParentID,
+		Slug:            d.Slug,
+		PermissionMode:  d.PermissionMode,
+		ReasoningEffort: d.ReasoningEffort,
+		SubagentName:    d.SubagentName,
+		PRNumber:        d.PRNumber,
+		PRURL:           d.PRURL,
+		PRRepo:          d.PRRepo,
 	}
 	out.ProjectID, out.ProjectKey, out.ProjectName, out.ProjectKind = d.ProjectID, d.ProjectKey, d.ProjectName, d.ProjectKind
 	return out
@@ -448,19 +464,25 @@ func messageToDTO(m store.Message) messageDTO {
 }
 
 type toolCallDTO struct {
-	MessageOrdinal  int    `json:"message_ordinal"`
-	CallIndex       int    `json:"call_index"`
-	ToolName        string `json:"tool_name"`
-	Category        string `json:"category,omitempty"`
-	FilePath        string `json:"file_path,omitempty"`
-	Detail          string `json:"detail,omitempty"`
-	InputSHA256     string `json:"input_sha256,omitempty"`
-	InputBytes      int64  `json:"input_bytes,omitempty"`
-	InputMediaType  string `json:"input_media_type,omitempty"`
-	ResultSHA256    string `json:"result_sha256,omitempty"`
-	ResultBytes     int64  `json:"result_bytes,omitempty"`
-	ResultMediaType string `json:"result_media_type,omitempty"`
-	ResultStatus    string `json:"result_status,omitempty"`
+	MessageOrdinal    int    `json:"message_ordinal"`
+	CallIndex         int    `json:"call_index"`
+	ToolName          string `json:"tool_name"`
+	Category          string `json:"category,omitempty"`
+	FilePath          string `json:"file_path,omitempty"`
+	Detail            string `json:"detail,omitempty"`
+	InputSHA256       string `json:"input_sha256,omitempty"`
+	InputBytes        int64  `json:"input_bytes,omitempty"`
+	InputMediaType    string `json:"input_media_type,omitempty"`
+	ResultSHA256      string `json:"result_sha256,omitempty"`
+	ResultBytes       int64  `json:"result_bytes,omitempty"`
+	ResultMediaType   string `json:"result_media_type,omitempty"`
+	ResultStatus      string `json:"result_status,omitempty"`
+	StructSHA256      string `json:"struct_sha256,omitempty"`
+	StructBytes       int64  `json:"struct_bytes,omitempty"`
+	StructMediaType   string `json:"struct_media_type,omitempty"`
+	AttributionAgent  string `json:"attribution_agent,omitempty"`
+	AttributionSkill  string `json:"attribution_skill,omitempty"`
+	AttributionPlugin string `json:"attribution_plugin,omitempty"`
 }
 
 func toolCallToDTO(c store.ToolCallView) toolCallDTO {
@@ -470,6 +492,25 @@ func toolCallToDTO(c store.ToolCallView) toolCallDTO {
 		InputSHA256: c.InputSHA, InputBytes: c.InputBytes, InputMediaType: c.InputMediaType,
 		ResultSHA256: c.ResultSHA, ResultBytes: c.ResultBytes, ResultMediaType: c.ResultMediaType,
 		ResultStatus: c.ResultStatus,
+		StructSHA256: c.StructSHA256, StructBytes: c.StructBytes, StructMediaType: c.StructMediaType,
+		AttributionAgent: c.AttributionAgent, AttributionSkill: c.AttributionSkill,
+		AttributionPlugin: c.AttributionPlugin,
+	}
+}
+
+type sessionEventDTO struct {
+	MessageOrdinal *int64          `json:"message_ordinal"`
+	Kind           string          `json:"kind"`
+	Attrs          json.RawMessage `json:"attrs"`
+	OccurredAt     time.Time       `json:"occurred_at"`
+}
+
+func sessionEventToDTO(event store.SessionEvent) sessionEventDTO {
+	return sessionEventDTO{
+		MessageOrdinal: event.MessageOrdinal,
+		Kind:           event.Kind,
+		Attrs:          event.Attrs,
+		OccurredAt:     event.OccurredAt,
 	}
 }
 

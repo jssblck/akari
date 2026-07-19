@@ -77,6 +77,17 @@ func toProjectionDelta(p parser.Delta) store.ProjectionDelta {
 	d := store.ProjectionDelta{
 		Started: p.Started,
 		Ended:   p.Ended,
+		Identity: store.SessionIdentityDelta{
+			CustomTitle:     p.Identity.CustomTitle,
+			Slug:            p.Identity.Slug,
+			PermissionMode:  p.Identity.PermissionMode,
+			ReasoningEffort: p.Identity.ReasoningEffort,
+			SubagentName:    p.Identity.SubagentName,
+			PRNumber:        p.Identity.PRNumber,
+			PRURL:           p.Identity.PRURL,
+			PRRepo:          p.Identity.PRRepo,
+			ParentSourceID:  p.Identity.ParentSourceID,
+		},
 	}
 
 	for _, m := range p.Messages {
@@ -95,13 +106,16 @@ func toProjectionDelta(p parser.Delta) store.ProjectionDelta {
 
 	for _, t := range p.ToolCalls {
 		tc := store.ProjToolCall{
-			MessageOrdinal: t.MessageOrdinal,
-			CallIndex:      t.CallIndex,
-			ToolName:       t.ToolName,
-			Category:       t.Category,
-			FilePath:       t.FilePath,
-			Detail:         t.Detail,
-			CallUID:        t.CallUID,
+			MessageOrdinal:    t.MessageOrdinal,
+			CallIndex:         t.CallIndex,
+			ToolName:          t.ToolName,
+			Category:          t.Category,
+			FilePath:          t.FilePath,
+			Detail:            t.Detail,
+			CallUID:           t.CallUID,
+			AttributionAgent:  t.AttributionAgent,
+			AttributionSkill:  t.AttributionSkill,
+			AttributionPlugin: t.AttributionPlugin,
 		}
 		switch {
 		case t.InputSHA256 != "":
@@ -128,12 +142,25 @@ func toProjectionDelta(p parser.Delta) store.ProjectionDelta {
 
 	for _, tr := range p.ToolResults {
 		d.ToolResults = append(d.ToolResults, store.ToolResultDelta{
-			CallUID:    tr.CallUID,
-			Body:       tr.Body,
-			BodySHA256: tr.BodySHA256,
-			Bytes:      int64(tr.Bytes),
-			MediaType:  tr.MediaType,
-			Status:     tr.Status,
+			CallUID:         tr.CallUID,
+			Body:            tr.Body,
+			BodySHA256:      tr.BodySHA256,
+			Bytes:           int64(tr.Bytes),
+			MediaType:       tr.MediaType,
+			Status:          tr.Status,
+			StructBody:      tr.StructBody,
+			StructSHA256:    tr.StructSHA256,
+			StructBytes:     tr.StructBytes,
+			StructMediaType: tr.StructMediaType,
+		})
+	}
+
+	for _, event := range p.Events {
+		d.Events = append(d.Events, store.EventDelta{
+			MessageOrdinal: event.MessageOrdinal,
+			Kind:           event.Kind,
+			AttrsJSON:      event.AttrsJSON,
+			OccurredAt:     event.OccurredAt,
 		})
 	}
 

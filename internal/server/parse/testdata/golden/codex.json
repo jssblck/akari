@@ -2,6 +2,39 @@
   "Messages": [
     {
       "Ordinal": 0,
+      "Role": "system",
+      "Content": "You are Codex, an agent based on GPT-5.\n\nCollaborate with the user until their goal is handled.",
+      "ThinkingText": "",
+      "ThinkingBytes": 0,
+      "Model": "",
+      "HasThinking": false,
+      "HasToolUse": false,
+      "Timestamp": "2024-01-01T10:00:00Z"
+    },
+    {
+      "Ordinal": 1,
+      "Role": "context",
+      "Content": "# Collaboration Mode: Default\n\nYou are now in Default mode.",
+      "ThinkingText": "",
+      "ThinkingBytes": 0,
+      "Model": "",
+      "HasThinking": false,
+      "HasToolUse": false,
+      "Timestamp": "2024-01-01T10:00:00Z"
+    },
+    {
+      "Ordinal": 2,
+      "Role": "context",
+      "Content": "## Operating principles\n\nRun make build before you commit.",
+      "ThinkingText": "",
+      "ThinkingBytes": 0,
+      "Model": "",
+      "HasThinking": false,
+      "HasToolUse": false,
+      "Timestamp": "2024-01-01T10:00:00Z"
+    },
+    {
+      "Ordinal": 3,
       "Role": "context",
       "Content": "# AGENTS.md instructions for /home/ada/akari\n\n\u003cINSTRUCTIONS\u003e\nRun make build before you commit.\n\u003c/INSTRUCTIONS\u003e\n\u003cenvironment_context\u003e\n  \u003ccwd\u003e/home/ada/akari\u003c/cwd\u003e\n  \u003cshell\u003ebash\u003c/shell\u003e\n\u003c/environment_context\u003e",
       "ThinkingText": "",
@@ -12,7 +45,7 @@
       "Timestamp": "2024-01-01T10:00:00Z"
     },
     {
-      "Ordinal": 1,
+      "Ordinal": 4,
       "Role": "assistant",
       "Content": "Two files.",
       "ThinkingText": "Plan the shell command.",
@@ -23,7 +56,40 @@
       "Timestamp": "2024-01-01T10:00:01Z"
     },
     {
-      "Ordinal": 2,
+      "Ordinal": 5,
+      "Role": "user",
+      "Content": "search the web for the fix and ask the reviewer",
+      "ThinkingText": "",
+      "ThinkingBytes": 0,
+      "Model": "",
+      "HasThinking": false,
+      "HasToolUse": false,
+      "Timestamp": "2024-01-01T10:00:06Z"
+    },
+    {
+      "Ordinal": 7,
+      "Role": "context",
+      "Content": "Message Type: FINAL_ANSWER\nSender: /root/auth_qa/reviewer\nPayload:\nThe constant-time compare is missing.",
+      "ThinkingText": "",
+      "ThinkingBytes": 0,
+      "Model": "",
+      "HasThinking": false,
+      "HasToolUse": false,
+      "Timestamp": "2024-01-01T10:00:10Z"
+    },
+    {
+      "Ordinal": 6,
+      "Role": "assistant",
+      "Content": "Use crypto/subtle.",
+      "ThinkingText": "**Searching for the fix**",
+      "ThinkingBytes": 54,
+      "Model": "gpt-5-codex",
+      "HasThinking": true,
+      "HasToolUse": true,
+      "Timestamp": "2024-01-01T10:00:07Z"
+    },
+    {
+      "Ordinal": 8,
       "Role": "user",
       "Content": "thanks",
       "ThinkingText": "",
@@ -31,12 +97,12 @@
       "Model": "",
       "HasThinking": false,
       "HasToolUse": false,
-      "Timestamp": "2024-01-01T10:00:05Z"
+      "Timestamp": "2024-01-01T10:00:22Z"
     }
   ],
   "ToolCalls": [
     {
-      "MessageOrdinal": 1,
+      "MessageOrdinal": 4,
       "CallIndex": 0,
       "ToolName": "shell_command",
       "Category": "bash",
@@ -46,7 +112,42 @@
       "InputSHA256": "",
       "InputBytes": 16,
       "InputMediaType": "application/json",
-      "CallUID": "call_1"
+      "CallUID": "call_1",
+      "AttributionAgent": "",
+      "AttributionSkill": "",
+      "AttributionPlugin": ""
+    },
+    {
+      "MessageOrdinal": 6,
+      "CallIndex": 0,
+      "ToolName": "web_search",
+      "Category": "",
+      "FilePath": "",
+      "Detail": "golang token verify bug",
+      "InputBody": "{\"action\":{\"type\":\"search\",\"query\":\"golang token verify bug\"},\"query\":\"golang token verify bug\"}",
+      "InputSHA256": "",
+      "InputBytes": 96,
+      "InputMediaType": "application/json",
+      "CallUID": "ws_1",
+      "AttributionAgent": "",
+      "AttributionSkill": "",
+      "AttributionPlugin": ""
+    },
+    {
+      "MessageOrdinal": 6,
+      "CallIndex": 1,
+      "ToolName": "mcp__node_repl__js",
+      "Category": "",
+      "FilePath": "",
+      "Detail": "",
+      "InputBody": "{\"code\":\"1+1\"}",
+      "InputSHA256": "",
+      "InputBytes": 14,
+      "InputMediaType": "application/json",
+      "CallUID": "mcp_1",
+      "AttributionAgent": "",
+      "AttributionSkill": "",
+      "AttributionPlugin": ""
     }
   ],
   "ToolResults": [
@@ -56,12 +157,92 @@
       "BodySHA256": "",
       "Bytes": 15,
       "MediaType": "text/plain",
-      "Status": "ok"
+      "Status": "ok",
+      "StructBody": "",
+      "StructSHA256": "",
+      "StructBytes": 0,
+      "StructMediaType": ""
+    },
+    {
+      "CallUID": "ws_1",
+      "Body": "[{\"type\":\"text_result\",\"domain\":\"go.dev\",\"title\":\"crypto/subtle\",\"url\":\"https://go.dev/pkg/crypto/subtle\"}]",
+      "BodySHA256": "",
+      "Bytes": 107,
+      "MediaType": "application/json",
+      "Status": "ok",
+      "StructBody": "",
+      "StructSHA256": "",
+      "StructBytes": 0,
+      "StructMediaType": ""
+    },
+    {
+      "CallUID": "mcp_1",
+      "Body": "{\"Ok\":{\"content\":[{\"type\":\"text\",\"text\":\"2\"}]}}",
+      "BodySHA256": "",
+      "Bytes": 47,
+      "MediaType": "application/json",
+      "Status": "ok",
+      "StructBody": "",
+      "StructSHA256": "",
+      "StructBytes": 0,
+      "StructMediaType": ""
     }
   ],
-  "Usage": null,
+  "Usage": [
+    {
+      "MessageOrdinal": 4,
+      "Model": "gpt-5-codex",
+      "Input": 4000,
+      "Output": 150,
+      "CacheWrite": 1000,
+      "CacheRead": 4000,
+      "Reasoning": 80,
+      "CostUSD": 0.006999999999999999,
+      "OccurredAt": "2024-01-01T10:00:04Z",
+      "DedupKey": "",
+      "SourceOffset": 2179,
+      "SourceIndex": 0
+    }
+  ],
   "Attachments": null,
   "Fallbacks": null,
+  "Events": [
+    {
+      "MessageOrdinal": 4,
+      "Kind": "turn_end",
+      "AttrsJSON": "{\"duration_ms\":5200,\"ttft_ms\":800}",
+      "OccurredAt": "2024-01-01T10:00:05Z"
+    },
+    {
+      "MessageOrdinal": 6,
+      "Kind": "subagent_activity",
+      "AttrsJSON": "{\"agent_path\":\"/root/auth_qa/reviewer\",\"state\":\"started\",\"thread_id\":\"thread-sub-1\"}",
+      "OccurredAt": "2024-01-01T10:00:09Z"
+    },
+    {
+      "MessageOrdinal": 6,
+      "Kind": "compaction",
+      "AttrsJSON": "{}",
+      "OccurredAt": "2024-01-01T10:00:20Z"
+    },
+    {
+      "MessageOrdinal": 6,
+      "Kind": "turn_aborted",
+      "AttrsJSON": "{\"duration_ms\":2100,\"reason\":\"interrupted\"}",
+      "OccurredAt": "2024-01-01T10:00:21Z"
+    }
+  ],
+  "Identity": {
+    "CustomTitle": "",
+    "Slug": "",
+    "PermissionMode": "danger-full-access",
+    "ReasoningEffort": "high",
+    "SubagentName": "auth_qa",
+    "PRNumber": 0,
+    "PRURL": "",
+    "PRRepo": "",
+    "ParentSourceID": "parent-thread-1"
+  },
   "Started": "2024-01-01T10:00:00Z",
-  "Ended": "2024-01-01T10:00:05Z"
+  "Ended": "2024-01-01T10:00:22Z"
 }

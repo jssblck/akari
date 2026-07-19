@@ -3,6 +3,7 @@ package upload
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"io"
 	"os"
@@ -371,25 +372,36 @@ func TestTransformStreamsBigLineBody(t *testing.T) {
 // no effect on the result.
 func TestTransformBigAndSmallEquivalent(t *testing.T) {
 	body := strings.Repeat("payload-", 300) // ~2400 bytes
-	line := `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"` + body + `"}]}}` + "\n"
-	f, size := openTemp(t, line)
-
-	// Small path: threshold above the line.
-	setBigLineThreshold(t, 1<<20)
-	small := runTransform(t, f, 0, size, "claude", true)
-
-	// Big path: threshold below the line.
-	setBigLineThreshold(t, 256)
-	bigp := runTransform(t, f, 0, size, "claude", true)
-
-	if string(small.data) != string(bigp.data) {
-		t.Fatalf("big vs small transform differ:\n small=%q\n big  =%q", small.data, bigp.data)
+	image := base64.StdEncoding.EncodeToString(append([]byte("\x89PNG\r\n\x1a\n"), bytes.Repeat([]byte("pixels"), 400)...))
+	cases := []struct {
+		name, line string
+	}{
+		{"tool result block", `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"` + body + `"}]}}` + "\n"},
+		{"pasted image", `{"type":"user","message":{"content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + image + `"}}]}}` + "\n"},
+		{"structured object before message", `{"type":"user","toolUseResult":{"stdout":"` + body + `"},"message":{"content":"done"}}` + "\n"},
+		{"structured string after message", `{"type":"user","message":{"content":"done"},"toolUseResult":"` + body + `"}` + "\n"},
 	}
-	if len(small.bodies) != 1 || len(bigp.bodies) != 1 {
-		t.Fatalf("body counts: small=%d big=%d", len(small.bodies), len(bigp.bodies))
-	}
-	if small.bodies[0].SHA256 != bigp.bodies[0].SHA256 {
-		t.Fatalf("big vs small body hash differ: %s vs %s", small.bodies[0].SHA256, bigp.bodies[0].SHA256)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f, size := openTemp(t, c.line)
+			setBigLineThreshold(t, 1<<20)
+			small := runTransform(t, f, 0, size, "claude", true)
+			setBigLineThreshold(t, 256)
+			bigp := runTransform(t, f, 0, size, "claude", true)
+
+			if string(small.data) != string(bigp.data) {
+				t.Fatalf("big vs small transform differ:\n small=%q\n big  =%q", small.data, bigp.data)
+			}
+			if len(small.bodies) != 1 || len(bigp.bodies) != 1 {
+				t.Fatalf("body counts: small=%d big=%d", len(small.bodies), len(bigp.bodies))
+			}
+			if small.bodies[0].SHA256 != bigp.bodies[0].SHA256 || small.bodies[0].MediaType != bigp.bodies[0].MediaType || small.bodies[0].Bytes != bigp.bodies[0].Bytes {
+				t.Fatalf("big vs small body metadata differ: %+v vs %+v", small.bodies[0], bigp.bodies[0])
+			}
+			if strings.Contains(string(bigp.data), `"file_path"`) || strings.Contains(string(bigp.data), `"detail"`) {
+				t.Fatalf("non-input sentinel gained input projections: %s", bigp.data)
+			}
+		})
 	}
 }
 
@@ -483,6 +495,35 @@ func TestPrefixDigestRecomputesBigBodyKeys(t *testing.T) {
 	}
 	if got := hex.EncodeToString(h.Sum(nil)); got != hexSHA(string(transformed)) {
 		t.Fatal("cold prefix digest does not match the transformed bytes the upload produced")
+	}
+}
+
+func TestPrefixDigestRecomputesClaudeUserLiftExtensions(t *testing.T) {
+	setBigLineThreshold(t, 256)
+	body := strings.Repeat("compress me ", 400)
+	image := base64.StdEncoding.EncodeToString(append([]byte("\x89PNG\r\n\x1a\n"), bytes.Repeat([]byte("pixels"), 800)...))
+	cases := []struct {
+		name, content string
+	}{
+		{"pasted image", `{"type":"user","message":{"content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + image + `"}}]}}` + "\n"},
+		{"structured object", `{"type":"user","toolUseResult":{"stdout":"` + body + `"},"message":{"content":"done"}}` + "\n"},
+		{"structured string", `{"type":"user","message":{"content":"done"},"toolUseResult":"` + body + `"}` + "\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f, size := openTemp(t, c.content)
+			transformed := runTransform(t, f, 0, size, "claude", true).data
+			h, orig, ok, err := transformPrefixDigest(context.Background(), f, "claude", size, int64(len(transformed)), casenc.New())
+			if err != nil || !ok {
+				t.Fatalf("cold prefix digest: ok=%v err=%v", ok, err)
+			}
+			if orig != size {
+				t.Fatalf("recovered original base = %d, want %d", orig, size)
+			}
+			if got := hex.EncodeToString(h.Sum(nil)); got != hexSHA(string(transformed)) {
+				t.Fatal("cold prefix digest differs from transformed upload")
+			}
+		})
 	}
 }
 

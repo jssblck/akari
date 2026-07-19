@@ -218,13 +218,15 @@ func keepRemoteAttributionTx(ctx context.Context, tx pgx.Tx, p AnnounceParams) (
 		r.SessionID = existingID
 		// Keep only the remote project attribution. Mutable announce metadata still
 		// follows the latest client observation, and terminal remains sticky.
+		parentSource := announceParentSource(p)
 		if _, err := tx.Exec(ctx,
 			`UPDATE sessions
 			    SET machine = $2, cwd = $3, git_branch = $4,
 			        terminal = sessions.terminal OR $5,
+			        parent_source_id = CASE WHEN $6 <> '' THEN $6 ELSE parent_source_id END,
 			        updated_at = now()
 			  WHERE id = $1`,
-			existingID, p.Machine, p.Cwd, p.GitBranch, p.Terminal); err != nil {
+			existingID, p.Machine, p.Cwd, p.GitBranch, p.Terminal, parentSource); err != nil {
 			return AnnounceResult{}, false, fmt.Errorf("update kept remote session %d metadata: %w", existingID, err)
 		}
 		if err := refreshCwdDerivedStateTx(ctx, tx, existingID, priorCwd, p.Cwd); err != nil {
@@ -232,6 +234,9 @@ func keepRemoteAttributionTx(ctx context.Context, tx pgx.Tx, p AnnounceParams) (
 		}
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO session_raw (session_id) VALUES ($1) ON CONFLICT DO NOTHING`, existingID); err != nil {
+			return AnnounceResult{}, false, err
+		}
+		if err := linkSubagentParentTx(ctx, tx, p, existingID); err != nil {
 			return AnnounceResult{}, false, err
 		}
 		err := tx.QueryRow(ctx,
@@ -261,18 +266,23 @@ func announceIntoProjectTx(ctx context.Context, tx pgx.Tx, p AnnounceParams) (An
 	// terminal is sticky: OR the incoming value onto the stored one so a --finalize
 	// announce sets it and a later ordinary re-announce (watch loop) of the same
 	// session never clears it. A once-terminal session stays terminal.
+	parentSource := announceParentSource(p)
 	if err := tx.QueryRow(ctx,
-		`INSERT INTO sessions (user_id, project_id, agent, source_session_id, machine, cwd, git_branch, terminal)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		`INSERT INTO sessions (user_id, project_id, agent, source_session_id, machine, cwd, git_branch, terminal, parent_source_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		 ON CONFLICT (user_id, agent, source_session_id) DO UPDATE
 		   SET project_id = EXCLUDED.project_id,
 		       machine    = EXCLUDED.machine,
 		       cwd        = EXCLUDED.cwd,
 		       git_branch = EXCLUDED.git_branch,
 		       terminal   = sessions.terminal OR EXCLUDED.terminal,
+		       parent_source_id = CASE
+		         WHEN EXCLUDED.parent_source_id <> '' THEN EXCLUDED.parent_source_id
+		         ELSE sessions.parent_source_id
+		       END,
 		       updated_at = now()
 		 RETURNING id`,
-		p.UserID, p.ProjectID, p.Agent, p.SourceSessionID, p.Machine, p.Cwd, p.GitBranch, p.Terminal).Scan(&r.SessionID); err != nil {
+		p.UserID, p.ProjectID, p.Agent, p.SourceSessionID, p.Machine, p.Cwd, p.GitBranch, p.Terminal, parentSource).Scan(&r.SessionID); err != nil {
 		return AnnounceResult{}, fmt.Errorf("upsert session for announce: %w", err)
 	}
 	// file_rel_path is a projection of the session's cwd and each tool call's file_path (derived at
@@ -413,49 +423,42 @@ func subagentParentSource(sourceID string) (parentSource string, ok bool) {
 	return sourceID[:i], true
 }
 
-// linkSubagentParentTx records the parent/child relationship the schema models, keying on
-// the source id: a subagent's is "<parent>/subagents/...", so the parent id is the prefix.
-// A subagent runs in its own transcript file that akari ingests as its own session, and
-// this is the one step that links it to the session that spawned it (parent_session_id and
-// relationship_type). It runs on every announce, so whichever of the pair lands second does
-// the linking and ingest order does not matter: when the announced session is a subagent it
-// links up to an existing parent, and when it is a top-level session it adopts any subagent
-// children ingested before it. Both are guarded by parent_session_id IS NULL, so a settled
-// link is never rewritten. Only Claude nests children this way, so nothing here runs for
-// another agent.
-func linkSubagentParentTx(ctx context.Context, tx pgx.Tx, p AnnounceParams, sessionID int64) error {
+func announceParentSource(p AnnounceParams) string {
 	if p.Agent != "claude" {
-		return nil
+		return ""
 	}
-	if parentSource, ok := subagentParentSource(p.SourceSessionID); ok {
-		if _, err := tx.Exec(ctx,
-			`UPDATE sessions
-			    SET parent_session_id = parent.id, relationship_type = 'subagent'
-			   FROM sessions AS parent
-			  WHERE sessions.id = $1
-			    AND sessions.parent_session_id IS NULL
-			    AND parent.user_id = $2 AND parent.agent = 'claude'
-			    AND parent.source_session_id = $3`,
-			sessionID, p.UserID, parentSource); err != nil {
-			return fmt.Errorf("link subagent session %d to parent: %w", sessionID, err)
-		}
-		return nil
+	parentSource, _ := subagentParentSource(p.SourceSessionID)
+	return parentSource
+}
+
+// linkSubagentParentTx links from the stored parent-source key, whether announce
+// derived it from a Claude source id or a rebuild parsed it from another agent's
+// transcript. It also lets the announcing row adopt children that arrived first.
+// Both writes are guarded so an established relationship is never rewritten.
+func linkSubagentParentTx(ctx context.Context, tx pgx.Tx, p AnnounceParams, sessionID int64) error {
+	if _, err := tx.Exec(ctx,
+		`UPDATE sessions AS child
+		    SET parent_session_id = parent.id, relationship_type = 'subagent'
+		   FROM sessions AS parent
+		  WHERE child.id = $1
+		    AND child.parent_session_id IS NULL
+		    AND child.parent_source_id <> ''
+		    AND parent.user_id = $2
+		    AND parent.agent = $3
+		    AND parent.source_session_id = child.parent_source_id
+		    AND parent.id <> child.id`,
+		sessionID, p.UserID, p.Agent); err != nil {
+		return fmt.Errorf("link subagent session %d to parent: %w", sessionID, err)
 	}
-	// A top-level session may be the parent of subagents ingested before it. Matching the
-	// parent-source expression (not a LIKE prefix) keeps the lookup on
-	// idx_sessions_unlinked_subagents under pgx's cached generic plans, where a parameterized
-	// LIKE cannot extract a prefix range. The split_part literal mirrors the index expression
-	// exactly so the planner uses it, and the position guard drops the announcing session's
-	// own row, which shares the expression value but is not a subagent. It is the same match
-	// the 0019 backfill runs for existing rows.
 	if _, err := tx.Exec(ctx,
 		`UPDATE sessions
 		    SET parent_session_id = $1, relationship_type = 'subagent'
-		  WHERE user_id = $2 AND agent = 'claude'
+		  WHERE user_id = $2 AND agent = $3
 		    AND parent_session_id IS NULL
-		    AND position('/subagents/' IN source_session_id) > 1
-		    AND split_part(source_session_id, '/subagents/', 1) = $3`,
-		sessionID, p.UserID, p.SourceSessionID); err != nil {
+		    AND parent_source_id <> ''
+		    AND parent_source_id = $4
+		    AND id <> $1`,
+		sessionID, p.UserID, p.Agent, p.SourceSessionID); err != nil {
 		return fmt.Errorf("adopt subagents of session %d: %w", sessionID, err)
 	}
 	return nil
@@ -572,6 +575,7 @@ func (s *Store) ResetRaw(ctx context.Context, sessionID int64) error {
 			// re-upload of the same raw merge into the stale rows instead of inserting, so the
 			// re-count never fires and the rollup stays 0.
 			"DELETE FROM model_fallbacks WHERE session_id = $1",
+			"DELETE FROM session_events WHERE session_id = $1",
 			// Derived signals clear with the projection they summarize; the rebuild
 			// that follows the re-uploaded bytes re-grades the session.
 			"DELETE FROM session_signals WHERE session_id = $1",
@@ -602,9 +606,10 @@ func (s *Store) ResetRaw(ctx context.Context, sessionID int64) error {
 		if err != nil {
 			return fmt.Errorf("reset raw cursor for session %d: %w", sessionID, err)
 		}
-		// Zero the rollups so the session reads as empty until the rebuild refills
-		// them from the re-uploaded bytes. The projection moved, so the stored grade
-		// is behind: signals_stale keeps the settle tick on the hook meanwhile.
+		// Zero the rollups and transcript-owned identity so the session reads as empty
+		// until the rebuild refills them. parent_source_id stays intact: announce owns
+		// it for Claude, and a Codex rebuild overwrites any stale value after re-upload.
+		// The projection moved, so signals_stale keeps the settle tick on the hook.
 		if _, err := tx.Exec(ctx,
 			`UPDATE sessions SET
 			   message_count = 0, user_message_count = 0,
@@ -613,6 +618,9 @@ func (s *Store) ResetRaw(ctx context.Context, sessionID int64) error {
 			   total_cache_write_tokens = 0, total_cache_read_tokens = 0,
 			   total_cost_usd = 0, total_cache_savings_usd = 0,
 			   started_at = NULL, ended_at = NULL,
+			   custom_title = '', slug = '', permission_mode = '',
+			   reasoning_effort = '', subagent_name = '',
+			   pr_number = 0, pr_url = '', pr_repo = '',
 			   updated_at = now(),
 			   signals_stale = true
 			 WHERE id = $1`, sessionID); err != nil {

@@ -14,7 +14,14 @@ import {
 } from "react";
 
 import { formatCost, formatCount, formatTime, formatTokens } from "../format";
-import type { Attachment, Message, ToolCall, TranscriptPage } from "../types";
+import type {
+  Attachment,
+  Message,
+  SessionEvent,
+  ToolCall,
+  TranscriptPage,
+} from "../types";
+import { SessionEventNotice } from "./session-event-notice";
 import {
   contextLabel,
   contextStamp,
@@ -118,6 +125,14 @@ function fallbacksByOrdinal(fbs: ModelFallback[]): Map<number, ModelFallback> {
   return out;
 }
 
+function eventsByOrdinal(events: SessionEvent[]): Map<number, SessionEvent[]> {
+  const anchored = events.filter(
+    (event): event is SessionEvent & { MessageOrdinal: number } =>
+      event.MessageOrdinal !== null,
+  );
+  return groupByOrdinal(anchored);
+}
+
 function isImageMedia(mediaType: string): boolean {
   return mediaType.startsWith("image/");
 }
@@ -189,6 +204,7 @@ export const Transcript = forwardRef<
             ...(cur.Attachments ?? []),
             ...(fragment.Attachments ?? []),
           ],
+          Events: fragment.Events ?? cur.Events,
           Fallbacks: [...(cur.Fallbacks ?? []), ...(fragment.Fallbacks ?? [])],
         }));
       },
@@ -207,6 +223,10 @@ export const Transcript = forwardRef<
   const fallbacks = useMemo(
     () => fallbacksByOrdinal(asFallbacks(page.Fallbacks)),
     [page.Fallbacks],
+  );
+  const events = useMemo(
+    () => eventsByOrdinal(page.Events ?? []),
+    [page.Events],
   );
   const metrics = useMemo(
     () => walkMetrics(page.Seed ?? [], page.Msgs ?? []),
@@ -244,6 +264,7 @@ export const Transcript = forwardRef<
                   ...(earlier.Attachments ?? []),
                   ...(cur.Attachments ?? []),
                 ],
+                Events: earlier.Events ?? cur.Events,
                 Fallbacks: [
                   ...(earlier.Fallbacks ?? []),
                   ...(cur.Fallbacks ?? []),
@@ -285,6 +306,7 @@ export const Transcript = forwardRef<
             metrics={metrics.get(message.Ordinal) ?? { latency: 0, shed: null }}
             tools={toolsByOrdinal.get(message.Ordinal) ?? []}
             attachments={attachmentsByOrdinal.get(message.Ordinal) ?? []}
+            events={events.get(message.Ordinal) ?? []}
             fallback={fallbacks.get(message.Ordinal)}
             agent={agent}
             blobBase={blobBase}
@@ -300,6 +322,7 @@ function MessageRow({
   metrics,
   tools,
   attachments,
+  events,
   fallback,
   agent,
   blobBase,
@@ -308,6 +331,7 @@ function MessageRow({
   metrics: MsgMetrics;
   tools: ToolCall[];
   attachments: Attachment[];
+  events: SessionEvent[];
   fallback: ModelFallback | undefined;
   agent: string;
   blobBase: string;
@@ -316,8 +340,14 @@ function MessageRow({
   return (
     <>
       {metrics.shed ? <ShedDivider shed={metrics.shed} /> : null}
+      {events.map((event) => (
+        <SessionEventNotice
+          key={`${event.Kind}-${event.OccurredAt}-${JSON.stringify(event.Attrs)}`}
+          event={event}
+        />
+      ))}
       {fallback ? <FallbackNotice fallback={fallback} /> : null}
-      {message.Role === "context" ? (
+      {message.Role === "context" || message.Role === "system" ? (
         <ContextTurn message={message} />
       ) : (
         <MessageTurn
@@ -341,9 +371,9 @@ function ContextTurn({ message }: { message: Message }) {
       data-ordinal={message.Ordinal}
     >
       <summary className="context-summary">
-        <span className="role">context</span>
+        <span className="role">{message.Role}</span>
         <span className="tag context-kind">
-          {contextLabel(message.Content)}
+          {contextLabel(message.Content, message.Role)}
         </span>
         <span className="spacer" />
         <span className="muted small">{formatTime(message.Timestamp)}</span>

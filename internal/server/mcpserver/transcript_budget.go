@@ -56,6 +56,15 @@ func loadTranscript(ctx context.Context, st *store.Store, sessionID int64, after
 		}
 		tr.Messages = append(tr.Messages, dto)
 	}
+	if after == nil {
+		events, err := st.SessionEvents(ctx, sessionID, store.ModelFallbackListCap)
+		if err != nil {
+			return nil, err
+		}
+		for _, event := range events {
+			tr.Events = append(tr.Events, sessionEventToDTO(event))
+		}
+	}
 	if len(msgs) == 0 {
 		return tr, nil
 	}

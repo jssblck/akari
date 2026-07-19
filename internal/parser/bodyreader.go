@@ -31,10 +31,9 @@ const (
 	BodyArrayText
 	// BodyBase64 treats the value as a JSON string carrying a base64-encoded binary
 	// blob (optionally wrapped in a `data:<media>;base64,` URI) and emits the decoded
-	// binary bytes. This is the canonical form for the image payloads Codex inlines
-	// (image_generation results, data-URI image_url blocks, pasted images): the CAS
-	// stores the real PNG/JPEG bytes, not the base64 text, so a reader serves the blob
-	// directly under its image media type. The decode ignores \r and \n exactly as
+	// binary bytes. This is the canonical form for inline image payloads from Codex
+	// and Claude: the CAS stores the real PNG/JPEG bytes, not the base64 text, so a
+	// reader serves the blob directly under its image media type. The decode ignores \r and \n exactly as
 	// encoding/base64 does, so the streamed result is byte-identical to the buffered
 	// base64.StdEncoding.DecodeString the extractor uses.
 	BodyBase64
@@ -52,6 +51,7 @@ const (
 //   - BodyRaw: the raw span, copied verbatim.
 //   - BodyJSONString: the section inside the quotes, JSON-string-decoded on the fly.
 //   - BodyArrayText: the array's contributing blocks, decoded and newline-joined.
+//   - BodyBase64: the decoded binary contents of a base64 JSON string.
 //
 // ctx threads into the BodyArrayText enumeration so a canceled hash or upload of a
 // huge array result aborts during the lazy walk rather than scanning the whole

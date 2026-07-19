@@ -2238,13 +2238,21 @@ export interface components {
             /** Format: int64 */
             OwnerID: number;
             ParentID: number | null;
+            PermissionMode: string;
+            /** Format: int64 */
+            PRNumber: number;
+            PRRepo: string;
+            PRURL: string;
             /** Format: int64 */
             ProjectID: number;
             ProjectKey: string;
             ProjectKind: string;
             ProjectName: string;
             PublicID: string | null;
+            ReasoningEffort: string;
+            Slug: string;
             StartedAt: string | null;
+            SubagentName: string;
             Title: string;
             /** Format: int64 */
             TotalCacheRead: number;
@@ -2260,6 +2268,15 @@ export interface components {
             UserMessageCount: number;
             Username: string;
             Visibility: string;
+        };
+        SessionEvent: {
+            Attrs: {
+                [key: string]: unknown;
+            };
+            Kind: string;
+            MessageOrdinal: number | null;
+            /** Format: date-time */
+            OccurredAt: string;
         };
         SessionFilter: {
             /** Format: int64 */
@@ -2473,6 +2490,7 @@ export interface components {
             Outcome: string;
             PublicID: string | null;
             StartedAt: string | null;
+            SubagentName: string;
             Title: string;
             /** Format: int64 */
             TotalCacheRead: number;
@@ -2516,6 +2534,9 @@ export interface components {
             tokens: components["schemas"]["TokenListItem"][] | null;
         };
         ToolCallView: {
+            AttributionAgent: string;
+            AttributionPlugin: string;
+            AttributionSkill: string;
             /** Format: int64 */
             CallIndex: number;
             Category: string;
@@ -2533,6 +2554,10 @@ export interface components {
             ResultMediaType: string;
             ResultSHA: string;
             ResultStatus: string;
+            /** Format: int64 */
+            StructBytes: number;
+            StructMediaType: string;
+            StructSHA256: string;
             ToolName: string;
         };
         ToolFailSeries: {
@@ -2580,6 +2605,7 @@ export interface components {
             Attachments: components["schemas"]["AttachmentView"][] | null;
             /** Format: int64 */
             EarlierCount: number;
+            Events: components["schemas"]["SessionEvent"][] | null;
             Fallbacks: components["schemas"]["ModelFallback"][] | null;
             HasEarlier: boolean;
             More: boolean;

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 
 	"github.com/tidwall/gjson"
 )
@@ -360,20 +361,35 @@ func claudeBodyFields(e gjson.Result) []bodyField {
 		}
 	case "user":
 		content := e.Get("message.content")
-		if !content.IsArray() {
-			return nil
-		}
-		for _, b := range content.Array() {
-			if b.Get("type").String() != "tool_result" {
-				continue
+		if content.IsArray() {
+			for _, b := range content.Array() {
+				switch b.Get("type").String() {
+				case "tool_result":
+					body := b.Get("content")
+					c, media := bodyContent(body)
+					if f, ok := rawField(body, c, media, bodyKindResult); ok {
+						fields = append(fields, f)
+					}
+				case "image":
+					if f, ok := imageField(b.Get("source.data")); ok {
+						fields = append(fields, f)
+					}
+				}
 			}
-			body := b.Get("content")
-			c, media := bodyContent(body)
-			if f, ok := rawField(body, c, media, bodyKindResult); ok {
+		}
+		result := e.Get("toolUseResult")
+		switch {
+		case result.IsObject(), result.IsArray():
+			if f, ok := rawField(result, result.Raw, "application/json", bodyKindResult); ok {
+				fields = append(fields, f)
+			}
+		case result.Type == gjson.String:
+			if f, ok := rawField(result, result.String(), "text/plain", bodyKindResult); ok {
 				fields = append(fields, f)
 			}
 		}
 	}
+	sort.SliceStable(fields, func(i, j int) bool { return fields[i].start < fields[j].start })
 	return fields
 }
 

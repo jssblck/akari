@@ -652,6 +652,9 @@ main:has(> .session-page) {
 .sub-verdict {
   white-space: nowrap;
 }
+.sub-agent .tag + .tag {
+  margin-left: 6px;
+}
 /* ---- Flow ribbon: the turn minimap ---- */
 /* The ticks squeeze to fit one row even in a dense session (Fix dense turn
    minimap overflow, 46441c1): a gradient background paints the tick's color over
@@ -1316,6 +1319,20 @@ pre.tool-body.error {
 }
 .msg-fallback {
   margin: 4px 0;
+}
+.msg-event {
+  margin: 4px 0;
+}
+.msg-event .event-label {
+  display: inline-block;
+  padding: 2px 8px;
+  color: var(--muted);
+  background: rgba(180, 164, 255, 0.06);
+  border: 1px solid rgba(180, 164, 255, 0.28);
+  border-radius: 4px;
+  font-family: "Geist Mono", monospace;
+  letter-spacing: 0.02em;
+  font-size: 11px;
 }
 .msg-fallback .fallback-label {
   display: inline-block;

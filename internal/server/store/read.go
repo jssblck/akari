@@ -96,13 +96,20 @@ type SessionSummary struct {
 // per-model-priced rollup rides only the single-session read that needs it.
 type SessionDetail struct {
 	SessionSummary
-	OwnerID     int64
-	ProjectID   int64
-	ProjectKey  string
-	ProjectName string
-	ProjectKind string
-	Cwd         string
-	ParentID    *int64
+	OwnerID         int64
+	ProjectID       int64
+	ProjectKey      string
+	ProjectName     string
+	ProjectKind     string
+	Cwd             string
+	ParentID        *int64
+	Slug            string
+	PermissionMode  string
+	ReasoningEffort string
+	SubagentName    string
+	PRNumber        int
+	PRURL           string
+	PRRepo          string
 	// TotalCacheSavingsUSD is the session's rolled-up prompt-cache saving (folded by the
 	// rebuild beside total_cost_usd), so the Cache tile reads it in O(1) instead of
 	// scanning usage_events on every live refresh.
@@ -166,15 +173,21 @@ type ToolCallView struct {
 	// FileRelPath is the worktree-relative form of FilePath (migration 0030), empty when the
 	// path sits outside the session's workspace or no cwd was known. The transcript shows it in
 	// preference to the absolute FilePath: the same repo file reads the same across worktrees.
-	FileRelPath     string
-	Detail          string
-	InputSHA        string
-	InputBytes      int64
-	InputMediaType  string
-	ResultSHA       string
-	ResultBytes     int64
-	ResultMediaType string
-	ResultStatus    string
+	FileRelPath       string
+	Detail            string
+	InputSHA          string
+	InputBytes        int64
+	InputMediaType    string
+	ResultSHA         string
+	ResultBytes       int64
+	ResultMediaType   string
+	ResultStatus      string
+	StructSHA256      string
+	StructBytes       int64
+	StructMediaType   string
+	AttributionAgent  string
+	AttributionSkill  string
+	AttributionPlugin string
 }
 
 // SessionFilter narrows a session list. Empty fields are ignored.
@@ -659,10 +672,12 @@ const titleCap = 240
 // harness boilerplate. The strip is anchored and non-greedy so it removes exactly the
 // leading caveat and nothing past its close; a message without one is unchanged.
 var titleLateralSQL = `LEFT JOIN LATERAL (
-	         SELECT left(regexp_replace(m.content, '^\s*<local-command-caveat>.*?</local-command-caveat>\s*', ''), ` + itoa(titleCap) + `) AS content
-	           FROM messages m
-	          WHERE m.session_id = s.id AND m.role = 'user'
-	          ORDER BY m.ordinal LIMIT 1
+	         SELECT coalesce(nullif(s.custom_title, ''), (
+	                  SELECT left(regexp_replace(m.content, '^\s*<local-command-caveat>.*?</local-command-caveat>\s*', ''), ` + itoa(titleCap) + `)
+	                    FROM messages m
+	                   WHERE m.session_id = s.id AND m.role = 'user'
+	                   ORDER BY m.ordinal LIMIT 1
+	                )) AS content
 	       ) title ON true`
 
 // snippetSQLWindowRadius and snippetSQLWindowLen bound the matching-message content

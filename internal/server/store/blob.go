@@ -464,9 +464,9 @@ func upsertBlobPin(ctx context.Context, tx pgx.Tx, sha string) error {
 }
 
 // pinSessionBlobsTx refreshes a sweep-protection pin on every blob a session
-// references through its lifted tool bodies and image attachments. The reparse path
-// calls it before clearing those rows so the blobs survive the window between the
-// clear (committed here) and the rebuild (the following Advance).
+// references through its lifted tool bodies, structured results, and image
+// attachments. The reparse path calls it before clearing those rows so the blobs
+// survive the window between the clear and the following rebuild.
 //
 // The pin runs entirely in the database as one INSERT ... SELECT over the union of
 // referenced hashes, so no per-session slice of hashes is held in Go: a session with
@@ -482,6 +482,8 @@ func pinSessionBlobsTx(ctx context.Context, tx pgx.Tx, sessionID int64) error {
 		     SELECT input_sha256 AS sha FROM tool_calls WHERE session_id = $1 AND input_sha256 IS NOT NULL
 		     UNION
 		     SELECT result_sha256 FROM tool_calls WHERE session_id = $1 AND result_sha256 IS NOT NULL
+		     UNION
+		     SELECT struct_sha256 FROM tool_calls WHERE session_id = $1 AND struct_sha256 IS NOT NULL
 		     UNION
 		     SELECT sha256 FROM attachments WHERE session_id = $1
 		 ) refs
@@ -547,24 +549,26 @@ func (s *Store) WriteBlobPrefixTo(ctx context.Context, w io.Writer, sha256hex st
 }
 
 // SessionReferencesBlob reports whether a session points at a blob, through a
-// tool call's input or result or through an attachment. Blob serving is gated on
-// this so a session can never read a blob it does not reference, even though the
-// CAS dedupes content across sessions.
+// tool call's input, result, or structured result, or through an attachment. Blob
+// serving is gated on this so a session cannot read another session's CAS content.
 //
 // Lifting Codex images to the CAS means a session view fetches a blob per rendered
 // image as well as per tool body, so this runs once per blob on every open and live
 // refresh: it must stay logarithmic in the session's references, not scan them. Each
 // arm is a hash-leading index lookup: tool_calls by (input_sha256, session_id) and
-// (result_sha256, session_id), attachments by (sha256, session_id). The parameter is
-// cast to char(64) so it matches the bpchar columns and their indexes; a bare text
-// parameter would compare bpchar against text, cast the columns, and fall back to
-// scanning the session's whole slice of tool calls and attachments.
+// (result_sha256, session_id), (struct_sha256, session_id), and attachments by
+// (sha256, session_id). The parameter is cast to char(64) so it matches the
+// bpchar columns and their indexes; a bare text parameter would compare bpchar
+// against text, cast the columns, and fall back to scanning the session's whole
+// slice of tool calls and attachments.
 func (s *Store) SessionReferencesBlob(ctx context.Context, sessionID int64, sha256hex string) (bool, error) {
 	var ok bool
 	err := s.Pool.QueryRow(ctx,
 		`SELECT EXISTS (
 		   SELECT 1 FROM tool_calls
-		    WHERE session_id = $1 AND (input_sha256 = $2::char(64) OR result_sha256 = $2::char(64))
+		    WHERE session_id = $1 AND (input_sha256 = $2::char(64)
+		                               OR result_sha256 = $2::char(64)
+		                               OR struct_sha256 = $2::char(64))
 		   UNION ALL
 		   SELECT 1 FROM attachments
 		    WHERE session_id = $1 AND sha256 = $2::char(64)
@@ -665,7 +669,9 @@ func (s *Store) sweepBlobBatch(ctx context.Context) (int, error) {
 			`SELECT sha256, lo_oid FROM blobs b
 			  WHERE NOT EXISTS (
 			          SELECT 1 FROM tool_calls t
-			           WHERE t.input_sha256 = b.sha256 OR t.result_sha256 = b.sha256)
+			           WHERE t.input_sha256 = b.sha256
+			              OR t.result_sha256 = b.sha256
+			              OR t.struct_sha256 = b.sha256)
 			    AND NOT EXISTS (
 			          SELECT 1 FROM attachments a WHERE a.sha256 = b.sha256)
 			    AND NOT EXISTS (

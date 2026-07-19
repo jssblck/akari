@@ -65,6 +65,50 @@
       "HasThinking": false,
       "HasToolUse": false,
       "Timestamp": "2024-01-01T10:00:25Z"
+    },
+    {
+      "Ordinal": 6,
+      "Role": "context",
+      "Content": "Available skills:\n- ship-it: Land the change: commit, PR, CI to green.",
+      "ThinkingText": "",
+      "ThinkingBytes": 0,
+      "Model": "",
+      "HasThinking": false,
+      "HasToolUse": false,
+      "Timestamp": "2024-01-01T10:00:27Z"
+    },
+    {
+      "Ordinal": 7,
+      "Role": "context",
+      "Content": "Base directory for this skill: /home/grace/.claude/skills/ship-it\n\n# Ship it\n\nCommit, push, and open the PR.",
+      "ThinkingText": "",
+      "ThinkingBytes": 0,
+      "Model": "",
+      "HasThinking": false,
+      "HasToolUse": false,
+      "Timestamp": "2024-01-01T10:00:28Z"
+    },
+    {
+      "Ordinal": 8,
+      "Role": "user",
+      "Content": "Here is the failing screenshot",
+      "ThinkingText": "",
+      "ThinkingBytes": 0,
+      "Model": "",
+      "HasThinking": false,
+      "HasToolUse": false,
+      "Timestamp": "2024-01-01T10:00:30Z"
+    },
+    {
+      "Ordinal": 9,
+      "Role": "context",
+      "Content": "This session is being continued from a previous conversation that ran out of context. Summary:\n1. Fixing the auth bug.",
+      "ThinkingText": "",
+      "ThinkingBytes": 0,
+      "Model": "",
+      "HasThinking": false,
+      "HasToolUse": false,
+      "Timestamp": "2024-01-01T10:01:01Z"
     }
   ],
   "ToolCalls": [
@@ -79,7 +123,10 @@
       "InputSHA256": "",
       "InputBytes": 23,
       "InputMediaType": "application/json",
-      "CallUID": "toolu_1"
+      "CallUID": "toolu_1",
+      "AttributionAgent": "",
+      "AttributionSkill": "",
+      "AttributionPlugin": ""
     },
     {
       "MessageOrdinal": 2,
@@ -92,7 +139,10 @@
       "InputSHA256": "",
       "InputBytes": 25,
       "InputMediaType": "application/json",
-      "CallUID": "toolu_p1"
+      "CallUID": "toolu_p1",
+      "AttributionAgent": "",
+      "AttributionSkill": "code-review",
+      "AttributionPlugin": "feature-dev"
     },
     {
       "MessageOrdinal": 2,
@@ -105,7 +155,10 @@
       "InputSHA256": "",
       "InputBytes": 24,
       "InputMediaType": "application/json",
-      "CallUID": "toolu_p2"
+      "CallUID": "toolu_p2",
+      "AttributionAgent": "",
+      "AttributionSkill": "",
+      "AttributionPlugin": ""
     }
   ],
   "ToolResults": [
@@ -115,7 +168,11 @@
       "BodySHA256": "",
       "Bytes": 12,
       "MediaType": "text/plain",
-      "Status": "ok"
+      "Status": "ok",
+      "StructBody": "{\"type\":\"text\",\"file\":{\"filePath\":\"auth.go\",\"content\":\"package auth\"}}",
+      "StructSHA256": "",
+      "StructBytes": 70,
+      "StructMediaType": "application/json"
     },
     {
       "CallUID": "toolu_p1",
@@ -123,7 +180,11 @@
       "BodySHA256": "",
       "Bytes": 23,
       "MediaType": "text/plain",
-      "Status": "ok"
+      "Status": "ok",
+      "StructBody": "",
+      "StructSHA256": "",
+      "StructBytes": 0,
+      "StructMediaType": ""
     },
     {
       "CallUID": "toolu_p2",
@@ -131,7 +192,11 @@
       "BodySHA256": "",
       "Bytes": 13,
       "MediaType": "text/plain",
-      "Status": "ok"
+      "Status": "ok",
+      "StructBody": "",
+      "StructSHA256": "",
+      "StructBytes": 0,
+      "StructMediaType": ""
     }
   ],
   "Usage": [
@@ -146,7 +211,7 @@
       "CostUSD": 0.012928799999999999,
       "OccurredAt": "2024-01-01T10:00:05Z",
       "DedupKey": "msg_1",
-      "SourceOffset": 137,
+      "SourceOffset": 166,
       "SourceIndex": 0
     },
     {
@@ -160,7 +225,7 @@
       "CostUSD": 0.007199999999999999,
       "OccurredAt": "2024-01-01T10:00:07Z",
       "DedupKey": "msg_par",
-      "SourceOffset": 758,
+      "SourceOffset": 874,
       "SourceIndex": 0
     },
     {
@@ -174,7 +239,7 @@
       "CostUSD": 0.007199999999999999,
       "OccurredAt": "2024-01-01T10:00:08Z",
       "DedupKey": "msg_par",
-      "SourceOffset": 1260,
+      "SourceOffset": 1443,
       "SourceIndex": 0
     },
     {
@@ -188,7 +253,7 @@
       "CostUSD": 0.0081,
       "OccurredAt": "2024-01-01T10:00:09Z",
       "DedupKey": "msg_2",
-      "SourceOffset": 1751,
+      "SourceOffset": 1934,
       "SourceIndex": 0
     },
     {
@@ -202,7 +267,7 @@
       "CostUSD": 0.0135,
       "OccurredAt": "2024-01-01T10:00:25Z",
       "DedupKey": "msg_3",
-      "SourceOffset": 2144,
+      "SourceOffset": 2327,
       "SourceIndex": 0
     },
     {
@@ -216,11 +281,20 @@
       "CostUSD": 0.0135,
       "OccurredAt": "2024-01-01T10:00:26Z",
       "DedupKey": "msg_3",
-      "SourceOffset": 2845,
+      "SourceOffset": 3028,
       "SourceIndex": 0
     }
   ],
-  "Attachments": null,
+  "Attachments": [
+    {
+      "MessageOrdinal": 8,
+      "SHA256": "",
+      "Body": "\ufffdPNG\r\n\u001a\n\u0000\u0000\u0000\rIHDR\u0000\u0000\u0000\u0001\u0000\u0000\u0000\u0001\b\u0006\u0000\u0000\u0000\u001f\u0015ĉ\u0000\u0000\u0000\rIDATx\ufffdc\ufffd\ufffd\ufffdP\u000f\u0000\u0004\ufffd\u0001\ufffd\ufffd\ufffd\ufffd!\u0000\u0000\u0000\u0000IEND\ufffdB`\ufffd",
+      "Bytes": 70,
+      "MediaType": "image/png",
+      "Filename": ""
+    }
+  ],
   "Fallbacks": [
     {
       "MessageOrdinal": 5,
@@ -265,6 +339,43 @@
       "DedupKey": "req_fallback_1"
     }
   ],
+  "Events": [
+    {
+      "MessageOrdinal": 8,
+      "Kind": "compaction",
+      "AttrsJSON": "{\"dropped_tokens\":168000,\"post_tokens\":12000,\"pre_tokens\":180000,\"trigger\":\"auto\"}",
+      "OccurredAt": "2024-01-01T10:01:00Z"
+    },
+    {
+      "MessageOrdinal": 9,
+      "Kind": "turn_end",
+      "AttrsJSON": "{\"duration_ms\":41250,\"message_count\":6}",
+      "OccurredAt": "2024-01-01T10:01:05Z"
+    },
+    {
+      "MessageOrdinal": 9,
+      "Kind": "api_error",
+      "AttrsJSON": "{\"max_retries\":10,\"message\":\"Unable to connect to API (ECONNRESET)\",\"retry_attempt\":1}",
+      "OccurredAt": "2024-01-01T10:01:06Z"
+    },
+    {
+      "MessageOrdinal": 9,
+      "Kind": "stop_hook",
+      "AttrsJSON": "{\"errors\":[\"hook exited 1\"],\"hook_count\":2,\"prevented_continuation\":true,\"stop_reason\":\"lint failed\"}",
+      "OccurredAt": "2024-01-01T10:01:07Z"
+    }
+  ],
+  "Identity": {
+    "CustomTitle": "Auth bug hunt",
+    "Slug": "gallant-hopper-1234",
+    "PermissionMode": "bypassPermissions",
+    "ReasoningEffort": "",
+    "SubagentName": "",
+    "PRNumber": 42,
+    "PRURL": "https://github.com/ada/engine/pull/42",
+    "PRRepo": "ada/engine",
+    "ParentSourceID": ""
+  },
   "Started": "2024-01-01T10:00:00Z",
-  "Ended": "2024-01-01T10:00:26Z"
+  "Ended": "2024-01-01T10:01:10Z"
 }

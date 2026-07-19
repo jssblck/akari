@@ -128,28 +128,23 @@ var table = map[string][]DatedRate{
 	// GPT-5.6 is the first OpenAI family to BILL cache writes (creation tokens at
 	// 1.25x input; the $6.25/$3.125/$1.25 column on the pricing page), a real break
 	// from the free-write convention every older OpenAI model follows (see below).
-	// CacheWrite still stays zero here, but for a different reason than the older
-	// models: not because writes are free, but because Codex does not yet persist the
-	// write count. Its rollout carries only input_tokens and cached_input_tokens, so
-	// akari has no cache-write volume to multiply. Setting a nonzero rate now would be
-	// inert (times zero) and would misrepresent the table as complete. This under-bills
-	// the write premium (0.25x input on written tokens only, always an undercount) until
-	// Codex emits the count and the parser reads it. Tracked in issue #126, which also
-	// records the input = total - cached - cacheWrite subtraction the parser fix needs.
-	"gpt-5.6":       flat(Rate{Input: 5, Output: 30, CacheRead: 0.50}),
-	"gpt-5.6-sol":   flat(Rate{Input: 5, Output: 30, CacheRead: 0.50}),
-	"gpt-5.6-terra": flat(Rate{Input: 2.50, Output: 15, CacheRead: 0.25}),
-	"gpt-5.6-luna":  flat(Rate{Input: 1, Output: 6, CacheRead: 0.10}),
+	// The Codex reducer reads token_count's cache_write_input_tokens (zero on every
+	// rollout observed so far, but live in the schema) and subtracts it from the
+	// combined input alongside the cached reads, so the write premium prices
+	// correctly the moment Codex reports a nonzero count (issue #126).
+	"gpt-5.6":       flat(Rate{Input: 5, Output: 30, CacheWrite: 6.25, CacheRead: 0.50}),
+	"gpt-5.6-sol":   flat(Rate{Input: 5, Output: 30, CacheWrite: 6.25, CacheRead: 0.50}),
+	"gpt-5.6-terra": flat(Rate{Input: 2.50, Output: 15, CacheWrite: 3.125, CacheRead: 0.25}),
+	"gpt-5.6-luna":  flat(Rate{Input: 1, Output: 6, CacheWrite: 1.25, CacheRead: 0.10}),
 	//
-	// CacheWrite is deliberately left unset (zero) for every OpenAI model, and that
-	// is not a missing rate: OpenAI does not bill cache creation as its own line.
-	// Caching there is automatic and free to write, so a token newly cached is
-	// charged once at the standard input rate, and only re-reads of it are
-	// discounted (CacheRead). The Codex parser reflects this by reporting the whole
-	// uncached remainder (total prompt minus cached) as Input and only the cached
-	// hits as CacheRead, so those cache-write tokens are already priced at Input.
-	// Adding a nonzero CacheWrite here would double-count them: OpenAI never reports
-	// a separate cache-write count for it to multiply, so it must stay zero.
+	// CacheWrite is deliberately left unset (zero) for every OpenAI model before
+	// GPT-5.6, and that is not a missing rate: those models do not bill cache
+	// creation as its own line. Caching there is automatic and free to write, so a
+	// token newly cached is charged once at the standard input rate, and only
+	// re-reads of it are discounted (CacheRead). The Codex parser reports the
+	// uncached, unwritten remainder as Input and the cached hits as CacheRead, and
+	// these models report no cache-write count, so their write tokens stay priced
+	// at Input. Adding a nonzero CacheWrite here would misstate their pricing.
 	//
 	// The -pro tiers carry no CacheRead on purpose: OpenAI disables prompt-cache
 	// retention for them, so a repeated prefix is re-billed at full input ($30/M)

@@ -48,17 +48,20 @@ type MessageDelta struct {
 // or description) the UI shows when a call has no file_path; it is empty when
 // the input has no summarizable key or was lifted before the field existed.
 type ProjToolCall struct {
-	MessageOrdinal int
-	CallIndex      int
-	ToolName       string
-	Category       string
-	FilePath       string
-	Detail         string
-	InputBody      string
-	InputSHA256    string
-	InputBytes     int64
-	InputMediaType string
-	CallUID        string
+	MessageOrdinal    int
+	CallIndex         int
+	ToolName          string
+	Category          string
+	FilePath          string
+	Detail            string
+	InputBody         string
+	InputSHA256       string
+	InputBytes        int64
+	InputMediaType    string
+	CallUID           string
+	AttributionAgent  string
+	AttributionSkill  string
+	AttributionPlugin string
 }
 
 // ToolResultDelta patches a tool call's result, matched by call id. The result
@@ -66,12 +69,40 @@ type ProjToolCall struct {
 // it inline for the server to write, or BodySHA256 is the reference the client
 // already uploaded. Both are empty when the result carries no body.
 type ToolResultDelta struct {
-	CallUID    string
-	Body       string
-	BodySHA256 string
-	Bytes      int64
-	MediaType  string
-	Status     string
+	CallUID         string
+	Body            string
+	BodySHA256      string
+	Bytes           int64
+	MediaType       string
+	Status          string
+	StructBody      string
+	StructSHA256    string
+	StructBytes     int
+	StructMediaType string
+}
+
+// EventDelta is one parser-owned session event. AttrsJSON is the event-kind-specific
+// JSON object; the rebuild replaces the complete ordered set on every parse.
+type EventDelta struct {
+	MessageOrdinal *int
+	Kind           string
+	AttrsJSON      string
+	OccurredAt     time.Time
+}
+
+// SessionIdentityDelta is transcript-declared session metadata. Every field is
+// overwritten on rebuild except ParentSourceID: an empty parser value preserves the
+// announce-derived Claude parent key.
+type SessionIdentityDelta struct {
+	CustomTitle     string
+	Slug            string
+	PermissionMode  string
+	ReasoningEffort string
+	SubagentName    string
+	PRNumber        int
+	PRURL           string
+	PRRepo          string
+	ParentSourceID  string
 }
 
 // ProjUsage is one usage event as the reducer saw it, pre-dedup. SourceOffset
@@ -145,6 +176,8 @@ type ProjectionDelta struct {
 	Usage       []ProjUsage
 	Attachments []AttachmentDelta
 	Fallbacks   []ProjFallback
+	Events      []EventDelta
+	Identity    SessionIdentityDelta
 
 	Started time.Time
 	Ended   time.Time
@@ -253,7 +286,51 @@ func (s *Store) RebuildSession(ctx context.Context, sessionID int64, epoch int, 
 	if err != nil {
 		return err
 	}
-	return feedErr
+	if feedErr != nil {
+		return feedErr
+	}
+	return s.linkDeclaredFamily(ctx, sessionID)
+}
+
+// linkDeclaredFamily resolves the parent/child links a rebuild's
+// parent_source_id write makes possible: the rebuilt session links up to an
+// existing parent, and children that declared it before its row settled are
+// adopted. It runs after the rebuild transaction commits because both writes
+// touch sessions rows beyond the rebuilt one and FK-reference the parent row,
+// which must not happen while the rebuild holds blob_pins (see the single-write
+// rule in rebuildTx). Each statement is its own transaction, so a link-up only
+// ever holds the child row while key-sharing its parent: lock chains point up
+// the family tree and cannot cycle. Both are guarded by parent_session_id IS
+// NULL, so a settled link is never rewritten, and both mirror announce's
+// linkSubagentParentTx exactly; whichever path runs second is a no-op.
+func (s *Store) linkDeclaredFamily(ctx context.Context, sessionID int64) error {
+	if _, err := s.Pool.Exec(ctx,
+		`UPDATE sessions AS child
+		    SET parent_session_id = parent.id, relationship_type = 'subagent'
+		   FROM sessions AS parent
+		  WHERE child.id = $1
+		    AND child.parent_source_id <> ''
+		    AND child.parent_session_id IS NULL
+		    AND parent.user_id = child.user_id
+		    AND parent.agent = child.agent
+		    AND parent.source_session_id = child.parent_source_id
+		    AND parent.id <> child.id`, sessionID); err != nil {
+		return fmt.Errorf("link rebuilt session %d to parent: %w", sessionID, err)
+	}
+	if _, err := s.Pool.Exec(ctx,
+		`UPDATE sessions AS child
+		    SET parent_session_id = parent.id, relationship_type = 'subagent'
+		   FROM sessions AS parent
+		  WHERE parent.id = $1
+		    AND child.parent_session_id IS NULL
+		    AND child.parent_source_id <> ''
+		    AND child.user_id = parent.user_id
+		    AND child.agent = parent.agent
+		    AND child.parent_source_id = parent.source_session_id
+		    AND child.id <> parent.id`, sessionID); err != nil {
+		return fmt.Errorf("adopt children of rebuilt session %d: %w", sessionID, err)
+	}
+	return nil
 }
 
 // rebuildTx replaces a session's derived rows with the folded form of one
@@ -275,6 +352,7 @@ func rebuildTx(ctx context.Context, tx pgx.Tx, sessionID int64, epoch int, byteL
 		"DELETE FROM message_turn_usage WHERE session_id = $1",
 		"DELETE FROM attachments WHERE session_id = $1",
 		"DELETE FROM model_fallbacks WHERE session_id = $1",
+		"DELETE FROM session_events WHERE session_id = $1",
 	} {
 		if _, err := tx.Exec(ctx, q, sessionID); err != nil {
 			return fmt.Errorf("clear projection for rebuild of session %d (%s): %w", sessionID, q, err)
@@ -298,6 +376,9 @@ func rebuildTx(ctx context.Context, tx pgx.Tx, sessionID int64, epoch int, byteL
 	if err != nil {
 		return err
 	}
+	if err := writeEvents(ctx, tx, sessionID, d.Events); err != nil {
+		return err
+	}
 
 	// The insights rollup tables re-derive from the projection rows just written, in this
 	// same transaction, so they are exactly as fresh as the projection and equal a fresh
@@ -318,7 +399,9 @@ func rebuildTx(ctx context.Context, tx pgx.Tx, sessionID int64, epoch int, byteL
 	// by the same transaction), taking FOR KEY SHARE on the parent session's row
 	// while this transaction holds shared blob_pins rows, which deadlocks against
 	// a concurrent rebuild of the parent (see gradeSignalsTx and
-	// TestConcurrentRebuildDeadlockStress).
+	// TestConcurrentRebuildDeadlockStress). Subagent linking writes other
+	// sessions' rows and FK-references the parent for the same reason, so it runs
+	// after this transaction commits (see linkDeclaredFamily).
 	var gradeable bool
 	if err := tx.QueryRow(ctx,
 		`SELECT s.terminal OR ($2::timestamptz IS NOT NULL
@@ -354,12 +437,26 @@ func rebuildTx(ctx context.Context, tx pgx.Tx, sessionID int64, epoch int, byteL
 		   started_at = $11,
 		   ended_at = $12,
 		   updated_at = now(),
-		   signals_stale = $13
+		   signals_stale = $13,
+		   custom_title = $14,
+		   slug = $15,
+		   permission_mode = $16,
+		   reasoning_effort = $17,
+		   subagent_name = $18,
+		   pr_number = $19,
+		   pr_url = $20,
+		   pr_repo = $21,
+		   parent_source_id = CASE WHEN $22 <> '' THEN $22 ELSE parent_source_id END
 		 WHERE id = $1`,
 		sessionID, len(d.Messages), userMessages, fallbackCount,
 		roll.input, roll.output, roll.cacheWrite, roll.cacheRead,
 		roll.costUSD, roll.cacheSavingsUSD,
-		nullTime(d.Started), nullTime(d.Ended), !gradeable); err != nil {
+		nullTime(d.Started), nullTime(d.Ended), !gradeable,
+		sanitizeText(d.Identity.CustomTitle), sanitizeText(d.Identity.Slug),
+		sanitizeText(d.Identity.PermissionMode), sanitizeText(d.Identity.ReasoningEffort),
+		sanitizeText(d.Identity.SubagentName), d.Identity.PRNumber,
+		sanitizeText(d.Identity.PRURL), sanitizeText(d.Identity.PRRepo),
+		sanitizeText(d.Identity.ParentSourceID)); err != nil {
 		return fmt.Errorf("update aggregates for session %d: %w", sessionID, err)
 	}
 
@@ -452,6 +549,28 @@ func writeMessages(ctx context.Context, tx pgx.Tx, sessionID int64, msgs []Messa
 	return nil
 }
 
+func writeEvents(ctx context.Context, tx pgx.Tx, sessionID int64, events []EventDelta) error {
+	if len(events) == 0 {
+		return nil
+	}
+	rows := make([][]any, 0, len(events))
+	for seq, event := range events {
+		attrs := sanitizeText(event.AttrsJSON)
+		if attrs == "" {
+			attrs = "{}"
+		}
+		rows = append(rows, []any{
+			sessionID, seq, event.MessageOrdinal, sanitizeText(event.Kind), []byte(attrs), nullTime(event.OccurredAt),
+		})
+	}
+	if _, err := tx.CopyFrom(ctx, pgx.Identifier{"session_events"},
+		[]string{"session_id", "seq", "message_ordinal", "kind", "attrs", "occurred_at"},
+		pgx.CopyFromRows(rows)); err != nil {
+		return fmt.Errorf("copy events for session %d: %w", sessionID, err)
+	}
+	return nil
+}
+
 // writeToolCalls resolves each call's input body into the CAS (writing inline
 // bodies, pinning client-lifted references), patches results onto their calls by
 // call id, and bulk-inserts the completed rows.
@@ -478,11 +597,14 @@ func writeToolCalls(ctx context.Context, tx pgx.Tx, sessionID int64, calls []Pro
 
 	// resolved carries each call's result columns once a result patches it.
 	type resolvedResult struct {
-		sha       any
-		bytes     int64
-		mediaType string
-		status    string
-		set       bool
+		sha             any
+		bytes           int64
+		mediaType       string
+		status          string
+		structSHA       any
+		structBytes     int
+		structMediaType string
+		set             bool
 	}
 	resolved := make([]resolvedResult, len(calls))
 	byUID := map[string][]int{}
@@ -543,8 +665,29 @@ func writeToolCalls(ctx context.Context, tx pgx.Tx, sessionID int64, calls []Pro
 		if media == "" {
 			media = "text/plain"
 		}
+		var structSHA any
+		switch {
+		case tr.StructSHA256 != "":
+			blobRefs = append(blobRefs, blobRef{
+				sha:        tr.StructSHA256,
+				localWrite: writeSeen[tr.StructSHA256],
+				errCtx:     fmt.Sprintf("reference structured tool result blob %s for session %d call %q", tr.StructSHA256, sessionID, tr.CallUID),
+			})
+			structSHA = tr.StructSHA256
+		case len(tr.StructBody) > 0:
+			structSHA = collectWrite(tr.StructBody, tr.StructMediaType,
+				fmt.Sprintf("write structured tool result blob for session %d call %q", sessionID, tr.CallUID))
+		}
+		structMedia := sanitizeText(tr.StructMediaType)
+		if structSHA != nil && structMedia == "" {
+			structMedia = "application/json"
+		}
 		for _, i := range idxs {
-			resolved[i] = resolvedResult{sha: sha, bytes: tr.Bytes, mediaType: media, status: sanitizeText(tr.Status), set: true}
+			resolved[i] = resolvedResult{
+				sha: sha, bytes: tr.Bytes, mediaType: media, status: sanitizeText(tr.Status),
+				structSHA: structSHA, structBytes: tr.StructBytes, structMediaType: structMedia,
+				set: true,
+			}
 		}
 	}
 
@@ -582,16 +725,23 @@ func writeToolCalls(ctx context.Context, tx pgx.Tx, sessionID int64, calls []Pro
 		if rel, ok := sessionRelPath(sessionCwd, sanitizeText(t.FilePath)); ok {
 			relPath = rel
 		}
-		var resSHA, resBytes, resMedia, resStatus any
+		var resSHA, resBytes, resMedia, resStatus, structSHA, structBytes, structMedia any
 		if resolved[i].set {
 			resSHA, resBytes, resMedia, resStatus = resolved[i].sha, resolved[i].bytes, resolved[i].mediaType, resolved[i].status
+			// A result with no structured body leaves all three struct columns NULL,
+			// the same "absent" convention the pending result_* columns use.
+			if resolved[i].structSHA != nil {
+				structSHA, structBytes, structMedia = resolved[i].structSHA, resolved[i].structBytes, resolved[i].structMediaType
+			}
 		}
 		rows = append(rows, []any{
 			sessionID, t.MessageOrdinal, t.CallIndex, sanitizeText(t.ToolName), sanitizeText(t.Category),
 			nullString(sanitizeText(t.FilePath)), relPath,
 			inputSHA, t.InputBytes, inputMedia, nullString(sanitizeText(t.CallUID)),
 			nullString(sanitizeText(t.Detail)),
+			sanitizeText(t.AttributionAgent), sanitizeText(t.AttributionSkill), sanitizeText(t.AttributionPlugin),
 			resSHA, resBytes, resMedia, resStatus,
+			structSHA, structBytes, structMedia,
 		})
 	}
 	if err := resolveBlobsTx(ctx, tx, blobRefs, blobWrites); err != nil {
@@ -601,7 +751,9 @@ func writeToolCalls(ctx context.Context, tx pgx.Tx, sessionID int64, calls []Pro
 		[]string{"session_id", "message_ordinal", "call_index", "tool_name", "category",
 			"file_path", "file_rel_path",
 			"input_sha256", "input_bytes", "input_media_type", "call_uid", "detail",
-			"result_sha256", "result_bytes", "result_media_type", "result_status"},
+			"attribution_agent", "attribution_skill", "attribution_plugin",
+			"result_sha256", "result_bytes", "result_media_type", "result_status",
+			"struct_sha256", "struct_bytes", "struct_media_type"},
 		pgx.CopyFromRows(rows)); err != nil {
 		return fmt.Errorf("copy tool calls for session %d: %w", sessionID, err)
 	}

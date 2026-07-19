@@ -2623,6 +2623,19 @@
               }
             ]
           },
+          "PermissionMode": {
+            "type": "string"
+          },
+          "PRNumber": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "PRRepo": {
+            "type": "string"
+          },
+          "PRURL": {
+            "type": "string"
+          },
           "ProjectID": {
             "format": "int64",
             "type": "integer"
@@ -2646,6 +2659,12 @@
               }
             ]
           },
+          "ReasoningEffort": {
+            "type": "string"
+          },
+          "Slug": {
+            "type": "string"
+          },
           "StartedAt": {
             "anyOf": [
               {
@@ -2656,6 +2675,9 @@
                 "type": "null"
               }
             ]
+          },
+          "SubagentName": {
+            "type": "string"
           },
           "Title": {
             "type": "string"
@@ -2704,13 +2726,20 @@
           "MessageCount",
           "ModelFallbackCount",
           "OwnerID",
+          "PRNumber",
+          "PRRepo",
+          "PRURL",
           "ParentID",
+          "PermissionMode",
           "ProjectID",
           "ProjectKey",
           "ProjectKind",
           "ProjectName",
           "PublicID",
+          "ReasoningEffort",
+          "Slug",
           "StartedAt",
+          "SubagentName",
           "Title",
           "TotalCacheRead",
           "TotalCacheSavingsUSD",
@@ -2721,6 +2750,40 @@
           "UserMessageCount",
           "Username",
           "Visibility"
+        ],
+        "type": "object"
+      },
+      "SessionEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "Attrs": {
+            "additionalProperties": {},
+            "type": "object"
+          },
+          "Kind": {
+            "type": "string"
+          },
+          "MessageOrdinal": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "OccurredAt": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "Attrs",
+          "Kind",
+          "MessageOrdinal",
+          "OccurredAt"
         ],
         "type": "object"
       },
@@ -3700,6 +3763,9 @@
               }
             ]
           },
+          "SubagentName": {
+            "type": "string"
+          },
           "Title": {
             "type": "string"
           },
@@ -3746,6 +3812,7 @@
           "Outcome",
           "PublicID",
           "StartedAt",
+          "SubagentName",
           "Title",
           "TotalCacheRead",
           "TotalCacheWrite",
@@ -3902,6 +3969,15 @@
       "ToolCallView": {
         "additionalProperties": false,
         "properties": {
+          "AttributionAgent": {
+            "type": "string"
+          },
+          "AttributionPlugin": {
+            "type": "string"
+          },
+          "AttributionSkill": {
+            "type": "string"
+          },
           "CallIndex": {
             "format": "int64",
             "type": "integer"
@@ -3945,11 +4021,24 @@
           "ResultStatus": {
             "type": "string"
           },
+          "StructBytes": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "StructMediaType": {
+            "type": "string"
+          },
+          "StructSHA256": {
+            "type": "string"
+          },
           "ToolName": {
             "type": "string"
           }
         },
         "required": [
+          "AttributionAgent",
+          "AttributionPlugin",
+          "AttributionSkill",
           "CallIndex",
           "Category",
           "Detail",
@@ -3963,6 +4052,9 @@
           "ResultMediaType",
           "ResultSHA",
           "ResultStatus",
+          "StructBytes",
+          "StructMediaType",
+          "StructSHA256",
           "ToolName"
         ],
         "type": "object"
@@ -4160,6 +4252,15 @@
             "format": "int64",
             "type": "integer"
           },
+          "Events": {
+            "items": {
+              "$ref": "#/components/schemas/SessionEvent"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "Fallbacks": {
             "items": {
               "$ref": "#/components/schemas/ModelFallback"
@@ -4206,6 +4307,7 @@
         "required": [
           "Attachments",
           "EarlierCount",
+          "Events",
           "Fallbacks",
           "HasEarlier",
           "More",

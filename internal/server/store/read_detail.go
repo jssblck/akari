@@ -26,6 +26,8 @@ func (s *Store) scanDetail(ctx context.Context, q querier, where string, arg any
 		        s.total_cost_usd, s.visibility, s.public_id,
 		        s.started_at, s.ended_at, s.last_active_at,
 		        s.user_id, s.project_id, p.remote_key, p.display_name, p.kind, s.cwd, s.parent_session_id,
+		        s.slug, s.permission_mode, s.reasoning_effort, s.subagent_name,
+		        s.pr_number, s.pr_url, s.pr_repo,
 		        s.total_cache_savings_usd,
 		        coalesce(title.content, '')
 		   FROM sessions s
@@ -40,6 +42,8 @@ func (s *Store) scanDetail(ctx context.Context, q querier, where string, arg any
 		&d.TotalCostUSD, &d.Visibility, &d.PublicID,
 		&d.StartedAt, &d.EndedAt, &d.LastActiveAt,
 		&d.OwnerID, &d.ProjectID, &d.ProjectKey, &d.ProjectName, &d.ProjectKind, &d.Cwd, &d.ParentID,
+		&d.Slug, &d.PermissionMode, &d.ReasoningEffort, &d.SubagentName,
+		&d.PRNumber, &d.PRURL, &d.PRRepo,
 		&d.TotalCacheSavingsUSD,
 		&d.Title)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -157,7 +161,9 @@ func (s *Store) scanMessages(ctx context.Context, q querier, sessionID int64, qu
 // and the session snapshot's in-transaction read.
 const toolCallsQuery = `SELECT message_ordinal, call_index, tool_name, coalesce(category,''), coalesce(file_path,''), coalesce(file_rel_path,''), coalesce(detail,''),
 	        coalesce(input_sha256,''), coalesce(input_bytes,0), coalesce(input_media_type,''),
-	        coalesce(result_sha256,''), coalesce(result_bytes,0), coalesce(result_media_type,''), coalesce(result_status,'')
+	        coalesce(result_sha256,''), coalesce(result_bytes,0), coalesce(result_media_type,''), coalesce(result_status,''),
+	        coalesce(struct_sha256,''), coalesce(struct_bytes,0), coalesce(struct_media_type,''),
+	        attribution_agent, attribution_skill, attribution_plugin
 	   FROM tool_calls WHERE session_id = $1 ORDER BY message_ordinal, call_index`
 
 // ToolCalls returns all of a session's tool calls as metadata, for the web
@@ -171,7 +177,9 @@ func (s *Store) ToolCalls(ctx context.Context, sessionID int64) ([]ToolCallView,
 // in-transaction read (which must see the same snapshot as the window's messages).
 const toolCallsInRangeQuery = `SELECT message_ordinal, call_index, tool_name, coalesce(category,''), coalesce(file_path,''), coalesce(file_rel_path,''), coalesce(detail,''),
 	        coalesce(input_sha256,''), coalesce(input_bytes,0), coalesce(input_media_type,''),
-	        coalesce(result_sha256,''), coalesce(result_bytes,0), coalesce(result_media_type,''), coalesce(result_status,'')
+	        coalesce(result_sha256,''), coalesce(result_bytes,0), coalesce(result_media_type,''), coalesce(result_status,''),
+	        coalesce(struct_sha256,''), coalesce(struct_bytes,0), coalesce(struct_media_type,''),
+	        attribution_agent, attribution_skill, attribution_plugin
 	   FROM tool_calls WHERE session_id = $1 AND message_ordinal BETWEEN $2 AND $3
 	   ORDER BY message_ordinal, call_index`
 
@@ -193,7 +201,9 @@ func (s *Store) scanToolCalls(ctx context.Context, q querier, query string, args
 		var t ToolCallView
 		if err := rows.Scan(&t.MessageOrdinal, &t.CallIndex, &t.ToolName, &t.Category, &t.FilePath, &t.FileRelPath, &t.Detail,
 			&t.InputSHA, &t.InputBytes, &t.InputMediaType,
-			&t.ResultSHA, &t.ResultBytes, &t.ResultMediaType, &t.ResultStatus); err != nil {
+			&t.ResultSHA, &t.ResultBytes, &t.ResultMediaType, &t.ResultStatus,
+			&t.StructSHA256, &t.StructBytes, &t.StructMediaType,
+			&t.AttributionAgent, &t.AttributionSkill, &t.AttributionPlugin); err != nil {
 			return nil, err
 		}
 		out = append(out, t)
