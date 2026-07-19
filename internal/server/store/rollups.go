@@ -27,14 +27,13 @@ import (
 // like a reducer or scoring change (the reparse it forces is what re-derives the corpus).
 
 // sessionUsageDailyDerive folds one session's usage_events into per-(UTC day, model) sums:
-// the four token classes, the summed cost, and whether any folded event was token-bearing
-// but unpriced (the costIncompleteExpr base, so read-side bool_or(unpriced) reproduces it).
+// the four token classes and the summed estimated cost.
 // An undated event folds into a NULL day, preserving the documented rollup-versus-analytics
 // gap (docs/data-aggregation.md): the dated consumers filter day IS NOT NULL, and the
 // ledger reconciliation counts the NULL-day rows as exactly the undated usage.
 const sessionUsageDailyDerive = `
 INSERT INTO session_usage_daily
-  (session_id, day, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, unpriced)
+  (session_id, day, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd)
 SELECT ue.session_id,
        (ue.occurred_at AT TIME ZONE 'UTC')::date,
        ue.model,
@@ -42,8 +41,7 @@ SELECT ue.session_id,
        coalesce(sum(ue.output_tokens), 0),
        coalesce(sum(ue.cache_read_tokens), 0),
        coalesce(sum(ue.cache_write_tokens), 0),
-       coalesce(sum(ue.cost_usd), 0),
-       coalesce(bool_or(ue.cost_usd IS NULL AND (ue.input_tokens + ue.output_tokens + ue.cache_read_tokens + ue.cache_write_tokens + ue.reasoning_tokens) > 0), false)
+       coalesce(sum(ue.cost_usd), 0)
   FROM usage_events ue
  WHERE ue.session_id = $1
  GROUP BY 1, 2, 3`

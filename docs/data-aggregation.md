@@ -24,7 +24,7 @@ The rule the codebase follows now:
 Token and cost data is aggregated from exactly three places.
 
 1. **The ledger: `usage_events`.** The granular, per-event record. One row per
-   priced (or unpriced) usage event, carrying the four token classes (input,
+   usage event, carrying the four token classes (input,
    output, cache read, cache write), a cost, an `occurred_at`, and the dedup keys
    that make a replayed line idempotent. Summing it is the source of truth.
 
@@ -35,9 +35,8 @@ Token and cost data is aggregated from exactly three places.
    long list or index never has to scan the ledger.
 
 3. **The daily rollup: `session_usage_daily`.** Per (session, UTC day, model)
-   sums of the four token classes and cost, plus an `unpriced` flag that
-   reproduces the ledger's cost-incomplete predicate. Written by the same
-   rebuild transaction (`internal/server/store/rollups.go`), it is the base the
+   sums of the four token classes and cost. Written by the same rebuild
+   transaction (`internal/server/store/rollups.go`), it is the base the
    Insights money panels read (fleet mix, economics, cache savings, subagent
    cost share) so a page render never groups the ledger. An undated event folds
    into a NULL day, keeping the undated gap identical to the session rollups'.
@@ -65,7 +64,7 @@ This holds by construction, but nothing in the schema enforces it, so it is exac
 the kind of thing that rots. It is pinned directly by
 `TestSessionRollupMatchesLedger` (after live ingest and after an epoch rebuild,
 across multiple agents, models, cache tokens, duplicate usage, undated usage, and
-unpriced usage) and, for the specific Claude duplicate-usage case, by
+unknown model rates) and, for the specific Claude duplicate-usage case, by
 `TestClaudeDuplicateUsageCountedOnce` in the parse package.
 
 `sessions.model_fallback_count` follows the same construction against the

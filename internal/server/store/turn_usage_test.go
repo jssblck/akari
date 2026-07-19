@@ -36,9 +36,8 @@ func msgByOrdinal(msgs []store.Message) map[int]store.Message {
 }
 
 // TestMessagesTurnUsageFolds pins that each message's folded Usage sums a turn's streamed chunks,
-// computes context occupancy as input + cache read + cache write (output excluded), leaves cost
-// NULL only when every contributing row is unpriced (a lower-bound partial when some rows are
-// priced), and that a NULL-ordinal usage row lands on no message's Usage.
+// computes context occupancy as input + cache read + cache write (output excluded), sums unknown
+// prices as zero, and leaves a NULL-ordinal usage row on no message's Usage.
 func TestMessagesTurnUsageFolds(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -46,9 +45,9 @@ func TestMessagesTurnUsageFolds(t *testing.T) {
 	sid := seedForReads(t, st)
 
 	ord0, ord1 := 0, 1
-	cost := func(f float64) *float64 { return &f }
+	cost := func(f float64) float64 { return f }
 	// Two message turns, each with usage. Turn 0: two streamed chunks, both priced. Turn 1: one
-	// priced row, one unpriced row (a mixed group, so the cost is a priced partial). A usage row with
+	// priced row, one zero-priced row. A usage row with
 	// no ordinal must not land on any message's Usage.
 	delta := store.ProjectionDelta{
 		Messages: []store.MessageDelta{
@@ -59,7 +58,7 @@ func TestMessagesTurnUsageFolds(t *testing.T) {
 			{MessageOrdinal: &ord0, Model: "gpt-5", Input: 1000, Output: 200, CacheRead: 5000, CacheWrite: 300, Reasoning: 40, CostUSD: cost(0.10), SourceOffset: 1, SourceIndex: 0},
 			{MessageOrdinal: &ord0, Model: "gpt-5", Input: 500, Output: 100, CacheRead: 2000, CacheWrite: 0, Reasoning: 10, CostUSD: cost(0.05), SourceOffset: 2, SourceIndex: 0},
 			{MessageOrdinal: &ord1, Model: "gpt-5", Input: 800, Output: 400, CacheRead: 100000, CacheWrite: 0, CostUSD: cost(0.30), SourceOffset: 3, SourceIndex: 0},
-			{MessageOrdinal: &ord1, Model: "mystery", Input: 100, Output: 50, CacheRead: 0, CacheWrite: 0, CostUSD: nil, SourceOffset: 4, SourceIndex: 0},
+			{MessageOrdinal: &ord1, Model: "mystery", Input: 100, Output: 50, CacheRead: 0, CacheWrite: 0, CostUSD: 0, SourceOffset: 4, SourceIndex: 0},
 			{MessageOrdinal: nil, Model: "gpt-5", Input: 999, Output: 999, CostUSD: cost(9.99), SourceOffset: 5, SourceIndex: 0},
 		},
 	}
@@ -83,13 +82,8 @@ func TestMessagesTurnUsageFolds(t *testing.T) {
 	if u0.ContextTokens != 8800 {
 		t.Errorf("turn 0 context = %d, want 8800 (input + cache read + cache write, output excluded)", u0.ContextTokens)
 	}
-	if u0.CostUSD == nil || *u0.CostUSD < 0.149 || *u0.CostUSD > 0.151 {
+	if u0.CostUSD < 0.149 || u0.CostUSD > 0.151 {
 		t.Errorf("turn 0 cost = %v, want ~0.15", u0.CostUSD)
-	}
-
-	// Turn 0 is fully priced, so its cost is exact, not a lower bound.
-	if u0.CostIncomplete {
-		t.Error("turn 0 is fully priced and must not read cost-incomplete")
 	}
 
 	m1 := by[1]
@@ -100,20 +94,13 @@ func TestMessagesTurnUsageFolds(t *testing.T) {
 	if u1.ContextTokens != 100900 { // 900 input + 100000 cache read + 0 cache write
 		t.Errorf("turn 1 context = %d, want 100900", u1.ContextTokens)
 	}
-	// A mixed group returns the priced partial (0.30), not NULL and not a summed-with-zero figure.
-	if u1.CostUSD == nil || *u1.CostUSD < 0.299 || *u1.CostUSD > 0.301 {
-		t.Errorf("turn 1 cost = %v, want ~0.30 (the priced partial)", u1.CostUSD)
-	}
-	// The mixed group folded a token-bearing unpriced row, so its cost is a lower bound: the flag
-	// must fire so API consumers do not treat the priced portion as complete beside unpriced tokens.
-	if !u1.CostIncomplete {
-		t.Error("turn 1 mixes priced and token-bearing unpriced rows and must read cost-incomplete")
+	if u1.CostUSD < 0.299 || u1.CostUSD > 0.301 {
+		t.Errorf("turn 1 cost = %v, want ~0.30", u1.CostUSD)
 	}
 }
 
-// TestMessagesTurnUsageUnpricedTurn pins that a turn whose every row is unpriced folds to a nil
-// cost (unmeasured) on its Usage, never a summed zero that would read as free.
-func TestMessagesTurnUsageUnpricedTurn(t *testing.T) {
+// TestMessagesTurnUsageUnknownPrice pins that a turn whose every rate is unknown folds to zero.
+func TestMessagesTurnUsageUnknownPrice(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
 	ctx := context.Background()
@@ -123,7 +110,7 @@ func TestMessagesTurnUsageUnpricedTurn(t *testing.T) {
 	rebuildWith(t, st, sid, store.ProjectionDelta{
 		Messages: []store.MessageDelta{{Ordinal: 0, Role: "assistant", Content: "a", Model: "mystery"}},
 		Usage: []store.ProjUsage{
-			{MessageOrdinal: &ord, Model: "mystery", Input: 100, Output: 50, CostUSD: nil, SourceOffset: 1, SourceIndex: 0},
+			{MessageOrdinal: &ord, Model: "mystery", Input: 100, Output: 50, CostUSD: 0, SourceOffset: 1, SourceIndex: 0},
 		},
 	})
 	msgs, err := st.Messages(ctx, sid)
@@ -134,8 +121,8 @@ func TestMessagesTurnUsageUnpricedTurn(t *testing.T) {
 	if by[0].Usage == nil {
 		t.Fatalf("turn 0 carries no folded usage")
 	}
-	if by[0].Usage.CostUSD != nil {
-		t.Errorf("an all-unpriced turn should have nil cost, got %v", *by[0].Usage.CostUSD)
+	if by[0].Usage.CostUSD != 0 {
+		t.Errorf("an unknown-price turn should have zero cost, got %v", by[0].Usage.CostUSD)
 	}
 }
 
@@ -148,7 +135,7 @@ func TestMessagesTurnUsageNullOrdinalInvisible(t *testing.T) {
 	ctx := context.Background()
 	sid := seedForReads(t, st)
 
-	cost := func(f float64) *float64 { return &f }
+	cost := func(f float64) float64 { return f }
 	rebuildWith(t, st, sid, store.ProjectionDelta{
 		Messages: []store.MessageDelta{{Ordinal: 0, Role: "assistant", Content: "a", Model: "gpt-5"}},
 		Usage: []store.ProjUsage{
@@ -191,9 +178,9 @@ func TestMessagesTurnUsageDivergesFromContextFold(t *testing.T) {
 	delta := store.ProjectionDelta{
 		Messages: []store.MessageDelta{{Ordinal: 0, Role: "assistant", Content: "a", Model: "gpt-5"}},
 		Usage: []store.ProjUsage{
-			{MessageOrdinal: &ord0, Model: "gpt-5", CacheRead: 100000, CostUSD: nil, SourceOffset: 1, SourceIndex: 0},
-			{MessageOrdinal: &ord0, Model: "gpt-5", CacheRead: 1000, CostUSD: nil, SourceOffset: 2, SourceIndex: 0},
-			{MessageOrdinal: nil, Model: "gpt-5", CacheRead: 1000, CostUSD: nil, SourceOffset: 3, SourceIndex: 0},
+			{MessageOrdinal: &ord0, Model: "gpt-5", CacheRead: 100000, CostUSD: 0, SourceOffset: 1, SourceIndex: 0},
+			{MessageOrdinal: &ord0, Model: "gpt-5", CacheRead: 1000, CostUSD: 0, SourceOffset: 2, SourceIndex: 0},
+			{MessageOrdinal: nil, Model: "gpt-5", CacheRead: 1000, CostUSD: 0, SourceOffset: 3, SourceIndex: 0},
 		},
 	}
 	rebuildWith(t, st, sid, delta)
@@ -323,10 +310,8 @@ func TestMessagesDuplicatePromptMatchesStoredCount(t *testing.T) {
 // the surviving usage_events it summarizes. The rollup is folded in memory from the surviving usage
 // rows on every rebuild and read by the transcript in place of that GROUP BY, so if the two ever
 // drifted the transcript would show a turn load the ledger does not back. It seeds a mixed corpus (a
-// multi-chunk turn, a priced+unpriced mixed turn, an all-unpriced turn, and a NULL-ordinal row that
-// belongs to no turn) and asserts the stored rollup matches the aggregate the old read computed,
-// including the all-unpriced-is-nil cost rule and the cost_incomplete flag, and that the
-// NULL-ordinal row folded into no rollup row.
+// multi-chunk turn, a priced+unknown mixed turn, an all-unknown turn, and a NULL-ordinal row that
+// belongs to no turn) and asserts the stored rollup matches the aggregate the old read computed.
 func TestMessageTurnUsageMatchesUsageEvents(t *testing.T) {
 	t.Parallel()
 	st := storetest.NewStore(t)
@@ -334,7 +319,7 @@ func TestMessageTurnUsageMatchesUsageEvents(t *testing.T) {
 	sid := seedForReads(t, st)
 
 	ord0, ord1, ord2 := 0, 1, 2
-	cost := func(f float64) *float64 { return &f }
+	cost := func(f float64) float64 { return f }
 	delta := store.ProjectionDelta{
 		Messages: []store.MessageDelta{
 			{Ordinal: 0, Role: "assistant", Content: "a", Model: "gpt-5"},
@@ -345,24 +330,22 @@ func TestMessageTurnUsageMatchesUsageEvents(t *testing.T) {
 			// Turn 0: two streamed chunks, both priced (the rollup must sum them).
 			{MessageOrdinal: &ord0, Model: "gpt-5", Input: 1000, Output: 200, CacheRead: 5000, CacheWrite: 300, Reasoning: 40, CostUSD: cost(0.10), SourceOffset: 1, SourceIndex: 0},
 			{MessageOrdinal: &ord0, Model: "gpt-5", Input: 500, Output: 100, CacheRead: 2000, CacheWrite: 0, Reasoning: 10, CostUSD: cost(0.05), SourceOffset: 2, SourceIndex: 0},
-			// Turn 1: one priced, one token-bearing unpriced (a mixed group: priced partial + flag).
+			// Turn 1: one priced, one token-bearing row with an unknown rate.
 			{MessageOrdinal: &ord1, Model: "gpt-5", Input: 800, Output: 400, CacheRead: 100000, CostUSD: cost(0.30), SourceOffset: 3, SourceIndex: 0},
-			{MessageOrdinal: &ord1, Model: "mystery", Input: 100, Output: 50, CostUSD: nil, SourceOffset: 4, SourceIndex: 0},
-			// Turn 2: all unpriced (cost reads nil, not a summed zero).
-			{MessageOrdinal: &ord2, Model: "mystery", Input: 70, Output: 30, CostUSD: nil, SourceOffset: 5, SourceIndex: 0},
+			{MessageOrdinal: &ord1, Model: "mystery", Input: 100, Output: 50, CostUSD: 0, SourceOffset: 4, SourceIndex: 0},
+			// Turn 2: all rates unknown, so cost is zero.
+			{MessageOrdinal: &ord2, Model: "mystery", Input: 70, Output: 30, CostUSD: 0, SourceOffset: 5, SourceIndex: 0},
 			// A NULL-ordinal row: attributable to no turn, so it folds into no rollup row.
 			{MessageOrdinal: nil, Model: "gpt-5", Input: 999, Output: 999, CostUSD: cost(9.99), SourceOffset: 6, SourceIndex: 0},
 		},
 	}
 	rebuildWith(t, st, sid, delta)
 
-	// A row is (tokens..., costSum, costCount, costIncomplete): the exact shape both the stored rollup
+	// A row is (tokens..., costSum): the exact shape both the stored rollup
 	// and a fresh aggregate over usage_events produce, so the two maps compare directly.
 	type roll struct {
 		in, out, cw, cr, rz int64
 		costSum             float64
-		costCount           int64
-		costIncomplete      bool
 	}
 	scanRolls := func(q string) map[int]roll {
 		rows, err := st.Pool.Query(ctx, q, sid)
@@ -374,7 +357,7 @@ func TestMessageTurnUsageMatchesUsageEvents(t *testing.T) {
 		for rows.Next() {
 			var ord int
 			var r roll
-			if err := rows.Scan(&ord, &r.in, &r.out, &r.cw, &r.cr, &r.rz, &r.costSum, &r.costCount, &r.costIncomplete); err != nil {
+			if err := rows.Scan(&ord, &r.in, &r.out, &r.cw, &r.cr, &r.rz, &r.costSum); err != nil {
 				t.Fatalf("scan %q: %v", q, err)
 			}
 			out[ord] = r
@@ -387,16 +370,14 @@ func TestMessageTurnUsageMatchesUsageEvents(t *testing.T) {
 
 	// The stored rollup.
 	stored := scanRolls(`SELECT message_ordinal, input_tokens, output_tokens, cache_write_tokens,
-	                             cache_read_tokens, reasoning_tokens, cost_sum, cost_count, cost_incomplete
+	                             cache_read_tokens, reasoning_tokens, cost_sum
 	                        FROM message_turn_usage WHERE session_id = $1`)
 	// A fresh aggregate over the surviving usage_events, the fold the transcript read before the
-	// rollup replaced it. coalesce(sum(cost_usd),0) matches the rollup's NOT NULL cost_sum; the
-	// cost_incomplete predicate mirrors the one projection.go folds per row.
+	// rollup replaced it. coalesce(sum(cost_usd),0) matches the rollup's NOT NULL cost_sum.
 	fresh := scanRolls(`SELECT message_ordinal,
 	                            coalesce(sum(input_tokens),0), coalesce(sum(output_tokens),0),
 	                            coalesce(sum(cache_write_tokens),0), coalesce(sum(cache_read_tokens),0),
-	                            coalesce(sum(reasoning_tokens),0), coalesce(sum(cost_usd),0), count(cost_usd),
-	                            bool_or(cost_usd IS NULL AND (input_tokens + output_tokens + cache_read_tokens + cache_write_tokens + reasoning_tokens) > 0)
+	                            coalesce(sum(reasoning_tokens),0), coalesce(sum(cost_usd),0)
 	                       FROM usage_events
 	                      WHERE session_id = $1 AND message_ordinal IS NOT NULL
 	                      GROUP BY message_ordinal`)
@@ -417,15 +398,6 @@ func TestMessageTurnUsageMatchesUsageEvents(t *testing.T) {
 		if _, ok := fresh[ord]; !ok {
 			t.Errorf("ordinal %d in the rollup has no backing usage_events aggregate", ord)
 		}
-	}
-
-	// The flag pins directly too: turn 0 fully priced (exact), turn 1 mixed (a lower bound), turn 2
-	// all unpriced (also a token-bearing unpriced row present, so flagged).
-	if stored[0].costIncomplete {
-		t.Error("turn 0 is fully priced and must not read cost-incomplete")
-	}
-	if !stored[1].costIncomplete {
-		t.Error("turn 1 mixes priced and token-bearing unpriced rows and must read cost-incomplete")
 	}
 }
 

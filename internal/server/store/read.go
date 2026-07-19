@@ -29,20 +29,6 @@ type ProjectSummary struct {
 	// four classes the overview heatmap surfaces per day).
 	TotalCacheRead  int64
 	TotalCacheWrite int64
-	// CostIncomplete is true when any session folded into this project's totals
-	// carries an unpriced usage event, so the rolled-up cost is a lower bound. It
-	// is the OR of the per-session cost_incomplete flags, letting the index render
-	// API consumers can distinguish it from an exact figure
-	// that silently understates an aggregate built from incomplete sessions.
-	//
-	// Like every other figure on this index, it is rollup-scoped (every surviving
-	// usage row), so it can read true for a project whose only unpriced usage is
-	// undated while the all-time analytics panel, which drops undated rows off its
-	// time axis, reads exact. That is the one documented rollup-vs-analytics gap,
-	// the same one the token and cost totals carry (see, in package store's tests,
-	// TestUndatedUsageIsTheOnlyRollupAnalyticsGap): the flag tracks each surface's
-	// own displayed total rather than diverging from it.
-	CostIncomplete bool
 	// LastActivity is the most recent session activity in the project: max over its
 	// sessions' last_active_at (last-event time), not their updated_at write time,
 	// so a reparse of the project's sessions does not float it to the top of the
@@ -85,7 +71,6 @@ type SessionSummary struct {
 	TotalCacheWrite    int64
 	TotalCacheRead     int64
 	TotalCostUSD       float64
-	CostIncomplete     bool
 	Visibility         string
 	PublicID           *string
 	StartedAt          *time.Time
@@ -120,11 +105,8 @@ type SessionDetail struct {
 	ParentID    *int64
 	// TotalCacheSavingsUSD is the session's rolled-up prompt-cache saving (folded by the
 	// rebuild beside total_cost_usd), so the Cache tile reads it in O(1) instead of
-	// scanning usage_events on every live refresh. CacheSavingsIncomplete flags that some
-	// cached volume rode an unpriced model, so the figure is partial (and, unlike cost,
-	// not a clean lower bound: an omitted model's saving can be either sign).
-	TotalCacheSavingsUSD   float64
-	CacheSavingsIncomplete bool
+	// scanning usage_events on every live refresh.
+	TotalCacheSavingsUSD float64
 }
 
 // Message is one transcript row for rendering. The prompt-hygiene facts (PromptShort,
@@ -604,7 +586,6 @@ func (s *Store) ListProjects(ctx context.Context) ([]ProjectSummary, error) {
 		        coalesce(sum(s.total_output_tokens), 0),
 		        coalesce(sum(s.total_cache_read_tokens), 0),
 		        coalesce(sum(s.total_cache_write_tokens), 0),
-		        coalesce(bool_or(s.cost_incomplete), false),
 		        max(s.last_active_at)
 		   FROM projects p
 		   LEFT JOIN sessions s ON s.project_id = p.id
@@ -619,7 +600,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]ProjectSummary, error) {
 		var p ProjectSummary
 		if err := rows.Scan(&p.ID, &p.RemoteKey, &p.Host, &p.Owner, &p.Repo, &p.DisplayName, &p.Kind, &p.OverviewPublic,
 			&p.SessionCount, &p.TotalCostUSD, &p.TotalInput, &p.TotalOutput,
-			&p.TotalCacheRead, &p.TotalCacheWrite, &p.CostIncomplete, &p.LastActivity); err != nil {
+			&p.TotalCacheRead, &p.TotalCacheWrite, &p.LastActivity); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -647,7 +628,7 @@ const sessionSelect = `
 	       s.message_count, s.user_message_count, s.model_fallback_count,
 	       s.total_input_tokens, s.total_output_tokens,
 	       s.total_cache_write_tokens, s.total_cache_read_tokens,
-	       s.total_cost_usd, s.cost_incomplete, s.visibility, s.public_id,
+	       s.total_cost_usd, s.visibility, s.public_id,
 	       s.started_at, s.ended_at, s.last_active_at
 	  FROM sessions s
 	  JOIN users u ON u.id = s.user_id`
@@ -731,12 +712,8 @@ const messageReadColumns = `m.ordinal, m.role, m.content, m.thinking_text, m.mod
 //     cost. It is maintained at insert (projection.go) as each surviving usage row lands, so this
 //     read joins one indexed row per message rather than scanning and grouping usage_events. The
 //     context occupancy (input + cache read + cache write, output excluded) is computed here from
-//     the joined sums. cost_count (the number of priced rows folded into the turn) rides along so
-//     the scan can apply the all-unpriced-is-nil rule (a turn with no priced row reads nil cost, not
-//     a summed zero that would misread as free; a mixed turn keeps its priced partial), and
-//     cost_incomplete flags a turn that folded a token-bearing but unpriced row so the priced cost
-//     reads as a lower bound. That cost_incomplete rule mirrors costIncompleteExpr (analytics.go),
-//     so the turn, session, and analytics incompleteness flags agree. Only turn-attributed
+//     the joined sums. Unknown model prices are already stored as zero, so the cost is one scalar.
+//     Only turn-attributed
 //     usage contributes to the rollup: a NULL-ordinal usage row belongs to the session totals, not
 //     to any one message, so it is never folded here (projection.go skips it). This is the deliberate
 //     divergence from the stored context signal (gatherContextHealth), which folds every raw
@@ -763,7 +740,7 @@ const messagesFullSelect = `
 	       coalesce(mtu.input_tokens,0), coalesce(mtu.output_tokens,0), coalesce(mtu.cache_read_tokens,0), coalesce(mtu.cache_write_tokens,0),
 	       coalesce(mtu.reasoning_tokens,0),
 	       coalesce(mtu.input_tokens,0) + coalesce(mtu.cache_read_tokens,0) + coalesce(mtu.cache_write_tokens,0),
-	       mtu.cost_sum, coalesce(mtu.cost_count,0), coalesce(mtu.cost_incomplete, false)
+	       coalesce(mtu.cost_sum, 0)
 	  FROM messages m
 	  LEFT JOIN message_turn_usage mtu ON mtu.session_id = m.session_id AND mtu.message_ordinal = m.ordinal
 	 WHERE m.session_id = $1`
@@ -779,7 +756,7 @@ const messagesFullQuery = messagesFullSelect + `
 // caller's window args start at $2.
 const messagesWindowQuery = `
 	SELECT ` + messageReadColumns + `,
-	       false, 0::bigint, 0::bigint, 0::bigint, 0::bigint, 0::bigint, 0::bigint, NULL::double precision, 0::bigint, false
+	       false, 0::bigint, 0::bigint, 0::bigint, 0::bigint, 0::bigint, 0::bigint, 0::double precision
 	  FROM messages m
 	 WHERE m.session_id = $1`
 

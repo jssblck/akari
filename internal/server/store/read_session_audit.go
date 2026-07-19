@@ -97,7 +97,7 @@ func (s *Store) subagents(ctx context.Context, q querier, parentID int64) ([]Sub
 		       s.message_count, s.user_message_count, s.model_fallback_count,
 		       s.total_input_tokens, s.total_output_tokens,
 		       s.total_cache_write_tokens, s.total_cache_read_tokens,
-		       s.total_cost_usd, s.cost_incomplete, s.visibility, s.public_id,
+		       s.total_cost_usd, s.visibility, s.public_id,
 		       s.started_at, s.ended_at, s.last_active_at,
 		       sig.grade, sig.outcome,
 		       coalesce(title.content, '')
@@ -118,7 +118,7 @@ func (s *Store) subagents(ctx context.Context, q querier, parentID int64) ([]Sub
 		if err := rows.Scan(&r.ID, &r.Agent, &r.Machine, &r.GitBranch, &r.Username,
 			&r.MessageCount, &r.UserMessageCount, &r.ModelFallbackCount,
 			&r.TotalInput, &r.TotalOutput, &r.TotalCacheWrite, &r.TotalCacheRead,
-			&r.TotalCostUSD, &r.CostIncomplete, &r.Visibility, &r.PublicID,
+			&r.TotalCostUSD, &r.Visibility, &r.PublicID,
 			&r.StartedAt, &r.EndedAt, &r.LastActiveAt,
 			&r.Grade, &outcome,
 			&r.Title); err != nil {

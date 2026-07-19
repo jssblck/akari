@@ -246,7 +246,7 @@ const messagesOutlineQuery = `
 	       coalesce(m.prompt_short, false), coalesce(m.prompt_no_code, false), coalesce(m.prompt_digest, 0),
 	       (m.prompt_digest IS NOT NULL AND m.content_length > 0),
 	       coalesce(m.duplicate_prompt, false),
-	       false, 0::bigint, 0::bigint, 0::bigint, 0::bigint, 0::bigint, 0::bigint, NULL::double precision, 0::bigint, false
+	       false, 0::bigint, 0::bigint, 0::bigint, 0::bigint, 0::bigint, 0::bigint, 0::double precision
 	  FROM messages m
 	 WHERE m.session_id = $1
 	 ORDER BY m.ordinal`

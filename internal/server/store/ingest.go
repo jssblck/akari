@@ -611,8 +611,7 @@ func (s *Store) ResetRaw(ctx context.Context, sessionID int64) error {
 			   model_fallback_count = 0,
 			   total_input_tokens = 0, total_output_tokens = 0,
 			   total_cache_write_tokens = 0, total_cache_read_tokens = 0,
-			   total_cost_usd = 0, cost_incomplete = FALSE,
-			   total_cache_savings_usd = 0, cache_savings_incomplete = FALSE,
+			   total_cost_usd = 0, total_cache_savings_usd = 0,
 			   started_at = NULL, ended_at = NULL,
 			   updated_at = now(),
 			   signals_stale = true

@@ -14,13 +14,13 @@ import (
 
 // rollupsDelta is the shared fixture for the rollup reconciliation tests: one session's
 // projection with every wrinkle the derivations must handle. Two usage events on one (day,
-// model) that must fold, a second model on a second day with an unpriced token-bearing
+// model) that must fold, a second model on a second day with a zero-priced token-bearing
 // event, an undated event (NULL day), a replayed tool call that must dedup, a failing
 // call, two deduped edits of one file, an untimestamped prompt whose turn must not
 // measure, and an idle gap past the active threshold that must not count.
 func rollupsDelta() store.ProjectionDelta {
 	t0 := time.Date(2026, 6, 3, 10, 0, 0, 0, time.UTC)
-	cost := func(v float64) *float64 { return &v }
+	cost := func(v float64) float64 { return v }
 	return store.ProjectionDelta{
 		Messages: []store.MessageDelta{
 			{Ordinal: 0, Role: "user", Content: "fix the bug", Timestamp: t0},
@@ -48,7 +48,7 @@ func rollupsDelta() store.ProjectionDelta {
 		Usage: []store.ProjUsage{
 			{Model: "m1", Input: 100, Output: 10, CacheRead: 50, CacheWrite: 5, CostUSD: cost(0.5), OccurredAt: t0, DedupKey: "u1", SourceOffset: 10},
 			{Model: "m1", Input: 200, Output: 20, CostUSD: cost(1.0), OccurredAt: t0.Add(13 * time.Hour), DedupKey: "u2", SourceOffset: 20}, // same UTC day, folds
-			{Model: "m2", Input: 10, OccurredAt: t0.Add(24 * time.Hour), DedupKey: "u3", SourceOffset: 30},                                  // no cost, tokens > 0: unpriced
+			{Model: "m2", Input: 10, OccurredAt: t0.Add(24 * time.Hour), DedupKey: "u3", SourceOffset: 30},                                  // unknown rate: zero cost
 			{Model: "m1", Input: 7, CostUSD: cost(0.1), DedupKey: "u4", SourceOffset: 40},                                                   // undated: NULL day
 		},
 		Started: t0,
@@ -124,12 +124,12 @@ func TestRollupsDerivedInRebuild(t *testing.T) {
 	sid := seedSession(t, st, uid, pid, "rollups-1")
 	rebuildWith(t, st, sid, rollupsDelta())
 
-	// Usage: (2026-06-03, m1) folds two events; (2026-06-04, m2) is unpriced; the undated
-	// event lands on a NULL day. Cost sums skip NULL (coalesce to 0 on the m2 row).
+	// Usage: (2026-06-03, m1) folds two events; (2026-06-04, m2) has an unknown rate; the
+	// undated event lands on a NULL day. Unknown rates contribute zero cost.
 	assertRows(t, st, "session_usage_daily", sid, []string{
-		`(` + fmt.Sprint(sid) + `,,m1,7,0,0,0,0.1,f)`,
-		`(` + fmt.Sprint(sid) + `,2026-06-03,m1,300,30,50,5,1.5,f)`,
-		`(` + fmt.Sprint(sid) + `,2026-06-04,m2,10,0,0,0,0,t)`,
+		`(` + fmt.Sprint(sid) + `,,m1,7,0,0,0,0.1)`,
+		`(` + fmt.Sprint(sid) + `,2026-06-03,m1,300,30,50,5,1.5)`,
+		`(` + fmt.Sprint(sid) + `,2026-06-04,m2,10,0,0,0,0)`,
 	})
 
 	// Tools: the replayed Read collapses to one call; Bash's empty category normalizes to

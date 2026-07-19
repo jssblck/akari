@@ -241,7 +241,6 @@ describe("turn usage / cost / context helpers", () => {
       CacheWrite: 5,
       Reasoning: 0,
       CostUSD: 0.05,
-      CostIncomplete: false,
       ContextTokens: 1234,
       ...overrides,
     };
@@ -251,19 +250,13 @@ describe("turn usage / cost / context helpers", () => {
     expect(turnTokenTotal(usage())).toBe(165);
   });
 
-  it("labels a turn with no priced cost as unpriced", () => {
-    // CostUSD is typed as a plain number, but a Go nil *float64 still arrives
-    // over JSON as null, which is exactly the case turnCostLabel guards.
-    const noCost = { ...usage(), CostUSD: null as unknown as number };
-    const label = turnCostLabel(noCost, (v) => `$${v}`);
-    expect(label).toBe("unpriced");
+  it("formats an unknown price as zero", () => {
+    const label = turnCostLabel(usage({ CostUSD: 0 }), (v) => `$${v}`);
+    expect(label).toBe("$0");
   });
 
   it("formats a priced turn through the given formatter", () => {
-    const label = turnCostLabel(
-      usage({ CostUSD: 0.5, CostIncomplete: true }),
-      (v) => `$${v}`,
-    );
+    const label = turnCostLabel(usage({ CostUSD: 0.5 }), (v) => `$${v}`);
     expect(label).toBe("$0.5");
   });
 

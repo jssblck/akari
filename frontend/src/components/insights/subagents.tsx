@@ -221,7 +221,7 @@ export function SubagentsInstrument({ trends }: { trends: Trends }) {
           />
           <Stat
             label="cost run through subagents"
-            value={`${Math.round(s.CostThroughSubagentsPct)}%${s.CostShareIncomplete ? " partial" : ""}`}
+            value={`${Math.round(s.CostThroughSubagentsPct)}%`}
           />
           <Stat label="deepest tree (levels)" value={String(s.DeepestTree)} />
         </StatStrip>

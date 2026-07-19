@@ -17,18 +17,8 @@ import {
   formatTokens,
 } from "../format";
 import "../overview.css";
+import { formatSavings } from "../pricing-format";
 import type { Analytics, Breakdown, OverviewResponse, User } from "../types";
-
-// formatSavings mirrors the server's FmtSavings: a non-negative saving reads
-// "saved $X", and the rare negative (cache written but never re-read enough
-// to repay the write premium) reads "cost $X" on its magnitude, so the Cache
-// tile stays honest without a stray minus sign. Incomplete appends "partial"
-// because an omitted model's saving can run either direction.
-function formatSavings(usd: number, incomplete: boolean): string {
-  const verb = usd < 0 ? "cost " : "saved ";
-  const amount = formatCost(Math.abs(usd));
-  return incomplete ? `${verb}${amount} partial` : `${verb}${amount}`;
-}
 
 export function AnalyticsPanel({
   analytics,
@@ -111,10 +101,7 @@ export function AnalyticsPanel({
                 <dd>{formatTokens(analytics.Cache.Input)}</dd>
               </dl>
               <div className="tt-cost">
-                {formatSavings(
-                  analytics.Cache.SavingsUSD,
-                  analytics.Cache.SavingsIncomplete,
-                )}
+                {formatSavings(analytics.Cache.SavingsUSD)}
               </div>
             </HoverTip>
           }

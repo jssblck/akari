@@ -1665,7 +1665,6 @@ export interface components {
         Analytics: {
             Agents: components["schemas"]["Breakdown"][] | null;
             Cache: components["schemas"]["CacheStats"];
-            CostIncomplete: boolean;
             Models: components["schemas"]["Breakdown"][] | null;
             Series: components["schemas"]["DayPoint"][] | null;
             /** Format: int64 */
@@ -1714,7 +1713,6 @@ export interface components {
             CacheRead: number;
             /** Format: int64 */
             CacheWrite: number;
-            CostIncomplete: boolean;
             CostUSD: number;
             /** Format: int64 */
             Input: number;
@@ -1735,7 +1733,6 @@ export interface components {
             Input: number;
             /** Format: int64 */
             Output: number;
-            SavingsIncomplete: boolean;
             SavingsUSD: number;
         };
         Chapter: {
@@ -1867,16 +1864,13 @@ export interface components {
             project_id: number;
         };
         Economics: {
-            AbandonedIncomplete: boolean;
             AbandonedSharePct: number;
             CacheHitRate: number[] | null;
             CacheHitRateLatest: number;
             CacheMeasured: boolean[] | null;
             CacheSavings: number[] | null;
-            CacheSavingsIncomplete: boolean;
             CostAbandoned: number[] | null;
             CostCompleted: number[] | null;
-            CostIncomplete: boolean;
             CostOther: number[] | null;
             TotalAbandoned: number;
             TotalCacheSavings: number;
@@ -1908,7 +1902,6 @@ export interface components {
             NewestModel: string;
         };
         Gallery: {
-            CostIncomplete: boolean;
             LongestCostUSD: number;
             LongestDurationS: number;
             MedianCompletedCostUSD: number;
@@ -1922,7 +1915,6 @@ export interface components {
         };
         GallerySession: {
             Archetype: string;
-            CostIncomplete: boolean;
             CostUSD: number;
             DurationS: number;
             Grade: string;
@@ -2077,7 +2069,6 @@ export interface components {
             sessions: components["schemas"]["ProjectSessionSummary"][] | null;
         };
         ProjectSummary: {
-            CostIncomplete: boolean;
             DisplayName: string;
             Host: string;
             /** Format: int64 */
@@ -2102,7 +2093,6 @@ export interface components {
         };
         ProjectSessionSummary: {
             Agent: string;
-            CostIncomplete: boolean;
             EndedAt: string | null;
             GitBranch: string;
             Grade: string | null;
@@ -2234,8 +2224,6 @@ export interface components {
         };
         SessionDetail: {
             Agent: string;
-            CacheSavingsIncomplete: boolean;
-            CostIncomplete: boolean;
             Cwd: string;
             EndedAt: string | null;
             GitBranch: string;
@@ -2307,7 +2295,6 @@ export interface components {
             CacheRead: number;
             /** Format: int64 */
             CacheWrite: number;
-            CostIncomplete: boolean;
             CostUSD: number;
             /** Format: int64 */
             Input: number;
@@ -2323,7 +2310,6 @@ export interface components {
         };
         SessionRow: {
             Agent: string;
-            CostIncomplete: boolean;
             EndedAt: string | null;
             GitBranch: string;
             Grade: string | null;
@@ -2403,7 +2389,6 @@ export interface components {
         };
         SessionSummary: {
             Agent: string;
-            CostIncomplete: boolean;
             EndedAt: string | null;
             GitBranch: string;
             /** Format: int64 */
@@ -2474,7 +2459,6 @@ export interface components {
         };
         SubagentRow: {
             Agent: string;
-            CostIncomplete: boolean;
             EndedAt: string | null;
             GitBranch: string;
             Grade: string | null;
@@ -2506,7 +2490,6 @@ export interface components {
         };
         SubagentStats: {
             CostShare: number[] | null;
-            CostShareIncomplete: boolean;
             CostThroughSubagentsPct: number;
             /** Format: int64 */
             DeepestTree: number;
@@ -2608,7 +2591,6 @@ export interface components {
             page: components["schemas"]["TranscriptPage"];
         };
         TreeRollup: {
-            CostIncomplete: boolean;
             CostUSD: number;
             /** Format: int64 */
             SubagentCount: number;
@@ -2634,8 +2616,7 @@ export interface components {
             CacheWrite: number;
             /** Format: int64 */
             ContextTokens: number;
-            CostIncomplete: boolean;
-            CostUSD: number | null;
+            CostUSD: number;
             /** Format: int64 */
             Input: number;
             /** Format: int64 */

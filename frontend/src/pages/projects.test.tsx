@@ -20,7 +20,6 @@ function project(overrides: Partial<Project> = {}): Project {
     TotalCacheRead: 0,
     TotalCacheWrite: 0,
     TotalCostUSD: 2.5,
-    CostIncomplete: false,
     LastActivity: "2026-07-13T12:00:00Z",
     OverviewPublic: false,
     ...overrides,

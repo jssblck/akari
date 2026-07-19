@@ -20,7 +20,6 @@ function row(overrides: Partial<SessionRow> = {}): SessionRow {
     TotalCacheWrite: 0,
     TotalCacheRead: 0,
     TotalCostUSD: 0.5,
-    CostIncomplete: false,
     Visibility: "private",
     PublicID: null,
     StartedAt: null,
@@ -34,7 +33,7 @@ function row(overrides: Partial<SessionRow> = {}): SessionRow {
     Grade: null,
     Outcome: "completed",
     Search: { Text: "", MatchStart: 0, MatchEnd: 0 },
-    Tree: { SubagentCount: 0, CostUSD: 0, CostIncomplete: false },
+    Tree: { SubagentCount: 0, CostUSD: 0 },
     ...overrides,
   };
 }
@@ -214,7 +213,7 @@ describe("SessionsPage feed rendering", () => {
     stubSessionsResponse([
       row({
         ID: 1,
-        Tree: { SubagentCount: 100, CostUSD: 42, CostIncomplete: false },
+        Tree: { SubagentCount: 100, CostUSD: 42 },
       }),
     ]);
     render(

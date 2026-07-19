@@ -191,7 +191,7 @@ func TestPublicProjectAPIOmitsUserBreakdown(t *testing.T) {
 		},
 		Usage: []store.ProjUsage{{
 			MessageOrdinal: &ordinal, Model: "claude-fable-5",
-			Input: 100, Output: 50, CostUSD: &cost,
+			Input: 100, Output: 50, CostUSD: cost,
 			OccurredAt: time.Now().UTC(), DedupKey: "public-users-split-0",
 		}},
 	})

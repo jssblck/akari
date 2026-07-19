@@ -85,7 +85,7 @@ type ProjUsage struct {
 	CacheWrite     int
 	CacheRead      int
 	Reasoning      int
-	CostUSD        *float64
+	CostUSD        float64
 	OccurredAt     time.Time
 	DedupKey       string
 	SourceOffset   int64
@@ -350,18 +350,15 @@ func rebuildTx(ctx context.Context, tx pgx.Tx, sessionID int64, epoch int, byteL
 		   total_cache_write_tokens = $7,
 		   total_cache_read_tokens = $8,
 		   total_cost_usd = $9,
-		   cost_incomplete = $10,
-		   total_cache_savings_usd = $11,
-		   cache_savings_incomplete = $12,
-		   started_at = $13,
-		   ended_at = $14,
+		   total_cache_savings_usd = $10,
+		   started_at = $11,
+		   ended_at = $12,
 		   updated_at = now(),
-		   signals_stale = $15
+		   signals_stale = $13
 		 WHERE id = $1`,
 		sessionID, len(d.Messages), userMessages, fallbackCount,
 		roll.input, roll.output, roll.cacheWrite, roll.cacheRead,
-		roll.costUSD, roll.costIncomplete,
-		roll.cacheSavingsUSD, roll.cacheSavingsIncomplete,
+		roll.costUSD, roll.cacheSavingsUSD,
 		nullTime(d.Started), nullTime(d.Ended), !gradeable); err != nil {
 		return fmt.Errorf("update aggregates for session %d: %w", sessionID, err)
 	}
@@ -616,9 +613,7 @@ func writeToolCalls(ctx context.Context, tx pgx.Tx, sessionID int64, calls []Pro
 type usageRollup struct {
 	input, output, cacheWrite, cacheRead int64
 	costUSD                              float64
-	costIncomplete                       bool
 	cacheSavingsUSD                      float64
-	cacheSavingsIncomplete               bool
 }
 
 // writeUsage dedups the reducer's usage events in memory, bulk-inserts the
@@ -647,8 +642,6 @@ func writeUsage(ctx context.Context, tx pgx.Tx, sessionID int64, usage []ProjUsa
 	type turnAgg struct {
 		input, output, cacheWrite, cacheRead, reasoning int64
 		costSum                                         float64
-		costCount                                       int64
-		costIncomplete                                  bool
 	}
 	turns := map[int]*turnAgg{}
 	var turnOrder []int
@@ -667,19 +660,15 @@ func writeUsage(ctx context.Context, tx pgx.Tx, sessionID int64, usage []ProjUsa
 		}
 		seenSource[src] = true
 
-		var ord, cost any
+		var ord any
 		if u.MessageOrdinal != nil {
 			ord = *u.MessageOrdinal
 		}
-		if u.CostUSD != nil {
-			cost = *u.CostUSD
-		}
 		rows = append(rows, []any{
 			sessionID, ord, sanitizeText(u.Model), u.Input, u.Output, u.CacheWrite, u.CacheRead,
-			u.Reasoning, cost, nullTime(u.OccurredAt), key, u.SourceOffset, u.SourceIndex,
+			u.Reasoning, u.CostUSD, nullTime(u.OccurredAt), key, u.SourceOffset, u.SourceIndex,
 		})
 
-		hasTokens := u.Input+u.Output+u.CacheWrite+u.CacheRead+u.Reasoning > 0
 		// Fold this surviving row into its turn's rollup, so the transcript reads one
 		// row per turn instead of re-grouping usage_events on every render. A
 		// NULL-ordinal row belongs to the session totals, not to any one message.
@@ -695,35 +684,19 @@ func writeUsage(ctx context.Context, tx pgx.Tx, sessionID int64, usage []ProjUsa
 			t.cacheWrite += int64(u.CacheWrite)
 			t.cacheRead += int64(u.CacheRead)
 			t.reasoning += int64(u.Reasoning)
-			if u.CostUSD != nil {
-				t.costSum += *u.CostUSD
-				t.costCount++
-			} else if hasTokens {
-				t.costIncomplete = true
-			}
+			t.costSum += u.CostUSD
 		}
 
 		roll.input += int64(u.Input)
 		roll.output += int64(u.Output)
 		roll.cacheWrite += int64(u.CacheWrite)
 		roll.cacheRead += int64(u.CacheRead)
-		switch {
-		case u.CostUSD != nil:
-			roll.costUSD += *u.CostUSD
-		case hasTokens:
-			// Tokens spent on a model the pricing table does not know: the session
-			// total is a partial sum and the flag says so.
-			roll.costIncomplete = true
-		}
+		roll.costUSD += u.CostUSD
 		// Fold the prompt-cache saving over the same surviving rows. Pricing is
 		// linear in tokens, so summing each row's saving equals summing the model's
 		// grouped totals (what SessionCacheStats does over the whole session), which
 		// is what lets the rollup and that per-model recompute reconcile exactly.
-		if saving, ok := pricing.CacheSavings(u.Model, u.OccurredAt, int64(u.CacheRead), int64(u.CacheWrite)); ok {
-			roll.cacheSavingsUSD += saving
-		} else if u.CacheRead > 0 || u.CacheWrite > 0 {
-			roll.cacheSavingsIncomplete = true
-		}
+		roll.cacheSavingsUSD += pricing.CacheSavings(u.Model, u.OccurredAt, int64(u.CacheRead), int64(u.CacheWrite))
 	}
 
 	if _, err := tx.CopyFrom(ctx, pgx.Identifier{"usage_events"},
@@ -738,21 +711,15 @@ func writeUsage(ctx context.Context, tx pgx.Tx, sessionID int64, usage []ProjUsa
 		turnRows := make([][]any, 0, len(turnOrder))
 		for _, ord := range turnOrder {
 			t := turns[ord]
-			var costSum any
-			if t.costCount > 0 {
-				costSum = t.costSum
-			} else {
-				costSum = 0.0
-			}
 			turnRows = append(turnRows, []any{
 				sessionID, ord, t.input, t.output, t.cacheWrite, t.cacheRead, t.reasoning,
-				costSum, t.costCount, t.costIncomplete,
+				t.costSum,
 			})
 		}
 		if _, err := tx.CopyFrom(ctx, pgx.Identifier{"message_turn_usage"},
 			[]string{"session_id", "message_ordinal", "input_tokens", "output_tokens",
 				"cache_write_tokens", "cache_read_tokens", "reasoning_tokens",
-				"cost_sum", "cost_count", "cost_incomplete"},
+				"cost_sum"},
 			pgx.CopyFromRows(turnRows)); err != nil {
 			return usageRollup{}, fmt.Errorf("copy turn usage for session %d: %w", sessionID, err)
 		}

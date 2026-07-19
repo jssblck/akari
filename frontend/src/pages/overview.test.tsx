@@ -17,7 +17,6 @@ function breakdown(
     CacheWrite: 5,
     Reasoning: 0,
     Sessions: 1,
-    CostIncomplete: false,
     ...overrides,
   };
 }
@@ -44,14 +43,12 @@ function analytics(overrides: Partial<Analytics> = {}): Analytics {
     TotalCacheWrite: 200,
     TotalReasoning: 0,
     Sessions: 7,
-    CostIncomplete: false,
     Cache: {
       Input: 5000,
       Output: 2000,
       CacheRead: 500,
       CacheWrite: 200,
       SavingsUSD: 3.25,
-      SavingsIncomplete: false,
     },
     ...overrides,
   };
@@ -79,19 +76,19 @@ describe("AnalyticsPanel", () => {
     expect(screen.getByText("claude")).toBeInTheDocument();
   });
 
-  it("does not mark incomplete costs with a plus", () => {
+  it("presents zero-priced unknown models as part of the estimate", () => {
     render(
       <AnalyticsPanel
         analytics={analytics({
-          CostIncomplete: true,
-          Models: [breakdown("unpriced", { CostIncomplete: true })],
+          Models: [breakdown("Other", { CostUSD: 0 })],
         })}
       />,
     );
 
     expect(screen.getByText("$12.5")).toBeInTheDocument();
-    expect(screen.getAllByText("$1.00").length).toBeGreaterThan(0);
-    expect(screen.queryByText(/\$[\d.]+\+/)).not.toBeInTheDocument();
+    expect(screen.getAllByText("$0.00").length).toBeGreaterThan(0);
+    expect(screen.getByText("saved around $3.25")).toBeInTheDocument();
+    expect(screen.queryByText(/partial|\$[\d.]+\+/i)).not.toBeInTheDocument();
   });
 
   it("places scoped controls in the activity header and marks its mobile presentation", () => {

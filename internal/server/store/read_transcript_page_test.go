@@ -287,8 +287,8 @@ func TestTranscriptWindowCarriesTurnUsage(t *testing.T) {
 	sid := seedTurns(t, st, "grace", total)
 	if _, err := st.Pool.Exec(ctx,
 		`INSERT INTO message_turn_usage (session_id, message_ordinal, input_tokens, output_tokens,
-		        cache_read_tokens, cache_write_tokens, reasoning_tokens, cost_sum, cost_count, cost_incomplete)
-		 VALUES ($1, 201, 1000, 50, 8000, 200, 0, 0.25, 1, false)`, sid); err != nil {
+		        cache_read_tokens, cache_write_tokens, reasoning_tokens, cost_sum)
+		 VALUES ($1, 201, 1000, 50, 8000, 200, 0, 0.25)`, sid); err != nil {
 		t.Fatalf("turn usage: %v", err)
 	}
 
@@ -308,7 +308,7 @@ func TestTranscriptWindowCarriesTurnUsage(t *testing.T) {
 		if m.Usage.ContextTokens != 1000+8000+200 {
 			t.Fatalf("context occupancy = %d, want 9200", m.Usage.ContextTokens)
 		}
-		if m.Usage.CostUSD == nil || *m.Usage.CostUSD != 0.25 {
+		if m.Usage.CostUSD != 0.25 {
 			t.Fatalf("turn cost = %v, want 0.25", m.Usage.CostUSD)
 		}
 	}

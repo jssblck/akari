@@ -204,8 +204,7 @@ better against its intended background.
 ### Secondary (status signals)
 - **Sage** (`#9fd6a6`): success, a healthy or complete state.
 - **Rose** (`#ef9aa9`): errors and destructive intent.
-- **Peach** (`#f0c592`): in-progress, incomplete, or estimated values (for
-  example a partial or incomplete cost).
+- **Peach** (`#f0c592`): warnings and in-progress states.
 - **Teal** (`#92cfd4`): neutral informational emphasis.
 
 ### Tertiary (data visualization)

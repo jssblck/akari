@@ -32,7 +32,6 @@ function trends(): Trends {
       PriciestCostUSD: 0,
       LongestDurationS: 0,
       LongestCostUSD: 0,
-      CostIncomplete: false,
     },
     Velocity: {
       ActiveHours: [1, 2],
@@ -105,9 +104,6 @@ function trends(): Trends {
       AbandonedSharePct: 11,
       TotalCacheSavings: 4.5,
       CacheHitRateLatest: 75,
-      CostIncomplete: false,
-      AbandonedIncomplete: false,
-      CacheSavingsIncomplete: false,
     },
     Subagents: {
       DelegateShare: [10, 20],
@@ -118,7 +114,6 @@ function trends(): Trends {
       SubagentSessionsInWindow: 3,
       CostThroughSubagentsPct: 10,
       DeepestTree: 2,
-      CostShareIncomplete: false,
     },
     Rhythm: { Cells: Array.from({ length: 7 }, () => Array(24).fill(0)) },
   };

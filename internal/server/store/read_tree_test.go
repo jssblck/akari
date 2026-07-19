@@ -20,21 +20,11 @@ func setParent(t *testing.T, st *store.Store, ctx context.Context, childID, pare
 	}
 }
 
-// setCostIncomplete marks a session's cost as a floor (an unpriced model, a missing rate),
-// so the rollup can be checked for propagating the flag up the subtree.
-func setCostIncomplete(t *testing.T, st *store.Store, ctx context.Context, sid int64) {
-	t.Helper()
-	if _, err := st.Pool.Exec(ctx, `UPDATE sessions SET cost_incomplete = true WHERE id = $1`, sid); err != nil {
-		t.Fatalf("set cost_incomplete for session %d: %v", sid, err)
-	}
-}
-
 // TestTreeRollup pins the feed's whole-work-item rollup against a hand-built fan-out: a
 // root folds in its subagents at every depth (not just its direct children), a continuation
-// is its own work item and never folds into the session it continued, and the incomplete
-// flag propagates when any session in the subtree is unpriced. The rollup rides only the
-// non-subagent feed rows, since a subagent is machinery under its parent, not a row of its
-// own.
+// is its own work item and never folds into the session it continued. The rollup rides only
+// the non-subagent feed rows, since a subagent is machinery under its parent, not a row of
+// its own.
 func TestTreeRollup(t *testing.T) {
 	t.Parallel()
 	st, ctx, uid, pid := signalsEnv(t)
@@ -49,7 +39,6 @@ func TestTreeRollup(t *testing.T) {
 	subA2 := seedSession(t, st, uid, pid, "sub-a2")
 	setSessionCost(t, st, ctx, subA2, 3.00)
 	setParent(t, st, ctx, subA2, rootA, "subagent")
-	setCostIncomplete(t, st, ctx, subA2) // an unpriced subagent makes the whole subtree a floor
 	subA1a := seedSession(t, st, uid, pid, "sub-a1a")
 	setSessionCost(t, st, ctx, subA1a, 0.50)
 	setParent(t, st, ctx, subA1a, subA1, "subagent")
@@ -88,19 +77,18 @@ func TestTreeRollup(t *testing.T) {
 	}
 
 	cases := []struct {
-		name       string
-		id         int64
-		count      int
-		cost       float64
-		incomplete bool
+		name  string
+		id    int64
+		count int
+		cost  float64
 	}{
 		// A: itself ($1) + two subagents ($2, $3) + one grandchild ($0.50) = $6.50 over 3
-		// subagents; incomplete because subA2 is unpriced. C's $5.10 is NOT folded in.
-		{"root A", rootA, 3, 6.50, true},
-		// B fanned out nothing: its own $0.40, zero subagents, fully priced.
-		{"root B", rootB, 0, 0.40, false},
-		// C: itself ($5) + its one subagent ($0.10) = $5.10 over 1 subagent, fully priced.
-		{"continuation C", contC, 1, 5.10, false},
+		// subagents. C's $5.10 is NOT folded in.
+		{"root A", rootA, 3, 6.50},
+		// B fanned out nothing: its own $0.40, zero subagents.
+		{"root B", rootB, 0, 0.40},
+		// C: itself ($5) + its one subagent ($0.10) = $5.10 over 1 subagent.
+		{"continuation C", contC, 1, 5.10},
 	}
 	for _, c := range cases {
 		tr := byID[c.id].Tree
@@ -109,9 +97,6 @@ func TestTreeRollup(t *testing.T) {
 		}
 		if math.Abs(tr.CostUSD-c.cost) > 1e-9 {
 			t.Errorf("%s: CostUSD = %v, want %v", c.name, tr.CostUSD, c.cost)
-		}
-		if tr.CostIncomplete != c.incomplete {
-			t.Errorf("%s: CostIncomplete = %v, want %v", c.name, tr.CostIncomplete, c.incomplete)
 		}
 	}
 }

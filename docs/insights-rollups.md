@@ -186,8 +186,7 @@ CREATE TABLE session_usage_daily (
   output_tokens      BIGINT NOT NULL,
   cache_read_tokens  BIGINT NOT NULL,
   cache_write_tokens BIGINT NOT NULL,
-  cost_usd           DOUBLE PRECISION NOT NULL,
-  cost_incomplete    BOOLEAN NOT NULL
+  cost_usd           DOUBLE PRECISION NOT NULL
 );
 CREATE INDEX idx_session_usage_daily_session ON session_usage_daily (session_id);
 CREATE INDEX idx_session_usage_daily_day ON session_usage_daily (day) WHERE day IS NOT NULL;

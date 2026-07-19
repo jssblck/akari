@@ -105,25 +105,16 @@ func TestInsightsTrends(t *testing.T) {
 	// f.Until bound the quality headline would count seven while the outcome series summed six.
 	mkSession(ada, "t-future", -2, "completed", "A", "claude-sonnet-5", "internal/server/web/future.go")
 
-	// An unpriced, token-bearing usage event on an unknown model (day 2). The pricing table
-	// cannot price it, so every cost figure in the window becomes a lower bound and the cache
-	// savings total becomes partial. Its cost is NULL, so it adds no dollars and the exact totals
-	// above are unchanged, and it rides day 2, so the latest measured cache bucket (day 1) keeps
-	// its rate. The cache tokens on an unknown model both flag cost incomplete (via the shared
-	// costIncompleteExpr) and leave the saving unpriced.
+	// A zero-priced, token-bearing usage event on an unknown model (day 2). It adds no
+	// dollars or cache savings, and it rides day 2, so the latest measured cache bucket
+	// (day 1) keeps its rate.
 	if _, err := st.Pool.Exec(ctx,
 		`INSERT INTO usage_events (session_id, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, occurred_at, dedup_key)
-		 VALUES ($1, 'pi-unpriced-xyz', 0, 0, 500, 0, NULL, now() - make_interval(days => 2), 't1-unpriced')`,
+		 VALUES ($1, 'pi-unpriced-xyz', 0, 0, 500, 0, 0, now() - make_interval(days => 2), 't1-unpriced')`,
 		root1); err != nil {
 		t.Fatalf("seed unpriced usage: %v", err)
 	}
 	deriveRollups(t, st, root1)
-	// The session's maintained cost_incomplete flag, so the gallery's per-session cost figures
-	// carry the same lower-bound marker the canonical rollups do.
-	if _, err := st.Pool.Exec(ctx,
-		`UPDATE sessions SET cost_incomplete = true WHERE id = $1`, root1); err != nil {
-		t.Fatalf("flag session cost incomplete: %v", err)
-	}
 
 	since := time.Now().Add(-7 * 24 * time.Hour)
 	ins, err := st.Insights(ctx, store.AnalyticsFilter{Since: since, Bucket: "day"}, store.AllInsightsPanels)
@@ -243,21 +234,6 @@ func TestInsightsTrends(t *testing.T) {
 	// write); the seed's 8000 / (4000 + 8000 + 3000) is ~53%. Dropping cache_write would read ~66%.
 	if got := tr.Economics.CacheHitRateLatest; got < 52 || got > 55 {
 		t.Errorf("cache hit rate = %v, want ~53 (8000/(4000+8000+3000)); a value near 66 means cache_write was dropped from the denominator", got)
-	}
-	// Incompleteness propagates: a token-bearing unpriced event makes every window cost figure a
-	// lower bound, and cached volume on an unpriced model makes the saving partial. The insights
-	// projections must carry the same flags the canonical cost and cache surfaces do.
-	if !tr.Economics.CostIncomplete {
-		t.Error("economics CostIncomplete = false, want true (a token-bearing unpriced event is in window)")
-	}
-	if !tr.Economics.CacheSavingsIncomplete {
-		t.Error("economics CacheSavingsIncomplete = false, want true (cached volume rode an unpriced model)")
-	}
-	if !tr.Gallery.CostIncomplete {
-		t.Error("gallery CostIncomplete = false, want true (a cohort session is flagged cost_incomplete)")
-	}
-	if !tr.Subagents.CostShareIncomplete {
-		t.Error("subagents CostShareIncomplete = false, want true (the cost share divides lower-bound sums)")
 	}
 
 	// Gallery summaries and Rows cover the same full cohort. Each seeded session
@@ -558,7 +534,7 @@ func TestUsageTrendsWholeDayWindow(t *testing.T) {
 	day := time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, time.UTC)
 	since := day.Add(12 * time.Hour)
 
-	cost := func(v float64) *float64 { return &v }
+	cost := func(v float64) float64 { return v }
 	sid := seedSession(t, st, ada, pid, "whole-day")
 	rebuildWith(t, st, sid, store.ProjectionDelta{
 		Messages: []store.MessageDelta{{Ordinal: 0, Role: "user", Content: "go", Timestamp: day.Add(2 * time.Hour)}},
@@ -587,16 +563,10 @@ func TestUsageTrendsWholeDayWindow(t *testing.T) {
 	if e.TotalSpend < 2.99 || e.TotalSpend > 3.01 {
 		t.Errorf("total spend = %v, want 3.0 (the window's first UTC day counts in full; undated usage excluded)", e.TotalSpend)
 	}
-	if !e.CostIncomplete {
-		t.Error("CostIncomplete = false, want true (the m2 event carries tokens with no price)")
-	}
 	// Both models band in the mix: m1's tokens on the first day (including the pre-noon
 	// event's) and m2's on the second.
 	if got := len(ins.Trends.FleetMix.Models); got != 2 {
 		t.Errorf("fleet mix bands = %d, want 2 (m1 and m2)", got)
-	}
-	if !ins.Trends.Subagents.CostShareIncomplete {
-		t.Error("subagent CostShareIncomplete = false, want true (the same unpriced event flags the share's numerator and denominator)")
 	}
 }
 
@@ -662,49 +632,8 @@ func TestFleetMixArrivalScansPastTheFold(t *testing.T) {
 	}
 }
 
-// TestEconomicsAbandonedIncompleteScoped pins that the abandoned-spend incompleteness marker is
-// the abandoned subset's own, not the whole window's. A completed session with unpriced usage
-// makes the window incomplete, but when every abandoned session is fully priced the abandoned
-// subfigure is exact, so the Insights summary must not stamp it with a spurious "+".
-func TestEconomicsAbandonedIncompleteScoped(t *testing.T) {
-	t.Parallel()
-	st, ctx, uid, pid := signalsEnv(t)
-	g := func(s string) *string { return &s }
-	since := time.Now().Add(-30 * 24 * time.Hour)
-
-	// A completed session with token-bearing but unpriced usage: it makes the window incomplete.
-	comp := seedSession(t, st, uid, pid, "econ-completed")
-	insertGradeOutcomeSignal(t, st, ctx, comp, g("A"), "completed")
-	seedUsageUnpriced(t, st, comp, "mystery-model", 1000, 500, "econ-comp-unpriced")
-
-	// An abandoned session whose usage is fully priced: the abandoned subset is NOT incomplete.
-	aband := seedSession(t, st, uid, pid, "econ-abandoned")
-	insertGradeOutcomeSignal(t, st, ctx, aband, nil, "abandoned")
-	seedUsage(t, st, aband, "claude-opus-4-8", 4.00, 900, 450, 1, "econ-aband-priced")
-
-	ins, err := st.Insights(ctx, store.AnalyticsFilter{ProjectID: pid, Since: since, Bucket: "day"}, store.AllInsightsPanels)
-	if err != nil {
-		t.Fatalf("insights: %v", err)
-	}
-	if ins.Trends == nil {
-		t.Fatal("trends are nil; a day-bucketed window should carry a grid")
-	}
-	e := ins.Trends.Economics
-	if !e.CostIncomplete {
-		t.Error("window CostIncomplete should be true: the completed session had unpriced usage")
-	}
-	if e.AbandonedIncomplete {
-		t.Error("AbandonedIncomplete should be false: the abandoned session's usage is fully priced")
-	}
-	if e.TotalAbandoned < 3.99 || e.TotalAbandoned > 4.01 {
-		t.Errorf("abandoned spend = %v, want ~4.0", e.TotalAbandoned)
-	}
-}
-
-// TestEconomicsAbandonedIncompleteWhenAbandonedUnpriced is the other side: when an abandoned
-// session carries token-bearing unpriced usage, the abandoned subfigure is itself a lower bound,
-// so AbandonedIncomplete is true and the summary's abandoned dollars read as approximate.
-func TestEconomicsAbandonedIncompleteWhenAbandonedUnpriced(t *testing.T) {
+// Unknown model prices contribute zero to economics totals.
+func TestEconomicsUnknownPriceContributesZero(t *testing.T) {
 	t.Parallel()
 	st, ctx, uid, pid := signalsEnv(t)
 	since := time.Now().Add(-30 * 24 * time.Hour)
@@ -721,7 +650,7 @@ func TestEconomicsAbandonedIncompleteWhenAbandonedUnpriced(t *testing.T) {
 	if ins.Trends == nil {
 		t.Fatal("trends are nil; a day-bucketed window should carry a grid")
 	}
-	if !ins.Trends.Economics.AbandonedIncomplete {
-		t.Error("AbandonedIncomplete should be true: the abandoned session carried token-bearing unpriced usage")
+	if got := ins.Trends.Economics.TotalAbandoned; got < 1.99 || got > 2.01 {
+		t.Errorf("abandoned spend = %v, want ~2.0 from the known-price row", got)
 	}
 }
