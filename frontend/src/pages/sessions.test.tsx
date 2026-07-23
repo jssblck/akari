@@ -3,7 +3,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { SessionRow } from "../types";
-import { keysetCursorValue, SessionsPage } from "./sessions";
+import { keysetCursorValue, SessionsPage, splitTitleTail } from "./sessions";
 
 function row(overrides: Partial<SessionRow> = {}): SessionRow {
   return {
@@ -204,9 +204,52 @@ describe("SessionsPage feed rendering", () => {
     await screen.findByText("Fix the flaky test");
     const signals = document.querySelector(".srow-signals");
     expect(signals).toHaveTextContent("Completed");
-    expect(signals?.children).toHaveLength(4);
+    expect(signals?.children).toHaveLength(6);
     expect(signals).not.toHaveTextContent("12 messages");
     expect(signals).not.toHaveTextContent("1.5k");
+  });
+
+  it("shows the row's cost as its own signal column", async () => {
+    stubSessionsResponse([row({ ID: 1, TotalCostUSD: 12.5 })]);
+    render(
+      <MemoryRouter initialEntries={["/sessions"]}>
+        <SessionsPage />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("Fix the flaky test");
+    expect(document.querySelector(".srow-cost")).toHaveTextContent("$12.50");
+  });
+
+  it("gives a public session a fixed signal slot instead of a second line under the title", async () => {
+    stubSessionsResponse([
+      row({ ID: 1, Visibility: "public", PublicID: "abc123" }),
+    ]);
+    render(
+      <MemoryRouter initialEntries={["/sessions"]}>
+        <SessionsPage />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("Fix the flaky test");
+    expect(document.querySelector(".srow-line .tag.public")).toBeNull();
+    expect(
+      document.querySelector(".srow-signals .srow-public .tag.public"),
+    ).toHaveTextContent("public");
+  });
+
+  it("reserves the same public slot with an empty placeholder for a private session", async () => {
+    stubSessionsResponse([row({ ID: 1, Visibility: "private" })]);
+    render(
+      <MemoryRouter initialEntries={["/sessions"]}>
+        <SessionsPage />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("Fix the flaky test");
+    expect(
+      document.querySelector(".srow-signals .srow-public-empty"),
+    ).not.toBeNull();
   });
 
   it("keeps fan-out cost detail in the popover instead of the column", async () => {
@@ -396,5 +439,89 @@ describe("SessionsPage feed rendering", () => {
         );
       else Reflect.deleteProperty(HTMLElement.prototype, "hidePopover");
     }
+  });
+
+  it("splits a long title into a head and a tail that survives any column width", async () => {
+    const longTitle =
+      "Automation: Refresh Chronicle GitHub work ledger Automation ID: refresh-chronicle-github-work-ledger Automation metadata follows below";
+    stubSessionsResponse([row({ ID: 1, Title: longTitle })]);
+    render(
+      <MemoryRouter initialEntries={["/sessions"]}>
+        <SessionsPage />
+      </MemoryRouter>,
+    );
+
+    const headEl = await screen.findByText(/^Automation:/);
+    const titleEl = headEl.closest(".srow-title");
+    // The head carries the CSS ellipsis (sessions.css .srow-title-head), so
+    // it is unclipped full text in the DOM; only the tail is a separate,
+    // never-shrinking span, and together they read as the same title.
+    expect(titleEl?.textContent).toBe(longTitle);
+    expect(titleEl?.querySelector(".srow-title-tail")?.textContent).toBe(
+      splitTitleTail(longTitle).tail,
+    );
+    expect(titleEl?.textContent).toContain("below");
+  });
+
+  it("keeps the filter controls collapsed behind a Filters toggle until opened", async () => {
+    stubSessionsResponse([row({ ID: 1 })]);
+    render(
+      <MemoryRouter initialEntries={["/sessions"]}>
+        <SessionsPage />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("Fix the flaky test");
+    const toggle = screen.getByRole("button", { name: "Filters" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(document.querySelector(".sessions-toolbar.filters-open")).toBeNull();
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(
+      document.querySelector(".sessions-toolbar.filters-open"),
+    ).not.toBeNull();
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+  });
+});
+
+describe("splitTitleTail", () => {
+  it("puts short text entirely in the head, with no tail", () => {
+    expect(splitTitleTail("Fix the flaky test")).toEqual({
+      head: "Fix the flaky test",
+      tail: "",
+    });
+  });
+
+  it("keeps a fixed-length tail and puts everything else in the head", () => {
+    const text = `${"a".repeat(60)}DISTINCT${"b".repeat(10)}`;
+    const result = splitTitleTail(text, 10);
+    expect(result.tail).toBe("b".repeat(10));
+    expect(result.head).toBe(`${"a".repeat(60)}DISTINCT`);
+  });
+
+  it("starts the tail at a word boundary so the seam never cuts a word", () => {
+    const text = "please push the current state of the repository somewhere";
+    const result = splitTitleTail(text, 24);
+    // The boundary is taken forwards, so the tail comes out at or under the
+    // requested length and still fits the width the row reserves for it.
+    expect(result.tail).toBe(" repository somewhere");
+    expect(result.tail.length).toBeLessThanOrEqual(24);
+    expect(`${result.head}${result.tail}`).toBe(text);
+  });
+
+  it("keeps the hard cut when the closing token is longer than the tail", () => {
+    const text = `run job ${"9".repeat(40)}`;
+    const result = splitTitleTail(text, 24);
+    expect(result.tail).toBe("9".repeat(24));
+  });
+
+  it("collapses embedded whitespace before measuring length", () => {
+    expect(splitTitleTail("  Fix   the\nflaky   test  ", 4)).toEqual({
+      head: "Fix the flaky ",
+      tail: "test",
+    });
   });
 });

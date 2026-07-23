@@ -131,6 +131,9 @@
 .project-date-cell {
   white-space: nowrap;
 }
+.project-mobile-meta {
+  display: none;
+}
 .project-kind,
 .project-kind-empty {
   display: inline-flex;
@@ -313,9 +316,7 @@
     gap: 10px;
   }
   .projects-table tbody tr {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 120px;
-    align-items: center;
+    display: block;
     overflow: hidden;
     background: var(--surface);
     border: 1px solid var(--border);
@@ -337,14 +338,14 @@
   .projects-table .project-location,
   .projects-table .project-kind-cell,
   .projects-table td.num,
+  .projects-table .project-activity-cell,
   .projects-table .project-date-cell {
     display: none;
   }
-  .projects-table .project-activity-cell {
-    padding: 12px;
-  }
-  .projects-table .project-activity,
-  .projects-table .project-activity .activity-bars {
-    width: 100%;
+  .projects-table .project-mobile-meta {
+    display: block;
+    margin-top: 4px;
+    color: var(--muted);
+    font-size: 12px;
   }
 }

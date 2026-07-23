@@ -24,12 +24,7 @@ const nav = [
   { to: "/overview", label: "Overview", icon: GaugeIcon },
   { to: "/projects", label: "Projects", icon: FolderOpenIcon },
   { to: "/sessions", label: "Sessions", icon: ListMagnifyingGlassIcon },
-  {
-    to: "/insights",
-    label: "Insights",
-    icon: ChartLineUpIcon,
-    hideOnMobile: true,
-  },
+  { to: "/insights", label: "Insights", icon: ChartLineUpIcon },
 ];
 
 export function AppShell() {
@@ -107,14 +102,7 @@ export function AppShell() {
                   <NavLink
                     key={item.to}
                     to={item.to}
-                    className={({ isActive }) =>
-                      [
-                        isActive ? "active" : "",
-                        item.hideOnMobile ? "mobile-nav-hidden" : "",
-                      ]
-                        .filter(Boolean)
-                        .join(" ")
-                    }
+                    className={({ isActive }) => (isActive ? "active" : "")}
                     onClick={() => setMobileNavOpen(false)}
                   >
                     <item.icon size={17} weight="regular" />

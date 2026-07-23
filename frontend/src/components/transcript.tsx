@@ -7,11 +7,14 @@
 // the TranscriptWalker in internal/server/web/session_metrics.go.
 import {
   forwardRef,
+  memo,
   useEffect,
   useImperativeHandle,
   useMemo,
   useState,
 } from "react";
+import Markdown, { type Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 import { formatCost, formatCount, formatTime, formatTokens } from "../format";
 import type {
@@ -152,6 +155,44 @@ function formatBytes(n: number): string {
   if (n >= 1 << 10) return `${(n / (1 << 10)).toFixed(1)} KB`;
   return `${n} B`;
 }
+
+const HTTP_LINK = /^https?:\/\//i;
+
+// An agent can write anything into a link target, including a path or scheme
+// that only makes sense on the machine it ran on. Only http(s) targets become
+// a real, safely-attributed hyperlink; everything else renders as plain text
+// so transcript markdown can never turn into a silent navigation.
+const assistantMarkdownComponents: Components = {
+  a: ({ href, children }) =>
+    href && HTTP_LINK.test(href) ? (
+      <a href={href} target="_blank" rel="noopener noreferrer">
+        {children}
+      </a>
+    ) : (
+      children
+    ),
+};
+
+// Re-parsing markdown on every transcript re-render (loading earlier history,
+// opening the tool inspector, a hover popover elsewhere on the page) would
+// make a long session sluggish, so this only re-renders when its own message
+// text changes.
+const AssistantContent = memo(function AssistantContent({
+  content,
+}: {
+  content: string;
+}) {
+  return (
+    <div className="content prose">
+      <Markdown
+        remarkPlugins={[remarkGfm]}
+        components={assistantMarkdownComponents}
+      >
+        {content}
+      </Markdown>
+    </div>
+  );
+});
 
 // TranscriptHandle is the imperative surface the session detail page uses to
 // splice a live SSE append into an already-loaded transcript. A normal prop
@@ -481,7 +522,23 @@ function MessageTurn({
         </span>
         <time className="muted small">{formatTime(message.Timestamp)}</time>
       </div>
-      {band ? (
+      {message.HasThinking && message.ThinkingText ? (
+        <details className="thinking">
+          <summary>
+            <span className="thinking-summary-label">
+              Thinking{band ? ` (${thinkingBucketLabel(band)})` : ""}
+            </span>
+            <span
+              className="thinking-summary-hint muted small"
+              aria-hidden="true"
+            />
+          </summary>
+          <div className="thinking-body">{message.ThinkingText}</div>
+        </details>
+      ) : band ? (
+        // A redacted-thinking turn (the model reasoned but reported no text)
+        // has no disclosure to fold the level into, so it keeps the standalone
+        // badge as the only surface for that fact.
         <div
           className={`thinking-band band-${band}`}
           title="observed deliberation on this turn, on an absolute token scale (exact where the agent reports it, else estimated from the reasoning trace)"
@@ -492,14 +549,12 @@ function MessageTurn({
           </span>
         </div>
       ) : null}
-      {message.HasThinking && message.ThinkingText ? (
-        <details className="thinking">
-          <summary>Thinking</summary>
-          <div className="thinking-body">{message.ThinkingText}</div>
-        </details>
-      ) : null}
       {message.Content ? (
-        <div className="content">{message.Content}</div>
+        message.Role === "assistant" ? (
+          <AssistantContent content={message.Content} />
+        ) : (
+          <div className="content">{message.Content}</div>
+        )
       ) : null}
       {attachments.length > 0 ? (
         <div className="attachments">

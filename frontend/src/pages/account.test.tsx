@@ -1,16 +1,19 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { AccountProject, AccountResponse } from "../types";
+import type { AccountProject, AccountResponse, Token } from "../types";
 import { AccountPage } from "./account";
 
-function accountResponse(projects: AccountProject[]): AccountResponse {
+function accountResponse(
+  projects: AccountProject[],
+  tokens: Token[] = [],
+): AccountResponse {
   return {
     connections: [],
     invites: [],
     projects,
     reparse: { done: 0, failed: 0, in_progress: false, total: 0 },
-    tokens: [],
+    tokens,
     user: {
       authenticated: true,
       csrf_token: "",
@@ -106,5 +109,133 @@ describe("AccountPage project publication controls", () => {
         method: "PUT",
       }),
     );
+  });
+
+  it("gives the disabled Publish button the same weight as Make private", async () => {
+    const fetchMock = vi.fn(async () =>
+      Response.json(
+        accountResponse([
+          {
+            id: 7,
+            name: "akari",
+            published: false,
+            remote_key: "github.com/jssblck/akari",
+          },
+        ]),
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<AccountPage />);
+
+    const heading = await screen.findByRole("heading", {
+      name: "Public project overviews",
+    });
+    const section = heading.closest("section");
+    expect(section).not.toBeNull();
+    const publish = within(section as HTMLElement).getByRole("button", {
+      name: "Publish",
+    });
+    expect(publish).toHaveClass("button", "secondary");
+  });
+});
+
+describe("AccountPage token controls", () => {
+  function tokens(): Token[] {
+    return [
+      {
+        CreatedAt: "2026-01-01T00:00:00Z",
+        ID: 1,
+        LastUsedAt: null,
+        Name: "ci-ingest",
+        RevokedAt: null,
+        Scope: "ingest",
+      },
+      {
+        CreatedAt: "2025-06-01T00:00:00Z",
+        ID: 2,
+        LastUsedAt: null,
+        Name: "old-full",
+        RevokedAt: "2025-12-01T00:00:00Z",
+        Scope: "full",
+      },
+      {
+        CreatedAt: "2025-06-02T00:00:00Z",
+        ID: 3,
+        LastUsedAt: null,
+        Name: "old-read",
+        RevokedAt: "2025-12-02T00:00:00Z",
+        Scope: "read",
+      },
+    ];
+  }
+
+  it("disables Create until a token name is entered", async () => {
+    const fetchMock = vi.fn(async () => Response.json(accountResponse([])));
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<AccountPage />);
+
+    const heading = await screen.findByRole("heading", { name: "API tokens" });
+    const section = heading.closest("section");
+    expect(section).not.toBeNull();
+    const controls = within(section as HTMLElement);
+
+    const create = controls.getByRole("button", { name: "Create" });
+    expect(create).toBeDisabled();
+
+    fireEvent.change(controls.getByPlaceholderText("Token name"), {
+      target: { value: "laptop" },
+    });
+    expect(create).toBeEnabled();
+
+    fireEvent.change(controls.getByPlaceholderText("Token name"), {
+      target: { value: "   " },
+    });
+    expect(create).toBeDisabled();
+  });
+
+  it("keeps revoked tokens out of the active list, folded behind a count", async () => {
+    const fetchMock = vi.fn(async () =>
+      Response.json(accountResponse([], tokens())),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<AccountPage />);
+
+    const heading = await screen.findByRole("heading", { name: "API tokens" });
+    const section = heading.closest("section");
+    expect(section).not.toBeNull();
+    const controls = within(section as HTMLElement);
+
+    expect(await controls.findByText("ci-ingest")).toBeVisible();
+
+    const summary = controls.getByText("2 revoked");
+    expect(controls.getByText("old-full")).not.toBeVisible();
+    expect(controls.getByText("old-read")).not.toBeVisible();
+
+    fireEvent.click(summary);
+    expect(controls.getByText("old-full")).toBeVisible();
+    expect(controls.getByText("old-read")).toBeVisible();
+  });
+});
+
+describe("AccountPage public overview sharing copy", () => {
+  it("describes what publishing exposes instead of repeating the Private status", async () => {
+    const fetchMock = vi.fn(async () => Response.json(accountResponse([])));
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<AccountPage />);
+
+    const heading = await screen.findByRole("heading", {
+      name: "Public overview",
+    });
+    const section = heading.closest("section");
+    expect(section).not.toBeNull();
+    const controls = within(section as HTMLElement);
+
+    expect(controls.getByText("Private")).toBeInTheDocument();
+    expect(controls.queryByText("No public overview.")).not.toBeInTheDocument();
+    expect(controls.getByText(/publishing shows/i)).toBeInTheDocument();
   });
 });

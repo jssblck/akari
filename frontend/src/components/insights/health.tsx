@@ -823,12 +823,16 @@ export function HealthInstrument({
           </div>
         </TabPanel>
         <TabPanel stripId="health-tabs" tabId="grades" active={active}>
-          <GradesChart
-            signals={signals}
-            n={n}
-            labels={trends.Labels}
-            mini={false}
-          />
+          <div className="overflow-x">
+            <div style={{ minWidth: 480 }}>
+              <GradesChart
+                signals={signals}
+                n={n}
+                labels={trends.Labels}
+                mini={false}
+              />
+            </div>
+          </div>
           <Legend
             items={GRADE_ORDER.map((key) => ({
               color: gradeColor(key),
@@ -837,20 +841,28 @@ export function HealthInstrument({
           />
         </TabPanel>
         <TabPanel stripId="health-tabs" tabId="outcomes" active={active}>
-          <OutcomesChart
-            signals={signals}
-            n={n}
-            labels={trends.Labels}
-            mini={false}
-          />
+          <div className="overflow-x">
+            <div style={{ minWidth: 480 }}>
+              <OutcomesChart
+                signals={signals}
+                n={n}
+                labels={trends.Labels}
+                mini={false}
+              />
+            </div>
+          </div>
         </TabPanel>
         <TabPanel stripId="health-tabs" tabId="hygiene" active={active}>
-          <HygieneChart
-            signals={signals}
-            n={n}
-            labels={trends.Labels}
-            mini={false}
-          />
+          <div className="overflow-x">
+            <div style={{ minWidth: 480 }}>
+              <HygieneChart
+                signals={signals}
+                n={n}
+                labels={trends.Labels}
+                mini={false}
+              />
+            </div>
+          </div>
           <Legend
             items={HYGIENE_SERIES.map((s) => ({
               color: s.color,

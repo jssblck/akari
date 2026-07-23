@@ -537,10 +537,18 @@ export function VelocityInstrument({
               value={insights.Concurrency.AvgConcurrent.toFixed(1)}
             />
           </StatStrip>
-          <ActiveHoursChart trends={trends} mini={false} />
+          <div className="overflow-x">
+            <div style={{ minWidth: 480 }}>
+              <ActiveHoursChart trends={trends} mini={false} />
+            </div>
+          </div>
         </TabPanel>
         <TabPanel stripId="velocity-tabs" tabId="response" active={active}>
-          <ResponseTimeChart trends={trends} mini={false} />
+          <div className="overflow-x">
+            <div style={{ minWidth: 480 }}>
+              <ResponseTimeChart trends={trends} mini={false} />
+            </div>
+          </div>
         </TabPanel>
         <TabPanel stripId="velocity-tabs" tabId="throughput" active={active}>
           <StatStrip>
@@ -553,7 +561,11 @@ export function VelocityInstrument({
               value={insights.Velocity.ToolsPerActiveMin.toFixed(1)}
             />
           </StatStrip>
-          <ThroughputChart trends={trends} mini={false} />
+          <div className="overflow-x">
+            <div style={{ minWidth: 480 }}>
+              <ThroughputChart trends={trends} mini={false} />
+            </div>
+          </div>
         </TabPanel>
         <TabPanel stripId="velocity-tabs" tabId="rhythm" active={active}>
           <div className="overflow-x">

@@ -73,6 +73,9 @@ function TokenSection({
   refresh: () => void;
 }) {
   const [secret, setSecret] = useState("");
+  const [name, setName] = useState("");
+  const activeTokens = tokens.filter((token) => !token.RevokedAt);
+  const revokedTokens = tokens.filter((token) => token.RevokedAt);
   return (
     <section className="settings-section">
       <div className="settings-copy">
@@ -102,6 +105,7 @@ function TokenSection({
               );
               setSecret(result.token);
               form.reset();
+              setName("");
               notify("Token created", "ok");
               refresh();
             } catch (error) {
@@ -114,13 +118,19 @@ function TokenSection({
             }
           }}
         >
-          <input name="name" required placeholder="Token name" />
+          <input
+            name="name"
+            required
+            placeholder="Token name"
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+          />
           <select name="scope" defaultValue="ingest">
             <option value="ingest">Ingest</option>
             <option value="read">Read</option>
             <option value="full">Full</option>
           </select>
-          <button className="button" type="submit">
+          <button className="button" type="submit" disabled={!name.trim()}>
             Create
           </button>
         </form>
@@ -139,44 +149,58 @@ function TokenSection({
           </div>
         ) : null}
         <div className="settings-list">
-          {tokens.map((token) => (
-            <div
-              className={
-                token.RevokedAt ? "settings-row revoked" : "settings-row"
-              }
-              key={token.ID}
-            >
+          {activeTokens.map((token) => (
+            <div className="settings-row" key={token.ID}>
               <div>
                 <strong>{token.Name}</strong>
                 <span>
                   {token.Scope} · created {formatTime(token.CreatedAt)}
                 </span>
               </div>
-              {token.RevokedAt ? (
-                <span className="tag">revoked</span>
-              ) : (
-                <button
-                  type="button"
-                  className="icon-link danger"
-                  aria-label={`Revoke ${token.Name}`}
-                  onClick={async () => {
-                    if (
-                      await attempt(
-                        request(`/api/v1/tokens/${token.ID}/revoke`, {
-                          method: "POST",
-                        }),
-                        "Token revoked",
-                      )
+              <button
+                type="button"
+                className="icon-link danger"
+                aria-label={`Revoke ${token.Name}`}
+                onClick={async () => {
+                  if (
+                    await attempt(
+                      request(`/api/v1/tokens/${token.ID}/revoke`, {
+                        method: "POST",
+                      }),
+                      "Token revoked",
                     )
-                      refresh();
-                  }}
-                >
-                  <TrashIcon />
-                </button>
-              )}
+                  )
+                    refresh();
+                }}
+              >
+                <TrashIcon />
+              </button>
             </div>
           ))}
         </div>
+        {revokedTokens.length > 0 ? (
+          <details className="token-revoked-fold">
+            <summary>
+              <span className="token-revoked-summary-label">
+                {revokedTokens.length} revoked
+              </span>
+              <span className="token-revoked-hint muted" aria-hidden="true" />
+            </summary>
+            <div className="settings-list">
+              {revokedTokens.map((token) => (
+                <div className="settings-row revoked" key={token.ID}>
+                  <div>
+                    <strong>{token.Name}</strong>
+                    <span>
+                      {token.Scope} · created {formatTime(token.CreatedAt)}
+                    </span>
+                  </div>
+                  <span className="tag">revoked</span>
+                </div>
+              ))}
+            </div>
+          </details>
+        ) : null}
       </div>
     </section>
   );
@@ -207,7 +231,10 @@ function PublicationSection({
             {user.overview_public ? (
               <PublicLink url={publicURL} copyLabel="Copy public link" />
             ) : (
-              <span>No public overview.</span>
+              <span>
+                Publishing shows total cost, tokens, and session counts to
+                anyone with the link.
+              </span>
             )}
           </div>
           <button
@@ -326,7 +353,7 @@ function ProjectPublicationSection({
             ))}
           </select>
           <button
-            className="button"
+            className="button secondary"
             type="submit"
             disabled={!selectedProjectID}
           >

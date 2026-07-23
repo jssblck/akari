@@ -48,3 +48,47 @@
 .project-publication-list {
   margin-top: 12px;
 }
+
+/* Below the width where .settings-section itself stacks to one column,
+   .inline-form's row of select/input/button no longer fits: each child
+   shrinks to its min-content width instead, so the last one runs past the
+   viewport edge. Stacking the form the same way the section around it
+   already stacks keeps every child within the page width. */
+@media (max-width: 780px) {
+  .inline-form {
+    flex-direction: column;
+  }
+}
+
+/* Revoked tokens have no further use but stay in the list forever, so they're
+   collapsed behind a disclosure instead of accumulating in the always-visible
+   one. Mirrors .subagents-fold's show/hide hint (sessions.css). */
+.token-revoked-fold {
+  margin-top: 12px;
+}
+.token-revoked-summary-label {
+  color: var(--subtext);
+}
+.token-revoked-hint {
+  font-size: 11px;
+}
+.token-revoked-fold > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 0;
+  color: var(--text);
+  list-style: none;
+}
+.token-revoked-fold > summary::-webkit-details-marker {
+  display: none;
+}
+.token-revoked-fold:not([open]) > summary .token-revoked-hint::after {
+  content: "show";
+}
+.token-revoked-fold[open] > summary .token-revoked-hint::after {
+  content: "hide";
+}
+.token-revoked-fold > summary:hover .token-revoked-hint {
+  color: var(--lilac);
+}

@@ -160,8 +160,13 @@ function EmptyInsights() {
 
 export function InsightsPage() {
   const [params] = useSearchParams();
+  // A bare URL (no ?range) would otherwise fall through to the server's
+  // year-long default, which on a young instance draws a chart that is
+  // mostly empty. 90 days is a window this page's data actually fills.
+  const query = new URLSearchParams(params);
+  if (!query.has("range")) query.set("range", "90d");
   const state = useAPI<InsightsResponse>(
-    `/api/v1/app/insights?${params.toString()}`,
+    `/api/v1/app/insights?${query.toString()}`,
   );
   return (
     <div className="page">

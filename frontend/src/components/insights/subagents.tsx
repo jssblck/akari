@@ -225,12 +225,16 @@ export function SubagentsInstrument({ trends }: { trends: Trends }) {
           />
           <Stat label="deepest tree (levels)" value={String(s.DeepestTree)} />
         </StatStrip>
-        <DelegationChart
-          n={trends.BucketStarts.length}
-          labels={trends.Labels}
-          delegateShare={s.DelegateShare}
-          costShare={s.CostShare}
-        />
+        <div className="overflow-x">
+          <div style={{ minWidth: 480 }}>
+            <DelegationChart
+              n={trends.BucketStarts.length}
+              labels={trends.Labels}
+              delegateShare={s.DelegateShare}
+              costShare={s.CostShare}
+            />
+          </div>
+        </div>
         <Legend
           items={[
             { color: "var(--accent)", label: "Root sessions that delegate" },
@@ -238,7 +242,11 @@ export function SubagentsInstrument({ trends }: { trends: Trends }) {
           ]}
         />
         <div style={{ marginTop: 20 }}>
-          <FanoutChart trends={trends} />
+          <div className="overflow-x">
+            <div style={{ minWidth: 480 }}>
+              <FanoutChart trends={trends} />
+            </div>
+          </div>
         </div>
       </div>
     </section>

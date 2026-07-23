@@ -178,4 +178,21 @@ describe("ProjectsPage", () => {
     );
     expect(screen.getByText("Peak day").nextSibling).toHaveTextContent("100");
   });
+
+  it("keeps cost, session count, and recency in the mobile meta line", async () => {
+    stubProjectsResponse({
+      projects: [project({ ID: 1, TotalCostUSD: 2.5, SessionCount: 10 })],
+      sparklines: { "1": [0, 1] },
+    });
+    render(
+      <MemoryRouter initialEntries={["/projects"]}>
+        <ProjectsPage />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("Repositories");
+    const meta = document.querySelector(".project-mobile-meta");
+    expect(meta).toHaveTextContent("$2.50");
+    expect(meta).toHaveTextContent("10 sessions");
+  });
 });

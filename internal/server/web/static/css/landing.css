@@ -271,6 +271,20 @@
   .mk-stat { min-width: 116px; }
   .mk-grid { min-width: 420px; }
   .landing-mock .mock-frame:has(.mk-grid) { overflow-x: auto; }
+  /* The strip and table above just became horizontal scroll containers, and a
+     scroll container clips vertically too (overflow-x auto forces overflow-y to
+     the same auto behaviour), so an absolutely positioned card can no longer
+     escape it the way it does on the wide desktop layout. Drop the card into
+     normal flow instead: display swaps it in and out rather than
+     opacity/visibility, so it takes no space until shown and then simply grows
+     the row, which never gets clipped. */
+  .tok-tip {
+    display: none;
+    position: static;
+    margin-top: 6px;
+    width: auto; max-width: none; min-width: 0;
+  }
+  .tok-cell:hover .tok-tip, .tok-cell:focus-within .tok-tip { display: block; }
 }
 @media (max-width: 520px) {
   /* The history facet rail folds away below the rows on the smallest screens so the

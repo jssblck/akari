@@ -188,6 +188,28 @@ main { max-width: var(--maxw); margin: 0 auto; padding: var(--sp-xl); }
 section { margin-top: var(--sp-2xl); }
 .panel-head { display: flex; align-items: baseline; gap: var(--sp-md); margin-bottom: var(--sp-md); }
 
+/* ---- Token figures (hover/focus breakdown card) ---- */
+/* A tok-cell's compact total sits in a table cell; hovering or focusing the
+   cell reveals the full class breakdown in a card anchored beneath it, the
+   same dotted-underline-plus-card idiom the stat tiles below use. This page
+   ships no script, so the reveal has to be pure CSS: opacity and visibility
+   toggled by :hover and :focus-within rather than a class swap. */
+.tok-cell { position: relative; cursor: help; }
+.tok-total { text-decoration: underline dotted var(--faint); text-underline-offset: 3px; }
+.tok-tip {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: var(--z-overlay);
+  width: max-content; max-width: 260px; min-width: 190px;
+  padding: var(--sp-sm) var(--sp-md);
+  background: var(--surface-2); border: 1px solid var(--border-strong);
+  border-radius: var(--r-md); box-shadow: var(--shadow-overlay);
+  opacity: 0; visibility: hidden; transform: translateY(-3px); pointer-events: none;
+  transition: opacity var(--dur-fast) var(--ease-state), transform var(--dur-fast) var(--ease-state), visibility 0s linear var(--dur-fast);
+}
+.tok-cell:hover .tok-tip, .tok-cell:focus-within .tok-tip {
+  opacity: 1; visibility: visible; transform: none; transition-delay: 0s;
+}
+.tok-tip .tt-total { display: block; margin-bottom: 5px; color: var(--text); font: 450 0.75rem var(--mono); }
+
 /* ---- Tables (the data grid) ---- */
 /* Every data table sits in a .table-scroll wrapper: a wide table scrolls inside
    its own panel instead of forcing the whole page to scroll horizontally at
@@ -312,10 +334,10 @@ td.num, th.num, table.grid td.num, table.grid th.num { text-align: right; font-f
 .fallback-stat:hover .stat-tip, .fallback-stat:focus-within .stat-tip {
   opacity: 1; visibility: visible; transform: none; transition-delay: 0s;
 }
-.stat-tip .tt-grid { display: grid; grid-template-columns: auto auto; gap: 1px var(--sp-md); margin: 0; font: 450 0.75rem/1.6 var(--mono); }
-.stat-tip .tt-grid dt { color: var(--muted); }
-.stat-tip .tt-grid dd { margin: 0; color: var(--subtext); text-align: right; font-variant-numeric: tabular-nums; }
-.stat-tip .tt-cost { margin-top: 5px; padding-top: 5px; border-top: 1px solid var(--border); color: var(--text); font: 450 0.75rem var(--mono); font-variant-numeric: tabular-nums; text-align: right; }
+.stat-tip .tt-grid, .tok-tip .tt-grid { display: grid; grid-template-columns: auto auto; gap: 1px var(--sp-md); margin: 0; font: 450 0.75rem/1.6 var(--mono); }
+.stat-tip .tt-grid dt, .tok-tip .tt-grid dt { color: var(--muted); }
+.stat-tip .tt-grid dd, .tok-tip .tt-grid dd { margin: 0; color: var(--subtext); text-align: right; font-variant-numeric: tabular-nums; }
+.stat-tip .tt-cost, .tok-tip .tt-cost { margin-top: 5px; padding-top: 5px; border-top: 1px solid var(--border); color: var(--text); font: 450 0.75rem var(--mono); font-variant-numeric: tabular-nums; text-align: right; }
 /* tt-sub heads a second group inside a stat tooltip (the quality tile's input-hygiene
    readout below its score drivers), a muted, ruled label that keeps the two groups from
    reading as one list. */

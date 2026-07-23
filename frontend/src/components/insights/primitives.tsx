@@ -295,13 +295,15 @@ export function TooltipTitle({ children }: { children: ReactNode }) {
 
 export function TooltipRow({
   color,
+  title,
   children,
 }: {
   color?: string;
+  title?: string;
   children: ReactNode;
 }) {
   return (
-    <div className="tt-row" style={color ? { color } : undefined}>
+    <div className="tt-row" style={color ? { color } : undefined} title={title}>
       {children}
     </div>
   );

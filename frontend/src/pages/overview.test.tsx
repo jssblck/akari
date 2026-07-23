@@ -59,9 +59,9 @@ describe("AnalyticsPanel", () => {
     render(<AnalyticsPanel analytics={analytics()} />);
 
     expect(screen.getByText("Cost")).toBeInTheDocument();
-    // TotalCost=12.5 sits in the $10-$100 band, which formatCost renders with
-    // a single decimal digit.
-    expect(screen.getByText("$12.5")).toBeInTheDocument();
+    // formatCost now holds a single fixed precision (two decimals) above a
+    // cent, so $12.50 reads the same shape as every other cost in the column.
+    expect(screen.getByText("$12.50")).toBeInTheDocument();
     expect(screen.getByText("Sessions")).toBeInTheDocument();
     expect(screen.getByText("7")).toBeInTheDocument();
 
@@ -76,6 +76,19 @@ describe("AnalyticsPanel", () => {
     expect(screen.getByText("claude")).toBeInTheDocument();
   });
 
+  it("discloses the pre-cache cost behind the Cost stat, like Tokens and Cache hit already do", () => {
+    render(<AnalyticsPanel analytics={analytics()} />);
+
+    const costStat = screen.getByText("Cost").closest(".stat");
+    expect(costStat?.querySelector(".hover-tip-summary")?.textContent).toBe(
+      "$12.50",
+    );
+    // TotalCost (12.5) plus Cache.SavingsUSD (3.25): what the same usage
+    // would have cost without caching.
+    expect(costStat?.textContent).toContain("Without cache$15.75");
+    expect(costStat?.textContent).toContain("saved around $3.25");
+  });
+
   it("presents zero-priced unknown models as part of the estimate", () => {
     render(
       <AnalyticsPanel
@@ -85,10 +98,30 @@ describe("AnalyticsPanel", () => {
       />,
     );
 
-    expect(screen.getByText("$12.5")).toBeInTheDocument();
-    expect(screen.getAllByText("$0.00").length).toBeGreaterThan(0);
-    expect(screen.getByText("saved around $3.25")).toBeInTheDocument();
+    expect(screen.getByText("$12.50")).toBeInTheDocument();
+    expect(screen.getByText("not priced")).toBeInTheDocument();
+    expect(screen.getAllByText("saved around $3.25").length).toBeGreaterThan(0);
     expect(screen.queryByText(/partial|\$[\d.]+\+/i)).not.toBeInTheDocument();
+
+    // The token figure's own hover card must not repeat the misleading exact
+    // zero either: it should just omit the cost line, the same way the row
+    // omits it in favour of "not priced".
+    const row = screen.getByText("Other").closest(".breakdown-row");
+    expect(row?.querySelector(".tt-cost")).not.toBeInTheDocument();
+  });
+
+  it("keeps the share fill in its own track instead of behind the row text", () => {
+    const { container } = render(<AnalyticsPanel analytics={analytics()} />);
+
+    const row = screen.getByText("fable-5").closest(".breakdown-row");
+    const track = row?.querySelector(".breakdown-track");
+    const fill = track?.querySelector(".breakdown-fill");
+    expect(fill).toBeInTheDocument();
+    // The head (label and cost) and sub (tokens and sessions) lines are not
+    // nested inside the fill's track, so the fill can never paint under them.
+    expect(track?.querySelector(".breakdown-head")).toBeNull();
+    expect(track?.querySelector(".breakdown-sub")).toBeNull();
+    expect(container.querySelector(".breakdown-fill")).toBe(fill);
   });
 
   it("places scoped controls in the activity header and marks its mobile presentation", () => {

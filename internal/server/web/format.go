@@ -5,17 +5,16 @@ import (
 	"fmt"
 )
 
-// FmtCost renders a USD cost. Sub-cent costs still show enough precision to be
-// meaningful.
+// FmtCost renders a USD cost. Sub-cent costs still show four digits of
+// precision so a cheap session reads as $0.0042 rather than rounding to a
+// meaningless $0.00; above a cent it holds a single fixed precision so a
+// column of costs stays scannable, with no magnitude tier to make one row
+// look like a different kind of number than its neighbours.
 func FmtCost(usd float64) string {
-	switch {
-	case usd == 0:
-		return "$0"
-	case usd < 0.01:
+	if usd > 0 && usd < 0.01 {
 		return fmt.Sprintf("$%.4f", usd)
-	default:
-		return fmt.Sprintf("$%.2f", usd)
 	}
+	return fmt.Sprintf("$%.2f", usd)
 }
 
 // FmtPercent renders a 0..1 fraction as a whole-number percent, for the cache hit

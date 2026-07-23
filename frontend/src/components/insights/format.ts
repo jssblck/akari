@@ -1,9 +1,8 @@
 // Formatters specific to the Insights chart engine. These mirror the old
-// insights.js formatters (fmtInt/fmtK/fmtPct/fmtS) and the Go web package's
-// prettyModel helper exactly, since captions and tooltips must read identically
-// to the port's source of truth. frontend/src/format.ts already covers the
-// app-wide cost/token/count formatters used elsewhere; these are the ones
-// unique to this page's charts.
+// insights.js formatters (fmtInt/fmtK/fmtPct/fmtS), since captions and
+// tooltips must read identically to the port's source of truth.
+// frontend/src/format.ts already covers the app-wide cost/token/count
+// formatters used elsewhere; these are the ones unique to this page's charts.
 
 export function fmtInt(n: number): string {
   return Math.round(n).toLocaleString("en-US");
@@ -36,8 +35,15 @@ export function fmtDuration(s: number): string {
   return `${(s / 3600).toFixed(1)}h`;
 }
 
-// prettyModel shortens a model identifier for a legend chip, matching the
-// server's insights_data.go prettyModel exactly.
+// prettyModel shortens a model identifier for a legend chip by stripping one
+// leading vendor prefix ("claude-" or "anthropic/"), nothing else. An id with
+// neither prefix passes through unchanged. Stripping a prefix can still put two
+// different ids on the same label (a bare "sonnet-5" beside "claude-sonnet-5"),
+// which a legend must never do, so a caller labelling a known set of models is
+// responsible for detecting that clash and keeping the full id: see modelStyle
+// in fleet-mix.tsx. Callers that need the untruncated id back for a tooltip or
+// title attribute read it from the source data; this function keeps no reverse
+// mapping.
 export function prettyModel(m: string): string {
   if (m === "" || m === "unknown") return "unknown";
   let s = m;
@@ -121,9 +127,11 @@ export const ARCHETYPE_LABEL: Record<string, string> = {
   automation: "Automation",
 };
 
-// archetypeColor matches the gallery scatter's swatches (insights_data.go's
-// archetypeColor), distinct from the health instrument's archetype-share
-// stack colors (which follow the plain vizVars ramp instead).
+// ARCHETYPE_COLOR is the fixed swatch each archetype keeps everywhere it
+// appears (the gallery scatter, its legend), distinct from the health
+// instrument's archetype-share stack colors (which follow the plain vizVars
+// ramp instead, since that chart ranks by share rather than naming a fixed
+// archetype per slot).
 export const ARCHETYPE_COLOR: Record<string, string> = {
   quick: "var(--viz-2)",
   standard: "var(--viz-4)",
