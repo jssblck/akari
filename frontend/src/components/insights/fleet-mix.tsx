@@ -26,7 +26,7 @@ const PB = 24;
 
 // modelStyle assigns each model its ordinal viz hue (skipping "other", which
 // is always var(--muted) and never consumes a ramp slot) and its
-// prettified label, matching the server's fleetMixData exactly. Returns
+// prettified label, in the order the server already ranked them. Returns
 // lookup functions rather than raw maps so every call site gets a plain
 // string back instead of repeating a fallback at each use.
 function modelStyle(models: Trends["FleetMix"]["Models"]) {
@@ -42,10 +42,45 @@ function modelStyle(models: Trends["FleetMix"]["Models"]) {
     }
     labels[m.Model] = prettyModel(m.Model);
   }
+  // Stripping a vendor prefix can land two different models on one label, so any
+  // shortened form claimed by more than one identifier goes back to the full id.
+  // Two models rendering as the same chip would read as one model.
+  const claims: Record<string, number> = {};
+  for (const label of Object.values(labels)) {
+    claims[label] = (claims[label] ?? 0) + 1;
+  }
+  for (const [model, label] of Object.entries(labels)) {
+    if ((claims[label] ?? 0) > 1) labels[model] = model;
+  }
   return {
     colorOf: (model: string) => colors[model] ?? "var(--muted)",
     labelOf: (model: string) => labels[model] ?? prettyModel(model),
   };
+}
+
+// axisLabelsWithYear appends the calendar year to every label when the
+// window spans more than one year. The Year and All ranges bucket weekly
+// with no year in the label ("Jan 2"), so the axis's three ticks (first,
+// middle, last) can otherwise land on the same month name a year apart and
+// read as ambiguous rather than as a long window.
+function axisLabelsWithYear(
+  labels: string[],
+  bucketStarts: string[],
+): string[] {
+  const first = bucketStarts[0];
+  const last = bucketStarts[bucketStarts.length - 1];
+  if (!first || !last) return labels;
+  // Bucket starts are UTC instants and the server's own "Jan 2" labels are
+  // formatted from the same instants, so the year has to come from the UTC
+  // calendar too: reading it in the viewer's local time zone would round a
+  // midnight UTC bucket into the wrong year for anyone west of Greenwich.
+  const firstYear = new Date(first).getUTCFullYear();
+  const lastYear = new Date(last).getUTCFullYear();
+  if (firstYear === lastYear) return labels;
+  return labels.map((label, i) => {
+    const start = bucketStarts[i];
+    return start ? `${label}, ${new Date(start).getUTCFullYear()}` : label;
+  });
 }
 
 function FleetMixChart({ trends }: { trends: Trends }) {
@@ -53,6 +88,7 @@ function FleetMixChart({ trends }: { trends: Trends }) {
   const n = trends.BucketStarts.length;
   const models = trends.FleetMix.Models;
   const { colorOf, labelOf } = modelStyle(models);
+  const axisLabels = axisLabelsWithYear(trends.Labels, trends.BucketStarts);
   const xScale = scaleLinear([0, Math.max(n - 1, 1)], [PL, W - PR]);
   const yScale = scaleLinear([0, 100], [H - PB, PT]);
 
@@ -93,7 +129,7 @@ function FleetMixChart({ trends }: { trends: Trends }) {
         pR={PR}
         mini={false}
         n={n}
-        labels={trends.Labels}
+        labels={axisLabels}
       />
       <ClipRect id={clipId} x={PL} y={PT} w={W - PL - PR} h={H - PT - PB}>
         {bands.map((b) => (
@@ -117,9 +153,13 @@ function FleetMixChart({ trends }: { trends: Trends }) {
         xScale={xScale}
         tooltip={(i) => (
           <>
-            <TooltipTitle>{trends.Labels[i]}</TooltipTitle>
+            <TooltipTitle>{axisLabels[i]}</TooltipTitle>
             {models.map((m) => (
-              <TooltipRow color={colorOf(m.Model)} key={m.Model}>
+              <TooltipRow
+                color={colorOf(m.Model)}
+                key={m.Model}
+                title={m.Model}
+              >
                 {labelOf(m.Model)} <b>{(m.Share[i] ?? 0).toFixed(1)}%</b>
               </TooltipRow>
             ))}
@@ -152,20 +192,34 @@ export function FleetMixInstrument({ trends }: { trends: Trends }) {
         <StatStrip>
           <Stat label="models in window" value={formatCount(models.length)} />
           {busiest && (
-            <Stat label="busiest model" value={labelOf(busiest.Model)} />
+            <Stat
+              label="busiest model"
+              value={
+                <span title={busiest.Model}>{labelOf(busiest.Model)}</span>
+              }
+            />
           )}
           {showArrival && (
             <Stat
               label="newest arrival"
-              value={prettyModel(trends.FleetMix.NewestModel)}
+              value={
+                <span title={trends.FleetMix.NewestModel}>
+                  {prettyModel(trends.FleetMix.NewestModel)}
+                </span>
+              }
             />
           )}
         </StatStrip>
-        <FleetMixChart trends={trends} />
+        <div className="overflow-x">
+          <div style={{ minWidth: 480 }}>
+            <FleetMixChart trends={trends} />
+          </div>
+        </div>
         <Legend
           items={models.map((m) => ({
             color: colorOf(m.Model),
             label: labelOf(m.Model),
+            title: m.Model,
           }))}
         />
       </div>

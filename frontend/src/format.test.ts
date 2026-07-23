@@ -15,12 +15,16 @@ describe("formatCost", () => {
     expect(formatCost(1.5)).toBe("$1.50");
   });
 
-  it("uses one decimal digit from $10 up to $100", () => {
-    expect(formatCost(12.34)).toBe("$12.3");
+  it("keeps two decimal digits from $10 up to $100", () => {
+    expect(formatCost(12.34)).toBe("$12.34");
   });
 
-  it("uses zero decimal digits at $100 and above", () => {
-    expect(formatCost(123.4)).toBe("$123");
+  it("keeps two decimal digits at $100 and above", () => {
+    expect(formatCost(123.4)).toBe("$123.40");
+  });
+
+  it("keeps two decimal digits into the thousands", () => {
+    expect(formatCost(5925)).toBe("$5,925.00");
   });
 });
 

@@ -1,5 +1,6 @@
 import {
   CheckCircleIcon,
+  CircleDashedIcon,
   QuestionIcon,
   WarningDiamondIcon,
   XCircleIcon,
@@ -57,16 +58,29 @@ export function SessionGrade({ grade }: { grade: string | null }) {
   );
 }
 
-export function SessionOutcome({ outcome }: { outcome: string }) {
-  const label = OUTCOME_LABELS[outcome] ?? outcome;
+export function SessionOutcome({
+  outcome,
+  endedAt,
+}: {
+  outcome: string;
+  endedAt: string | null;
+}) {
+  // A session still in progress has no outcome yet: grading runs once a
+  // session settles, not while it is live. That is a different fact from an
+  // unrecognized outcome string, so it gets its own label and icon rather
+  // than falling into the question-mark "unknown" case, which reads as an
+  // error next to a column of checks.
+  const running = outcome === "" && endedAt === null;
+  const label = running ? "Running" : (OUTCOME_LABELS[outcome] ?? outcome);
   const iconProps = { size: 17, weight: "bold" as const, "aria-hidden": true };
   let icon = <QuestionIcon {...iconProps} />;
+  if (running) icon = <CircleDashedIcon {...iconProps} />;
   if (outcome === "completed") icon = <CheckCircleIcon {...iconProps} />;
   if (outcome === "abandoned") icon = <WarningDiamondIcon {...iconProps} />;
   if (outcome === "errored") icon = <XCircleIcon {...iconProps} />;
   return (
     <HoverTip
-      className={`srow-signal srow-outcome outcome-${outcome}`}
+      className={`srow-signal srow-outcome outcome-${running ? "running" : outcome}`}
       summary={
         <>
           {icon}
@@ -76,7 +90,9 @@ export function SessionOutcome({ outcome }: { outcome: string }) {
     >
       <strong className="tip-title">{label}</strong>
       <p className="tip-copy">
-        {OUTCOME_DETAILS[outcome] ?? OUTCOME_DETAILS.unknown}
+        {running
+          ? "The session is still running."
+          : (OUTCOME_DETAILS[outcome] ?? OUTCOME_DETAILS.unknown)}
       </p>
     </HoverTip>
   );

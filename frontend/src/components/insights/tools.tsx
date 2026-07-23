@@ -570,13 +570,17 @@ export function ToolsInstrument({
           />
         </TabPanel>
         <TabPanel stripId="tools-tabs" tabId="mix" active={active}>
-          <ToolMixChart
-            n={n}
-            labels={trends.Labels}
-            order={mixOrder}
-            mix={trends.Tools.Mix}
-            mini={false}
-          />
+          <div className="overflow-x">
+            <div style={{ minWidth: 480 }}>
+              <ToolMixChart
+                n={n}
+                labels={trends.Labels}
+                order={mixOrder}
+                mix={trends.Tools.Mix}
+                mini={false}
+              />
+            </div>
+          </div>
           <Legend
             items={mixOrder.map((cat) => ({
               color: categoryColor(cat),
@@ -585,13 +589,17 @@ export function ToolsInstrument({
           />
         </TabPanel>
         <TabPanel stripId="tools-tabs" tabId="failures" active={active}>
-          <FailuresChart
-            n={n}
-            labels={trends.Labels}
-            fleet={trends.Tools.FailFleet}
-            worst={trends.Tools.FailWorst}
-            mini={false}
-          />
+          <div className="overflow-x">
+            <div style={{ minWidth: 480 }}>
+              <FailuresChart
+                n={n}
+                labels={trends.Labels}
+                fleet={trends.Tools.FailFleet}
+                worst={trends.Tools.FailWorst}
+                mini={false}
+              />
+            </div>
+          </div>
         </TabPanel>
         <TabPanel stripId="tools-tabs" tabId="churn" active={active}>
           <StatStrip>
@@ -611,13 +619,17 @@ export function ToolsInstrument({
               />
             )}
           </StatStrip>
-          <ChurnTrendChart
-            n={n}
-            labels={trends.Labels}
-            reedits={trends.Churn.ReEdits}
-            files={trends.Churn.Files}
-            mini={false}
-          />
+          <div className="overflow-x">
+            <div style={{ minWidth: 480 }}>
+              <ChurnTrendChart
+                n={n}
+                labels={trends.Labels}
+                reedits={trends.Churn.ReEdits}
+                files={trends.Churn.Files}
+                mini={false}
+              />
+            </div>
+          </div>
           <ChurnTreemap trends={trends} />
         </TabPanel>
       </div>

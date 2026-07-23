@@ -238,6 +238,19 @@ function ProjectLocation({ value, tail }: { value: string; tail: boolean }) {
   );
 }
 
+// ProjectMobileMeta carries the cost, session count and recency that the
+// mobile card layout has no other cell for, since the numeric and date
+// columns are hidden below the table breakpoint.
+function ProjectMobileMeta({ project }: { project: Project }) {
+  return (
+    <span className="project-mobile-meta">
+      {formatCost(project.TotalCostUSD)} · {formatCount(project.SessionCount)}{" "}
+      session{project.SessionCount === 1 ? "" : "s"} ·{" "}
+      {relativeTime(project.LastActivity)}
+    </span>
+  );
+}
+
 // ProjectRow makes the whole row a click target while keeping a real anchor
 // for modifier-clicks (open in new tab, copy link): a plain click anywhere in
 // the row navigates via the router, but a click on the anchor itself, or one
@@ -281,6 +294,7 @@ function ProjectRow({
             </>
           ) : null}
         </span>
+        <ProjectMobileMeta project={project} />
       </td>
       <td className="project-kind-cell">
         <ProjectKindCell kind={project.Kind} />
@@ -651,7 +665,10 @@ export function ProjectPage() {
                             </td>
                             <td className="project-session-signals">
                               <SessionGrade grade={session.Grade} />
-                              <SessionOutcome outcome={session.Outcome} />
+                              <SessionOutcome
+                                outcome={session.Outcome}
+                                endedAt={session.EndedAt}
+                              />
                             </td>
                           </tr>
                         ))}

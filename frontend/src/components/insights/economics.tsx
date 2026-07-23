@@ -343,12 +343,16 @@ export function EconomicsInstrument({
               value={formatCost(gallery.MedianCompletedCostUSD)}
             />
           </StatStrip>
-          <CostQualityChart
-            n={n}
-            labels={trends.Labels}
-            economics={e}
-            mini={false}
-          />
+          <div className="overflow-x">
+            <div style={{ minWidth: 480 }}>
+              <CostQualityChart
+                n={n}
+                labels={trends.Labels}
+                economics={e}
+                mini={false}
+              />
+            </div>
+          </div>
           <Legend
             items={[
               { color: "var(--ok)", label: "Completed sessions" },
@@ -369,7 +373,16 @@ export function EconomicsInstrument({
             />
             <Stat label="savings per $1 spent" value={formatCost(perDollar)} />
           </StatStrip>
-          <CacheChart n={n} labels={trends.Labels} economics={e} mini={false} />
+          <div className="overflow-x">
+            <div style={{ minWidth: 480 }}>
+              <CacheChart
+                n={n}
+                labels={trends.Labels}
+                economics={e}
+                mini={false}
+              />
+            </div>
+          </div>
         </TabPanel>
       </div>
     </section>

@@ -1548,12 +1548,9 @@ select:focus {
   .sidebar nav {
     flex-direction: column;
   }
-  .sidebar nav a.mobile-nav-hidden {
-    display: none;
-  }
   .sidebar-foot {
     flex-direction: column;
-    margin: auto 0 0;
+    margin: 18px 0 0;
     padding: 14px 0 0;
     border-top: 1px solid var(--border);
   }
@@ -1670,6 +1667,7 @@ select:focus {
 }
 .hover-tip-summary {
   display: inline-flex;
+  gap: 8px;
   text-decoration: underline dotted var(--faint);
   text-underline-offset: 4px;
 }
